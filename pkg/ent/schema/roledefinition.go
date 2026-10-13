@@ -47,6 +47,14 @@ func (RoleDefinition) Fields() []ent.Field {
 			Optional(),
 		field.Bool("system").
 			Default(false),
+		// confers_membership reports whether a binding of this role makes
+		// its principal a member of the bound project. Every rule that
+		// means "member" (membership evidence, member lists, owner and
+		// admin counts, membership-loss reconciliation) ignores bindings
+		// of roles where it is false. Existing and custom roles default
+		// to true; the seeded project-visitor role sets it to false.
+		field.Bool("confers_membership").
+			Default(true),
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),

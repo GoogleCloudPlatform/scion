@@ -25,12 +25,12 @@ import (
 
 // Blank imports.
 //
-// A test file that blank-imports a package (_ "github.com/mattn/go-sqlite3")
+// A test file that blank-imports a package (_ "modernc.org/sqlite")
 // depends on the package's init side effect: registering a database/sql
 // driver, embedding the time zone database, and so on. Other files rely on
-// that side effect without importing anything (sql.Open("sqlite3", ...)),
+// that side effect without importing anything (sql.Open("sqlite", ...)),
 // so the use graph has no edge for it. A shard in which no file imports the
-// package compiles, then fails at run time (sql: unknown driver "sqlite3").
+// package compiles, then fails at run time (sql: unknown driver "sqlite").
 //
 // The generator therefore adds untagged imports files to the overlay that
 // blank-import every package a test file of the package blank-imports.

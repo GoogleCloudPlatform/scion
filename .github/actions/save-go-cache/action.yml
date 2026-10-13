@@ -1,0 +1,63 @@
+# Saves the Go module and build cache restored by
+# ./.github/actions/setup-go-cache (see that file). It saves only on a push
+# to main, and only when the primary key (today's) was not restored
+# exactly; on any other event, or on a hit, it does nothing.
+#
+# Before saving it:
+# - runs `go clean -testcache`, so that no cached test result is ever
+#   saved: some go test commands in CI run without -count=1, and a restored
+#   test result would let them report "(cached)" instead of running;
+# - deletes build cache entries this job neither used nor wrote (older than
+#   the restore stamp), so the cache does not keep growing.
+# Call it without an `if:`, so that only a successful job saves. A job that
+# failed early skipped compiles, the trim would drop their entries, and the
+# truncated cache would take the day's key (later runs hit it exactly and
+# never save); a failed run saves nothing, and the next green main push of
+# the day saves the full cache.
+name: Save the per-workload Go cache
+description: Save the Go module and build cache restored by setup-go-cache, on pushes to main only.
+inputs:
+  key:
+    description: setup-go-cache's cache-key output.
+    required: true
+  cache-hit:
+    description: setup-go-cache's cache-hit output.
+    required: false
+    default: 'false'
+runs:
+  using: composite
+  steps:
+    - name: Prepare the Go cache for saving
+      id: prep
+      if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && inputs.cache-hit != 'true' && inputs.key != '' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        gocache=$(go env GOCACHE)
+        gomodcache=$(go env GOMODCACHE)
+        go clean -testcache
+        stamp="$RUNNER_TEMP/go-cache-restored.stamp"
+        mkdir -p "$gocache"
+        echo "GOCACHE before trimming: $(du -sh "$gocache" | cut -f1)"
+        if [ -f "$stamp" ]; then
+          # Entries live in the two-hex-digit subdirectories; the top-level
+          # files (testexpire.txt, trim.txt, README) stay.
+          find "$gocache" -mindepth 2 -type f ! -newer "$stamp" -delete
+        else
+          echo "::warning title=save-go-cache::no restore stamp ($stamp); saving GOCACHE untrimmed"
+        fi
+        echo "GOCACHE to save: $(du -sh "$gocache" | cut -f1); GOMODCACHE: $(du -sh "$gomodcache" | cut -f1)"
+        {
+          echo "gocache=${gocache}"
+          echo "gomodcache=${gomodcache}"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Save the Go cache
+      if: ${{ steps.prep.outcome == 'success' }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        # The same paths, in the same order, as setup-go-cache's restore.
+        path: |
+          ${{ steps.prep.outputs.gomodcache }}
+          ${{ steps.prep.outputs.gocache }}
+        key: ${{ inputs.key }}

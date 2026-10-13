@@ -2025,21 +2025,27 @@ func (s *Server) createAgentInProject(
 
 	// Resolve message_mode (D10 spawn defaults):
 	//   1. Explicit req.MessageMode from CLI flag → use it (after validation).
-	//   2. Template specifies message_mode → use it.
+	//   2. Template specifies message_mode → use it. Read from the
+	//      template's job config (its stripped AgentConfig snapshot,
+	//      ptone/scion#4222), the template's own scion-agent.yaml.
 	//   3. Parent agent exists → inherit parent's message_mode.
 	//   4. Otherwise → default to "project" (handled by Ent schema default).
+	var templateMessageMode string
+	if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil {
+		templateMessageMode = jc.MessageMode
+	}
 	if req.MessageMode != "" {
 		if !store.IsValidMessageMode(req.MessageMode) {
 			ValidationError(w, "invalid message mode: "+req.MessageMode, nil)
 			return
 		}
 		agent.MessageMode = req.MessageMode
-	} else if resolvedTemplate != nil && resolvedTemplate.Config != nil && resolvedTemplate.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(resolvedTemplate.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+resolvedTemplate.Config.MessageMode, nil)
+	} else if templateMessageMode != "" {
+		if !store.IsValidMessageMode(templateMessageMode) {
+			ValidationError(w, "invalid template message mode: "+templateMessageMode, nil)
 			return
 		}
-		agent.MessageMode = resolvedTemplate.Config.MessageMode
+		agent.MessageMode = templateMessageMode
 	} else if parentMessageMode != "" {
 		agent.MessageMode = parentMessageMode
 	} else {

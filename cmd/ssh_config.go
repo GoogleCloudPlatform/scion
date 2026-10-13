@@ -98,15 +98,15 @@ var sshExit = os.Exit
 // sshCommandEnv is everything ssh and ssh-config read from the environment,
 // resolved once so tests can supply it directly.
 type sshCommandEnv struct {
-	home              string
-	exe               string // absolute scion path written into ProxyCommand
-	endpoint          string // hub endpoint from GetHubEndpoint
-	token             string // user token from getHubAccessToken
-	settingsProjectID string // hub project id from local settings, if any
-	stdin             io.Reader
-	stdout            io.Writer
-	stderr            io.Writer
-	probe             func(ctx context.Context, endpoint string) error
+	home     string
+	exe      string         // absolute scion path written into ProxyCommand
+	endpoint string         // hub endpoint from GetHubEndpoint
+	token    string         // user token from getHubAccessToken
+	project  hubOnlyProject // project for a bare agent reference
+	stdin    io.Reader
+	stdout   io.Writer
+	stderr   io.Writer
+	probe    func(ctx context.Context, endpoint string) error
 }
 
 // defaultSSHCommandEnv resolves the endpoint, credential, home directory and
@@ -125,22 +125,15 @@ func defaultSSHCommandEnv() (*sshCommandEnv, error) {
 	// come from the current directory's project or the global layer.
 	settings := tunnelSettings()
 	endpoint := tunnelEndpoint(settings)
-	projectID := projectPath
-	if projectID == "" && settings != nil {
-		projectID = settings.GetHubProjectID()
-		if projectID == "" {
-			projectID = settings.ProjectID
-		}
-	}
 	env := &sshCommandEnv{
-		home:              home,
-		exe:               exe,
-		endpoint:          endpoint,
-		settingsProjectID: projectID,
-		stdin:             os.Stdin,
-		stdout:            os.Stdout,
-		stderr:            os.Stderr,
-		probe:             probeSSHHubEndpoint,
+		home:     home,
+		exe:      exe,
+		endpoint: endpoint,
+		project:  resolveHubOnlyProject(),
+		stdin:    os.Stdin,
+		stdout:   os.Stdout,
+		stderr:   os.Stderr,
+		probe:    probeSSHHubEndpoint,
 	}
 	if endpoint != "" {
 		env.token = getHubAccessToken(endpoint)
@@ -352,20 +345,30 @@ func (h *sshHubConn) sshProjectSlug(ctx context.Context, projects map[string]hub
 }
 
 // resolveSSHTarget resolves an agent reference. "<project>/<agent>" names the
-// project; a bare agent uses the project from local settings, or else must
-// match exactly one agent across all projects.
-func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref, settingsProjectID string) (sshAgentEntry, error) {
+// project; a bare agent uses dflt (see resolveHubOnlyProject), or, when no
+// project applies, must match exactly one agent across all projects.
+func (h *sshHubConn) resolveSSHTarget(ctx context.Context, ref string, dflt hubOnlyProject) (sshAgentEntry, error) {
 	project, agent, hasProject := strings.Cut(ref, "/")
 	if !hasProject {
 		agent = ref
-		project = settingsProjectID
+		project = dflt.ref
 	}
 	if agent == "" || (hasProject && project == "") {
 		return sshAgentEntry{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid agent reference %q; use <agent> or <project>/<agent>", ref)
 	}
+	if !hasProject {
+		if err := dflt.unlinkedError(); err != nil {
+			return sshAgentEntry{}, err
+		}
+	}
 	if project != "" {
 		projectID, projectSlug, err := h.resolveSSHProjectID(ctx, project)
 		if err != nil {
+			// resolveSSHProjectID exits with ExitAgentNotFound only when
+			// the hub has no such project.
+			if !hasProject && tunnelclient.CodeOf(err) == tunnelclient.ExitAgentNotFound {
+				return sshAgentEntry{}, dflt.notFoundError(h.endpoint)
+			}
 			return sshAgentEntry{}, err
 		}
 		a, err := h.client.ProjectAgents(projectID).Get(ctx, agent)
@@ -522,7 +525,7 @@ func warnUnreachableSSHHubs(ctx context.Context, env *sshCommandEnv, others []ss
 func sshConfigOneAgent(ctx context.Context, env *sshCommandEnv, hub *sshHubTarget, ref string, write bool) error {
 	rctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
 	defer cancel()
-	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.settingsProjectID)
+	entry, err := hub.conn.resolveSSHTarget(rctx, ref, env.project)
 	if err != nil {
 		return err
 	}

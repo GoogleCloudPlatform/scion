@@ -406,10 +406,11 @@ func TestV2_Reconfigure_TwiceDuringOneHandler(t *testing.T) {
 }
 
 // gatedTelegram forwards to a fake Telegram API, except that it holds the
-// first sendMessage call after arm until unblock, and hands a pending update
-// to the next getUpdates call.
+// first call of the gated method (sendMessage by default) after arm until
+// unblock, and hands a pending update to the next getUpdates call.
 type gatedTelegram struct {
 	srv         *httptest.Server
+	method      string
 	armed       atomic.Bool
 	entered     chan struct{}
 	release     chan struct{}
@@ -419,14 +420,20 @@ type gatedTelegram struct {
 
 func newGatedTelegram(t *testing.T, tgSrv *fakeTGServerV2) *gatedTelegram {
 	t.Helper()
+	return newGatedTelegramOn(t, tgSrv, "sendMessage")
+}
+
+// newGatedTelegramOn is newGatedTelegram with the gate on the given method.
+func newGatedTelegramOn(t *testing.T, tgSrv *fakeTGServerV2, method string) *gatedTelegram {
+	t.Helper()
 	target, err := url.Parse(tgSrv.srv.URL)
 	require.NoError(t, err)
 	proxy := httputil.NewSingleHostReverseProxy(target)
 
-	g := &gatedTelegram{entered: make(chan struct{}), release: make(chan struct{})}
+	g := &gatedTelegram{method: "/" + method, entered: make(chan struct{}), release: make(chan struct{})}
 	g.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case strings.HasSuffix(r.URL.Path, "/sendMessage") && g.armed.CompareAndSwap(true, false):
+		case strings.HasSuffix(r.URL.Path, g.method) && g.armed.CompareAndSwap(true, false):
 			close(g.entered)
 			select {
 			case <-g.release:
@@ -457,16 +464,16 @@ func newGatedTelegram(t *testing.T, tgSrv *fakeTGServerV2) *gatedTelegram {
 	return g
 }
 
-// unblock releases a held sendMessage call; it may be called more than once.
+// unblock releases a held call; it may be called more than once.
 func (g *gatedTelegram) unblock() { g.releaseOnce.Do(func() { close(g.release) }) }
 
-// waitHeld waits until a sendMessage call is being held.
+// waitHeld waits until a call is being held.
 func (g *gatedTelegram) waitHeld(t *testing.T) {
 	t.Helper()
 	select {
 	case <-g.entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("no sendMessage call reached the gate")
+		t.Fatalf("no %s call reached the gate", strings.TrimPrefix(g.method, "/"))
 	}
 }
 
@@ -554,6 +561,56 @@ func TestV2_Reconfigure_WaitsForPolledHandler(t *testing.T) {
 
 	require.NoError(t, b.Configure(cfg))
 	assertKeptUntilReleased(t, g, oldStore, oldQueue, func() {})
+}
+
+// A polled callback being handled during a reconfigure that stays in poll
+// mode finishes its store work after the reconfigure has stopped the poll
+// loop: the handler's context is not cancelled with the loop.
+func TestV2_Reconfigure_PollToPollPolledHandlerCompletes(t *testing.T) {
+	tgSrv := newFakeTGServerV2(t)
+	g := newGatedTelegramOn(t, tgSrv, "getChat")
+	b := NewV2(slog.Default())
+	defer b.Close()
+	defer g.unblock()
+
+	// Both configurations use one database, so the link the handler saves
+	// through the previous store can be read through the current one.
+	cfg := validPollConfig(t, tgSrv)
+	cfg["api_base_url"] = g.srv.URL
+	require.NoError(t, b.Configure(cfg))
+
+	// A group setup waiting for its default agent: the callback below saves
+	// the group link after a getChat call, which the gate holds.
+	const chatID = int64(-500)
+	b.callbacks.mu.Lock()
+	b.callbacks.pendingSetups[chatID] = &pendingSetup{projectID: "proj-1", projectSlug: "proj-one", createdAt: time.Now()}
+	b.callbacks.mu.Unlock()
+
+	g.pending.Store(&Update{UpdateID: 8, CallbackQuery: &CallbackQuery{
+		ID:      "cb-1",
+		From:    &TGUser{ID: 42, FirstName: "Alice"},
+		Message: &TGMessage{MessageID: 5, Chat: TGChat{ID: chatID, Type: "supergroup"}},
+		Data:    "setup:dflt:coder",
+	}})
+	g.armed.Store(true)
+	require.NoError(t, b.Subscribe("scion.project.proj-1.>"))
+	g.waitHeld(t)
+	_, oldDone := pollState(b)
+
+	require.NoError(t, b.Configure(cfg)) // poll to poll: stops the loop
+	g.unblock()
+	select {
+	case <-oldDone:
+	case <-time.After(5 * time.Second):
+		require.FailNow(t, "the stopped poll loop did not exit after the handler was released")
+	}
+	waitRetired(t, b)
+
+	link, err := b.store.GetGroupLink(context.Background(), chatID)
+	require.NoError(t, err)
+	require.NotNil(t, link, "the held handler must save the group link after the loop is stopped")
+	assert.Equal(t, "proj-1", link.ProjectID)
+	assert.Equal(t, "coder", link.DefaultAgent)
 }
 
 // A Publish in progress during a reconfigure keeps the previous store and

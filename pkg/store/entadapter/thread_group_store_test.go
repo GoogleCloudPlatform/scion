@@ -442,6 +442,110 @@ func TestThreadGroupSetMember_GroupDeletedInSameTransaction(t *testing.T) {
 	require.NoError(t, err, "the failed transaction rolled the delete back")
 }
 
+// TestThreadGroupAddMemberIfUnfiled is design 5a rule 3: an unfiled
+// conversation is filed, and one already in a group (this or another) is
+// never moved.
+func TestThreadGroupAddMemberIfUnfiled(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	g1 := newThreadGroup(t, cs, projectID, "one")
+	g2 := newThreadGroup(t, cs, projectID, "two")
+	conv := newGroupConversation(t, cs, projectID)
+
+	filed, err := cs.AddThreadGroupMemberIfUnfiled(ctx, g1.ID, conv, "user-1")
+	require.NoError(t, err)
+	assert.True(t, filed)
+	got, err := cs.GetThreadGroup(ctx, g1.ID)
+	require.NoError(t, err)
+	require.Len(t, got.Members, 1)
+	m := got.Members[0]
+	assert.Equal(t, projectID, m.ProjectID)
+	assert.Equal(t, "user-1", m.AddedBy)
+
+	// Same group again: not filed by this call, row unchanged.
+	filed, err = cs.AddThreadGroupMemberIfUnfiled(ctx, g1.ID, conv, "user-2")
+	require.NoError(t, err)
+	assert.False(t, filed)
+	// Another group: not moved.
+	filed, err = cs.AddThreadGroupMemberIfUnfiled(ctx, g2.ID, conv, "user-2")
+	require.NoError(t, err)
+	assert.False(t, filed)
+
+	assert.Equal(t, 1, memberRows(t, cs, conv))
+	again, err := cs.GetThreadGroup(ctx, g1.ID)
+	require.NoError(t, err)
+	require.Len(t, again.Members, 1)
+	assert.Equal(t, m.ID, again.Members[0].ID)
+	assert.Equal(t, "user-1", again.Members[0].AddedBy)
+	assert.True(t, again.Members[0].AddedAt.Equal(m.AddedAt))
+	assert.Zero(t, groupMemberRows(t, cs, g2.ID))
+}
+
+func TestThreadGroupAddMemberIfUnfiled_MissingGroupWritesNothing(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	conv := newGroupConversation(t, cs, projectID)
+
+	_, err := cs.AddThreadGroupMemberIfUnfiled(ctx, uuid.NewString(), conv, "user-1")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	_, err = cs.AddThreadGroupMemberIfUnfiled(ctx, "not-a-uuid", conv, "user-1")
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	g := newThreadGroup(t, cs, projectID, "one")
+	_, err = cs.AddThreadGroupMemberIfUnfiled(ctx, g.ID, "not-a-uuid", "user-1")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+	assert.Zero(t, memberRows(t, cs, conv))
+}
+
+// TestThreadGroupAddMemberIfUnfiled_ConcurrentFilesOnce races filings of one
+// conversation into several groups: exactly one call reports filed, and the
+// one row left is in that call's group.
+func TestThreadGroupAddMemberIfUnfiled_ConcurrentFilesOnce(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	conv := newGroupConversation(t, cs, projectID)
+	groups := make([]string, 4)
+	for i := range groups {
+		groups[i] = newThreadGroup(t, cs, projectID, "g"+string(rune('a'+i))).ID
+	}
+
+	var (
+		wg     sync.WaitGroup
+		mu     sync.Mutex
+		winner []string
+	)
+	for round := 0; round < 3; round++ {
+		for _, gid := range groups {
+			wg.Add(1)
+			go func(gid string) {
+				defer wg.Done()
+				for {
+					filed, err := cs.AddThreadGroupMemberIfUnfiled(ctx, gid, conv, "user-1")
+					if errors.Is(err, store.ErrTransient) {
+						continue
+					}
+					if err != nil {
+						t.Errorf("AddThreadGroupMemberIfUnfiled: %v", err)
+						return
+					}
+					if filed {
+						mu.Lock()
+						winner = append(winner, gid)
+						mu.Unlock()
+					}
+					return
+				}
+			}(gid)
+		}
+	}
+	wg.Wait()
+	require.Len(t, winner, 1, "exactly one call filed the conversation")
+	assert.Equal(t, 1, memberRows(t, cs, conv))
+	assert.Equal(t, 1, groupMemberRows(t, cs, winner[0]))
+}
+
 func TestThreadGroupRemoveMember(t *testing.T) {
 	ctx := context.Background()
 	cs := newThreadGroupTestStore(t)
@@ -868,4 +972,58 @@ func TestThreadGroupDelete_WaitsForUncommittedFiling_Postgres(t *testing.T) {
 	}
 	assert.Zero(t, memberRows(t, cs, conv), "no orphan member row")
 	assert.Zero(t, groupMemberRows(t, cs, g.ID))
+}
+
+func TestThreadGroupCount(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+
+	n, err := cs.CountThreadGroups(ctx, projectID)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	g := newThreadGroup(t, cs, projectID, "one")
+	newThreadGroup(t, cs, projectID, "two")
+	newThreadGroup(t, cs, uuid.NewString(), "other project")
+	require.NoError(t, cs.SetThreadGroupMember(ctx, g.ID, newGroupConversation(t, cs, projectID), "u"))
+
+	n, err = cs.CountThreadGroups(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "groups of this project only; members do not count")
+
+	_, err = cs.CountThreadGroups(ctx, "not-a-uuid")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestThreadGroupGetIDForConversation(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	a := newThreadGroup(t, cs, projectID, "a")
+	b := newThreadGroup(t, cs, projectID, "b")
+	c := newGroupConversation(t, cs, projectID)
+
+	id, err := cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Empty(t, id, "not filed")
+
+	require.NoError(t, cs.SetThreadGroupMember(ctx, a.ID, c, "u"))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, a.ID, id)
+
+	require.NoError(t, cs.SetThreadGroupMember(ctx, b.ID, c, "u"))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, id, "follows a move")
+
+	require.NoError(t, cs.RemoveThreadGroupMember(ctx, b.ID, c))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Empty(t, id, "removed")
+
+	id, err = cs.GetThreadGroupIDForConversation(ctx, "not-a-uuid")
+	require.NoError(t, err)
+	assert.Empty(t, id, "a malformed ID is in no group")
 }

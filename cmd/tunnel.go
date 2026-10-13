@@ -172,6 +172,9 @@ type tunnelHub struct {
 	endpoint string
 	src      transportauth.TokenSource
 	mode     transportauth.HeaderMode
+	// lookupMissed records that ResolveAgent found no such project or
+	// agent, so runTunnel can name the project and its source.
+	lookupMissed atomic.Bool
 }
 
 func (h *tunnelHub) client(cred tunnelclient.Credential) (hubclient.Client, error) {
@@ -216,18 +219,30 @@ func (h *tunnelHub) ResolveAgent(ctx context.Context, cred tunnelclient.Credenti
 	} else {
 		p, err := c.Projects().Get(ctx, project)
 		if err != nil {
-			return tunnelclient.Target{}, tunnelHTTPError(err)
+			return tunnelclient.Target{}, h.lookupError(err)
 		}
 		projectID = p.ID
 	}
 	a, err := c.ProjectAgents(projectID).Get(ctx, agent)
 	if err != nil {
-		return tunnelclient.Target{}, tunnelHTTPError(err)
+		return tunnelclient.Target{}, h.lookupError(err)
 	}
 	if !a.DeletedAt.IsZero() {
+		h.lookupMissed.Store(true)
 		return tunnelclient.Target{}, &tunnelclient.HTTPError{Status: http.StatusNotFound, Code: "agent_not_found", Message: "agent was deleted"}
 	}
 	return tunnelclient.Target{AgentID: a.ID, ProjectID: projectID}, nil
+}
+
+// lookupError is tunnelHTTPError for a project or agent lookup, recording
+// a not-found answer in lookupMissed.
+func (h *tunnelHub) lookupError(err error) error {
+	err = tunnelHTTPError(err)
+	var he *tunnelclient.HTTPError
+	if errors.As(err, &he) && he.Status == http.StatusNotFound {
+		h.lookupMissed.Store(true)
+	}
+	return err
 }
 
 // tunnelHTTPError turns a hub client error into a tunnelclient.HTTPError
@@ -293,10 +308,11 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if endpoint == "" {
 		return tunnelclient.Errorf(tunnelclient.ExitUsage, "no hub endpoint: pass --hub or configure hub.endpoint")
 	}
-	project := projectPath
-	if project == "" && settings != nil {
-		project = settings.ProjectID
+	target := resolveHubOnlyProject()
+	if err := target.unlinkedError(); err != nil {
+		return err
 	}
+	project := target.ref
 	req := tunnelclient.Request{
 		Agent:     args[0],
 		Project:   project,
@@ -342,7 +358,18 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	}
 	var te *tunnelclient.Error
 	if errors.As(err, &te) {
-		return te
+		return tunnelNotFoundError(te, hub.lookupMissed.Load(), args[0], target)
 	}
 	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+}
+
+// tunnelNotFoundError names the project and its source in te when the
+// agent lookup found no such project or agent (missed); the hub's own
+// message would show the project as sent, often a raw id. Other errors are
+// returned as they are.
+func tunnelNotFoundError(te *tunnelclient.Error, missed bool, agent string, target hubOnlyProject) *tunnelclient.Error {
+	if te.Code != tunnelclient.ExitAgentNotFound || !missed {
+		return te
+	}
+	return tunnelclient.Errorf(te.Code, "agent %s not found in %s", agent, target.describe())
 }

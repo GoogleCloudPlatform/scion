@@ -8,8 +8,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel/log"
 )
@@ -109,7 +109,7 @@ func SetupWithOTel(component, hubName string, debug bool, useGCP bool, lp log.Lo
 	// forwarded to Cloud Logging by the runtime. When a direct Cloud Logging
 	// handler is also present in extraHandlers, including the stdout base
 	// handler would produce duplicate entries. Skip it in that case.
-	onCloudRun := os.Getenv("K_SERVICE") != ""
+	onCloudRun := cloudrunenv.IsService()
 	cloudHandlerPresent := hasCloudHandler(extraHandlers)
 	if !onCloudRun || !cloudHandlerPresent {
 		baseHandler := createBaseHandler(component, useGCP, hubName)

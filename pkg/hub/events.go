@@ -61,6 +61,10 @@ type EventPublisher interface {
 	// deleted) on project.<projectID>.chat.topic so SSE subscribers can
 	// update the space rail in real time.
 	PublishChatTopicEvent(ctx context.Context, projectID string, action string, topic WebChatTopic)
+	// PublishChatThreadGroupEvent publishes a thread group lifecycle event
+	// (created, updated, deleted) on project.<projectID>.chat.thread_group so
+	// SSE subscribers can update the space rail in real time (ptone/scion#4424).
+	PublishChatThreadGroupEvent(ctx context.Context, projectID string, action string, group ThreadGroupResponse)
 	// PublishChatReadStateEvent publishes a read-watermark advance to the other
 	// participants of a DM on user.<peerID>.chat.read-state so the sender can
 	// render "seen" without polling.

@@ -242,6 +242,23 @@ func TestReviewRejectsUnmarkedChanges(t *testing.T) {
 	}
 }
 
+// TestReviewRejectionFlagsWhitespace: the 422 hunks say when a change is
+// whitespace only and when it is to the final newline (ptone/scion#4578).
+func TestReviewRejectionFlagsWhitespace(t *testing.T) {
+	f := newReviewFixture(t)
+	// Trailing spaces on the last line, and no final newline.
+	edited := strings.TrimSuffix(reviewMarked, "\n") + "  "
+	_, r := f.review(userU, with(f.v1, "plan.md", edited), "plan.md")
+	files, _ := unmarked(t, r)
+	if len(files) != 1 || len(files[0].Hunks) != 1 || files[0].Hunks[0].Line != 4 ||
+		!files[0].Hunks[0].WhitespaceOnly || files[0].Hunks[0].FinalNewline != "removed" {
+		t.Fatalf("files %+v", files)
+	}
+	if !strings.Contains(r.body, `"whitespace_only":true`) || !strings.Contains(r.body, `"final_newline":"removed"`) {
+		t.Fatalf("422 body %s", r.body)
+	}
+}
+
 func mustVersion(t *testing.T, f *reviewFixture, seq int) *Version {
 	t.Helper()
 	v, err := f.store.GetVersion(context.Background(), f.id, seq)
