@@ -22,10 +22,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -499,6 +501,13 @@ func TestHandleProjectDiscoverResources(t *testing.T) {
 // the harness-config (leaf), not a parent of configs.
 func mockSingleHarnessConfigTarball(t *testing.T) func() {
 	t.Helper()
+	return mockSingleHarnessConfigTarballWith(t, "harness: claude\n")
+}
+
+// mockSingleHarnessConfigTarballWith is mockSingleHarnessConfigTarball with the
+// given config.yaml content.
+func mockSingleHarnessConfigTarballWith(t *testing.T, configYAML string) func() {
+	t.Helper()
 	old := http.DefaultClient.Transport
 	http.DefaultClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
@@ -506,7 +515,7 @@ func mockSingleHarnessConfigTarball(t *testing.T) func() {
 			gzw := gzip.NewWriter(&buf)
 			tw := tar.NewWriter(gzw)
 			files := map[string]string{
-				"repo-main/harnesses/antigravity/config.yaml": "harness: claude\n",
+				"repo-main/harnesses/antigravity/config.yaml": configYAML,
 				"repo-main/harnesses/antigravity/README.md":   "hello",
 			}
 			for name, body := range files {
@@ -611,6 +620,79 @@ func TestHandleResourcesImport_SingleHarnessConfig(t *testing.T) {
 	}
 	if result.TotalCount != 1 {
 		t.Fatalf("expected 1 global harness-config, got %d", result.TotalCount)
+	}
+}
+
+// TestHandleResourcesImport_HarnessConfigUnknownTopLevelKeyWarns covers
+// ptone/scion#4975 on the unified endpoint: a config.yaml with an unknown
+// top-level key imports (200) and the response lists the warning.
+func TestHandleResourcesImport_HarnessConfigUnknownTopLevelKeyWarns(t *testing.T) {
+	srv, s, _ := testTemplateBootstrapServer(t)
+	ctx := context.Background()
+
+	admin := &store.User{ID: tid("user-admin-warn-hc"), Email: "admin-warn-hc@test.com", DisplayName: "Admin", Role: store.UserRoleAdmin}
+	if err := s.CreateUser(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	ensureHubMembership(ctx, s, admin.ID)
+	ensureAdminRoleBinding(t, s, admin.ID)
+
+	defer mockSingleHarnessConfigTarballWith(t, "harness: claude\nzz_future: 1\naa_future: {x: 1}\n")()
+
+	rec := doRequestAsUser(t, srv, admin, http.MethodPost, "/api/v1/resources/import", ImportResourcesRequest{
+		Kind:      "harness-config",
+		Scope:     "global",
+		SourceURL: "https://github.com/acme/repo/tree/main/harnesses/antigravity",
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var resp ImportResourcesResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Count != 1 || len(resp.Failed) != 0 {
+		t.Fatalf("expected one import and no failures, got %+v", resp)
+	}
+	if len(resp.Warnings) != 1 || resp.Warnings[0].Name != "antigravity" ||
+		!strings.Contains(resp.Warnings[0].Reason, "aa_future, zz_future") {
+		t.Fatalf("expected one warning for antigravity naming aa_future, zz_future, got %+v", resp.Warnings)
+	}
+}
+
+// TestImportResultCollector_RecordsFailuresAndWarnings checks the collector the
+// JSON import handlers share, including concurrent emits from the import
+// workers.
+func TestImportResultCollector_RecordsFailuresAndWarnings(t *testing.T) {
+	var c importResultCollector
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			name := fmt.Sprintf("r%d", i)
+			if i%2 == 0 {
+				c.progress(ResourceImportEvent{Type: ImportEventFailed, Name: name, Reason: "bad"})
+				return
+			}
+			c.progress(ResourceImportEvent{Type: ImportEventCompleted, Name: name, Warnings: []string{"w1", "w2"}})
+		}(i)
+	}
+	wg.Wait()
+	c.progress(ResourceImportEvent{Type: ImportEventCompleted, Name: "clean"})
+	c.progress(ResourceImportEvent{Type: ImportEventStarted, Name: "r9", Warnings: []string{"ignored"}})
+
+	if got := len(c.Failures()); got != 4 {
+		t.Errorf("failures = %d, want 4", got)
+	}
+	warnings := c.Warnings()
+	if len(warnings) != 8 {
+		t.Fatalf("warnings = %+v, want 8 entries", warnings)
+	}
+	for i := 1; i < len(warnings); i++ {
+		if warnings[i-1].Name > warnings[i].Name {
+			t.Fatalf("warnings not sorted by name: %+v", warnings)
+		}
 	}
 }
 

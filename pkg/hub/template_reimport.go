@@ -163,8 +163,9 @@ func (s *Server) handleTemplateReimport(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
+	var results importResultCollector
+	imported, err := run(results.progress)
+	failures := results.Failures()
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
 		return

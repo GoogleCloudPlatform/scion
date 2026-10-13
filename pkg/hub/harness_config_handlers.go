@@ -1371,8 +1371,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
+	var results importResultCollector
+	imported, err := run(results.progress)
+	failures := results.Failures()
 	if err != nil {
 		if writeUnusableProvisionerImportError(w, err) {
 			return
@@ -1395,6 +1396,7 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		HarnessConfigs: imported,
 		Count:          len(imported),
 		Failed:         failures,
+		Warnings:       results.Warnings(),
 	})
 }
 

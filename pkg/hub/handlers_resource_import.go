@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -58,7 +59,7 @@ func (s *Server) handleProjectImportTemplates(w http.ResponseWriter, r *http.Req
 		defaultWorkspacePath:    "/.scion/templates",
 		storageLabel:            "Template",
 		validationFailurePrefix: "config validation failed: ",
-		response: func(imported []string, failures []ImportFailure) any {
+		response: func(imported []string, failures, _ []ImportFailure) any {
 			return ImportTemplatesResponse{Templates: imported, Count: len(imported), Failed: failures}
 		},
 	})
@@ -77,6 +78,10 @@ type ImportHarnessConfigsResponse struct {
 	HarnessConfigs []string        `json:"harnessConfigs"`
 	Count          int             `json:"count"`
 	Failed         []ImportFailure `json:"failed,omitempty"`
+	// Warnings lists non-fatal problems with imported configs, one entry
+	// per warning (e.g. unknown top-level config.yaml keys that were
+	// ignored). The configs named here were imported.
+	Warnings []ImportFailure `json:"warnings,omitempty"`
 }
 
 // handleProjectImportHarnessConfigs imports harness-configs directly from a
@@ -89,8 +94,8 @@ func (s *Server) handleProjectImportHarnessConfigs(w http.ResponseWriter, r *htt
 		defaultWorkspacePath:    "/.scion/harness-configs",
 		storageLabel:            "Harness-config",
 		validationFailurePrefix: "config.yaml validation failed: ",
-		response: func(imported []string, failures []ImportFailure) any {
-			return ImportHarnessConfigsResponse{HarnessConfigs: imported, Count: len(imported), Failed: failures}
+		response: func(imported []string, failures, warnings []ImportFailure) any {
+			return ImportHarnessConfigsResponse{HarnessConfigs: imported, Count: len(imported), Failed: failures, Warnings: warnings}
 		},
 	})
 }
@@ -108,7 +113,7 @@ type projectImportOptions struct {
 	defaultWorkspacePath    string
 	storageLabel            string
 	validationFailurePrefix string
-	response                func([]string, []ImportFailure) any
+	response                func(imported []string, failures, warnings []ImportFailure) any
 }
 
 func (s *Server) handleProjectImportResources(
@@ -165,8 +170,9 @@ func (s *Server) handleProjectImportResources(
 		return
 	}
 
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
+	var results importResultCollector
+	imported, err := run(results.progress)
+	failures := results.Failures()
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -188,7 +194,7 @@ func (s *Server) handleProjectImportResources(
 		return
 	}
 
-	writeJSON(w, http.StatusOK, options.response(imported, failures))
+	writeJSON(w, http.StatusOK, options.response(imported, failures, results.Warnings()))
 }
 
 // ImportResourcesRequest is the body for the unified import endpoint
@@ -214,6 +220,9 @@ type ImportResourcesResponse struct {
 	Imported []string        `json:"imported"`
 	Count    int             `json:"count"`
 	Failed   []ImportFailure `json:"failed,omitempty"`
+	// Warnings lists non-fatal problems with imported resources, one entry
+	// per warning; the resources named here were imported.
+	Warnings []ImportFailure `json:"warnings,omitempty"`
 }
 
 // handleResourcesImport handles POST /api/v1/resources/import: a single,
@@ -339,8 +348,9 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var failures []ImportFailure
-	imported, err := run(failureCollector(&failures))
+	var results importResultCollector
+	imported, err := run(results.progress)
+	failures := results.Failures()
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return
@@ -367,19 +377,52 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		Imported: imported,
 		Count:    len(imported),
 		Failed:   failures,
+		Warnings: results.Warnings(),
 	})
 }
 
-// failureCollector returns a progress callback that records ImportEventFailed
-// events into the provided slice. The caller passes this to the import driver
-// instead of nil so that per-resource validation failures are surfaced in the
-// non-streaming JSON response.
-func failureCollector(failures *[]ImportFailure) importProgressFunc {
-	return func(ev ResourceImportEvent) {
-		if ev.Type == ImportEventFailed {
-			*failures = append(*failures, ImportFailure{Name: ev.Name, Reason: ev.Reason})
+// importResultCollector records per-resource failures and warnings from the
+// import driver's progress events, so the non-streaming JSON responses can
+// report them. Pass its progress method to the driver instead of nil.
+//
+// The driver emits from several workers at once (resourceImportConcurrency),
+// so every access is guarded by mu.
+type importResultCollector struct {
+	mu       sync.Mutex
+	failures []ImportFailure
+	warnings []ImportFailure
+}
+
+// progress records ImportEventFailed events as failures and the warnings on
+// ImportEventCompleted events, one entry per warning.
+func (c *importResultCollector) progress(ev ResourceImportEvent) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	switch ev.Type {
+	case ImportEventFailed:
+		c.failures = append(c.failures, ImportFailure{Name: ev.Name, Reason: ev.Reason})
+	case ImportEventCompleted:
+		for _, w := range ev.Warnings {
+			c.warnings = append(c.warnings, ImportFailure{Name: ev.Name, Reason: w})
 		}
 	}
+}
+
+// Failures returns the recorded failures.
+func (c *importResultCollector) Failures() []ImportFailure {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.failures)
+}
+
+// Warnings returns the recorded warnings, sorted by resource name so the
+// response does not depend on worker scheduling.
+func (c *importResultCollector) Warnings() []ImportFailure {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := slices.Clone(c.warnings)
+	slices.SortStableFunc(out, func(a, b ImportFailure) int { return strings.Compare(a.Name, b.Name) })
+	return out
 }
 
 // importAcceptsNDJSON reports whether the client opted into a streaming

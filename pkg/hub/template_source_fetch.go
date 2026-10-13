@@ -469,6 +469,6 @@ func (s *Server) reimportTemplateSourceWithLimits(ctx context.Context, src *temp
 	// Report and write under the target's own name; the store resolves the
 	// record by tmpl.ID regardless of the folder name.
 	selected.name = tmpl.Name
-	kind.newStore = func(string) (*ResourceStore, error) { return s.targetTemplateStore(tmpl.ID), nil }
+	kind.newStore = func(string) (*ResourceStore, []string, error) { return s.targetTemplateStore(tmpl.ID), nil, nil }
 	return s.importResourceDirs(ctx, []resourceDir{selected}, nil, tmpl.Scope, tmpl.ScopeID, kind, progress), nil
 }

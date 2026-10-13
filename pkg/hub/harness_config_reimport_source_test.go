@@ -20,7 +20,9 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -59,13 +61,20 @@ var invalidRecordedSourceURLs = []string{
 // added to config.yaml so the import keeps the row's name, as a .tar.gz.
 func claudeTarGzServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	return claudeTarGzServerWithConfigPrefix(t, "name: claude\n")
+}
+
+// claudeTarGzServerWithConfigPrefix is claudeTarGzServer with prefix, instead
+// of "name: claude\n", prepended to config.yaml.
+func claudeTarGzServerWithConfigPrefix(t *testing.T, prefix string) *httptest.Server {
+	t.Helper()
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	for _, f := range embeddedClaudeFiles(t) {
 		data := f.data
 		if f.path == "config.yaml" {
-			data = append([]byte("name: claude\n"), data...)
+			data = append([]byte(prefix), data...)
 		}
 		require.NoError(t, tw.WriteHeader(&tar.Header{Name: f.path, Mode: 0o644, Size: int64(len(data))}))
 		_, err := tw.Write(data)
@@ -84,6 +93,86 @@ func claudeTarGzServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+// reimportFutureKeyPrefix is a config.yaml prefix carrying a top-level key
+// this binary's schema does not know, as if written for a newer Scion.
+const reimportFutureKeyPrefix = "name: claude\nfuture_block:\n  enabled: true\n"
+
+// TestReimport_UnknownTopLevelKeyWarns covers ptone/scion#4975: a source whose
+// config.yaml has an unknown top-level key reimports with 200, reports the
+// key as a warning, and stores config.yaml byte-for-byte, key included.
+func TestReimport_UnknownTopLevelKeyWarns(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	src := claudeTarGzServerWithConfigPrefix(t, reimportFutureKeyPrefix)
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": src.URL + "/configs/claude.tar.gz"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ImportHarnessConfigsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, []string{"claude"}, resp.HarnessConfigs)
+	assert.Empty(t, resp.Failed)
+	require.Len(t, resp.Warnings, 1, rec.Body.String())
+	assert.Equal(t, "claude", resp.Warnings[0].Name)
+	assert.Contains(t, resp.Warnings[0].Reason, "future_block")
+
+	after := globalClaude(t, s)
+	require.NotNil(t, after)
+	assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport must replace the files")
+	rc, _, err := srv.GetStorage().Download(context.Background(), after.StoragePath+"/config.yaml")
+	require.NoError(t, err)
+	defer func() { _ = rc.Close() }()
+	stored, err := io.ReadAll(rc)
+	require.NoError(t, err)
+	var want []byte
+	for _, f := range embeddedClaudeFiles(t) {
+		if f.path == "config.yaml" {
+			want = append([]byte(reimportFutureKeyPrefix), f.data...)
+		}
+	}
+	assert.Equal(t, string(want), string(stored), "stored config.yaml must keep the unknown key, byte-for-byte")
+}
+
+// TestReimport_UnknownTopLevelKeyNDJSONCompletedCarriesWarnings checks the
+// streaming reimport: the completed event carries the warning.
+func TestReimport_UnknownTopLevelKeyNDJSONCompletedCarriesWarnings(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	src := claudeTarGzServerWithConfigPrefix(t, reimportFutureKeyPrefix)
+
+	body, err := json.Marshal(map[string]interface{}{"sourceUrl": src.URL + "/configs/claude.tar.gz"})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/x-ndjson")
+	req.Header.Set("Authorization", "Bearer "+testDevToken)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var events []ResourceImportEvent
+	for _, line := range strings.Split(strings.TrimSpace(rec.Body.String()), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var ev ResourceImportEvent
+		require.NoError(t, json.Unmarshal([]byte(line), &ev), line)
+		events = append(events, ev)
+	}
+	var completed *ResourceImportEvent
+	for i := range events {
+		require.NotEqual(t, ImportEventFailed, events[i].Type, "unexpected failed event: %+v", events[i])
+		require.NotEqual(t, ImportEventError, events[i].Type, "unexpected error event: %+v", events[i])
+		if events[i].Type == ImportEventCompleted {
+			completed = &events[i]
+		}
+	}
+	require.NotNil(t, completed, rec.Body.String())
+	assert.Equal(t, "claude", completed.Name)
+	require.Len(t, completed.Warnings, 1)
+	assert.Contains(t, completed.Warnings[0], "future_block")
 }
 
 func reimportErrorCode(t *testing.T, body []byte) string {

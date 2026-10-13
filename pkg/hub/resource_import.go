@@ -110,6 +110,10 @@ type ResourceImportEvent struct {
 	Imported []string `json:"imported,omitempty"`
 	Skipped  []string `json:"skipped,omitempty"`
 	Failed   []string `json:"failed,omitempty"`
+	// Warnings lists non-fatal problems found while importing the resource
+	// (e.g. unknown top-level harness-config keys that were ignored); set
+	// on completed when there are any.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // importProgressFunc receives import progress events. It may be nil (the
@@ -140,8 +144,10 @@ type resourceImportKind struct {
 	isResourceDir func(dir string) bool
 	// newStore builds the ResourceStore that persists a directory of this kind.
 	// For harness-configs this loads config.yaml to resolve the harness type, so
-	// it can fail; failures cause that directory to be skipped.
-	newStore func(dir string) (*ResourceStore, error)
+	// it can fail; failures cause that directory to be skipped. The returned
+	// warnings (non-fatal load problems) are logged and reported on the
+	// directory's completed event.
+	newStore func(dir string) (*ResourceStore, []string, error)
 	// checkContent, when set, validates the content of every directory
 	// selected for import before any directory is persisted. A non-nil error
 	// refuses the whole import, so a refused import or reimport writes
@@ -155,7 +161,7 @@ func (s *Server) templateImportKind() resourceImportKind {
 		noun:          "templates",
 		marker:        "scion-agent.yaml",
 		isResourceDir: templateimport.IsScionTemplate,
-		newStore:      func(string) (*ResourceStore, error) { return s.templateStore(), nil },
+		newStore:      func(string) (*ResourceStore, []string, error) { return s.templateStore(), nil, nil },
 	}
 }
 
@@ -165,12 +171,12 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 		noun:          "harness-configs",
 		marker:        "config.yaml",
 		isResourceDir: isHarnessConfigDir,
-		newStore: func(dir string) (*ResourceStore, error) {
+		newStore: func(dir string) (*ResourceStore, []string, error) {
 			hcDir, err := config.LoadHarnessConfigDir(dir)
 			if err != nil {
-				return nil, err
+				return nil, nil, err
 			}
-			return s.harnessConfigStore(hcDir.Config.Harness), nil
+			return s.harnessConfigStore(hcDir.Config.Harness), hcDir.Warnings, nil
 		},
 		checkContent: checkHarnessConfigDirsProvisioner,
 	}
@@ -498,7 +504,7 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 
 			emit(progress, ResourceImportEvent{Type: ImportEventStarted, Name: rd.name})
 
-			rstore, err := kind.newStore(rd.path)
+			rstore, warnings, err := kind.newStore(rd.path)
 			if err == nil {
 				_, err = rstore.Bootstrap(ctx, rd.name, rd.path, scope, scopeID, rd.sourceURL, true)
 			}
@@ -514,9 +520,13 @@ func (s *Server) importResourceDirs(ctx context.Context, dirs []resourceDir, ski
 				return nil
 			}
 			importedSlots[i] = rd.name
+			for _, w := range warnings {
+				s.resourceLog.Warn(kind.noun+" import: imported resource with warning",
+					"name", rd.name, "warning", w)
+			}
 			emit(progress, ResourceImportEvent{
 				Type: ImportEventCompleted, Name: rd.name,
-				Completed: done, Total: total,
+				Completed: done, Total: total, Warnings: warnings,
 			})
 			return nil
 		})
