@@ -137,7 +137,9 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 // Returns the runtime config, the effective runtime type, and any error.
 // If profileName is empty, ActiveProfile is used; when the hub settings
 // overlay replaced the profiles map and ActiveProfile is not one of them,
-// the error is an *ActiveProfileError naming both.
+// the error is an *ActiveProfileError naming both. A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
@@ -148,6 +150,9 @@ func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -1192,6 +1197,10 @@ type VersionedSettings struct {
 	// Profiles and ActiveProfile is not one of them (see
 	// resolveOverlaidActiveProfile). It is not serialized.
 	activeProfileErr *ActiveProfileError
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`

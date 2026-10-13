@@ -33,7 +33,8 @@ import (
 // profile the stored profiles lack fails start, restart and resume with no
 // fallback to the default; a dispatch that needs the default profile, when
 // the stored profiles do not define active_profile, fails with an error
-// naming both; and none of this is a startup error.
+// naming both; a create naming a profile the stored profiles lack fails the
+// same way; and none of this is a startup error.
 
 // installStoredProfilesOverlay installs a global settings overlay whose
 // stored profiles define only the kubernetes profile, so the fixture's
@@ -140,7 +141,8 @@ func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 			f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
 			w := op.run(t, f, name)
-			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`)
+			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
+				"retry once its profile is configured")
 			if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
 				t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
 			}
@@ -161,7 +163,11 @@ func TestOverlayProfiles_DispatchNeedingDefaultFailsClearly(t *testing.T) {
 		w := lifecyclePost(t, f.srv, "/api/v1/agents/fresh-agent/start", map[string]any{
 			"projectPath": f.projectPath,
 		})
-		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+lifecycleK8sProfile)
+		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+lifecycleK8sProfile,
+			"retry once active_profile names one of the hub's stored profiles")
+		if strings.Contains(w.Body.String(), "retry once its profile is configured") {
+			t.Errorf("default-profile error uses the saved-profile wording: %s", w.Body.String())
+		}
 		if f.defaultMgr.StartCalls() != 0 {
 			t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
 		}
@@ -178,6 +184,25 @@ func TestOverlayProfiles_DispatchNeedingDefaultFailsClearly(t *testing.T) {
 			"config":        map[string]any{"template": "claude"},
 		})
 		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+lifecycleK8sProfile)
+	})
+	t.Run("create with explicit profile missing from stored profiles", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		installStoredProfilesOverlay(t)
+		w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+			"name":        "missing-profile-agent",
+			"slug":        "missing-profile-agent",
+			"id":          "agent-uuid-missing",
+			"projectPath": f.projectPath,
+			"config":      map[string]any{"template": "claude", "profile": "local"},
+		})
+		assertDispatchRefused(t, w, "requested runtime profile cannot be resolved", `profile "local" not found`,
+			"available profiles: "+lifecycleK8sProfile, "retry once the profile is one of the hub's stored profiles")
+		if f.defaultMgr.StartCalls() != 0 {
+			t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
+		}
+		if runs, _ := f.k8sRun(); runs != 0 {
+			t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+		}
 	})
 	t.Run("create with explicit profile", func(t *testing.T) {
 		f := newLifecycleFixture(t)

@@ -136,10 +136,7 @@ type ActiveProfileError struct {
 }
 
 func (e *ActiveProfileError) Error() string {
-	available := "none"
-	if len(e.Available) > 0 {
-		available = strings.Join(e.Available, ", ")
-	}
+	available := joinAvailableProfiles(e.Available)
 	configured := fmt.Sprintf("%q", e.Configured)
 	if e.Configured == "" {
 		configured = `"" (unset)`
@@ -148,24 +145,50 @@ func (e *ActiveProfileError) Error() string {
 		configured, available)
 }
 
+// StoredProfileNotFoundError reports that a profile named explicitly (an
+// agent's requested or saved profile) is not one of the hub's stored
+// profiles, after the overlay replaced the profiles map. Its text keeps the
+// "profile %q not found" form and adds the available profiles.
+type StoredProfileNotFoundError struct {
+	// Requested is the profile name that was asked for.
+	Requested string
+	// Available is the sorted list of profile names in the overlaid map.
+	Available []string
+}
+
+func (e *StoredProfileNotFoundError) Error() string {
+	return fmt.Sprintf("profile %q not found in the hub's stored profiles (available profiles: %s)",
+		e.Requested, joinAvailableProfiles(e.Available))
+}
+
+func joinAvailableProfiles(names []string) string {
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
+}
+
 // resolveOverlaidActiveProfile decides the default profile once the overlay
-// has replaced vs.Profiles. The file's active_profile is kept when that
-// profile exists in the overlaid map; otherwise vs records an
-// ActiveProfileError, which ResolveRuntime returns when the default profile
-// is needed. vs.ActiveProfile itself is left unchanged either way.
+// has replaced vs.Profiles, and records the stored profile names so that
+// ResolveRuntime can name them when a requested profile is missing. The
+// file's active_profile is kept when that profile exists in the overlaid
+// map; otherwise vs records an ActiveProfileError, which ResolveRuntime
+// returns when the default profile is needed. vs.ActiveProfile itself is
+// left unchanged either way.
 //
 // active_profile has no hub (DB) setting today. If one is ever added, its
 // value would take precedence over the file's value here.
 func resolveOverlaidActiveProfile(vs *VersionedSettings) {
-	vs.activeProfileErr = nil
-	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
-		return
-	}
 	available := make([]string, 0, len(vs.Profiles))
 	for name := range vs.Profiles {
 		available = append(available, name)
 	}
 	sort.Strings(available)
+	vs.storedProfileNames = available
+	vs.activeProfileErr = nil
+	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
+		return
+	}
 	vs.activeProfileErr = &ActiveProfileError{Configured: vs.ActiveProfile, Available: available}
 }
 

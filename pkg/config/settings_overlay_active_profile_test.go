@@ -148,3 +148,38 @@ func TestSettingsOverlay_ActiveProfile_FlatViewDropsError(t *testing.T) {
 		t.Errorf("flat view returned *ActiveProfileError: %v", err)
 	}
 }
+
+// A named profile the overlaid profiles lack yields an error naming it and
+// the stored profiles, keeping the "profile %q not found" form.
+func TestSettingsOverlay_RequestedProfileMissingNamesRequestedAndAvailable(t *testing.T) {
+	vs := overlayActiveProfileFixture("local")
+	overlayWithProfiles().Apply(vs)
+
+	_, _, err := vs.ResolveRuntime("vanished")
+	var spe *StoredProfileNotFoundError
+	if !errors.As(err, &spe) {
+		t.Fatalf("ResolveRuntime(vanished) error = %v, want *StoredProfileNotFoundError", err)
+	}
+	for _, want := range []string{`profile "vanished" not found`, "cluster, local"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not contain %q", err, want)
+		}
+	}
+}
+
+// Without overlaid profiles, or in the flat view, a missing named profile
+// keeps the bare not-found error.
+func TestSettingsOverlay_RequestedProfileMissingUnchangedWithoutOverlaidProfiles(t *testing.T) {
+	vs := overlayActiveProfileFixture("local")
+	_, _, err := vs.ResolveRuntime("vanished")
+	var spe *StoredProfileNotFoundError
+	if errors.As(err, &spe) || err == nil || err.Error() != `profile "vanished" not found` {
+		t.Errorf("no overlay: error = %v, want the bare not-found error", err)
+	}
+
+	overlayWithProfiles().Apply(vs)
+	view := vs.ForProfileResolution(ProfileResolutionFlatInstance)
+	if _, _, err := view.ResolveRuntime("vanished"); errors.As(err, &spe) {
+		t.Errorf("flat view returned *StoredProfileNotFoundError: %v", err)
+	}
+}
