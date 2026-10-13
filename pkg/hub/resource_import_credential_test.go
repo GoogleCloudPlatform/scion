@@ -31,13 +31,14 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// importCredSecretBackend is a secret backend serving project-scope values
-// from a map. Only Get is implemented; the embedded nil interface panics on
-// any other call, which keeps the test honest about what importCredential
-// touches.
+// importCredSecretBackend is a secret backend serving values from a map for
+// one secret scope and scope ID (project scope unless scope is set). Only Get
+// is implemented; the embedded nil interface panics on any other call, which
+// keeps the test honest about what importCredential touches.
 type importCredSecretBackend struct {
 	secret.SecretBackend
-	projectID string
+	scope     string // secret scope served; "" means secret.ScopeProject
+	projectID string // scope ID served
 	values    map[string]string
 	getErr    error
 	gets      int // number of Get calls
@@ -48,7 +49,11 @@ func (b *importCredSecretBackend) Get(_ context.Context, name, scope, scopeID st
 	if b.getErr != nil {
 		return nil, b.getErr
 	}
-	if scope != secret.ScopeProject || scopeID != b.projectID {
+	wantScope := b.scope
+	if wantScope == "" {
+		wantScope = secret.ScopeProject
+	}
+	if scope != wantScope || scopeID != b.projectID {
 		return nil, store.ErrNotFound
 	}
 	val, ok := b.values[name]
@@ -174,7 +179,7 @@ func TestImportCredential_GitHubCascade(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			srv, _, _, logBuf := newImportCredServer(t, projectID, tt.values)
-			got := srv.importCredential(context.Background(), projectID, sourceURL)
+			got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, sourceURL)
 			if got != tt.want {
 				t.Errorf("importCredential = %q, want %q", got, tt.want)
 			}
@@ -206,7 +211,7 @@ func TestImportCredential_NonGitHubURLsUnaffected(t *testing.T) {
 			projectID := tid("project-import-cred-nongh")
 			srv, s, backend, _ := newImportCredServer(t, projectID, values)
 			createAppInstalledProject(t, srv, s, projectID, int64(91000+i))
-			if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "" {
+			if got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, sourceURL); got != "" {
 				t.Errorf("importCredential = %q, want no credential", got)
 			}
 			if backend.gets != 0 {
@@ -234,7 +239,7 @@ func TestImportCredential_GHKeyBeatsGitHubApp(t *testing.T) {
 			"GITHUB_TOKEN":            "fake-default-cred",
 		})
 		createAppInstalledProject(t, srv, s, projectID, 92001)
-		if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "fake-repo-cred" {
+		if got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, sourceURL); got != "fake-repo-cred" {
 			t.Errorf("importCredential = %q, want the GH_ repo credential", got)
 		}
 		if status := projectAppStatus(t, s, projectID); status != nil {
@@ -248,7 +253,7 @@ func TestImportCredential_GHKeyBeatsGitHubApp(t *testing.T) {
 			"GITHUB_TOKEN": "fake-default-cred",
 		})
 		createAppInstalledProject(t, srv, s, projectID, 92002)
-		if got := srv.importCredential(context.Background(), projectID, sourceURL); got != "fake-default-cred" {
+		if got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, sourceURL); got != "fake-default-cred" {
 			t.Errorf("importCredential = %q, want the GITHUB_TOKEN fallback after the failed mint", got)
 		}
 		status := projectAppStatus(t, s, projectID)
@@ -266,17 +271,21 @@ func TestImportCredential_DotGitURLUsesRepoKey(t *testing.T) {
 		"GH_ACME_CORP__TEMPLATES": "fake-repo-cred",
 		"GH_ACME_CORP":            "fake-owner-cred",
 	})
-	if got := srv.importCredential(context.Background(), projectID, "https://github.com/acme-corp/templates.git"); got != "fake-repo-cred" {
+	if got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, "https://github.com/acme-corp/templates.git"); got != "fake-repo-cred" {
 		t.Errorf("importCredential = %q, want the GH_ repo credential", got)
 	}
 }
 
-// TestImportCredential_NoProject verifies that a global-scope import (no
-// project) stays unauthenticated even when convention keys exist.
-func TestImportCredential_NoProject(t *testing.T) {
-	srv, _, _, _ := newImportCredServer(t, "", map[string]string{"GH_ACME_CORP": "fake-owner-cred", "GITHUB_TOKEN": "fake-default-cred"})
-	if got := srv.importCredential(context.Background(), "", "https://github.com/acme-corp/templates"); got != "" {
+// TestImportCredential_ProjectScopeWithoutProject verifies that a
+// project-scope fetch with no project ID (skill discovery without a
+// projectId) stays unauthenticated and reads no credential.
+func TestImportCredential_ProjectScopeWithoutProject(t *testing.T) {
+	srv, _, backend, _ := newImportCredServer(t, "", map[string]string{"GH_ACME_CORP": "fake-owner-cred", "GITHUB_TOKEN": "fake-default-cred"})
+	if got := srv.importCredential(context.Background(), store.TemplateScopeProject, "", "https://github.com/acme-corp/templates"); got != "" {
 		t.Errorf("importCredential = %q, want unauthenticated", got)
+	}
+	if backend.gets != 0 {
+		t.Errorf("secret backend Get called %d times, want 0", backend.gets)
 	}
 }
 
@@ -287,7 +296,7 @@ func TestImportCredential_BackendErrorFallsThrough(t *testing.T) {
 	const projectID = "project-import-cred-err"
 	srv, _, _, logBuf := newImportCredServer(t, projectID, nil)
 	srv.SetSecretBackend(&importCredSecretBackend{projectID: projectID, getErr: errors.New("backend unavailable")})
-	if got := srv.importCredential(context.Background(), projectID, "https://github.com/acme-corp/templates"); got != "" {
+	if got := srv.importCredential(context.Background(), store.TemplateScopeProject, projectID, "https://github.com/acme-corp/templates"); got != "" {
 		t.Errorf("importCredential = %q, want unauthenticated", got)
 	}
 	if !strings.Contains(logBuf.String(), "secret=GH_ACME_CORP__TEMPLATES") {
@@ -320,7 +329,7 @@ func TestFetchRemoteForImport_RepoKeyOnTheWire(t *testing.T) {
 		capturedAuth = req.Header.Get("Authorization")
 	})()
 
-	cachePath, err := srv.fetchRemoteForImport(ctx, projectID, "https://github.com/acme-corp/templates/tree/main/templates")
+	cachePath, err := srv.fetchRemoteForImport(ctx, store.TemplateScopeProject, projectID, "https://github.com/acme-corp/templates/tree/main/templates")
 	if err != nil {
 		t.Fatalf("fetchRemoteForImport: %v", err)
 	}

@@ -337,10 +337,17 @@ The same secret names authenticate remote imports into a project. This covers im
 
 For example, with a `GH_ACME_CORP` project secret, a project-scope import from `https://github.com/acme-corp/templates/tree/main/.scion/templates` uses that credential.
 
-Limits:
+Other scopes use the same names, read from their own credentials only:
 
-- Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
-- Global-scope (Hub-level) imports, user-scope imports and `scion harness-config install` are unauthenticated, so they work only with public repositories.
+| Import | Where the Hub or CLI looks, in order |
+| :--- | :--- |
+| Global scope (Hub-level) | Hub-scope `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN`. There is no GitHub App step: App installations belong to projects. |
+| User scope | Your own user-scope `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN`. An import uses them only when you are the user it imports for, never for another user. |
+| `scion harness-config install` and `scion templates import` | The `GH_{OWNER}__{REPO}`, `GH_{OWNER}`, then `GITHUB_TOKEN` environment variables of the shell running the CLI. The CLI fetches the source itself, so this applies in Hub mode too. |
+
+In every scope the first match wins, and with no match the fetch is unauthenticated, which works for public repos only. A global or user-scope import never reads project credentials.
+
+Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
 
 ### Injection Mode Behavior
 
