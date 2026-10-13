@@ -1218,8 +1218,8 @@ test.describe.serial('artifact page view and render (R2)', () => {
       j.state.setupError = `beforeAll: ${refusal}`;
       throw new Error(refusal);
     }
-    // Error-text redaction self-test: a full Playwright message naming a view
-    // URL (a goto call log, a strict-mode iframe preview) keeps no capability.
+    // Error-text self-test: kept error text holds no view capability and no
+    // call log (four synthetic cases, see errorRedactionSelfTest).
     const redaction = errorRedactionSelfTest();
     j.state.evidence.errorRedactionSelfTest = redaction;
     if (!redaction.ok) {
@@ -2885,10 +2885,12 @@ async function runCleanup(testInfo: {
 }
 
 /**
- * Checks that error text kept in the evidence is redacted: two synthetic
- * Playwright messages (a page.goto timeout call log and a strict-mode
- * iframe preview) each name a view capability before redaction and none
- * after. The samples themselves are never written to the evidence.
+ * Checks error text exactly as rows keep it (j.keptError) on four synthetic
+ * Playwright messages: a page.goto timeout call log and a strict-mode
+ * iframe preview (each names a view capability before and none after), an
+ * API call log with cookie headers (no cookie value or line after), and a
+ * view URL in the first line before a call log (redacted in place). The
+ * samples themselves are never written to the evidence.
  */
 function errorRedactionSelfTest(): { ok: boolean; cases: Array<{ name: string; ok: boolean }> } {
   const cap = '3d547973-a268-4edc-aea6-7fdd85c6b068.1.1791930136.abcdefghijklmnopqrstuvwxyz0123';

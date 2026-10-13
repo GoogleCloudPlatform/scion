@@ -403,7 +403,9 @@ export function createJourney<K extends string>(opts: JourneyOptions<K>) {
     r.errors.push(...softErrors);
     if (threw) {
       const msg = generic ?? redact(firstLine(threw));
-      r.errors.push(generic ?? keptError(threw instanceof Error ? threw.message : String(threw)));
+      r.errors.push(
+        generic ?? keptError(threw instanceof Error ? threw.message : firstLine(threw))
+      );
       if (r.graded) state.hardFailures.push(`${id}: ${msg}`);
     }
     if (threw || softErrors.length > 0) {
