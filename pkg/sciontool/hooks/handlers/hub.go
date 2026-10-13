@@ -205,6 +205,24 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			Message:  "Ready",
 		})
 
+	case hooks.EventSubagentEnd:
+		// The StatusHandler cleared a sub-agent-held wait to working when
+		// this SubagentStop was its last owner, and marked that write. Any
+		// other SubagentStop, and any parent event, changed nothing the Hub
+		// shows, so nothing is sent. The marker stays until the next local
+		// write, so a second SubagentStop before then re-sends working,
+		// which is harmless.
+		if !isSubagentEvent(event) || !isLocalSubagentEndRelease() {
+			return nil
+		}
+		log.Debug("Hub: Reporting working (sub-agent wait released)")
+		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{
+			Activity: state.ActivityWorking,
+			Status:   as.DisplayStatus(),
+			Message:  "Ready",
+		})
+
 	case hooks.EventNotification:
 		// A Notification during a wait the agent set itself leaves that
 		// wait in place locally; sending a new waiting_for_input would
@@ -217,6 +235,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 		// limits_exceeded and crashed in place locally; the Hub follows.
 		if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
 			log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+			return nil
+		}
+		// Any Notification, the parent's included, leaves limits_exceeded
+		// and crashed in place locally; the Hub follows.
+		if h.isLocalTerminal() {
+			log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
 			return nil
 		}
 		// Agent is waiting for input
@@ -297,10 +321,26 @@ func (h *HubHandler) isLocalWaitAgentSet() bool {
 	return isAgentSetWaiting(readLocalAgentInfo())
 }
 
+// isLocalSubagentEndRelease reports whether the local agent-info.json holds
+// the working activity that the last owner's SubagentStop wrote when it
+// released a sub-agent-held wait.
+func isLocalSubagentEndRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSubagentEnd
+}
+
 // isLocalHeldNonWaiting reports whether the local agent-info.json holds
 // blocked, completed, limits_exceeded or crashed.
 func (h *HubHandler) isLocalHeldNonWaiting() bool {
 	return isHeldNonWaitingActivity(readLocalActivity())
+}
+
+// isLocalTerminal reports whether the local agent-info.json holds a
+// terminal activity: limits_exceeded or crashed (state.Activity.IsTerminal).
+func (h *HubHandler) isLocalTerminal() bool {
+	return state.Activity(readLocalActivity()).IsTerminal()
 }
 
 // readLocalActivity returns the activity recorded in the local

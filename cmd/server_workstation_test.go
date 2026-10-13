@@ -318,7 +318,8 @@ func TestPrintWorkstationQuickstart(t *testing.T) {
 	output := buf.String()
 
 	assert.Contains(t, output, "http://127.0.0.1:8080", "should show web UI URL")
-	assert.Contains(t, output, "export SCION_DEV_TOKEN="+token, "should show dev token export")
+	assert.Contains(t, output, wantDevTokenExport(filepath.Join(dir, "dev-token")), "should show the dev token file export")
+	assert.NotContains(t, output, "scion_dev_", "should not print the dev token value")
 }
 
 func TestPrintWorkstationQuickstart_NoWeb(t *testing.T) {
