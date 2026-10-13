@@ -44,28 +44,29 @@ import (
 var actionMapNames = map[string]bool{"ResourceActions": true, "ScopeActions": true}
 
 // actionMapAllow is one allow-list entry: the number of reads of the map
-// in the function, and why the function reads the map directly.
+// in the function by kind (index, range, len or value), and why the
+// function reads the map directly.
 type actionMapAllow struct {
-	reads  int
+	reads  map[string]int
 	reason string
 }
 
 // actionMapReadAllowList lists, as "function map", each function that
 // reads an action map directly. A method is written (*T).M or T.M. Each
-// entry must match exactly its pinned number of reads, so an entry with no
+// entry must match exactly its pinned reads by kind, so an entry with no
 // read fails and the list cannot go stale.
 var actionMapReadAllowList = map[string]actionMapAllow{
-	"(*AuthzService).ComputeCapabilities ResourceActions": {1,
+	"(*AuthzService).ComputeCapabilities ResourceActions": {map[string]int{"index": 1},
 		"capability helper: the actions for one resource"},
-	"(*AuthzService).ComputeScopeCapabilities ScopeActions": {1,
+	"(*AuthzService).ComputeScopeCapabilities ScopeActions": {map[string]int{"index": 1},
 		"capability helper: the scope actions for a resource type"},
-	"(*AuthzService).ComputeCapabilitiesBatch ResourceActions": {1,
+	"(*AuthzService).ComputeCapabilitiesBatch ResourceActions": {map[string]int{"index": 1},
 		"capability helper: the actions for a list of resources"},
-	"(*Server).listProjectAgentsSorted ResourceActions": {1,
+	"(*Server).listProjectAgentsSorted ResourceActions": {map[string]int{"index": 1},
 		"splits the agent actions into read and the rest for ComputeCapabilitiesForActions"},
-	"(*Server).projectGCPServiceAccountCapabilities ResourceActions": {1,
+	"(*Server).projectGCPServiceAccountCapabilities ResourceActions": {map[string]int{"index": 1},
 		"action order for overrideCapabilities on project-scoped service accounts"},
-	"(*Server).projectGCPServiceAccountCapabilities ScopeActions": {1,
+	"(*Server).projectGCPServiceAccountCapabilities ScopeActions": {map[string]int{"index": 1},
 		"action order for overrideCapabilities on a project's service account collection"},
 }
 
@@ -206,13 +207,26 @@ func scanActionMapRefs(fset *token.FileSet, files map[string]*ast.File) []action
 	return refs
 }
 
+// formatKindCounts formats read counts by kind as "kind=n ...", sorted by
+// kind and without zero counts, or "" when there is no read.
+func formatKindCounts(counts map[string]int) string {
+	var parts []string
+	for kind, n := range counts {
+		if n != 0 {
+			parts = append(parts, fmt.Sprintf("%s=%d", kind, n))
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
 // checkActionMapRefs returns, sorted, each problem with refs against
 // allow: a declaration that shadows a map name, a read in a place with no
-// entry, an entry with no reason, an entry whose read count differs, and
-// an entry with no read.
+// entry, an entry with no reason, an entry whose reads by kind differ,
+// and an entry with no read.
 func checkActionMapRefs(refs []actionMapRef, allow map[string]actionMapAllow) []string {
 	var problems []string
-	reads := map[string]int{}
+	reads := map[string]map[string]int{}
 	for _, r := range refs {
 		if r.kind == "shadow" {
 			problems = append(problems, fmt.Sprintf("%s: %s %s: declares a name that shadows the package-level map", r.pos, r.place, r.name))
@@ -223,17 +237,21 @@ func checkActionMapRefs(refs []actionMapRef, allow map[string]actionMapAllow) []
 			problems = append(problems, fmt.Sprintf("%s: %s %s %s: not in the allow list", r.pos, r.place, r.name, r.kind))
 			continue
 		}
-		reads[key]++
+		if reads[key] == nil {
+			reads[key] = map[string]int{}
+		}
+		reads[key][r.kind]++
 	}
 	for key, a := range allow {
 		if strings.TrimSpace(a.reason) == "" {
 			problems = append(problems, fmt.Sprintf("%s: allow-list entry has no reason", key))
 		}
-		switch n := reads[key]; {
-		case n == 0:
+		got, want := formatKindCounts(reads[key]), formatKindCounts(a.reads)
+		switch {
+		case got == "":
 			problems = append(problems, fmt.Sprintf("%s: allow-list entry matches no read", key))
-		case n != a.reads:
-			problems = append(problems, fmt.Sprintf("%s: %d reads, allow list pins %d", key, n, a.reads))
+		case got != want:
+			problems = append(problems, fmt.Sprintf("%s: reads %s, allow list pins %s", key, got, want))
 		}
 	}
 	sort.Strings(problems)
@@ -242,7 +260,7 @@ func checkActionMapRefs(refs []actionMapRef, allow map[string]actionMapAllow) []
 
 // TestActionMapReads_OnlyInAllowList fails when a non-test file in pkg/hub
 // or a guardScanSubdirs package reads ResourceActions or ScopeActions
-// outside actionMapReadAllowList, or when an entry's read count differs.
+// outside actionMapReadAllowList, or when an entry's reads by kind differ.
 func TestActionMapReads_OnlyInAllowList(t *testing.T) {
 	fset := token.NewFileSet()
 	files := parseGoDir(t, fset, findHubDir(t), true)
@@ -261,15 +279,14 @@ func TestActionMapReads_OnlyInAllowList(t *testing.T) {
 			"actionMapReadAllowList. Use the capability helpers "+
 			"(ComputeCapabilities, ComputeCapabilitiesBatch, "+
 			"ComputeScopeCapabilities), or add the function to the allow "+
-			"list with its read count and a reason")
+			"list with its reads by kind and a reason")
 }
 
 // TestActionMapReads_ReportsUnlistedAndStale proves the guard reports each
 // form of read outside the allow list, a closure, a package-level
 // initialiser, a shadowing declaration, an entry with no reason, a count
-// mismatch and a stale
-// entry, so a passing TestActionMapReads_OnlyInAllowList is not a scanner
-// that matches nothing.
+// or kind mismatch and a stale entry, so a passing
+// TestActionMapReads_OnlyInAllowList is not a scanner that matches nothing.
 func TestActionMapReads_ReportsUnlistedAndStale(t *testing.T) {
 	const src = `package hub
 
@@ -307,18 +324,35 @@ func shadowLocal() {
 	ScopeActions := 1
 	_ = ScopeActions
 }
+
+func kindChanged() {
+	_ = ScopeActions
+}
+
+func noReason() {
+	_ = ResourceActions["r"]
+}
+
+func parenRange() {
+	for range (ScopeActions) {
+	}
+}
 `
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "sample.go", src, 0)
 	require.NoError(t, err)
 	refs := scanActionMapRefs(fset, map[string]*ast.File{"sample.go": f})
+	index1 := map[string]int{"index": 1}
 	allow := map[string]actionMapAllow{
-		"allowed ResourceActions": {1, "listed"},
-		"twice ScopeActions":      {1, "pinned below its count"},
-		"stale ScopeActions":      {1, "no such read"},
-		"unlisted ScopeActions":   {1, " "},
+		"allowed ResourceActions":  {index1, "listed"},
+		"twice ScopeActions":       {index1, "pinned below its count"},
+		"stale ScopeActions":       {index1, "no such read"},
+		"kindChanged ScopeActions": {index1, "pinned as an index read"},
+		"noReason ResourceActions": {index1, " "},
 	}
 	assert.Equal(t, []string{
+		"kindChanged ScopeActions: reads value=1, allow list pins index=1",
+		"noReason ResourceActions: allow-list entry has no reason",
 		"sample.go:12: closure in allowed ScopeActions index: not in the allow list",
 		"sample.go:21: (*Server).unlisted ResourceActions range: not in the allow list",
 		"sample.go:23: (*Server).unlisted ScopeActions len: not in the allow list",
@@ -328,11 +362,10 @@ func shadowLocal() {
 		"sample.go:30: shadowParam ResourceActions index: not in the allow list",
 		"sample.go:34: shadowLocal ScopeActions: declares a name that shadows the package-level map",
 		"sample.go:35: shadowLocal ScopeActions value: not in the allow list",
+		"sample.go:47: parenRange ScopeActions range: not in the allow list",
 		"sample.go:7: package level ResourceActions len: not in the allow list",
 		"stale ScopeActions: allow-list entry matches no read",
-		"twice ScopeActions: 2 reads, allow list pins 1",
-		"unlisted ScopeActions: allow-list entry has no reason",
-		"unlisted ScopeActions: allow-list entry matches no read",
+		"twice ScopeActions: reads index=2, allow list pins index=1",
 	}, checkActionMapRefs(refs, allow))
 
 	kinds := map[string]string{}
