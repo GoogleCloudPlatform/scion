@@ -39,6 +39,9 @@ func TestLoadConfig_Defaults(t *testing.T) {
 	if cfg.CAFile != "" {
 		t.Errorf("Expected CAFile to be empty by default, got %q", cfg.CAFile)
 	}
+	if cfg.CertFile != "" || cfg.KeyFile != "" {
+		t.Errorf("Expected CertFile and KeyFile to be empty by default, got %q and %q", cfg.CertFile, cfg.KeyFile)
+	}
 	if cfg.MetricsDebug {
 		t.Error("Expected MetricsDebug to be false by default")
 	}
@@ -59,6 +62,8 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	if err := os.Setenv(EnvCAFile, "/etc/ssl/certs/custom-root.pem"); err != nil {
 		t.Fatalf("failed to set %s: %v", EnvCAFile, err)
 	}
+	_ = os.Setenv(EnvCertFile, "/etc/ssl/certs/client.pem")
+	_ = os.Setenv(EnvKeyFile, "/etc/ssl/private/client-key.pem")
 	_ = os.Setenv(EnvGRPCPort, "14317")
 	_ = os.Setenv(EnvHTTPPort, "14318")
 	_ = os.Setenv(EnvProjectID, "my-project")
@@ -86,6 +91,12 @@ func TestLoadConfig_EnvOverrides(t *testing.T) {
 	}
 	if cfg.CAFile != "/etc/ssl/certs/custom-root.pem" {
 		t.Errorf("Expected CAFile to be '/etc/ssl/certs/custom-root.pem', got %q", cfg.CAFile)
+	}
+	if cfg.CertFile != "/etc/ssl/certs/client.pem" {
+		t.Errorf("Expected CertFile to be '/etc/ssl/certs/client.pem', got %q", cfg.CertFile)
+	}
+	if cfg.KeyFile != "/etc/ssl/private/client-key.pem" {
+		t.Errorf("Expected KeyFile to be '/etc/ssl/private/client-key.pem', got %q", cfg.KeyFile)
 	}
 	if cfg.GRPCPort != 14317 {
 		t.Errorf("Expected GRPCPort to be 14317, got %d", cfg.GRPCPort)
@@ -577,6 +588,8 @@ func clearTelemetryEnv() {
 	if err := os.Unsetenv(EnvCAFile); err != nil {
 		panic(err)
 	}
+	_ = os.Unsetenv(EnvCertFile)
+	_ = os.Unsetenv(EnvKeyFile)
 	_ = os.Unsetenv(EnvGRPCPort)
 	_ = os.Unsetenv(EnvHTTPPort)
 	_ = os.Unsetenv(EnvFilterExclude)

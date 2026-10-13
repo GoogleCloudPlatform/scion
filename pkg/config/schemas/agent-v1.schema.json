@@ -341,7 +341,9 @@
               "properties": {
                 "enabled": { "type": "boolean" },
                 "insecure_skip_verify": { "type": "boolean" },
-                "ca_file": { "type": "string" }
+                "ca_file": { "type": "string" },
+                "cert_file": { "type": "string" },
+                "key_file": { "type": "string" }
               },
               "additionalProperties": false
             },
