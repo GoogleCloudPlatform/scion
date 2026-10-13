@@ -360,7 +360,7 @@ const vscodeGoldenSettings = `{
     "Scion agent": {
       "args": [
         "-c",
-        "tmux has-session -t scion 2\u003e/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:agent\""
+        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:agent\""
       ],
       "icon": "hubot",
       "overrideName": true,
@@ -369,7 +369,7 @@ const vscodeGoldenSettings = `{
     "Scion shell": {
       "args": [
         "-c",
-        "tmux has-session -t scion 2\u003e/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:shell\""
+        "tmux has-session -t scion 2>/dev/null || exec \"${SHELL:-/bin/sh}\" -l; exec tmux new-session -t scion -s \"vsc-$$\" \; set-option -t \"vsc-$$\" destroy-unattached on \; set-option -t \"vsc-$$\" window-status-format '' \; select-window -t \"vsc-$$:shell\""
       ],
       "icon": "terminal",
       "overrideName": true,

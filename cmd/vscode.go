@@ -549,6 +549,9 @@ func decodeJSONObject(data []byte) (map[string]any, error) {
 func encodeVSCodeSettings(m map[string]any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
+	// Write angle brackets and ampersands literally, so the shell text in
+	// the profiles reads as written.
+	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(m); err != nil {
 		return nil, err
