@@ -9,8 +9,11 @@
 #   test result would let them report "(cached)" instead of running;
 # - deletes build cache entries this job neither used nor wrote (older than
 #   the restore stamp), so the cache does not keep growing.
-# Call it with `if: ${{ !cancelled() }}`, so that a job whose tests failed
-# still saves its compile output.
+# Call it without an `if:`, so that only a successful job saves. A job that
+# failed early skipped compiles, the trim would drop their entries, and the
+# truncated cache would take the day's key (later runs hit it exactly and
+# never save); a failed run saves nothing, and the next green main push of
+# the day saves the full cache.
 name: Save the per-workload Go cache
 description: Save the Go module and build cache restored by setup-go-cache, on pushes to main only.
 inputs:
@@ -34,6 +37,7 @@ runs:
         gomodcache=$(go env GOMODCACHE)
         go clean -testcache
         stamp="$RUNNER_TEMP/go-cache-restored.stamp"
+        mkdir -p "$gocache"
         echo "GOCACHE before trimming: $(du -sh "$gocache" | cut -f1)"
         if [ -f "$stamp" ]; then
           # Entries live in the two-hex-digit subdirectories; the top-level

@@ -22,7 +22,6 @@
 #       workload: build-test
 #   ...
 #   - name: Save Go cache
-#     if: ${{ !cancelled() }}
 #     uses: ./.github/actions/save-go-cache
 #     with:
 #       key: ${{ steps.go.outputs.cache-key }}
@@ -69,6 +68,7 @@ runs:
         prefix="go-${RUNNER_OS}-${RUNNER_ARCH}-${GO_VERSION}-${WORKLOAD}-"
         {
           echo "prefix=${prefix}"
+          echo "prefix-sum=${prefix}${GO_SUM_HASH}-"
           echo "key=${prefix}${GO_SUM_HASH}-$(date -u +%Y%m%d)"
           echo "gocache=$(go env GOCACHE)"
           echo "gomodcache=$(go env GOMODCACHE)"
@@ -84,13 +84,24 @@ runs:
           ${{ steps.key.outputs.gocache }}
         key: ${{ steps.key.outputs.key }}
         restore-keys: |
-          ${{ steps.key.outputs.prefix }}${{ hashFiles('go.sum') }}-
+          ${{ steps.key.outputs.prefix-sum }}
           ${{ steps.key.outputs.prefix }}
 
     # Build cache entries this job uses or writes get a newer mtime than this
-    # stamp (Go refreshes an entry's mtime on use once it is an hour old);
-    # save-go-cache drops the rest, so a saved cache holds only what its
-    # workload used, and does not grow from day to day.
+    # stamp; save-go-cache drops the rest, so a saved cache holds only what
+    # its workload used, and does not grow from day to day. Go refreshes an
+    # entry's mtime on use only once it is an hour old, so the restored
+    # entries are first back-dated by two hours: otherwise a cache saved
+    # less than an hour before this run would lose entries this job used.
+    # (An entry Go never opens, such as the output of an action whose
+    # result it did not need, is still dropped; that only costs a miss.)
     - name: Mark the Go cache restore time
       shell: bash
-      run: touch "$RUNNER_TEMP/go-cache-restored.stamp"
+      env:
+        GOCACHE_DIR: ${{ steps.key.outputs.gocache }}
+      run: |
+        set -euo pipefail
+        if [ -d "$GOCACHE_DIR" ]; then
+          find "$GOCACHE_DIR" -mindepth 2 -type f -exec touch -d '2 hours ago' {} +
+        fi
+        touch "$RUNNER_TEMP/go-cache-restored.stamp"

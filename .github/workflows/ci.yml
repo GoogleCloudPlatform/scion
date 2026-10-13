@@ -628,7 +628,6 @@ jobs:
         run: make build
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -681,7 +680,6 @@ jobs:
         run: make test-cmd-sqlite
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -746,7 +744,6 @@ jobs:
           echo "pkg/hub shards with integration Postgres tests: $json"
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -829,7 +826,6 @@ jobs:
         run: make test-hub-postgres-default SHARD="$SHARD"
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -997,7 +993,6 @@ jobs:
           make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -1070,7 +1065,6 @@ jobs:
         run: make test-tz-contract
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -1124,7 +1118,6 @@ jobs:
         run: ./hack/workstation-smoke.sh
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -1158,7 +1151,6 @@ jobs:
           args: '--new-from-merge-base=origin/main'
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
@@ -1333,7 +1325,6 @@ jobs:
           fi
 
       - name: Save Go cache
-        if: ${{ !cancelled() }}
         uses: ./.github/actions/save-go-cache
         with:
           key: ${{ steps.go.outputs.cache-key }}
