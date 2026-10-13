@@ -48,7 +48,7 @@ func (s *Server) authorizeUserTemplates(w http.ResponseWriter, r *http.Request, 
 	return s.authorize(w, r, templateUserScopeResource(userIdent), action)
 }
 
-// isUserAccessTokenRequest reports whether the request is made with a user
+// isUserAccessTokenRequest reports whether the request uses a user
 // access token: the identity is a token identity, or the credential record
 // names a user access token.
 func isUserAccessTokenRequest(r *http.Request, userIdent UserIdentity) bool {
