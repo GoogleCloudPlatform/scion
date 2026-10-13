@@ -34,7 +34,9 @@ import (
 // broker still holds its files and could still be asked to remove them.
 //
 // The soft delete does not record on the row whether the files were kept,
-// so every expired soft-deleted agent with a broker gets the purge dispatch.
+// so every expired soft-deleted agent with a broker and a run ID gets the
+// purge dispatch (a row with no run ID is purged without one, see
+// settleRetainedFiles).
 // That is safe for one whose files were deleted: the broker removes only the
 // files of an agent whose agent-info.json carries the soft-delete mark and
 // that no runtime entry or start holds, and otherwise answers 404 (no files)
@@ -42,7 +44,9 @@ import (
 //
 // Before dispatching, the purge claims the row with the delete marker
 // (deletion_state deleting under a short lease), so a restore or start of
-// the agent is refused while the broker removes its files (deleteBlocksStart).
+// the agent is refused while the broker removes its files (deleteBlocksStart),
+// and purges the record right after the broker answers, while the claim is
+// still live.
 // A restore that landed first makes the claim match nothing, and the row is
 // left alone. If the hub dies mid-dispatch, the lease lapses: a restore is no
 // longer refused (restoreAgentTx clears the lapsed marker), and the next
@@ -93,14 +97,16 @@ func (s *Server) purgeExpiredAgents(ctx context.Context, cutoff time.Time) (int,
 		if len(page) == 0 {
 			return total, nil
 		}
-		var remove []string
 		for _, a := range page {
-			if s.settleRetainedFiles(ctx, a, cutoff) == retainedPurgeRemove {
-				remove = append(remove, a.ID)
+			if s.settleRetainedFiles(ctx, a, cutoff) != retainedPurgeRemove {
+				continue
 			}
-		}
-		if len(remove) > 0 {
-			n, err := s.store.PurgeDeletedAgentsByID(ctx, remove, cutoff)
+			// Purged at once, while the claim taken for its dispatch is
+			// still live, so the claim's lease never lapses between the
+			// broker removing the files and the record going away (a
+			// restore in that gap would bring back an agent without its
+			// files). Purged rows drop out of later pages.
+			n, err := s.store.PurgeDeletedAgentsByID(ctx, []string{a.ID}, cutoff)
 			total += n
 			if err != nil {
 				return total, err
@@ -121,6 +127,14 @@ func (s *Server) settleRetainedFiles(ctx context.Context, a *store.Agent, cutoff
 	if a.RuntimeBrokerID == "" {
 		return retainedPurgeRemove
 	}
+	// A row with no run ID predates run IDs. A purge of it could not be
+	// fenced to its run, and a broker without the purge checks would
+	// remove by name alone, so the files of a newer agent reusing the name
+	// could go with it. Such a record is purged without a dispatch.
+	if a.RunID == "" {
+		log.Warn("Purge: the agent has no run ID; its retained files, if any, were left on its broker")
+		return retainedPurgeRemove
+	}
 	broker, err := s.store.GetRuntimeBroker(ctx, a.RuntimeBrokerID)
 	if errors.Is(err, store.ErrNotFound) {
 		log.Warn("Purge: the agent's broker no longer exists; its retained files, if any, were left on that host")
@@ -135,8 +149,18 @@ func (s *Server) settleRetainedFiles(ctx context.Context, a *store.Agent, cutoff
 		return s.retainedPurgeKeepOrGiveUp(log, a, cutoff, "broker not reachable")
 	}
 
-	claim, ok := s.claimForRetainedPurge(ctx, a.ID, cutoff)
+	claim, ok := s.claimForRetainedPurge(ctx, a.ID)
 	if !ok {
+		// A soft-deleted row left finalizing by a permanent delete that
+		// stopped after its teardown cannot be claimed; teardown already
+		// ran, so it is purged as before, with no dispatch, rather than
+		// kept forever. Anything else (restored, or claimed by another
+		// purge) is left alone this run.
+		if row, err := s.store.GetAgent(ctx, a.ID); err == nil && !row.DeletedAt.IsZero() &&
+			row.DeletionState == store.DeletionStateFinalizing {
+			log.Info("Purge: the agent's permanent delete already ran its teardown; purging the record")
+			return retainedPurgeRemove
+		}
 		return retainedPurgeSkip
 	}
 	row, err := s.store.GetAgent(ctx, a.ID)
@@ -218,9 +242,10 @@ func (s *Server) retainedPurgeKeepOrGiveUp(log *slog.Logger, a *store.Agent, cut
 // claimForRetainedPurge claims the soft-deleted row id for a purge dispatch:
 // deletion_state deleting under retainedPurgeLease, with a new claim epoch.
 // It matches a row with no delete marker (or a failed one), or one whose
-// earlier purge claim lapsed; a row restored since it was listed (deleted_at null) or held by a
-// live claim matches nothing. It returns the claim taken.
-func (s *Server) claimForRetainedPurge(ctx context.Context, id string, cutoff time.Time) (int64, bool) {
+// earlier purge claim lapsed. A row restored since it was listed
+// (deleted_at null), held by a live claim, or finalizing matches nothing.
+// It returns the claim taken.
+func (s *Server) claimForRetainedPurge(ctx context.Context, id string) (int64, bool) {
 	now := time.Now()
 	lease := now.Add(retainedPurgeLease)
 	deleting := store.DeletionStateDeleting

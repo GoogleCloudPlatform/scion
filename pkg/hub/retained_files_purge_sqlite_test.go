@@ -44,10 +44,24 @@ func retainedPurgeFixture(t *testing.T, suffix string, deletedAgo time.Duration)
 	srv.mu.Lock()
 	srv.config.SoftDeleteRetention = retainedPurgeTestRetention
 	srv.mu.Unlock()
+	a := addRetainedPurgeAgent(t, s, suffix, deletedAgo)
+	return srv, s, disp, a
+}
+
+// addRetainedPurgeAgent adds an agent of run "run-1" on its own online
+// broker, soft-deleted deletedAgo ago.
+func addRetainedPurgeAgent(t *testing.T, s store.Store, suffix string, deletedAgo time.Duration) *store.Agent {
+	t.Helper()
+	ctx := context.Background()
 	a := setupBrokerAgentInPhase(t, s, "rp-"+suffix, state.PhaseStopped)
+	_, err := s.SetAgentRunID(ctx, a.ID, "run-1", nil)
+	require.NoError(t, err)
+	a = mustGetAgent(t, s, a.ID)
 	a.DeletedAt = time.Now().Add(-deletedAgo)
-	require.NoError(t, s.UpdateAgent(context.Background(), a))
-	return srv, s, disp, mustGetAgent(t, s, a.ID)
+	require.NoError(t, s.UpdateAgent(ctx, a))
+	got := mustGetAgent(t, s, a.ID)
+	require.Equal(t, "run-1", got.RunID)
+	return got
 }
 
 // setBrokerStatus sets the agent's broker status.
@@ -96,6 +110,92 @@ func TestPurgeExpiredAgents_RemovesRetainedFilesThenPurges(t *testing.T) {
 	assert.True(t, heldDuringDispatch, "the row is claimed while the broker removes the files")
 	assert.Equal(t, http.StatusConflict, restoreCode, "a restore is refused during the dispatch")
 	assert.True(t, agentGone(t, s, a.ID), "the record is purged after the broker answered")
+	deleteFiles, removeBranch := disp.deleteFlags()
+	assert.Equal(t, []bool{true}, deleteFiles, "the purge is a files delete")
+	assert.Equal(t, []bool{false}, removeBranch, "the purge keeps the agent's branch")
+}
+
+// Each record is purged right after its broker answers, while its claim is
+// live, not after the rest of the page: a claim that lapses later (here,
+// during the next agent's dispatch) can no longer let a restore bring back
+// an agent whose files were removed.
+func TestPurgeExpiredAgents_PurgesEachRecordWhileClaimed(t *testing.T) {
+	srv, s, disp, first := retainedPurgeFixture(t, "page-a", 2*time.Hour)
+	second := addRetainedPurgeAgent(t, s, "page-b", 2*time.Hour)
+	if second.ID < first.ID {
+		first, second = second, first // the purge settles agents in ID order
+	}
+	var mu sync.Mutex
+	var firstGoneDuringSecond, restoredWithoutFiles bool
+	disp.setFn(func(ctx context.Context, got *store.Agent) error {
+		if got.ID != second.ID {
+			return nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		// Lapse the first agent's claim, if its row is still there, and try
+		// to restore it.
+		past := time.Now().Add(-time.Minute)
+		_, err := s.UpdateAgentDeletion(context.Background(), first.ID,
+			store.DeletionPredicate{States: []string{store.DeletionStateDeleting}},
+			store.DeletionFields{LeaseAt: &past, KeepUpdated: true})
+		require.NoError(t, err)
+		firstGoneDuringSecond = agentGone(t, s, first.ID)
+		rec := restoreForTest(t, srv, first.ID)
+		restoredWithoutFiles = rec.Code < 300
+		return nil
+	})
+
+	srv.purgeHandler()(context.Background())
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 2, disp.callCount())
+	assert.True(t, firstGoneDuringSecond, "the first record is purged before the next dispatch")
+	assert.False(t, restoredWithoutFiles, "no agent is restored after its files were removed")
+	assert.True(t, agentGone(t, s, first.ID))
+	assert.True(t, agentGone(t, s, second.ID))
+}
+
+// A row with no run ID (created before run IDs) is purged without a
+// dispatch: its delete could not be fenced to its run.
+func TestPurgeExpiredAgents_NoRunIDPurgesWithoutDispatch(t *testing.T) {
+	srv, s, disp, _ := retainedPurgeFixture(t, "norun-x", 2*time.Hour)
+	legacy := setupBrokerAgentInPhase(t, s, "rp-norun", state.PhaseStopped)
+	legacy.DeletedAt = time.Now().Add(-2 * time.Hour)
+	require.NoError(t, s.UpdateAgent(context.Background(), legacy))
+	require.Empty(t, mustGetAgent(t, s, legacy.ID).RunID)
+
+	var dispatched []string
+	var mu sync.Mutex
+	disp.setFn(func(_ context.Context, got *store.Agent) error {
+		mu.Lock()
+		dispatched = append(dispatched, got.ID)
+		mu.Unlock()
+		return nil
+	})
+	srv.purgeHandler()(context.Background())
+	mu.Lock()
+	defer mu.Unlock()
+	assert.NotContains(t, dispatched, legacy.ID, "a row with no run ID gets no purge dispatch")
+	assert.True(t, agentGone(t, s, legacy.ID), "and is purged")
+}
+
+// A soft-deleted row left finalizing (a permanent delete that stopped after
+// its teardown) cannot be claimed; it is purged without a dispatch, as
+// before, rather than kept forever.
+func TestPurgeExpiredAgents_FinalizingRowPurgesWithoutDispatch(t *testing.T) {
+	srv, s, disp, a := retainedPurgeFixture(t, "finalizing", 2*time.Hour)
+	finalizing := store.DeletionStateFinalizing
+	n, err := s.UpdateAgentDeletion(context.Background(), a.ID,
+		store.DeletionPredicate{States: []string{store.DeletionStateNone}, DeletedAtNotNull: true},
+		store.DeletionFields{State: &finalizing, BumpClaim: true})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+
+	srv.purgeHandler()(context.Background())
+	assert.Equal(t, 0, disp.callCount())
+	assert.True(t, agentGone(t, s, a.ID))
 }
 
 // An agent still inside the retention window is neither dispatched nor
@@ -218,7 +318,7 @@ func TestPurgeExpiredAgents_RestoreBeforeClaimWins(t *testing.T) {
 	rec := restoreForTest(t, srv, a.ID)
 	require.Less(t, rec.Code, 300, rec.Body.String())
 
-	_, ok := srv.claimForRetainedPurge(context.Background(), a.ID, time.Now().Add(-retainedPurgeTestRetention))
+	_, ok := srv.claimForRetainedPurge(context.Background(), a.ID)
 	assert.False(t, ok, "a restored row cannot be claimed")
 	srv.purgeHandler()(context.Background())
 	assert.Equal(t, 0, disp.callCount())
