@@ -142,7 +142,7 @@ An artifact whose entry file is HTML, such as a single page or a small site publ
 - **Scripts run, isolated.** The page's scripts run in an isolated origin with no access to the Hub page around it, your session or the Hub API. They cannot make network requests, open windows, submit forms or navigate away.
 - **Keep every asset in the bundle.** Images, styles, scripts and fonts load only from the bundle's own files. Images referenced by absolute `http(s)` URL do not load; the publish prints a warning, and the viewer shows one above the frame.
 - **The view expires.** A view lasts 30 minutes. After that the page says so and offers **Reload view**. **Full screen** and **Open in new tab** are on the bar above the frame.
-- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires. Treat it like a short-lived share link: do not paste it into chat or tickets; share the `scion://artifact/` reference instead.
+- **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires, and it cannot be revoked. Treat it as a temporary access URL: do not paste it into chat or tickets; share the `scion://artifact/` reference instead.
 
 Markdown artifacts are different. Their preview runs no scripts: HTML written in the Markdown is shown as plain text, and links open in a new tab. When you publish a Markdown artifact, the Hub fetches the remote images it references and serves copies from then on. Images that could not be fetched show a placeholder instead.
 
@@ -244,7 +244,7 @@ In a conversation, choose the paperclip and then **Attach artifact…**. The pic
 In a message, each artifact shows as a chip with its title, version and owner. Clicking a chip, or a `scion://artifact/` link in the text, opens a preview over the conversation, with **Copy link** and **Open in artifact viewer**. Markdown and HTML render there as on the artifact page. Each reader sees what their own access allows: a reader who cannot open the artifact sees **Artifact unavailable**.
 
 :::note[Messages that do not go to an agent]
-Artifacts attached with the picker are kept only on a message that goes to an agent. In a conversation between users, or in a thread with no default agent when you do not @mention an agent, they are currently dropped without a chip or a warning. Paste the artifact's `scion://artifact/` reference into the message text instead: it shows as a link that opens the preview.
+Artifacts attached with the picker are kept only on a message that goes to an agent. In a conversation between users, or in a thread with no default agent when you neither @mention an agent nor reply to an agent's message, they are currently dropped without a chip or a warning. Paste the artifact's `scion://artifact/` reference into the message text instead: it shows as a link that opens the preview.
 :::
 
 ### CLI
