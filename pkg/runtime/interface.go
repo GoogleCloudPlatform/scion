@@ -221,8 +221,8 @@ type RunConfig struct {
 	// the start (a flat instance latches it for its Checkpoint). It also
 	// fires for resources created before a later failure. Honoured by the
 	// runtimes that create resources through launchHooks: Docker, Podman,
-	// Apple container and Kubernetes; other runtimes (Cloud Run,
-	// substrate) do not report created resources.
+	// Apple container, Kubernetes and cloudrun-sandbox; other runtimes
+	// (Cloud Run Instances, substrate) do not report created resources.
 	ObserveResourceCreated func(api.ResourceHandle)
 	// KubernetesBlockIdentity marks a pod whose GCP identity mode is
 	// "block" (ptone/scion#4034). The Kubernetes runtime then sets
@@ -257,7 +257,7 @@ const (
 	CheckpointStepLaunching = api.LaunchStepLaunching
 	// CheckpointStepSandboxLayout precedes the cloudrun-sandbox runtime's
 	// host directory layout (prepareScionLayout).
-	CheckpointStepSandboxLayout = "sandbox_layout"
+	CheckpointStepSandboxLayout = api.LaunchStepSandboxLayout
 	// CheckpointStepPreClean precedes a name-based delete of a stale
 	// resource left by an earlier agent of the same name.
 	CheckpointStepPreClean = api.LaunchStepPreClean
