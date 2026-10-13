@@ -129,9 +129,10 @@ const (
 	runScopeUnavailable
 )
 
-// agentRunReader reads the agent row a token names.
+// agentRunReader reads the run and deletion time of the agent a token
+// names (a narrow primary-key read, not the whole row).
 type agentRunReader interface {
-	GetAgent(ctx context.Context, id string) (*store.Agent, error)
+	GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error)
 }
 
 // agentRunScopeMetrics counts run-scope check outcomes.
@@ -289,7 +290,7 @@ func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenCl
 		if header == "" {
 			return runScopeOutcomeUnscoped, ""
 		}
-		agent, err := c.agents.GetAgent(ctx, claims.Subject)
+		agent, err := c.agents.GetAgentRunState(ctx, claims.Subject)
 		switch {
 		case errors.Is(err, store.ErrNotFound):
 			return runScopeOutcomeUnscoped, ""
@@ -307,7 +308,7 @@ func (c *agentRunScopeChecker) outcome(ctx context.Context, claims *AgentTokenCl
 	if header != "" && header != runID {
 		return runScopeOutcomeHeader, ""
 	}
-	agent, err := c.agents.GetAgent(ctx, claims.Subject)
+	agent, err := c.agents.GetAgentRunState(ctx, claims.Subject)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		return runScopeOutcomeAgentGone, ""

@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 200
+**Operations:** 205
 
 ## Table of Contents
 
@@ -86,6 +86,11 @@
 - [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+- [project.threadgroup.list](#projectthreadgrouplist) — List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+- [project.threadgroup.read](#projectthreadgroupread) — Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+- [inbox.threadgroup.create](#inboxthreadgroupcreate) — Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+- [inbox.threadgroup.update](#inboxthreadgroupupdate) — Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+- [inbox.threadgroup.delete](#inboxthreadgroupdelete) — Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
 - [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 - [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
 - [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
@@ -193,7 +198,7 @@
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
@@ -3177,6 +3182,180 @@
 
 - `pkg/hub:TestConversationResolve_GroupReferenceRequiresProjectRead`
 - `pkg/hub:TestConversationResolve_AgentReferenceRequiresAgentRead`
+
+---
+
+## project.threadgroup.list
+
+**Domain:** project
+
+**Description:** List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_query`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-query
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_OtherProjectAgentForbidden`
+
+---
+
+## project.threadgroup.read
+
+**Domain:** project
+
+**Description:** Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_NonMemberUserForbidden`
+
+---
+
+## inbox.threadgroup.create
+
+**Domain:** inbox
+
+**Description:** Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+
+---
+
+## inbox.threadgroup.update
+
+**Domain:** inbox
+
+**Description:** Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/thread-groups/{id}` |
+| http_route | POST | `/api/v1/thread-groups/{id}/threads` |
+| http_route | DELETE | `/api/v1/thread-groups/{id}/threads/{conversationId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_AddThreadValidation`
+
+---
+
+## inbox.threadgroup.delete
+
+**Domain:** inbox
+
+**Description:** Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.threadgroup.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** thread_group_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
 
 ---
 
@@ -7084,7 +7263,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available
+**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
 
 ### Entry Points
 
@@ -7094,7 +7273,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -7107,13 +7286,13 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
 
 ### Audit
 
 - **Event Type:** `test_identity_web_code_issue`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** user_id, code_id, code_expires_at, issued_by
+- **After Fields:** user_id, code_id, code_expires_at, issued_by, workload_delegation
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`, `conflict`
@@ -7122,6 +7301,9 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentityWeb_Mint`
+- `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
+- `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
+- `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
 
 ---
 

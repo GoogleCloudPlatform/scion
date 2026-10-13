@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/shareddirs"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // errWorkspaceWritesUnavailable is the error message returned when workspace
@@ -94,14 +95,14 @@ func contentDisposition(disposition, filename string) string {
 // the environment block). This avoids the complexity of sync.Once while
 // remaining test-friendly via t.Setenv.
 func isCloudRunEnv() bool {
-	return os.Getenv("K_SERVICE") != ""
+	return cloudrunenv.IsService()
 }
 
 // isCloudRunInstance reports whether the hub is running on a Cloud Run Instance.
 // CLOUD_RUN_INSTANCE is set by the platform on Instances but NOT on Cloud Run
 // Services (which use K_SERVICE instead). See design doc section 4.6.
 func isCloudRunInstance() bool {
-	return os.Getenv("CLOUD_RUN_INSTANCE") != ""
+	return cloudrunenv.IsInstance()
 }
 
 // workspaceWriteBlocked returns true when workspace writes should be rejected

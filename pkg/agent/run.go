@@ -2516,6 +2516,7 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		Progress:          opts.Progress,
 		// Observes every created resource (flat instance ownership
 		// records) without changing cleanup ownership.
 		ObserveResourceCreated: opts.ObserveResourceCreated,

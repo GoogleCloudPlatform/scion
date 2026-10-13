@@ -71,6 +71,7 @@ import '../shared/detail-header.js';
 import { DeletionLeaseController } from '../shared/deletion-badge.js';
 import '../shared/deletion-banner.js';
 import { runAgentDelete, lifecycleActionErrorMessage } from '../../client/agent-delete.js';
+import { showResponseBodyWarnings } from '../../client/response-warnings.js';
 import type { AgentDeleteRequest } from '../../client/agent-delete.js';
 import '../shared/message-mode-badge.js';
 import '../shared/messageability-indicator.js';
@@ -1149,6 +1150,11 @@ export class ScionPageAgentDetail extends LitElement {
 
       if (!response.ok) {
         throw new Error(await lifecycleActionErrorMessage(response, `Failed to ${action} agent`));
+      }
+      if (actionUrls[action].endsWith('/start')) {
+        // The hub's start warnings (for example, a token issued without the
+        // artifact scopes).
+        await showResponseBodyWarnings(response);
       }
 
       this.backgroundRefresh();

@@ -103,6 +103,12 @@ type HealthSummaryHub struct {
 	// LiveTestAdminIdentities is nil when the count could not be read.
 	LiveTestAdminIdentities        *int `json:"live_test_admin_identities"`
 	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
+	// TestMode is the hub's resolved --test-mode level (off, member, admin
+	// or super-admin); empty from a hub that predates --test-mode.
+	TestMode string `json:"test_mode"`
+	// TestModePreconditions names the preconditions that admitted
+	// TestMode; empty when the level is off.
+	TestModePreconditions []string `json:"test_mode_preconditions"`
 }
 
 // HealthSummaryHubFleet counts the live hub instances by status.

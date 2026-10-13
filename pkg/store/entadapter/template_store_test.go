@@ -254,6 +254,59 @@ func TestTemplateAgentConfigRoundTrip(t *testing.T) {
 	assert.Nil(t, gotPlain.AgentConfig)
 }
 
+// TestSetTemplateAgentConfig: the snapshot backfill writes only agent_config,
+// only while the row has none and still matches the content hash and
+// layout, and leaves every other column (Updated, Status, Config) as stored
+// (ptone/scion#4222).
+func TestSetTemplateAgentConfig(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "bf", Slug: "bf", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+		Config: &store.TemplateConfig{Model: "row-model"},
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	before, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	want := store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs}
+
+	ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, store.TemplateContentPrecondition{ContentHash: "other", Layout: store.TemplateLayoutBlobs})
+	require.NoError(t, err)
+	assert.False(t, ok, "a content hash mismatch writes nothing")
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, store.TemplateContentPrecondition{ContentHash: "hash-1"})
+	require.NoError(t, err)
+	assert.False(t, ok, "a layout mismatch writes nothing")
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, nil, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a nil snapshot writes nothing")
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"}, want)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.AgentConfig)
+	assert.Equal(t, "snap", got.AgentConfig.Model)
+	assert.True(t, before.Updated.Equal(got.Updated), "Updated is kept")
+	assert.Equal(t, before.Status, got.Status)
+	assert.Equal(t, before.Config, got.Config)
+	assert.Equal(t, before.ContentHash, got.ContentHash)
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "second"}, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a row that has a snapshot is not overwritten")
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "snap", got.AgentConfig.Model)
+
+	ok, err = ts.SetTemplateAgentConfig(ctx, uuid.New().String(), &api.ScionConfig{Model: "x"}, want)
+	require.NoError(t, err)
+	assert.False(t, ok, "a missing row writes nothing")
+}
+
 func TestUpdateTemplateNotFound(t *testing.T) {
 	ts := newTestTemplateStore(t)
 	tmpl := &store.Template{ID: uuid.New().String(), Name: "ghost", Slug: "ghost", Harness: "claude", Scope: "global", Status: "active"}

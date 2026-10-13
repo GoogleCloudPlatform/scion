@@ -178,8 +178,18 @@ func TestResolveLinkedCheckout(t *testing.T) {
 		if got.Refusal == "" {
 			t.Fatal("expected a remote-mismatch refusal")
 		}
+		// The refusal names the checkout path, a t.TempDir whose numeric
+		// suffix (e.g. ".../TestX1714162123/001") can contain markers such
+		// as "123/". The path holds no credentials, so check only the text
+		// after it, where the remotes are shown.
+		const pathLead = linkedCheckoutErrPrefix + "the project's checkout at "
+		cut := strings.Index(got.Refusal, " has origin ")
+		if !strings.HasPrefix(got.Refusal, pathLead) || cut <= len(pathLead) {
+			t.Fatalf("Refusal %q does not have the expected checkout-path layout", got.Refusal)
+		}
+		remotes := got.Refusal[cut:]
 		for _, secret := range []string{"s3cr3t", "45/", "or1g-pw", "123/", "x-access-token", "user:", "q7", "frag"} {
-			if strings.Contains(got.Refusal, secret) {
+			if strings.Contains(remotes, secret) {
 				t.Errorf("Refusal %q contains %q", got.Refusal, secret)
 			}
 		}

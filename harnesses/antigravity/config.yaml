@@ -17,6 +17,14 @@ provisioner:
 config_dir: .gemini/antigravity-cli
 skills_dir: .gemini/antigravity-cli/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: GEMINI.md
 system_prompt_mode: prepend_to_instructions

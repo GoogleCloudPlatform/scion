@@ -699,9 +699,9 @@ func TestSSHConfig_AgentReferenceResolution(t *testing.T) {
 		assert.Equal(t, tunnelclient.ExitUsage, runSSHConfig(context.Background(), env, []string{"c"}, false))
 		assert.Contains(t, errb.String(), "a-b/c, a/c")
 	})
-	t.Run("settings project", func(t *testing.T) {
+	t.Run("default project", func(t *testing.T) {
 		env, out, errb := newSSHTestEnv(t, t.TempDir(), hub)
-		env.settingsProjectID = "p-a"
+		env.project = hubOnlyProject{ref: "p-a", label: "a", source: hubOnlySourceDirectory}
 		require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, []string{"c"}, false), errb.String())
 		assert.Contains(t, out.String(), "Host scion."+hub.label(t)+".a.c\n")
 	})

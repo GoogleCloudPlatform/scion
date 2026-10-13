@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // GetRuntime returns the appropriate Runtime implementation based on environment,
@@ -94,7 +95,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
 			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
 			// distinguish cloudrun-sandbox from cloudrun-instances.
-			if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+			if cloudrunenv.IsInstance() {
 				if SandboxLauncherAvailable() {
 					runtimeType = "cloudrun-sandbox"
 					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
@@ -102,7 +103,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 					runtimeType = "cloudrun-instances"
 					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
 				}
-			} else if os.Getenv("K_SERVICE") != "" {
+			} else if cloudrunenv.IsService() {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -130,7 +131,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "docker":
 		// On Cloud Run Instances the docker daemon is unavailable.
 		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
-		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+		if cloudrunenv.IsInstance() {
 			if SandboxLauncherAvailable() {
 				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
 				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
@@ -154,7 +155,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		// On Cloud Run the docker daemon is unavailable regardless of
 		// whether the CLI binary exists in the container image.
-		if os.Getenv("K_SERVICE") != "" {
+		if cloudrunenv.IsService() {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
 			cfg := rtConfig.CloudRun
 			if cfg == nil {
@@ -197,7 +198,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
-		if cfg == nil && os.Getenv("K_SERVICE") != "" {
+		if cfg == nil && cloudrunenv.IsService() {
 			// Auto-detected Cloud Run environment with no explicit config
 			// from settings. Create a default config; project/region will
 			// be discovered from GCP metadata when API calls are made.

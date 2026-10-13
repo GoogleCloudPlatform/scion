@@ -96,7 +96,7 @@ func init() {
 // contention-related, concurrent teardown could be qualitatively worse.
 // Explicitly accepted: the timeout bounds the worst case per-sandbox,
 // but aggregate behavior under concurrency is unverified.
-func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id string) error {
+func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id string, obs sandboxObserved) error {
 	timeout := r.deleteTimeout
 	if timeout == 0 {
 		timeout = DefaultDeleteTimeout
@@ -163,8 +163,8 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 		return ctx.Err()
 	}
 
-	// Remove from state store.
-	r.state.remove(id)
+	// Remove from state store (compare-and-set against obs).
+	r.removeAfterDelete(id, obs)
 	return nil
 }
 

@@ -404,6 +404,11 @@ type AgentStore interface {
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgent(ctx context.Context, id string) (*Agent, error)
 
+	// GetAgentRunState reads only the run_id and deleted_at of an agent,
+	// by ID. Like GetAgent it returns a soft-deleted row (DeletedAt set),
+	// and ErrNotFound for a missing row or a malformed ID.
+	GetAgentRunState(ctx context.Context, id string) (AgentRunState, error)
+
 	// GetAgentBySlug retrieves an agent by its slug within a project.
 	// Returns ErrNotFound if the agent doesn't exist.
 	GetAgentBySlug(ctx context.Context, projectID, slug string) (*Agent, error)
@@ -1645,6 +1650,15 @@ type TemplateStore interface {
 	// but no longer matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
+	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
+	// template id, and only while the stored row has no snapshot and still
+	// matches expected (one conditional UPDATE). No other column changes,
+	// Updated included. It reports whether a row was written: false with a
+	// nil error means the row already has a snapshot, its content or layout
+	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// backfill rows committed before the snapshot existed (ptone/scion#4222).
+	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
+
 	// DeleteTemplate removes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
 	DeleteTemplate(ctx context.Context, id string) error
@@ -2499,7 +2513,9 @@ type ScheduledEventStore interface {
 	// ListScheduledEvents returns events matching the filter criteria.
 	ListScheduledEvents(ctx context.Context, filter ScheduledEventFilter, opts ListOptions) (*ListResult[ScheduledEvent], error)
 
-	// PurgeOldScheduledEvents removes non-pending events older than cutoff.
+	// PurgeOldScheduledEvents removes non-pending events that completed
+	// before cutoff: fired_at before cutoff, or, for an event with no
+	// fired_at (a cancelled one), created before cutoff.
 	PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error)
 }
 
@@ -3190,6 +3206,17 @@ type ThreadGroupStore interface {
 	// with no groups returns an empty, non-nil slice.
 	ListThreadGroups(ctx context.Context, projectID string) ([]ThreadGroup, error)
 
+	// CountThreadGroups returns how many thread groups a project has,
+	// without loading them or their members (the hub's per-project limit
+	// check).
+	CountThreadGroups(ctx context.Context, projectID string) (int, error)
+
+	// GetThreadGroupIDForConversation returns the ID of the thread group a
+	// conversation is filed in, or "" when it is in none (including a
+	// malformed ID). It is a point lookup on the unique conversation index
+	// and does not check that the conversation is live.
+	GetThreadGroupIDForConversation(ctx context.Context, conversationID string) (string, error)
+
 	// RenameThreadGroup renames a thread group and bumps UpdatedAt (last
 	// writer wins). Returns ErrNotFound if it does not exist,
 	// ErrAlreadyExists if another group in the project has the same name
@@ -3207,6 +3234,16 @@ type ThreadGroupStore interface {
 	// The group's existence is checked in the same transaction; a missing
 	// group returns ErrNotFound and writes nothing.
 	SetThreadGroupMember(ctx context.Context, groupID, conversationID, addedBy string) error
+
+	// AddThreadGroupMemberIfUnfiled files a conversation into a thread group
+	// only if it is not in any thread group yet; a conversation that is
+	// already filed (in this or another group) is left where it is. It
+	// reports whether this call filed it. It relies on the unique
+	// conversation index, so concurrent callers file a conversation once.
+	// The group's existence is checked in the same transaction; a missing
+	// group returns ErrNotFound and writes nothing. The automatic migration
+	// of personal groups uses it (design section 5a, rule 3).
+	AddThreadGroupMemberIfUnfiled(ctx context.Context, groupID, conversationID, addedBy string) (bool, error)
 
 	// RemoveThreadGroupMember takes a conversation out of a thread group. It
 	// is idempotent: a conversation that is not in that group, or a group ID
@@ -3280,7 +3317,22 @@ type RoleStore interface {
 	//   - PrincipalType must be one of user/agent/group
 	//   - super-admin and project-owner bindings are direct-user-only
 	//   - Duplicate (role, principal, scope) is rejected
+	//   - A federated account (UserKindFederated) is refused
+	//     (ErrFederatedAccountRefused)
+	//   - A role that does not confer membership (project-visitor) is
+	//     refused (ErrNonMembershipRoleRefused); see CreateVisitorRoleBinding
 	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// CreateVisitorRoleBinding creates a visitor grant: a binding of the
+	// seeded project-visitor role (system, ConfersMembership false), at
+	// project scope (non-empty ScopeID), to a user principal whose account
+	// is UserKindFederated. Anything else is refused with
+	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
+	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
+	// be empty, in which case the project-visitor role is resolved by
+	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
+	// on the store passed to WithTx.
+	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
@@ -3331,13 +3383,17 @@ type RoleStore interface {
 
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
+	// The project membership reads (this, ListProjectMembers and
+	// IsProjectMember) count only active bindings of roles that confer
+	// membership (RoleDefinition.ConfersProjectMembership): a visitor is
+	// not a member.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)
 
 	// ListProjectMembers returns all members of a project via role bindings.
 	ListProjectMembers(ctx context.Context, projectID string) ([]*ProjectMembership, error)
 
-	// IsProjectMember returns true if the user has any project-scoped role binding
-	// for the given project.
+	// IsProjectMember returns true if the user has any active project-scoped
+	// role binding for the given project of a role that confers membership.
 	IsProjectMember(ctx context.Context, projectID, userID string) (bool, error)
 }
 
