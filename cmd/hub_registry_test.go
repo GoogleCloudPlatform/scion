@@ -457,6 +457,7 @@ func TestResolveInvocationTarget_NicknameScope(t *testing.T) {
 		assert.Equal(t, "https://other.example.com", hubEndpoint, "%v", args)
 		assert.Empty(t, hubFlagName, "%v", args)
 		assert.Empty(t, stderr, "%v reads no context.yaml for a URL", args)
+		assert.False(t, contextWarned, "%v reads no context.yaml for a URL", args)
 
 		resetContextTargets()
 		hubEndpoint = "prod"
