@@ -1425,7 +1425,9 @@ func TestTestAdminPolicy_DelegationGrantManagementHTTP(t *testing.T) {
 		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
 		return g
 	}
-	path := func(g *store.AgentDelegationGrant) string { return "/api/v1/agents/" + g.AgentID + "/delegations/" + g.ID }
+	path := func(g *store.AgentDelegationGrant) string {
+		return "/api/v1/agents/" + g.AgentID + "/delegations/" + g.ID
+	}
 	ownerAgent := agent(owner.ID)
 	otherHub := grant(ownerAgent, owner.ID, "hub", "")
 	otherProject := grant(ownerAgent, owner.ID, "project", projectID)
