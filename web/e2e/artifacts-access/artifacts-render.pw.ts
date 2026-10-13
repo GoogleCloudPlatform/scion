@@ -163,6 +163,11 @@ const ROWS: Record<string, RowSpec> = {
   'R2-17a': { role: 'anonymous', title: 'a held view URL works without a session' },
   'R2-17b': { role: 'anonymous', title: 'a held view URL is refused after it expires', where: 'skip' },
   'R2-20': { role: 'member', title: 'markdown in the chat preview' },
+  'R2-20x': {
+    role: 'owner -> member',
+    title: 'recorded only: chips, references the hub recorded, artifactWarning',
+    graded: false,
+  },
   'R2-21': { role: 'member', title: 'HTML bundle in the chat preview', where: 'skip' },
   'R2-18': {
     role: '-',
@@ -711,7 +716,8 @@ async function markdownFacts(
       embeds: doc?.querySelectorAll('iframe, object, embed').length ?? -1,
       forms: doc?.querySelectorAll('form').length ?? -1,
       styleKept: (doc?.querySelectorAll('body style').length ?? 0) > 0,
-      parentFlag: (window as unknown as { __r2md?: unknown }).__r2md ?? null,
+      frameFlag:
+        (iframe.contentWindow as unknown as { __r2md?: unknown } | null)?.__r2md ?? null,
     };
   });
 }
@@ -775,7 +781,7 @@ function expectMarkdownInert(facts: Record<string, unknown>, flags: { r2md: unkn
   expect.soft(facts.hoverMarker, 'hover marker text kept').toBe(true);
   expect.soft(facts.jsLinkText, 'js link text kept').toBe(true);
   expect.soft(facts.jsLinkHref, 'js link has no href').toBeNull();
-  expect.soft(facts.parentFlag, 'no fixture script ran (frame view)').toBeNull();
+  expect.soft(facts.frameFlag, 'no fixture script ran (frame window)').toBeNull();
   expect.soft(flags.r2md, 'no fixture script ran (app page)').toBeNull();
 }
 
@@ -1400,9 +1406,9 @@ async function runMain(browser: Browser): Promise<void> {
       await popup.close();
       const facts = await markdownFacts(page);
       const flags = await parentFlags(page);
-      r.ui.afterClick = { scripts: facts.scripts, parentFlag: facts.parentFlag, appFlag: flags.r2md };
+      r.ui.afterClick = { scripts: facts.scripts, frameFlag: facts.frameFlag, appFlag: flags.r2md };
       expect.soft(facts.scripts, 'no script elements').toBe(0);
-      expect.soft(facts.parentFlag, 'no script ran').toBeNull();
+      expect.soft(facts.frameFlag, 'no script ran').toBeNull();
       expect.soft(flags.r2md, 'no script ran (app page)').toBeNull();
       r.api.push({ as: 'owner', method: 'GET', path: want, status: status ?? 0, code: null });
     },
@@ -1916,6 +1922,20 @@ async function runMain(browser: Browser): Promise<void> {
 /** R2-20 is filled in by the chat fixture (see chatRow below). */
 async function runChatRow(): Promise<void> {
   await j.row('R2-20', (r) => chatRow(r), { requires: ['R2-07'] });
+  const send = r2.chat.send as Record<string, unknown> | undefined;
+  if (!send) {
+    j.notRun(['R2-20x'], 'no chat message was sent (see R2-20)');
+    return;
+  }
+  await j.row('R2-20x', (r) => {
+    r.ui = {
+      chips: (r2.chat.preview as { chips?: number } | undefined)?.chips ?? null,
+      referencesRecorded: send.referencesRecorded ?? null,
+      artifactWarning: send.artifactWarning ?? null,
+      sendStatus: send.status ?? null,
+      note: 'chip behaviour not graded; a chip count of 0 refers to ptone/scion#4905',
+    };
+  });
 }
 
 /**
