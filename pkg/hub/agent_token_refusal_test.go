@@ -158,10 +158,11 @@ func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 		notFound := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			NotFound(w, "Access Constraint")
 		})
-		dh := withTestOuterHeader(DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(notFound))
+		dh := withTestOuterHeader(srv.corsMiddleware(DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(notFound)))
 		want := serveAuditRoute(dh, func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testDevToken) })
 		require.Equal(t, http.StatusNotFound, want.Status, want.Body)
 		require.Equal(t, testOuterHeaderValue, want.Header.Get(testOuterHeader))
+		require.NotEmpty(t, want.Header.Get("Access-Control-Allow-Origin"))
 
 		got := serveAuditRoute(dh, func(r *http.Request) { r.Header.Set("X-Scion-Agent-Token", "not-a-token") })
 		assert.Equal(t, want, got)

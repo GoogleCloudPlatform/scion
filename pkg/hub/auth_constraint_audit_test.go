@@ -17,6 +17,7 @@ package hub
 import (
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,51 @@ func TestConstraintAuditAuthNormalizationDoesNotMatchNeighborRoutes(t *testing.T
 						t.Fatal("failed authentication invoked the next handler")
 					}
 				})
+			}
+		})
+	}
+}
+
+// TestConstraintAuditNotFoundIgnoresHandlerSetHeaders: whatever headers
+// the wrapped handler sets before a 400, 401 or 403, the audit route
+// answers exactly the not-found response written over the headers present
+// when the writer was wrapped.
+func TestConstraintAuditNotFoundIgnoresHandlerSetHeaders(t *testing.T) {
+	preWrap := func(w http.ResponseWriter) {
+		h := w.Header()
+		h.Set("X-Test-Outer", "kept")
+		h.Set("Access-Control-Allow-Origin", "https://outer.example")
+		h.Set("Access-Control-Allow-Methods", "GET, POST")
+		h.Set("Access-Control-Allow-Headers", "Authorization, X-Scion-Agent-Token")
+		h.Set("Access-Control-Max-Age", "3600")
+	}
+	want := httptest.NewRecorder()
+	preWrap(want)
+	NotFound(want, "Access Constraint")
+
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, constraintAuditAuthTestPath, nil)
+			rec := httptest.NewRecorder()
+			preWrap(rec)
+			w := normalizeConstraintAuditAuthFailures(rec, req)
+			if w == http.ResponseWriter(rec) {
+				t.Fatal("the audit route was not wrapped")
+			}
+
+			w.Header().Set("X-Test-Auth-Added", "dropped")
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte("handler body\n"))
+
+			if rec.Code != want.Code {
+				t.Fatalf("status = %d, want %d; body: %s", rec.Code, want.Code, rec.Body.String())
+			}
+			if !reflect.DeepEqual(rec.Header(), want.Header()) {
+				t.Errorf("headers = %#v, want %#v", rec.Header(), want.Header())
+			}
+			if rec.Body.String() != want.Body.String() {
+				t.Errorf("body = %q, want %q", rec.Body.String(), want.Body.String())
 			}
 		})
 	}
