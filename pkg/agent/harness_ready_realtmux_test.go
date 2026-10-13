@@ -39,6 +39,21 @@ import (
 // readiness probe runs the production script, with only the tmux socket and
 // the readiness file paths pointed at the test's own.
 func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
+	const nonce = "0123456789abcdef"
+	runRealTmuxDelayedReader(t, nonce, state.FormatInitRun(nonce, state.ReadyModeHook), harnessReadyTimings{
+		PollInterval:   100 * time.Millisecond,
+		Deadline:       15 * time.Second,
+		Settle:         200 * time.Millisecond,
+		SettleFallback: 8 * time.Second,
+	})
+}
+
+// runRealTmuxDelayedReader runs the delayed-reader scenario of
+// TestRealTmuxBufferedMessageWaitsForDelayedReader with the given init-run
+// file content and manager timings, and returns how long Message took to
+// reach the reader, measured from the send.
+func runRealTmuxDelayedReader(t *testing.T, nonce, initRunContent string, timings harnessReadyTimings) time.Duration {
+	t.Helper()
 	if testing.Short() {
 		t.Skip("skipping real-tmux integration test in short mode")
 	}
@@ -62,7 +77,6 @@ func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
 	outFile := filepath.Join(dir, "out")
 	initRun := filepath.Join(dir, "init-run")
 	ready := filepath.Join(dir, "ready")
-	const nonce = "0123456789abcdef"
 
 	runTmux := func(stdin io.Reader, args ...string) (string, error) {
 		cmd := exec.Command(tmuxPath, append([]string{"-S", sock}, args...)...)
@@ -75,7 +89,7 @@ func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
 	}
 	t.Cleanup(func() { _, _ = runTmux(nil, "kill-server") })
 
-	if err := os.WriteFile(initRun, []byte(state.FormatInitRun(nonce, state.ReadyModeHook)), 0o644); err != nil {
+	if err := os.WriteFile(initRun, []byte(initRunContent), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -112,12 +126,7 @@ func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
 		},
 	}
 
-	mgr := &AgentManager{Runtime: shim, readyTimings: harnessReadyTimings{
-		PollInterval:   100 * time.Millisecond,
-		Deadline:       15 * time.Second,
-		Settle:         200 * time.Millisecond,
-		SettleFallback: 8 * time.Second,
-	}}
+	mgr := &AgentManager{Runtime: shim, readyTimings: timings}
 	mgr.msgBuffer = NewMessageBuffer(20*time.Millisecond, func(agentID, projectID, message string, interrupt bool) error {
 		return mgr.deliverImmediate(context.Background(), agentID, projectID, message, interrupt)
 	})
@@ -125,6 +134,7 @@ func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
 	defer mgr.Close()
 
 	const msg = "first task for the new agent"
+	sent := time.Now()
 	if err := mgr.Message(context.Background(), "test-agent", "", msg, false); err != nil {
 		t.Fatalf("Message: %v", err)
 	}
@@ -136,7 +146,7 @@ func TestRealTmuxBufferedMessageWaitsForDelayedReader(t *testing.T) {
 			if got != msg {
 				t.Fatalf("reader got %q, want %q", got, msg)
 			}
-			return
+			return time.Since(sent)
 		}
 		if time.Now().After(deadline) {
 			pane, _ := runTmux(nil, "capture-pane", "-p", "-t", "scion:0")
