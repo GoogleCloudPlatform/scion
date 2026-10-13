@@ -332,8 +332,9 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 // dispatch, ptone/scion#2890). A deleting row is skipped too: it reaches
 // the claim only once its lease has expired (an abandoned engine), and the
 // re-claim's dispatch check then refuses it with a rollback that restores
-// its prior phase and intent, where a refusal here would leave it stuck in
-// deleting and stopping. A row that is gone is left to the claim,
+// its prior phase (the run intent the abandoned engine recorded stays
+// stopped), where a refusal here would leave it stuck in deleting and
+// stopping. A row that is gone is left to the claim,
 // which then affects nothing. An unpinned agent with no Runtime Broker
 // passes, as before (checkAgentPinnedPlacement).
 func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) error {

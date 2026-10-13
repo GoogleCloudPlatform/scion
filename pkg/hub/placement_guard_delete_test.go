@@ -117,9 +117,17 @@ func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.
 // lease and a running prior, as an engine that died would leave it.
 func seedAbandonedDeletion(t *testing.T, s store.Store, id, st string) {
 	t.Helper()
+	seedAbandonedDeletionWithPrior(t, s, id, st, `{"phase":"running","activity":"working"}`)
+}
+
+// seedAbandonedDeletionWithPrior is seedAbandonedDeletion with the given
+// prior. The dead engine had recorded the stop intent, as dispatch() does.
+func seedAbandonedDeletionWithPrior(t *testing.T, s store.Store, id, st, prior string) {
+	t.Helper()
+	_, err := s.SetRunIntent(context.Background(), id, store.RunIntentStopped)
+	require.NoError(t, err)
 	past := time.Now().Add(-time.Minute)
 	stopping := string(state.PhaseStopping)
-	prior := `{"phase":"running","activity":"working"}`
 	n, err := s.UpdateAgentDeletion(context.Background(), id, store.DeletionPredicate{}, store.DeletionFields{
 		State: &st, BumpClaim: true, LeaseAt: &past, StartedAt: &past, Prior: &prior, Phase: &stopping,
 	})
@@ -172,6 +180,76 @@ func TestAgentDelete_AbandonedDeletingRowRollsBack(t *testing.T) {
 	assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "no longer stuck in deleting")
 	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored, not stopping")
+	assert.Equal(t, store.RunIntentStopped, got.RunIntent, "the stop intent the abandoned engine recorded stays (the deletion prior keeps no intent)")
+}
+
+// The engine's check of the claimed snapshot is the only placement guard
+// for an abandoned deleting row (the pre-check skips it) on the two paths
+// that finalize without a dispatch: a best-effort row whose Runtime Broker
+// is offline, and a pinned agent with no Runtime Broker. Under force, both
+// are refused as a conflict, the row and reservation kept, nothing sent.
+func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
+	t.Run("best-effort row, Runtime Broker offline", func(t *testing.T) {
+		ctx := context.Background()
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.stalePinnedAgent(t, "stale-best-effort", string(state.PhaseCreated))
+		reserveBrokerSlot(t, f.s, f.legacy, a.ID)
+		seedAbandonedDeletionWithPrior(t, f.s, a.ID, store.DeletionStateDeleting, `{"phase":"created"}`)
+		require.NoError(t, f.s.UpdateRuntimeBrokerHeartbeat(ctx, f.legacy.ID, store.BrokerStatusOffline))
+
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		got := mustGetAgent(t, f.s, a.ID)
+		assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
+		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+		assert.False(t, f.client.deleteCalled, "nothing is sent")
+		assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
+	})
+
+	t.Run("pinned agent with no Runtime Broker", func(t *testing.T) {
+		ctx := context.Background()
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.pinnedAgent(t, "pinned-no-broker", string(state.PhaseRunning))
+		reserveBrokerSlot(t, f.s, f.flat, a.ID)
+		a.RuntimeBrokerID = ""
+		require.NoError(t, f.s.UpdateAgent(ctx, a))
+		require.True(t, mustGetAgent(t, f.s, a.ID).IsPinned())
+		seedAbandonedDeletion(t, f.s, a.ID, store.DeletionStateDeleting)
+
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+		got := mustGetAgent(t, f.s, a.ID)
+		assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
+		assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+		assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+		assert.False(t, f.client.deleteCalled, "nothing is sent")
+		assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.flat.ID), "the reservation is kept")
+	})
+}
+
+// Fixture purge reports an agent refused by the placement pre-check as
+// failed/placement_conflict, and leaves its row and claim untouched.
+func TestFixturePurge_PlacementRefusalLabel(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	stamp := store.FixtureProvenance{RootID: uuid.NewString(), IssuerID: uuid.NewString()}
+	a := f.stalePinnedAgentWith(t, "stale-fixture", string(state.PhaseRunning), func(a *store.Agent) {
+		a.Fixture = stamp
+	})
+	require.Equal(t, stamp.RootID, a.Fixture.RootID)
+	before := mustGetAgent(t, f.s, a.ID)
+
+	var retained []TestIdentityPurgeItem
+	deleted, item := f.srv.purgeFixtureAgent(ctx, a, "fixture-purge-test", &retained)
+	assert.False(t, deleted)
+	require.NotNil(t, item)
+	assert.Equal(t, "failed", item.Status)
+	assert.Equal(t, "placement_conflict", item.Reason)
+	after := mustGetAgent(t, f.s, a.ID)
+	assert.Equal(t, before.DeletionState, after.DeletionState, "no claim is taken")
+	assert.Equal(t, before.DeletionClaim, after.DeletionClaim)
+	assert.False(t, f.client.deleteCalled)
 }
 
 // --- env-gather recreate ---------------------------------------------------------
