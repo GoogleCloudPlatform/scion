@@ -1559,6 +1559,7 @@ The command populates a structured JSON schema divided into two latency tiers:
 - `annotations`: System key-value pairs attached to the agent.
 - `ancestry`: A lineage array representing the agent's parent/child spawn relationships.
 - `taskSummary`: A brief summary of active task execution.
+- `messageMode`: The agent's effective [message mode](/scion/hosted/user/messaging/#message-authorization--modes) (`none`, `lineage`, `branch`, `project` or `hub`), shown as `Msg Mode:` in plain text.
 - `experiments`: The hub experiments that are on now, read live from `GET /api/v1/experiments` (shown as `Experiments:` in plain text, `(none)` when none is on). It includes server-checked experiments that also have a web layer, such as `hub.artifacts`, so an agent can tell whether artifacts are available. The key is absent when the Hub could not be asked. The agent environment variable `SCION_HUB_EXPERIMENTS` lists only the experiments dispatched to agents, fixed when the agent starts, so it is not the full list.
 
 ##### Token scopes (requires `--full`; read locally, no Hub connectivity needed)
