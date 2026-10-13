@@ -201,6 +201,8 @@ func TestRetryDispatch_SubscriberDeleted(t *testing.T) {
 	for _, n := range allNotifs {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when subscriber is permanently deleted")
+			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
 }
@@ -230,6 +232,8 @@ func TestRetryDispatch_WatchedAgentDeleted(t *testing.T) {
 	for _, n := range allNotifs {
 		if n.ID == notifs[0].ID {
 			assert.True(t, n.Dispatched, "notification should stay claimed when watched agent is deleted")
+			assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome, "a given-up notification must be stored as failed")
+			assert.Zero(t, n.DispatchAttempts, "no delivery was attempted")
 		}
 	}
 }
@@ -425,6 +429,14 @@ func TestNotificationOrphanGCHandler(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetNotification(ctx, unacked)
 	assert.NoError(t, err)
+}
+
+// getNotification reads the notification with the given ID.
+func getNotification(t *testing.T, env *notificationTestEnv, id string) *store.Notification {
+	t.Helper()
+	n, err := env.store.GetNotification(context.Background(), id)
+	require.NoError(t, err)
+	return n
 }
 
 // notificationDispatched returns the dispatched flag of the notification
@@ -817,4 +829,95 @@ func TestDrainUndispatchedNotifications_StopsAfterBrokerUnreachable(t *testing.T
 	assert.Equal(t, 1, d.callsFor(env.subscriber.ID), "the drain must stop attempting an unreachable broker")
 	assert.False(t, notificationDispatched(t, env, a1))
 	assert.False(t, notificationDispatched(t, env, a2))
+}
+
+// A delivered retry stores the delivered outcome and counts its attempt
+// (ptone/scion#4800).
+func TestRetryDispatch_Delivered_RecordsOutcomeAndAttempts(t *testing.T) {
+	env := setupRetryTest(t)
+	ctx := context.Background()
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	n := getNotification(t, env, notifs[0].ID)
+	assert.True(t, n.Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome)
+	assert.Equal(t, 1, n.DispatchAttempts)
+}
+
+// A notification whose retries are exhausted (delivery fails past
+// notificationRetryMaxAge) is stored as failed, not as delivered, with every
+// attempt counted (ptone/scion#4800).
+func TestRetryDispatch_Exhausted_RecordsFailedOutcomeAndAttempts(t *testing.T) {
+	env := setupNotificationTest(t)
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
+	ctx := context.Background()
+
+	notif := &store.Notification{
+		ID:             api.NewUUID(),
+		SubscriptionID: env.sub.ID,
+		AgentID:        env.watched.ID,
+		ProjectID:      env.project.ID,
+		SubscriberType: store.SubscriberTypeAgent,
+		SubscriberID:   env.subscriber.Slug,
+		Status:         "COMPLETED",
+		Message:        "watched-agent has reached a state of COMPLETED",
+		CreatedAt:      time.Now().Add(-notificationRetryMaxAge - time.Hour),
+	}
+	require.NoError(t, env.store.CreateNotification(ctx, notif))
+	// Two earlier failed attempts (the primary dispatch and one sweep).
+	require.NoError(t, env.store.RecordNotificationDispatchAttempt(ctx, notif.ID))
+	require.NoError(t, env.store.RecordNotificationDispatchAttempt(ctx, notif.ID))
+
+	notifs, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, notifs, 1)
+
+	env.nd.RetryDispatch(ctx, &notifs[0])
+
+	require.Len(t, env.dispatcher.getCalls(), 1)
+	n := getNotification(t, env, notif.ID)
+	assert.True(t, n.Dispatched, "a given-up notification stays claimed")
+	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome)
+	assert.Equal(t, 3, n.DispatchAttempts)
+}
+
+// Through the sweep handler: a failed sweep attempt is counted and leaves no
+// outcome, and the sweep that delivers stores delivered with both attempts
+// (ptone/scion#4800).
+func TestSweepHandler_CountsAttemptsUntilDelivered(t *testing.T) {
+	env := setupRetryTest(t)
+	env.dispatcher.setReturnErr(errors.New("broker refused"))
+	ctx := context.Background()
+
+	srv := &Server{
+		store:                  env.store,
+		agentLifecycleLog:      slog.Default(),
+		notificationDispatcher: env.nd,
+	}
+	handler := srv.notificationDispatchSweepHandler()
+
+	pending, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	id := pending[0].ID
+
+	handler(ctx)
+	n := getNotification(t, env, id)
+	assert.False(t, n.Dispatched)
+	assert.Empty(t, n.DispatchOutcome, "a failed attempt that will be retried has no outcome")
+	assert.Equal(t, 1, n.DispatchAttempts)
+
+	env.dispatcher.setReturnErr(nil)
+
+	handler(ctx)
+	n = getNotification(t, env, id)
+	assert.True(t, n.Dispatched)
+	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome)
+	assert.Equal(t, 2, n.DispatchAttempts)
 }

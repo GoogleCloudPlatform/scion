@@ -2450,6 +2450,19 @@ type NotificationStore interface {
 	// proceed (no dispatcher, no broker) after an optimistic claim.
 	UnmarkNotificationDispatched(ctx context.Context, id string) error
 
+	// RecordNotificationDispatchAttempt atomically increments a
+	// notification's DispatchAttempts by one. Callers record an attempt just
+	// before each delivery attempt to a subscriber agent.
+	// Returns ErrNotFound if the notification doesn't exist.
+	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
+
+	// SetNotificationDispatchOutcome records a notification's terminal
+	// dispatch outcome (NotificationOutcomeDelivered or
+	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
+	// not pick it up again. Returns ErrInvalidInput for any other outcome
+	// and ErrNotFound if the notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error
+
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
 	//
