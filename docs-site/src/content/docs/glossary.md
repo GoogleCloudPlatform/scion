@@ -94,6 +94,12 @@ The directory mounted as the container user's home folder, holding that agent's 
 ### Hub
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
 
+### Hub nickname
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
+
+### Current context
+The current Hub and the project remembered on it, selected per user with `scion use` (alias of `scion project use`). Commands use it when no flag, environment variable or project directory chooses a Hub or project; inside a project directory the directory wins. Agents never use it.
+
 ### Runtime Broker
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. It is not itself a compute node. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
 

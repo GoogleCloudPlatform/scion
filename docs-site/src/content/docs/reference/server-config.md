@@ -977,8 +977,8 @@ The operator-configured Hub endpoint is resolved from the environment, flags and
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
 1. `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` — explicit Hub public URL.
-2. Project-level `hub.endpoint` setting.
-3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+2. `--base-url` or `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+3. **Deprecated:** the CLI's `hub.endpoint` setting (which `SCION_HUB_ENDPOINT` also sets). This fallback will be removed in a later release; see [Deprecated fallback to the CLI's hub endpoint](#deprecated-fallback-to-the-clis-hub-endpoint).
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
    - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
      The derived URL is the IAP front end, which the Hub's own host does not serve. On a co-located broker (for example, the single-node VM deployment), agents dispatched to Docker therefore receive `http://scion-hub.internal:<hub listen port>` instead. That hostname is mapped to the Docker host gateway, so the agents reach the Hub directly while staying on bridge networking. Agents dispatched to Podman receive `http://host.containers.internal:<port>`, which Podman resolves itself. On rootless Podman 5.0 to 5.2 with pasta networking, that name can be missing or unreachable (fixed in Podman 5.3). A host-gateway mapping has the same gap there, so upgrade Podman if agents cannot reach the Hub. This applies whatever the broker's default runtime is, including Docker or Podman runtime profiles on a Kubernetes-default broker. Agents dispatched to Kubernetes runtime profiles, Cloud Run, or Apple container still receive the derived URL.
@@ -988,6 +988,20 @@ When `server.hub.public_url` is not explicitly set, the Hub endpoint injected in
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 
 The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
+
+#### The hub a Runtime Broker reports to
+
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose broker runs next to the Hub, the broker uses the Hub's localhost address when that setting is unset. A broker-only server falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+
+#### Deprecated fallback to the CLI's hub endpoint
+
+`hub.endpoint` and `SCION_HUB_ENDPOINT` are CLI settings. The CLI now keeps its Hubs in a per-user hub list (see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/)), and the server's own endpoints belong in `server.hub.public_url` and `server.broker.hub_endpoint`. When the server's endpoint actually comes from the legacy fallback, the server logs this warning once at startup:
+
+```text
+deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
+```
+
+There is no warning when removing the fallback would not change the result, for example on a workstation whose `hub.endpoint` is its own loopback address. On a host configured as a server, `scion doctor` reports the same text as its `server-hub-endpoint` check; it cannot see the server's flags, so it warns only when every way the server could run would be affected. Selecting a Hub with `scion use` never changes the endpoint a server advertises.
 
 #### Splitting the agent endpoint from the public URL
 
