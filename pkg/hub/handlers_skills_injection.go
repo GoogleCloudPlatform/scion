@@ -411,7 +411,7 @@ const permUserSkillInjectionUpdate = "user_skill_injection.update"
 // token identity is refused too. It writes 403 on denial.
 func (s *Server) authorizeUserSkillInjectionWrite(w http.ResponseWriter, r *http.Request, userIdent UserIdentity) bool {
 	_, isToken := userIdent.(*ScopedUserIdentity)
-	if !isToken && GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT {
+	if !isToken && isUserAccessTokenRequest(r, userIdent) {
 		resourceType, action := selfPermissionResourceAction(permUserSkillInjectionUpdate)
 		logAuthzDenial(r, userIdent, Resource{Type: resourceType}, action, selfScopeReasonCredential)
 		writeForbiddenStructured(w, "", resourceType, action)
