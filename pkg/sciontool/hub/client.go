@@ -38,6 +38,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -1131,22 +1132,21 @@ const (
 
 // tokenRefreshBackoff returns the delay before the next refresh retry after the
 // given number of consecutive failures, using exponential backoff (starting at
-// base, doubling each attempt) capped at max.
+// base, doubling each attempt) capped at max. It is the delay the refresh loop
+// gets from the shared backoff helper after that many failures.
 func tokenRefreshBackoff(consecutiveFailures int, base, max time.Duration) time.Duration {
-	if consecutiveFailures < 1 {
-		consecutiveFailures = 1
-	}
-	delay := base
+	b := newTokenRefreshBackoff(base, max)
+	d := b.Failure()
 	for i := 1; i < consecutiveFailures; i++ {
-		delay *= 2
-		if delay >= max {
-			return max
-		}
+		d = b.Failure()
 	}
-	if delay > max {
-		delay = max
-	}
-	return delay
+	return d
+}
+
+// newTokenRefreshBackoff returns the refresh loop's retry policy: doubling
+// from base to max, without jitter.
+func newTokenRefreshBackoff(base, max time.Duration) *backoff.Backoff {
+	return &backoff.Backoff{Base: base, Max: max}
 }
 
 // StartTokenRefresh starts a background goroutine that refreshes the agent token
@@ -1214,6 +1214,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		// adjustRefreshForTransportTokens picks the earlier deadline.
 		refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 		consecutiveFailures := 0
+		retry := newTokenRefreshBackoff(retryBase, retryMax)
 		authLostNotified := false
 
 		for {
@@ -1273,13 +1274,14 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				}
 
 				consecutiveFailures++
-				refreshAt = clk.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
+				refreshAt = clk.Now().Add(retry.Failure())
 				continue
 			}
 
 			// Successful refresh: reset failure tracking and clear any prior
 			// auth-lost state so a later loss is reported again.
 			consecutiveFailures = 0
+			retry.Reset()
 			authLostNotified = false
 			tokenExpiry = newExpiry
 
