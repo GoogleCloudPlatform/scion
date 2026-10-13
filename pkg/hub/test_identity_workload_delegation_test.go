@@ -1511,7 +1511,7 @@ func x2EnableWebSessions(t *testing.T, e *x2Env) {
 }
 
 // x2WebCodeAudits returns the web-login code audit records for identity id.
-func x2WebCodeAudits(t *testing.T, e *x2Env, id string) []store.MutationAuditRecord {
+func x2WebCodeAudits(t *testing.T, e *x2Env, id string) []*store.MutationAuditRecord {
 	t.Helper()
 	audits, _, err := e.s.ListMutationAudits(context.Background(), store.MutationAuditFilter{MutationType: testIdentityWebCodeIssueMutation, TargetID: id})
 	require.NoError(t, err)
@@ -1561,7 +1561,7 @@ func TestWorkloadDelegation_WebLoginCodeForOwnIdentity(t *testing.T) {
 	assert.Equal(t, string(CredentialKindWorkloadDelegation), summary.CredentialKind)
 
 	// The web session gate still applies to a workload request.
-	e.srv.testIdentityWeb = nil
+	e.srv.testIdentityWeb = testIdentityWebState{}
 	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), testIdentityWebReasonUnavailable)
