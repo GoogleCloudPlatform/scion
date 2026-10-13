@@ -312,7 +312,7 @@ func TestReport_H1_SucceededPreRunning(t *testing.T) {
 
 	answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
-		Runtime: "kubernetes", RuntimeState: "Running",
+		AgentConfig: store.BrokerAgentConfig{Runtime: "kubernetes"}, RuntimeState: "Running",
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
@@ -401,7 +401,7 @@ func TestReport_H1_RunningObservedThenSucceededAppliesEcho(t *testing.T) {
 
 	answer, updated, err = s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
 		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded,
-		Runtime: "docker",
+		AgentConfig: store.BrokerAgentConfig{Runtime: "docker"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultCompleted, answer.Result)
@@ -793,7 +793,7 @@ func TestReport_H1_RunningPhaseSucceededAppliesEcho(t *testing.T) {
 	require.Equal(t, store.LaunchStateActive, before.LaunchState, "setup: the launch must still be active")
 
 	answer, updated, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
-		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, Runtime: "docker",
+		LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateSucceeded, AgentConfig: store.BrokerAgentConfig{Runtime: "docker"},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, store.LaunchReportResultApplied, answer.Result)
