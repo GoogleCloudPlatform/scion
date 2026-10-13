@@ -315,16 +315,16 @@ func (s *Server) fetchRemoteForImport(ctx context.Context, scope, scopeID, sourc
 // the given resource scope, or "" to fetch unauthenticated. Each scope reads
 // only its own credentials:
 //
-//   - project (scopeID is the project ID): the repo-specific project secret
+//   - project (scopeID is the project ID): the repo-specific project credential
 //     GH_{OWNER}__{REPO}, then the owner-level GH_{OWNER} (see pkg/ghauth),
 //     then a GitHub App installation token for the project, if it has one,
-//     then the project's GITHUB_TOKEN secret. This mirrors the skill
+//     then the project's GITHUB_TOKEN credential. This mirrors the skill
 //     resolver's project-scope cascade.
-//   - global (hub-level; scopeID is ignored): the same names as hub secrets,
+//   - global (hub-level; scopeID is ignored): the same names as hub credentials,
 //     GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN. There is no GitHub
 //     App step: App installations belong to projects.
 //   - user (scopeID is the user ID): the same names as the user's own
-//     secrets, GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN, and only
+//     credentials, GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN, and only
 //     when the caller in ctx is that user, so an import never spends another
 //     user's credential.
 //
@@ -370,8 +370,8 @@ func (s *Server) projectImportCredential(ctx context.Context, projectID, owner, 
 		}
 	}
 
-	// Fall back to the project GITHUB_TOKEN secret if no App token was minted.
-	if val := s.secretForImport(ctx, secret.ScopeProject, projectID, ghauth.DefaultKey); val != "" {
+	// Fall back to the project GITHUB_TOKEN credential if no App token was minted.
+	if val := s.credentialForImport(ctx, secret.ScopeProject, projectID, ghauth.DefaultKey); val != "" {
 		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
 		return val
 	}
@@ -380,41 +380,41 @@ func (s *Server) projectImportCredential(ctx context.Context, projectID, owner, 
 
 // scopedImportCredential is the hub- and user-scope cascade of
 // importCredential: GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN, all
-// read from secretScope/scopeID.
-func (s *Server) scopedImportCredential(ctx context.Context, secretScope, scopeID, owner, repo string) string {
-	val, key := s.ghConventionCredential(ctx, secretScope, scopeID, owner, repo)
+// read from credScope/scopeID.
+func (s *Server) scopedImportCredential(ctx context.Context, credScope, scopeID, owner, repo string) string {
+	val, key := s.ghConventionCredential(ctx, credScope, scopeID, owner, repo)
 	if val == "" {
-		val, key = s.secretForImport(ctx, secretScope, scopeID, ghauth.DefaultKey), ghauth.DefaultKey
+		val, key = s.credentialForImport(ctx, credScope, scopeID, ghauth.DefaultKey), ghauth.DefaultKey
 	}
 	if val == "" {
 		return ""
 	}
-	s.resourceLog.Info("using credential for resource import", "scope", secretScope, "scopeID", scopeID, "secret", key)
+	s.resourceLog.Info("using credential for resource import", "scope", credScope, "scopeID", scopeID, "secret", key)
 	return val
 }
 
 // ghConventionCredential returns the first GH_ convention credential set for
-// owner/repo in secretScope/scopeID, and its name (see ghauth.Lookup).
-func (s *Server) ghConventionCredential(ctx context.Context, secretScope, scopeID, owner, repo string) (value, name string) {
+// owner/repo in credScope/scopeID, and its name (see ghauth.Lookup).
+func (s *Server) ghConventionCredential(ctx context.Context, credScope, scopeID, owner, repo string) (value, name string) {
 	return ghauth.Lookup(owner, repo, func(key string) string {
-		return s.secretForImport(ctx, secretScope, scopeID, key)
+		return s.credentialForImport(ctx, credScope, scopeID, key)
 	})
 }
 
-// secretForImport returns the value of the credential named key in
-// secretScope/scopeID, or "" if it is unset, empty, or no secret backend is
+// credentialForImport returns the value of the credential named key in
+// credScope/scopeID, or "" if it is unset, empty, or no credential backend is
 // configured. A lookup failure other than not-found is logged (without any
 // value) and treated as unset, so the cascade falls through to the next
 // source.
-func (s *Server) secretForImport(ctx context.Context, secretScope, scopeID, key string) string {
+func (s *Server) credentialForImport(ctx context.Context, credScope, scopeID, key string) string {
 	sb := s.GetSecretBackend()
 	if sb == nil {
 		return ""
 	}
-	sec, err := sb.Get(ctx, key, secretScope, scopeID)
+	sec, err := sb.Get(ctx, key, credScope, scopeID)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.resourceLog.Warn("Failed to retrieve credential for resource import", "scope", secretScope, "scopeID", scopeID, "secret", key, "error", err)
+			s.resourceLog.Warn("Failed to retrieve credential for resource import", "scope", credScope, "scopeID", scopeID, "secret", key, "error", err)
 		}
 		return ""
 	}

@@ -125,14 +125,14 @@ func TestImportCredential_UserScopeOnlyForThatUser(t *testing.T) {
 				t.Errorf("importCredential = %q, want unauthenticated", got)
 			}
 			if backend.gets != 0 {
-				t.Errorf("secret backend Get called %d times, want 0", backend.gets)
+				t.Errorf("credential backend Get called %d times, want 0", backend.gets)
 			}
 		})
 	}
 }
 
 // TestImportCredential_ScopesReadOnlyTheirOwnCredentials verifies that each
-// scope asks the backend only for its own secret scope: hub scope never
+// scope asks the backend only for its own credential scope: hub scope never
 // reads project or user credentials, and user scope never reads hub ones.
 func TestImportCredential_ScopesReadOnlyTheirOwnCredentials(t *testing.T) {
 	const userID = "user-import-cred-iso"
@@ -166,7 +166,7 @@ func TestImportCredential_ScopesReadOnlyTheirOwnCredentials(t *testing.T) {
 	}
 }
 
-// scopeRecordingBackend records the secret scope of every Get and finds
+// scopeRecordingBackend records the credential scope of every Get and finds
 // nothing. The embedded nil interface panics on any other call.
 type scopeRecordingBackend struct {
 	secret.SecretBackend
@@ -199,7 +199,7 @@ func TestImportCredential_HubAndUserScopeNonGitHubReadNothing(t *testing.T) {
 				t.Errorf("global scope: importCredential = %q, want no credential", got)
 			}
 			if backend.gets != 0 {
-				t.Errorf("secret backend Get called %d times, want 0", backend.gets)
+				t.Errorf("credential backend Get called %d times, want 0", backend.gets)
 			}
 		})
 	}
@@ -208,16 +208,16 @@ func TestImportCredential_HubAndUserScopeNonGitHubReadNothing(t *testing.T) {
 // TestResourcesEndpoints_ScopeCredentialOnTheWire verifies end to end that
 // the unified import and discover endpoints send the hub credential for
 // global scope and the caller's own credential for user scope, each stored
-// through the real local secret backend, as the Bearer credential, and that
+// through the real local credential backend, as the Bearer credential, and that
 // a hub credential is not sent for a user-scope import.
 func TestResourcesEndpoints_ScopeCredentialOnTheWire(t *testing.T) {
 	tests := []struct {
-		name        string
-		path        string
-		scope       string
-		admin       bool
-		secretScope string // where the credential is stored
-		wantAuth    string
+		name      string
+		path      string
+		scope     string
+		admin     bool
+		credScope string // where the credential is stored
+		wantAuth  string
 	}{
 		{"global import uses hub credential", "/api/v1/resources/import", "global", true, secret.ScopeHub, "Bearer fake-scope-cred"},
 		{"global discover uses hub credential", "/api/v1/resources/discover", "global", true, secret.ScopeHub, "Bearer fake-scope-cred"},
@@ -240,12 +240,12 @@ func TestResourcesEndpoints_ScopeCredentialOnTheWire(t *testing.T) {
 
 			srv.SetSecretBackend(secret.NewLocalBackend(s, srv.HubID(), "test-secret"))
 			scopeID := srv.HubID()
-			if tt.secretScope == secret.ScopeUser {
+			if tt.credScope == secret.ScopeUser {
 				scopeID = user.ID
 			}
 			if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
 				Name: "GH_ACME_CORP", Value: "fake-scope-cred", SecretType: secret.TypeEnvironment,
-				Scope: tt.secretScope, ScopeID: scopeID,
+				Scope: tt.credScope, ScopeID: scopeID,
 			}); err != nil {
 				t.Fatalf("failed to store credential: %v", err)
 			}

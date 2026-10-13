@@ -32,7 +32,7 @@ import (
 )
 
 // importCredSecretBackend is a secret backend serving values from a map for
-// one secret scope and scope ID (project scope unless scope is set). Only Get
+// one credential scope and scope ID (project scope unless scope is set). Only Get
 // is implemented; the embedded nil interface panics on any other call, which
 // keeps the test honest about what importCredential touches.
 type importCredSecretBackend struct {
@@ -285,7 +285,7 @@ func TestImportCredential_ProjectScopeWithoutProject(t *testing.T) {
 		t.Errorf("importCredential = %q, want unauthenticated", got)
 	}
 	if backend.gets != 0 {
-		t.Errorf("secret backend Get called %d times, want 0", backend.gets)
+		t.Errorf("credential backend Get called %d times, want 0", backend.gets)
 	}
 }
 

@@ -25,7 +25,7 @@ import (
 // remoteFetchCredential returns the GitHub credential the CLI sends when it
 // fetches source itself, or "" to fetch unauthenticated. For a GitHub folder
 // URL it reads the caller's environment in the same order the Hub uses for
-// project secrets: GH_{OWNER}__{REPO}, then GH_{OWNER} (see pkg/ghauth), then
+// project credentials: GH_{OWNER}__{REPO}, then GH_{OWNER} (see pkg/ghauth), then
 // GITHUB_TOKEN. Other sources (archives, rclone, other hosts) read nothing:
 // FetchRemoteTemplate sends a credential only for GitHub folders. Only the
 // variable name is logged, never its value.
