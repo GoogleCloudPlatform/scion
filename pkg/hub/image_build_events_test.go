@@ -17,12 +17,16 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,8 +43,7 @@ func TestRunImageBuild_DeliversOnlyToRequesterSubject(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("stub build script is a POSIX shell script")
 	}
-	script := filepath.Join(t.TempDir(), "build-images.sh")
-	require.NoError(t, os.WriteFile(script, []byte("#!/bin/sh\necho build-line-one\necho build-line-two\n"), 0o755))
+	script := writeStubBuildScript(t, "#!/bin/sh\necho build-line-one\necho build-line-two\n")
 
 	pub := NewChannelEventPublisher()
 	requesterCh, unsubRequester := pub.Subscribe("user.u-req.>")
@@ -79,19 +82,67 @@ func TestRunImageBuild_DeliversOnlyToRequesterSubject(t *testing.T) {
 	assert.Empty(t, systemCh, "build output must not be published on system.* subjects")
 }
 
+// writeStubBuildScript writes an executable stub build script, closing it
+// before it is run. It skips the test when the temp directory does not allow
+// exec (a noexec mount), and waits out a transient ETXTBSY, which a fork in
+// another goroutine can cause while the file was still open for writing.
+func writeStubBuildScript(t *testing.T, body string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "build-images.sh")
+	f, err := os.OpenFile(script, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	require.NoError(t, err)
+	_, err = f.WriteString(body)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	for attempt := 0; ; attempt++ {
+		err := exec.Command(script).Run()
+		switch {
+		case err == nil:
+			return script
+		case errors.Is(err, syscall.ETXTBSY) && attempt < 50:
+			time.Sleep(20 * time.Millisecond)
+		case errors.Is(err, syscall.EACCES), errors.Is(err, syscall.EPERM):
+			t.Skipf("cannot exec a stub script in %s (temp directory likely mounted noexec): %v", dir, err)
+		default:
+			t.Fatalf("stub build script %s did not run: %v", script, err)
+		}
+	}
+}
+
 // TestHandleSystemImagesBuild_RequiresUserIdentity checks that a build
-// request with no user identity is refused before a build is marked active,
-// since there is no requester subject to deliver its output to.
+// request without a user identity (none at all, or a non-user principal such
+// as an agent or a broker) is refused before a build is marked active, since
+// there is no requester subject to deliver its output to.
 func TestHandleSystemImagesBuild_RequiresUserIdentity(t *testing.T) {
-	srv := &Server{events: noopEventPublisher{}}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/system/images/build", nil)
-	req.RemoteAddr = "127.0.0.1:12345"
-	rr := httptest.NewRecorder()
+	agentClaims := &AgentTokenClaims{}
+	agentClaims.Subject = "agent-1"
 
-	srv.handleSystemImagesBuild(rr, req)
+	tests := []struct {
+		name     string
+		identity Identity
+	}{
+		{name: "no identity"},
+		{name: "agent identity", identity: &agentIdentityWrapper{agentClaims}},
+		{name: "broker identity", identity: NewBrokerIdentity("broker-1")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := &Server{events: noopEventPublisher{}}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/system/images/build", nil)
+			req.RemoteAddr = "127.0.0.1:12345"
+			if tt.identity != nil {
+				req = req.WithContext(contextWithIdentity(req.Context(), tt.identity))
+			}
+			rr := httptest.NewRecorder()
 
-	assert.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
-	assert.False(t, srv.imageBuildActive.Load(), "a refused request must not mark a build active")
+			srv.handleSystemImagesBuild(rr, req)
+
+			assert.Equal(t, http.StatusUnauthorized, rr.Code, rr.Body.String())
+			assert.False(t, srv.imageBuildActive.Load(), "a refused request must not mark a build active")
+		})
+	}
 }
 
 // TestAuthorizeSSESubjects_ImageBuildSubjectIsRequesterOnly checks that the
