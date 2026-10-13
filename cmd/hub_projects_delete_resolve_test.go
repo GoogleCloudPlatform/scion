@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"net/http/httptest"
 	"os"
 	"strconv"
@@ -240,6 +241,32 @@ func TestRunHubProjectsDelete_AgentsRemain(t *testing.T) {
 		assert.Contains(t, err.Error(), "worker (a-1), delete failed")
 		assert.Contains(t, err.Error(), "... and more")
 		assert.Contains(t, err.Error(), "--force")
+		assert.Empty(t, hub.deletes)
+	})
+
+	t.Run("refused without force, JSON output", func(t *testing.T) {
+		hub := setupProjectsDeleteTest(t, true)
+		hub.agentsRemain = true
+		outputFormat = "json"
+
+		var err error
+		out := captureStdout(t, func() {
+			err = runHubProjectsDelete(hubProjectsDeleteCmd, []string{deleteTestIDA})
+		})
+		require.Error(t, err)
+		assert.True(t, isReportedInJSON(err), "the refusal is reported in the JSON document")
+		var got ActionResult
+		require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+		assert.Equal(t, "error", got.Status)
+		assert.Equal(t, deleteTestIDA, got.Details["projectId"])
+		assert.Equal(t, true, got.Details["truncated"])
+		agents, ok := got.Details["agents"].([]interface{})
+		require.True(t, ok, "details.agents is a list: %v", got.Details)
+		require.Len(t, agents, 1)
+		agent, _ := agents[0].(map[string]interface{})
+		assert.Equal(t, "a-1", agent["id"])
+		assert.Equal(t, "worker", agent["slug"])
+		assert.Equal(t, "failed", agent["deletionState"])
 		assert.Empty(t, hub.deletes)
 	})
 

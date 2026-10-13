@@ -1568,7 +1568,20 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	// Delete the project. Without --force the hub refuses while agents
 	// remain (409 conflict listing them).
 	if err := client.Projects().Delete(ctx, project.ID, &hubclient.DeleteProjectOptions{Force: hubProjectsDeleteForce}); err != nil {
-		if msg, ok := projectHasAgentsMessage(err); ok {
+		if msg, details, ok := projectHasAgentsMessage(err); ok {
+			if isJSONOutput() {
+				return outputJSONResult(ActionResult{
+					Status:  "error",
+					Command: "hub projects delete",
+					Message: msg,
+					Details: map[string]interface{}{
+						"projectId":   project.ID,
+						"projectName": project.Name,
+						"agents":      details["agents"],
+						"truncated":   details["truncated"],
+					},
+				}, true, msg)
+			}
 			return errors.New(msg)
 		}
 		return fmt.Errorf("failed to delete project: %w", err)
@@ -3070,15 +3083,15 @@ func hubProjectCloneURLLabel(gitURL string) string {
 
 // projectHasAgentsMessage formats the hub's 409 refusal of a project delete
 // whose agents remain (details.agents), listing the agents and the --force
-// hint. ok is false for any other error.
-func projectHasAgentsMessage(err error) (string, bool) {
+// hint, and returns the refusal's details. ok is false for any other error.
+func projectHasAgentsMessage(err error) (string, map[string]interface{}, bool) {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusConflict {
-		return "", false
+		return "", nil, false
 	}
 	agents, ok := apiErr.Details["agents"].([]interface{})
 	if !ok || len(agents) == 0 {
-		return "", false
+		return "", nil, false
 	}
 	var b strings.Builder
 	b.WriteString("failed to delete project: it still has agents that are not deleted:")
@@ -3095,5 +3108,5 @@ func projectHasAgentsMessage(err error) (string, bool) {
 		b.WriteString("\n  - ... and more")
 	}
 	b.WriteString("\nDelete these agents first, or use --force to delete the project anyway (agent runtime deletes are then best-effort).")
-	return b.String(), true
+	return b.String(), apiErr.Details, true
 }
