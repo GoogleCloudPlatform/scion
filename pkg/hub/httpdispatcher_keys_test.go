@@ -259,12 +259,20 @@ func TestHTTPAgentDispatcher_DispatchAgentKeys_FailsClosedOnInvalidInput(t *test
 			// target.AgentID: an empty agent ID is refused by that row load
 			// (no such row), which subsumes the input-shape check; every
 			// other case passes the backstop and is refused by its own check.
-			if tc.name == "empty agent ID" {
-				if !strings.Contains(err.Error(), "for the placement check") {
-					t.Fatalf("expected the backstop's row load to refuse an empty agent ID, got %v", err)
-				}
-			} else if _, refused := placementRefusalOf(err); refused && tc.name != "empty runtime broker ID" {
-				t.Fatalf("expected the %s check, not a placement refusal: %v", tc.name, err)
+			// Each case is refused by its own check: the input checks, or
+			// (empty agent ID) the backstop's row load, or (empty runtime
+			// broker ID) the backstop's broker-equality check.
+			want := map[string]string{
+				"zero deadline":           "execute-before deadline is zero or already past",
+				"already past":            "execute-before deadline is zero or already past",
+				"empty operation ID":      "operation ID is required",
+				"empty agent slug":        "are all required",
+				"empty agent ID":          "for the placement check",
+				"empty project ID":        "are all required",
+				"empty runtime broker ID": "the request names Runtime Broker",
+			}[tc.name]
+			if want == "" || !strings.Contains(err.Error(), want) {
+				t.Fatalf("expected the %s refusal (%q), got %v", tc.name, want, err)
 			}
 			if mockClient.calls != 0 {
 				t.Fatalf("expected zero ExecuteKeys calls for a %s, got %d", tc.name, mockClient.calls)

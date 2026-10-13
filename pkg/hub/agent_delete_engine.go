@@ -758,13 +758,23 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	// Placement check on the claimed snapshot, before the shortcuts below:
 	// the best-effort path finalizes without a dispatch when the Runtime
 	// Broker looks unreachable, so the dispatcher's backstop would never
-	// run for it. A refusal is handled as the backstop's would be (see
-	// below). A store failure is left to the dispatch, as before.
+	// run for it, and an abandoned deleting row reaches here without the
+	// claim's pre-check. A refusal is handled as the backstop's would be
+	// (see below). For a pinned agent, a check that could not read the
+	// Runtime Broker row fails the delete too: force and best-effort
+	// finalize on a dispatch error, and a failed check is not evidence of
+	// teardown. An unpinned agent's store failure is left to the dispatch,
+	// as before.
 	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
 		if refusal, ok := placementRefusalOf(err); ok {
 			s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; not dispatching, not finalizing",
 				"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
 			return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		}
+		if agent.IsPinned() {
+			s.agentLifecycleLog.Error("delete engine: could not check the pinned agent's placement; not dispatching, not finalizing",
+				"agent_id", agent.ID, "claim", e.plan.claim, "force", req.Force, "error", err)
+			return e.rollback(store.DeletionCodeRuntimeError, "Failed to check the agent's saved placement: "+err.Error()), false
 		}
 	}
 

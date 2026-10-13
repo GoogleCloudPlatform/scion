@@ -609,6 +609,8 @@ func TestPlacementGuard_KeysRefusedBeforeDispatch(t *testing.T) {
 func TestPlacementGuard_ResetAuthExecLogsAnswer409(t *testing.T) {
 	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
 	a := f.stalePinnedAgent(t, "stale-rel", string(state.PhaseRunning))
+	client := &countingBrokerClient{}
+	f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.s, client, false, slog.Default()))
 	for _, tc := range []struct {
 		name   string
 		method string
@@ -623,7 +625,7 @@ func TestPlacementGuard_ResetAuthExecLogsAnswer409(t *testing.T) {
 			rec := doRequest(t, f.srv, tc.method, tc.path, tc.body)
 			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
 			requireStalePinDetails(t, d, a, f)
-			assert.False(t, f.client.resetAuthCalled, "nothing is sent")
+			assert.Equal(t, 0, client.count(), "nothing is sent: %v", client.calls)
 		})
 	}
 }

@@ -228,6 +228,63 @@ func TestAgentDelete_SnapshotCheckGuardsDispatchShortcuts(t *testing.T) {
 	})
 }
 
+// A pinned agent whose placement check cannot read its Runtime Broker row
+// is never finalized by a force or best-effort delete: a failed check is
+// not evidence of teardown. The agent here is pinned to a legacy row
+// (PinValid holds, so only the row read can show the inconsistency), its
+// delete engine died (abandoned deleting row, which skips the pre-check),
+// and every Runtime Broker row read fails.
+func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
+	boom := errors.New("injected broker read failure")
+	for _, tc := range []struct {
+		name  string
+		phase string
+		prior string
+		query string
+	}{
+		{"force", string(state.PhaseStopping), `{"phase":"running","activity":"working"}`, "?force=true"},
+		{"best-effort", string(state.PhaseCreated), `{"phase":"created"}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			a := f.pinnedAgent(t, "pinned-read-fail-"+tc.name, string(state.PhaseRunning))
+			// Move the pin and the assignment together onto the legacy row,
+			// through the placement compare-and-set the store allows.
+			moved, err := f.s.SetAgentPinnedRuntimeTarget(ctx, a.ID,
+				store.PinnedPlacement{RuntimeBrokerID: f.flat.ID, RuntimeTargetID: a.PinnedRuntimeTargetID, RuntimeTargetType: a.PinnedRuntimeTargetType},
+				store.PinnedPlacement{RuntimeBrokerID: f.legacy.ID, RuntimeTargetID: a.PinnedRuntimeTargetID, RuntimeTargetType: a.PinnedRuntimeTargetType})
+			require.NoError(t, err)
+			require.True(t, moved.PinValid())
+			require.Equal(t, f.legacy.ID, moved.RuntimeBrokerID)
+			reserveBrokerSlot(t, f.s, f.legacy, a.ID)
+			_, err = f.s.SetRunIntent(ctx, a.ID, store.RunIntentStopped)
+			require.NoError(t, err)
+			past := time.Now().Add(-time.Minute)
+			deleting := store.DeletionStateDeleting
+			n, err := f.s.UpdateAgentDeletion(ctx, a.ID, store.DeletionPredicate{}, store.DeletionFields{
+				State: &deleting, BumpClaim: true, LeaseAt: &past, StartedAt: &past, Prior: &tc.prior, Phase: &tc.phase,
+			})
+			require.NoError(t, err)
+			require.Equal(t, 1, n)
+
+			faulty := &brokerReadErrStore{Store: f.s, err: boom}
+			f.srv.store = faulty
+			t.Cleanup(func() { f.srv.store = f.s })
+			client := &countingBrokerClient{}
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(faulty, client, false, slog.Default()))
+
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+tc.query, nil)
+			require.GreaterOrEqual(t, rec.Code, 400, "never a success: %s", rec.Body.String())
+			assert.Equal(t, 0, client.count(), "nothing is sent")
+			got := mustGetAgent(t, f.s, a.ID)
+			assert.True(t, got.DeletedAt.IsZero(), "the row is not finalized")
+			assert.NotEqual(t, store.DeletionStateFinalizing, got.DeletionState)
+			assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
+		})
+	}
+}
+
 // Fixture purge reports an agent refused by the placement pre-check as
 // failed/placement_conflict, and leaves its row and claim untouched.
 func TestFixturePurge_PlacementRefusalLabel(t *testing.T) {
