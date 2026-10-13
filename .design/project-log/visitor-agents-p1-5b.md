@@ -71,11 +71,26 @@
   rule that might someday admit a user does not open another project's
   agents to a visitor.
 
+## Fix round
+
+- A visitor's read of a soft-deleted agent by ID used to succeed:
+  `resolveProjectAgent` falls back to `GetAgent`, which does not filter
+  deleted rows, while the slug lookup and the list do. Admission
+  (`visitorMayReadAgent`) and the handler now both refuse a deleted agent
+  with the uniform refusal.
+- The visitor message, by-ID and DM paths (the 5A paths) resolve agents
+  the same way and do not check deletion either; neither does the member
+  send path. Left as is and reported, since whether a DM with a deleted
+  agent stays readable is a product decision.
+- `?messageable=true` on the visitor agent list keeps only agents the
+  visitor may message now (`ComputeMessageability`, the decision a send
+  gets). That decision returns no error; any store or authorization fault
+  inside it is a denial, so the agent is left out.
+
 ## Follow-ups
 
-- The bridge's agent cards should list only agents the caller may message.
-  The visitor view has no messageability field, so the bridge has to try
-  the send or the hub has to add a filter. A design decision is needed.
+- Decided: the bridge's agent cards use `?messageable=true` on the visitor
+  agent list (added below), so the bridge never probes by sending.
 - The own-DM list reads every conversation the visitor participates in,
   with no paging. That is fine for visitors with few DMs; add paging if it
   grows.
