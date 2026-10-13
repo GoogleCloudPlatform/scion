@@ -79,38 +79,66 @@ func requireCreatorMissingEntry(t *testing.T, body resetAuthAllBody, raw string,
 	assert.Equal(t, map[string]int{resetAuthCodeCreatorMissing: 1}, body.FailedByCode)
 }
 
-// A running agent whose creator was hard-deleted is reported with
+// A running agent whose creator was deleted, hard or soft, is reported with
 // delegation_creator_missing, the creator's ID named as the creator, and a
 // failed_by_code count; a healthy agent in the same run still succeeds.
 func TestAdminResetAuthAll_DeletedCreator(t *testing.T) {
-	f := newMintFixture(t, "rar-deleted")
-	setBackfillCompleted(t, f.store)
-	ctx := context.Background()
+	cases := []struct {
+		name   string
+		delete func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error
+	}{
+		{"hard delete", func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error {
+			if err := tx.DeleteAgent(ctx, parent.ID); err != nil {
+				return err
+			}
+			return f.srv.hardDeleteAgentTx(ctx, tx, parent, AuditActor{})
+		}},
+		// The soft delete deactivates the creator's edge with
+		// EdgeDeactivationAgentSoftDelete and keeps its row.
+		{"soft delete", func(ctx context.Context, f *mintFixture, tx store.Store, parent *store.Agent) error {
+			row, err := tx.GetAgent(ctx, parent.ID)
+			if err != nil {
+				return err
+			}
+			row.DeletedAt = time.Now()
+			if err := tx.UpdateAgent(ctx, row); err != nil {
+				return err
+			}
+			return f.srv.softDeleteAgentTx(ctx, tx, row, AuditActor{})
+		}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			name := fmt.Sprintf("rar-deleted-%d", i)
+			f := newMintFixture(t, name)
+			setBackfillCompleted(t, f.store)
+			ctx := context.Background()
 
-	parent := f.agent(t, "rar-deleted-parent", AgentRoleFull, state.PhaseStopped)
-	f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, ceilPrincip, provSession)
-	child := f.childAgent(t, "rar-deleted-child", parent, AgentRoleFull)
-	ok := healthyResetAuthAgent(t, f, "rar-deleted-ok")
+			parent := f.agent(t, name+"-parent", AgentRoleFull, state.PhaseStopped)
+			f.edge(t, store.DelegationPrincipalUser, f.userID, parent.ID, ceilPrincip, provSession)
+			child := f.childAgent(t, name+"-child", parent, AgentRoleFull)
+			ok := healthyResetAuthAgent(t, f, name+"-ok")
 
-	require.NoError(t, f.store.WithTx(ctx, func(tx store.Store) error {
-		if err := f.srv.hardDeleteAgentTx(ctx, tx, parent, AuditActor{}); err != nil {
-			return err
-		}
-		return tx.DeleteAgent(ctx, parent.ID)
-	}))
+			require.NoError(t, f.store.WithTx(ctx, func(tx store.Store) error {
+				return tc.delete(ctx, f, tx, parent)
+			}))
 
-	body, raw := postResetAuthAll(t, f.srv)
+			body, raw := postResetAuthAll(t, f.srv)
 
-	assert.Equal(t, 2, body.Total)
-	require.Len(t, body.Succeeded, 1, raw)
-	assert.Equal(t, ok.ID, body.Succeeded[0].ID)
-	requireCreatorMissingEntry(t, body, raw, child, parent.ID, 1,
-		fmt.Sprintf("creator agent %s has no active delegation in this project (deleted or moved); recreate this agent", parent.ID))
-	assertIssueDeniedAudit(t, f.store, child.ID, mintSiteResetAuth, string(DenyCauseCeilingOrphaned))
+			assert.Equal(t, 2, body.Total)
+			require.Len(t, body.Succeeded, 1, raw)
+			assert.Equal(t, ok.ID, body.Succeeded[0].ID)
+			requireCreatorMissingEntry(t, body, raw, child, parent.ID, 1,
+				fmt.Sprintf("creator agent %s no longer has an active delegation in this project; recreate this agent", parent.ID))
+			assertIssueDeniedAudit(t, f.store, child.ID, mintSiteResetAuth, string(DenyCauseCeilingOrphaned))
+		})
+	}
 }
 
 // A running agent whose creator is in another project (its only edge is
-// scoped there) is reported the same way.
+// scoped there) is reported the same way. No lifecycle path produces this
+// today (sub-agents are created only within their own project), so the
+// state is seeded directly, as stored or legacy data would hold it.
 func TestAdminResetAuthAll_CreatorInOtherProject(t *testing.T) {
 	f := newMintFixture(t, "rar-moved")
 	setBackfillCompleted(t, f.store)
@@ -139,7 +167,7 @@ func TestAdminResetAuthAll_CreatorInOtherProject(t *testing.T) {
 	assert.Equal(t, 1, body.Total)
 	assert.Empty(t, body.Succeeded, raw)
 	requireCreatorMissingEntry(t, body, raw, child, parent.ID, 1,
-		fmt.Sprintf("creator agent %s has no active delegation in this project (deleted or moved); recreate this agent", parent.ID))
+		fmt.Sprintf("creator agent %s no longer has an active delegation in this project; recreate this agent", parent.ID))
 }
 
 // A missing edge two hops up names that agent as an ancestor, with its
@@ -159,7 +187,7 @@ func TestAdminResetAuthAll_AncestorMissing(t *testing.T) {
 	body, raw := postResetAuthAll(t, f.srv)
 
 	requireCreatorMissingEntry(t, body, raw, child, root.ID, 2,
-		fmt.Sprintf("ancestor agent %s (2 levels up the creator chain) has no active delegation in this project (deleted or moved); recreate this agent", root.ID))
+		fmt.Sprintf("ancestor agent %s (2 levels up the creator chain) no longer has an active delegation in this project; recreate this agent", root.ID))
 }
 
 // The agent's own missing edge and any other structural chain outcome (here
@@ -196,6 +224,59 @@ func TestAdminResetAuthAll_OtherDelegationCategories(t *testing.T) {
 	}, byID[cyclic.ID])
 	assert.NotContains(t, raw, "provenance:", "no raw error text in the response")
 	assert.Equal(t, map[string]int{resetAuthCodeOwnMissing: 1, resetAuthCodeDelegationCeiling: 1}, body.FailedByCode)
+}
+
+// A failure that is not a structural delegation denial (here a running
+// agent with no runtime broker assigned) keeps its raw error, carries no
+// code, cause or ancestor fields, and is counted as unclassified.
+func TestAdminResetAuthAll_UnclassifiedFailure(t *testing.T) {
+	f := newMintFixture(t, "rar-unclassified")
+	setBackfillCompleted(t, f.store)
+	ctx := context.Background()
+	a := f.agent(t, "rar-unclassified-agent", AgentRoleFull, state.PhaseRunning)
+	a.RuntimeBrokerID = ""
+	require.NoError(t, f.store.UpdateAgent(ctx, a))
+
+	body, raw := postResetAuthAll(t, f.srv)
+
+	assert.Equal(t, 1, body.Total)
+	assert.Empty(t, body.Succeeded, raw)
+	require.Len(t, body.Failed, 1, raw)
+	assert.Equal(t, map[string]any{
+		"id": a.ID, "name": a.Name, "error": errNoRuntimeBrokerAssigned.Error(),
+	}, body.Failed[0])
+	assert.Equal(t, map[string]int{"unclassified": 1}, body.FailedByCode)
+}
+
+// An agent with a valid chain that is held (not in good standing) gets
+// agent_not_in_standing with the fixed reason and its own count, and no raw
+// standing text.
+func TestAdminResetAuthAll_NotInStanding(t *testing.T) {
+	f := newMintFixture(t, "rar-standing")
+	setBackfillCompleted(t, f.store)
+	ctx := context.Background()
+	a := healthyResetAuthAgent(t, f, "rar-standing-agent")
+	_, err := f.store.CreateAgentHolds(ctx, []*store.AgentHold{{
+		AgentID: a.ID, ProjectID: f.projectID, Cause: store.AgentHoldCauseOwnerAccessEnded,
+		RootPrincipalType: store.AgentHoldRootUser, RootPrincipalID: f.userID,
+		Trigger: store.MembershipLossTriggerMemberRemove, ActorKind: "system", ActorID: "hub", CorrelationID: "test",
+	}})
+	require.NoError(t, err)
+
+	body, raw := postResetAuthAll(t, f.srv)
+
+	assert.Equal(t, 1, body.Total)
+	assert.Empty(t, body.Succeeded, raw)
+	require.Len(t, body.Failed, 1, raw)
+	assert.Equal(t, map[string]any{
+		"id": a.ID, "name": a.Name,
+		"code":  resetAuthCodeNotInStanding,
+		"error": "this agent is not in good standing (for example it is held, or its owner no longer has access); resolve its standing, then reset auth again",
+	}, body.Failed[0])
+	assert.NotContains(t, raw, errAgentNotInStanding.Error()+":", "no raw standing text in the response")
+	assert.NotContains(t, raw, standingReasonAgentHeld, "no standing reason code in the response")
+	assert.Equal(t, map[string]int{resetAuthCodeNotInStanding: 1}, body.FailedByCode)
+	assert.False(t, f.client.resetAuthCalled, "no token handed to the broker")
 }
 
 // The success path carries an empty failed_by_code and unchanged entries.

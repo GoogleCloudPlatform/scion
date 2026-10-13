@@ -586,8 +586,9 @@ var errOwnEdgeMissing = errors.New("provenance: the agent has no edge of its own
 // ancestorEdgeMissingError is the detail of a chainEffectCeiling
 // ErrProvenanceMissing found above depth 0: AgentID is the agent's creator
 // (Depth 1) or a further ancestor (Depth > 1) that has no active edge in the
-// agent's project, because it was deleted, is in or was moved to another
-// project, or its create was rolled back. The walk wraps it together with
+// agent's project: for example it was deleted, its own delegator was
+// deleted, its create was rolled back, or (in stored or legacy data) it is
+// in another project. The walk wraps it together with
 // ErrProvenanceMissing, so errors.Is(err, ErrProvenanceMissing) still holds.
 type ancestorEdgeMissingError struct {
 	AgentID string

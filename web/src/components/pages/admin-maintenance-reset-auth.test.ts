@@ -20,7 +20,7 @@ import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 // category, and the per-category counts from failed_by_code.
 
 const CREATOR_REASON =
-  'creator agent parent-1 has no active delegation in this project (deleted or moved); recreate this agent';
+  'creator agent parent-1 no longer has an active delegation in this project; recreate this agent';
 
 const RESET_AUTH_RESULT = {
   succeeded: [{ id: 'ok-1', name: 'ok' }],
@@ -35,10 +35,16 @@ const RESET_AUTH_RESULT = {
       ancestor_depth: 1,
     },
     { id: 'rt-1', name: 'rt', error: 'runtime not available', code: 'runtime_unavailable' },
+    { id: 'held-1', name: 'held', error: 'not in standing', code: 'agent_not_in_standing' },
     { id: 'x-1', name: 'x', error: 'broker unreachable' },
   ],
-  total: 4,
-  failed_by_code: { delegation_creator_missing: 1, runtime_unavailable: 1, unclassified: 1 },
+  total: 5,
+  failed_by_code: {
+    delegation_creator_missing: 1,
+    runtime_unavailable: 1,
+    agent_not_in_standing: 1,
+    unclassified: 1,
+  },
 };
 
 function handler(input: string | URL | Request): Promise<Response> {
@@ -89,11 +95,13 @@ describe('admin maintenance reset auth result', () => {
     const categories = el.shadowRoot?.querySelector('.reset-auth-categories')?.textContent ?? '';
     expect(categories).toContain('Creator delegation missing: 1');
     expect(categories).toContain('Runtime unavailable: 1');
+    expect(categories).toContain('Not in good standing: 1');
     expect(categories).toContain('Other: 1');
 
     const log = el.shadowRoot?.querySelector('.result-log.result-error')?.textContent ?? '';
     expect(log).toContain(`child: ${CREATOR_REASON} [Creator delegation missing]`);
     expect(log).toContain('rt: runtime not available [Runtime unavailable]');
+    expect(log).toContain('held: not in standing [Not in good standing]');
     expect(log).toContain('x: broker unreachable');
     expect(log).not.toContain('x: broker unreachable [');
   });

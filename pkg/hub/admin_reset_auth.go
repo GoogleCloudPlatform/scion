@@ -68,7 +68,8 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 		// not have the agent's runtime available, and to internal_error
 		// when the agent token could not be issued; both can be retried.
 		// A structural delegation denial sets one of the delegation_* codes
-		// (resetAuthDelegationFailure); retrying does not help those.
+		// (resetAuthDelegationFailure), and an agent not in good standing
+		// agent_not_in_standing; retrying does not help those.
 		Code string `json:"code,omitempty"`
 		// Cause is the deny cause of a structural delegation denial.
 		Cause DenyCause `json:"cause,omitempty"`
@@ -96,6 +97,9 @@ func (s *Server) handleAdminResetAuthAll(w http.ResponseWriter, r *http.Request)
 				if errors.Is(err, errAgentTokenRecord) {
 					res.Error = agentTokenRecordFailedMessage
 					res.Code = ErrCodeInternalError
+				} else if errors.Is(err, errAgentNotInStanding) {
+					res.Error = resetAuthNotInStandingReason
+					res.Code = resetAuthCodeNotInStanding
 				} else if f, ok := resetAuthDelegationFailure(err); ok {
 					res.Error = f.Reason
 					res.Code = f.Code
@@ -156,6 +160,15 @@ const (
 	resetAuthCodeDelegationCeiling = "delegation_ceiling"
 )
 
+// resetAuthCodeNotInStanding is the per-agent failure code of the bulk
+// reset-auth for an agent that is not in good standing (errAgentNotInStanding),
+// with the fixed reason resetAuthNotInStandingReason; the specific standing
+// reason stays in the server log.
+const (
+	resetAuthCodeNotInStanding   = "agent_not_in_standing"
+	resetAuthNotInStandingReason = "this agent is not in good standing (for example it is held, or its owner no longer has access); resolve its standing, then reset auth again"
+)
+
 // resetAuthCodeUnclassified is the failed_by_code key for a failure that
 // carries no code.
 const resetAuthCodeUnclassified = "unclassified"
@@ -188,10 +201,10 @@ func resetAuthDelegationFailure(err error) (resetAuthDelegation, bool) {
 		out.AncestorID = ancestor.AgentID
 		out.AncestorDepth = ancestor.Depth
 		if ancestor.Depth == 1 {
-			out.Reason = fmt.Sprintf("creator agent %s has no active delegation in this project (deleted or moved); recreate this agent",
+			out.Reason = fmt.Sprintf("creator agent %s no longer has an active delegation in this project; recreate this agent",
 				ancestor.AgentID)
 		} else {
-			out.Reason = fmt.Sprintf("ancestor agent %s (%d levels up the creator chain) has no active delegation in this project (deleted or moved); recreate this agent",
+			out.Reason = fmt.Sprintf("ancestor agent %s (%d levels up the creator chain) no longer has an active delegation in this project; recreate this agent",
 				ancestor.AgentID, ancestor.Depth)
 		}
 	case issueErr.OwnEdgeMissing:
