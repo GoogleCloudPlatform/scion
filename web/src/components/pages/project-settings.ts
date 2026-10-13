@@ -1720,9 +1720,8 @@ export class ScionPageProjectSettings extends LitElement {
                 <div class="delete-info">
                   <h3>Delete this project</h3>
                   <p>
-                    Permanently remove this project and its configuration. A project that still
-                    has agents cannot be deleted; delete its agents first. This action cannot be
-                    undone.
+                    Permanently remove this project and its configuration. A project that still has
+                    agents cannot be deleted; delete its agents first. This action cannot be undone.
                   </p>
                 </div>
                 <div class="delete-actions">
