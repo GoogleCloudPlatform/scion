@@ -48,6 +48,7 @@ func TestClearableConfigPath(t *testing.T) {
 		"telemetry":         false,
 		"harness":           false,
 		"cleared_fields":    false,
+		"message_mode":      false,
 		"":                  false,
 	} {
 		if got := ClearableConfigPath(path); got != want {
