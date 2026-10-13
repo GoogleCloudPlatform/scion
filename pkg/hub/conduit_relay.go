@@ -451,22 +451,50 @@ func (s *Server) conduitRevalidatePrincipal(ctx context.Context, p relay.Princip
 	return nil
 }
 
+// conduitAdmission is the pre-upgrade admission decision of a conduit
+// handshake (decideConduit): the principal the session is admitted as and
+// what serving it needs. The decision only reads; the session is created
+// by serveConduitAdmitted.
+type conduitAdmission struct {
+	rt        *conduitRuntime
+	principal relay.Principal
+	// brokerSecret is the fingerprint of the broker secret the upgrade
+	// was signed with (brokers only).
+	brokerSecret conduitBrokerSecretFingerprint
+	// user and credentialExpiry are the user principal and its
+	// credential's expiry (users only).
+	user             UserIdentity
+	credentialExpiry time.Time
+}
+
 // handleConduit serves GET /api/v1/conduit: a conduit session for an
-// agent, a Runtime Broker (HMAC headers, handleConduitBroker) or a user
-// (serveConduitUser, which asks for tunnels by RPC). Agent principals need
-// an agent token with agent:port:forward; anonymous callers and other
-// principals are refused at the HTTP layer before any upgrade. An agent's
-// project, launch id and generation come from the agent row read here,
-// never from the Hello; admission then applies the 1d-i incarnation policy
-// (launch-id match, the legacy-fallback fence, gen-N fallback).
+// agent, a Runtime Broker (HMAC headers, decideConduitBroker) or a user
+// (decideConduitUser; the session asks for tunnels by RPC). Agent
+// principals need an agent token with agent:port:forward; anonymous
+// callers and other principals are refused at the HTTP layer before any
+// upgrade. An agent's project, launch id and generation come from the
+// agent row read here, never from the Hello; admission then applies the
+// 1d-i incarnation policy (launch-id match, the legacy-fallback fence,
+// gen-N fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.decideConduit(w, r)
+	if !ok {
+		return
+	}
+	s.serveConduitAdmitted(w, r, a)
+}
+
+// decideConduit runs every pre-upgrade check of a conduit handshake and
+// returns the admission. On a refusal it writes the response and returns
+// false.
+func (s *Server) decideConduit(w http.ResponseWriter, r *http.Request) (conduitAdmission, bool) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
-		return
+		return conduitAdmission{}, false
 	}
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
-		return
+		return conduitAdmission{}, false
 	}
 	// One arm per principal kind; anything else is refused before any
 	// upgrade. A broker authenticates with HMAC headers in its own handler,
@@ -475,48 +503,45 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 	identity := GetIdentityFromContext(r.Context())
 	agentIdent, isAgent := identity.(AgentIdentity)
 	userIdent, isUser := identity.(UserIdentity)
-	var ident AgentIdentity
 	switch {
 	case r.Header.Get(HeaderBrokerID) != "":
-		s.handleConduitBroker(w, r)
-		return
+		return s.decideConduitBroker(w, r)
 	case isAgent:
-		ident = agentIdent
+		return s.decideConduitAgent(w, r, agentIdent)
 	case isUser:
-		s.serveConduitUser(w, r, userIdent)
-		return
+		return s.decideConduitUser(w, r, userIdent)
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
-		return
+		return conduitAdmission{}, false
 	}
+}
+
+// decideConduitAgent is decideConduit for an agent principal.
+func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, ident AgentIdentity) (conduitAdmission, bool) {
 	if err := conduitAgentScopeCheck(ident); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	rt := s.conduit.Load()
 	if rt == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	agent, err := s.conduitAgentRowCheck(r.Context(), ident)
 	switch {
 	case errors.Is(err, errConduitAgentGone):
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Agent no longer exists", nil)
-		return
+		return conduitAdmission{}, false
 	case errors.Is(err, errConduitAgentMismatch):
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Agent token does not match the agent", nil)
-		return
+		return conduitAdmission{}, false
 	case err != nil:
 		writeErrorFromErr(w, errors.Unwrap(err), "") // the store error, as read
-		return
+		return conduitAdmission{}, false
 	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
-		return
-	}
-	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
-	if err != nil {
-		return
+		return conduitAdmission{}, false
 	}
 	p := relay.Principal{
 		Kind:      registry.PrincipalAgent,
@@ -529,17 +554,40 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 			p.TokenRun = rs.conduitBinding(context.WithoutCancel(r.Context()), claims, runScopeRequestFrom(r))
 		}
 	}
+	return conduitAdmission{rt: rt, principal: p}, true
+}
+
+// serveConduitAdmitted upgrades the connection and serves the admitted
+// session until it ends.
+func (s *Server) serveConduitAdmitted(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	switch a.principal.Kind {
+	case registry.PrincipalBroker:
+		s.serveConduitBroker(w, r, a)
+	case registry.PrincipalUser:
+		s.serveConduitUser(w, r, a)
+	default:
+		s.serveConduitAgent(w, r, a)
+	}
+}
+
+// serveConduitAgent serves an admitted agent session.
+func (s *Server) serveConduitAgent(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
+	if err != nil {
+		return
+	}
+	rt, p := a.rt, a.principal
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
 	ctx := context.WithoutCancel(r.Context())
 	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
-		slog.Debug("Conduit session ended", "agent_id", agent.ID, "error", err)
+		slog.Debug("Conduit session ended", "agent_id", p.ID, "error", err)
 	}
 	// An agent deleted during the handshake: the session row is gone
 	// (Serve deleted it); drop the epoch row its admission recreated.
 	if errors.Is(s.conduitRevalidatePrincipal(ctx, p), errConduitAgentGone) {
-		if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agent.ID); err != nil {
-			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agent.ID, "error", err)
+		if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, p.ID); err != nil {
+			slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", p.ID, "error", err)
 		}
 	}
 }

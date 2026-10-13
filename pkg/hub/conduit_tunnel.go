@@ -666,44 +666,51 @@ func conduitTunnelOpenError(err error) error {
 	}
 }
 
-// serveConduitUser serves GET /api/v1/conduit for an authenticated user
-// (hub.conduit on): the session may only ask the hub for tunnels by RPC.
-// The credential's expiry is captured here and bounds new tunnels on the
+// decideConduitUser is decideConduit for an authenticated user (hub.conduit
+// on): the session may only ask the hub for tunnels by RPC. The
+// credential's expiry is captured here and bounds new tunnels on the
 // session.
-func (s *Server) serveConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity) {
+func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity) (conduitAdmission, bool) {
 	rt := s.conduit.Load()
 	if rt == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	expiry, err := s.conduitCredentialExpiry(r)
 	if errors.Is(err, errConduitCredentialNotAdmitted) {
 		slog.Info("Conduit user session refused", "user_id", user.ID(), "error", err)
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "This credential cannot open conduit sessions", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	if err != nil {
 		slog.Warn("Conduit: reading the admitting credential's expiry failed", "user_id", user.ID(), "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Unable to read the credential's expiry", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
-		return
+		return conduitAdmission{}, false
 	}
+	p := relay.Principal{
+		Kind: registry.PrincipalUser,
+		ID:   user.ID(),
+	}
+	return conduitAdmission{rt: rt, principal: p, user: user, credentialExpiry: expiry}, true
+}
+
+// serveConduitUser serves an admitted user session. Its RPCs go to the
+// session's tunnel state.
+func (s *Server) serveConduitUser(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
 	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
 	if err != nil {
 		return
 	}
-	ts := newConduitTunnelSession(s, user, expiry)
-	p := relay.Principal{
-		Kind:       registry.PrincipalUser,
-		ID:         user.ID(),
-		RPCHandler: ts,
-	}
+	ts := newConduitTunnelSession(s, a.user, a.credentialExpiry)
+	p := a.principal
+	p.RPCHandler = ts
 	ctx := context.WithoutCancel(r.Context())
-	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
-		slog.Debug("Conduit user session ended", "user_id", user.ID(), "error", err)
+	if err := a.rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
+		slog.Debug("Conduit user session ended", "user_id", a.user.ID(), "error", err)
 	}
 }
 

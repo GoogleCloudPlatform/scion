@@ -79,53 +79,59 @@ func brokerExecScope(b *store.RuntimeBroker) string {
 	return b.RuntimeTarget.ID
 }
 
-// handleConduitBroker serves a Runtime Broker's conduit session. The
-// caller (handleConduit) has already checked hub.conduit and the method.
-// The broker's endpoint incarnation is the process id its Hello presents
-// (the hub keeps no authoritative value for it), and its exec_scope comes
-// from the broker row.
-func (s *Server) handleConduitBroker(w http.ResponseWriter, r *http.Request) {
+// decideConduitBroker is decideConduit for a Runtime Broker. The caller
+// has already checked hub.conduit and the method. The broker's endpoint
+// incarnation is the process id its Hello presents (the hub keeps no
+// authoritative value for it), and its exec_scope comes from the broker
+// row.
+func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request) (conduitAdmission, bool) {
 	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
 	if !ok {
-		return
+		return conduitAdmission{}, false
 	}
 	rt := s.conduit.Load()
 	if rt == nil {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
-		return
+		return conduitAdmission{}, false
 	}
 	broker, err := s.store.GetRuntimeBroker(r.Context(), brokerID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "Runtime broker no longer exists", nil)
-			return
+			return conduitAdmission{}, false
 		}
 		writeErrorFromErr(w, err, "")
-		return
+		return conduitAdmission{}, false
 	}
 	fp, ok := s.conduitBrokerAdmissionSecret(w, r, broker.ID)
 	if !ok {
-		return
+		return conduitAdmission{}, false
 	}
 	if !isWebSocketUpgrade(r) {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest, "WebSocket upgrade required", nil)
-		return
-	}
-	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
-	if err != nil {
-		return
+		return conduitAdmission{}, false
 	}
 	p := relay.Principal{
 		Kind:      registry.PrincipalBroker,
 		ID:        broker.ID,
 		ExecScope: brokerExecScope(broker),
 	}
+	return conduitAdmission{rt: rt, principal: p, brokerSecret: fp}, true
+}
+
+// serveConduitBroker serves an admitted Runtime Broker session.
+func (s *Server) serveConduitBroker(w http.ResponseWriter, r *http.Request, a conduitAdmission) {
+	conn, err := ws.Upgrade(w, r, nil, ws.Options{})
+	if err != nil {
+		return
+	}
+	p := a.principal
 	// The session outlives no request deadline: it ends when the
 	// connection closes or the relay drains.
-	ctx, untrack := s.trackConduitBrokerSession(context.WithoutCancel(r.Context()), broker.ID, fp)
+	ctx, untrack := s.trackConduitBrokerSession(context.WithoutCancel(r.Context()), p.ID, a.brokerSecret)
 	defer untrack()
-	if err := rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
-		slog.Debug("Conduit session ended", "broker_id", broker.ID, "error", err)
+	if err := a.rt.relay.Serve(ctx, conn, p); err != nil && !errors.Is(err, relay.ErrNotServing) {
+		slog.Debug("Conduit session ended", "broker_id", p.ID, "error", err)
 	}
 	// Unlike the agent path, a broker removed during the handshake keeps
 	// its epoch row: broker ids are reused, and the design keeps broker
@@ -137,7 +143,7 @@ var errConduitBrokerGone = errors.New("runtime broker no longer exists")
 
 // conduitRevalidateBroker re-reads the broker row once a broker session is
 // admitted and registered: a session a re-check has already denied, a
-// broker deleted after handleConduitBroker's read, or a broker whose
+// broker deleted after decideConduitBroker's read, or a broker whose
 // admitting secret is no longer current, is closed with 4401. It only
 // reads. A denied session closes before any store read; otherwise a read
 // error other than not-found keeps the session (the broker session

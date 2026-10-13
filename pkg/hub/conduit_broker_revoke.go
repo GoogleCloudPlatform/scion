@@ -267,7 +267,7 @@ func (s *Server) conduitBrokerCredentialChanged(brokerID string) {
 }
 
 // conduitBrokerSessionCtxKey carries the *conduitBrokerSession from
-// handleConduitBroker to the post-registration revalidation.
+// serveConduitBroker to the post-registration revalidation.
 type conduitBrokerSessionCtxKey struct{}
 
 // conduitBrokerAdmissionSecret returns the fingerprint of the broker secret
