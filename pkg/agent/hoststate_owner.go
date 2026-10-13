@@ -48,7 +48,7 @@ type RunOwnerTarget struct {
 	// global project. "" names the nearest directory above the working
 	// directory with a .scion entry (not followed), or the global project
 	// when there is none; unlike config.FindProjectRoot it does not skip a
-	// marker that does not resolve, which is then refused (see
+	// marker that does not agree, which is then refused (see
 	// runOwnerProjectRoot).
 	ProjectPath string
 	// AgentName comes from the request or dispatch.
@@ -98,7 +98,7 @@ func refuseHostStateRoot(format string, args ...any) error {
 //     dir as config gives it (not resolved);
 //   - "": the nearest directory above the working directory that has a
 //     .scion entry, which is not followed (a marker found there is
-//     checked like any other, so one that does not resolve is refused
+//     checked like any other, so one that does not agree is refused
 //     rather than skipped as config.FindProjectRoot skips it); with no
 //     .scion entry above, the global project as for "global";
 //   - otherwise the path, or its parent when its base name is .scion.
@@ -245,13 +245,9 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 		if marker.ProjectSlug != slug {
 			return "", refuseHostStateRoot("%s names slug %q, want %q", scionPath, marker.ProjectSlug, slug)
 		}
-		// Defense in depth: with the ID and slug equal this cannot differ
-		// today (both paths are built from them); it keeps the marker's
-		// own resolution tied to ext if either derivation changes.
-		resolved, err := marker.ExternalProjectPath()
-		if err != nil || filepath.Clean(resolved) != filepath.Join(ext, config.DotScion) {
-			return "", refuseHostStateRoot("%s does not resolve to %s", scionPath, ext)
-		}
+		// The marker's own resolution is not used: with its ID and slug
+		// equal to the broker-held ones it names ext (both are built from
+		// them by config.ProjectMarker.DirName).
 		if !isRealDir(ext) || !isRealDir(filepath.Join(ext, config.DotScion)) {
 			return "", refuseHostStateRoot("%s or its .scion is not a real directory", ext)
 		}
@@ -300,10 +296,12 @@ func RecordRunOwner(t RunOwnerTarget, runID string) error {
 
 // recordRunOwnerInAgentDir is RecordRunOwner for a caller that holds the
 // agent's dir (Provision, ProvisionAgent): the record must land in
-// agentDir. A root whose agent dir is not agentDir (or a missing agent
-// dir) returns errRunOwnerDirMismatch and writes nothing, so a divergence
-// between HostStateRootFor and the agent-dir resolution is logged by the
-// caller instead of being lost silently.
+// agentDir. A root whose agent dir is not agentDir returns
+// errRunOwnerDirMismatch, and a missing agent dir returns an error too
+// (errRunOwnerDirMismatch, or one matching fs.ErrNotExist when the two
+// paths are the same); nothing is written then, so a divergence between
+// HostStateRootFor and the agent-dir resolution is logged by the caller
+// instead of being lost silently.
 func recordRunOwnerInAgentDir(t RunOwnerTarget, agentDir, runID string) error {
 	root, err := runOwnerRoot(t, runID)
 	if err != nil {
@@ -365,16 +363,18 @@ const maxLegacyAgentInfoSize = 64 << 10
 // legacyAgentInfoRunID is transitional (ptone/scion#4771): it returns the
 // runId that agent-info.json in the agent home recorded before the record
 // moved to HostStateFile, so agents provisioned or started before the move
-// keep their ptone/scion#2675 protection until their next start or
-// provision records the run in HostStateFile. It can be removed once such
+// keep their ptone/scion#2675 protection. It can be removed once such
 // agents have restarted.
 //
-// It is read only when HostStateFile records no run, and nothing writes
-// it (updateSavedAgentInfo drops it). Callers compare it with the run they
-// act on, so it can only keep files (a different run) or change nothing
-// (the same run): a missing, symlinked, unreadable, oversized or invalid
-// value gives "", as a missing record did before, and so does a home the
-// host cannot read.
+// It is read only when HostStateFile records no run. Nothing writes it:
+// migrateLegacyRunOwner copies it into HostStateFile (from ProvisionAgent
+// without a run, and from updateSavedAgentInfo, which drops it from
+// agent-info.json only once HostStateFile records a run), so a host
+// rewrite of agent-info.json does not end the protection. Callers compare
+// it with the run they act on, so it can only keep files (a different run)
+// or change nothing (the same run): a missing, symlinked, unreadable,
+// oversized or invalid value gives "", as a missing record did before, and
+// so does a home the host cannot read.
 func legacyAgentInfoRunID(projectPath, agentName string) string {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
@@ -405,4 +405,43 @@ func legacyAgentInfoRunID(projectPath, agentName string) string {
 		return ""
 	}
 	return info.RunID
+}
+
+// hostStateOwnRunID returns the run HostStateFile records for t, without
+// the legacy fallback.
+func hostStateOwnRunID(t RunOwnerTarget) (string, error) {
+	root, err := HostStateRootFor(t)
+	if err != nil {
+		return "", err
+	}
+	hs, err := ReadHostState(root, t.AgentName)
+	if err != nil {
+		return "", err
+	}
+	return hs.RunID, nil
+}
+
+// migrateLegacyRunOwner is transitional (ptone/scion#4771): when
+// HostStateFile records no run for t and agent-info.json still carries a
+// valid legacy runId (legacyAgentInfoRunID), it records that run in
+// HostStateFile with record. It reports whether HostStateFile records a
+// run afterwards (recorded is true when it already did) and the legacy
+// value it found ("" when there is none or it is invalid). The value
+// keeps the meaning it had: it can only keep files for another run.
+func migrateLegacyRunOwner(t RunOwnerTarget, record func(runID string) error) (recorded bool, legacy string, err error) {
+	legacy = legacyAgentInfoRunID(t.ProjectPath, t.AgentName)
+	if legacy == "" {
+		return false, "", nil
+	}
+	own, err := hostStateOwnRunID(t)
+	if err != nil {
+		return false, legacy, err
+	}
+	if own != "" {
+		return true, legacy, nil
+	}
+	if err := record(legacy); err != nil {
+		return false, legacy, err
+	}
+	return true, legacy, nil
 }

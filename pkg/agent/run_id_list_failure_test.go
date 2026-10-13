@@ -91,6 +91,38 @@ func TestStart_ListFailureKeepsPreviousRun(t *testing.T) {
 	}
 }
 
+// A legacy agent (run-1 only in agent-info.json) keeps run-1 as its owner
+// through a start whose list fails and whose create collides: the
+// running-phase write copies it into the host state file before dropping
+// it from agent-info.json (ptone/scion#4771).
+func TestStart_ListFailureKeepsLegacyRun(t *testing.T) {
+	projectScionDir, agentDir := startTZFixture(t, "", `""`)
+	info := filepath.Join(agentDir, "home", "agent-info.json")
+	if err := os.WriteFile(info, []byte(`{"name":"tz-agent","phase":"stopped","runId":"run-1"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rt := &runtime.MockRuntime{
+		ListFunc: func(context.Context, map[string]string) ([]api.AgentInfo, error) {
+			return nil, errors.New("runtime unavailable")
+		},
+		RunFunc: func(context.Context, runtime.RunConfig) (string, error) { return "", errNameInUse },
+	}
+	if _, err := NewManager(rt).Start(context.Background(), api.StartOptions{
+		Name: "tz-agent", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, RunID: "run-2",
+	}); err == nil {
+		t.Fatal("Start succeeded although the create collided on the name")
+	}
+	if got := hostStateRun(t, projectScionDir, "tz-agent"); got != "run-1" {
+		t.Errorf("host state run = %q, want the legacy run-1 copied", got)
+	}
+	if !filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-1") {
+		t.Error("a delete of run-1 would leave the agent's files behind")
+	}
+	if filesRemovedByDeleteOf("tz-agent", projectScionDir, "run-2") {
+		t.Error("a delete of run-2 would remove run-1's files")
+	}
+}
+
 // A fresh provision reached after the list failed records no run while
 // the create collides, so a delete of whichever run the hub settles on
 // removes the files.

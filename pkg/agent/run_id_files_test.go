@@ -88,6 +88,46 @@ func TestProvisionAgent_RecordsRunID(t *testing.T) {
 	}
 }
 
+// A provision without a run (reincarnate, provision-only) keeps the owner
+// of a legacy agent, whose run is still only in agent-info.json: it is
+// copied into the host state file before the agent-info.json rewrite drops
+// it, so a delete for another run keeps the files (ptone/scion#4771).
+func TestProvisionAgent_CopiesLegacyRunOwner(t *testing.T) {
+	projectScionDir := provisionRunIDFixture(t)
+	ctx := api.ContextWithRunID(context.Background(), "run-new")
+	if _, _, _, err := ProvisionAgent(ctx, "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent: %v", err)
+	}
+	// Make it a legacy agent: no host state record, runId in agent-info.json.
+	root, err := HostStateRootFor(RunOwnerTarget{ProjectPath: projectScionDir, AgentName: "dev"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, config.DotScion, "agents", "dev", HostStateFile)); err != nil {
+		t.Fatal(err)
+	}
+	info := filepath.Join(config.GetAgentHomePath(projectScionDir, "dev"), "agent-info.json")
+	if err := os.WriteFile(info, []byte(`{"name":"dev","phase":"stopped","runId":"run-legacy"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, _, err := ProvisionAgent(context.Background(), "dev", "default", "", "", projectScionDir, "", "", "", ""); err != nil {
+		t.Fatalf("ProvisionAgent without a run: %v", err)
+	}
+	if got := hostStateRun(t, projectScionDir, "dev"); got != "run-legacy" {
+		t.Fatalf("host state run = %q, want the legacy run-legacy carried over", got)
+	}
+	if got := agentInfoRunID(t, info); got != "" {
+		t.Errorf("agent-info.json runId = %q, want none", got)
+	}
+	if filesRemovedByDeleteOf("dev", projectScionDir, "run-other") {
+		t.Error("a delete for another run would remove the legacy owner's files")
+	}
+	if !filesRemovedByDeleteOf("dev", projectScionDir, "run-legacy") {
+		t.Error("a delete for the legacy owner's run would leave its files")
+	}
+}
+
 // Start records its run (the hub's, or the one it mints) as the owner of an
 // already provisioned agent's files before the container is created.
 func TestStart_RecordsRunIDBeforeContainer(t *testing.T) {
