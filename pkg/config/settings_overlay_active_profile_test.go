@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -275,6 +276,76 @@ func TestSettingsOverlay_ActiveProfile_ZeroOrSeveralStoredProfilesRefused(t *tes
 			}
 			if strings.Contains(logs.String(), "only stored profile") {
 				t.Errorf("fallback logged with %s stored profiles: %s", name, logs.String())
+			}
+		})
+	}
+}
+
+// Flat co-located instance: after the hub settings overlay is applied, the
+// flat instance view (ForFlatInstance) sees none of the overlay's profiles,
+// active_profile resolution or stored-profile errors, and its runtime_target
+// values win over the overlaid runtimes'; the overlay's image_registry and
+// harness_configs stay on their lower, non-profile rungs. Both a single
+// stored profile (which would replace active_profile on a legacy broker) and
+// several (which would make the default profile an error) are covered.
+func TestSettingsOverlay_FlatInstanceViewIsolatedFromOverlay(t *testing.T) {
+	for name, profiles := range map[string]map[string]V1ProfileConfig{
+		"single stored profile": {"stored": {Runtime: "cluster", SharedDirStorageClass: "prof-rwx", SharedDirSize: "30Gi"}},
+		"several stored profiles": {
+			"stored":  {Runtime: "cluster", SharedDirStorageClass: "prof-rwx", SharedDirSize: "30Gi"},
+			"stored2": {Runtime: "cluster"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("SCION_IMAGE_REGISTRY", "")
+			vs := legacySharedDirSettings() // file active_profile "batch"
+			o := NewSettingsOverlay()
+			o.Update(
+				map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "stored-ns", SharedDirStorageClass: "rt-stored", SharedDirSize: "50Gi"}},
+				profiles,
+				map[string]HarnessConfigEntry{"claude": {}},
+				"registry.example/stored")
+			o.Apply(vs)
+
+			policy := k8sPolicy("k8s-nfs-1", "inst-rwx", "40Gi")
+			wantTarget := policy.Target
+			view := vs.ForFlatInstance(policy)
+
+			// (a) No profile tier reaches the flat view.
+			if view.ActiveProfile != "" || view.Profiles != nil {
+				t.Fatalf("flat view has a profile tier: active=%q profiles=%v", view.ActiveProfile, view.Profiles)
+			}
+			_, _, err := view.ResolveRuntime("")
+			var ape *ActiveProfileError
+			if errors.As(err, &ape) {
+				t.Fatalf("flat view ResolveRuntime(\"\") returned *ActiveProfileError: %v", err)
+			}
+			if err == nil || err.Error() != `profile "" not found` {
+				t.Fatalf("flat view ResolveRuntime(\"\") error = %v, want the plain not-found error", err)
+			}
+			var spe *StoredProfileNotFoundError
+			if _, _, err := view.ResolveRuntime("stored"); errors.As(err, &spe) || err == nil {
+				t.Fatalf("flat view ResolveRuntime(stored) = %v, want the plain not-found error", err)
+			}
+
+			// (b) runtime_target comes from the instance, not the overlaid
+			// runtimes or profiles.
+			for _, p := range []string{"", "stored", "batch"} {
+				class, size, key := view.ResolveSharedDirDefaultsWithSource(p)
+				if class != "inst-rwx" || size != "40Gi" || key != "server.broker.instances[k8s-nfs-1].runtime_target.shared_dir_size" {
+					t.Fatalf("profile %q: got (%q, %q, %q), want the instance values", p, class, size, key)
+				}
+			}
+			if view.flat != policy || !reflect.DeepEqual(view.flat.Target, wantTarget) {
+				t.Fatalf("flat policy changed: %+v", view.flat.Target)
+			}
+
+			// Non-profile overlay values stay shared, on their own rungs.
+			if view.ImageRegistry != "registry.example/stored" {
+				t.Errorf("ImageRegistry = %q, want the overlay's top-level value", view.ImageRegistry)
+			}
+			if _, ok := view.HarnessConfigs["claude"]; !ok {
+				t.Errorf("HarnessConfigs = %v, want the overlay's entries", view.HarnessConfigs)
 			}
 		})
 	}

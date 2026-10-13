@@ -82,6 +82,10 @@ func (vs *VersionedSettings) ForFlatInstance(p *FlatInstancePolicy) *VersionedSe
 	view := *vs
 	view.ActiveProfile = ""
 	view.Profiles = nil
+	// The hub settings overlay's record of the stored profiles and of an
+	// unresolvable active_profile belongs to the profile tier too.
+	view.activeProfileErr = nil
+	view.storedProfileNames = nil
 	view.flat = p
 	return &view
 }
