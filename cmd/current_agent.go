@@ -62,15 +62,15 @@ func currentAgentTarget(targets []string, targetProjectID string) string {
 // refuseCurrentAgentTarget returns an error if one of targets is the
 // current agent and allowSelf (the command's --self flag) is false
 // (ptone/scion#4843). Removing the current agent ends its own session, so
-// it has to be asked for explicitly. command is the subcommand as typed
-// after "scion" (for example "delete" or "delete --cleanup-only"); it is
-// used in the hint.
-func refuseCurrentAgentTarget(targets []string, targetProjectID string, allowSelf bool, command string) error {
+// it has to be asked for explicitly. The error does not print a command to
+// run: a rebuilt command could drop other targets or flags (such as
+// --project) and so remove something other than what was asked for.
+func refuseCurrentAgentTarget(targets []string, targetProjectID string, allowSelf bool) error {
 	if allowSelf {
 		return nil
 	}
 	if name := currentAgentTarget(targets, targetProjectID); name != "" {
-		return fmt.Errorf("agent '%s' is the current agent (this command is running inside it); nothing was changed.\n--self is required to remove the current agent, which ends this session: scion %s --self %s", name, command, name)
+		return fmt.Errorf("agent %q is the current agent; --self is required to remove it (nothing was changed; re-run the same command with --self added)", name)
 	}
 	return nil
 }

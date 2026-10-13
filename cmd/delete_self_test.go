@@ -31,11 +31,7 @@ import (
 func setupSelfDeleteViaHub(t *testing.T, name, id, ownProjectID string) (string, map[string]url.Values) {
 	t.Helper()
 	orig := saveDeleteTestState()
-	origCleanup := deleteCleanupOnly
-	t.Cleanup(func() {
-		orig.restore()
-		deleteCleanupOnly = origCleanup
-	})
+	t.Cleanup(orig.restore)
 
 	setCurrentAgentEnv(t, name, name, id, ownProjectID)
 	tmpHome := t.TempDir()
@@ -151,7 +147,56 @@ func TestDeleteCmd_CleanupOnlyCurrentAgentRefused(t *testing.T) {
 
 	_, err := runDelete(t, selfAgentName)
 	require.Error(t, err, "--cleanup-only of the current agent without --self must be refused")
-	assert.Contains(t, err.Error(), "scion delete --cleanup-only --self self-agent")
+	assert.Contains(t, err.Error(), "--self is required")
 	assert.DirExists(t, agentDir, "the current agent's files are kept")
 	assert.Empty(t, queries)
+}
+
+// Without a Hub the target project is unknown, so a name match alone
+// refuses (fail closed): none of the named agents is deleted locally.
+func TestDeleteCmd_LocalCurrentAgentWithoutSelfRefused(t *testing.T) {
+	projectDir := setupSelfDeleteLocal(t)
+	agentDir := createAgentDir(t, projectDir, selfAgentName)
+	otherDir := createAgentDir(t, projectDir, "other-agent")
+
+	_, err := runDelete(t, "other-agent", selfAgentName)
+	require.Error(t, err, "a local delete of the current agent without --self must be refused")
+	assert.Contains(t, err.Error(), "--self is required")
+	assert.DirExists(t, agentDir)
+	assert.DirExists(t, otherDir, "a refusal leaves the other named agents in place too")
+}
+
+// Without a Hub, --self deletes the current agent as usual.
+func TestDeleteCmd_LocalCurrentAgentWithSelfDeletes(t *testing.T) {
+	projectDir := setupSelfDeleteLocal(t)
+	agentDir := createAgentDir(t, projectDir, selfAgentName)
+	deleteSelf = true
+
+	_, err := runDelete(t, selfAgentName)
+	require.NoError(t, err, "--self must allow a local delete of the current agent")
+	assert.NoDirExists(t, agentDir)
+}
+
+// setupSelfDeleteLocal prepares a local (no Hub) run of the delete command
+// inside agent selfAgentName of project selfProjectID, and returns the
+// project directory.
+func setupSelfDeleteLocal(t *testing.T) string {
+	t.Helper()
+	orig := saveDeleteTestState()
+	t.Cleanup(orig.restore)
+
+	setCurrentAgentEnv(t, selfAgentName, selfAgentName, selfAgentID, selfProjectID)
+	tmpHome := t.TempDir()
+	t.Setenv("HOME", tmpHome)
+	noHub = true
+	preserveBranch = true
+	deleteStopped = false
+	deleteForce = false
+	deleteCleanupOnly = false
+	deleteSelf = false
+
+	projectDir := filepath.Join(tmpHome, "project", ".scion")
+	require.NoError(t, os.MkdirAll(filepath.Join(projectDir, "agents"), 0o755))
+	projectPath = projectDir
+	return projectDir
 }

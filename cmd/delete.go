@@ -67,9 +67,10 @@ refuses while the Hub still has the agent (run 'scion delete <agent>'
 instead). When the Hub cannot be checked (unreachable, or no Hub in use) it
 refuses unless --force is given.
 
-Inside an agent, the agent cannot delete itself by accident: if a named
-agent is the current agent, the command refuses and deletes nothing unless
---self is given. Deleting other agents is unchanged.`,
+Inside an agent, if a named agent is the current agent (the one the
+command runs in), the command refuses and deletes none of the named agents
+unless --self is given. Other agents are deleted as usual. Outside an agent
+container --self has no effect.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
@@ -102,7 +103,7 @@ agent is the current agent, the command refuses and deletes nothing unless
 
 		if deleteCleanupOnly {
 			hubCtx, hubErr := CheckHubAvailabilityForAgents(projectPath, args, true)
-			if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf, "delete --cleanup-only"); err != nil {
+			if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
 				return err
 			}
 			return deleteAgentsCleanupOnly(hubCtx, hubErr, args)
@@ -119,11 +120,10 @@ agent is the current agent, the command refuses and deletes nothing unless
 		}
 
 		// Checked for every named agent before any delete, so a refusal
-		// leaves all of them in place.
-		if !deleteStopped {
-			if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf, "delete"); err != nil {
-				return err
-			}
+		// leaves all of them in place. With --stopped there are no named
+		// agents, and the current agent is running, so it is never listed.
+		if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
+			return err
 		}
 
 		// --force only changes Hub behaviour. Local delete already removes the

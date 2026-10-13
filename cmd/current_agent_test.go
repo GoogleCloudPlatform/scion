@@ -109,14 +109,15 @@ func TestCurrentAgentTarget(t *testing.T) {
 func TestRefuseCurrentAgentTarget(t *testing.T) {
 	setCurrentAgentEnv(t, selfAgentName, selfAgentName, selfAgentID, selfProjectID)
 
-	err := refuseCurrentAgentTarget([]string{selfAgentName}, selfProjectID, false, "delete")
+	err := refuseCurrentAgentTarget([]string{"other-agent", selfAgentName}, selfProjectID, false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "agent 'self-agent' is the current agent")
+	assert.Contains(t, err.Error(), `agent "self-agent" is the current agent`)
 	assert.Contains(t, err.Error(), "--self is required")
-	assert.Contains(t, err.Error(), "scion delete --self self-agent")
+	assert.Contains(t, err.Error(), "re-run the same command with --self added")
+	assert.NotContains(t, err.Error(), "scion delete", "the error must not print a rebuilt command")
 
-	assert.NoError(t, refuseCurrentAgentTarget([]string{selfAgentName}, selfProjectID, true, "delete"),
+	assert.NoError(t, refuseCurrentAgentTarget([]string{selfAgentName}, selfProjectID, true),
 		"--self allows the current agent")
-	assert.NoError(t, refuseCurrentAgentTarget([]string{"other-agent"}, selfProjectID, false, "delete"),
+	assert.NoError(t, refuseCurrentAgentTarget([]string{"other-agent"}, selfProjectID, false),
 		"other agents are not refused")
 }
