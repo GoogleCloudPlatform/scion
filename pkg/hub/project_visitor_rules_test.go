@@ -64,7 +64,7 @@ func (f *visitorGrantFixture) listRules(t *testing.T) []ProjectVisitorRuleView {
 	return resp.Rules
 }
 
-// visitorThrough runs token through the auth middleware and returns the
+// visitorThrough runs an issuer token through the auth middleware and returns the
 // visitor identity, or nil when the request is not a visitor.
 func (f *visitorGrantFixture) visitorThrough(t *testing.T, token string) *VisitorIdentity {
 	t.Helper()
@@ -357,7 +357,7 @@ func TestFederatedVisitor_RuleMaterialization(t *testing.T) {
 	assert.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1)
 	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), 2)
 
-	// A token with no email_verified claim matches too.
+	// An issuer token with no email_verified claim matches too.
 	assert.NotNil(t, f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-cy", "cy@any.example", nil)))
 
 	for name, tok := range map[string]string{

@@ -41,7 +41,7 @@
   removed visitor IDs), all in the transaction of the change.
 - **Request path.** `linkPendingVisitor` (first contact) now also creates
   an account when no pending one exists but an active rule matches the
-  token's verified email domain, links it, and applies the matching rules
+  issuer token's verified email domain, links it, and applies the matching rules
   (`bindVisitorRules`), all in one transaction. For an account linked
   earlier, `applyVisitorRules` adds the bindings of rules added since; it
   writes nothing when nothing is missing, and a failure there is logged
@@ -72,7 +72,7 @@
 - Natural expiry of a rule does not delete rows: the bindings carry the
   rule's window, so they stop authorizing at the same instant. Removing
   the rule deletes them. A sweeper for expired rules is a follow-up.
-- Rule matching uses the email of the current verified token; the
+- Rule matching uses the email of the current verified issuer token; the
   account's stored email (fixed at first contact) is not re-read for it.
 - One project-visitor binding per account and project (the existing
   unique index): an email grant and a rule on the same project never

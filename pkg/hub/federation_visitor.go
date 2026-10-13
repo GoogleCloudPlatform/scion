@@ -70,7 +70,7 @@ var errFederatedVisitorIssuerNotAccepted = errors.New("hub does not accept visit
 // other store error is returned; the middleware answers it with 503.
 //
 // For an active account linked before this request, the visitor rules
-// matching the token's verified email are applied (applyVisitorRules), so
+// matching the issuer token's verified email are applied (applyVisitorRules), so
 // a rule added after the account's first contact binds it on its next
 // request.
 func (s *Server) resolveFederatedVisitor(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error) {
@@ -114,7 +114,7 @@ func (s *Server) resolveFederatedVisitor(ctx context.Context, identity Federated
 }
 
 // visitorTokenEmail returns the normalized issuer and email of a verified
-// federated user token whose email a visitor grant or rule may match, and
+// issuer token of a federated user whose email a visitor grant or rule may match, and
 // true, when all of these hold:
 //   - the hub accepts visitor grants for the issuer (visitorGrantIssuer:
 //     trusted, issuer_type user or hub, allow_visitor_grants on);
