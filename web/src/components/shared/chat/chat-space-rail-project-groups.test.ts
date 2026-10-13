@@ -97,7 +97,12 @@ function hubThread(threadId: string): HubThread {
   return { conversationId: `conv-${threadId}`, threadId, name: t.name };
 }
 
-function hubGroup(id: string, name: string, threadIds: string[], kind: 'user' | 'agent' = 'user') {
+function hubGroup(
+  id: string,
+  name: string,
+  threadIds: string[],
+  kind: 'user' | 'agent' = 'user'
+): HubGroup {
   return {
     id,
     projectId: P,
@@ -105,7 +110,7 @@ function hubGroup(id: string, name: string, threadIds: string[], kind: 'user' | 
     createdBy: kind === 'user' ? 'user-b' : 'agent-1',
     createdByKind: kind,
     threads: threadIds.map(hubThread),
-  } satisfies HubGroup;
+  };
 }
 
 /** The wire shape of a group (what the API and the SSE event carry). */
@@ -264,7 +269,10 @@ function topLevel(el: any): string[] {
   return el.currentTopLevelOrder(P).map((id: string) => names.get(id) ?? id);
 }
 
-function personalPrefs(threadGroups: unknown, threadOrder?: Record<string, string[]>) {
+function personalPrefs(
+  threadGroups: unknown,
+  threadOrder?: Record<string, string[]>
+): Record<string, string> {
   return {
     spaceSortMode: 'alpha',
     threadSortMode: 'alpha',

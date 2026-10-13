@@ -365,6 +365,15 @@ function parseRailPrefs(payload: unknown): RailPrefs {
   };
 }
 
+/** The group in a successful thread-groups API answer, or null if the body is not one. */
+async function readGroupResponse(res: Response): Promise<ProjectThreadGroup | null> {
+  try {
+    return parseProjectThreadGroup(await res.json());
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The stored personal `threadGroups` document exactly as the server sent
  * it, or undefined when it did not arrive as a string. With project thread
@@ -2999,12 +3008,7 @@ export class ScionChatSpaceRail extends LitElement {
 
   /** Read a group from a successful API answer into the space, or reload the space's groups. */
   private async applyGroupResponse(projectId: string, res: Response): Promise<void> {
-    let pg: ProjectThreadGroup | null = null;
-    try {
-      pg = parseProjectThreadGroup(await res.json());
-    } catch {
-      pg = null;
-    }
+    const pg = await readGroupResponse(res);
     if (pg) this.upsertProjectGroup(projectId, pg);
     else void this.loadProjectGroups(projectId);
   }
@@ -3095,12 +3099,7 @@ export class ScionChatSpaceRail extends LitElement {
       }
     );
     if (!res) return;
-    let pg: ProjectThreadGroup | null = null;
-    try {
-      pg = parseProjectThreadGroup(await res.json());
-    } catch {
-      pg = null;
-    }
+    const pg = await readGroupResponse(res);
     if (!pg) {
       void this.loadProjectGroups(projectId);
       return;
