@@ -5,6 +5,10 @@ Copyright 2025 The Scion Authors.
 package dialects
 
 import (
+	"bufio"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
@@ -251,4 +255,50 @@ func TestClaudeDialect_ParseTokens(t *testing.T) {
 		assert.Equal(t, int64(400), event.Data.OutputTokens)
 		assert.Equal(t, int64(600), event.Data.CachedTokens)
 	})
+}
+
+// TestClaudeDialect_CapturedSubagentPayloads parses the captured, scrubbed
+// Claude Code sub-agent hook payloads (testdata/claude) and checks the event
+// names and that only the sub-agent's events carry agent_id.
+func TestClaudeDialect_CapturedSubagentPayloads(t *testing.T) {
+	f, err := os.Open(filepath.Join("testdata", "claude", "hook-payloads-2.1.296.jsonl"))
+	require.NoError(t, err)
+	defer func() { _ = f.Close() }()
+
+	want := []struct {
+		name    string
+		tool    string
+		agentID string
+	}{
+		{hooks.EventSessionStart, "", ""},
+		{hooks.EventToolStart, "Agent", ""},
+		{hooks.EventToolStart, "Bash", "a0000000000000001"},
+		{hooks.EventToolEnd, "Bash", "a0000000000000001"},
+		{hooks.EventSubagentEnd, "", "a0000000000000001"},
+		{hooks.EventToolEnd, "Agent", ""},
+		{hooks.EventAgentEnd, "", ""},
+	}
+
+	d := NewClaudeDialect()
+	scanner := bufio.NewScanner(f)
+	i := 0
+	for scanner.Scan() {
+		require.Less(t, i, len(want), "more records than expected")
+		var payload map[string]interface{}
+		require.NoError(t, json.Unmarshal(scanner.Bytes(), &payload))
+		event, err := d.Parse(payload)
+		require.NoError(t, err)
+		assert.Equal(t, want[i].name, event.Name, "record %d", i)
+		assert.Equal(t, want[i].tool, event.Data.ToolName, "record %d", i)
+		assert.Equal(t, "11111111-1111-1111-1111-111111111111", event.Data.SessionID, "record %d", i)
+		agentID, hasAgentID := event.Data.Raw["agent_id"]
+		if want[i].agentID == "" {
+			assert.False(t, hasAgentID, "record %d", i)
+		} else {
+			assert.Equal(t, want[i].agentID, agentID, "record %d", i)
+		}
+		i++
+	}
+	require.NoError(t, scanner.Err())
+	assert.Equal(t, len(want), i)
 }

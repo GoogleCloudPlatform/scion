@@ -163,6 +163,11 @@ Examples:
   # Register with auto-provide enabled (requires broker.auto_provide)
   scion runtime-broker register --auto-provide
 
+  # Register the configured flat Runtime Broker instance "local-docker"
+  # (server.broker.instances); its credentials are saved under
+  # ~/.scion/runtime-brokers/local-docker/hub-credentials/
+  scion runtime-broker register --instance local-docker
+
   # Register under a custom broker name instead of the hostname, for
   # example when running several brokers on one host. The name is saved
   # in the global settings and used by later commands and by the broker.
@@ -418,6 +423,7 @@ func init() {
 	brokerRegisterCmd.Flags().StringVar(&brokerRegisterName, "broker-name", "", "Name this broker registers under on the hub, saved in the global settings (server.broker.broker_nickname) for later commands and the broker server; when not set, the saved name, else the hostname")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportMode, "transport-mode", "", "Transport auth mode: 'iap' or 'cloudrun_invoker' (overrides SCION_TRANSPORT_MODE)")
 	brokerRegisterCmd.Flags().StringVar(&brokerTransportAudience, "transport-audience", "", "Transport auth OIDC audience (overrides SCION_TRANSPORT_AUDIENCE)")
+	brokerRegisterCmd.Flags().StringVar(&brokerRegisterInstance, "instance", "", "Register the configured flat Runtime Broker instance with this key (server.broker.instances in the global settings.yaml)")
 
 	// Deregister flags
 	brokerDeregisterCmd.Flags().BoolVar(&brokerDeregisterBrokerOnly, "broker-only", false, "Only remove broker record, not project providers")
@@ -448,6 +454,13 @@ func init() {
 }
 
 func runBrokerRegister(cmd *cobra.Command, args []string) error {
+	if brokerRegisterInstance != "" {
+		// A flat instance registers under its configured name.
+		if f := cmd.Flags().Lookup("broker-name"); f != nil && f.Changed {
+			return fmt.Errorf("--broker-name cannot be used with --instance: a flat Runtime Broker instance registers under its configured name")
+		}
+		return runBrokerRegisterInstance(cmd, brokerRegisterInstance)
+	}
 	brokerName, brokerNameSet, err := resolveRegisterBrokerName(cmd)
 	if err != nil {
 		return err
@@ -639,12 +652,14 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// (ptone/scion#3534).
 	if shouldOfferProjectProvider(projectID, settings.IsHubEnabled(), isGlobal) {
 		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
+			gitRemote := util.GetGitRemote()
 			req := &hubclient.RegisterProjectRequest{
 				ID:        projectID,
 				Name:      projectName,
 				Path:      resolvedPath,
 				BrokerID:  brokerID,
-				GitRemote: util.NormalizeGitRemote(util.GetGitRemote()),
+				GitRemote: util.NormalizeGitRemote(gitRemote),
+				Labels:    hubsync.LinkedProjectLabels(endpoint, gitRemote),
 			}
 
 			resp, err := client.Projects().Register(ctx, req)
@@ -2307,7 +2322,10 @@ func getLocalBrokerID() string {
 // "reprovisionEmptyPerAgent" (in-place empty-per-agent reprovision,
 // miller79/scion#167); the hub checks runtime suitability separately.
 func brokerRegistrationCapabilities() []string {
-	return []string{"sync", "attach", "reprovision", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
+	// asyncLaunch matches the broker's heartbeat (runtimebroker.StaticCapabilities),
+	// so the Hub knows it from the join on, before the first heartbeat
+	// (ptone/scion#2918).
+	return []string{"sync", "attach", "reprovision", "asyncLaunch", "emptyPerAgentWorkspace", "agentMove", "reprovisionEmptyPerAgent"}
 }
 
 // buildBrokerProfiles builds BrokerProfile objects from settings.Profiles.

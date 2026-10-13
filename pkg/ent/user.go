@@ -58,6 +58,12 @@ type User struct {
 	IssuanceID *string `json:"issuance_id,omitempty"`
 	// ID of the issuer's user access token for an admin-kind test identity; null for a session issuer
 	IssuerCredentialID *string `json:"issuer_credential_id,omitempty"`
+	// Lower-cased email of a federated user, as asserted by home_issuer
+	FederatedEmail *string `json:"federated_email,omitempty"`
+	// Canonical issuer URL of a federated user
+	HomeIssuer *string `json:"home_issuer,omitempty"`
+	// ID of the issuer delegation a test_fixture user was issued through; empty for session and PAT issuance
+	IssuerDelegationID *string `json:"issuer_delegation_id,omitempty"`
 	// Edges holds the relations/edges for other nodes in the graph.
 	// The values are being populated by the UserQuery when eager-loading is set.
 	Edges        UserEdges `json:"edges"`
@@ -150,7 +156,7 @@ func (*User) scanValues(columns []string) ([]any, error) {
 			values[i] = new([]byte)
 		case user.FieldSessionGeneration:
 			values[i] = new(sql.NullInt64)
-		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose, user.FieldIssuanceID, user.FieldIssuerCredentialID:
+		case user.FieldEmail, user.FieldDisplayName, user.FieldAvatarURL, user.FieldRole, user.FieldStatus, user.FieldInvitedBy, user.FieldInviteNote, user.FieldKind, user.FieldIssuedBy, user.FieldPurpose, user.FieldIssuanceID, user.FieldIssuerCredentialID, user.FieldFederatedEmail, user.FieldHomeIssuer, user.FieldIssuerDelegationID:
 			values[i] = new(sql.NullString)
 		case user.FieldCreated, user.FieldLastLogin, user.FieldLastSeen, user.FieldExpiresAt:
 			values[i] = new(sql.NullTime)
@@ -296,6 +302,27 @@ func (_m *User) assignValues(columns []string, values []any) error {
 				_m.IssuerCredentialID = new(string)
 				*_m.IssuerCredentialID = value.String
 			}
+		case user.FieldFederatedEmail:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field federated_email", values[i])
+			} else if value.Valid {
+				_m.FederatedEmail = new(string)
+				*_m.FederatedEmail = value.String
+			}
+		case user.FieldHomeIssuer:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field home_issuer", values[i])
+			} else if value.Valid {
+				_m.HomeIssuer = new(string)
+				*_m.HomeIssuer = value.String
+			}
+		case user.FieldIssuerDelegationID:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field issuer_delegation_id", values[i])
+			} else if value.Valid {
+				_m.IssuerDelegationID = new(string)
+				*_m.IssuerDelegationID = value.String
+			}
 		default:
 			_m.selectValues.Set(columns[i], values[i])
 		}
@@ -431,6 +458,21 @@ func (_m *User) String() string {
 	builder.WriteString(", ")
 	if v := _m.IssuerCredentialID; v != nil {
 		builder.WriteString("issuer_credential_id=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.FederatedEmail; v != nil {
+		builder.WriteString("federated_email=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.HomeIssuer; v != nil {
+		builder.WriteString("home_issuer=")
+		builder.WriteString(*v)
+	}
+	builder.WriteString(", ")
+	if v := _m.IssuerDelegationID; v != nil {
+		builder.WriteString("issuer_delegation_id=")
 		builder.WriteString(*v)
 	}
 	builder.WriteByte(')')

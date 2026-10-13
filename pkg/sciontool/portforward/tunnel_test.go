@@ -120,7 +120,7 @@ func TestRunOnce_DialCarriesTransportHeader(t *testing.T) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			_ = NewManager(client).runOnce(ctx)
+			_, _ = NewManager(client).runOnce(ctx)
 
 			select {
 			case h := <-got:
@@ -151,7 +151,7 @@ func TestRunOnce_NoTransportSourceStillDials(t *testing.T) {
 	client := scionhub.NewClientWithConfig(srv.URL, "agent-credential", "agent-1")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = NewManager(client).runOnce(ctx)
+	_, _ = NewManager(client).runOnce(ctx)
 
 	h := <-got
 	if v := h.Get("Authorization"); v != "" {

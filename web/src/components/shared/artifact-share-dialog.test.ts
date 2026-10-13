@@ -317,6 +317,31 @@ describe('share dialog', () => {
     );
   });
 
+  it('shows a review grant with its label only and offers review in no menu', async () => {
+    const REVIEWER: ArtifactGrant = {
+      id: 'g-review',
+      subjectKind: 'principal',
+      subjectRef: 'user:user-alex',
+      permission: 'review',
+      createdAt: '2026-10-03T12:00:00Z',
+    };
+    mockServer({ grants: [HOME, PRIYA, REVIEWER] });
+    const el = await mount();
+    const grants = $$(el, '.grant');
+    expect(grants).toHaveLength(3);
+    expect(grants[2].textContent).toContain('Can review');
+    expect(grants[2].querySelector('sl-select')).toBeNull();
+    expect(button(el, 'Remove', grants[2])).not.toBeNull();
+    const menus = $$(el, 'sl-select[aria-label="Permission"]');
+    expect(menus).toHaveLength(2); // the Add row and Priya's grant
+    for (const select of menus) {
+      const values = Array.from(select.querySelectorAll('sl-option')).map((o) =>
+        o.getAttribute('value')
+      );
+      expect(values).toEqual(['read', 'write', 'admin']);
+    }
+  });
+
   it('shows the empty state with no links', async () => {
     mockServer();
     const el = await mount();
@@ -563,9 +588,10 @@ describe('share dialog', () => {
       expect($(el, 'sl-dialog')!.getAttribute('label')).toBe('Grant review access');
       const text = el.shadowRoot!.textContent!.replace(/\s+/g, ' ');
       expect(text).toContain(
-        'Give a person review access to “Draft plan”. They will be able to read it and publish new versions, including reviews.'
+        'Give a person who can already read “Draft plan” review access. They will be able to publish reviews of it, and nothing else.'
       );
-      expect(text).toContain('Permission: Can edit');
+      expect(text).toContain('Permission: Can review');
+      expect(text).not.toContain('read it');
       expect($(el, '#links-heading')).toBeNull();
       expect($(el, '#people-heading')).toBeNull();
       expect($(el, '#retention-heading')).toBeNull();
@@ -577,7 +603,7 @@ describe('share dialog', () => {
       expect(() => button(el, 'Create link')).toThrow();
     });
 
-    it('grants a user write access and confirms it, offering no projects', async () => {
+    it('grants a user review access and confirms it, offering no projects', async () => {
       const s = mockServer({ cross: true });
       const el = await mount(agentOwned(), 'review');
       await searchFor(el, 're');
@@ -593,10 +619,10 @@ describe('share dialog', () => {
       await settle(el);
       const posts = s.calls.filter((c) => c.method === 'POST' && c.url === `${BASE}/grants`);
       expect(posts.map((c) => c.body)).toEqual([
-        { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'write' },
+        { subjectKind: 'principal', subjectRef: 'user:user-alex', permission: 'review' },
       ]);
       expect($$(el, '.granted').map((g) => g.textContent!.replace(/\s+/g, ' ').trim())).toEqual([
-        'Alex Reviewer can now edit and review.',
+        'Alex Reviewer can now review.',
       ]);
       expect(($(el, '.picker sl-input') as HTMLElement & { value: string }).value).toBe('');
       expect(button(el, 'Add').hasAttribute('disabled')).toBe(true);

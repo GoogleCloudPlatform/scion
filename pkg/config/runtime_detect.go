@@ -31,11 +31,18 @@ type runtimeCandidate struct {
 }
 
 // localRuntimeCandidates lists container runtimes in preference order.
+// On macOS the order is podman, docker, then Apple container; on other
+// platforms the darwin-only container entry is skipped. An explicitly
+// configured runtime always takes precedence over auto-detection.
 var localRuntimeCandidates = []runtimeCandidate{
-	{Name: "container", Binary: "container", DarwinOnly: true, CheckArgs: []string{"--version"}},
 	{Name: "podman", Binary: "podman", CheckArgs: []string{"--version"}},
 	{Name: "docker", Binary: "docker", CheckArgs: []string{"--version"}},
+	{Name: "container", Binary: "container", DarwinOnly: true, CheckArgs: []string{"--version"}},
 }
+
+// hostGOOS reports the operating system used for runtime detection.
+// Override in tests to exercise platform-specific detection order.
+var hostGOOS = func() string { return runtime.GOOS }
 
 // lookPathFunc is the function used to look up binaries on PATH.
 // Override in tests to simulate different environments.
@@ -52,11 +59,11 @@ var runCheckFunc = func(binary string, args []string) error {
 // DetectLocalRuntime probes the system for an available container runtime.
 // It checks OS compatibility and verifies each candidate is both on PATH
 // and can execute successfully. Candidates are checked in preference order:
-// container (macOS only), podman, docker.
+// podman, docker, container (macOS only).
 // Returns the runtime name or an error if no supported runtime is found.
 func DetectLocalRuntime() (string, error) {
 	for _, c := range localRuntimeCandidates {
-		if c.DarwinOnly && runtime.GOOS != "darwin" {
+		if c.DarwinOnly && hostGOOS() != "darwin" {
 			continue
 		}
 		if _, err := lookPathFunc(c.Binary); err != nil {
@@ -68,8 +75,8 @@ func DetectLocalRuntime() (string, error) {
 		return c.Name, nil
 	}
 
-	if runtime.GOOS == "darwin" {
-		return "", fmt.Errorf("no supported container runtime found: install podman, container (Apple Virtualization), or docker")
+	if hostGOOS() == "darwin" {
+		return "", fmt.Errorf("no supported container runtime found: install podman, docker, or container (Apple Virtualization)")
 	}
 	return "", fmt.Errorf("no supported container runtime found: install podman or docker")
 }
@@ -80,7 +87,7 @@ func DetectLocalRuntime() (string, error) {
 func DetectAllLocalRuntimes() []string {
 	var available []string
 	for _, c := range localRuntimeCandidates {
-		if c.DarwinOnly && runtime.GOOS != "darwin" {
+		if c.DarwinOnly && hostGOOS() != "darwin" {
 			continue
 		}
 		if _, err := lookPathFunc(c.Binary); err != nil {

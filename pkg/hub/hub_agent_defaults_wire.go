@@ -71,14 +71,29 @@ func remoteHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts 
 }
 
 // startHubAgentDefaults is the hub-defaults wire value for a start or restart
-// dispatch: the auto-expose default and the enabled dispatch experiments
-// only, or nil when there are neither. The limit/resource fields stay
-// create/provision-only, so a start never changes which tier supplies them.
-func startHubAgentDefaults(autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
-	if autoExposePorts == nil && len(experiments) == 0 {
-		return nil
+// dispatch, built by remoteHubAgentDefaults like the create wire so the two
+// cannot drift. Which hub defaults ride each wire is listed here:
+//
+//   - create: the limits (max turns, model calls, duration), resources,
+//     the auto-expose default and the dispatch experiments.
+//   - start/restart: resources, the auto-expose default and the dispatch
+//     experiments. The broker no longer persists hub resources into the
+//     agent config (ptone/scion#4561) and applies them per start, so they
+//     are sent on every start. The limits stay create-only: Start does not
+//     read them from the request.
+//
+// It returns nil when there is nothing to send.
+func startHubAgentDefaults(d opsettings.AgentDefaultsSettings, autoExposePorts *bool, experiments []string) *RemoteHubAgentDefaults {
+	return remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{DefaultResources: d.DefaultResources}, autoExposePorts, experiments)
+}
+
+// hubAgentDefaults returns the hub's operational agent_defaults, or the zero
+// value when no provider is wired.
+func (d *HTTPAgentDispatcher) hubAgentDefaults() opsettings.AgentDefaultsSettings {
+	if d.hubAgentDefaultsProvider == nil {
+		return opsettings.AgentDefaultsSettings{}
 	}
-	return &RemoteHubAgentDefaults{AutoExposePorts: copyBoolPtr(autoExposePorts), Experiments: slices.Clone(experiments)}
+	return d.hubAgentDefaultsProvider()
 }
 
 func copyBoolPtr(b *bool) *bool {

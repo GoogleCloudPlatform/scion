@@ -221,6 +221,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/users/me/delegations": {
+		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/users/me/terminal-workspace": {
 		Pattern: "/api/v1/users/me/terminal-workspace", RouteID: "users.me.terminalWorkspace",
 		Classification: RouteAuthenticated,
@@ -1104,6 +1108,29 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue_admin", Resource: "test_identity", Action: "issue_admin",
 		SessionOnly: authzop.ReasonCredentialManagement,
 	},
+	// Workload-bound issuer delegations (phase X2): test_identity.issue at
+	// hub scope from an interactive session only (no PAT, agent or
+	// workload credential). The handlers further require a live human
+	// user row and limit list and revoke to the grantor or an unscoped
+	// platform admin session.
+	"POST /api/v1/test-identity-delegations": {
+		Pattern: "POST /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.create",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"GET /api/v1/test-identity-delegations": {
+		Pattern: "GET /api/v1/test-identity-delegations", RouteID: "testIdentityDelegations.list",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
+	"DELETE /api/v1/test-identity-delegations/{id}": {
+		Pattern: "DELETE /api/v1/test-identity-delegations/{id}", RouteID: "testIdentityDelegations.revoke",
+		Classification: RouteHubAdmin,
+		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
+		SessionOnly: authzop.ReasonCredentialManagement,
+	},
 
 	// -------------------------------------------------------------------------
 	// Broker HMAC: Registration and lifecycle
@@ -1339,6 +1366,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		// Every guarded route's decision audit carries its RouteID.
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
+		// A visitor (a federated account, VisitorIdentity) is refused on
+		// every route, whatever its classification, until per-route
+		// visitor admission replaces this check.
+		if refuseVisitorRequest(w, r) {
+			return
 		}
 		// An agent delegated credential is admitted only on the routes in
 		// agentDelegationAdmittedRoutes, whatever the route's

@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 // Hub env authority for broker-mode starts.
@@ -25,12 +27,6 @@ import (
 // scion-agent.json is not scrubbed, so the rule is reversible and a local
 // (non-broker) start still sees the on-disk value. Solo mode is unaffected.
 
-// hubOnlyEnvKeys lists the env keys that only the hub may supply for a
-// broker-mode start.
-var hubOnlyEnvKeys = map[string]struct{}{
-	"TZ": {},
-}
-
 // Layer names reported for a dropped broker-local value.
 const (
 	envLayerConfig             = "config"
@@ -40,9 +36,11 @@ const (
 // IsHubOnlyEnvKey reports whether key may be supplied only by the hub for a
 // hub-dispatched agent. The broker never treats such a key as a required
 // (gathered) env key.
+//
+// The key set lives in pkg/config (config.IsHubOnlyEnvKey), which also
+// classifies hub-only keys as reserved in templates (ptone/scion#4524).
 func IsHubOnlyEnvKey(key string) bool {
-	_, ok := hubOnlyEnvKeys[key]
-	return ok
+	return config.IsHubOnlyEnvKey(key)
 }
 
 // skipBrokerLocalEnvKey reports whether key must be skipped from broker-local layers

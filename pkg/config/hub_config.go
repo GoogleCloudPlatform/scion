@@ -98,6 +98,12 @@ type HubServerConfig struct {
 	// (see pkg/hub neverAPIWritableSettingsKeys).
 	HubClass string `json:"class,omitempty" yaml:"class,omitempty" koanf:"class"`
 
+	// TestIdentities is server.hub.test_identities: startup-only settings of
+	// hub-issued test identities, such as the workload issuer allowlist
+	// (ptone/scion#4240, phase X2). Like HubClass it is never writable
+	// through the settings API in any mode.
+	TestIdentities *TestIdentitiesConfig `json:"testIdentities,omitempty" yaml:"testIdentities,omitempty" koanf:"testIdentities"`
+
 	// MonitoringDashboardURL is an optional absolute http(s) URL of an
 	// external monitoring dashboard for this hub. The Health page links to
 	// it when set. See ValidateMonitoringDashboardURL.
@@ -574,6 +580,10 @@ type RuntimeTargetConfig struct {
 	DisplayName string `json:"displayName,omitempty" yaml:"displayName,omitempty" koanf:"displayName"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
+	// See V1RuntimeTargetConfig.
+	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -991,6 +1001,10 @@ type StorageConfig struct {
 	LocalPath string `json:"localPath" yaml:"localPath" koanf:"localPath"`
 }
 
+// DefaultBrokerHost is the built-in runtime broker listen host
+// (server.broker.host) used when settings do not set one.
+const DefaultBrokerHost = "0.0.0.0"
+
 // DefaultGlobalConfig returns the default global configuration.
 func DefaultGlobalConfig() GlobalConfig {
 	return GlobalConfig{
@@ -1009,7 +1023,7 @@ func DefaultGlobalConfig() GlobalConfig {
 		RuntimeBroker: RuntimeBrokerConfig{
 			Enabled:                       false,
 			Port:                          9800,
-			Host:                          "0.0.0.0",
+			Host:                          DefaultBrokerHost,
 			ReadTimeout:                   30 * time.Second,
 			WriteTimeout:                  120 * time.Second, // Longer for agent operations
 			CORSEnabled:                   true,
@@ -1753,7 +1767,36 @@ func serverEnvToOpsettingsKey(envKey string) string {
 		firstSeg = key[:dot]
 	}
 	if serverSubKeys[firstSeg] {
-		return "server." + key
+		return aliasOpsettingsEnvKey("server." + key)
+	}
+	return aliasOpsettingsEnvKey(key)
+}
+
+// seedEnvToOpsettingsKey maps a SCION_SEED_* env var key (after prefix
+// stripping) to the opsettings koanf keyspace. Server keys carry an explicit
+// SERVER_ segment (SCION_SEED_SERVER_HUB_ADMINEMAILS).
+func seedEnvToOpsettingsKey(envKey string) string {
+	return aliasOpsettingsEnvKey(envKeyToOpsettingsKey(envKey))
+}
+
+// opsettingsEnvKeyAliases maps an env-derived opsettings key to the key the
+// variable actually sets, for settings whose env variable name is not the
+// spelling derived from the koanf path. An empty target drops the variable.
+//
+// server.hub.public_url is set by SCION_SERVER_HUB_ENDPOINT, the variable
+// the hub's own endpoint resolution reads (GlobalConfig hub.endpoint), so the
+// opsettings layer and the admin UI see the same variable the hub uses. The
+// derived spelling SCION_SERVER_HUB_PUBLICURL is not read by the hub, so it
+// is dropped here and reported as unmatched at startup. The reverse mapping
+// for display lives in opsettings (koanfKeyToEnvSuffix).
+var opsettingsEnvKeyAliases = map[string]string{
+	"server.hub.endpoint":   PublicURLKey,
+	"server.hub.public_url": "",
+}
+
+func aliasOpsettingsEnvKey(key string) string {
+	if target, ok := opsettingsEnvKeyAliases[key]; ok {
+		return target
 	}
 	return key
 }
@@ -1817,7 +1860,7 @@ func LoadEnvKoanf() *koanf.Koanf {
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", envKeyToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
 	return k
 }
 

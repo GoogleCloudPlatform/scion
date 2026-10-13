@@ -126,6 +126,21 @@ func IssuerCredentialID(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldIssuerCredentialID, v))
 }
 
+// FederatedEmail applies equality check predicate on the "federated_email" field. It's identical to FederatedEmailEQ.
+func FederatedEmail(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldFederatedEmail, v))
+}
+
+// HomeIssuer applies equality check predicate on the "home_issuer" field. It's identical to HomeIssuerEQ.
+func HomeIssuer(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldHomeIssuer, v))
+}
+
+// IssuerDelegationID applies equality check predicate on the "issuer_delegation_id" field. It's identical to IssuerDelegationIDEQ.
+func IssuerDelegationID(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
 // EmailEQ applies the EQ predicate on the "email" field.
 func EmailEQ(v string) predicate.User {
 	return predicate.User(sql.FieldEQ(FieldEmail, v))
@@ -1079,6 +1094,231 @@ func IssuerCredentialIDEqualFold(v string) predicate.User {
 // IssuerCredentialIDContainsFold applies the ContainsFold predicate on the "issuer_credential_id" field.
 func IssuerCredentialIDContainsFold(v string) predicate.User {
 	return predicate.User(sql.FieldContainsFold(FieldIssuerCredentialID, v))
+}
+
+// FederatedEmailEQ applies the EQ predicate on the "federated_email" field.
+func FederatedEmailEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldFederatedEmail, v))
+}
+
+// FederatedEmailNEQ applies the NEQ predicate on the "federated_email" field.
+func FederatedEmailNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldFederatedEmail, v))
+}
+
+// FederatedEmailIn applies the In predicate on the "federated_email" field.
+func FederatedEmailIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldFederatedEmail, vs...))
+}
+
+// FederatedEmailNotIn applies the NotIn predicate on the "federated_email" field.
+func FederatedEmailNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldFederatedEmail, vs...))
+}
+
+// FederatedEmailGT applies the GT predicate on the "federated_email" field.
+func FederatedEmailGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldFederatedEmail, v))
+}
+
+// FederatedEmailGTE applies the GTE predicate on the "federated_email" field.
+func FederatedEmailGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldFederatedEmail, v))
+}
+
+// FederatedEmailLT applies the LT predicate on the "federated_email" field.
+func FederatedEmailLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldFederatedEmail, v))
+}
+
+// FederatedEmailLTE applies the LTE predicate on the "federated_email" field.
+func FederatedEmailLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldFederatedEmail, v))
+}
+
+// FederatedEmailContains applies the Contains predicate on the "federated_email" field.
+func FederatedEmailContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldFederatedEmail, v))
+}
+
+// FederatedEmailHasPrefix applies the HasPrefix predicate on the "federated_email" field.
+func FederatedEmailHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldFederatedEmail, v))
+}
+
+// FederatedEmailHasSuffix applies the HasSuffix predicate on the "federated_email" field.
+func FederatedEmailHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldFederatedEmail, v))
+}
+
+// FederatedEmailIsNil applies the IsNil predicate on the "federated_email" field.
+func FederatedEmailIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldFederatedEmail))
+}
+
+// FederatedEmailNotNil applies the NotNil predicate on the "federated_email" field.
+func FederatedEmailNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldFederatedEmail))
+}
+
+// FederatedEmailEqualFold applies the EqualFold predicate on the "federated_email" field.
+func FederatedEmailEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldFederatedEmail, v))
+}
+
+// FederatedEmailContainsFold applies the ContainsFold predicate on the "federated_email" field.
+func FederatedEmailContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldFederatedEmail, v))
+}
+
+// HomeIssuerEQ applies the EQ predicate on the "home_issuer" field.
+func HomeIssuerEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldHomeIssuer, v))
+}
+
+// HomeIssuerNEQ applies the NEQ predicate on the "home_issuer" field.
+func HomeIssuerNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldHomeIssuer, v))
+}
+
+// HomeIssuerIn applies the In predicate on the "home_issuer" field.
+func HomeIssuerIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldHomeIssuer, vs...))
+}
+
+// HomeIssuerNotIn applies the NotIn predicate on the "home_issuer" field.
+func HomeIssuerNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldHomeIssuer, vs...))
+}
+
+// HomeIssuerGT applies the GT predicate on the "home_issuer" field.
+func HomeIssuerGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldHomeIssuer, v))
+}
+
+// HomeIssuerGTE applies the GTE predicate on the "home_issuer" field.
+func HomeIssuerGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldHomeIssuer, v))
+}
+
+// HomeIssuerLT applies the LT predicate on the "home_issuer" field.
+func HomeIssuerLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldHomeIssuer, v))
+}
+
+// HomeIssuerLTE applies the LTE predicate on the "home_issuer" field.
+func HomeIssuerLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldHomeIssuer, v))
+}
+
+// HomeIssuerContains applies the Contains predicate on the "home_issuer" field.
+func HomeIssuerContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldHomeIssuer, v))
+}
+
+// HomeIssuerHasPrefix applies the HasPrefix predicate on the "home_issuer" field.
+func HomeIssuerHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldHomeIssuer, v))
+}
+
+// HomeIssuerHasSuffix applies the HasSuffix predicate on the "home_issuer" field.
+func HomeIssuerHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldHomeIssuer, v))
+}
+
+// HomeIssuerIsNil applies the IsNil predicate on the "home_issuer" field.
+func HomeIssuerIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldHomeIssuer))
+}
+
+// HomeIssuerNotNil applies the NotNil predicate on the "home_issuer" field.
+func HomeIssuerNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldHomeIssuer))
+}
+
+// HomeIssuerEqualFold applies the EqualFold predicate on the "home_issuer" field.
+func HomeIssuerEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldHomeIssuer, v))
+}
+
+// HomeIssuerContainsFold applies the ContainsFold predicate on the "home_issuer" field.
+func HomeIssuerContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldHomeIssuer, v))
+}
+
+// IssuerDelegationIDEQ applies the EQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEQ(v string) predicate.User {
+	return predicate.User(sql.FieldEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDNEQ applies the NEQ predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNEQ(v string) predicate.User {
+	return predicate.User(sql.FieldNEQ(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIn applies the In predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDNotIn applies the NotIn predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotIn(vs ...string) predicate.User {
+	return predicate.User(sql.FieldNotIn(FieldIssuerDelegationID, vs...))
+}
+
+// IssuerDelegationIDGT applies the GT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGT(v string) predicate.User {
+	return predicate.User(sql.FieldGT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDGTE applies the GTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDGTE(v string) predicate.User {
+	return predicate.User(sql.FieldGTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLT applies the LT predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLT(v string) predicate.User {
+	return predicate.User(sql.FieldLT(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDLTE applies the LTE predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDLTE(v string) predicate.User {
+	return predicate.User(sql.FieldLTE(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContains applies the Contains predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContains(v string) predicate.User {
+	return predicate.User(sql.FieldContains(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasPrefix applies the HasPrefix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasPrefix(v string) predicate.User {
+	return predicate.User(sql.FieldHasPrefix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDHasSuffix applies the HasSuffix predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDHasSuffix(v string) predicate.User {
+	return predicate.User(sql.FieldHasSuffix(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDIsNil applies the IsNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDIsNil() predicate.User {
+	return predicate.User(sql.FieldIsNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDNotNil applies the NotNil predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDNotNil() predicate.User {
+	return predicate.User(sql.FieldNotNull(FieldIssuerDelegationID))
+}
+
+// IssuerDelegationIDEqualFold applies the EqualFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDEqualFold(v string) predicate.User {
+	return predicate.User(sql.FieldEqualFold(FieldIssuerDelegationID, v))
+}
+
+// IssuerDelegationIDContainsFold applies the ContainsFold predicate on the "issuer_delegation_id" field.
+func IssuerDelegationIDContainsFold(v string) predicate.User {
+	return predicate.User(sql.FieldContainsFold(FieldIssuerDelegationID, v))
 }
 
 // HasOwnedGroups applies the HasEdge predicate on the "owned_groups" edge.

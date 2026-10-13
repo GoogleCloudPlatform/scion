@@ -38,6 +38,46 @@ type Section struct {
 	// save reports a changed restart-required key as pending a restart.
 	// Each entry must also be listed in KoanfPaths.
 	RestartRequired []string
+
+	// Durations lists the koanf paths of this section whose value is a Go
+	// duration string. A DB-tier save rejects a value of one of these keys
+	// that does not parse as a duration; "" or null clears the key. Each
+	// entry must also be listed in KoanfPaths and be a top-level key of the
+	// section document (see DurationKeys).
+	Durations []string
+
+	// NestedDurations lists duration-valued keys below the top level of
+	// the section document, as koanf paths that begin with the section
+	// name. A "*" segment matches every key of a map (for example each
+	// named runtime). A DB-tier save validates them as for Durations.
+	NestedDurations []string
+}
+
+// DurationKey is a duration-valued key of a section (Section.Durations).
+type DurationKey struct {
+	// KoanfPath is the key's koanf path, e.g. server.hub.stalled_threshold.
+	KoanfPath string
+	// SectionKey is the key's JSON field in the section document.
+	SectionKey string
+}
+
+// DurationKeys returns the duration-valued keys of the named section, or
+// nil if it has none. A koanf path without a section-level mapping (the
+// agent_defaults keys are top-level) is its own section key.
+func DurationKeys(section string) []DurationKey {
+	sec := SectionByName(section)
+	if sec == nil || len(sec.Durations) == 0 {
+		return nil
+	}
+	out := make([]DurationKey, 0, len(sec.Durations))
+	for _, kp := range sec.Durations {
+		key := SectionKeyFromKoanfPath(kp)
+		if key == "" {
+			key = kp
+		}
+		out = append(out, DurationKey{KoanfPath: kp, SectionKey: key})
+	}
+	return out
 }
 
 // dns1123SubdomainOrEmptyPattern mirrors the pattern used for
@@ -117,6 +157,7 @@ func init() {
 			Name:       "lifecycle",
 			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 			New:        func() any { return &LifecycleSettings{} },
+			Durations:  []string{"server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 		},
 		{
 			// maintenance is durable via DB but has no settings.yaml representation.
@@ -150,7 +191,8 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.resource",
 			},
-			New: func() any { return &TelemetrySettings{} },
+			New:             func() any { return &TelemetrySettings{} },
+			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval"},
 		},
 		{
 			Name: "auto_expose_ports",
@@ -196,7 +238,8 @@ func init() {
 				"default_gcp_identity_mode",
 				"default_gcp_identity_service_account_id",
 			},
-			New: func() any { return &AgentDefaultsSettings{} },
+			New:       func() any { return &AgentDefaultsSettings{} },
+			Durations: []string{"default_max_duration"},
 		},
 		{
 			Name:       "endpoints",
@@ -241,16 +284,18 @@ func init() {
 				"server.federation.refresh_interval",
 				"server.federation.debounce_interval",
 			},
-			New: func() any { return &FederationSettings{} },
+			New:       func() any { return &FederationSettings{} },
+			Durations: []string{"server.federation.refresh_interval", "server.federation.debounce_interval"},
 		},
 		{
 			// runtimes is a map-of-objects section: one hub_settings row stores
 			// the entire map as JSONB. Prefix-only KoanfPath ("runtimes") means
 			// OwningSection walks up from any nested key (e.g. "runtimes.docker.type")
 			// and hits this entry.
-			Name:       "runtimes",
-			KoanfPaths: []string{"runtimes"},
-			New:        func() any { m := make(RuntimesSettings); return &m },
+			Name:            "runtimes",
+			KoanfPaths:      []string{"runtimes"},
+			New:             func() any { m := make(RuntimesSettings); return &m },
+			NestedDurations: []string{"runtimes.*.substrate.template_ready_timeout"},
 		},
 		{
 			// profiles is a map-of-objects section, same pattern as runtimes.
@@ -260,9 +305,10 @@ func init() {
 		},
 		{
 			// harness_configs is a map-of-objects section, same pattern as runtimes.
-			Name:       "harness_configs",
-			KoanfPaths: []string{"harness_configs"},
-			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			Name:            "harness_configs",
+			KoanfPaths:      []string{"harness_configs"},
+			New:             func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{"harness_configs.*.provisioner.timeout"},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml
