@@ -170,9 +170,12 @@ func TestRunTemplateImport_SendsGitHubCredential(t *testing.T) {
 
 	cmd := newTemplateImportTestCmd(t)
 	require.NoError(t, cmd.Flags().Set("dry-run", "true"))
-	_ = captureStdout(t, func() {
-		_ = runTemplateImport(cmd, []string{"https://github.com/acme-corp/private.templates/tree/main/.scion/templates/reviewer"})
+	var runErr error
+	stdout := captureStdout(t, func() {
+		runErr = runTemplateImport(cmd, []string{"https://github.com/acme-corp/private.templates/tree/main/.scion/templates/reviewer"})
 	})
+	require.NoError(t, runErr)
+	assert.Contains(t, stdout, "claude", "dry run should report the fetched template")
 	tarballAuth, checkoutToken := sent()
 	assert.Equal(t, "Bearer fake-repo-cred", tarballAuth)
 	assert.Equal(t, "fake-repo-cred", checkoutToken)

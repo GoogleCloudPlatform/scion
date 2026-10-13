@@ -333,13 +333,12 @@ func TestHarnessConfigReimport_ScopeCredentialOnTheWire(t *testing.T) {
 				t.Fatalf("failed to create harness config: %v", err)
 			}
 
-			fetched := false
-			var capturedAuth string
+			// Every outbound request's Authorization header, in order ("" for none).
+			var auths []string
 			defer mockSkillTarballWithHook(t, map[string]string{
 				"repo-main/harness-configs/my-config/config.yaml": "harness: claude\n",
 			}, func(req *http.Request) {
-				fetched = true
-				capturedAuth = req.Header.Get("Authorization")
+				auths = append(auths, req.Header.Get("Authorization"))
 			})()
 
 			rec := doRequestAsUser(t, srv, user, http.MethodPost,
@@ -348,11 +347,8 @@ func TestHarnessConfigReimport_ScopeCredentialOnTheWire(t *testing.T) {
 			if tt.want200 && rec.Code != http.StatusOK {
 				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 			}
-			if !fetched {
-				t.Fatalf("reimport sent no fetch request (status %d: %s)", rec.Code, rec.Body.String())
-			}
-			if capturedAuth != tt.wantAuth {
-				t.Errorf("Authorization header = %q, want %q", capturedAuth, tt.wantAuth)
+			if len(auths) != 1 || auths[0] != tt.wantAuth {
+				t.Errorf("Authorization headers = %q, want exactly one fetch with %q (status %d: %s)", auths, tt.wantAuth, rec.Code, rec.Body.String())
 			}
 		})
 	}
