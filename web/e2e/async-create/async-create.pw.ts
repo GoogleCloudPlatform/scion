@@ -28,18 +28,24 @@
  *   the launch banner and then the agent reaches running; the Status tab
  *   phases only move forward; the SSE status events carry launch
  *   {state, step, error, endReason} and end with the launch ended without
- *   an error. The running path is a FIXTURE: the shipped harness's no-auth
- *   fallback (drop-to-shell), with no credentials anywhere; the agent's
- *   appliedConfig must show noAuth and harnessAuth "none".
+ *   an error; the SSE launch steps follow the canonical order and each
+ *   page launch-step text is the label of one of them (A2e; no page step
+ *   is recorded only). The running path is a FIXTURE: the shipped
+ *   harness's no-auth fallback (drop-to-shell), with no credentials
+ *   anywhere; the agent's appliedConfig must show noAuth, harnessAuth
+ *   "none", a harness config, and the declared image (A2d; the running
+ *   container's image is recorded next to it, not checked).
  * - Failure panel, no container runtime (only where agents cannot start):
  *   the broker fails the launch; the failed-create panel shows a known
- *   code and a message, Delete and Create again, and no Start or Resume.
+ *   code and a message, Delete and Create again, and none of the header
+ *   Start, Resume or Resume (best effort) controls.
  *   This is not A4: it does not exercise a bad image.
  * - A4 (needs a real launch): an image tag that does not exist, typed into
  *   the form's Container image field (request config.image), gives the
  *   same panel after an async (201) submit; then Delete from the panel,
  *   and the cause pin: the failed agent's appliedConfig.image is the exact
- *   typed ref.
+ *   typed ref. The launch code, end reason, step and time to the panel are
+ *   recorded only (A3f), never asserted.
  * - A5 (afterAll): the agents, the project and the test identity are
  *   deleted and checked absent; only then is the
  *   evidence (DOM timeline, SSE launch payloads, request log; no cookies
@@ -49,6 +55,7 @@
  * container runtime is usable; a skipped check never counts as passed.
  */
 
+import { execFileSync } from 'node:child_process';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -73,19 +80,29 @@ import {
   type SseLaunchRecord,
   type TimelineRow,
 } from './page-recorder.js';
-import { classifyRead, isGone, parseTimeoutMs, redactPath, type ReadState } from './journey-lib.js';
 import {
-  FORBIDDEN_HEADER_ACTIONS,
-  IMAGE_FAILURE_CODES,
+  classifyRead,
+  isGone,
+  launchStepProblems,
+  parseTimeoutMs,
+  redactPath,
+  stepSequence,
+  type ReadState,
+  type StepSeen,
+} from './journey-lib.js';
+import {
+  A3F_EXPECTED_CODE,
   KNOWN_LAUNCH_ERROR_CODES,
   LAUNCH_PHASES,
+  LAUNCH_STEPS,
   SELECTORS,
   confirmDialogButton,
-  headerButtonTexts,
+  headerControlsShown,
   incompleteCreateAgainLink,
   incompleteDeleteButton,
-  launchErrorCodeOf,
   phaseBadge,
+  uiStepLabel,
+  uiStepName,
 } from './selectors.js';
 import {
   isRemoteTarget,
@@ -359,32 +376,67 @@ function requestsSinceSubmit(tracked: TrackedPage, submit: SubmitResult): Reques
   return tracked.requests.filter((r) => r.t >= submit.submitAt);
 }
 
+/** One entry of the DOM-observed state sequence. */
+interface StateEntry {
+  t: number;
+  launchBanner: boolean;
+  /** The launch step shown in the banner (raw name, e.g. image_pull), or "". */
+  step: string;
+  incompleteBanner: boolean;
+  phase: string;
+}
+
 /**
  * The DOM-observed state sequence: one entry, with its time, each time the
- * launch banner, the failed-create panel or the Status tab phase changed.
+ * launch banner, its step, the failed-create panel or the Status tab phase
+ * changed. Steps are recorded as seen; no step list is required.
  */
-function stateSequence(
-  rows: TimelineRow[]
-): Array<{ t: number; launchBanner: boolean; incompleteBanner: boolean; phase: string }> {
-  const out: Array<{ t: number; launchBanner: boolean; incompleteBanner: boolean; phase: string }> =
-    [];
+function stateSequence(rows: TimelineRow[]): StateEntry[] {
+  const out: StateEntry[] = [];
   for (const r of rows) {
     const last = out.at(-1);
+    const step = uiStepName(r.step);
     if (
       !last ||
       last.launchBanner !== r.launchBanner ||
+      last.step !== step ||
       last.incompleteBanner !== r.incompleteBanner ||
       last.phase !== r.phase
     ) {
       out.push({
         t: r.t,
         launchBanner: r.launchBanner,
+        step,
         incompleteBanner: r.incompleteBanner,
         phase: r.phase,
       });
     }
   }
   return out;
+}
+
+/**
+ * The launch steps seen, for the evidence: the ordered SSE step list (each
+ * step with the time the browser first received it) and the launch-step
+ * texts the page showed, with their times and raw step names. Recorded
+ * only; a fast launch may show no step in the page.
+ */
+function launchSteps(
+  timeline: TimelineRow[],
+  sse: SseLaunchRecord[]
+): {
+  sse: StepSeen[];
+  ui: Array<{ t: number; text: string; step: string }>;
+} {
+  const sseSteps = stepSequence(
+    sse.filter((r) => r.launch).map((r) => ({ t: r.t, step: r.launch?.step ?? '' }))
+  );
+  const ui = stepSequence(timeline.map((r) => ({ t: r.t, step: r.step }))).map((s) => ({
+    t: s.t,
+    text: s.step,
+    step: uiStepName(s.step),
+  }));
+  return { sse: sseSteps, ui };
 }
 
 /** Reload and navigation result since the submit, for the evidence and the checks. */
@@ -428,7 +480,7 @@ async function expectNoStartNoReload(tracked: TrackedPage, submit: SubmitResult)
 async function expectFailedCreatePanel(
   page: Page,
   evidence?: Record<string, unknown>
-): Promise<{ code: string; message: string }> {
+): Promise<{ code: string; message: string; endReason: string }> {
   // With evidence, each fact is merged in as soon as it is read and each
   // A3c result as soon as it is checked, so a later failure cannot erase
   // what already passed.
@@ -436,23 +488,38 @@ async function expectFailedCreatePanel(
   if (evidence) evidence.panel = panel;
   await expect(page.locator(SELECTORS.incompleteBanner)).toBeVisible({ timeout: LAUNCH_TIMEOUT });
   panel.visible = true;
-  // The panel may first show only "stopping" while the create winds down.
+  const textOf = async (selector: string): Promise<string> =>
+    (await page.locator(selector).allInnerTexts()).join(' ').replace(/\s+/g, ' ').trim();
+  // A3b: launch-code and launch-error-message, each read on its own. The
+  // panel may first show only the "stopping" end reason, without a code,
+  // while the create winds down.
   await expect
-    .poll(
-      async () =>
-        launchErrorCodeOf((await page.locator(SELECTORS.launchErrorCode).allInnerTexts()).join('')),
-      { message: 'a launch error code in the panel', timeout: 120_000 }
-    )
+    .poll(() => textOf(SELECTORS.launchCode), {
+      message: 'launch-code in the panel',
+      timeout: 120_000,
+    })
     .not.toBe('');
-  const code = launchErrorCodeOf(await page.locator(SELECTORS.launchErrorCode).innerText());
-  const message = (await page.locator(SELECTORS.incompleteMessage).innerText()).trim();
-  if (evidence) Object.assign(evidence, { code, messageLength: message.length });
-  // A3b: a known code and a message.
-  expect(KNOWN_LAUNCH_ERROR_CODES as readonly string[], `code ${code} is a known code`).toContain(
-    code
-  );
-  expect(message, 'the panel error message').not.toBe('');
-  // A3c: Delete and Create again offered, no Start/Resume in the header.
+  const code = await textOf(SELECTORS.launchCode);
+  if (evidence) evidence.code = code;
+  const endReason = await textOf(SELECTORS.launchEndReason);
+  panel.endReason = endReason;
+  panel.errorCodeLine = await textOf(SELECTORS.launchErrorCode);
+  const message = await expect
+    .poll(() => textOf(SELECTORS.launchErrorMessage), {
+      message: 'launch-error-message in the panel',
+      timeout: 30_000,
+    })
+    .not.toBe('')
+    .then(
+      () => textOf(SELECTORS.launchErrorMessage),
+      () => ''
+    );
+  if (evidence) evidence.messageLength = message.length;
+  // Recorded, not checked: A3b asks for a non-empty code only.
+  panel.codeKnown = (KNOWN_LAUNCH_ERROR_CODES as readonly string[]).includes(code);
+  expect(message, 'launch-error-message').not.toBe('');
+  // A3c: Delete and Create again offered; header-start, header-resume and
+  // header-force-resume all absent (not rendered, or not visible).
   await expect(incompleteDeleteButton(page)).toBeVisible();
   panel.deleteAction = true;
   await expect(incompleteCreateAgainLink(page)).toHaveAttribute(
@@ -460,13 +527,12 @@ async function expectFailedCreatePanel(
     `/agents/new?projectId=${encodeURIComponent(journey.projectId!)}`
   );
   panel.createAgainAction = true;
-  const header = await headerButtonTexts(page);
-  panel.headerActions = header;
-  for (const action of FORBIDDEN_HEADER_ACTIONS) {
-    expect(header, `header offers no "${action}"`).not.toContain(action);
-  }
-  panel.forbiddenHeaderActions = false;
-  return { code, message };
+  const header = await headerControlsShown(page);
+  panel.headerControlsRendered = header.rendered;
+  panel.headerControlsVisible = header.visible;
+  expect(header.visible, 'no visible header-start, -resume or -force-resume').toEqual([]);
+  panel.forbiddenHeaderControls = false;
+  return { code, message, endReason };
 }
 
 /**
@@ -509,17 +575,19 @@ interface AppliedConfigView {
   harnessAuth?: string;
   harnessConfig?: string;
   image?: string;
+  profile?: string;
 }
 
-/** The agent's appliedConfig from a direct GET as the member (flat or wrapped body). */
-async function appliedConfigOf(agentId: string): Promise<AppliedConfigView | undefined> {
+/** The agent's appliedConfig and top-level template from a direct GET as the member. */
+async function appliedConfigOf(
+  agentId: string
+): Promise<{ applied: AppliedConfigView | undefined; template: string | undefined }> {
   const res = await member().get(`/api/v1/agents/${agentId}`);
   expect(res.status(), `GET agent ${agentId}`).toBe(200);
-  const body = (await res.json()) as {
-    agent?: { appliedConfig?: AppliedConfigView };
-    appliedConfig?: AppliedConfigView;
-  };
-  return body.appliedConfig ?? body.agent?.appliedConfig;
+  type AgentView = { appliedConfig?: AppliedConfigView; template?: string };
+  const body = (await res.json()) as AgentView & { agent?: AgentView };
+  const agent = body.agent ?? body;
+  return { applied: agent.appliedConfig, template: agent.template };
 }
 
 /** What readAppliedConfig read: the status, the config, or the error. */
@@ -639,27 +707,42 @@ function noteAgentDelete(agentId: string, statuses: Array<number | null>, forced
 }
 
 /**
- * Whether the page or the launch view names an image cause for the failure:
- * the bad tag or an image/pull/manifest phrase in the panel message, or an
- * image-specific code in the panel or the final launch error.
+ * The image of the agent's container as the local Docker daemon reports
+ * it (docker inspect .Config.Image), found by the scion.name and
+ * scion.project_id labels. Evidence only: never asserted, and not read on
+ * a remote target (its run log records it).
  */
-function imageFailureReason(
-  message: string,
-  code: string,
-  launch: { error?: string; endReason?: string } | null,
-  badImage: string | undefined
-): { exposed: boolean; source: string | null } {
-  const tag = badImage?.split(':').at(-1) ?? '';
-  if (tag && message.includes(tag)) return { exposed: true, source: 'panel message names the tag' };
-  if (/image|pull|manifest/i.test(message)) {
-    return { exposed: true, source: 'panel message names an image cause' };
+function containerImageOf(agentName: string): Record<string, unknown> {
+  if (target().mode !== 'local') {
+    return { source: 'not read: remote target (recorded by the run log)' };
   }
-  for (const c of [code, launch?.error ?? '']) {
-    if (c === 'image_pull_failed' || c === 'invalid_image') {
-      return { exposed: true, source: `code ${c}` };
-    }
+  try {
+    const ids = execFileSync(
+      'docker',
+      [
+        'ps',
+        '-a',
+        '-q',
+        '--filter',
+        `label=scion.name=${agentName}`,
+        '--filter',
+        `label=scion.project_id=${journey.projectId ?? ''}`,
+      ],
+      { encoding: 'utf-8', timeout: 20_000 }
+    )
+      .split('\n')
+      .map((id) => id.trim())
+      .filter((id) => id);
+    const images = ids.map((id) =>
+      execFileSync('docker', ['inspect', '--format', '{{.Config.Image}}', id], {
+        encoding: 'utf-8',
+        timeout: 20_000,
+      }).trim()
+    );
+    return { source: 'docker inspect .Config.Image', containers: ids.length, images };
+  } catch (err) {
+    return { source: 'docker inspect .Config.Image', error: firstLine(err) };
   }
-  return { exposed: false, source: null };
 }
 
 /**
@@ -889,11 +972,17 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note?: string }> = {
   A2a: { test: TITLE_A2 },
   A2b: { test: TITLE_A2 },
   A2c: { test: TITLE_A2, note: 'evidence: a2.timeline and a2.sse for comparison' },
+  A2d: {
+    test: TITLE_A2,
+    note: 'evidence: a2AppliedConfig (image vs expectedImage, template, profile, container)',
+  },
+  A2e: { test: TITLE_A2, note: 'evidence: a2.launchSteps and a2.launchStepProblems' },
   A3a: { test: TITLE_A4 },
   A3b: { test: TITLE_A4 },
   A3c: { test: TITLE_A4 },
   A3d: { test: TITLE_A4 },
   A3e: { test: TITLE_A4, note: 'cause pin: appliedConfig.image === the exact typed ref' },
+  A3f: { test: TITLE_A4, note: 'RECORD ONLY: evidence a4.a3f, never asserted' },
   A4: { test: TITLE_A5, note: 'the afterAll hook' },
   A5: {
     test: TITLE_A5,
@@ -912,8 +1001,8 @@ test.describe.serial('async agent create from the web form', () => {
       status: testInfo.status,
       skipReason: testInfo.annotations.find((a) => a.type === 'skip')?.description ?? null,
       durationMs: testInfo.duration,
-      // Every Playwright annotation (D1, FINDING, FORCED DELETE, skip), so they
-      // can be verified from the evidence.
+      // Every Playwright annotation (A3f RECORD ONLY, FORCED DELETE, skip),
+      // so they can be verified from the evidence.
       annotations: annotationsOf(testInfo.annotations),
     };
   });
@@ -936,6 +1025,7 @@ test.describe.serial('async agent create from the web form', () => {
       harnessConfig: t.harnessConfig ?? 'form default',
       expectedAgentImage: t.agentImage ?? null,
       badImage: t.badImage ?? null,
+      a3fExpectedCode: `${A3F_EXPECTED_CODE} (record only)`,
     };
     console.info(
       `[journey] target ${t.mode}; launch capable: ${String(t.launchCapable)} ` +
@@ -1050,10 +1140,23 @@ test.describe.serial('async agent create from the web form', () => {
 
     const timeline: TimelineRow[] = await timelineRows(page, submit.agentId);
     const sse: SseLaunchRecord[] = await sseRecords(page, submit.agentId);
+    // A2e input: the ordered SSE steps and the page's launch-step texts,
+    // checked after the A2d facts are recorded.
+    const steps = launchSteps(timeline, sse);
+    const stepProblems = launchStepProblems(
+      steps.sse.map((s) => s.step),
+      steps.ui.map((s) => s.text),
+      LAUNCH_STEPS,
+      uiStepLabel
+    );
     journey.evidence.a2 = {
       submitAt: submit.submitAt,
       landedAt: submit.landedAt ?? null,
       stateSequence: stateSequence(timeline),
+      launchSteps: steps,
+      launchStepProblems: stepProblems,
+      // A fast launch may show no step in the page: recorded only.
+      uiStepObserved: steps.ui.length > 0,
       reload: await reloadCheck(tracked, submit),
       timeline,
       sse,
@@ -1088,37 +1191,48 @@ test.describe.serial('async agent create from the web form', () => {
     expect(['succeeded', 'running_observed']).toContain(last.endReason);
     expectForwardOnly(phaseSequence(sse.map((r) => r.phase ?? '')), 'SSE phases');
 
+
     // The running path is the credential-free no-auth fallback: the agent
-    // must have started without credentials.
-    const applied = await appliedConfigOf(submit.agentId);
+    // must have started without credentials. The hub records the image the
+    // broker resolved on the succeeded async launch report, as on a sync
+    // create: appliedConfig.image must be set and be the expected image.
+    const { applied, template } = await appliedConfigOf(submit.agentId);
     const observedImage = applied?.image ?? '';
+    const expectedImage = t.agentImage ?? '';
+    const container = containerImageOf(journey.agents.find((a) => a.id === submit.agentId)!.name);
     journey.evidence.a2AppliedConfig = {
       noAuth: applied?.noAuth,
       harnessAuth: applied?.harnessAuth,
       harnessConfig: applied?.harnessConfig,
-      observedImage,
-      a2ImageReported: observedImage !== '',
-      a2AppliedConfigImageMissing: observedImage === '',
+      image: observedImage || null,
+      expectedImage: expectedImage || null,
+      imageMatchesExpected: observedImage !== '' && observedImage === expectedImage,
+      // Top-level agent.template (as on the sync path).
+      template: template ?? null,
+      // Not written for an agent pinned to a broker; null then.
+      profile: applied?.profile ?? null,
+      // Recorded, not checked: the running container's image.
+      container,
+      containerImageMatches:
+        Array.isArray(container.images) && container.images.length > 0
+          ? (container.images as string[]).every((img) => img === observedImage)
+          : null,
     };
     journey.a2Running = { image: observedImage, harnessConfig: applied?.harnessConfig ?? '' };
-    // TODO(D1, ptone/scion#4818 (part of #2153)): restore the hard assertion
-    // that appliedConfig.image is set once the hub applies the succeeded
-    // launch report's agent info on async creates. Today it drops it (image
-    // included) while the sync path records it, so the image is recorded and
-    // an empty one is annotated and flagged, never silently passed. The
-    // annotation comes before the hard checks below, so a run that fails
-    // them still shows D1.
-    if (observedImage === '') {
-      test.info().annotations.push({
-        type: 'D1',
-        description:
-          'ptone/scion#4818 (part of #2153): appliedConfig.image is empty after an async ' +
-          'create that used the harness default image; the hub does not apply the ' +
-          'succeeded launch report agent info',
-      });
-    }
+
+    // A2e: the SSE launch steps follow the canonical order, and each page
+    // launch-step text is the label of one of them, in the same order.
+    expect(stepProblems, 'A2e: canonical step order; page labels match SSE steps').toEqual([]);
+
+    // A2d.
     expectNoAuth(applied);
     expect(applied?.harnessConfig ?? '', 'A2 appliedConfig.harnessConfig is set').not.toBe('');
+    expect(observedImage, 'A2 appliedConfig.image is set').not.toBe('');
+    expect(
+      expectedImage,
+      'the expected agent image is known (set E2E_AGENT_IMAGE for a remote target)'
+    ).not.toBe('');
+    expect(observedImage, 'A2 appliedConfig.image is the expected image').toBe(expectedImage);
 
     // A1b over the whole launch, and no reload.
     await expectNoStartNoReload(tracked, submit);
@@ -1198,38 +1312,49 @@ test.describe.serial('async agent create from the web form', () => {
     await expectAsyncSubmit(tracked, submit);
     expect(submit.requestImage, 'the form sent the typed image as config.image').toBe(image);
 
-    // 1. Graded UX rows (A3b, A3c): the failed-create panel with code and
-    //    message, Delete and Create again, no Start/Resume in the header
-    //    (each merged into the evidence as it is read or checked); then the
+    // 1. Graded UX rows (A3b, A3c): the failed-create panel with
+    //    launch-code and launch-error-message, Delete and Create again, no
+    //    visible header-start/-resume/-force-resume (each merged into the evidence as it is read or checked); then the
     //    reload/state evidence is recorded before no /start and no reload
     //    are asserted.
     const panel = await expectFailedCreatePanel(tracked.page, a4Evidence);
     const sse = await sseRecords(tracked.page, submit.agentId);
     const lastLaunch = sse.filter((r) => r.launch).at(-1)?.launch ?? null;
-    const imageReason = imageFailureReason(panel.message, panel.code, lastLaunch, image);
     const timeline = await timelineRows(tracked.page, submit.agentId);
+    // A3f, RECORD ONLY (never asserted): the cause as the page and the
+    // launch report it, and fail-fast vs hang (time to the terminal state).
+    const panelAt = timeline.find((r) => r.incompleteBanner)?.t ?? null;
+    const endedAt = sse.find((r) => r.launch?.state === 'ended')?.t ?? null;
+    const a3f = {
+      recordOnly: true,
+      code: panel.code,
+      expectedCode: A3F_EXPECTED_CODE,
+      codeAsExpected: panel.code === A3F_EXPECTED_CODE,
+      endReasonLabel: panel.endReason,
+      endReason: lastLaunch?.endReason ?? null,
+      messageLength: panel.message.length,
+      step: lastLaunch?.step ?? '',
+      launchTimeout: panel.code === 'launch_timeout',
+      msToPanel: panelAt === null ? null : panelAt - submit.submitAt,
+      msToLaunchEnded: endedAt === null ? null : endedAt - submit.submitAt,
+    };
+    test.info().annotations.push({
+      type: 'A3f RECORD ONLY',
+      description:
+        `launch-code ${a3f.code} (expected ${A3F_EXPECTED_CODE}), endReason ` +
+        `${String(a3f.endReason)}, step "${a3f.step}"; never asserted`,
+    });
     Object.assign(a4Evidence, {
       finalLaunch: lastLaunch,
-      a4ImageReasonExposed: imageReason.exposed,
-      imageReasonSource: imageReason.source,
+      a3f,
       stateSequence: stateSequence(timeline),
+      launchSteps: launchSteps(timeline, sse),
       reload: await reloadCheck(tracked, submit),
       timeline,
       sse,
       requests: requestsSinceSubmit(tracked, submit),
     });
     await expectNoStartNoReload(tracked, submit);
-    // Recorded finding, never silent and never a failure on its own: the
-    // failure cause text is not exposed to clients yet (upstream #4666).
-    if (!imageReason.exposed) {
-      test.info().annotations.push({
-        type: 'FINDING',
-        description:
-          `no image-specific launch failure reason exposed (panel code ${panel.code}, ` +
-          `launch error ${String(lastLaunch?.error)}, ` +
-          `endReason ${String(lastLaunch?.endReason)}; the panel message names no image cause)`,
-      });
-    }
 
     // 2. The A3e facts, read while the agent still exists (Delete removes
     //    it). The read itself does not assert, so a failing read is
@@ -1255,14 +1380,10 @@ test.describe.serial('async agent create from the web form', () => {
     // 3. Delete from the failed page (A3d).
     await deleteFromPanel(tracked, submit.agentId, 'A4 (panel Delete)', a4Evidence);
 
-    // 4. Cause pin, hard (A3e): the failed agent's appliedConfig.image is the
-    //    EXACT typed ref, with an image failure code and the same
-    //    credential-free auth and harness config as A2 (which ran). An empty
-    //    or different image fails.
-    expect(
-      IMAGE_FAILURE_CODES as readonly string[],
-      `code ${panel.code} is an image failure code`
-    ).toContain(panel.code);
+    // 4. Cause pin, hard (A3e): the failed agent's appliedConfig.image is
+    //    the EXACT typed ref, with the same credential-free auth and harness
+    //    config as A2 (which ran). An empty or different image fails. The
+    //    launch code is A3f, recorded above and never asserted.
     expect(appliedRead.status, `GET agent ${submit.agentId} (${appliedRead.error ?? 'ok'})`).toBe(
       200
     );
@@ -1275,6 +1396,9 @@ test.describe.serial('async agent create from the web form', () => {
 
   // eslint-disable-next-line no-empty-pattern -- Playwright needs the fixtures argument
   test.afterAll(TITLE_A5, async ({}, testInfo) => {
+    // The afterAll's testInfo can carry the last test's annotations; its
+    // results entry lists only the ones added from here on.
+    const inheritedAnnotations = testInfo.annotations.length;
     const residue: string[] = [];
     const violations: string[] = [];
     const cleanup: Record<string, unknown> = {};
@@ -1383,7 +1507,7 @@ test.describe.serial('async agent create from the web form', () => {
       status: 'this afterAll; see the Playwright report',
       residue: residue.length,
       violations: violations.length,
-      annotations: annotationsOf(testInfo.annotations),
+      annotations: annotationsOf(testInfo.annotations.slice(inheritedAnnotations)),
     };
     // Prominent flag for the grader (see recordForcedDelete).
     journey.evidence.forcedDeleteOnLaunchCapableRun = (

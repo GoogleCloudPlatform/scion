@@ -20,8 +20,9 @@ reach running through the shipped harness's no-auth fallback
 (drop-to-shell), and the setup refuses to start while any credential
 variable named in `harnesses/*/config.yaml` auth metadata is set.
 `E2E_HARNESS_CONFIG` picks the harness config (default `antigravity`, the
-form's default); its image is `<registry>/scion-<harness>:latest`, and the
-setup log prints it. Without a usable container runtime the
+form's default); its image is `<registry>/scion-<harness>:latest`, and
+the setup log prints it. A2 requires `appliedConfig.image` to be exactly
+the declared ref: `E2E_AGENT_IMAGE` when set, else that default. Without a usable container runtime the
 broker still registers; the checks that need a real launch (A2/A3, A4)
 are skipped with the reason, and the no-runtime failure panel check runs
 instead. `E2E_LAUNCH_CAPABLE=1|0` overrides the detection.
@@ -38,7 +39,8 @@ and `E2E_TEST_IDENTITY_EMAIL` for a member test identity issued out of
 band (`scion hub test-identity issue` / `web-code --out`), plus
 `E2E_LAUNCH_CAPABLE=1` and `E2E_BAD_IMAGE` (an image ref whose tag does
 not exist; the failure checks type it into the form's Container image
-field and A4 asserts it exactly). Optional: `E2E_TARGET_PROJECT_ID`. The redeem removes the code file
+field and A4 asserts it exactly), and `E2E_AGENT_IMAGE` (the image the harness config resolves to on that hub;
+A2 asserts it exactly). Optional: `E2E_TARGET_PROJECT_ID`. The redeem removes the code file
 (the code is single-use). The runner deletes that identity afterwards; the spec cannot
 verify that, and its evidence is written before it. The no-runtime failure
 panel check runs on a remote target only with `E2E_LAUNCH_CAPABLE=0`.
@@ -76,22 +78,40 @@ normal for the SSE stream when its page closes. `cleanup.agents[*]` and
 `oracleRowMap` (row -> `{test, note}`) replace the earlier flat
 `cleanup["agent X"]` keys and string map values.
 
-A2 records the agent's `appliedConfig.image` but does not require it: on
-an async create the hub does not yet record the image the broker
-resolved (product defect D1, ptone/scion#4818 (part of #2153)), so
-`a2AppliedConfig.a2AppliedConfigImageMissing` is true and the test carries
-a D1 annotation.
+A2 requires the agent's `appliedConfig.image` to be the expected image
+and records it in `a2AppliedConfig` with the harness config, the
+top-level `template`, and `profile` (null for an agent pinned to a broker,
+which does not get one). On a local hub it also records the running
+container's image (`docker inspect` `.Config.Image`) as
+`a2AppliedConfig.container`, without checking it. `a2.launchSteps` (and
+`a4.launchSteps`) record the launch steps seen: `sse`, the ordered steps
+of the browser's SSE launch events with the time each first arrived, and
+`ui`, the page's launch-step texts with their times and raw step names.
+A2 requires the SSE steps to follow the canonical order (`LAUNCH_STEPS`
+in `selectors.ts`) and each page text to be `Step: ` plus one of them
+with underscores as spaces, in the same order; problems are listed in
+`a2.launchStepProblems`. A fast launch may show no step in the page,
+which is recorded only. `stateSequence` entries carry the step shown in
+the banner.
 
 A4 types the bad image ref into the form's Container image field
 (Additional Options; request `config.image`, the broker's top image tier).
-It first asserts and records the graded rows (failed-create panel, code
-and message, Delete and Create again, no Start or Resume, no reload), then
-deletes the agent from the panel, and only then pins the failure cause:
-the failed agent's `appliedConfig.image` is the exact typed ref, with an
-image failure code and the same credential-free auth and harness config
-as A2; an empty or different image fails. A launch failure that names no
-image cause sets `a4ImageReasonExposed: false` and a `FINDING` annotation
-(recorded, not failed). Every Playwright annotation is mirrored into
-`results[<test title>].annotations` in the evidence.
+It first asserts and records the graded rows (failed-create panel,
+launch-code and launch-error-message, Delete and Create again,
+header-start, header-resume and header-force-resume all absent or not
+visible, no reload), then deletes the agent from the panel, and only then
+pins the failure cause: the failed agent's `appliedConfig.image` is the
+exact typed ref, with the same credential-free auth and harness config as
+A2; an empty or different image fails. The launch code is recorded only
+(`a4.a3f`, with an `A3f RECORD ONLY` annotation): the code next to the
+expected `runtime_error` (`A3F_EXPECTED_CODE`; a container runtime gives
+no image-specific code), the end reason and its label, the message
+length, the launch step, and the time from submit to the panel and to the
+launch end, which tells a fast failure from a hanging pull
+(`launch_timeout`). Each test's Playwright annotations are mirrored into
+`results[<test title>].annotations` in the evidence; the A5 entry lists
+only the annotations the afterAll added itself.
 
-Selectors and state names live in `selectors.ts` only.
+The agent page is read through its data-testids only. Selectors and state
+names live in `selectors.ts`; the in-page recorder (`page-recorder.ts`)
+takes them from there.

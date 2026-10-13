@@ -87,7 +87,10 @@ async function globalSetup(): Promise<void> {
   const hubStateFile = hubStateFilePath(suiteStateFile);
   const imageRegistry = registry ?? PLACEHOLDER_REGISTRY;
   const harnessConfig = process.env.E2E_HARNESS_CONFIG || FORM_DEFAULT_HARNESS;
-  const agentImage = `${imageRegistry}/scion-${harnessConfig}:latest`;
+  // The image A2 expects: the declared ref (E2E_AGENT_IMAGE), else the
+  // harness default on this registry.
+  const agentImage =
+    process.env.E2E_AGENT_IMAGE || `${imageRegistry}/scion-${harnessConfig}:latest`;
   const badRepo = process.env.E2E_BAD_IMAGE_REPO || `scion-${harnessConfig}`;
   const badImage =
     process.env.E2E_BAD_IMAGE ||

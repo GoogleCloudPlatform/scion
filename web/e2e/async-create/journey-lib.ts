@@ -95,3 +95,65 @@ export function redactPath(pathname: string): string {
     })
     .join('/');
 }
+
+/** One step as first seen, with its time. */
+export interface StepSeen {
+  t: number;
+  step: string;
+}
+
+/**
+ * The ordered steps of a series of records: each non-empty step with the
+ * time it first appeared, consecutive repeats dropped. A step that comes
+ * back after another one is listed again, so a backwards move shows.
+ */
+export function stepSequence(
+  records: ReadonlyArray<{ t: number; step?: string | null }>
+): StepSeen[] {
+  const out: StepSeen[] = [];
+  for (const r of records) {
+    const step = r.step ?? '';
+    if (step && out.at(-1)?.step !== step) out.push({ t: r.t, step });
+  }
+  return out;
+}
+
+/**
+ * Problems with the launch steps seen, against the canonical step list:
+ * an SSE step outside the list, an SSE step that goes back in the list, a
+ * page launch-step text that is not the label of a step in the SSE
+ * sequence, or page labels out of the SSE order. Empty when all hold; no
+ * page label at all is not a problem (a fast launch may show none).
+ * label(step) is the text the page shows for a step.
+ */
+export function launchStepProblems(
+  sseSteps: readonly string[],
+  uiTexts: readonly string[],
+  canonical: readonly string[],
+  label: (step: string) => string
+): string[] {
+  const problems: string[] = [];
+  let lastRank = -1;
+  for (const step of sseSteps) {
+    const rank = canonical.indexOf(step);
+    if (rank < 0) {
+      problems.push(`SSE step "${step}" is not in the canonical list`);
+      continue;
+    }
+    if (rank <= lastRank) problems.push(`SSE step "${step}" goes back in the canonical order`);
+    lastRank = Math.max(lastRank, rank);
+  }
+  // Each page label must match an SSE step at or after the previous match.
+  let from = 0;
+  for (const text of uiTexts) {
+    const at = sseSteps.findIndex((step, i) => i >= from && label(step) === text);
+    if (at >= 0) {
+      from = at;
+    } else if (sseSteps.some((step) => label(step) === text)) {
+      problems.push(`page label "${text}" is out of the SSE step order`);
+    } else {
+      problems.push(`page label "${text}" matches no SSE step`);
+    }
+  }
+  return problems;
+}

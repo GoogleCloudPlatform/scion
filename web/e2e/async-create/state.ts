@@ -45,7 +45,7 @@ export interface LocalSuiteState {
   imageRegistry: string;
   /** Harness config the form picks (E2E_HARNESS_CONFIG, else the form's default). */
   harnessConfig: string;
-  /** The image that harness resolves to on this registry (logged; not enforced). */
+  /** The image that harness resolves to on this registry (A2 asserts it exactly). */
   agentImage: string;
   /** Bad image ref the failure checks type into the form: a tag that does not exist. */
   badImage: string;
@@ -71,7 +71,10 @@ export interface JourneyTarget {
   noRuntimeConfirmed: boolean;
   /** Bad image ref typed into the form (local: generated per run; remote: E2E_BAD_IMAGE). */
   badImage?: string;
-  /** Local only: the image the harness resolves to (for the evidence). */
+  /**
+   * The declared image ref A2 asserts appliedConfig.image is exactly:
+   * E2E_AGENT_IMAGE, else (local only) the harness default on the registry.
+   */
   agentImage?: string;
   /** Remote only: an existing project to create agents in (kept). */
   projectId?: string;
@@ -130,6 +133,8 @@ export function isRemoteTarget(): boolean {
  * - E2E_TARGET_PROJECT_ID: optional project with a provider broker; a
  *   hub-managed project is created (and deleted) when unset.
  * - E2E_HARNESS_CONFIG: optional harness config to pick in the form.
+ * - E2E_AGENT_IMAGE: the image that harness config resolves to on the
+ *   target; A2 requires appliedConfig.image to equal it exactly.
  */
 export function remoteTargetFromEnv(): JourneyTarget {
   const env = process.env;
@@ -165,5 +170,7 @@ export function remoteTargetFromEnv(): JourneyTarget {
     ...(env.E2E_HARNESS_CONFIG ? { harnessConfig: env.E2E_HARNESS_CONFIG } : {}),
     // The bad image ref typed into the form's Container image field.
     ...(env.E2E_BAD_IMAGE ? { badImage: env.E2E_BAD_IMAGE } : {}),
+    // The image A2 expects in appliedConfig.image.
+    ...(env.E2E_AGENT_IMAGE ? { agentImage: env.E2E_AGENT_IMAGE } : {}),
   };
 }

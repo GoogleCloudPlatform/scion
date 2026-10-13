@@ -15,8 +15,8 @@
 /**
  * Unit checks of the async create journey's pure helpers (no hub, no
  * browser): timeout parsing, the absence predicate used by its cleanup,
- * the evidence path redaction, the launch error code parser and the
- * credential guard.
+ * the evidence path redaction, the launch step readers and the credential
+ * guard.
  */
 
 import { expect, test } from '@playwright/test';
@@ -25,8 +25,15 @@ import {
   assertNoHarnessCredentialEnv,
   harnessCredentialEnvNames,
 } from '../async-create/credential-guard.js';
-import { classifyRead, isGone, parseTimeoutMs, redactPath } from '../async-create/journey-lib.js';
-import { launchErrorCodeOf } from '../async-create/selectors.js';
+import {
+  classifyRead,
+  isGone,
+  launchStepProblems,
+  parseTimeoutMs,
+  redactPath,
+  stepSequence,
+} from '../async-create/journey-lib.js';
+import { LAUNCH_STEPS, uiStepLabel, uiStepName } from '../async-create/selectors.js';
 
 test('parseTimeoutMs takes a positive number and refuses anything else', () => {
   expect(parseTimeoutMs(undefined, 5, 'X')).toBe(5);
@@ -59,11 +66,62 @@ test('classifyRead: only a 404 or a soft-deleted record is gone', () => {
   }
 });
 
-test('launchErrorCodeOf reads the code part of the panel text', () => {
-  expect(launchErrorCodeOf('runtime_error — failed')).toBe('runtime_error');
-  expect(launchErrorCodeOf('  image_pull_failed  ')).toBe('image_pull_failed');
-  expect(launchErrorCodeOf('stopping')).toBe('');
-  expect(launchErrorCodeOf('')).toBe('');
+test('uiStepName turns a launch-step text back into the raw step name', () => {
+  expect(uiStepName('Step: image pull')).toBe('image_pull');
+  expect(uiStepName(' Step:  pre clean ')).toBe('pre_clean');
+  expect(uiStepName('Step: launching')).toBe('launching');
+  expect(uiStepName('')).toBe('');
+});
+
+test('uiStepLabel and uiStepName are inverse for every canonical step', () => {
+  expect(uiStepLabel('pre_clean')).toBe('Step: pre clean');
+  for (const step of LAUNCH_STEPS) expect(uiStepName(uiStepLabel(step))).toBe(step);
+});
+
+test('launchStepProblems: canonical SSE order, page labels a matching subsequence', () => {
+  const check = (sse: string[], ui: string[]): string[] =>
+    launchStepProblems(sse, ui, LAUNCH_STEPS, uiStepLabel);
+  expect(check(['pre_clean', 'launching'], ['Step: pre clean', 'Step: launching'])).toEqual([]);
+  expect(check(['launching'], [])).toEqual([]);
+  expect(check([], [])).toEqual([]);
+  expect(check(['pre_clean', 'launching'], ['Step: launching'])).toEqual([]);
+  expect(check(['launching', 'pre_clean'], [])).toEqual([
+    'SSE step "pre_clean" goes back in the canonical order',
+  ]);
+  expect(check(['launching', 'pre_clean', 'launching'], [])).toEqual([
+    'SSE step "pre_clean" goes back in the canonical order',
+    'SSE step "launching" goes back in the canonical order',
+  ]);
+  expect(check(['warming_up'], [])).toEqual(['SSE step "warming_up" is not in the canonical list']);
+  expect(check(['launching'], ['Step: image pull'])).toEqual([
+    'page label "Step: image pull" matches no SSE step',
+  ]);
+  expect(check(['launching'], ['launching'])).toEqual([
+    'page label "launching" matches no SSE step',
+  ]);
+  expect(check(['pre_clean', 'launching'], ['Step: launching', 'Step: pre clean'])).toEqual([
+    'page label "Step: pre clean" is out of the SSE step order',
+  ]);
+});
+
+test('stepSequence keeps each step once per run, in order, with its first time', () => {
+  expect(
+    stepSequence([
+      { t: 1, step: '' },
+      { t: 2, step: 'pre_clean' },
+      { t: 3, step: 'pre_clean' },
+      { t: 4, step: undefined },
+      { t: 5, step: 'launching' },
+      { t: 6, step: null },
+      { t: 7, step: 'pre_clean' },
+    ])
+  ).toEqual([
+    { t: 2, step: 'pre_clean' },
+    { t: 5, step: 'launching' },
+    // A step that comes back is listed again, so a backwards move shows.
+    { t: 7, step: 'pre_clean' },
+  ]);
+  expect(stepSequence([])).toEqual([]);
 });
 
 test('the credential guard knows the shipped harness credential variables', () => {

@@ -21,8 +21,9 @@
  *   launch) in window.__e2eSse. Only those fields are kept.
  * - DOM: a sampler reads the agent page's shadow root every 50 ms
  *   and appends a row to window.__e2eTimeline whenever what it reads
- *   changes: path, Status tab phase, header status badge, launch banner and
- *   step, incomplete create panel and its code.
+ *   changes: path, Status tab phase, header lifecycle controls present,
+ *   launch banner and step text, incomplete create panel and its code.
+ *   Every element is read by its data-testid (selectors.ts).
  * - Document id: window.__e2eDocId is a random id per document. It is the
  *   same at the end only if the page was never reloaded or navigated as a
  *   document (the app's client-side routing keeps it).
@@ -32,7 +33,7 @@
 
 import type { Page } from '@playwright/test';
 
-import { SELECTORS } from './selectors.js';
+import { FORBIDDEN_HEADER_CONTROLS, SELECTORS } from './selectors.js';
 
 export interface SseLaunchRecord {
   t: number;
@@ -53,13 +54,15 @@ export interface SseLaunchRecord {
 export interface TimelineRow {
   t: number;
   path: string;
-  /** Status tab phase badge. */
+  /** Status tab phase badge (agent-phase status attribute). */
   phase: string;
-  /** Header badge: the activity while running, else the phase. */
-  headerStatus: string;
+  /** Header lifecycle controls present, by test id (header-start, ...). */
+  headerControls: string[];
   launchBanner: boolean;
+  /** launch-step text ("Step: <step>", "_" shown as a space). */
   step: string;
   incompleteBanner: boolean;
+  /** launch-code text (the failure code alone). */
   errorCode: string;
 }
 
@@ -67,11 +70,10 @@ interface RecorderSelectors {
   launchBanner: string;
   launchStep: string;
   incompleteBanner: string;
-  launchErrorCode: string;
-  headerStatusBadge: string;
-  infoItem: string;
-  infoLabel: string;
-  statusBadge: string;
+  launchCode: string;
+  agentPhase: string;
+  /** Header control test id -> selector. */
+  headerControls: Record<string, string>;
 }
 
 /** The init script. Runs in the browser; it must not close over anything. */
@@ -154,23 +156,14 @@ function installRecorders(sel: RecorderSelectors): void {
     const root: ParentNode | null = pageEl?.shadowRoot ?? null;
     const q = (s: string): Element | null => (root ? root.querySelector(s) : null);
     const text = (s: string): string => (q(s)?.textContent ?? '').replace(/\s+/g, ' ').trim();
-    let phase = '';
-    if (root) {
-      for (const item of Array.from(root.querySelectorAll(sel.infoItem))) {
-        if ((item.querySelector(sel.infoLabel)?.textContent ?? '').trim() === 'Phase') {
-          phase = item.querySelector(sel.statusBadge)?.getAttribute('status') ?? '';
-          break;
-        }
-      }
-    }
     const row = {
       path: location.pathname,
-      phase,
-      headerStatus: q(sel.headerStatusBadge)?.getAttribute('status') ?? '',
+      phase: q(sel.agentPhase)?.getAttribute('status') ?? '',
+      headerControls: Object.keys(sel.headerControls).filter((id) => !!q(sel.headerControls[id])),
       launchBanner: !!q(sel.launchBanner),
       step: text(sel.launchStep),
       incompleteBanner: !!q(sel.incompleteBanner),
-      errorCode: text(sel.launchErrorCode),
+      errorCode: text(sel.launchCode),
     };
     const key = JSON.stringify(row);
     if (key !== last) {
@@ -187,11 +180,9 @@ export async function installPageRecorders(page: Page): Promise<void> {
     launchBanner: SELECTORS.launchBanner,
     launchStep: SELECTORS.launchStep,
     incompleteBanner: SELECTORS.incompleteBanner,
-    launchErrorCode: SELECTORS.launchErrorCode,
-    headerStatusBadge: SELECTORS.headerStatusBadge,
-    infoItem: SELECTORS.infoItem,
-    infoLabel: SELECTORS.infoLabel,
-    statusBadge: SELECTORS.statusBadge,
+    launchCode: SELECTORS.launchCode,
+    agentPhase: SELECTORS.agentPhase,
+    headerControls: { ...FORBIDDEN_HEADER_CONTROLS },
   };
   await page.addInitScript(installRecorders, sel);
 }

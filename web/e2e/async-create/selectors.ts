@@ -16,40 +16,47 @@
  * Every selector and state name the async create journey reads, in one
  * place. The agent page and the create form are Lit elements with open
  * shadow roots; Playwright CSS locators pierce them, and the in-page
- * sampler (page-recorder.ts) searches shadow roots itself.
+ * sampler (page-recorder.ts) reads the agent page's shadow root itself.
  *
- * Three selectors are stable data-testids. The rest are class or element
- * selectors until the pages get test ids for them; when they do, only this
- * file changes.
+ * The agent page is read through its data-testids only (launch banner,
+ * failed-create panel, header lifecycle controls, Status tab phase). The
+ * create form and the confirm dialog have no test ids yet; they keep
+ * element selectors.
  */
 
 import type { Locator, Page } from '@playwright/test';
 
+/** A data-testid selector. */
+function testId(id: string): string {
+  return `[data-testid="${id}"]`;
+}
+
 export const SELECTORS = {
   // Agent page, launch in progress (launch.active).
-  launchBanner: '[data-testid="agent-launch-banner"]', // stable
-  launchStep: '[data-testid="agent-launch-banner"] .launch-step',
-  launchMessage: '[data-testid="agent-launch-banner"] .launch-message',
+  launchBanner: testId('agent-launch-banner'),
+  // "Step: <step>", with "_" shown as a space (see uiStepName).
+  launchStep: testId('launch-step'),
+  launchMessage: testId('launch-message'),
 
   // Agent page, a create that did not complete.
-  incompleteBanner: '[data-testid="incomplete-create-banner"]', // stable
-  launchErrorCode: '[data-testid="launch-error-code"]', // stable
-  incompleteMessage: '[data-testid="incomplete-create-banner"] .error-message',
-  incompleteActions: '[data-testid="incomplete-create-banner"] .error-actions',
+  incompleteBanner: testId('incomplete-create-banner'),
+  // The whole "<code> — <end reason>" line, and its two parts.
+  launchErrorCode: testId('launch-error-code'),
+  launchCode: testId('launch-code'),
+  launchEndReason: testId('launch-end-reason'),
+  launchErrorMessage: testId('launch-error-message'),
+  incompleteTemplate: testId('incomplete-create-template'),
+  incompleteTask: testId('incomplete-create-task'),
+  incompleteDelete: testId('incomplete-create-delete'),
+  incompleteRecreate: testId('incomplete-create-recreate'),
 
-  // Agent page header: lifecycle buttons (read by text) and the phase badge
-  // (status = activity when running, else phase).
-  headerButtons: '.header-actions sl-button',
-  headerStatusBadge: 'scion-detail-header scion-status-badge',
+  // Agent page header lifecycle controls.
+  headerStart: testId('header-start'),
+  headerResume: testId('header-resume'),
+  headerForceResume: testId('header-force-resume'),
 
-  // Status tab: the info item labelled "Phase" holds a badge whose status
-  // attribute is the phase.
-  infoItem: '.info-item',
-  infoLabel: '.info-label',
-  statusBadge: 'scion-status-badge',
-
-  // Generic error banner without a launch (a synchronous create error).
-  genericErrorBanner: '.agent-error-banner',
+  // Status tab phase badge (status attribute = phase).
+  agentPhase: testId('agent-phase'),
 
   // Create form.
   createPage: 'scion-page-agent-create',
@@ -71,8 +78,15 @@ export const SELECTORS = {
   confirmDialog: 'sl-dialog[open]',
 } as const;
 
-/** Header lifecycle buttons that must not be offered for an incomplete create. */
-export const FORBIDDEN_HEADER_ACTIONS = ['Start', 'Resume', 'Resume (best effort)'] as const;
+/**
+ * Header lifecycle controls that must all be absent for an incomplete
+ * create (Start, Resume, Resume (best effort)), by test id.
+ */
+export const FORBIDDEN_HEADER_CONTROLS = {
+  'header-start': SELECTORS.headerStart,
+  'header-resume': SELECTORS.headerResume,
+  'header-force-resume': SELECTORS.headerForceResume,
+} as const;
 
 /** Agent phases in launch order; the later ones end a launch. */
 export const PHASES = [
@@ -87,7 +101,29 @@ export const PHASES = [
   'error',
 ] as const;
 
-/** Phases of an in-flight create, in order. */
+/**
+ * Launch steps in canonical order (pkg/api/launch_codes.go). A container
+ * runtime reports only pre_clean (when a stale container existed) and then
+ * launching; claim is never reported as a step.
+ */
+export const LAUNCH_STEPS = [
+  'claim',
+  'pre_clean',
+  'secrets',
+  'pod_create',
+  'scheduling',
+  'awaiting_capacity',
+  'init_containers',
+  'container_create',
+  'image_pull',
+  'container_start',
+  'home_sync',
+  'workspace_sync',
+  'startup_gate',
+  'launching',
+] as const;
+
+/** Phases of an in-flight create, in order.
 export const LAUNCH_PHASES = ['created', 'provisioning', 'cloning', 'starting', 'running'] as const;
 
 export const LAUNCH_END_REASONS = [
@@ -127,44 +163,61 @@ export const KNOWN_LAUNCH_ERROR_CODES = [
   'broker_restarted',
 ] as const;
 
-/** Codes expected when the image cannot be pulled (the bad image check). */
-export const IMAGE_FAILURE_CODES = ['runtime_error', 'image_pull_failed', 'invalid_image'] as const;
-
 /**
- * The code part of the launch-error-code text ("<code> — <reason>", just
- * "<code>", or just a reason such as "stopping" while the create winds
- * down). Returns "" when the text holds no code.
+ * The launch code expected on a container runtime for an image tag that
+ * does not exist (A3f). RECORD ONLY: recorded next to the code seen, never
+ * asserted. Typed image codes (image_pull_failed, invalid_image) come from
+ * the Kubernetes runtime only.
  */
-export function launchErrorCodeOf(text: string): string {
-  const head = text.split('—')[0].trim();
-  return /^[a-z][a-z0-9_]*$/.test(head) && head.includes('_') ? head : '';
+export const A3F_EXPECTED_CODE = 'runtime_error';
+
+/** The launch-step text the page shows for a step: "Step: image pull". */
+export function uiStepLabel(step: string): string {
+  return `Step: ${step.replace(/_/g, ' ')}`;
 }
 
-/** The visible text of the header lifecycle buttons. */
-export async function headerButtonTexts(page: Page): Promise<string[]> {
-  const texts = await page.locator(SELECTORS.headerButtons).allInnerTexts();
-  return texts.map((t) => t.replace(/\s+/g, ' ').trim()).filter((t) => t.length > 0);
+/**
+ * The raw step name of a launch-step text: "Step: image pull" gives
+ * "image_pull". Returns "" for an empty text.
+ */
+export function uiStepName(text: string): string {
+  return text
+    .replace(/^\s*Step:\s*/, '')
+    .trim()
+    .replace(/\s+/g, '_');
+}
+
+/**
+ * The header lifecycle controls rendered on the page, and those of them
+ * that are visible, by test id.
+ */
+export async function headerControlsShown(
+  page: Page
+): Promise<{ rendered: string[]; visible: string[] }> {
+  const rendered: string[] = [];
+  const visible: string[] = [];
+  for (const [id, selector] of Object.entries(FORBIDDEN_HEADER_CONTROLS)) {
+    const control = page.locator(selector);
+    if ((await control.count()) === 0) continue;
+    rendered.push(id);
+    if (await control.first().isVisible()) visible.push(id);
+  }
+  return { rendered, visible };
 }
 
 /** The phase badge of the Status tab (status attribute = phase). */
 export function phaseBadge(page: Page): Locator {
-  return page
-    .locator(SELECTORS.infoItem)
-    .filter({ has: page.locator(SELECTORS.infoLabel, { hasText: /^\s*Phase\s*$/ }) })
-    .locator(SELECTORS.statusBadge)
-    .first();
+  return page.locator(SELECTORS.agentPhase).first();
 }
 
 /** The Delete button of the incomplete create panel. */
 export function incompleteDeleteButton(page: Page): Locator {
-  return page.locator(`${SELECTORS.incompleteActions} sl-button`).filter({ hasText: 'Delete' });
+  return page.locator(SELECTORS.incompleteDelete);
 }
 
 /** The "Create again" link of the incomplete create panel. */
 export function incompleteCreateAgainLink(page: Page): Locator {
-  return page
-    .locator(`${SELECTORS.incompleteActions} a`)
-    .filter({ has: page.locator('sl-button', { hasText: 'Create again' }) });
+  return page.locator(SELECTORS.incompleteRecreate);
 }
 
 /** The confirm button of the open confirm dialog. */
