@@ -129,7 +129,9 @@ const ISOLATION_FAIL = 'R2 isolation row failed; see restricted evidence';
 const R2_17B_REASON =
   'NOT RUN: the view TTL is a fixed 30-minute constant (pkg/artifacts/view.go:52) with no ' +
   'supported setting to lower it; the run does not wait 30 minutes';
-const R2_21_REASON = 'NOT RUN: chat HTML preview not merged (upstream ptone/scion#4580)';
+const R2_21_REASON =
+  'NOT RUN: not implemented in this suite; the chat HTML preview landed on main after the ' +
+  'spec freeze; covered by follow-up R2b';
 
 const VIEW_PREFIX = '/api/v1/artifacts/view/';
 
