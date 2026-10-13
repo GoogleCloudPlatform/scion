@@ -473,6 +473,30 @@ func toSessionView(r *ent.ConduitSession) (registry.SessionView, error) {
 	return v, nil
 }
 
+// ListRelays implements registry.Store with one read of relay_instances.
+func (s *ConduitRegistryStore) ListRelays(ctx context.Context) ([]registry.RelayInstance, error) {
+	rows, err := s.client.RelayInstance.Query().Order(ent.Asc(relayinstance.FieldID)).All(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("conduit registry store: list relays: %w", err)
+	}
+	out := make([]registry.RelayInstance, 0, len(rows))
+	for _, ri := range rows {
+		rel := registry.RelayInstance{
+			InstanceID:       ri.ID,
+			Generation:       ri.Generation,
+			InternalEndpoint: ri.InternalEndpoint,
+			StartedAt:        ri.StartedAt.UTC(),
+			LastSeen:         ri.LastSeen.UTC(),
+			Draining:         ri.Draining,
+		}
+		if ri.PublicEndpoint != nil {
+			rel.PublicEndpoint = *ri.PublicEndpoint
+		}
+		out = append(out, rel)
+	}
+	return out, nil
+}
+
 // DeleteSessionsOfStaleRelays implements registry.Store. It is a single
 // DELETE whose relay-staleness condition is a subquery, so a relay cannot be
 // judged stale and then have sessions it re-touched deleted by a separate
