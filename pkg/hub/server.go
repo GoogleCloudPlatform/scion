@@ -4849,7 +4849,8 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 }
 
 // scheduledEventRetention is how long non-pending scheduled events are kept
-// before the soft-delete-purge job deletes them.
+// after they complete (fired_at, or created when never fired) before the
+// soft-delete-purge job deletes them.
 const scheduledEventRetention = 7 * 24 * time.Hour
 
 // purgeHandler returns a recurring handler function that permanently removes
@@ -4875,9 +4876,10 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 			}
 		}
 
-		// Purge old scheduled events (non-pending, failed included, older
-		// than 7 days) on every tick, whatever the soft-delete retention
-		// (ptone/scion#4517).
+		// Purge scheduled events that are no longer pending (failed
+		// included) and completed more than scheduledEventRetention ago, on
+		// every tick, whatever the soft-delete retention (ptone/scion#4517).
+		// Completion is fired_at, or created for an event never fired.
 		eventCutoff := time.Now().Add(-scheduledEventRetention)
 		purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
 		if err != nil {
