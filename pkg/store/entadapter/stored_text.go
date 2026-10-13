@@ -23,20 +23,23 @@ import (
 	"github.com/google/uuid"
 )
 
-// A compare-and-swap on a time column (typically updated) has to compare the
-// exact stored value. On SQLite an ent time column is TEXT holding Go's
-// time.Time.String() form, which may carry a monotonic-clock suffix or a
-// non-UTC offset; a bound time.Time read back from it never equals that text.
-// So on SQLite the store reads the raw text with rawStoredText before its
-// typed read and puts storedTextEQ in the UPDATE's WHERE; on Postgres the
-// timestamptz value read compares as an instant (the generated <Col>EQ
-// predicate). Used by DeactivateDelegationEdgeGuarded and
-// TemplateStore.SetTemplateAgentConfig.
-
 // rawStoredText returns CAST(col AS TEXT) of the row of table whose idCol is
 // uid, read through drv so that inside WithTx it runs on the transaction's
 // connection. found is false when no row has that ID or the value is NULL.
 // For SQLite only.
+//
+// It and storedTextEQ make a compare-and-swap on a time column (typically
+// updated) compare the exact stored value on SQLite, where an ent time
+// column is TEXT. Rows written through ent are canonical ("... +0000 UTC";
+// entc.OpenSQLite sets _timezone=UTC and registers UTCTimeHook), and a bound
+// time.Time read back from them matches. But a legacy row written before
+// that, or a write that bypasses the hook (raw SQL, an OnConflict upsert),
+// can hold another form of the same instant (an RFC 3339 or non-UTC offset
+// form, or a monotonic-clock suffix), which a bound time.Time never equals.
+// So the store reads the raw text before its typed read and puts
+// storedTextEQ in the UPDATE's WHERE. On Postgres the column is timestamptz
+// and the generated <Col>EQ predicate compares instants. Used by
+// DeactivateDelegationEdgeGuarded and TemplateStore.SetTemplateAgentConfig.
 func rawStoredText(ctx context.Context, drv dialect.Driver, table, idCol, col string, uid uuid.UUID) (text string, found bool, err error) {
 	rows := &entsql.Rows{}
 	query := "SELECT CAST(" + col + " AS TEXT) FROM " + table + " WHERE " + idCol + " = ?"

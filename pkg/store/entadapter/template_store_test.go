@@ -312,9 +312,9 @@ func TestSetTemplateAgentConfig(t *testing.T) {
 // commits after SetTemplateAgentConfig read the row, and before its
 // conditional UPDATE runs, wins. The snapshot is not written and the row
 // keeps the edit's Updated time instead of the older one the store read
-// (ptone/scion#4674). TestSetTemplateAgentConfig covers the other side: an
-// unchanged row written by CreateTemplate (time.Now(), stored on SQLite with
-// its monotonic-clock suffix) still matches the Updated precondition.
+// (ptone/scion#4674). TestSetTemplateAgentConfig and
+// TestSetTemplateAgentConfigNonCanonicalUpdatedText cover the other side: an
+// unchanged row still matches the Updated precondition.
 func TestSetTemplateAgentConfigLosesToRacingMetadataEdit(t *testing.T) {
 	ts := newTestTemplateStore(t)
 	ctx := context.Background()
@@ -363,6 +363,52 @@ func TestSetTemplateAgentConfigLosesToRacingMetadataEdit(t *testing.T) {
 	assert.True(t, raced.Equal(got.Updated), "the racing edit's Updated time is kept: got %v, want %v", got.Updated, raced)
 	assert.Equal(t, "raced edit", got.Description)
 	assert.Nil(t, got.AgentConfig, "the snapshot is not written")
+}
+
+// TestSetTemplateAgentConfigNonCanonicalUpdatedText: on SQLite, a row whose
+// stored updated text is not the canonical form ent writes, but names the
+// same instant, still matches the Updated precondition: the snapshot is
+// written and updated still names that instant (ptone/scion#4674). This is
+// what the raw-text compare is for; see rawStoredText.
+func TestSetTemplateAgentConfigNonCanonicalUpdatedText(t *testing.T) {
+	enttest.SkipOnPostgres(t, "writes non-canonical SQLite TEXT timestamps; Postgres stores timestamptz")
+	for name, form := range nonCanonicalUpdatedForms {
+		t.Run(name, func(t *testing.T) {
+			ts := newTestTemplateStore(t)
+			ctx := context.Background()
+			tmpl := &store.Template{
+				ID: uuid.New().String(), Name: "nc", Slug: "nc", Harness: "claude",
+				Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+				ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+			}
+			require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+			uid, err := uuid.Parse(tmpl.ID)
+			require.NoError(t, err)
+			before, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			inst := before.Updated
+			require.NoError(t, ts.client.Driver().Exec(ctx,
+				"UPDATE templates SET updated = ? WHERE id = ?", []any{form(inst), uid}, nil))
+			raw, found, err := rawStoredText(ctx, ts.client.Driver(), "templates", "id", "updated", uid)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, form(inst), raw, "the non-canonical text is what is stored")
+			reread, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			require.True(t, inst.Equal(reread.Updated), "the driver reads the same instant back")
+
+			ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"},
+				store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs})
+			require.NoError(t, err)
+			assert.True(t, ok, "an unchanged row with non-canonical updated text is written")
+
+			got, err := ts.GetTemplate(ctx, tmpl.ID)
+			require.NoError(t, err)
+			require.NotNil(t, got.AgentConfig)
+			assert.Equal(t, "snap", got.AgentConfig.Model)
+			assert.True(t, inst.Equal(got.Updated), "updated still names the same instant")
+		})
+	}
 }
 
 func TestUpdateTemplateNotFound(t *testing.T) {
