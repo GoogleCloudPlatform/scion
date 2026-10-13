@@ -34,7 +34,7 @@ import (
 // the requester's original input:
 //
 //   - the hub telemetry default (settings telemetry, hubTelemetryProvider);
-//   - the project policy (scion.io/telemetry-enabled, projectTelemetryPolicy);
+//   - the project policy (projectSettingTelemetryEnabled, projectTelemetryPolicy);
 //   - the requester's telemetry, read from CreateInputs.InlineConfig (the
 //     create request plus explicit edits), never from the stored
 //     InlineConfig, which older hubs filled with a hub-default copy.
@@ -71,7 +71,7 @@ type telemetryDispatch struct {
 	requester *api.TelemetryConfig
 }
 
-// projectTelemetryPolicy returns the project's scion.io/telemetry-enabled
+// projectTelemetryPolicy returns the project's projectSettingTelemetryEnabled
 // annotation as a policy, or nil when it is unset or not a valid bool.
 func projectTelemetryPolicy(project *store.Project) *bool {
 	if project == nil || project.Annotations == nil {
