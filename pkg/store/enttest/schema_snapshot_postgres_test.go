@@ -216,6 +216,59 @@ func TestStatementRecorder(t *testing.T) {
 		}
 	})
 
+	// txScript runs one CREATE TABLE "b" in a recordingTx over fake after a
+	// CREATE TABLE "a" outside it, ends the transaction with end, and returns
+	// the recorded script.
+	txScript := func(t *testing.T, fake fakeTx, end func(tx *recordingTx)) string {
+		t.Helper()
+		r := &statementRecorder{}
+		r.exec(`CREATE TABLE "a" ("id" bigint)`, []any{}, nil)
+		tx := &recordingTx{Tx: fake, rec: r, start: r.begin()}
+		if err := tx.Exec(context.Background(), `CREATE TABLE "b" ("id" bigint)`, []any{}, nil); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		end(tx)
+		got, err := r.script()
+		if err != nil {
+			t.Fatalf("script: %v", err)
+		}
+		return got
+	}
+	onlyA := `CREATE TABLE "a" ("id" bigint);` + "\n"
+	aAndB := onlyA + `CREATE TABLE "b" ("id" bigint);` + "\n"
+
+	t.Run("rollback then commit stays discarded", func(t *testing.T) {
+		got := txScript(t, fakeTx{}, func(tx *recordingTx) {
+			_ = tx.Rollback()
+			_ = tx.Commit()
+		})
+		if got != onlyA {
+			t.Fatalf("script = %q, want %q", got, onlyA)
+		}
+	})
+
+	t.Run("double commit keeps statements once", func(t *testing.T) {
+		got := txScript(t, fakeTx{}, func(tx *recordingTx) {
+			_ = tx.Commit()
+			_ = tx.Commit()
+		})
+		if got != aAndB {
+			t.Fatalf("script = %q, want %q", got, aAndB)
+		}
+	})
+
+	t.Run("failed commit then rollback discards the transaction only", func(t *testing.T) {
+		got := txScript(t, fakeTx{commitErr: errors.New("commit failed")}, func(tx *recordingTx) {
+			if err := tx.Commit(); err == nil {
+				t.Fatal("commit: want an error")
+			}
+			_ = tx.Rollback()
+		})
+		if got != onlyA {
+			t.Fatalf("script = %q, want %q", got, onlyA)
+		}
+	})
+
 	t.Run("bind arguments", func(t *testing.T) {
 		r := &statementRecorder{}
 		r.exec("INSERT INTO ent_types (type) VALUES ($1)", []any{"agents"}, nil)
@@ -242,11 +295,12 @@ func TestStatementRecorder(t *testing.T) {
 
 // fakeTx is a dialect.Tx whose statements always succeed, for exercising
 // recordingTx without a database.
-type fakeTx struct{}
+// Commit returns commitErr.
+type fakeTx struct{ commitErr error }
 
 func (fakeTx) Exec(context.Context, string, any, any) error  { return nil }
 func (fakeTx) Query(context.Context, string, any, any) error { return nil }
-func (fakeTx) Commit() error                                 { return nil }
+func (f fakeTx) Commit() error                               { return f.commitErr }
 func (fakeTx) Rollback() error                               { return nil }
 
 // openTestClient opens a small Ent client on dsn, closed on cleanup.
