@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,8 @@ func TestHubTokenCreateHelpUsesRegistryScopes(t *testing.T) {
 		store.UATScopeAgentStop,
 		store.UATScopeAgentDispatch,
 	} {
-		if strings.Contains(help, stale) {
+		// Whole scope names only: agent:stop_all is a valid scope.
+		if regexp.MustCompile(`(^|[^a-z_:])` + regexp.QuoteMeta(stale) + `($|[^a-z_])`).MatchString(help) {
 			t.Fatalf("hub token create help exposes stale scope %q", stale)
 		}
 	}
