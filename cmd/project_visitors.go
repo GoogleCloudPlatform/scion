@@ -37,6 +37,7 @@ var (
 	projectVisitorsIssuer  string
 	projectVisitorsEmail   string
 	projectVisitorsExpires string
+	projectVisitorsJSON    bool
 )
 
 // projectVisitorsCmd is the parent command for project visitor grants.
@@ -53,7 +54,7 @@ A visitor stays pending until their first request from that issuer with
 the granted email.
 
 Requires project owner or admin, an interactive session (not a user access
-token), and the federation.project_visitors experiment on the Hub.`,
+credential), and the federation.project_visitors experiment on the Hub.`,
 }
 
 var projectVisitorsListCmd = &cobra.Command{
@@ -70,7 +71,7 @@ var projectVisitorsListCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to list project visitors: %w", err)
 		}
-		if hubOutputJSON {
+		if projectVisitorsWantJSON() {
 			return writeProjectVisitorsJSON(list)
 		}
 		if len(list) == 0 {
@@ -80,7 +81,7 @@ var projectVisitorsListCmd = &cobra.Command{
 		tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintln(tw, "EMAIL\tISSUER\tSTATUS\tEXPIRES\tID")
 		for _, v := range list {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Email, v.Issuer, v.Status, formatVisitorExpiry(v.ExpiresAt), v.ID)
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", v.Email, v.Issuer, formatVisitorStatus(v), formatVisitorExpiry(v.ExpiresAt), v.ID)
 		}
 		return tw.Flush()
 	},
@@ -115,7 +116,7 @@ Example:
 		if err != nil {
 			return fmt.Errorf("failed to add project visitor: %w", err)
 		}
-		if hubOutputJSON {
+		if projectVisitorsWantJSON() {
 			return writeProjectVisitorsJSON(v)
 		}
 		fmt.Printf("Added visitor %s (%s), status %s, expires %s.\n", v.Email, v.Issuer, v.Status, formatVisitorExpiry(v.ExpiresAt))
@@ -177,7 +178,7 @@ var projectVisitorsExtendCmd = &cobra.Command{
 		if err != nil {
 			return fmt.Errorf("failed to extend project visitor: %w", err)
 		}
-		if hubOutputJSON {
+		if projectVisitorsWantJSON() {
 			return writeProjectVisitorsJSON(updated)
 		}
 		fmt.Printf("Visitor %s (%s) now expires %s.\n", updated.Email, updated.Issuer, formatVisitorExpiry(updated.ExpiresAt))
@@ -233,11 +234,27 @@ func matchProjectVisitor(list []hubclient.ProjectVisitor, ref, issuer string) (*
 	}
 }
 
+// formatVisitorStatus is the STATUS column of "list": the account status,
+// marked when the Hub does not accept visitors from the issuer now (the
+// grant is kept, but the visitor's requests are refused).
+func formatVisitorStatus(v hubclient.ProjectVisitor) string {
+	if !v.IssuerAccepted {
+		return v.Status + " (issuer not accepted)"
+	}
+	return v.Status
+}
+
 func formatVisitorExpiry(t *time.Time) string {
 	if t == nil {
 		return "never"
 	}
 	return t.UTC().Format(time.RFC3339)
+}
+
+// projectVisitorsWantJSON reports whether the command prints JSON: --json
+// on the command, or the global --format json.
+func projectVisitorsWantJSON() bool {
+	return projectVisitorsJSON || isJSONOutput()
 }
 
 func writeProjectVisitorsJSON(v interface{}) error {
@@ -264,4 +281,8 @@ func init() {
 	projectVisitorsRemoveCmd.Flags().StringVar(&projectVisitorsIssuer, "issuer", "", "Issuer URL, when the email is a visitor from more than one issuer")
 	projectVisitorsExtendCmd.Flags().StringVar(&projectVisitorsIssuer, "issuer", "", "Issuer URL, when the email is a visitor from more than one issuer")
 	projectVisitorsExtendCmd.Flags().StringVar(&projectVisitorsExpires, "expires", "", "New expiry: "+expiryAcceptedForms)
+
+	for _, c := range []*cobra.Command{projectVisitorsListCmd, projectVisitorsAddCmd, projectVisitorsExtendCmd} {
+		c.Flags().BoolVar(&projectVisitorsJSON, "json", false, "Output in JSON format")
+	}
 }

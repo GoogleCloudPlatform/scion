@@ -44,15 +44,19 @@ type ProjectVisitorService interface {
 // ProjectVisitor is one visitor grant of a project.
 type ProjectVisitor struct {
 	// ID is the visitor's account ID on the hub; Update and Remove take it.
-	ID        string     `json:"id"`
-	BindingID string     `json:"bindingId"`
-	Email     string     `json:"email"`
-	Issuer    string     `json:"issuer"`
-	Status    string     `json:"status"` // pending, active or suspended
-	GrantedBy string     `json:"grantedBy,omitempty"`
-	NotBefore *time.Time `json:"notBefore,omitempty"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	ID        string `json:"id"`
+	BindingID string `json:"bindingId"`
+	Email     string `json:"email"`
+	Issuer    string `json:"issuer"`
+	Status    string `json:"status"` // pending, active or suspended
+	// IssuerAccepted reports whether the hub accepts visitors from Issuer
+	// now. While it is false the grant is kept but the visitor's requests
+	// are refused.
+	IssuerAccepted bool       `json:"issuerAccepted"`
+	GrantedBy      string     `json:"grantedBy,omitempty"`
+	NotBefore      *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 // ListProjectVisitorsResponse is the list response body.

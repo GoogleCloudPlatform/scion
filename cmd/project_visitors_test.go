@@ -95,3 +95,26 @@ func TestMatchProjectVisitor(t *testing.T) {
 	_, err = matchProjectVisitor(list, "carol@corp.example", "")
 	assert.ErrorContains(t, err, "no visitor")
 }
+
+// --json is registered on the commands that print a visitor, so their
+// JSON branches are reachable.
+func TestProjectVisitorsCommand_JSONFlag(t *testing.T) {
+	for _, c := range []*cobra.Command{projectVisitorsListCmd, projectVisitorsAddCmd, projectVisitorsExtendCmd} {
+		f := c.Flags().Lookup("json")
+		require.NotNil(t, f, "%s has --json", c.Name())
+		assert.Equal(t, "bool", f.Value.Type(), c.Name())
+	}
+	assert.Nil(t, projectVisitorsRemoveCmd.Flags().Lookup("json"), "remove prints no visitor")
+
+	savedFormat := outputFormat
+	t.Cleanup(func() { projectVisitorsJSON, outputFormat = false, savedFormat })
+	projectVisitorsJSON, outputFormat = false, ""
+	assert.False(t, projectVisitorsWantJSON())
+	require.NoError(t, projectVisitorsListCmd.Flags().Set("json", "true"))
+	assert.True(t, projectVisitorsWantJSON())
+}
+
+func TestProjectVisitorsCommand_FormatStatus(t *testing.T) {
+	assert.Equal(t, "active", formatVisitorStatus(hubclient.ProjectVisitor{Status: "active", IssuerAccepted: true}))
+	assert.Equal(t, "pending (issuer not accepted)", formatVisitorStatus(hubclient.ProjectVisitor{Status: "pending"}))
+}
