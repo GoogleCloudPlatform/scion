@@ -190,6 +190,84 @@ func TestResolveLinkedCheckout(t *testing.T) {
 	})
 }
 
+// TestResolveLinkedCheckout_RepoRootFailureRefuses: when git cannot
+// resolve the checkout's repository root, the dispatch is refused with the
+// per-cause message, without git's own error text.
+func TestResolveLinkedCheckout_RepoRootFailureRefuses(t *testing.T) {
+	requireWorktreeGit(t)
+	t.Setenv("HOME", t.TempDir())
+	_, dotScion := newLinkedCheckout(t, linkedTestRemote)
+	orig := linkedCheckoutRepoRoot
+	t.Cleanup(func() { linkedCheckoutRepoRoot = orig })
+	linkedCheckoutRepoRoot = func(string) (string, error) {
+		return "", errors.New("fatal: detected dubious ownership SECRET-GIT-OUTPUT")
+	}
+	got := resolveLinkedCheckout(linkedCheckoutInput{
+		WorkspaceMode:   store.WorkspaceModeWorktreePerAgent,
+		GitClone:        &api.GitCloneConfig{URL: linkedTestRemote},
+		ProjectPath:     dotScion,
+		Colocated:       true,
+		WorkstationMode: true,
+		RuntimeName:     "docker",
+	})
+	if got.Route {
+		t.Fatal("routed despite a repository root failure")
+	}
+	if !strings.HasPrefix(got.Refusal, linkedCheckoutErrPrefix) ||
+		!strings.Contains(got.Refusal, "git could not determine the repository root of the project's checkout at") {
+		t.Errorf("Refusal = %q, want the repository-root refusal", got.Refusal)
+	}
+	if strings.Contains(got.Refusal, "SECRET-GIT-OUTPUT") {
+		t.Errorf("Refusal %q contains git's error text", got.Refusal)
+	}
+}
+
+// TestIsHubManagedProjectPath covers the lexical check and the file
+// identity check (os.SameFile) that also recognises the projects directory
+// through a symlink or, on a case-insensitive filesystem, with different
+// letter case.
+func TestIsHubManagedProjectPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	projects := filepath.Join(home, ".scion", "projects")
+	if err := os.MkdirAll(filepath.Join(projects, "widgets"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(projects, alias); err != nil {
+		t.Fatal(err)
+	}
+	other := t.TempDir()
+	tests := map[string]struct {
+		path string
+		want bool
+	}{
+		"projects dir":                 {projects, true},
+		"project under it":             {filepath.Join(projects, "widgets"), true},
+		"missing project under it":     {filepath.Join(projects, "gone", ".scion"), true},
+		"via symlink":                  {filepath.Join(alias, "widgets"), true},
+		"missing project via symlink":  {filepath.Join(alias, "gone"), true},
+		"unrelated dir":                {other, false},
+		"sibling with a common prefix": {projects + "-x", false},
+		"global dir itself":            {filepath.Join(home, ".scion"), false},
+	}
+	for name, tc := range tests {
+		if got := isHubManagedProjectPath(tc.path); got != tc.want {
+			t.Errorf("%s: isHubManagedProjectPath(%q) = %v, want %v", name, tc.path, got, tc.want)
+		}
+	}
+
+	// Letter case: only meaningful on a case-insensitive filesystem.
+	upper := filepath.Join(home, ".scion", "PROJECTS", "widgets")
+	if _, err := os.Stat(upper); err != nil {
+		t.Log("filesystem is case-sensitive; skipping the letter-case check")
+		return
+	}
+	if !isHubManagedProjectPath(upper) {
+		t.Errorf("isHubManagedProjectPath(%q) = false on a case-insensitive filesystem, want true", upper)
+	}
+}
+
 func TestRedactRemoteForDisplay(t *testing.T) {
 	tests := map[string]string{
 		"https://github.com/acme/w.git":                     "https://github.com/acme/w.git",

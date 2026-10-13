@@ -31,6 +31,10 @@ import (
 // resolveLinkedCheckout.
 const linkedCheckoutErrPrefix = "cannot create a local worktree for this agent: "
 
+// linkedCheckoutRepoRoot resolves a checkout's repository root. A variable
+// so tests can make it fail.
+var linkedCheckoutRepoRoot = util.RepoRootDir
+
 // linkedCheckoutInput holds the dispatch fields resolveLinkedCheckout
 // decides on. Factored out for testability (no Server dependency).
 type linkedCheckoutInput struct {
@@ -140,14 +144,18 @@ func resolveLinkedCheckout(in linkedCheckoutInput) linkedCheckoutDecision {
 
 	// Resolve the project directory the way ProvisionAgent does, so the
 	// checkout verified here is the one its worktree case uses.
-	repoRoot := ""
-	if projectDir, err := config.GetResolvedProjectDir(in.ProjectPath); err == nil && util.IsGitRepoDir(projectDir) {
-		repoRoot, _ = util.RepoRootDir(projectDir)
-	}
-	if repoRoot == "" {
+	projectDir, err := config.GetResolvedProjectDir(in.ProjectPath)
+	if err != nil || !util.IsGitRepoDir(projectDir) {
 		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
 			"the project's local path " + in.ProjectPath + " is not in a git checkout; " +
 			"restore the checkout there, or run 'scion hub link' from the project's git checkout"}
+	}
+	repoRoot, err := linkedCheckoutRepoRoot(projectDir)
+	if err != nil || repoRoot == "" {
+		// git's own error text is not shown: it can carry arbitrary output.
+		return linkedCheckoutDecision{Refusal: linkedCheckoutErrPrefix +
+			"git could not determine the repository root of the project's checkout at " + projectDir +
+			"; check that git can read that repository (for example, its ownership and safe.directory setting)"}
 	}
 
 	// The remotes are compared normalised; they are shown with any
@@ -250,7 +258,11 @@ func redactRemoteForDisplay(raw string) string {
 
 // isHubManagedProjectPath reports whether projectPath is a hub-managed
 // project directory on this broker (~/.scion/projects/<slug> or below),
-// rather than a linked project's own path.
+// rather than a linked project's own path. Besides the lexical check, it
+// compares projectPath and each of its existing ancestors with the
+// projects directory by file identity (os.SameFile), so a path that names
+// that directory through a symlink, or with different letter case on a
+// case-insensitive filesystem (the macOS default), is recognised too.
 func isHubManagedProjectPath(projectPath string) bool {
 	globalDir, err := config.GetGlobalDir()
 	if err != nil {
@@ -258,5 +270,21 @@ func isHubManagedProjectPath(projectPath string) bool {
 	}
 	projectsDir := filepath.Join(globalDir, "projects")
 	clean := filepath.Clean(projectPath)
-	return clean == projectsDir || strings.HasPrefix(clean, projectsDir+string(filepath.Separator))
+	if clean == projectsDir || strings.HasPrefix(clean, projectsDir+string(filepath.Separator)) {
+		return true
+	}
+	projectsInfo, err := os.Stat(projectsDir)
+	if err != nil {
+		return false
+	}
+	for dir := clean; ; {
+		if info, err := os.Stat(dir); err == nil && os.SameFile(projectsInfo, info) {
+			return true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
 }
