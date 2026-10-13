@@ -99,3 +99,56 @@ func TestRecordLoginEndpoint_WritesToCommandOut(t *testing.T) {
 	assert.Equal(t, "Logged in to "+ctxTestHub+" (current hub, selected with 'scion use'); settings unchanged.\n", out.String())
 	assert.Empty(t, stdout)
 }
+
+// setupLoginLinkTest prepares a login whose hub comes from the link entry
+// of a linked directory project: a global settings file and a directory
+// project, neither with a hub endpoint, and a current hub that differs
+// from the linked one. It returns the two settings file paths.
+func setupLoginLinkTest(t *testing.T) (globalFile, projectFile string) {
+	t.Helper()
+	setupContextTest(t)
+	origHubURL := hubAuthHubURL
+	t.Cleanup(func() { hubAuthHubURL = origHubURL })
+	hubAuthHubURL = ""
+	writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
+	saveTestContext(t, ctxTestHub, ctxTestProjectID)
+	dotScion := makeLinkedDirProject(t, "")
+	saveLinkEntry(t, dotScion, linkEntryTestHub, "linked")
+	return filepath.Join(os.Getenv("HOME"), ".scion", "settings.yaml"), filepath.Join(dotScion, "settings.yaml")
+}
+
+// TestRecordLoginEndpoint_LinkEntryHubLeavesSettings: a login on the hub a
+// linked directory resolves to through its link entry stores no
+// hub.endpoint in any settings file and says so.
+func TestRecordLoginEndpoint_LinkEntryHubLeavesSettings(t *testing.T) {
+	globalFile, projectFile := setupLoginLinkTest(t)
+	globalBefore, projectBefore := readFileT(t, globalFile), readFileT(t, projectFile)
+
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+	require.Equal(t, targetSourceDirectory, hubSource)
+	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	require.Equal(t, linkEntryTestHub, hubURL)
+
+	out := captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
+	assert.Equal(t, "Logged in to "+linkEntryTestHub+" (the hub this directory is linked to); settings unchanged.\n", out)
+	assert.Equal(t, globalBefore, readFileT(t, globalFile), "global settings unchanged")
+	assert.Equal(t, projectBefore, readFileT(t, projectFile), "project settings unchanged")
+	assert.Empty(t, settingsEndpoint(t, filepath.Dir(globalFile)))
+	assert.Empty(t, settingsEndpoint(t, filepath.Dir(projectFile)))
+}
+
+// TestRecordLoginEndpoint_LinkEntryHubURLStillPersists: in a linked
+// directory, an explicit --hub-url is still saved as before; only the hub
+// from the link entry is kept out of settings.
+func TestRecordLoginEndpoint_LinkEntryHubURLStillPersists(t *testing.T) {
+	globalFile, projectFile := setupLoginLinkTest(t)
+	hubAuthHubURL = "https://other.example.com"
+
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "auth", "login"), ModeHuman))
+	hubURL := resolveHubAuthURL(hubAuthHubURL, hubEndpoint, os.Getenv, settingsHubEndpoint)
+	require.Equal(t, "https://other.example.com", hubURL)
+
+	_ = captureStdout(t, func() { recordLoginEndpoint(hubAuthLoginCmd, hubURL) })
+	saved := settingsEndpoint(t, filepath.Dir(globalFile)) + settingsEndpoint(t, filepath.Dir(projectFile))
+	assert.Equal(t, "https://other.example.com", saved, "the --hub-url endpoint is saved in one settings file")
+}
