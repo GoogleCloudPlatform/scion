@@ -57,6 +57,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          # Blobless partial clone: later steps need only commits and tags
+          # (git describe --tags, git rev-parse HEAD, and the go build VCS
+          # stamp), never file contents of older commits.
+          filter: blob:none
           persist-credentials: false
 
       - name: Set up Go
@@ -186,6 +190,10 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.ref }}
           fetch-depth: 0
+          # Blobless partial clone: no step reads history here (the go build
+          # VCS stamp needs only HEAD), so file contents of older commits are
+          # never needed.
+          filter: blob:none
           persist-credentials: false
 
       - name: Set up Go
