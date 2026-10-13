@@ -1152,10 +1152,10 @@ func headersCarry(hs []http.Header, s string) bool {
 	return false
 }
 
-// TestHubList_CheckSendsOnlyEntryTransport: 'hub list --check' reaches
-// hubs other than the effective one, so each of them gets only the
-// transport auth of its own entry, never the one from the environment; the
-// effective hub keeps the full chain.
+// TestHubList_CheckSendsOnlyEntryTransport: 'hub list --check' gives each
+// hub other than the effective one only its own entry's transport, never
+// the environment's; the effective hub keeps the environment's transport.
+// Every hub receives only its own login, or the dev token if loopback.
 func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
 	setupRegistryTest(t)
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
