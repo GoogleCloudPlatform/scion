@@ -291,7 +291,9 @@ afterEach(() => {
 
 describe('project thread groups — flag off', () => {
   it('keeps personal groups and never calls the thread-groups API', async () => {
-    hub.prefs['user-a'] = personalPrefs({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }] });
+    hub.prefs['user-a'] = personalPrefs({
+      [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }],
+    });
     hub.groups = [hubGroup('srv-x', 'Shared', ['t2'])];
 
     const el = await mountAs('user-a');
@@ -370,13 +372,18 @@ describe('project thread groups — flag on', () => {
 
   it('ignores an event whose group belongs to another project', async () => {
     const el = await mountAs('user-a');
-    el.applyThreadGroupEvent(P, 'created', { ...wire(hubGroup('srv-1', 'X', ['t1'])), projectId: 'p-z' });
+    el.applyThreadGroupEvent(P, 'created', {
+      ...wire(hubGroup('srv-1', 'X', ['t1'])),
+      projectId: 'p-z',
+    });
     await el.updateComplete;
     expect(groupsOf(el)).toEqual({});
   });
 
   it('drag-into-group persists on the hub, not in personal prefs', async () => {
-    const personalDoc = JSON.stringify({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }] });
+    const personalDoc = JSON.stringify({
+      [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }],
+    });
     hub.prefs['user-a'] = { ...personalPrefs({}), threadGroups: personalDoc };
     hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
     const el = await mountAs('user-a');
@@ -428,7 +435,10 @@ describe('project thread groups — flag on', () => {
     await settle(el);
 
     expect(threadGroupRequests()).toEqual(
-      expect.arrayContaining(['POST /api/v1/thread-groups', 'POST /api/v1/thread-groups/srv-1/threads'])
+      expect.arrayContaining([
+        'POST /api/v1/thread-groups',
+        'POST /api/v1/thread-groups/srv-1/threads',
+      ])
     );
     expect(hub.groups.map((g) => [g.name, g.threads.map((t) => t.threadId)])).toEqual([
       ['Release', ['t2']],

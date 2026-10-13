@@ -153,10 +153,7 @@ function parseProjectThreadGroup(raw: unknown): ProjectThreadGroup | null {
       if (typeof m.threadId !== 'string' || !m.threadId) continue;
       if (conversationIds.has(m.threadId)) continue;
       threadIds.push(m.threadId);
-      conversationIds.set(
-        m.threadId,
-        typeof m.conversationId === 'string' ? m.conversationId : ''
-      );
+      conversationIds.set(m.threadId, typeof m.conversationId === 'string' ? m.conversationId : '');
     }
   }
   return {
@@ -2832,9 +2829,12 @@ export class ScionChatSpaceRail extends LitElement {
   ): Promise<{ ok: boolean; seq: number; groups: ProjectThreadGroup[] }> {
     const seq = this._groupsMutationSeq.get(projectId) ?? 0;
     try {
-      const res = await apiFetch(`/api/v1/thread-groups?projectId=${encodeURIComponent(projectId)}`, {
-        signal,
-      });
+      const res = await apiFetch(
+        `/api/v1/thread-groups?projectId=${encodeURIComponent(projectId)}`,
+        {
+          signal,
+        }
+      );
       if (!res.ok) return { ok: false, seq, groups: [] };
       const data = (await res.json()) as { threadGroups?: unknown };
       const list = Array.isArray(data?.threadGroups) ? (data.threadGroups as unknown[]) : [];
@@ -3111,9 +3111,7 @@ export class ScionChatSpaceRail extends LitElement {
     // Only touch threadOrder for a space that already has its own snapshot
     // (see `hasExplicitOrder`), as with personal groups.
     if (this.hasExplicitOrder(projectId)) {
-      const order = [...(this.prefs.threadOrder?.[projectId] ?? [])].filter(
-        (id) => id !== groupId
-      );
+      const order = [...(this.prefs.threadOrder?.[projectId] ?? [])].filter((id) => id !== groupId);
       const idx = threadId ? order.indexOf(threadId) : -1;
       if (idx !== -1) {
         // The group takes the thread's place, and the thread leads it.
@@ -3140,7 +3138,9 @@ export class ScionChatSpaceRail extends LitElement {
       projectId,
       groups.map((g) => {
         const filtered = g.threadIds.filter((id) => id !== threadId);
-        return g.id === groupId ? { ...g, threadIds: [...filtered, threadId] } : { ...g, threadIds: filtered };
+        return g.id === groupId
+          ? { ...g, threadIds: [...filtered, threadId] }
+          : { ...g, threadIds: filtered };
       })
     );
     const res = await this.groupRequest(
@@ -3191,7 +3191,11 @@ export class ScionChatSpaceRail extends LitElement {
   }
 
   /** Rename a project group; a duplicate name (409) is reported and undone. */
-  private async renameProjectGroup(groupId: string, name: string, projectId: string): Promise<void> {
+  private async renameProjectGroup(
+    groupId: string,
+    name: string,
+    projectId: string
+  ): Promise<void> {
     const groups = this.projectGroups.get(projectId) ?? [];
     if (!groups.some((g) => g.id === groupId)) return;
     this.setProjectGroups(
