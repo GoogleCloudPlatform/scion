@@ -866,3 +866,53 @@ func TestPublicURLEnvName(t *testing.T) {
 		t.Errorf("FindUnmatchedSettingsEnv = %+v, want %+v", unmatched, want)
 	}
 }
+
+// TestLoadUnseededBootstrapKoanf_PublicURL checks that the unseeded
+// bootstrap merge leaves out the SCION_SEED_* layer and keeps the others:
+// a public URL supplied only as a seed value is absent from it, while
+// settings.yaml and SCION_SERVER_HUB_ENDPOINT still apply in their usual
+// order (ptone/scion#4826).
+func TestLoadUnseededBootstrapKoanf_PublicURL(t *testing.T) {
+	const seedURL, fileURL, envURL = "https://seed.example.com", "https://file.example.com", "https://env.example.com"
+	setup := func(t *testing.T, withFile bool) {
+		t.Helper()
+		tmpDir := t.TempDir()
+		t.Setenv("HOME", tmpDir)
+		t.Setenv("SCION_SERVER_HUB_ENDPOINT", "")
+		t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", seedURL)
+		if !withFile {
+			return
+		}
+		scionDir := filepath.Join(tmpDir, ".scion")
+		if err := os.MkdirAll(scionDir, 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		content := "schema_version: \"1\"\nserver:\n  hub:\n    public_url: " + fileURL + "\n"
+		if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(content), 0644); err != nil {
+			t.Fatalf("write settings.yaml: %v", err)
+		}
+	}
+
+	t.Run("seed only", func(t *testing.T) {
+		setup(t, false)
+		if got := LoadBootstrapKoanf().String(PublicURLKey); got != seedURL {
+			t.Errorf("full bootstrap %s = %q, want the seed value %q", PublicURLKey, got, seedURL)
+		}
+		if got := LoadUnseededBootstrapKoanfWithConfigPath("").String(PublicURLKey); got != "" {
+			t.Errorf("unseeded bootstrap %s = %q, want it unset", PublicURLKey, got)
+		}
+	})
+	t.Run("file over seed", func(t *testing.T) {
+		setup(t, true)
+		if got := LoadUnseededBootstrapKoanfWithConfigPath("").String(PublicURLKey); got != fileURL {
+			t.Errorf("unseeded bootstrap %s = %q, want the settings.yaml value %q", PublicURLKey, got, fileURL)
+		}
+	})
+	t.Run("env over file", func(t *testing.T) {
+		setup(t, true)
+		t.Setenv("SCION_SERVER_HUB_ENDPOINT", envURL)
+		if got := LoadUnseededBootstrapKoanfWithConfigPath("").String(PublicURLKey); got != envURL {
+			t.Errorf("unseeded bootstrap %s = %q, want the SCION_SERVER_HUB_ENDPOINT value %q", PublicURLKey, got, envURL)
+		}
+	})
+}

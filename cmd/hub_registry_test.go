@@ -17,17 +17,21 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -210,8 +214,9 @@ func TestHubList(t *testing.T) {
 	stdout, _, err = runScion(t, "hub", "list", "--check")
 	require.NoError(t, err)
 	assert.Contains(t, stdout, "REACHABLE")
-	assert.Regexp(t, `prod .* oauth \(alice@example.com\)\s+yes\n`, stdout)
-	assert.Regexp(t, `staging .* none\s+no\n`, stdout)
+	assert.Contains(t, stdout, "REACHABLE  VERIFIED")
+	assert.Regexp(t, `prod .* oauth \(alice@example.com\)\s+yes\s+-\n`, stdout, "no identity endpoint: not verified")
+	assert.Regexp(t, `staging .* none\s+no\s+-\n`, stdout)
 
 	stdout, _, err = runScion(t, "hub", "list", "--check", "--format", "json")
 	require.NoError(t, err)
@@ -936,4 +941,380 @@ func TestHubCommands_HandEditedContext(t *testing.T) {
 		require.ErrorIs(t, err, config.ErrCLIContextCorrupt)
 		assert.Contains(t, err.Error(), "cannot look up hub 'prod'")
 	})
+}
+
+// authCheckHub is a fake hub that answers health checks and accepts the
+// identity call only with the bearer token accept, rejecting any other with
+// 401. It records the Authorization header of each identity call.
+func authCheckHub(t *testing.T, accept string) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/api/v1/auth/me":
+			mu.Lock()
+			seen = append(seen, r.Header.Get("Authorization"))
+			mu.Unlock()
+			if r.Header.Get("Authorization") != "Bearer "+accept {
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]interface{}{"code": "unauthorized", "message": "invalid token"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "u1", "email": "alice@example.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), seen...)
+	}
+}
+
+// TestHubAuthFor_DevTokenOnlyOnLoopback: the dev token counts as a hub's
+// credential only for a loopback hub; any other hub has none.
+func TestHubAuthFor_DevTokenOnlyOnLoopback(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+
+	for _, endpoint := range []string{"http://127.0.0.1:8080", "http://localhost:8080", "http://[::1]:8080"} {
+		assert.Equal(t, "dev", hubAuthLabel(hubAuthFor(endpoint)), endpoint)
+	}
+	for _, endpoint := range []string{"https://hub.example.com", "http://192.0.2.1:8080"} {
+		info := hubAuthFor(endpoint)
+		assert.Equal(t, "none", hubAuthLabel(info), endpoint)
+		assert.Equal(t, "none", info.MethodType, endpoint)
+	}
+
+	// An OAuth login for a remote hub is still its credential.
+	storeTestLogin(t, "https://hub.example.com")
+	assert.Equal(t, "oauth (alice@example.com)", hubAuthLabel(hubAuthFor("https://hub.example.com")))
+}
+
+// TestHubAuthToken: 'hub list --check' sends a hub only its own login, or
+// the dev token when the hub is on a loopback address; never another token.
+func TestHubAuthToken(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	oauth := authInfo{MethodType: "oauth", OAuthCreds: &credentials.HubCredentials{AccessToken: "login-tok"}}
+	dev := authInfo{MethodType: "devauth", IsDevAuth: true}
+
+	assert.Equal(t, "login-tok", hubAuthToken("https://hub.example.com", oauth), "a hub's own login is sent")
+	assert.Equal(t, "scion_dev_test", hubAuthToken("http://127.0.0.1:8080", dev), "the dev token is sent to a loopback hub")
+	assert.Empty(t, hubAuthToken("https://hub.example.com", dev), "no dev token for a remote hub")
+	assert.Empty(t, hubAuthToken("http://127.0.0.1:8080", authInfo{MethodType: "bearer"}), "SCION_HUB_TOKEN is never sent")
+	assert.Empty(t, hubAuthToken("http://127.0.0.1:8080", authInfo{MethodType: "agent_token"}), "an agent token is never sent")
+	assert.Empty(t, hubAuthToken("http://127.0.0.1:8080", authInfo{MethodType: "none"}))
+}
+
+// TestHubList_CheckVerifiesAuth: --check asks each reachable hub whether
+// it accepts the CLI's credential for it, sending only that credential.
+func TestHubList_CheckVerifiesAuth(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	devOK, devOKSeen := authCheckHub(t, "scion_dev_test")
+	devBad, devBadSeen := authCheckHub(t, "scion_dev_other")
+	login, loginSeen := authCheckHub(t, "tok")
+	down := closedHubURL(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		require.NoError(t, c.AddHub("a-dev", devOK.URL))
+		require.NoError(t, c.AddHub("b-dev-rejected", devBad.URL))
+		require.NoError(t, c.AddHub("c-login", login.URL))
+		require.NoError(t, c.AddHub("d-down", down))
+		return nil
+	}))
+	storeTestLogin(t, login.URL)
+
+	stdout, _, err := runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Regexp(t, `a-dev .* dev\s+yes\s+yes\n`, stdout, "a loopback hub that accepts the dev token shows yes")
+	assert.Regexp(t, `b-dev-rejected .* dev\s+yes\s+no\n`, stdout, "a loopback hub that rejects the dev token shows no")
+	assert.Regexp(t, `c-login .* oauth \(alice@example.com\)\s+yes\s+yes\n`, stdout, "a hub with a login is verified with it")
+	assert.Regexp(t, `d-down .* dev\s+no\s+-\n`, stdout, "an unreachable hub is not verified")
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, devOKSeen())
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, devBadSeen())
+	assert.Equal(t, []string{"Bearer tok"}, loginSeen(), "a hub with a login gets only its login")
+
+	stdout, _, err = runScion(t, "hub", "list", "--check", "--format", "json")
+	require.NoError(t, err)
+	var rows []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &rows))
+	require.Len(t, rows, 4)
+	assert.Equal(t, true, rows[0]["verified"])
+	assert.Equal(t, false, rows[1]["verified"])
+	assert.Equal(t, true, rows[2]["verified"])
+	_, has := rows[3]["verified"]
+	assert.False(t, has, "verified is omitted when not checked")
+
+	// Without --check no identity call is made.
+	_, _, err = runScion(t, "hub", "list")
+	require.NoError(t, err)
+	assert.Len(t, devOKSeen(), 2, "only the two --check runs called the hub")
+}
+
+// TestHubList_CheckNeverSendsEnvToken: a token from the environment is not
+// tied to a hub, so --check does not send it and the hub is not verified.
+func TestHubList_CheckNeverSendsEnvToken(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_HUB_TOKEN", "env-token")
+	srv, seen := authCheckHub(t, "env-token")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("prod", srv.URL)
+	}))
+
+	stdout, _, err := runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Regexp(t, `prod .* env token\s+yes\s+-\n`, stdout)
+	assert.Empty(t, seen(), "no identity call with an env token")
+}
+
+// TestHubList_CheckRemoteHubGetsNoDevToken: a remote hub is never sent the
+// dev token, so --check shows it with no credential and does not verify it.
+func TestHubList_CheckRemoteHubGetsNoDevToken(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	origResponds, origAccepts := hubResponds, hubAccepts
+	t.Cleanup(func() { hubResponds, hubAccepts = origResponds, origAccepts })
+	hubResponds = func(string, bool) error { return nil }
+	var called []string
+	var mu sync.Mutex
+	hubAccepts = func(endpoint, token string, fanOut bool) (bool, bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		called = append(called, endpoint)
+		return true, true
+	}
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("remote", "https://hub.example.com")
+	}))
+
+	stdout, _, err := runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Regexp(t, `remote .* none\s+yes\s+-\n`, stdout)
+	assert.Empty(t, called, "no credential is sent to a remote hub")
+}
+
+// transportCheckHub is a fake hub that answers health checks and accepts
+// the identity call only with the bearer token accept. It records the path
+// and the headers of every request.
+func transportCheckHub(t *testing.T, accept string) (*httptest.Server, func() map[string][]http.Header) {
+	t.Helper()
+	var mu sync.Mutex
+	seen := map[string][]http.Header{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		seen[r.URL.Path] = append(seen[r.URL.Path], r.Header.Clone())
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.URL.Path == "/api/v1/auth/me" && r.Header.Get("Authorization") == "Bearer "+accept:
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "u1", "email": "alice@example.com"})
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"error": map[string]interface{}{"code": "unauthorized", "message": "invalid token"},
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv, func() map[string][]http.Header {
+		mu.Lock()
+		defer mu.Unlock()
+		out := map[string][]http.Header{}
+		for k, v := range seen {
+			out[k] = append([]http.Header(nil), v...)
+		}
+		return out
+	}
+}
+
+// headersCarry reports whether any of hs has a header value containing s.
+func headersCarry(hs []http.Header, s string) bool {
+	for _, h := range hs {
+		for _, values := range h {
+			for _, v := range values {
+				if strings.Contains(v, s) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// TestHubList_CheckSendsOnlyEntryTransport: 'hub list --check' gives each
+// hub other than the effective one only its own entry's transport, never
+// the environment's; the effective hub keeps the environment's transport.
+// Every hub receives only its own login, or the dev token if loopback.
+func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-tok")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", filepath.Join(t.TempDir(), "transport-token"))
+	t.Setenv("SCION_TRANSPORT_MODE", "iap")
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	var audiences []string
+	var mu sync.Mutex
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
+		mu.Lock()
+		audiences = append(audiences, audience)
+		mu.Unlock()
+		src := transportauth.NewInjectedSource()
+		src.SetToken("entry-transport-tok", time.Now().Add(time.Hour))
+		return src, nil
+	}
+	plain, plainSeen := transportCheckHub(t, "scion_dev_test")
+	guarded, guardedSeen := transportCheckHub(t, "scion_dev_test")
+	current, currentSeen := transportCheckHub(t, "scion_dev_test")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		for name, url := range map[string]string{"plain": plain.URL, "guarded": guarded.URL, "current": current.URL} {
+			if err := c.AddHub(name, url); err != nil {
+				return err
+			}
+		}
+		c.Hubs["guarded"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "entry-aud"}
+		c.CurrentHub = "current"
+		return nil
+	}))
+
+	stdout, _, err := runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Regexp(t, `guarded .* dev\s+yes\s+yes\n`, stdout)
+	assert.Regexp(t, `plain .* dev\s+yes\s+yes\n`, stdout)
+
+	p := plainSeen()
+	require.Len(t, p["/healthz"], 1)
+	require.Len(t, p["/api/v1/auth/me"], 1)
+	assert.False(t, headersCarry(p["/healthz"], "env-transport-tok"), "the health check never sends the environment's transport token")
+	assert.False(t, headersCarry(p["/api/v1/auth/me"], "env-transport-tok"), "the identity call never sends the environment's transport token")
+	assert.False(t, headersCarry(p["/healthz"], "entry-transport-tok"), "a hub without an entry transport gets none")
+
+	g := guardedSeen()
+	require.Len(t, g["/healthz"], 1)
+	require.Len(t, g["/api/v1/auth/me"], 1)
+	for _, h := range append(g["/healthz"], g["/api/v1/auth/me"]...) {
+		assert.Equal(t, "Bearer entry-transport-tok", h.Get("Proxy-Authorization"), "the entry's transport, in the entry's mode")
+	}
+	assert.False(t, headersCarry(append(g["/healthz"], g["/api/v1/auth/me"]...), "env-transport-tok"))
+
+	cur := currentSeen()
+	require.Len(t, cur["/api/v1/auth/me"], 1)
+	assert.True(t, headersCarry(append(cur["/healthz"], cur["/api/v1/auth/me"]...), "env-transport-tok"), "the effective hub keeps the environment's transport")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.NotEmpty(t, audiences)
+	for _, a := range audiences {
+		assert.Equal(t, "entry-aud", a)
+	}
+}
+
+// TestUseShow_DevTokenScope: bare 'scion use' applies the dev token rule of
+// 'hub list': a remote hub with only a dev token has no credential.
+func TestUseShow_DevTokenScope(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	saveTestContext(t, ctxTestHub, ctxTestProjectID)
+
+	stdout, _, err := runScion(t, "use")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Auth:     not logged in; run 'scion hub auth login --hub prod'\n", "remote hub, dev token only")
+	assert.NotContains(t, stdout, "Dev auth")
+
+	stdout, _, err = runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	var got struct {
+		Effective struct {
+			Auth map[string]interface{} `json:"auth"`
+		} `json:"effective"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
+	assert.Equal(t, map[string]interface{}{"method": "none"}, got.Effective.Auth)
+}
+
+// TestHubStatus_DevTokenScope: hub status applies the same dev token rule.
+// A hub that is not on a loopback name gets no dev token credential, so
+// its auth method is none and nothing is verified with it. The fake hub
+// listens on 127.0.0.2, which the CLI does not treat as loopback, and
+// would accept the dev token if it were sent for verification.
+func TestHubStatus_DevTokenScope(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is not available here: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "u1", "email": "dev@example.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	saveTestContext(t, srv.URL, ctxTestProjectID)
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = "" })
+
+	out := runHubStatusForTest(t)
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, "none", got["authMethod"], "a non-loopback hub gets no dev token credential")
+	assert.Equal(t, false, got["isDevAuth"])
+	_, verified := got["authVerified"]
+	assert.False(t, verified, "no credential, so nothing is verified")
+}
+
+// TestScopeDevAuth_KeepsTransportAuth: for a remote hub, a dev token is
+// replaced by what the CLI has without it: transport (proxy) auth when it
+// is active, otherwise no credential. A loopback hub keeps the dev token.
+func TestScopeDevAuth_KeepsTransportAuth(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	for _, name := range []string{"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_MODE", "SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE"} {
+		t.Setenv(name, "")
+	}
+	dev := authInfo{Method: "Dev auth", MethodType: "devauth", Source: "SCION_DEV_TOKEN env var", IsDevAuth: true}
+
+	assert.Equal(t, "none", scopeDevAuth(dev, "https://hub.example.com").MethodType, "no transport auth: no credential")
+	assert.Equal(t, dev, scopeDevAuth(dev, "http://127.0.0.1:8080"), "a loopback hub keeps the dev token")
+
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-tok")
+	t.Setenv("SCION_TRANSPORT_TOKEN_FILE", filepath.Join(t.TempDir(), "transport-token"))
+	got := scopeDevAuth(dev, "https://hub.example.com")
+	assert.Equal(t, "proxy-auth", got.MethodType, "a stale dev token does not hide transport auth")
+	assert.False(t, got.IsDevAuth)
+	assert.Equal(t, "devauth", getAuthInfo(&config.Settings{}, "https://hub.example.com").MethodType, "getAuthInfo checks the dev token before transport auth")
+}
+
+// TestUse_HubLoginHintDevTokenScope: 'scion use --hub' prints the login
+// hint for a remote hub with only a dev token, as 'hub add' does.
+func TestUse_HubLoginHintDevTokenScope(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", "https://staging.example.com")
+	}))
+
+	stdout, _, err := runScion(t, "use", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Not logged in to hub 'staging'. Run: scion hub auth login --hub staging\n", "remote hub, dev token only")
 }

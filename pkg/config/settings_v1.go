@@ -33,6 +33,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -2495,6 +2496,10 @@ type V1TelemetryTLSConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty" koanf:"insecure_skip_verify"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// CertFile and KeyFile are paths, inside the agent container, to a
+	// PEM-encoded client certificate and key for OTLP mTLS. Set both or neither.
+	CertFile string `json:"cert_file,omitempty" yaml:"cert_file,omitempty" koanf:"cert_file"`
+	KeyFile  string `json:"key_file,omitempty" yaml:"key_file,omitempty" koanf:"key_file"`
 }
 
 // V1TelemetryBatchConfig holds batch export settings.
@@ -2812,6 +2817,8 @@ type HarnessConfigEntry struct {
 	InterruptKey      string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
 	InterruptSequence []string                         `json:"interrupt_sequence,omitempty" yaml:"interrupt_sequence,omitempty" koanf:"interrupt_sequence"`
 	InterruptSignal   string                           `json:"interrupt_signal,omitempty" yaml:"interrupt_signal,omitempty" koanf:"interrupt_signal"`
+	Ready             *HarnessReadyConfig              `json:"ready,omitempty" yaml:"ready,omitempty" koanf:"ready"`
+	Delivery          *HarnessDeliveryConfig           `json:"delivery,omitempty" yaml:"delivery,omitempty" koanf:"delivery"`
 	InstructionsFile  string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
 	SystemPromptFile  string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
 	SystemPromptMode  string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
@@ -2867,6 +2874,306 @@ func (t *HarnessThinkingConfig) Validate() error {
 		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
 	}
 	return nil
+}
+
+// Ready strategies for HarnessReadyConfig.Strategy.
+const (
+	// ReadyStrategyHook means the harness is ready once the ready marker for
+	// the current run is written (by a session-start hook) plus the settle.
+	ReadyStrategyHook = "hook"
+	// ReadyStrategyDelay means the harness is ready once its tmux session has
+	// existed for the settle period.
+	ReadyStrategyDelay = "delay"
+)
+
+// Ready and delivery defaults and limits. The ready defaults equal the
+// runtime's current readiness constants (state.ReadySettleSession,
+// state.ReadyDeadline and the host's post-marker settle); a test in
+// pkg/agent pins them together. The delivery defaults reproduce the
+// historical hard-coded delivery: Enter, then two more Enters 300ms apart.
+const (
+	defaultReadySettleDelay   = 8 * time.Second
+	defaultReadySettleHook    = 1500 * time.Millisecond
+	defaultReadyTimeout       = 90 * time.Second
+	maxReadySettle            = 60 * time.Second
+	minReadyTimeout           = 10 * time.Second
+	maxReadyTimeout           = 10 * time.Minute
+	defaultDeliverySubmitKey  = "Enter"
+	defaultDeliveryExtras     = 2
+	defaultDeliveryExtraDelay = 300 * time.Millisecond
+	maxDeliverySubmitKeys     = 4
+	maxDeliverySubmitKeyBytes = 32
+	maxDeliveryExtraSubmits   = 5
+	maxDeliveryExtraDelay     = 5 * time.Second
+)
+
+// ReadySpec and DeliverySpec are the resolved, defaults-applied forms of the
+// ready and delivery blocks. They are defined in pkg/api so api.Harness can
+// return them without an import cycle.
+type ReadySpec = api.ReadySpec
+
+type DeliverySpec = api.DeliverySpec
+
+// HarnessReadyConfig declares how a harness's readiness for a pasted message
+// is decided. The rule is: ready = signal time + settle. Durations are Go
+// duration strings. All fields are optional; see ResolvedReady for defaults.
+type HarnessReadyConfig struct {
+	// Strategy is "hook" or "delay" (the default).
+	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty" koanf:"strategy"`
+	// Settle is the wait after the signal, 0 to 60s. Defaults to 8s for
+	// delay and 1.5s for hook.
+	Settle string `json:"settle,omitempty" yaml:"settle,omitempty" koanf:"settle"`
+	// Timeout is the deadline from launch for the hook strategy, 10s to
+	// 10m, default 90s. It is rejected for the delay strategy.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+}
+
+// HarnessDeliveryConfig declares how a message is submitted after it is
+// pasted into the harness's terminal. All fields are optional; see
+// ResolvedDelivery for defaults.
+type HarnessDeliveryConfig struct {
+	// SubmitKeys are tmux key names sent after the paste, one send-keys call
+	// each. 1 to 4 entries; default [Enter].
+	SubmitKeys []string `json:"submit_keys,omitempty" yaml:"submit_keys,omitempty" koanf:"submit_keys"`
+	// ExtraSubmits is how many more times SubmitKeys is sent after the first
+	// submit, 0 to 5, default 2. A pointer so an explicit 0 differs from
+	// unset.
+	ExtraSubmits *int `json:"extra_submits,omitempty" yaml:"extra_submits,omitempty" koanf:"extra_submits"`
+	// ExtraSubmitDelay is the wait before each extra submit, 0 to 5s,
+	// default 300ms.
+	ExtraSubmitDelay string `json:"extra_submit_delay,omitempty" yaml:"extra_submit_delay,omitempty" koanf:"extra_submit_delay"`
+}
+
+// DefaultReadySpec returns the ready spec used for strategy when no value is
+// configured. An unknown strategy gets the delay defaults.
+func DefaultReadySpec(strategy string) ReadySpec {
+	if strategy == ReadyStrategyHook {
+		return ReadySpec{Strategy: ReadyStrategyHook, Settle: defaultReadySettleHook, Timeout: defaultReadyTimeout}
+	}
+	return ReadySpec{Strategy: ReadyStrategyDelay, Settle: defaultReadySettleDelay}
+}
+
+// DefaultDeliverySpec returns the delivery spec used when no value is
+// configured. Each call returns a fresh SubmitKeys slice.
+func DefaultDeliverySpec() DeliverySpec {
+	return DeliverySpec{
+		SubmitKeys:       []string{defaultDeliverySubmitKey},
+		ExtraSubmits:     defaultDeliveryExtras,
+		ExtraSubmitDelay: defaultDeliveryExtraDelay,
+	}
+}
+
+// parseBoundedDuration parses a Go duration string and checks it lies in
+// [lo, hi].
+func parseBoundedDuration(field, value string, lo, hi time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", field, value, err)
+	}
+	if d < lo || d > hi {
+		return 0, fmt.Errorf("%s must be between %s and %s, got %s", field, lo, hi, value)
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) strategy() (string, error) {
+	switch r.Strategy {
+	case "":
+		return ReadyStrategyDelay, nil
+	case ReadyStrategyHook, ReadyStrategyDelay:
+		return r.Strategy, nil
+	}
+	return ReadyStrategyDelay, fmt.Errorf("ready.strategy must be %q or %q, got %q", ReadyStrategyHook, ReadyStrategyDelay, r.Strategy)
+}
+
+func (r *HarnessReadyConfig) settle(strategy string) (time.Duration, error) {
+	if r.Settle == "" {
+		return DefaultReadySpec(strategy).Settle, nil
+	}
+	d, err := parseBoundedDuration("ready.settle", r.Settle, 0, maxReadySettle)
+	if err != nil {
+		return DefaultReadySpec(strategy).Settle, err
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) timeout(strategy string) (time.Duration, error) {
+	def := DefaultReadySpec(strategy).Timeout
+	if r.Timeout == "" {
+		return def, nil
+	}
+	if strategy == ReadyStrategyDelay {
+		return def, fmt.Errorf("ready.timeout is not allowed with strategy %q", ReadyStrategyDelay)
+	}
+	d, err := parseBoundedDuration("ready.timeout", r.Timeout, minReadyTimeout, maxReadyTimeout)
+	if err != nil {
+		return def, err
+	}
+	return d, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: duration ranges
+// and that timeout is not set for the delay strategy. A nil block is valid.
+func (r *HarnessReadyConfig) Validate() error {
+	if r == nil {
+		return nil
+	}
+	strategy, err := r.strategy()
+	if err != nil {
+		return err
+	}
+	if _, err := r.settle(strategy); err != nil {
+		return err
+	}
+	if _, err := r.timeout(strategy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) submitKeys() ([]string, error) {
+	if len(d.SubmitKeys) == 0 {
+		return DefaultDeliverySpec().SubmitKeys, nil
+	}
+	if len(d.SubmitKeys) > maxDeliverySubmitKeys {
+		return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys must have 1 to %d entries, got %d", maxDeliverySubmitKeys, len(d.SubmitKeys))
+	}
+	for i, key := range d.SubmitKeys {
+		if err := validateSubmitKey(key); err != nil {
+			return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys[%d]: %w", i, err)
+		}
+	}
+	return slices.Clone(d.SubmitKeys), nil
+}
+
+// validateSubmitKey checks one tmux key name: 1 to 32 bytes with no
+// whitespace or control characters, no leading "-" and no trailing ";", so it
+// is passed to send-keys as exactly one key. tmux would parse a leading "-"
+// as a send-keys option, and it strips a trailing ";" from an argument and
+// treats it as a command separator, so the key would be cut short or lost.
+func validateSubmitKey(key string) error {
+	if key == "" || len(key) > maxDeliverySubmitKeyBytes {
+		return fmt.Errorf("key must be 1 to %d bytes, got %d", maxDeliverySubmitKeyBytes, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		return fmt.Errorf("key %q must not start with \"-\"", key)
+	}
+	if strings.HasSuffix(key, ";") {
+		return fmt.Errorf("key %q must not end with \";\"", key)
+	}
+	for _, r := range key {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("key %q must not contain whitespace or control characters", key)
+		}
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmits() (int, error) {
+	if d.ExtraSubmits == nil {
+		return defaultDeliveryExtras, nil
+	}
+	if n := *d.ExtraSubmits; n < 0 || n > maxDeliveryExtraSubmits {
+		return defaultDeliveryExtras, fmt.Errorf("delivery.extra_submits must be between 0 and %d, got %d", maxDeliveryExtraSubmits, n)
+	}
+	return *d.ExtraSubmits, nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmitDelay() (time.Duration, error) {
+	if d.ExtraSubmitDelay == "" {
+		return defaultDeliveryExtraDelay, nil
+	}
+	v, err := parseBoundedDuration("delivery.extra_submit_delay", d.ExtraSubmitDelay, 0, maxDeliveryExtraDelay)
+	if err != nil {
+		return defaultDeliveryExtraDelay, err
+	}
+	return v, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: key contents and
+// duration ranges. A nil block is valid. On load paths the schema runs first
+// and is the stricter gate for an empty submit_keys list and for a bare "0"
+// duration, both of which Validate treats as acceptable. Validate is the
+// stricter gate for key length, which it counts in bytes where the schema
+// counts code points, and for non-ASCII whitespace and control characters,
+// which the schema's ASCII-only character classes let through.
+func (d *HarnessDeliveryConfig) Validate() error {
+	if d == nil {
+		return nil
+	}
+	if _, err := d.submitKeys(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmits(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmitDelay(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// resolveWarned records which invalid harness-config fields have already been
+// logged by ResolvedReady and ResolvedDelivery, so each is warned once per
+// process.
+var resolveWarned sync.Map
+
+func warnResolveFallback(harness string, err error) {
+	key := harness + "\x00" + err.Error()
+	if _, loaded := resolveWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("Invalid harness-config value; using the default", "harness", harness, "error", err)
+}
+
+// ResolvedReady returns the ready spec with defaults applied. It never fails:
+// a field that is invalid (for example from a path that skips Validate) falls
+// back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedReady() ReadySpec {
+	if e == nil || e.Ready == nil {
+		return DefaultReadySpec(ReadyStrategyDelay)
+	}
+	r := e.Ready
+	strategy, strategyErr := r.strategy()
+	if strategyErr != nil {
+		warnResolveFallback(e.Harness, strategyErr)
+	}
+	spec := DefaultReadySpec(strategy)
+	var err error
+	if spec.Settle, err = r.settle(strategy); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	// After a strategy fallback the timeout check would describe a strategy
+	// the author never wrote, so keep the fallback's default timeout and rely
+	// on the strategy warning alone.
+	if strategyErr == nil {
+		if spec.Timeout, err = r.timeout(strategy); err != nil {
+			warnResolveFallback(e.Harness, err)
+		}
+	}
+	return spec
+}
+
+// ResolvedDelivery returns the delivery spec with defaults applied. It never
+// fails: a field that is invalid (for example from a path that skips
+// Validate) falls back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedDelivery() DeliverySpec {
+	if e == nil || e.Delivery == nil {
+		return DefaultDeliverySpec()
+	}
+	d := e.Delivery
+	var spec DeliverySpec
+	var err error
+	if spec.SubmitKeys, err = d.submitKeys(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmits, err = d.extraSubmits(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmitDelay, err = d.extraSubmitDelay(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	return spec
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -3137,13 +3444,26 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		tls := settings.Telemetry.Cloud.TLS
-		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
-			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		if err := validateTelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
 		}
 	}
 
 	return settings, nil
+}
+
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
+// plaintext together with verification or client certificate options, and
+// a client certificate without its key (or the reverse).
+func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
+	clientCert := tls.CertFile != "" || tls.KeyFile != ""
+	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
+		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
+	}
+	if (tls.CertFile == "") != (tls.KeyFile == "") {
+		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
+	}
+	return nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3599,6 +3919,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
 //	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
+//	"cert_file" -> "telemetry.cloud.tls.cert_file"
+//	"key_file" -> "telemetry.cloud.tls.key_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
 	case "endpoint":
@@ -3613,6 +3935,10 @@ func mapOtelEnvKey(key string) string {
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"
+	case "cert_file":
+		return "telemetry.cloud.tls.cert_file"
+	case "key_file":
+		return "telemetry.cloud.tls.key_file"
 	default:
 		return "telemetry.cloud." + key
 	}
