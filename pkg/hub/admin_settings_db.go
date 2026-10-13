@@ -875,7 +875,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
-	// An echo of the public URL in effect is not stored either, so a
+	// An echo of the public URL GET shows is not stored either, so a
 	// bootstrap value never becomes a saved value (ptone/scion#3905).
 	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
 		echoedRunning[config.PublicURLKey] = true
@@ -1402,6 +1402,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			beforeDocs[secName] = doc
 		}
 	}
+	// The saved public URL before the write, for the report below.
+	publicURLSavedBefore := storedManagedPublicURL(ops)
 
 	applied := make(map[string]int64)
 	var unchanged []string // sections whose write was skipped (unchangedManagedRow)
@@ -1516,13 +1518,15 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	for sec := range written {
 		writtenDocs[sec] = sectionDocs[sec]
 	}
-	// A row without public_url leaves the bootstrap value in effect, so the
-	// report compares that value, not its absence (ptone/scion#3905).
-	if doc, ok := beforeDocs["endpoints"]; ok {
-		beforeDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
-	}
+	// Without a saved public URL the operator endpoint is in effect, so the
+	// report compares that value, not the absence of a saved one; a seeded
+	// row's public_url is not a saved value (ptone/scion#3905,
+	// ptone/scion#4826). Written endpoints docs are managed rows.
+	operatorEndpoint := s.HubEndpoints().Operator
 	if doc, ok := writtenDocs["endpoints"]; ok {
-		writtenDocs["endpoints"] = publicURLInEffectDoc(ops, doc)
+		before := beforeDocs["endpoints"]
+		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
+		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
 	}
 	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
 

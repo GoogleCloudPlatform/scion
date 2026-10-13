@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -314,7 +315,7 @@ func ResolveHubIDFromEnv() string {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
-		if kService := os.Getenv("K_SERVICE"); kService != "" {
+		if kService := cloudrunenv.ServiceName(); kService != "" {
 			slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
 				"k_service", kService)
 			h := sha256.Sum256([]byte(kService))
@@ -353,7 +354,7 @@ func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
 		return v, true
 	}
-	if kService := os.Getenv("K_SERVICE"); kService != "" {
+	if kService := cloudrunenv.ServiceName(); kService != "" {
 		h := sha256.Sum256([]byte(kService))
 		return hex.EncodeToString(h[:6]), true
 	}
@@ -584,6 +585,8 @@ type RuntimeTargetConfig struct {
 	// See V1RuntimeTargetConfig.
 	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -1538,6 +1541,8 @@ var snakeCaseFields = map[string]string{
 	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
+	"certfile":                   "cert_file",
+	"keyfile":                    "key_file",
 	"defaultharnessconfig":       "default_harness_config",
 	"defaultmaxduration":         "default_max_duration",
 	"defaultuserrole":            "default_user_role",
@@ -1901,6 +1906,22 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, true)
+}
+
+// LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
+// without the SCION_SEED_* layer: coded defaults, settings.yaml (and the
+// --config location) and SCION_SERVER_*. These are the layers the hub's
+// endpoint resolution at startup reads; it ignores seed values, so the admin
+// view takes the public URL it shows when none is saved from this merge
+// (ptone/scion#4826).
+func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false)
+}
+
+// loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
+// layer when withSeed is true.
+func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
@@ -1935,8 +1956,10 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	}
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
-	seedK := LoadSeedEnvKoanf()
-	_ = k.Merge(seedK)
+	if withSeed {
+		seedK := LoadSeedEnvKoanf()
+		_ = k.Merge(seedK)
+	}
 
 	// 3. settings.yaml (+ legacy server.yaml).
 	globalDir, err := GetGlobalDir()

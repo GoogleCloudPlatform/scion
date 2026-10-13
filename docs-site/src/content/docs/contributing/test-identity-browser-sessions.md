@@ -17,7 +17,7 @@ The routes are described in the [API reference](/scion/reference/api/) under `/a
 
 Browser sessions for test identities are available only on a test hub that has both of these:
 
-- **Test identities enabled at the member level**: the hub starts with `--enable-test-identities`.
+- **Test identities enabled at the member level**: the hub starts with `--test-mode=member:<hub-id>` (or `admin:<hub-id>`), which itself requires `server.hub.class: test` and the marker below (see "Test mode (operators)" in the [API reference](/scion/reference/api/)).
 - **The test infrastructure marker** in its database, written with `scion server test-infra mark --hub-id <hub-id>` before the hub starts. Marking generates a hub-local key that only these sessions use. Unmarking or marking again replaces the key, which ends every test identity browser session.
 
 There is no separate switch for web sessions. When either requirement is missing, minting a code answers `404` with `details.reason: test_identity_web_sessions_unavailable`, and the member tier keeps working without web sessions. Hubs behind proxy auth (for example IAP) also need at least one driver principal; see [IAP-fronted hubs](#iap-fronted-hubs).

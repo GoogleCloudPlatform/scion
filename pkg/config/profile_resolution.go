@@ -16,9 +16,10 @@ package config
 
 import "context"
 
-// ProfileResolutionMode selects how a request resolves Runtime Broker
-// Profiles from settings (.design/flat-runtime-brokers-contract.md section
-// 10). It is carried per request on the context.
+// ProfileResolutionMode is how a request resolves Runtime Broker Profiles
+// from settings (.design/flat-runtime-brokers-contract.md section 10). It is
+// derived from the request's context: a request that carries a
+// FlatInstancePolicy is a flat instance request (ProfileResolutionFrom).
 type ProfileResolutionMode int
 
 const (
@@ -28,35 +29,30 @@ const (
 	ProfileResolutionLegacy ProfileResolutionMode = iota
 	// ProfileResolutionFlatInstance is resolution for a flat Runtime Broker
 	// instance: the profile tier is skipped entirely, including the
-	// active_profile fallback. Non-profile defaults (global settings,
-	// harness configs, templates, the request) still apply.
+	// active_profile fallback, and the instance's own policy takes the
+	// profile tier's rung (ForFlatInstance). Non-profile defaults (global
+	// settings, harness configs, templates, the request) still apply.
 	ProfileResolutionFlatInstance
 )
 
-type profileResolutionKey struct{}
-
-// WithProfileResolution returns ctx carrying mode.
-func WithProfileResolution(ctx context.Context, mode ProfileResolutionMode) context.Context {
-	return context.WithValue(ctx, profileResolutionKey{}, mode)
-}
-
-// ProfileResolutionFrom returns the mode ctx carries (legacy when none).
+// ProfileResolutionFrom returns the mode ctx carries: flat instance exactly
+// when ctx carries a FlatInstancePolicy (WithFlatInstancePolicy), legacy
+// otherwise.
 func ProfileResolutionFrom(ctx context.Context) ProfileResolutionMode {
-	if ctx == nil {
-		return ProfileResolutionLegacy
-	}
-	if m, ok := ctx.Value(profileResolutionKey{}).(ProfileResolutionMode); ok {
-		return m
+	if FlatInstancePolicyFrom(ctx) != nil {
+		return ProfileResolutionFlatInstance
 	}
 	return ProfileResolutionLegacy
 }
 
-// ForProfileResolution returns the settings view a request in mode reads.
-// Legacy mode returns vs itself. Flat instance mode returns a shallow copy
-// with no active profile and no profiles, so every profile-tier lookup
-// (including the active_profile fallback of the VersionedSettings
-// resolvers) finds nothing, while every other setting is shared unchanged.
-// vs and its maps are never modified.
+// ForProfileResolution returns the policy-less settings view of mode, for a
+// caller that knows a request is flat but cannot see the instance's local
+// policy (the Hub's reincarnation planning). Legacy mode returns vs itself.
+// Flat instance mode returns a shallow copy with no active profile and no
+// profiles, so every profile-tier lookup (including the active_profile
+// fallback of the VersionedSettings resolvers) finds nothing, while every
+// other setting is shared unchanged. vs and its maps are never modified.
+// A Runtime Broker serving a flat instance uses ForFlatInstance instead.
 func (vs *VersionedSettings) ForProfileResolution(mode ProfileResolutionMode) *VersionedSettings {
 	if vs == nil || mode != ProfileResolutionFlatInstance {
 		return vs
@@ -68,15 +64,16 @@ func (vs *VersionedSettings) ForProfileResolution(mode ProfileResolutionMode) *V
 }
 
 // LoadEffectiveSettingsFor is LoadEffectiveSettings returning the settings
-// view for the request's profile resolution mode (see ForProfileResolution).
+// view of the request: the flat instance view when ctx carries a
+// FlatInstancePolicy (see ForFlatInstance), the loaded settings otherwise.
 func LoadEffectiveSettingsFor(ctx context.Context, projectPath string) (*VersionedSettings, []string, error) {
 	vs, warnings, err := LoadEffectiveSettings(projectPath)
-	return vs.ForProfileResolution(ProfileResolutionFrom(ctx)), warnings, err
+	return vs.ForFlatInstance(FlatInstancePolicyFrom(ctx)), warnings, err
 }
 
 // LoadGlobalSettingsWithOverlayFor is LoadGlobalSettingsWithOverlay returning
-// the settings view for the request's profile resolution mode.
+// the settings view of the request (see LoadEffectiveSettingsFor).
 func LoadGlobalSettingsWithOverlayFor(ctx context.Context) (*VersionedSettings, []string, error) {
 	vs, warnings, err := LoadGlobalSettingsWithOverlay()
-	return vs.ForProfileResolution(ProfileResolutionFrom(ctx)), warnings, err
+	return vs.ForFlatInstance(FlatInstancePolicyFrom(ctx)), warnings, err
 }
