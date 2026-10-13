@@ -101,7 +101,7 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
 
 A pin is the agent's explicit timezone. It is set in three ways:
 
-- **At create.** A `TZ` value in the create request's `config.env`, in a Hub-resolved template, or in the Hub harness config becomes the pin.
+- **At create.** A `TZ` value in the create request's `config.env` or in the Hub harness config becomes the pin. A template's `TZ` does not: template env is a fallback that never sets the hub-only `TZ` key.
 - **Later, by API.** `PATCH /api/v1/agents/:id` with `explicitTimezone`:
   - an IANA name pins the agent; an invalid name, or `Local`, returns `400`;
   - `""` unpins it, and the agent follows steps 2-5 from then on.
@@ -117,7 +117,7 @@ An agent created by an older Hub may have a `TZ` saved in its applied config env
 
 - a pin, including a `legacy` pin, is carried to the new agent;
 - an unpin is carried too, so a create-time `TZ` does not come back;
-- an agent with neither re-derives its pin from its original create inputs and the current template.
+- an agent with neither re-derives its pin from its original create inputs.
 
 ## Cron schedules are UTC only
 

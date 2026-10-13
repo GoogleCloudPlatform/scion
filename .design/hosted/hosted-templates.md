@@ -169,7 +169,7 @@ grove:{groveId}:custom # Template from a specific grove
 
 ### 4.1. Template Record (Hub Database)
 
-> **Superseded:** the writable `config` field (default agent configuration) below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files (`scion-agent.yaml` / `.json`); for agent config, the hub row keeps only fields derived from those files. The original text is kept for history.
+> **Superseded:** the writable `config` field (default agent configuration) below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files (`scion-agent.yaml` / `.json`); for agent config, the hub row keeps only fields derived from those files. In those files, `env` is a lowest-precedence fallback for the job's own tools (never a default that beats settings), and environment keys (`image`, `telemetry`, `resources`, `volumes`, `kubernetes`, `hub`) are ignored. The original text is kept for history.
 
 ```json
 {
@@ -312,7 +312,7 @@ GET /api/v1/templates/{templateId}
 
 #### Create Template
 
-> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field will be removed (ptone/scion#4223), after which the API answers `400` with a pointer to `scion-agent.yaml`; until then the field remains as described below. The original text is kept for history.
+> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field is removed (ptone/scion#4223): a body carrying `config` answers `400` `template_config_in_file`, and one carrying `image` answers `400` `template_image_not_supported`; `PUT` is metadata-only. The original text is kept for history.
 
 ```
 POST /api/v1/templates
@@ -413,7 +413,7 @@ Hub verifies uploaded files match manifest, computes contentHash, and marks temp
 
 #### Update Template
 
-> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field will be removed (ptone/scion#4223), after which the API answers `400` with a pointer to `scion-agent.yaml`; until then the field remains as described below. The original text is kept for history.
+> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field is removed (ptone/scion#4223): a body carrying `config` answers `400` `template_config_in_file`, and one carrying `image` answers `400` `template_image_not_supported`; `PUT` is metadata-only. The original text is kept for history.
 
 ```
 PUT /api/v1/templates/{templateId}

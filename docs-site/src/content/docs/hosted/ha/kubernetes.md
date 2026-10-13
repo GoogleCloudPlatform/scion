@@ -52,7 +52,7 @@ The Runtime Broker's heartbeat lists agents on each runtime with its own deadlin
 
 ### Agent-Level Kubernetes Configuration
 
-Per-agent or per-template Kubernetes settings in `~/.scion/settings.yaml`:
+Per-agent Kubernetes settings, in the `kubernetes:` block of an agent's inline config (`--config` or the create request). A template's `kubernetes:` block is ignored with a warning: Kubernetes settings are part of the agent's environment, which comes from settings and profiles.
 
 ```yaml
 kubernetes:
@@ -64,9 +64,7 @@ kubernetes:
                                         # identity mode "assign": a value set
                                         # here directly on the create/start
                                         # request is rejected if it names a
-                                        # different KSA than the mapping; a
-                                        # template-only value is silently
-                                        # overridden by the mapping instead.
+                                        # different KSA than the mapping.
   runtimeClassName: gvisor             # sandboxed runtime (gVisor, Kata, etc.)
   priorityClassName: scion-agent-priority  # overrides the runtime-level default, if any
   safeToEvict: false                   # ask the autoscaler not to evict the pod (see below)
@@ -97,13 +95,13 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
 
-1. The agent's or template's `kubernetes:` block.
+1. The `kubernetes:` block of the agent's inline config.
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
 If none of them sets a key, the cluster's default StorageClass and `10Gi` are used.
 
-An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, a template cannot reset it to the cluster default; name the class explicitly instead.
+An empty value means "not set", so it does not override a lower source. Once a runtime entry or profile sets a class, an agent cannot reset it to the cluster default; name the class explicitly instead.
 
 `shared_dir_size` must be a positive Kubernetes quantity such as `10Gi` or `1Ti`. Settings validation and the admin settings API reject other values, and an agent start fails with an error naming the key that holds the bad value.
 
@@ -127,7 +125,7 @@ profiles:
     # shared_dir_storage_class: premium-rwx
 ```
 
-A template or agent can still override this for itself:
+An agent's inline config can still override this for that agent:
 
 ```yaml
 kubernetes:
@@ -200,7 +198,7 @@ A variable is set only when its limit is set, either in `resources.limits` or in
 
 Setting `GOMAXPROCS` turns off the Go 1.25+ default, which reads the cgroup CPU limit and follows changes to it (for example after an in-place pod resize). In return, images with older Go toolchains also get a value that matches the pod.
 
-A value set in the template or agent `env` always wins, and each variable is checked separately. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
+A value set in the agent's env (request env, settings or hub env) always wins, and each variable is checked separately. Template `env:` is a fallback applied after these derived values, so a template cannot replace them. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
 
 ```yaml
 env:
@@ -266,7 +264,7 @@ globalDefault: false
 description: "Priority class for Scion agent pods"
 ```
 
-Then reference it by name, either as a runtime-level default or per template/agent (the per-template value wins if both are set):
+Then reference it by name, either as a runtime-level default or per agent, in the agent's inline config (the per-agent value wins if both are set):
 
 ```yaml
 runtimes:
@@ -324,7 +322,7 @@ metadata:
 
 The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
 
-You can set it on a runtime, on a profile, or on a template or agent:
+You can set it on a runtime, on a profile, or in an agent's inline config:
 
 ```yaml
 # settings.yaml — runtime default
@@ -343,18 +341,18 @@ profiles:
 ```
 
 ```yaml
-# template or agent scion-agent.yaml — overrides profile and runtime
+# agent inline config (--config) — overrides profile and runtime
 kubernetes:
   safeToEvict: false
 ```
 
 Scion uses the first value it finds, in this order:
 
-1. The template or agent `kubernetes.safeToEvict`
+1. The agent's inline config `kubernetes.safeToEvict`
 2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
 3. The `safe_to_evict` on that profile's runtime entry
 
-An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on a template turns the annotation off for that template, even when the runtime sets `false`.
+An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` in an agent's inline config turns the annotation off for that agent, even when the runtime sets `false`.
 
 Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore it. `scion config validate` warns when it is set on a non-Kubernetes runtime, or on a profile that uses one, and Scion logs a warning at agent start when it is ignored.
 
@@ -449,7 +447,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
-- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the template or the agent's saved config.
+- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's inline or saved config.
 - `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
@@ -602,7 +600,7 @@ Nothing is filtered out: accounts with an `unknown` state are still listed, with
 
 The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
-**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A `serviceAccountName` set only in a template is overridden by the mapping.
+**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A template's `kubernetes:` block, including `serviceAccountName`, is ignored.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:
 
@@ -765,13 +763,13 @@ When the kubelet created the provisioning state directory, the provisioning init
 
 Workspaces provisioned before the provisioning state directory existed have `.scion-provisioned` in the workspace root. It is still honoured, so those workspaces are not provisioned again, and provisioning adds it to the checkout's `.git/info/exclude`. While Pods of a project may still run images with an older `sciontool`, the init container also takes the provisioning lock in the workspace root (`.scion-provision.lock`) before the one in the state directory. That lock is transient and excluded from git, and leftover lock entries are cleaned up on a later provisioning run.
 
-The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any template of the project uses an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
+The provisioning init container runs the agent's own image, so an older `sciontool` keeps running for as long as any agent of the project runs an older image, not just during an upgrade. Each start of such a Pod, after a newer one has provisioned the project:
 
 - runs the full provisioning step again: an existing clone is reused, but the whole workspace is chowned recursively on every start;
 - writes `.scion-provisioned` back into the workspace root (newer images add it to the git excludes);
 - if it only waits for another Pod's provisioning, times out, because the newer image writes the sentinel in the state directory.
 
-No data is lost in these cases, but to keep the workspace free of provisioning files, update the images of all of a project's templates to a release that includes the provisioning state directory.
+No data is lost in these cases, but to keep the workspace free of provisioning files, update the images the project's agents run (set in harness-configs and settings) to a release that includes the provisioning state directory.
 
 `mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
 
@@ -915,8 +913,8 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Ephemeral storage (disk) | Supported (requests + limits) |
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
-| PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
-| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on a template/agent) |
+| PriorityClassName | Supported (runtime default and per-agent override; the class must already exist on the cluster) |
+| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` in an agent's inline config) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |

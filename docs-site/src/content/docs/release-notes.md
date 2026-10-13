@@ -10,6 +10,40 @@ Conduit, still behind its experiment flag, now carries agent terminals, Runtime 
 
 [Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
 
+## Templates describe the job, not the environment
+
+A template now describes the agent's **job** (harness config, model, instructions, skills, tools, limits). Its **environment** (image, resources, volumes, Kubernetes settings, telemetry, hub access) comes only from the harness-config, settings and profiles, the hub and the project. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment) and [Agent Configuration](/scion/reference/agent-config/#key-classes).
+
+**Templates and environment keys** ([ptone/scion#4524](https://github.com/ptone/scion/issues/4524), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
+
+- A template's `telemetry`, `hub`, `image`, `resources`, `kubernetes` and `volumes` are ignored with a warning, and the Hub no longer copies a template's image, env or telemetry into agents. `GET /api/v1/admin/validate-resources` lists the affected templates (`templateConfigFindings`). Move these values to the harness-config or settings.
+- Template `env:` variables are now a lowest-precedence fallback: each applies only when no other source sets the key. Previously they beat settings harness-config env. Their values are no longer expanded from the broker host's environment. `SCION_*` keys and the harness-config's auth keys are never taken from a template. Template env is read from the template's current version on every start, so edits take effect on the next start.
+- Existing agents: a template env key baked into an agent's stored config with the same value as the template is treated as the fallback from the agent's next start.
+
+**Precedence** ([ptone/scion#4222](https://github.com/ptone/scion/issues/4222), [ptone/scion#4223](https://github.com/ptone/scion/issues/4223), [ptone/scion#4218](https://github.com/ptone/scion/issues/4218), [ptone/scion#4217](https://github.com/ptone/scion/issues/4217)):
+
+- The Hub default model and thinking level apply only when neither the template nor the project sets one. The template beats the Hub default; the project still beats the template.
+- Requester telemetry is on/off only. Other inline telemetry fields are ignored with a warning, on every Runtime Broker.
+- Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and `SCION_TELEMETRY_ENABLED`.
+- When a template sets both `harness_config` and `default_harness_config`, `default_harness_config` wins.
+- On the Hub, an explicit `harness:` key in a template wins over inferring the harness from the template's name.
+
+**Template API and storage** ([ptone/scion#4223](https://github.com/ptone/scion/issues/4223), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222), [ptone/scion#4221](https://github.com/ptone/scion/issues/4221), [ptone/scion#4217](https://github.com/ptone/scion/issues/4217)):
+
+- The template API rejects `config` (`400 template_config_in_file`) and `image` (`400 template_image_not_supported`) on create and update, and `PUT` updates metadata only. Edit `scion-agent.yaml` instead.
+- `GET` on a template returns a new read-only `agentConfig`, the parsed `scion-agent.yaml`.
+- Concurrent pushes of the same template: one wins, the other gets `409 template_conflict`, and the CLI retries once.
+- Each template's storage moves to a content-addressed layout, once, on its next commit. Unreferenced blobs are garbage-collected after a grace period (24 hours by default, never less than 1 hour).
+- Cloning a template whose bundled harness-config has an unusable provisioner fails with `422`.
+
+**Settings are no longer baked into agents** ([ptone/scion#4241](https://github.com/ptone/scion/issues/4241), [ptone/scion#4561](https://github.com/ptone/scion/issues/4561), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
+
+- Broker settings telemetry and the settings- and profile-derived image, image pull policy, resources and volumes are applied at each start, not persisted in `scion-agent.json`. A settings or profile change takes effect on the agent's next start. Hub `agent_defaults.resources` are also applied on every start.
+- Agents created before this change keep their already-baked values until they are reprovisioned.
+- Agents created before ptone/scion#4222 keep a copy of the Hub default telemetry in their stored config until they are reprovisioned. Starting them no longer resends it.
+
+**Upgrade order:** upgrade the Hub before the Runtime Brokers. A newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create, and gets the live template env only through the template version the agent was created from.
+
 ## `scion project list` lists projects across hubs
 
 `scion project list` (and `scion projects list`) now lists the projects on all your registered hubs, each with its hub, merged with the project directories on this machine. Use `--hub <hub>` to show one hub and `--refresh` to fetch each logged-in hub's project list. The earlier output, the project directories on this machine with their type, agent count, status and workspace, moved to `scion project list --local`, which keeps that format byte for byte, JSON included. **Scripts that parse `scion project list` should switch to `scion project list --local`.**

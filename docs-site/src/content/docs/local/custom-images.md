@@ -240,8 +240,11 @@ The `image_registry` setting is the lowest-priority way to configure images. Exp
 
 1. **CLI `--image` flag** (highest priority)
 2. **Profile `harness_overrides`** image field, when explicitly set
-3. **Template `scion-agent.yaml`** image field
-4. **`image_registry`** rewrite (lowest priority)
+3. **Agent inline config** (`--config`) image field
+4. **Settings `harness_configs.<name>.image`**, then the harness-config's own `config.yaml` image
+5. **`image_registry`** rewrite (lowest priority)
+
+A template's `image` field is ignored with a warning: a template describes the agent's job, and the image comes from the harness-config and settings.
 
 Each time a higher-priority source replaces another source's image, the agent start logs it at
 Info. See [Settings precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)

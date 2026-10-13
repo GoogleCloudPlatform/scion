@@ -265,11 +265,11 @@ scion start <name> --task "..." [--template claude] [--profile docker-local]
 3. **Provisioning** (`agent.ProvisionAgent`):
    a. Creates `agents/<name>/home/` and `agents/<name>/workspace/` directories.
    b. Resolves the template chain and copies home directory contents.
-   c. Merges configuration: `template base → template → settings (harness/profile) → agent overrides`.
+   c. Merges configuration: `template base → template (job keys only) → agent overrides`, filled from settings (harness/profile) and the harness-config where unset. Template environment keys are dropped with a warning, and template `env` is kept apart as a fallback the runtime applies last.
    d. Creates a git worktree at `agents/<name>/workspace/` on a new branch (slugified agent name).
    e. Runs harness-specific provisioning (`harness.Provision()`).
    f. Writes `scion-agent.json` and `agent-info.json`.
-4. **Image resolution**: Resolves the container image from settings/template/CLI override. Pulls if not present.
+4. **Image resolution**: Resolves the container image from the harness-config, settings, the profile override and the CLI override (never the template). Pulls if not present.
 5. **Container launch** (`runtime.Run`):
    a. Builds container run arguments (volumes, env vars, labels, resource limits).
    b. Mounts the agent home at `/home/<user>` and workspace at `/workspace`.

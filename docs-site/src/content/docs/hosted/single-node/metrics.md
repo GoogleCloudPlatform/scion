@@ -16,26 +16,26 @@ Scion provides built-in telemetry collection via `sciontool`, which runs as the 
 
 ## Configuration
 
-Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-template and per-agent overrides). Environment variables provide the highest-priority override.
+Telemetry is configured through `settings.yaml` (for global and project-level defaults) and the Hub's telemetry configuration. It is part of the agent's environment, not its job, so a template's `telemetry:` block is ignored with a warning. An agent's own inline config can only turn telemetry on or off. Environment variables provide the highest-priority override for `sciontool` inside the container.
 
 ### Configuration Hierarchy
 
-Telemetry settings resolve across scopes using **last-write-wins** semantics:
+Settings files resolve across scopes using **last-write-wins** semantics:
 
 1.  **Global settings** (`~/.scion/settings.yaml`) — Organization-wide defaults.
 2.  **Project settings** (`.scion/settings.yaml`) — Project-level overrides.
-3.  **Template config** (`scion-agent.yaml` in template) — Role-specific overrides.
-4.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
-5.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
+3.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
 
 At each scope, only the fields you specify are overridden; unset fields inherit from the previous scope.
 
+For a Hub-dispatched agent, whether telemetry is on resolves, lowest to highest: the Runtime Broker's settings, the Hub telemetry configuration, the requester's on/off (`--enable-telemetry` / `--disable-telemetry`), then the project's telemetry policy, which beats `SCION_TELEMETRY_ENABLED` as well. Broker settings telemetry is applied at each start and is not stored in the agent's `scion-agent.json`. See the [telemetry ladder](/scion/reference/settings-precedence/#the-telemetry-ladder).
+
 ### Settings File Configuration
 
-The `telemetry` block can appear in any `settings.yaml` (global or project) or `scion-agent.yaml` (template or agent):
+The `telemetry` block can appear in any `settings.yaml` (global or project):
 
 ```yaml
-# In settings.yaml or scion-agent.yaml
+# In settings.yaml
 telemetry:
   enabled: true
 
@@ -359,7 +359,7 @@ Monitors the security and connectivity of Runtime Brokers:
 
 ## Privacy Filtering
 
-By default, sciontool excludes `agent.user.prompt` events to protect user privacy. Filtering is configured via the `telemetry.filter` block in `settings.yaml` or `scion-agent.yaml`, or via environment variables.
+By default, sciontool excludes `agent.user.prompt` events to protect user privacy. Filtering is configured via the `telemetry.filter` block in `settings.yaml`, or via environment variables.
 
 ### Via Settings File
 
