@@ -2694,7 +2694,8 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 }
 
 // activeDirectProjectRoles returns the role names of userID's active
-// (isBindingActive), direct user-principal bindings on projectID, read
+// (isBindingActive), direct user-principal bindings on projectID of roles
+// that confer membership (ConfersProjectMembership), read
 // through st. With clamp set the bindings are passed through the test
 // identity clamps with authz's wiring (clampBindingsForUser), for a store
 // handle outside the authorization service; without it st must be the
@@ -2724,7 +2725,10 @@ func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzS
 		if err != nil {
 			return nil, err
 		}
-		if rd != nil {
+		// Callers decide membership and ownership from these names, so a
+		// role that does not confer membership (project-visitor) is left
+		// out.
+		if rd.ConfersProjectMembership() {
 			roles[rd.Name] = true
 		}
 	}

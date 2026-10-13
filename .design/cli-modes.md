@@ -28,7 +28,7 @@ Used inside agent containers. Agents can orchestrate sibling agents within their
 |---------|--------|
 | `server` (all subcommands) | Infrastructure administration — not relevant inside a container |
 | `broker` (all subcommands) | Runtime broker administration — not relevant inside a container |
-| `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
+| `hub` (all subcommands except the target-hub profile commands below) | Hub interaction — agents communicate via the messaging and notification systems, not direct Hub commands. Exception (ptone/scion#4240): `hub status`, `hub profile` and `hub test-identity` issue/token/list/delete/teardown/web-code are agent-allowed, and refuse at run time unless a target-hub profile names a hub other than the agent's own |
 | `init` | Grove initialization — infrastructure concern |
 | `grove` (all subcommands) | Grove administration — infrastructure concern |
 | `templates` (all subcommands) | Template management — managed by the operator |
@@ -163,8 +163,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `config cd-config` | Y | - |
 | `config cd-grove` | Y | - |
 | `config schema` | Y | - |
-| `create` | Y | Y |
-| `delete` | Y | Y |
+| `create` | Y | Y (also with a target-hub profile for another hub and `--project`, ptone/scion#4240) |
+| `delete` | Y | Y (also with a target-hub profile, as for `create`) |
 | `doctor` | Y | - |
 | `grove init` | Y | - |
 | `grove list` | Y | - |
@@ -175,9 +175,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `harness-config` (all) | Y | - |
 | `hub status` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub profile` (`add`, `list`, `show`, `remove`) | Y | Y (`add`/`show`/`remove` refuse a profile for the agent's own hub) |
-| `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
+| `hub test-identity` `issue`, `token`, `list`, `delete`, `teardown`, `web-code` | Y | Y (runtime: only with a target-hub profile for another hub, ptone/scion#4240) |
 | `hub test-identity delegate` (all) | Y | - (human consent step) |
-| `hub test-identity web-code` | Y | - (human only; not with a profile) |
 | `hub groves` (all) | Y | - |
 | `hub brokers` (all) | Y | - |
 | `hub enable` | Y | - |
@@ -191,10 +190,10 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `hub env` (all) | Y | - |
 | `hub notifications` | Y | - |
 | `init` | Y | - |
-| `list` | Y | Y |
-| `logs` | Y | Y |
-| `look` | Y | Y |
-| `message` | Y | Y |
+| `list` | Y | Y (also with a target-hub profile, as for `create`) |
+| `logs` | Y | Y (also with a target-hub profile, as for `create`) |
+| `look` | Y | Y (also with a target-hub profile, as for `create`) |
+| `message` | Y | Y (not with a target-hub profile) |
 | `messages` | Y | - |
 | `messages read` | Y | - |
 | `notifications` (all) | Y | Y |
@@ -216,8 +215,8 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `shared-dir info` | Y | Y |
 | `ssh` | Y | - |
 | `ssh-config` | Y | - |
-| `start` | Y | Y |
-| `stop` | Y | Y |
+| `start` | Y | Y (also with a target-hub profile, as for `create`) |
+| `stop` | Y | Y (also with a target-hub profile, as for `create`) |
 | `sync` | Y | - |
 | `templates` (all) | Y | - |
 | `tunnel` | Y | - |

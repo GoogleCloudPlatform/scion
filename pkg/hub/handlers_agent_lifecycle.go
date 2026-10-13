@@ -1275,11 +1275,15 @@ func (s *Server) wakeBrokerDrain(ctx context.Context, brokerID string) {
 		}
 	}
 	if s.controlChannel != nil && s.controlChannel.IsConnected(brokerID) {
-		go func() {
+		// Tracked broker work: shutdown joins it before the store closes,
+		// and it is skipped once shutdown has started (ptone/scion#4869).
+		s.brokerWork.goTracked(func(workCtx context.Context) {
 			dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), brokerDrainWakeTimeout)
 			defer cancel()
+			stop := context.AfterFunc(workCtx, cancel)
+			defer stop()
 			s.reconcileBroker(dctx, brokerID)
-		}()
+		})
 	}
 }
 

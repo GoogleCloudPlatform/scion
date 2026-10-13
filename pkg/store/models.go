@@ -3524,6 +3524,21 @@ type RoleDefinition struct {
 	System      bool      `json:"system"`      // true = seeded, not user-modifiable
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+	// ConfersMembership reports whether a binding of this role makes its
+	// principal a project member. Every role confers membership except
+	// the seeded project-visitor role. CreateRoleDefinition stores nil
+	// as true. Read it through ConfersProjectMembership.
+	ConfersMembership *bool `json:"confersMembership,omitempty"`
+}
+
+// ConfersProjectMembership reports whether a binding of rd makes its
+// principal a project member. An unset ConfersMembership means true; a nil
+// rd (an unresolved role definition) confers nothing.
+func (rd *RoleDefinition) ConfersProjectMembership() bool {
+	if rd == nil {
+		return false
+	}
+	return rd.ConfersMembership == nil || *rd.ConfersMembership
 }
 
 // RoleBinding connects a principal to a role definition, optionally scoped.
@@ -3570,6 +3585,11 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleVisitor is the seeded project role for a federated
+	// account granted visitor access to a project. It does not confer
+	// membership (RoleDefinition.ConfersMembership is false), and only
+	// CreateVisitorRoleBinding binds it.
+	ProjectRoleVisitor = "project-visitor"
 )
 
 // MembershipKindBuiltin is the value stored in the membership_kind column

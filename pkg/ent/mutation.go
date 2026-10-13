@@ -67832,6 +67832,7 @@ type RoleDefinitionMutation struct {
 	permissions          *[]string
 	appendpermissions    []string
 	system               *bool
+	confers_membership   *bool
 	created              *time.Time
 	updated              *time.Time
 	clearedFields        map[string]struct{}
@@ -68169,6 +68170,42 @@ func (m *RoleDefinitionMutation) ResetSystem() {
 	m.system = nil
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (m *RoleDefinitionMutation) SetConfersMembership(b bool) {
+	m.confers_membership = &b
+}
+
+// ConfersMembership returns the value of the "confers_membership" field in the mutation.
+func (m *RoleDefinitionMutation) ConfersMembership() (r bool, exists bool) {
+	v := m.confers_membership
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfersMembership returns the old "confers_membership" field's value of the RoleDefinition entity.
+// If the RoleDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleDefinitionMutation) OldConfersMembership(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfersMembership is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfersMembership requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfersMembership: %w", err)
+	}
+	return oldValue.ConfersMembership, nil
+}
+
+// ResetConfersMembership resets all changes to the "confers_membership" field.
+func (m *RoleDefinitionMutation) ResetConfersMembership() {
+	m.confers_membership = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *RoleDefinitionMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -68329,7 +68366,7 @@ func (m *RoleDefinitionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleDefinitionMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 8)
 	if m.name != nil {
 		fields = append(fields, roledefinition.FieldName)
 	}
@@ -68344,6 +68381,9 @@ func (m *RoleDefinitionMutation) Fields() []string {
 	}
 	if m.system != nil {
 		fields = append(fields, roledefinition.FieldSystem)
+	}
+	if m.confers_membership != nil {
+		fields = append(fields, roledefinition.FieldConfersMembership)
 	}
 	if m.created != nil {
 		fields = append(fields, roledefinition.FieldCreated)
@@ -68369,6 +68409,8 @@ func (m *RoleDefinitionMutation) Field(name string) (ent.Value, bool) {
 		return m.Permissions()
 	case roledefinition.FieldSystem:
 		return m.System()
+	case roledefinition.FieldConfersMembership:
+		return m.ConfersMembership()
 	case roledefinition.FieldCreated:
 		return m.Created()
 	case roledefinition.FieldUpdated:
@@ -68392,6 +68434,8 @@ func (m *RoleDefinitionMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldPermissions(ctx)
 	case roledefinition.FieldSystem:
 		return m.OldSystem(ctx)
+	case roledefinition.FieldConfersMembership:
+		return m.OldConfersMembership(ctx)
 	case roledefinition.FieldCreated:
 		return m.OldCreated(ctx)
 	case roledefinition.FieldUpdated:
@@ -68439,6 +68483,13 @@ func (m *RoleDefinitionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSystem(v)
+		return nil
+	case roledefinition.FieldConfersMembership:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfersMembership(v)
 		return nil
 	case roledefinition.FieldCreated:
 		v, ok := value.(time.Time)
@@ -68532,6 +68583,9 @@ func (m *RoleDefinitionMutation) ResetField(name string) error {
 		return nil
 	case roledefinition.FieldSystem:
 		m.ResetSystem()
+		return nil
+	case roledefinition.FieldConfersMembership:
+		m.ResetConfersMembership()
 		return nil
 	case roledefinition.FieldCreated:
 		m.ResetCreated()
