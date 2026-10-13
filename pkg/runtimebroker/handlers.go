@@ -6552,11 +6552,22 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 // Under profileStrictProvisioned the profile is the one recorded in the
 // agent's image provenance; agent-info.json is not consulted, and the 503
 // names the provisioned profile and how to recover.
+//
+// A saved profile missing from the hub's stored profiles
+// (*config.StoredProfileNotFoundError) never takes the fallback either: the
+// stored profiles are authoritative, so the request gets the 503 naming the
+// available profiles rather than running on the default runtime
+// (ptone/scion#3907). Brokers without stored profiles keep the fallback.
 func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
 	defMgr, defRT := s.defaultPair()
 	if mode == profileStrictProvisioned {
 		s.logSavedProfileUnresolved(opts, projectDir, cause)
 		return nil, "", fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
+	}
+	var spe *config.StoredProfileNotFoundError
+	if errors.As(cause, &spe) {
+		s.logSavedProfileUnresolved(opts, projectDir, cause)
+		return nil, "", clientErr
 	}
 	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
 		recorded == defRT.Name() &&

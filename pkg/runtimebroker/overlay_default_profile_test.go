@@ -130,21 +130,49 @@ func TestOverlayProfiles_SavedProfileWinsOverUnresolvableDefault(t *testing.T) {
 
 // A saved profile the stored profiles lack fails start, restart and resume
 // with the saved-profile error, and never falls back to the default profile
-// or the default runtime.
+// or the default runtime, including when agent-info.json records that the
+// agent last ran on the default runtime (ptone/scion#3907).
 func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
+	for _, recorded := range []string{"", "docker"} {
+		for _, op := range overlayDispatches() {
+			t.Run("recorded="+recorded+"/"+op.name, func(t *testing.T) {
+				f := newLifecycleFixture(t)
+				installStoredProfilesOverlay(t)
+				const name = "vanished-profile-agent"
+				writeSavedAgentInfo(t, f.projectPath, name, "vanished", recorded)
+				f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
+
+				w := op.run(t, f, name)
+				assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
+					"available profiles: "+lifecycleK8sProfile, "retry once its profile is configured")
+				if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
+					t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
+				}
+				if runs, _ := f.k8sRun(); runs != 0 {
+					t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+				}
+			})
+		}
+	}
+}
+
+// Without stored profiles, a saved profile that does not resolve still
+// falls back to the default runtime the agent is recorded as last running
+// on, for start, restart and resume.
+func TestOverlayProfiles_NoStoredProfilesKeepsRecordedRuntimeFallback(t *testing.T) {
 	for _, op := range overlayDispatches() {
 		t.Run(op.name, func(t *testing.T) {
 			f := newLifecycleFixture(t)
-			installStoredProfilesOverlay(t)
 			const name = "vanished-profile-agent"
-			writeSavedAgentProfile(t, f.projectPath, name, "vanished")
+			writeSavedAgentInfo(t, f.projectPath, name, "vanished", "docker")
 			f.defaultMgr.agents = append(f.defaultMgr.agents, lifecycleAgent(name, f.projectPath, ""))
 
 			w := op.run(t, f, name)
-			assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
-				"retry once its profile is configured")
-			if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
-				t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
+			if w.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+			}
+			if f.defaultMgr.StartCalls() != 1 {
+				t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
 			}
 			if runs, _ := f.k8sRun(); runs != 0 {
 				t.Errorf("kubernetes runtime runs = %d, want 0", runs)
