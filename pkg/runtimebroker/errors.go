@@ -728,8 +728,9 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	// errSavedProfileUnresolved's text names only the agent, the profile
-	// and a fixed or ResolveRuntime cause, and is client-safe as is.
-	if errors.Is(err, errSavedProfileUnresolved) {
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's also names the stored profile names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) {
 		writeSavedProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
