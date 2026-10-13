@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -201,16 +202,17 @@ func (s *Server) linkPendingVisitor(ctx context.Context, fu *FederatedUserIdenti
 const visitorRouteRefusalMessage = "You don't have access to this resource"
 
 // refuseVisitorRequest is routeGuard's visitor check. A request whose
-// identity is a *VisitorIdentity is admitted only on a route whose metadata
-// sets VisitorAllowed; on every other route, whatever its classification,
-// it is refused with the same 403 before the handler runs. A route that
-// does not set the flag refuses visitors. Requests with any other identity
-// are left alone. It writes the refusal and returns true when it refused.
+// identity is a *VisitorIdentity is admitted only when its method is in the
+// route's VisitorMethods; every other request, whatever the route's
+// classification, is refused with the same 403 before the handler runs. A
+// route with an empty list refuses visitors. Requests with any other
+// identity are left alone. It writes the refusal and returns true when it
+// refused.
 func refuseVisitorRequest(w http.ResponseWriter, r *http.Request, meta RouteMetadata) bool {
 	if !isVisitorIdentity(GetIdentityFromContext(r.Context())) {
 		return false
 	}
-	if meta.VisitorAllowed {
+	if slices.Contains(meta.VisitorMethods, r.Method) {
 		return false
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorRouteRefusalMessage, nil)

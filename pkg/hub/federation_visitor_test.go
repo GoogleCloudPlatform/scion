@@ -24,7 +24,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -246,12 +245,19 @@ func TestFederatedVisitor_LookupErrorAnswers503(t *testing.T) {
 	assert.Nil(t, identity, "the handler never runs")
 }
 
-// expectedVisitorAllowedRoutes is the complete set of routes that admit a
-// visitor (RouteMetadata.VisitorAllowed). Setting the flag on any other
-// route fails TestRouteGuard_AdmitsVisitorOnlyOnVisitorAllowedRoutes until
-// the route is added here.
-var expectedVisitorAllowedRoutes = []string{
-	"/api/v1/auth/me", // own profile, read-only
+// visitorRouteMethod is one route table pattern and one method sent to it.
+type visitorRouteMethod struct {
+	pattern, method string
+}
+
+// expectedVisitorRouteMethods is the complete set of (pattern, method)
+// pairs that admit a visitor (RouteMetadata.VisitorMethods). Listing any
+// other method on any route fails
+// TestRouteGuard_AdmitsVisitorOnlyOnListedMethods until the pair is added
+// here.
+var expectedVisitorRouteMethods = []visitorRouteMethod{
+	{"/api/v1/auth/me", http.MethodGet}, // own profile, read-only
+	{"/api/v1/auth/me", http.MethodHead},
 }
 
 // visitorRefusedProfileRoutes are the profile write routes reachable by a
@@ -281,9 +287,13 @@ var visitorRefusedProfileRoutes = []string{
 }
 
 // visitorRouteMethods returns the methods to try on a route pattern: the
-// pattern's own method when it has one, otherwise every common method.
+// pattern's own method when it has one (and HEAD for GET, which the mux
+// also serves), otherwise every common method.
 func visitorRouteMethods(pattern string) []string {
 	if method, _, ok := strings.Cut(pattern, " "); ok {
+		if method == http.MethodGet {
+			return []string{http.MethodGet, http.MethodHead}
+		}
 		return []string{method}
 	}
 	return []string{http.MethodGet, http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
@@ -319,34 +329,31 @@ func assertVisitorRefusal(t *testing.T, rec *httptest.ResponseRecorder, label st
 
 // Every registered route (TestRegisteredRoutesHaveRouteMetadata keeps the
 // table equal to the registered set) and method refuses a visitor before
-// the handler, with one response, unless the route is in
-// expectedVisitorAllowedRoutes; the routes that set VisitorAllowed are
-// exactly that list.
-func TestRouteGuard_AdmitsVisitorOnlyOnVisitorAllowedRoutes(t *testing.T) {
+// the handler, with one response, unless the pair is in
+// expectedVisitorRouteMethods; the pairs the routes list in VisitorMethods
+// are exactly that set.
+func TestRouteGuard_AdmitsVisitorOnlyOnListedMethods(t *testing.T) {
 	srv, _ := testServer(t)
 	visitor := NewVisitorIdentity(tid("guard-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
 
-	var flagged []string
+	listed := map[visitorRouteMethod]bool{}
 	for pattern, meta := range routeMetadataTable {
-		if meta.VisitorAllowed {
-			flagged = append(flagged, pattern)
+		for _, method := range meta.VisitorMethods {
+			listed[visitorRouteMethod{pattern, method}] = true
 		}
 	}
-	sort.Strings(flagged)
-	want := append([]string(nil), expectedVisitorAllowedRoutes...)
-	sort.Strings(want)
-	require.Equal(t, want, flagged, "routes that set VisitorAllowed")
-
-	allowed := make(map[string]bool, len(want))
-	for _, p := range want {
-		allowed[p] = true
+	allowed := make(map[visitorRouteMethod]bool, len(expectedVisitorRouteMethods))
+	for _, pm := range expectedVisitorRouteMethods {
+		allowed[pm] = true
 	}
+	require.Equal(t, allowed, listed, "the (pattern, method) pairs routes list in VisitorMethods")
+
 	require.NotEmpty(t, routeMetadataTable)
 	for pattern, meta := range routeMetadataTable {
 		for _, method := range visitorRouteMethods(pattern) {
 			label := method + " " + pattern
 			rec, called := serveGuardedAs(srv, meta, method, visitor)
-			if allowed[pattern] {
+			if allowed[visitorRouteMethod{pattern, method}] {
 				assert.True(t, called, "%s: the handler must run for a visitor", label)
 				assert.Equal(t, http.StatusOK, rec.Code, "%s", label)
 				continue
@@ -364,7 +371,7 @@ func TestRouteGuard_ProfileWriteRoutesRefuseVisitor(t *testing.T) {
 	for _, pattern := range visitorRefusedProfileRoutes {
 		meta, ok := routeMetadataTable[pattern]
 		require.True(t, ok, "%s is not a registered route", pattern)
-		assert.False(t, meta.VisitorAllowed, "%s must not admit a visitor", pattern)
+		assert.Empty(t, meta.VisitorMethods, "%s must not admit a visitor", pattern)
 		for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 			rec, called := serveGuardedAs(srv, meta, method, visitor)
 			assert.False(t, called, "%s %s: the handler must not run for a visitor", method, pattern)
@@ -373,9 +380,10 @@ func TestRouteGuard_ProfileWriteRoutesRefuseVisitor(t *testing.T) {
 	}
 }
 
-// The flag defaults to refusal: a route of any classification that does
-// not set VisitorAllowed refuses a visitor, and setting it admits one.
-func TestRouteGuard_VisitorRefusedUnlessRouteSetsVisitorAllowed(t *testing.T) {
+// The list defaults to refusal: a route of any classification with no
+// VisitorMethods refuses a visitor, and a list admits one on its methods
+// only.
+func TestRouteGuard_VisitorRefusedUnlessMethodListed(t *testing.T) {
 	srv, _ := testServer(t)
 	visitor := NewVisitorIdentity(tid("default-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
 	for _, c := range []RouteClassification{RoutePublic, RouteAuthenticated, RoutePolicy, RouteHubAdmin,
@@ -387,10 +395,15 @@ func TestRouteGuard_VisitorRefusedUnlessRouteSetsVisitorAllowed(t *testing.T) {
 	}
 
 	meta := RouteMetadata{Pattern: "/api/v1/test/visitor", RouteID: "test.visitor",
-		Classification: RouteAuthenticated, VisitorAllowed: true}
+		Classification: RouteAuthenticated, VisitorMethods: []string{http.MethodGet}}
 	rec, called := serveGuardedAs(srv, meta, http.MethodGet, visitor)
-	assert.True(t, called, "a VisitorAllowed route admits a visitor")
+	assert.True(t, called, "a listed method admits a visitor")
 	assert.Equal(t, http.StatusOK, rec.Code)
+	for _, method := range []string{http.MethodHead, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		rec, called := serveGuardedAs(srv, meta, method, visitor)
+		assert.False(t, called, "%s: a method not listed must not run the handler for a visitor", method)
+		assertVisitorRefusal(t, rec, method)
+	}
 }
 
 // The visitor check leaves every other identity alone: on no registered

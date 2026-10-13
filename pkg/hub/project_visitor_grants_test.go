@@ -811,18 +811,25 @@ func TestProjectVisitors_VisitorIsRefusedOnTheRoutes(t *testing.T) {
 // through the full server handler.
 func (f *visitorGrantFixture) federatedGet(t *testing.T, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, path, nil)
+	return f.federatedRequest(t, http.MethodGet, path, token)
+}
+
+// federatedRequest sends method path with the issuer token as the
+// federation credential through the full server handler.
+func (f *visitorGrantFixture) federatedRequest(t *testing.T, method, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
 	req.Header.Set(FederationTokenHeader, token)
 	rec := httptest.NewRecorder()
 	f.srv.Handler().ServeHTTP(rec, req)
 	return rec
 }
 
-// A linked visitor reads its own profile on GET /api/v1/auth/me (a
-// VisitorAllowed route): the federated account's ID and the email the
-// issuer verified. The same credential is refused on a route without the
-// flag.
-func TestVisitorAllowed_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
+// A linked visitor reads its own profile on GET /api/v1/auth/me (a method
+// the route lists in VisitorMethods): the federated account's ID and the
+// email the issuer verified. The same credential is refused on a route
+// with no VisitorMethods.
+func TestVisitorRoute_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	v := f.grantOK(t, grantTestIssuer, "ada@corp.example")
 	token := f.token(t, grantTestIssuer, "sub-ada", "ada@corp.example", boolPtr(true))
@@ -841,8 +848,8 @@ func TestVisitorAllowed_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
 }
 
 // With allow_visitor_grants off for the issuer, a linked visitor is
-// refused on the VisitorAllowed route too, with the uniform refusal.
-func TestVisitorAllowed_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
+// refused on /api/v1/auth/me GET too, with the uniform refusal.
+func TestVisitorRoute_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	f.grantOK(t, grantTestIssuer, "bea@corp.example")
 	token := f.token(t, grantTestIssuer, "sub-bea", "bea@corp.example", boolPtr(true))
@@ -860,8 +867,8 @@ func TestVisitorAllowed_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
 
 // An unlinked federated user (no grant, so no federated account) is not a
 // visitor: it gets the same responses with the visitor experiment on as
-// with it off, on the VisitorAllowed route and on a route without the flag.
-func TestVisitorAllowed_UnlinkedFederatedUserUnchanged(t *testing.T) {
+// with it off, on /api/v1/auth/me and on a route with no VisitorMethods.
+func TestVisitorRoute_UnlinkedFederatedUserUnchanged(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	token := f.token(t, grantTestOtherIssuer, "sub-cyd", "cyd@other.example", boolPtr(true))
 	identity, _, code := f.identityThroughMiddleware(t, token)
@@ -883,6 +890,28 @@ func TestVisitorAllowed_UnlinkedFederatedUserUnchanged(t *testing.T) {
 	var me UserResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
 	assert.Equal(t, grantTestOtherIssuer+":sub-cyd", me.ID, "the verified identity, not a local account")
+}
+
+// On /api/v1/auth/me a linked visitor is admitted on GET and HEAD only;
+// POST, PUT, PATCH and DELETE answer the uniform refusal before the
+// handler runs.
+func TestVisitorRoute_AuthMeAdmitsReadMethodsOnly(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	f.grantOK(t, grantTestIssuer, "dee@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-dee", "dee@corp.example", boolPtr(true))
+
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s: %s", method, rec.Body.String())
+	}
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
+		rec := f.federatedRequest(t, method, "/api/v1/auth/me", token)
+		require.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", method, rec.Body.String())
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "%s", method)
+		assert.Equal(t, ErrCodeForbidden, resp.Error.Code, "%s", method)
+		assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "%s: the uniform refusal", method)
+	}
 }
 
 // allow_visitor_grants is checked on every visitor request: turning it off

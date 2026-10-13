@@ -17,7 +17,9 @@ package hub
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
+	"strings"
 )
 
 // startupRouteMetadata is the route table New validates. It is a variable
@@ -63,16 +65,32 @@ func validateSessionOnlyRoutes(table map[string]RouteMetadata) error {
 	return nil
 }
 
-// validateVisitorAllowedRoutes checks every route that sets VisitorAllowed.
-// A visitor admitted by routeGuard still passes the route's classification
-// guard, so the flag is accepted only on an authenticated or policy route,
+// visitorListableMethods are the methods VisitorMethods may name.
+var visitorListableMethods = map[string]bool{
+	http.MethodGet: true, http.MethodHead: true, http.MethodPost: true,
+	http.MethodPut: true, http.MethodPatch: true, http.MethodDelete: true,
+}
+
+// patternServesMethod reports whether a method-qualified pattern whose
+// method is patternMethod serves method: its own method, and HEAD for a
+// GET pattern (http.ServeMux serves HEAD on GET patterns).
+func patternServesMethod(patternMethod, method string) bool {
+	return method == patternMethod || (patternMethod == http.MethodGet && method == http.MethodHead)
+}
+
+// validateVisitorRoutes checks every route that lists VisitorMethods. A
+// visitor admitted by routeGuard still passes the route's classification
+// guard, so a list is accepted only on an authenticated or policy route,
 // where that guard admits a user identity and the handler authorizes it.
-// (Session-only routes are hub-admin routes, so they are excluded too.) It
-// returns every violation, sorted by pattern; New refuses to start on any.
-func validateVisitorAllowedRoutes(table map[string]RouteMetadata) error {
+// (Session-only routes are hub-admin routes, so they are excluded too.)
+// Each method must be a known method, listed once, and served by the
+// pattern: a method-qualified pattern ("GET /x") serves only its method
+// (and HEAD for GET). It returns every violation, sorted by pattern; New
+// refuses to start on any.
+func validateVisitorRoutes(table map[string]RouteMetadata) error {
 	patterns := make([]string, 0, len(table))
 	for p, meta := range table {
-		if meta.VisitorAllowed {
+		if len(meta.VisitorMethods) > 0 {
 			patterns = append(patterns, p)
 		}
 	}
@@ -81,12 +99,26 @@ func validateVisitorAllowedRoutes(table map[string]RouteMetadata) error {
 	for _, p := range patterns {
 		meta := table[p]
 		if meta.Classification != RouteAuthenticated && meta.Classification != RoutePolicy {
-			errs = append(errs, fmt.Errorf("route %q (%s): visitor-allowed: classification %q (want %q or %q)",
+			errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: classification %q (want %q or %q)",
 				p, meta.RouteID, meta.Classification, RouteAuthenticated, RoutePolicy))
+		}
+		patternMethod, _, qualified := strings.Cut(p, " ")
+		seen := make(map[string]bool, len(meta.VisitorMethods))
+		for _, m := range meta.VisitorMethods {
+			switch {
+			case !visitorListableMethods[m]:
+				errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: unknown method %q", p, meta.RouteID, m))
+			case seen[m]:
+				errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: method %q listed twice", p, meta.RouteID, m))
+			case qualified && !patternServesMethod(patternMethod, m):
+				errs = append(errs, fmt.Errorf("route %q (%s): visitor methods: method %q is not served by the pattern's method %q",
+					p, meta.RouteID, m, patternMethod))
+			}
+			seen[m] = true
 		}
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("invalid visitor-allowed route metadata: %w", errors.Join(errs...))
+		return fmt.Errorf("invalid visitor route metadata: %w", errors.Join(errs...))
 	}
 	return nil
 }
