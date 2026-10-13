@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"slices"
 	"strings"
 	"time"
 
@@ -30,7 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
-	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // KeyRefreshInterval is the longest a target goes without refreshing its
@@ -53,32 +51,43 @@ const keyRefreshTimeout = 30 * time.Second
 // maxKeyResponseBytes bounds the grant-key response body.
 const maxKeyResponseBytes = 1 << 20
 
-// appliedWelcomes is how many recent Welcomes applyWelcomeKeys remembers.
-const appliedWelcomes = 4
+// UnknownKidFetchInterval is the least time between two key fetches made
+// because a grant named a kid the key set lacks. It is one budget for the
+// whole target, whatever the kid.
+const UnknownKidFetchInterval = 10 * time.Second
 
-// applyWelcomeKeys installs the grant keys of w once per Welcome: from
-// OnSession, or from the first stream of the session if that arrives
-// first. A Welcome applied before is not applied again, so it cannot undo
-// a later refresh.
-func (a *Agent) applyWelcomeKeys(w *conduitv1.Welcome) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if slices.Contains(a.applied, w) {
+// fetchForUnknownKid fetches the keys once because a grant named an
+// unknown kid, unless such a fetch already started within
+// UnknownKidFetchInterval (design v2.21.16 §3.5 "Target-side deadlines").
+// Callers arriving during a fetch wait for it. Either way the caller
+// verifies once more and refuses if the kid is still unknown.
+func (a *Agent) fetchForUnknownKid(ctx context.Context) {
+	a.unknownKidMu.Lock()
+	defer a.unknownKidMu.Unlock()
+	now := a.clk.Now()
+	if !a.lastUnknownKidFetch.IsZero() && now.Sub(a.lastUnknownKidFetch) < UnknownKidFetchInterval {
 		return
 	}
-	a.applied = append(a.applied, w)
-	if len(a.applied) > appliedWelcomes {
-		a.applied = slices.Delete(a.applied, 0, len(a.applied)-appliedWelcomes)
+	a.lastUnknownKidFetch = now
+	if err := a.RefreshKeys(ctx); err != nil {
+		log.Warn("Conduit: grant key fetch for an unknown key id failed: %v", err)
 	}
-	if err := a.keys.SetFromWelcome(w); err != nil {
-		log.Warn("Conduit: Welcome grant keys refused: %v", err)
+}
+
+// kickKeyRefresh asks the refresh loop to fetch the keys now. Kicks
+// arriving while one is pending collapse into it.
+func (a *Agent) kickKeyRefresh() {
+	select {
+	case a.keyKick <- struct{}{}:
+	default:
 	}
 }
 
 // refreshKeysLoop refreshes the grant keys every KeyRefreshInterval (or
-// the configured shorter interval) until ctx ends. A failed fetch is
-// retried with backoff (keyRetryMin doubling to keyRetryMax) instead of
-// waiting a full interval.
+// the configured shorter interval) until ctx ends, and at once on each
+// kick (kickKeyRefresh). A failed fetch is retried with backoff
+// (keyRetryMin doubling to keyRetryMax) instead of waiting a full
+// interval.
 func (a *Agent) refreshKeysLoop(ctx context.Context) {
 	interval := a.opts.KeyRefreshInterval
 	retry := newKeyRetryBackoff(interval)
@@ -90,6 +99,8 @@ func (a *Agent) refreshKeysLoop(ctx context.Context) {
 			stop()
 			return
 		case <-ch:
+		case <-a.keyKick:
+			stop()
 		}
 		err := a.RefreshKeys(ctx)
 		if err == nil || ctx.Err() != nil {
@@ -125,7 +136,9 @@ func keyClient(c *http.Client) *http.Client {
 
 // RefreshKeys fetches the hub's current grant verification keys over the
 // authenticated hub API (agent token, plus the transport credential) and
-// replaces the key set.
+// replaces the key set. The same response sets whether stream deadlines
+// are enforced (target_stream_deadlines: "enforce"; absent or "off" turns
+// enforcement off). A response that fails to parse changes neither.
 func (a *Agent) RefreshKeys(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, keyRefreshTimeout)
 	defer cancel()
@@ -149,16 +162,32 @@ func (a *Agent) RefreshKeys(ctx context.Context) error {
 		return fmt.Errorf("grant keys: HTTP %d", resp.StatusCode)
 	}
 	var out struct {
-		Keys []grant.WireKey `json:"keys"`
+		Keys                  []grant.WireKey `json:"keys"`
+		TargetStreamDeadlines string          `json:"target_stream_deadlines"`
 	}
 	if err := json.Unmarshal(body, &out); err != nil {
 		return fmt.Errorf("grant keys: %w", err)
 	}
+	var enforce bool
+	switch out.TargetStreamDeadlines {
+	case "", deadlinesOff:
+	case deadlinesEnforce:
+		enforce = true
+	default:
+		return fmt.Errorf("grant keys: unknown target_stream_deadlines %q", out.TargetStreamDeadlines)
+	}
 	if err := a.keys.Set(grant.FromWire(out.Keys)); err != nil {
 		return fmt.Errorf("grant keys: %w", err)
 	}
+	a.enforceDeadlines.Store(enforce)
 	return nil
 }
+
+// Values of target_stream_deadlines in the grant-key response.
+const (
+	deadlinesOff     = "off"
+	deadlinesEnforce = "enforce"
+)
 
 // Keys exposes the current key set (tests).
 func (a *Agent) Keys() *target.KeyHolder { return &a.keys }

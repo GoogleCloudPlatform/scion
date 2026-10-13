@@ -28,6 +28,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -155,8 +156,7 @@ type Options struct {
 	// §3.8). When nil the agent neither advertises nor serves the ssh
 	// kind. New validates it.
 	SSH *sshd.Config
-	// OnSession is called after each admitted session's grant keys are
-	// installed. Optional.
+	// OnSession is called after each session is admitted. Optional.
 	OnSession func(*conduitv1.Welcome)
 	// OnEnd is called after each attempt or session ends with the
 	// dialer's decision: the redial delay, or the error Run returns.
@@ -176,6 +176,8 @@ type Options struct {
 	// ptyBeforeAccept, when set, runs after a PTY stream's client is
 	// spawned and before the stream is accepted (test hook).
 	ptyBeforeAccept func(ctx context.Context)
+	// deadlineGrace, when set, replaces target.DeadlineGrace (test hook).
+	deadlineGrace time.Duration
 }
 
 // Agent is the agent's conduit dialer and stream target (TCP, PTY).
@@ -186,8 +188,22 @@ type Agent struct {
 	keys   target.KeyHolder
 	replay grant.ReplayCache
 
+	// deadlines enforces the authorization deadlines of accepted streams
+	// and verifies their renewals.
+	deadlines *target.Deadlines
+	// enforceDeadlines is the enforcement mode from the last grant-key
+	// fetch: a user stream's open grant must then carry authz_until.
+	enforceDeadlines atomic.Bool
+	// keyKick asks the key refresh loop for an immediate fetch.
+	keyKick chan struct{}
+	// renewals holds renewals waiting for a key fetch (renewalWorker).
+	renewals chan pendingRenewal
+	// unknownKidMu serializes fetches made for unknown kids;
+	// lastUnknownKidFetch is when the last one started.
+	unknownKidMu        sync.Mutex
+	lastUnknownKidFetch time.Time
+
 	mu            sync.Mutex
-	applied       []*conduitv1.Welcome // Welcomes whose keys were applied, newest last
 	lastCredRefsh time.Time
 	// refusedSince is when the current run of 4409 refusals began (zero
 	// while none is in progress); an admitted session resets it.
@@ -245,12 +261,16 @@ func New(opts Options) (*Agent, error) {
 	if clk == nil {
 		clk = clock.Real()
 	}
-	return &Agent{
-		opts:   opts,
-		url:    u,
-		clk:    clk,
-		replay: grant.NewMemoryReplayCache(clk.Now, 0),
-	}, nil
+	a := &Agent{
+		opts:     opts,
+		url:      u,
+		clk:      clk,
+		replay:   grant.NewMemoryReplayCache(clk.Now, 0),
+		keyKick:  make(chan struct{}, 1),
+		renewals: make(chan pendingRenewal, renewalQueueSize),
+	}
+	a.deadlines = &target.Deadlines{Keys: &a.keys, Replay: a.replay, Clock: clk, Grace: opts.deadlineGrace}
+	return a, nil
 }
 
 // EndpointURL returns the ws(s) URL of the hub's conduit endpoint.
@@ -277,11 +297,16 @@ func EndpointURL(hubURL string) (string, error) {
 func (a *Agent) Run(ctx context.Context) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The first key fetch runs at once: grants verify only against keys
+	// fetched from the hub, never against a Welcome's.
+	a.kickKeyRefresh()
 	go a.refreshKeysLoop(ctx)
+	go a.renewalWorker(ctx)
 
 	cfg := a.opts.Session
 	cfg.Clock = a.clk
 	cfg.StreamHandler = core.StreamHandlerFunc(a.handleStream)
+	cfg.OnStreamRenewal = a.handleRenewal
 	r := &core.Reconnector{
 		Dialer: &ws.Dialer{URL: a.url, Header: a.header, WS: a.opts.WS},
 		Config: cfg,
@@ -293,7 +318,6 @@ func (a *Agent) Run(ctx context.Context) error {
 				a.mu.Unlock()
 			}
 			a.admitted()
-			a.applyWelcomeKeys(w)
 			log.Info("Conduit session established (session %s, relay %s, incarnation %q)",
 				w.GetSessionId(), w.GetRelayInstanceId(), w.GetEndpointIncarnation())
 			if a.opts.OnSession != nil {
@@ -323,6 +347,7 @@ func (a *Agent) hello() *conduitv1.Hello {
 			StreamKinds:         a.streamKinds(),
 			Rpc:                 a.opts.RPCRoutes,
 			EndpointIncarnation: a.opts.LaunchID,
+			Features:            []string{core.FeatureStreamRenewal},
 		},
 	}
 }

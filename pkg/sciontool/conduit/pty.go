@@ -148,6 +148,7 @@ func (a *Agent) handlePTY(ctx context.Context, open *conduitv1.StreamOpen, ps co
 		_ = p.Close()
 		return nil // the stream already left the opening state
 	}
+	defer a.trackDeadline(ctx, st, claims)()
 	servePTY(ctx, st, p)
 	return nil
 }

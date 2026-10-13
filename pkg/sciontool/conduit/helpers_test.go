@@ -65,7 +65,13 @@ type fakeHub struct {
 	reject  error // non-nil: refuse admission with this error
 	welcome func(*conduitv1.Hello) *conduitv1.Welcome
 	keys    []grant.PublicKey // served by the grant-key route
-	tokens  []string          // X-Scion-Agent-Token of every conduit request
+	// welcomeKeys, when non-nil, are listed in the Welcome instead of
+	// keys.
+	welcomeKeys []grant.PublicKey
+	// deadlines, when set, is served as target_stream_deadlines by the
+	// grant-key route.
+	deadlines string
+	tokens    []string // X-Scion-Agent-Token of every conduit request
 
 	conduitHits atomic.Int64
 	keyHits     atomic.Int64
@@ -92,11 +98,15 @@ func newFakeHub(t *testing.T, keys ...grant.PublicKey) *fakeHub {
 		}
 		h.mu.Lock()
 		defer h.mu.Unlock()
+		wk := h.keys
+		if h.welcomeKeys != nil {
+			wk = h.welcomeKeys
+		}
 		return &conduitv1.Welcome{
 			SessionId:           "sess-" + strconv.FormatInt(h.conduitHits.Load(), 10),
 			RelayInstanceId:     "relay-a",
 			ConnectionEpoch:     h.conduitHits.Load(),
-			GrantKeys:           target.KeysToProto(h.keys),
+			GrantKeys:           target.KeysToProto(wk),
 			EndpointIncarnation: inc,
 		}
 	}
@@ -109,9 +119,12 @@ func newFakeHub(t *testing.T, keys ...grant.PublicKey) *fakeHub {
 			return
 		}
 		h.mu.Lock()
-		keys := grant.ToWire(h.keys)
+		resp := map[string]any{"keys": grant.ToWire(h.keys)}
+		if h.deadlines != "" {
+			resp["target_stream_deadlines"] = h.deadlines
+		}
 		h.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"keys": keys})
+		_ = json.NewEncoder(w).Encode(resp)
 	})
 	h.srv = httptest.NewServer(mux)
 	t.Cleanup(h.srv.Close)
@@ -255,9 +268,16 @@ func runResult(t *testing.T, done <-chan error) error {
 // w.endpoint_incarnation when non-empty).
 func tcpOpen(t *testing.T, key testKey, w core.SessionInfo, incarnation string, port int) *conduitv1.StreamOpen {
 	t.Helper()
+	return tcpOpenWith(t, key, w, incarnation, port, nil)
+}
+
+// tcpOpenWith is tcpOpen with mut applied to the grant's claims before
+// minting.
+func tcpOpenWith(t *testing.T, key testKey, w core.SessionInfo, incarnation string, port int, mut func(*grant.Claims)) *conduitv1.StreamOpen {
+	t.Helper()
 	params := map[string]string{grant.ParamHost: loopbackHost, grant.ParamPort: strconv.Itoa(port)}
 	now := time.Now().Truncate(time.Second)
-	tok, err := grant.Mint(&key.signer, grant.Claims{
+	c := grant.Claims{
 		Issuer:    "scion-hub",
 		Subject:   "user:u1",
 		ProjectID: testProjectID,
@@ -271,7 +291,11 @@ func tcpOpen(t *testing.T, key testKey, w core.SessionInfo, incarnation string, 
 		Stream:    grant.StreamHeader{Kind: grant.StreamKindTCP, Params: params},
 		NotBefore: now,
 		Expiry:    now.Add(50 * time.Second),
-	})
+	}
+	if mut != nil {
+		mut(&c)
+	}
+	tok, err := grant.Mint(&key.signer, c)
 	if err != nil {
 		t.Fatal(err)
 	}

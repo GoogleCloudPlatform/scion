@@ -59,6 +59,7 @@ func (a *Agent) handleSSH(ctx context.Context, open *conduitv1.StreamOpen, ps co
 	if err != nil {
 		return nil // the stream already left the opening state
 	}
+	defer a.trackDeadline(ctx, st, claims)()
 	if err := a.opts.SSH.Serve(ctx, streamConn{st}); err != nil {
 		log.Debug("Conduit: SSH stream %d: %v", ps.ID(), err)
 	}

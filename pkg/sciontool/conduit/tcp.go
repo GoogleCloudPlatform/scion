@@ -80,22 +80,32 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 }
 
 // verifyGrant verifies open's grant against this session's Welcome and
-// consumes its jti. It returns the grant's claims, or a refusal reason
-// (the caller rejects with 4403) and the error to log.
+// the keys fetched from the hub, and consumes its jti. A grant naming an
+// unknown kid gets one more try after fetchForUnknownKid. In enforce mode
+// a user stream's grant must carry an authorization deadline. It returns
+// the grant's claims, or a refusal reason (the caller rejects with 4403)
+// and the error to log.
 func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*grant.Claims, string, error) {
 	w := core.WelcomeFromContext(ctx)
 	if w == nil {
 		return nil, reasonGrantInvalid + ": no session binding", errors.New("no session binding")
 	}
-	a.applyWelcomeKeys(w)
 	v := &target.Verifier{
 		Identity: target.IdentityFromWelcome(grant.TargetKindAgent, a.opts.AgentID, a.opts.ProjectID, w),
 		Keys:     &a.keys,
 		Replay:   a.replay,
 		Now:      a.clk.Now,
 	}
-	claims, err := v.VerifyStreamOpen(ctx, target.BindingFromWelcome(w), open, target.Acting{})
+	b := target.BindingFromWelcome(w)
+	claims, err := v.VerifyStreamOpen(ctx, b, open, target.Acting{})
+	if errors.Is(err, grant.ErrUnknownKey) {
+		a.fetchForUnknownKid(ctx)
+		claims, err = v.VerifyStreamOpen(ctx, b, open, target.Acting{})
+	}
 	if err != nil {
+		return nil, reasonGrantInvalid, err
+	}
+	if err := a.requireDeadline(claims); err != nil {
 		return nil, reasonGrantInvalid, err
 	}
 	return claims, "", nil
@@ -105,7 +115,8 @@ func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*g
 // against this session's Welcome, check the target against the local
 // policy, dial loopback, and only then accept.
 func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
-	if _, reason, err := a.verifyGrant(ctx, open); err != nil {
+	claims, reason, err := a.verifyGrant(ctx, open)
+	if err != nil {
 		log.Warn("Conduit: refused TCP stream %d: grant: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reason)
 	}
@@ -124,6 +135,7 @@ func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps co
 		_ = conn.Close()
 		return nil // the stream already left the opening state
 	}
+	defer a.trackDeadline(ctx, st, claims)()
 	splice(ctx, st, conn)
 	return nil
 }
