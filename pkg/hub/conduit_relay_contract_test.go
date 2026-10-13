@@ -87,6 +87,8 @@ func TestSeparateRelayListenerReceivesHubEvents(t *testing.T) {
 
 	// A lost LISTEN connection reconnects and re-runs the listen hooks,
 	// which re-check everything (a notice missed meanwhile is covered).
+	// This terminates every backend with the listener's application_name,
+	// so SCION_TEST_POSTGRES_DSN must name a dedicated test database.
 	conn, err := pgx.Connect(ctx, dsn)
 	require.NoError(t, err)
 	defer func() { _ = conn.Close(context.Background()) }()

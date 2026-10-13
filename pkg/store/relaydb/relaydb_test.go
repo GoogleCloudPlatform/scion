@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -140,17 +141,42 @@ func TestListenHooksRunOffTheReadLoop(t *testing.T) {
 		<-release
 		close(ran)
 	})
-	l.fireOnListen() // returns while the hook blocks
+	returned := make(chan struct{})
+	go func() {
+		l.fireOnListen()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(10 * time.Second):
+		t.Fatal("fireOnListen blocked on a listen hook: hooks run on the read loop")
+	}
 	close(release)
-	<-ran
+	select {
+	case <-ran:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the listen hook never ran")
+	}
 }
 
-// TestListenerNotStartedUntilStart: NewListener does not connect, and a
-// listener that was never started closes at once.
+// TestListenerNotStartedUntilStart: NewListener starts no connection loop
+// (nothing connects or LISTENs before Start), and a listener that was never
+// started closes at once.
 func TestListenerNotStartedUntilStart(t *testing.T) {
 	l, err := NewListener("postgres://relay@127.0.0.1:1/scion", []string{"agent.*.deleted"}, slog.Default())
 	if err != nil {
 		t.Fatal(err)
 	}
+	if l.started {
+		t.Fatal("the listener started before Start")
+	}
+	select {
+	case <-l.done:
+		t.Fatal("a connection loop ran before Start")
+	default:
+	}
 	l.Close()
+	if l.started {
+		t.Fatal("Close started the listener")
+	}
 }
