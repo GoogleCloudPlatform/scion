@@ -1600,14 +1600,14 @@ type TemplateStore interface {
 
 	// UpdateTemplateContent writes the columns a commit owns (Files,
 	// ContentHash, Harness, DefaultHarnessConfig, AgentConfig, Layout,
-	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, Config,
-	// UpdatedBy) only if the stored row still matches expected
-	// (compare-and-swap). It never writes the metadata UpdateTemplate owns
-	// (Name, Slug, DisplayName, Description, Image, BaseTemplate, OwnerID,
-	// Scope, ScopeID, ProjectID), so neither writer can revert the other
-	// (ptone/scion#4221). Config is on the list only until the
-	// file-telemetry helper is removed (ptone/scion#4223). Returns ErrTemplateConflict when the row exists
-	// but no longer matches, and ErrNotFound when it does not exist.
+	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, UpdatedBy)
+	// only if the stored row still matches expected (compare-and-swap). It
+	// never writes the metadata UpdateTemplate owns (Name, Slug,
+	// DisplayName, Description, Image, BaseTemplate, OwnerID, Scope,
+	// ScopeID, ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221), and it never writes Config (ptone/scion#4223).
+	// Returns ErrTemplateConflict when the row exists but no longer
+	// matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
 	// SetTemplateAgentConfig writes only the AgentConfig snapshot of

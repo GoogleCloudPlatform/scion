@@ -933,23 +933,6 @@ export interface DeletionInfo {
 export type DeletionStage = 'finalizing' | (string & Record<never, never>);
 
 /**
- * Template configuration embedded in template detail responses.
- * Partial subset of the Go `store.TemplateConfig` struct, covering fields used by the frontend.
- */
-export interface TemplateConfig {
-  harness?: string;
-  image?: string;
-  configDir?: string;
-  env?: Record<string, string>;
-  detached?: boolean;
-  commandArgs?: string[];
-  model?: string;
-  messageMode?: MessageMode;
-  telemetry?: TelemetryConfig;
-  kubernetes?: Record<string, unknown>;
-}
-
-/**
  * The job keys the frontend reads from a template's agentConfig: the hub's
  * read-only snapshot of the template's own scion-agent.yaml (keys in
  * scion-agent.yaml spelling). The hub reads a template's job keys from it
@@ -979,7 +962,6 @@ export interface Template {
   /** URL the template was imported from, when it was imported. */
   sourceUrl?: string;
   files?: TemplateFileInfo[];
-  config?: TemplateConfig;
   /** Read-only snapshot of the template's own scion-agent.yaml; see TemplateAgentConfig. */
   agentConfig?: TemplateAgentConfig;
   /** Creation and last-update times, as the hub sends them. */

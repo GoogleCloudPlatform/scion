@@ -193,8 +193,8 @@ func (s *Server) buildAppliedConfig(req CreateAgentRequest, creatorName string, 
 		ac.Image = req.Config.Image
 		// Env gets its own map, never req.Config.Env itself: ac.InlineConfig
 		// below IS req.Config, so sharing the map would let every later
-		// AppliedConfig.Env writer (the template-env fill, the project
-		// auto-expose tier, the post-dispatch resolved-env merge) leak into
+		// AppliedConfig.Env writer (the project auto-expose tier, the
+		// post-dispatch resolved-env merge) leak into
 		// InlineConfig.Env, which holds the requester's explicit keys only.
 		ac.Env = maps.Clone(req.Config.Env)
 		ac.Model = req.Config.Model
@@ -406,6 +406,8 @@ func sharedWorkspaceCloneConfig(project *store.Project) *api.GitCloneConfig {
 //     after applyProjectDefaults and before applyHubAgentDefaults, so the
 //     hub default fills only when the template and the project both leave
 //     the model unset.
+//   - ThinkingLevel: request > project > template > hub (ptone/scion#4223),
+//     with its template rung placed exactly like the model rung.
 //   - HarnessConfig: request > project > template > hub. The template rung
 //     also runs here, but BEFORE applyHubAgentDefaults, so the hub-wide
 //     default only fills a slot that request, project, AND template all
@@ -448,13 +450,23 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 			"agent", agent.Name, "agent_id", agent.ID, "profile", dropped, "runtime_broker_id", agent.PinnedRuntimeBrokerID)
 	}
 
-	// Template model rung — after the request and project tiers, before the
+	// Template model and thinking-level rungs — after the request and project tiers, before the
 	// hub default (ptone/scion#4222): request > project > template > hub.
 	// The model is a job key read from the template's job config (its
 	// stripped AgentConfig snapshot).
-	if agent.AppliedConfig.Model == "" {
-		if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil && jc.Model != "" {
-			agent.AppliedConfig.Model = jc.Model
+	//
+	// Thinking level is a job key too and takes the same rung
+	// (ptone/scion#4223), so the hub default_thinking_level fills only when
+	// the request, the project and the template all leave it unset.
+	if agent.AppliedConfig.Model == "" || agent.AppliedConfig.ThinkingLevel == nil {
+		if jc := s.templateJobConfig(ctx, resolvedTemplate); jc != nil {
+			if agent.AppliedConfig.Model == "" && jc.Model != "" {
+				agent.AppliedConfig.Model = jc.Model
+			}
+			if agent.AppliedConfig.ThinkingLevel == nil && jc.ThinkingLevel != nil {
+				level := *jc.ThinkingLevel
+				agent.AppliedConfig.ThinkingLevel = &level
+			}
 		}
 	}
 
@@ -463,10 +475,11 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 	s.warnRequesterTelemetryDropped(ctx, agent)
 
 	// Hub operational agent_defaults — strictly between applyProjectDefaults
-	// (and the template model rung) and populateAgentConfig. See
+	// (and the template model and thinking-level rungs) and
+	// populateAgentConfig. See
 	// applyHubAgentDefaults for why that placement is the whole point:
 	// running it before the template rungs above would let the hub default
-	// beat the template for HarnessConfig and Model.
+	// beat the template for HarnessConfig, Model and ThinkingLevel.
 	if applyHubAgentDefaults(agent.AppliedConfig, s.hubAgentDefaults()) {
 		ctx = withHubDefaultHarnessConfig(ctx)
 	}
@@ -502,8 +515,8 @@ func (s *Server) deriveAgentConfig(ctx context.Context, agent *store.Agent, proj
 //
 // For context, not as a substitute for reusing deriveAgentConfig: the
 // resulting per-field precedence differs by field, because of *where* each
-// tier is applied. Model is request > project > template > hub, all four
-// applied by deriveAgentConfig before this function runs. HarnessConfig is
+// tier is applied. Model and ThinkingLevel are request > project > template
+// > hub, all four applied by deriveAgentConfig before this function runs. HarnessConfig is
 // request > project > template > hub, because deriveAgentConfig fills the
 // harness-config rung (request > project annotation > template) before
 // applyProjectDefaults/applyHubAgentDefaults run — so the hub-wide
@@ -824,15 +837,18 @@ func (s *Server) resolveDerivedConfig(ctx context.Context, agent *store.Agent, p
 //     CreateInputs.InlineConfig.Env). That value is already in ac.Env, so
 //     nothing is written.
 //  2. project annotation scion.io/auto-expose-ports-enabled: written into
-//     ac.Env, overwriting a template-derived value.
-//  3. template env, already merged into ac.Env by the template-env fill, is
-//     left as is; harness-config env applies at the broker below it.
-//  4. hub AutoExposePortsDefault: never written to the agent record. The
+//     ac.Env.
+//  3. hub AutoExposePortsDefault: never written to the agent record. The
 //     dispatcher sends it in api.HubAgentDefaults and the broker's
-//     buildAgentEnv applies it only when no higher tier set the key.
+//     buildAgentEnv applies it only when no higher tier set the key;
+//     harness-config env applies at the broker too.
 //
-// explicit must be the request snapshot, not ac.Env, so a template-derived
-// value is never mistaken for an explicit one. Neither InlineConfig.Env nor
+// A template is not a tier: SCION_* is a reserved key a template cannot set
+// (ptone/scion#4524), and the hub does not copy template env into the agent
+// (ptone/scion#4222).
+//
+// explicit must be the request snapshot, not ac.Env, so a derived value is
+// never mistaken for an explicit one. Neither InlineConfig.Env nor
 // CreateInputs is written: the resolved value is derived, not explicit.
 func resolveAutoExposeEnv(ac *store.AgentAppliedConfig, project *store.Project, explicit map[string]string) {
 	if ac == nil {

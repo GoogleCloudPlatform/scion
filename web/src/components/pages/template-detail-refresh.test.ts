@@ -188,3 +188,44 @@ describe('template detail: Refresh from Source', () => {
     );
   });
 });
+
+describe('template detail: message mode', () => {
+  let element: ScionPageTemplateDetail | null = null;
+
+  beforeAll(async () => {
+    await import('./template-detail.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  function modeBadge(el: HTMLElement): Element | null {
+    return el.shadowRoot?.querySelector('scion-message-mode-badge') ?? null;
+  }
+
+  it('reads the mode from agentConfig.message_mode', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(jsonResponse(makeTemplate({ agentConfig: { message_mode: 'lineage' } })))
+      )
+    );
+    element = await createElement();
+    expect(modeBadge(element)?.getAttribute('mode')).toBe('lineage');
+  });
+
+  it('ignores a legacy row config messageMode (ptone/scion#4223)', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(jsonResponse(makeTemplate({ config: { messageMode: 'branch' } })))
+      )
+    );
+    element = await createElement();
+    expect(modeBadge(element)).toBeNull();
+  });
+});

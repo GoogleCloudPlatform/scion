@@ -373,29 +373,53 @@ func TestTemplateTiers_ModelOrder(t *testing.T) {
 	}
 }
 
+// TestTemplateTiers_ThinkingLevelOrder: request > project > template
+// (snapshot) > hub (ptone/scion#4223). The template rung sits before the
+// hub default like the model rung, so the hub default_thinking_level fills
+// only when the request, the project and the template all leave it unset.
+// Every case sets the hub default, and the case names list the tiers set.
+func TestTemplateTiers_ThinkingLevelOrder(t *testing.T) {
+	intp := func(v int) *int { return &v }
+	cases := []struct {
+		name                         string
+		request, snapshot, hub, want *int
+		project                      string
+	}{
+		{name: "request + project + template + hub: request", request: intp(1), project: "7", snapshot: intp(5), hub: intp(3), want: intp(1)},
+		{name: "project + template + hub: project", project: "7", snapshot: intp(5), hub: intp(3), want: intp(7)},
+		{name: "template + hub: template", snapshot: intp(5), hub: intp(3), want: intp(5)},
+		{name: "hub only: hub", hub: intp(3), want: intp(3)},
+		{name: "none: unset", want: nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTiersFixture(t, true)
+			setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultThinkingLevel: tc.hub})
+			f.project.Annotations = map[string]string{}
+			if tc.project != "" {
+				f.project.Annotations[projectSettingDefaultThinkingLevel] = tc.project
+			}
+			f.template.AgentConfig = &api.ScionConfig{ThinkingLevel: tc.snapshot}
+			var reqCfg *api.ScionConfig
+			if tc.request != nil {
+				reqCfg = &api.ScionConfig{ThinkingLevel: tc.request}
+			}
+			agent := f.newAgent(t, t.Context(), "tl-order", reqCfg)
+			if tc.want == nil {
+				assert.Nil(t, agent.AppliedConfig.ThinkingLevel)
+				return
+			}
+			require.NotNil(t, agent.AppliedConfig.ThinkingLevel)
+			assert.Equal(t, *tc.want, *agent.AppliedConfig.ThinkingLevel)
+		})
+	}
+}
+
 // TestTemplateTiers_OtherLaddersUnchanged is the regression test for the
-// fields whose order TS-2b does not change: thinking level and harness
-// config (project > template > hub), and limits (project inline, hub in
-// HubAgentDefaults, never inline).
+// fields whose order TS-2b does not change: harness config (project >
+// template > hub) and limits (project inline, hub in HubAgentDefaults,
+// never inline). Thinking level is TestTemplateTiers_ThinkingLevelOrder.
 func TestTemplateTiers_OtherLaddersUnchanged(t *testing.T) {
-	t.Run("thinking level: project beats hub", func(t *testing.T) {
-		f := newTiersFixture(t, true)
-		hubTL := 3
-		setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultThinkingLevel: &hubTL})
-		f.project.Annotations = map[string]string{projectSettingDefaultThinkingLevel: "7"}
-		agent := f.newAgent(t, t.Context(), "tl-project", nil)
-		require.NotNil(t, agent.AppliedConfig.ThinkingLevel)
-		assert.Equal(t, 7, *agent.AppliedConfig.ThinkingLevel)
-	})
-	t.Run("thinking level: hub when project unset", func(t *testing.T) {
-		f := newTiersFixture(t, true)
-		hubTL := 3
-		setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultThinkingLevel: &hubTL})
-		f.project.Annotations = map[string]string{}
-		agent := f.newAgent(t, t.Context(), "tl-hub", nil)
-		require.NotNil(t, agent.AppliedConfig.ThinkingLevel)
-		assert.Equal(t, 3, *agent.AppliedConfig.ThinkingLevel)
-	})
 	t.Run("harness config: project beats template beats hub", func(t *testing.T) {
 		f := newTiersFixture(t, true)
 		setHubAgentDefaults(f.srv, opsettings.AgentDefaultsSettings{DefaultHarnessConfig: "hub-hc"})

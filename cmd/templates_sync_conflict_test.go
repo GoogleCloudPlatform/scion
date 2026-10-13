@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -40,9 +41,12 @@ type conflictHub struct {
 	winnerFiles map[string]string
 	// recorded calls
 	finalizeExpected []string
-	uploadRequested  [][]string
-	finalized        *hubclient.TemplateManifest
-	conflicted       bool
+	// finalizeUploadIDs records each finalize's uploadId; each upload
+	// request answers a fresh one ("upload-1", "upload-2", ...).
+	finalizeUploadIDs []string
+	uploadRequested   [][]string
+	finalized         *hubclient.TemplateManifest
+	conflicted        bool
 	// notFoundFirst makes the first finalize answer the Hub's "file not
 	// found" validation error, which sends sync down its re-upload-all
 	// retry.
@@ -86,7 +90,8 @@ func (h *conflictHub) server(t *testing.T, initialFiles map[string]string) *http
 				paths = append(paths, f.Path)
 			}
 			h.uploadRequested = append(h.uploadRequested, paths)
-			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []map[string]interface{}{}}))
+			uploadID := fmt.Sprintf("upload-%d", len(h.uploadRequested))
+			assert.NoError(t, json.NewEncoder(w).Encode(map[string]interface{}{"uploadUrls": []map[string]interface{}{}, "uploadId": uploadID}))
 		case r.URL.Path == "/api/v1/templates/conflict-tpl/finalize" && r.Method == http.MethodPost:
 			var req hubclient.FinalizeRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -94,6 +99,7 @@ func (h *conflictHub) server(t *testing.T, initialFiles map[string]string) *http
 				return
 			}
 			h.finalizeExpected = append(h.finalizeExpected, req.ExpectedContentHash)
+			h.finalizeUploadIDs = append(h.finalizeUploadIDs, req.UploadID)
 			if h.notFoundFirst {
 				h.notFoundFirst = false
 				w.WriteHeader(http.StatusBadRequest)
@@ -218,4 +224,74 @@ func TestSyncTemplateToHub_ConflictAfterMissingFilesRetry(t *testing.T) {
 	require.Contains(t, err.Error(), "changed on the Hub by another push while re-uploading")
 	require.Len(t, h.finalizeExpected, 2)
 	require.Nil(t, h.finalized)
+}
+
+// Acceptance 5 (ptone/scion#4223): every finalize sends the uploadId of the
+// upload it commits: the first attempt, the conflict re-sync and the
+// re-upload-all retry after "file not found", on the sync path and on the
+// agent-start update path.
+func TestTemplateFinalize_SendsUploadID(t *testing.T) {
+	agentYAML := transfer.HashBytes([]byte("harness: claude\n"))
+
+	t.Run("sync: first attempt and conflict re-sync", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+		writeTemplateFile(t, localPath, "mine.md", "mine\n")
+		// The winner does not have mine.md, so the re-sync uploads it again.
+		h := &conflictHub{conflicts: 1, winnerFiles: map[string]string{"scion-agent.yaml": agentYAML}}
+		server := h.server(t, map[string]string{"scion-agent.yaml": agentYAML})
+		defer server.Close()
+		captureStdout(t, func() {
+			require.NoError(t, syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude"))
+		})
+		require.Equal(t, [][]string{{"mine.md"}, {"mine.md"}}, h.uploadRequested)
+		require.Equal(t, []string{"upload-1", "upload-2"}, h.finalizeUploadIDs)
+		require.NotNil(t, h.finalized)
+	})
+
+	t.Run("sync: re-upload-all retry after file not found", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+		writeTemplateFile(t, localPath, "mine.md", "mine\n")
+		h := &conflictHub{notFoundFirst: true}
+		server := h.server(t, map[string]string{"scion-agent.yaml": agentYAML})
+		defer server.Close()
+		captureStdout(t, func() {
+			require.NoError(t, syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude"))
+		})
+		require.Len(t, h.uploadRequested, 2)
+		require.ElementsMatch(t, []string{"scion-agent.yaml", "mine.md"}, h.uploadRequested[1], "the retry re-uploads every file")
+		require.Equal(t, []string{"upload-1", "upload-2"}, h.finalizeUploadIDs)
+		require.NotNil(t, h.finalized)
+	})
+
+	t.Run("sync: nothing uploaded sends no uploadId", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+		h := &conflictHub{}
+		server := h.server(t, map[string]string{"scion-agent.yaml": agentYAML, "gone.md": transfer.HashBytes([]byte("gone\n"))})
+		defer server.Close()
+		captureStdout(t, func() {
+			require.NoError(t, syncTemplateToHub(newTemplateSyncHubCtx(t, server), "base", localPath, "global", "claude"))
+		})
+		require.Empty(t, h.uploadRequested)
+		require.Equal(t, []string{""}, h.finalizeUploadIDs)
+	})
+
+	t.Run("updateHubTemplate: first attempt and conflict re-sync", func(t *testing.T) {
+		localPath := t.TempDir()
+		writeTemplateFile(t, localPath, "scion-agent.yaml", "harness: claude\n")
+		files, err := hubclient.CollectFiles(localPath, nil)
+		require.NoError(t, err)
+		h := &conflictHub{conflicts: 1, winnerFiles: map[string]string{"other.md": transfer.HashBytes([]byte("other\n"))}}
+		server := h.server(t, map[string]string{})
+		defer server.Close()
+		hubTemplate := &hubclient.Template{ID: "conflict-tpl", Name: "base", ContentHash: "sha256:old"}
+		captureStdout(t, func() {
+			_, err := updateHubTemplate(context.Background(), newTemplateSyncHubCtx(t, server), hubTemplate, &config.Template{Name: "base", Path: localPath}, files, "")
+			require.NoError(t, err)
+		})
+		require.Len(t, h.uploadRequested, 2)
+		require.Equal(t, []string{"upload-1", "upload-2"}, h.finalizeUploadIDs)
+	})
 }
