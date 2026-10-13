@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 213
+**Operations:** 230
 
 ## Table of Contents
 
@@ -168,19 +168,21 @@
 - [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
 - [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
-- [skill.read](#skillread) — Read skill definitions or list/discover skills
-- [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
-- [skill.update](#skillupdate) — Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+- [skill.list](#skilllist) — List skills; each row is filtered by skill read
+- [skill.read](#skillread) — Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
+- [skill.create](#skillcreate) — Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
+- [skill.update](#skillupdate) — Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
 - [skill.delete](#skilldelete) — Delete a skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
-- [skill.register](#skillregister) — Register skills in a skill registry
-- [template.read](#templateread) — Read template definitions or discover available templates
-- [template.create](#templatecreate) — Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
-- [template.update](#templateupdate) — Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
-- [template.delete](#templatedelete) — Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
-- [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs
-- [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
-- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
-- [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [skill.register](#skillregister) — Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
+- [template.list](#templatelist) — List templates; each row is filtered by template read
+- [template.read](#templateread) — Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
+- [template.create](#templatecreate) — Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
+- [template.update](#templateupdate) — Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
+- [template.delete](#templatedelete) — Delete a global or project template. A user-scope template is template.user.delete
+- [harnessconfig.read](#harnessconfigread) — Read harness configurations or list available configs; read a config's download URLs, storage validation, image status and files. A record the caller may not read answers as not found
+- [harnessconfig.create](#harnessconfigcreate) — Create a harness configuration in the global, project or caller's own user scope the request body names; a user-scope config's scope and owner are the caller. A user-scope harness config refuses a federated caller (requireProfileWriter)
+- [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration: its definition and metadata, file uploads, finalize, the image check and file writes. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [harnessconfig.delete](#harnessconfigdelete) — Delete a global or project harness configuration. The route gate needs harness_config read and the delete needs harness_config delete on the owning scope. A user-scope config is harnessconfig.user.delete
 - [template.user.clone](#templateuserclone) — Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
 - [template.user.reimport](#templateuserreimport) — Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
 - [skill.user.create](#skillusercreate) — Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
@@ -189,6 +191,21 @@
 - [harnessconfig.user.reimport](#harnessconfiguserreimport) — Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
 - [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
 - [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
+- [skill.global.create](#skillglobalcreate) — Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
+- [skill.discover.project](#skilldiscoverproject) — Discover the skills in a remote GitHub directory for a project named by the request body, spending that project's GitHub credentials. A user access token needs skill:create on a boundary that contains the project
+- [skill.discover.global](#skilldiscoverglobal) — Discover the skills in a public remote GitHub directory with no project named. A user access token needs skill:create_global on a hub boundary
+- [skill.resolve.local](#skillresolvelocal) — Resolve skill:// references against the hub catalog. Each candidate is checked for skill read; a candidate the caller may not read answers as not found
+- [skill.resolve.github.project](#skillresolvegithubproject) — Resolve gh:// references with a project named by the request body, using that project's GitHub credentials. The caller needs skill read on the project, so a user access token needs skill:read on a boundary that contains the project; a refused reference answers forbidden
+- [skill.resolve.github.public](#skillresolvegithubpublic) — Resolve gh:// references from public repositories with no project named; the hub fetches them and writes its resolution cache. A user access token needs skill:read on the global catalog, on a hub boundary; a refused reference answers forbidden
+- [skill.file.signedread](#skillfilesignedread) — Read one skill version file through a signed URL issued by the skill download. The signature alone authorizes exactly the skill, version and file it was issued for; no principal is evaluated
+- [template.clone](#templateclone) — Clone a readable template into the global scope or a project the request body names. The source needs template read; the destination needs template create on its scope, so a user access token needs template:read and template:create on a boundary that contains both
+- [template.reimport](#templatereimport) — Reimport a global or project template from its source. The template needs template read and the reimport needs template create on the owning scope, as import does
+- [template.import.global](#templateimportglobal) — Import or discover templates for the global catalog. The check is template create on a collection-level request at the hub scope, so a user access token needs template:create on a hub boundary
+- [template.import.project](#templateimportproject) — Import or discover templates for a project named by the request body. The check is template create on a collection-level request inside that project
+- [harnessconfig.clone](#harnessconfigclone) — Clone a readable harness configuration into the global scope or a project the request body names. The route gate needs harness_config read on the source; the destination needs harness_config create on its scope
+- [harnessconfig.reimport](#harnessconfigreimport) — Reimport a global or project harness configuration from its source. The route gate needs harness_config read and the reimport needs harness_config create on the owning scope, as import does
+- [harnessconfig.import.global](#harnessconfigimportglobal) — Import or discover harness configurations for the global catalog. The check is harness_config create on a collection-level request at the hub scope, so a user access token needs harness_config:create on a hub boundary
+- [harnessconfig.import.project](#harnessconfigimportproject) — Import or discover harness configurations for a project named by the request body. The check is harness_config create on a collection-level request inside that project
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -6181,29 +6198,27 @@
 
 ---
 
-## skill.read
+## skill.list
 
 **Domain:** skill
 
-**Description:** Read skill definitions or list/discover skills
+**Description:** List skills; each row is filtered by skill read
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/skills` |
-| http_route | GET | `/api/v1/skills/{id}` |
-| http_route | POST | `/api/v1/skills/discover-directory` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `skill.read`
+**Base Permission:** `skill.list`
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 
@@ -6213,11 +6228,48 @@
 
 ---
 
+## skill.read
+
+**Domain:** skill
+
+**Description:** Read a skill, its versions, its download URLs, its resolved version and its files. A record the caller may not read answers as not found
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/skills/{id}` |
+| http_route | GET | `/api/v1/skills/{id}/versions` |
+| http_route | GET | `/api/v1/skills/{id}/versions/{vid}` |
+| http_route | GET | `/api/v1/skills/{id}/download` |
+| http_route | GET | `/api/v1/skills/{id}/resolve` |
+| http_route | GET | `/api/v1/skills/{id}/files/{path}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `skill.read`
+
+**Resource Resolver:** skill-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
 ## skill.create
 
 **Domain:** skill
 
-**Description:** Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+**Description:** Create a skill in a project named by the request body. A user access token needs skill:create on a boundary that contains the project
 
 ### Entry Points
 
@@ -6228,6 +6280,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
 
 **Base Permission:** `skill.create`
 
@@ -6240,7 +6294,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -6248,13 +6302,18 @@
 
 **Domain:** skill
 
-**Description:** Update an existing skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
+**Description:** Update a skill: its metadata, version publishing and deprecation, file uploads and finalize. A user-scope skill refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/skills/{id}` |
+| http_route | POST | `/api/v1/skills/{id}/versions` |
+| http_route | POST | `/api/v1/skills/{id}/versions/{vid}/deprecate` |
+| http_route | POST | `/api/v1/skills/{id}/upload` |
+| http_route | POST | `/api/v1/skills/{id}/finalize` |
+| http_route | PUT | `/api/v1/skills/{id}/files/{path}` |
 
 **Principals:** `user`
 
@@ -6321,7 +6380,7 @@
 
 **Domain:** skill
 
-**Description:** Register skills in a skill registry
+**Description:** Manage skill registries and their pinned hashes. The route guard checks skill.register on the hub-scoped registry target, so a user access token needs skill:register on a hub boundary
 
 ### Entry Points
 
@@ -6331,11 +6390,17 @@
 | http_route | GET | `/api/v1/skill-registries` |
 | http_route | GET | `/api/v1/skill-registries/{id}` |
 | http_route | PUT | `/api/v1/skill-registries/{id}` |
+| http_route | PATCH | `/api/v1/skill-registries/{id}` |
+| http_route | POST | `/api/v1/skill-registries/{id}/pin` |
+| http_route | GET | `/api/v1/skill-registries/{id}/pins` |
+| http_route | POST | `/api/v1/skill-registries/{id}/unpin` |
 | http_route | DELETE | `/api/v1/skill-registries/{id}` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
 
 **Base Permission:** `skill.register`
 
@@ -6355,32 +6420,31 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSkillRegistryToken_RequiresRegisterSelector`
 
 ---
 
-## template.read
+## template.list
 
 **Domain:** template
 
-**Description:** Read template definitions or discover available templates
+**Description:** List templates; each row is filtered by template read
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/templates` |
-| http_route | GET | `/api/v1/templates/{id}` |
-| http_route | POST | `/api/v1/resources/discover` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
 
-**Base Permission:** `template.read`
+**Base Permission:** `template.list`
 
 **Resource Resolver:** project-from-url
 
-**Effects:** `read-one`, `list-scoped`
+**Effects:** `list-scoped`
 
 **Denial Codes:** `forbidden`
 
@@ -6390,22 +6454,59 @@
 
 ---
 
+## template.read
+
+**Domain:** template
+
+**Description:** Read a template, its download URLs, its storage validation and its files. A record the caller may not read answers as not found
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/templates/{id}` |
+| http_route | GET | `/api/v1/templates/{id}/download` |
+| http_route | GET | `/api/v1/templates/{id}/validate` |
+| http_route | GET | `/api/v1/templates/{id}/files` |
+| http_route | GET | `/api/v1/templates/{id}/files/{path}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `template.read`
+
+**Resource Resolver:** template-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
 ## template.create
 
 **Domain:** template
 
-**Description:** Create a new template or import resources. A user-scope create through /api/v1/templates or /api/v1/resources/import refuses a federated caller (requireProfileWriter)
+**Description:** Create a template in the global, project or caller's own user scope the request body names. A user-scope create refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/templates` |
-| http_route | POST | `/api/v1/resources/import` |
 
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `template.create`
 
@@ -6419,7 +6520,6 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestGenericUserTemplateWrites_FederatedUserRefused`
-- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
 
 ---
 
@@ -6427,13 +6527,19 @@
 
 **Domain:** template
 
-**Description:** Update an existing template definition. A user-scope template refuses a federated caller (requireProfileWriter)
+**Description:** Update a template: its definition and metadata, file uploads, finalize and file writes. A user-scope template refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PUT | `/api/v1/templates/{id}` |
+| http_route | PATCH | `/api/v1/templates/{id}` |
+| http_route | POST | `/api/v1/templates/{id}/upload` |
+| http_route | POST | `/api/v1/templates/{id}/finalize` |
+| http_route | POST | `/api/v1/templates/{id}/files` |
+| http_route | PUT | `/api/v1/templates/{id}/files/{path}` |
+| http_route | DELETE | `/api/v1/templates/{id}/files/{path}` |
 
 **Principals:** `user`
 
@@ -6460,7 +6566,7 @@
 
 **Domain:** template
 
-**Description:** Delete a template definition. A user-scope template refuses a federated caller (requireProfileWriter)
+**Description:** Delete a global or project template. A user-scope template is template.user.delete
 
 ### Entry Points
 
@@ -6471,6 +6577,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `template.delete`
 
@@ -6498,7 +6606,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Read harness configurations or list available configs
+**Description:** Read harness configurations or list available configs; read a config's download URLs, storage validation, image status and files. A record the caller may not read answers as not found
 
 ### Entry Points
 
@@ -6506,6 +6614,11 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/harness-configs` |
 | http_route | GET | `/api/v1/harness-configs/{id}` |
+| http_route | GET | `/api/v1/harness-configs/{id}/download` |
+| http_route | GET | `/api/v1/harness-configs/{id}/validate` |
+| http_route | GET | `/api/v1/harness-configs/{id}/image-status` |
+| http_route | GET | `/api/v1/harness-configs/{id}/files` |
+| http_route | GET | `/api/v1/harness-configs/{id}/files/{path}` |
 
 **Principals:** `user`
 
@@ -6531,7 +6644,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
+**Description:** Create a harness configuration in the global, project or caller's own user scope the request body names; a user-scope config's scope and owner are the caller. A user-scope harness config refuses a federated caller (requireProfileWriter)
 
 ### Entry Points
 
@@ -6542,6 +6655,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `harness_config.create`
 
@@ -6562,13 +6677,20 @@
 
 **Domain:** harnessconfig
 
-**Description:** Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+**Description:** Update a harness configuration: its definition and metadata, file uploads, finalize, the image check and file writes. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PUT | `/api/v1/harness-configs/{id}` |
+| http_route | PATCH | `/api/v1/harness-configs/{id}` |
+| http_route | POST | `/api/v1/harness-configs/{id}/upload` |
+| http_route | POST | `/api/v1/harness-configs/{id}/finalize` |
+| http_route | POST | `/api/v1/harness-configs/{id}/check-image` |
+| http_route | POST | `/api/v1/harness-configs/{id}/files` |
+| http_route | PUT | `/api/v1/harness-configs/{id}/files/{path}` |
+| http_route | DELETE | `/api/v1/harness-configs/{id}/files/{path}` |
 
 **Principals:** `user`
 
@@ -6595,7 +6717,7 @@
 
 **Domain:** harnessconfig
 
-**Description:** Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+**Description:** Delete a global or project harness configuration. The route gate needs harness_config read and the delete needs harness_config delete on the owning scope. A user-scope config is harnessconfig.user.delete
 
 ### Entry Points
 
@@ -6606,6 +6728,8 @@
 **Principals:** `user`
 
 **Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `harness_config.delete`
 
@@ -6626,6 +6750,7 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
+- `pkg/hub:TestHarnessDeleteToken_RequiresReadAndDelete`
 
 ---
 
@@ -6894,6 +7019,486 @@
 
 - `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
 - `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
+## skill.global.create
+
+**Domain:** skill
+
+**Description:** Create a skill in the global catalog (global or core scope). The check is skill.create_global on a collection-level request at the hub scope, so a user access token needs skill:create_global on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `skill.create_global`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGlobalSkillCreate_RequiresCreateGlobalSelectorAndHubBoundary`
+
+---
+
+## skill.discover.project
+
+**Domain:** skill
+
+**Description:** Discover the skills in a remote GitHub directory for a project named by the request body, spending that project's GitHub credentials. A user access token needs skill:create on a boundary that contains the project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills/discover-directory` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `skill.create`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestDiscoverDirectory_RequiresSkillCreateOnProject`
+
+---
+
+## skill.discover.global
+
+**Domain:** skill
+
+**Description:** Discover the skills in a public remote GitHub directory with no project named. A user access token needs skill:create_global on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills/discover-directory` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `skill.create_global`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestDiscoverDirectory_GlobalRequiresCreateGlobalSelector`
+
+---
+
+## skill.resolve.local
+
+**Domain:** skill
+
+**Description:** Resolve skill:// references against the hub catalog. Each candidate is checked for skill read; a candidate the caller may not read answers as not found
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills/resolve` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `skill.read`
+
+**Resource Resolver:** skill-from-body
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestLocalSkillResolve_TokenNeedsSkillRead`
+
+---
+
+## skill.resolve.github.project
+
+**Domain:** skill
+
+**Description:** Resolve gh:// references with a project named by the request body, using that project's GitHub credentials. The caller needs skill read on the project, so a user access token needs skill:read on a boundary that contains the project; a refused reference answers forbidden
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills/resolve` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `skill.read`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectGitHubSkillResolve_TokenNeedsSkillReadOnProject`
+
+---
+
+## skill.resolve.github.public
+
+**Domain:** skill
+
+**Description:** Resolve gh:// references from public repositories with no project named; the hub fetches them and writes its resolution cache. A user access token needs skill:read on the global catalog, on a hub boundary; a refused reference answers forbidden
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills/resolve` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.read`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestPublicGitHubSkillResolve_TokenNeedsSkillReadOnHub`
+
+---
+
+## skill.file.signedread
+
+**Domain:** skill
+
+**Description:** Read one skill version file through a signed URL issued by the skill download. The signature alone authorizes exactly the skill, version and file it was issued for; no principal is evaluated
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/skills/{id}/files/{path}` |
+
+**Bearer:** `non_user`
+
+**Resource Resolver:** skill-from-url
+
+**Effects:** `read-one`
+
+### Tests
+
+- `pkg/hub:TestSignedSkillFileURL_EndToEnd`
+
+### Exemptions
+
+- **public_endpoint:** Capability URL: the signature issued by the skill download authorizes one skill version file, with no principal (scope: signed skill file read) — waives: `principals`, `credentials`, `base_permission`, `denial_codes`
+
+---
+
+## template.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the global scope or a project the request body names. The source needs template read; the destination needs template create on its scope, so a user access token needs template:read and template:create on a boundary that contains both
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogCloneToken_RequiresReadAndCreate`
+
+---
+
+## template.reimport
+
+**Domain:** template
+
+**Description:** Reimport a global or project template from its source. The template needs template read and the reimport needs template create on the owning scope, as import does
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** template-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogReimportToken_RequiresReadAndCreate`
+
+---
+
+## template.import.global
+
+**Domain:** template
+
+**Description:** Import or discover templates for the global catalog. The check is template create on a collection-level request at the hub scope, so a user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGlobalResourceImport_ResolvesHubThroughEvidence`
+
+---
+
+## template.import.project
+
+**Domain:** template
+
+**Description:** Import or discover templates for a project named by the request body. The check is template create on a collection-level request inside that project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectResourceImport_TokenNeedsCreateOnTheProject`
+
+---
+
+## harnessconfig.clone
+
+**Domain:** harnessconfig
+
+**Description:** Clone a readable harness configuration into the global scope or a project the request body names. The route gate needs harness_config read on the source; the destination needs harness_config create on its scope
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogCloneToken_RequiresReadAndCreate`
+
+---
+
+## harnessconfig.reimport
+
+**Domain:** harnessconfig
+
+**Description:** Reimport a global or project harness configuration from its source. The route gate needs harness_config read and the reimport needs harness_config create on the owning scope, as import does
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** harnessconfig-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCatalogReimportToken_RequiresReadAndCreate`
+
+---
+
+## harnessconfig.import.global
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for the global catalog. The check is harness_config create on a collection-level request at the hub scope, so a user access token needs harness_config:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestGlobalResourceImport_ResolvesHubThroughEvidence`
+
+---
+
+## harnessconfig.import.project
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for a project named by the request body. The check is harness_config create on a collection-level request inside that project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestProjectResourceImport_TokenNeedsCreateOnTheProject`
 
 ---
 
