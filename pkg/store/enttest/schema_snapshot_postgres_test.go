@@ -182,7 +182,7 @@ func TestStatementRecorder(t *testing.T) {
 
 	t.Run("rollback after commit keeps committed statements", func(t *testing.T) {
 		r := &statementRecorder{}
-		tx := &recordingTx{Tx: fakeTx{}, rec: r, start: r.begin()}
+		tx := &recordingTx{Tx: &fakeTx{}, rec: r, start: r.begin()}
 		if err := tx.Exec(context.Background(), `CREATE TABLE "a" ("id" bigint)`, []any{}, nil); err != nil {
 			t.Fatalf("exec: %v", err)
 		}
@@ -202,7 +202,7 @@ func TestStatementRecorder(t *testing.T) {
 	t.Run("rollback discards the transaction", func(t *testing.T) {
 		r := &statementRecorder{}
 		r.exec(`CREATE TABLE "a" ("id" bigint)`, []any{}, nil)
-		tx := &recordingTx{Tx: fakeTx{}, rec: r, start: r.begin()}
+		tx := &recordingTx{Tx: &fakeTx{}, rec: r, start: r.begin()}
 		if err := tx.Exec(context.Background(), `CREATE TABLE "b" ("id" bigint)`, []any{}, nil); err != nil {
 			t.Fatalf("exec: %v", err)
 		}
@@ -219,7 +219,7 @@ func TestStatementRecorder(t *testing.T) {
 	// txScript runs one CREATE TABLE "b" in a recordingTx over fake after a
 	// CREATE TABLE "a" outside it, ends the transaction with end, and returns
 	// the recorded script.
-	txScript := func(t *testing.T, fake fakeTx, end func(tx *recordingTx)) string {
+	txScript := func(t *testing.T, fake *fakeTx, end func(tx *recordingTx)) string {
 		t.Helper()
 		r := &statementRecorder{}
 		r.exec(`CREATE TABLE "a" ("id" bigint)`, []any{}, nil)
@@ -237,20 +237,31 @@ func TestStatementRecorder(t *testing.T) {
 	onlyA := `CREATE TABLE "a" ("id" bigint);` + "\n"
 	aAndB := onlyA + `CREATE TABLE "b" ("id" bigint);` + "\n"
 
-	t.Run("rollback then commit stays discarded", func(t *testing.T) {
-		got := txScript(t, fakeTx{}, func(tx *recordingTx) {
+	t.Run("commit after rollback does not truncate again", func(t *testing.T) {
+		// A statement recorded after the Rollback must survive the late
+		// Commit, which fails with sql.ErrTxDone; without the done guard in
+		// Commit, that failure would truncate back to the transaction start.
+		onlyAC := onlyA + `CREATE TABLE "c" ("id" bigint);` + "\n"
+		got := txScript(t, &fakeTx{}, func(tx *recordingTx) {
 			_ = tx.Rollback()
-			_ = tx.Commit()
+			tx.rec.exec(`CREATE TABLE "c" ("id" bigint)`, []any{}, nil)
+			if err := tx.Commit(); !errors.Is(err, sql.ErrTxDone) {
+				t.Fatalf("commit after rollback: err = %v, want sql.ErrTxDone", err)
+			}
 		})
-		if got != onlyA {
-			t.Fatalf("script = %q, want %q", got, onlyA)
+		if got != onlyAC {
+			t.Fatalf("script = %q, want %q", got, onlyAC)
 		}
 	})
 
 	t.Run("double commit keeps statements once", func(t *testing.T) {
-		got := txScript(t, fakeTx{}, func(tx *recordingTx) {
+		// The second Commit fails with sql.ErrTxDone; without the done guard
+		// in Commit, that failure would discard the committed "b".
+		got := txScript(t, &fakeTx{}, func(tx *recordingTx) {
 			_ = tx.Commit()
-			_ = tx.Commit()
+			if err := tx.Commit(); !errors.Is(err, sql.ErrTxDone) {
+				t.Fatalf("second commit: err = %v, want sql.ErrTxDone", err)
+			}
 		})
 		if got != aAndB {
 			t.Fatalf("script = %q, want %q", got, aAndB)
@@ -258,7 +269,7 @@ func TestStatementRecorder(t *testing.T) {
 	})
 
 	t.Run("failed commit then rollback discards the transaction only", func(t *testing.T) {
-		got := txScript(t, fakeTx{commitErr: errors.New("commit failed")}, func(tx *recordingTx) {
+		got := txScript(t, &fakeTx{commitErr: errors.New("commit failed")}, func(tx *recordingTx) {
 			if err := tx.Commit(); err == nil {
 				t.Fatal("commit: want an error")
 			}
@@ -294,14 +305,32 @@ func TestStatementRecorder(t *testing.T) {
 }
 
 // fakeTx is a dialect.Tx whose statements always succeed, for exercising
-// recordingTx without a database.
-// Commit returns commitErr.
-type fakeTx struct{ commitErr error }
+// recordingTx without a database. Commit returns commitErr. Like a real
+// *sql.Tx, once Commit or Rollback has been called, any later Commit or
+// Rollback returns sql.ErrTxDone.
+type fakeTx struct {
+	commitErr error
+	ended     bool
+}
 
-func (fakeTx) Exec(context.Context, string, any, any) error  { return nil }
-func (fakeTx) Query(context.Context, string, any, any) error { return nil }
-func (f fakeTx) Commit() error                               { return f.commitErr }
-func (fakeTx) Rollback() error                               { return nil }
+func (*fakeTx) Exec(context.Context, string, any, any) error  { return nil }
+func (*fakeTx) Query(context.Context, string, any, any) error { return nil }
+
+func (f *fakeTx) Commit() error {
+	if f.ended {
+		return sql.ErrTxDone
+	}
+	f.ended = true
+	return f.commitErr
+}
+
+func (f *fakeTx) Rollback() error {
+	if f.ended {
+		return sql.ErrTxDone
+	}
+	f.ended = true
+	return nil
+}
 
 // openTestClient opens a small Ent client on dsn, closed on cleanup.
 func openTestClient(t *testing.T, dsn string) *ent.Client {
