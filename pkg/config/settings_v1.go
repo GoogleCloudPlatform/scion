@@ -1730,12 +1730,23 @@ type V1RuntimeBrokerInstanceConfig struct {
 }
 
 // V1RuntimeTargetConfig declares a flat Runtime Broker's runtime target.
-// Context and Namespace are Kubernetes-only (defined, not implemented).
+// Context, Namespace and Kubeconfig are Kubernetes-only. Kubeconfig is an
+// optional absolute path to this instance's own kubeconfig file; it stays
+// local (never sent to the Hub, never identity).
 type V1RuntimeTargetConfig struct {
 	Type        string `json:"type" yaml:"type" koanf:"type"`
 	DisplayName string `json:"display_name,omitempty" yaml:"display_name,omitempty" koanf:"display_name"`
 	Context     string `json:"context,omitempty" yaml:"context,omitempty" koanf:"context"`
 	Namespace   string `json:"namespace,omitempty" yaml:"namespace,omitempty" koanf:"namespace"`
+	Kubeconfig  string `json:"kubeconfig,omitempty" yaml:"kubeconfig,omitempty" koanf:"kubeconfig"`
+	// KubernetesBlockServiceAccount and KubernetesServiceAccountMappings are
+	// this Kubernetes instance's own GCP identity policy (the "block"
+	// ServiceAccount and the "assign" GSA-to-KSA mapping), the flat
+	// counterparts of the runtime entry settings of the same name. They are
+	// local operator policy: never part of the Hub's runtime target
+	// descriptor or the persisted target identity. Kubernetes only.
+	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
+	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -3189,10 +3200,17 @@ func undecodableSettingsKeys(k *koanf.Koanf) []string {
 // key "hub" as a string and collides with the struct-typed hub settings.
 // Hub settings come from the SCION_HUB_* variables (e.g.
 // SCION_HUB_ENDPOINT), which are unaffected.
+//
+// SCION_HUB_PROFILE and SCION_HUB_RUN select a CLI target-hub profile and
+// its run label (pkg/hubprofile, ptone/scion#4240). The CLI reads them
+// directly; left mapped they would land on hub.profile and hub.run, which
+// are not settings.
 var settingsExcludedEnvVars = []string{
 	"SCION_AUTO_EXPOSE_PORTS",
 	"SCION_AUTO_EXPOSE_PORTS_LIST",
 	"SCION_HUB",
+	"SCION_HUB_PROFILE",
+	"SCION_HUB_RUN",
 }
 
 // isSettingsExcludedEnv reports whether name is in settingsExcludedEnvVars.

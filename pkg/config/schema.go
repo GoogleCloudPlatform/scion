@@ -160,6 +160,9 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		Server   struct {
 			SharedDirStorage *V1SharedDirStorageConfig `yaml:"shared_dir_storage"`
 			HomeStorage      *V1HomeStorageConfig      `yaml:"home_storage"`
+			Broker           struct {
+				Instances []V1RuntimeBrokerInstanceConfig `yaml:"instances"`
+			} `yaml:"broker"`
 		} `yaml:"server"`
 	}
 	// A decode failure here (e.g. a wrongly typed field) is already
@@ -171,6 +174,7 @@ func ValidateSettings(data []byte, schemaVersion string) ([]ValidationError, err
 		if err := vs.Server.HomeStorage.Validate(); err != nil {
 			errs = append(errs, ValidationError{Path: "server.home_storage", Message: err.Error()})
 		}
+		errs = append(errs, RuntimeBrokerInstanceDuplicateKeys(vs.Server.Broker.Instances)...)
 	}
 	return errs, nil
 }

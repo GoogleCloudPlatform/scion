@@ -93,6 +93,7 @@ func sortedEnvVarKeys(envVars map[string]string) []string {
 }
 
 func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+	ctx = m.withWorkspaceLock(ctx)
 	startEntry := time.Now()
 	// callerHubEndpoint is opts.Env's SCION_HUB_ENDPOINT exactly as the
 	// caller passed it in — captured before anything below ever writes to
@@ -172,7 +173,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	// 0. Check if container already exists (scoped to this project)
 	slug := api.Slugify(opts.Name)
-	agents, listErr := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	// Owner-filtered on a flat instance (listRuntime): a pre-clean never sees, or removes, another instance's object.
+	agents, listErr := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if listErr == nil {
 		for _, a := range agents {
 			// Skip agents from a different project
@@ -288,6 +290,9 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 
 	util.Debugf("Start: calling GetAgent name=%s template=%q image=%q harnessConfig=%q projectPath=%q profile=%q",
 		opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile)
+	// Collect the warnings for template environment keys GetAgent ignores
+	// (ptone/scion#4524); they join the start warnings below.
+	ctx, templateEnvWarns := withTemplateEnvWarnings(ctx)
 	agentDir, agentHome, agentWorkspace, finalScionCfg, err := GetAgent(ctx, opts.Name, opts.Template, opts.Image, opts.HarnessConfig, opts.ProjectPath, opts.Profile, "", opts.Branch, opts.Workspace, startInlineConfig)
 	if err != nil {
 		return nil, err
@@ -383,8 +388,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// recorded broker-side, in the agent dir; see image_provenance.go. For
 	// an agent that has it, the recorded template stands in for
 	// finalScionCfg.Info.Template (read from agent-info.json in the agent
-	// home): this chain selects the template-tier image and pull
-	// policy and the harness-config dir searched for the file tier.
+	// home): this chain selects the harness-config dir searched for the
+	// file tier, and whether the template is still resolvable.
 	provenance, err := readImageProvenance(agentDir)
 	if err != nil {
 		logImageProvenanceError(opts.Name, err)
@@ -400,10 +405,12 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	hydrated := templateHydrated(provenance, finalScionCfg)
 	// templateUnresolvable is true only when a named template could not be
 	// found at all (renamed or deleted since the agent was created) — not
-	// when there is simply no template name to resolve. It gates the
-	// recorded-image/pull-policy fallback below, so a restart of an agent
-	// whose template disappeared doesn't silently drop to Hub settings or
-	// the file default the way an empty templateChain otherwise would.
+	// when there is simply no template name to resolve. It gates the legacy
+	// recorded template snapshot tier below (the template image and pull
+	// policy recorded for an agent provisioned before ptone/scion#4524), so
+	// a restart of such an agent whose template disappeared keeps that
+	// recorded value instead of dropping to Hub settings or the file
+	// default, as an agent with no template name does.
 	templateUnresolvable := false
 	templateName := ""
 	if opts.Template != "" && filepath.IsAbs(opts.Template) {
@@ -423,8 +430,8 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	if templateName == "" && !hydrated {
 		templateName = opts.Template
 	}
-	var templateChain []*config.Template
 	var templatePaths []string
+	var templateChain []*config.Template
 	if templateName != "" {
 		if chain, err := config.GetTemplateChainInProject(templateName, opts.ProjectPath); err == nil {
 			templateChain = chain
@@ -452,6 +459,10 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// order (ptone/scion#1799).
 	var fileImage, settingsImage, profileOverrideImage string
 	var filePullPolicy, settingsPullPolicy, profileOverridePullPolicy string
+	// The harness-config file's and settings harness_configs volumes are
+	// environment values applied here on every start, never persisted
+	// (ptone/scion#4561).
+	var fileVolumes, settingsVolumes []api.VolumeMount
 	if harnessConfigName != "" {
 		if hcDir, err := resolveHarnessConfigDir(ctx, harnessConfigName, projectDir, templatePaths...); err == nil {
 			if hcDir.Config.Image != "" {
@@ -459,6 +470,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 				util.Debugf("image resolution: on-disk harness-config image=%s path=%s", fileImage, hcDir.Path)
 			}
 			filePullPolicy = hcDir.Config.ImagePullPolicy
+			fileVolumes = hcDir.Config.Volumes
 			if hcDir.Config.User != "" {
 				unixUsername = hcDir.Config.User
 			}
@@ -520,12 +532,37 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 					settingsPullPolicy = settings.HarnessConfigs[harnessConfigName].ImagePullPolicy
 				}
 			}
+			settingsVolumes = hConfig.Volumes
 			if hConfig.User != "" {
 				unixUsername = hConfig.User
 			}
 		} else {
 			util.Debugf("image resolution: settings harness-config %q not found", harnessConfigName)
 		}
+	}
+
+	// Environment values (ptone/scion#4561): image, kubernetes, resources
+	// and volumes come from settings, not from the persisted agent config,
+	// which holds only the requester's own values (inline config) and the
+	// provisioned workspace mount. They are read from scion-agent.json on
+	// disk rather than from finalScionCfg, which on a first start is the
+	// config ProvisionAgent returned with every tier already merged in, so
+	// a first start and a restart see the same agent values. ownEnv is also
+	// what the scion-agent.json rewrites below persist. The image and pull
+	// policy are resolved separately (pickImage / pickPullPolicy below);
+	// volumes and resources are applied here.
+	ownEnv := environmentOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentEnvironment(agentDir); ok {
+		ownEnv = persisted
+	}
+	if finalScionCfg != nil {
+		envProfile := opts.Profile
+		if envProfile == "" && finalScionCfg.Info != nil {
+			envProfile = finalScionCfg.Info.Profile
+		}
+		finalScionCfg = withEnvironment(finalScionCfg, ownEnv.clone())
+		finalScionCfg.Volumes = mergeEnvironmentVolumes(settingsVolumes, fileVolumes, ownEnv.Volumes)
+		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 	}
 
 	// Telemetry tiers applied per start: broker settings telemetry < hub
@@ -608,31 +645,57 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		opts.GitClone = gc
 	}
 
-	var warnings []string
+	warnings := templateEnvWarns.Warnings()
 
-	// The template tier: the live template chain (later template wins).
-	// When the named template can no longer be resolved (renamed or deleted
-	// since provision, or a hub agent restarted on a broker with no local
-	// copy), it falls back to the template chain's OWN image / pull policy
-	// that ProvisionAgent recorded in broker-side agent state (image-provenance.json
-	// in the agent dir, not agent-info.json in the agent home) — never to the
-	// merged scion-agent.json value, which also folds in that moment's
-	// inline, profile, settings and file values, so a profile or settings
-	// pin removed since then would otherwise linger disguised as the
-	// template's (ptone/scion#1799). An agent provisioned before
-	// image provenance was recorded still falls back to that merged value.
-	templateTierSource := imageTierTemplate
-	templateImage, templatePullPolicy := templateChainImage(templateChain)
+	// The template env layer (ptone/scion#4524): recomputed from the live
+	// template chain on every start, never read from scion-agent.json, and
+	// handed to the runtime as RunConfig.FallbackEnv below. An unresolvable
+	// template has no template env.
+	//
+	// For an agent with a Hub template, a start or restart leaves
+	// opts.Template unset (so image and harness-config resolution are
+	// unchanged); the broker hydrates the template and passes its path in
+	// opts.TemplateEnvSource for the template env only.
+	envChain := templateChain
+	if envChain == nil && opts.TemplateEnvSource != "" {
+		if chain, err := config.GetTemplateChainInProject(opts.TemplateEnvSource, opts.ProjectPath); err == nil {
+			envChain = chain
+		} else {
+			util.Debugf("template env: source %q could not be resolved: %v", opts.TemplateEnvSource, err)
+		}
+	}
+	templateEnv := templateChainEnv(envChain)
+	if envChain == nil && (templateUnresolvable || opts.TemplateEnvSource != "") {
+		if label := templateDisplayName(templateName, provenance, finalScionCfg); label != "" {
+			warnings = append(warnings, fmt.Sprintf("Warning: template %s not found; its env fallback is not applied", label))
+		}
+	}
+
+	// There is no live template tier: image and kubernetes are environment
+	// keys, which a template may not set (ptone/scion#4524).
+	//
+	// The recorded template snapshot is a legacy tier for an agent
+	// provisioned before that change whose template can no longer be
+	// resolved (renamed or deleted since provision, or a hub agent restarted
+	// on a broker with no local copy). It replays the template chain's OWN
+	// image / pull policy recorded in broker-side image provenance
+	// (image-provenance.json in the agent dir, not agent-info.json in the
+	// agent home), never the merged scion-agent.json value, which also folds
+	// in that moment's inline, profile, settings and file values, so a
+	// profile or settings pin removed since then cannot linger disguised as
+	// the template's (ptone/scion#1799). New agents record no template image,
+	// so for them the tier is empty. An agent provisioned before image
+	// provenance was recorded still falls back to the merged value.
+	var snapshotImage, snapshotPullPolicy string
 	if templateUnresolvable {
-		templateTierSource = imageTierTemplateSnapshot
 		switch {
 		case provenance != nil:
-			templateImage = provenance.TemplateImage
-			templatePullPolicy = provenance.TemplateImagePullPolicy
+			snapshotImage = provenance.TemplateImage
+			snapshotPullPolicy = provenance.TemplateImagePullPolicy
 		case finalScionCfg != nil:
-			templateImage = finalScionCfg.Image
+			snapshotImage = finalScionCfg.Image
 			if finalScionCfg.Kubernetes != nil {
-				templatePullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
+				snapshotPullPolicy = finalScionCfg.Kubernetes.ImagePullPolicy
 			}
 		}
 	}
@@ -691,16 +754,18 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		explicitPullPolicy = finalScionCfg.Info.ExplicitImagePullPolicy
 	}
 
-	// Resolve, lowest tier first. An EXPLICIT profile harness_overrides
-	// image / pull policy outranks the template and inline tiers; only the
-	// user's explicit request image (or explicit pull policy) ranks above
-	// it. The plain settings harness_configs default stays below the
-	// template (ptone/scion#1799). This runs before the registry rewrite so
-	// the rewrite applies last regardless of source.
+	// Resolve, lowest tier first: harness-config file < settings
+	// harness_configs < (legacy template snapshot) < inline < profile
+	// harness_overrides < request. An EXPLICIT profile override image
+	// outranks the inline tier; only the user's explicit request image
+	// ranks above it (ptone/scion#1799). For the pull policy, the user's
+	// explicit inline policy ranks above the profile override (there is no
+	// per-request pull-policy flag). This runs before the registry rewrite
+	// so the rewrite applies last regardless of source.
 	resolvedImage, imageSource := pickImage(slog.Default(), opts.Name, []imageCandidate{
 		{source: imageTierHarnessConfigFile, image: fileImage},
 		{source: imageTierSettings, image: settingsImage},
-		{source: templateTierSource, image: templateImage},
+		{source: imageTierTemplateSnapshot, image: snapshotImage},
 		{source: imageTierInline, image: inlineImage},
 		{source: imageTierProfileOverride, image: profileOverrideImage},
 		{source: requestImageSource, image: requestImage},
@@ -708,7 +773,7 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	resolvedPullPolicy, pullPolicySource := pickPullPolicy(slog.Default(), opts.Name, []imageCandidate{
 		{source: imageTierHarnessConfigFile, image: filePullPolicy},
 		{source: imageTierSettings, image: settingsPullPolicy},
-		{source: templateTierSource, image: templatePullPolicy},
+		{source: imageTierTemplateSnapshot, image: snapshotPullPolicy},
 		{source: imageTierProfileOverride, image: profileOverridePullPolicy},
 		{source: imageTierInline, image: explicitPullPolicy},
 	})
@@ -1443,7 +1508,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1454,7 +1519,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -1517,7 +1582,19 @@ authDone:
 		}
 	}
 
-	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(finalScionCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
+	// A stored Env key whose value equals the live template env value was
+	// merged in from the template by an older version: it applies only
+	// through the template fill (demoted on a per-start copy; scion-agent.json
+	// is not rewritten).
+	//
+	// The harness-config's auth-candidate keys are suppressed for the
+	// template env fallback (RunConfig.SuppressedFallbackKeys), so a
+	// template never takes part in auth; a demoted key among them is
+	// reported, never dropped silently.
+	suppressedFallbackKeys := sortedKeys(configAuthEnvKeySet(authMeta))
+	envCfg, demotedTemplateKeys := demoteLegacyTemplateEnv(finalScionCfg, templateEnv)
+	warnings = append(warnings, suppressedDemotedKeyWarnings(demotedTemplateKeys, suppressedFallbackKeys)...)
+	agentEnv, envWarnings, missingEnvKeys, droppedConfigEnv := buildAgentEnv(envCfg, opts.Env, api.HubAgentDefaultsFromContext(ctx).DefaultEnv(), opts.BrokerMode)
 	droppedBrokerEnvVars = append(droppedBrokerEnvVars, droppedConfigEnv...)
 	hubOnlyEnvWarnings := warnDroppedBrokerEnv(agentID, opts.Env, droppedBrokerEnvVars)
 	warnings = append(warnings, hubOnlyEnvWarnings...)
@@ -2159,7 +2236,7 @@ authDone:
 	}
 	effectiveSafeToEvict, safeToEvictFrom := settingsSafeToEvict, "settings "+safeToEvictSource
 	if tmplSafeToEvict != nil {
-		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent or template config"
+		effectiveSafeToEvict, safeToEvictFrom = tmplSafeToEvict, "kubernetes.safeToEvict in the agent config"
 	}
 	if effectiveSafeToEvict != nil {
 		if m.Runtime.Name() == "kubernetes" {
@@ -2175,7 +2252,7 @@ authDone:
 		if len(effectiveSharedDirs) > 0 {
 			size, source := sdSize, "settings "+sdSizeKey
 			if finalScionCfg != nil && finalScionCfg.Kubernetes != nil && finalScionCfg.Kubernetes.SharedDirSize != "" {
-				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent or template config"
+				size, source = finalScionCfg.Kubernetes.SharedDirSize, "kubernetes.shared_dir_size in the agent config"
 			}
 			if err := config.ValidateSharedDirSize(size); err != nil {
 				return nil, fmt.Errorf("%s: %w", source, err)
@@ -2189,6 +2266,14 @@ authDone:
 	// container's env and label cannot disagree. Any value from the
 	// request or template env is replaced.
 	agentEnv = withLaunchIDEnv(agentEnv, runID)
+
+	// The template env layer is never part of agentEnv: it travels as
+	// RunConfig.FallbackEnv, which every runtime applies as the LAST step
+	// of its own env assembly, after auth env, harness env, telemetry env
+	// and env-type secrets too; suppressedFallbackKeys (above) keeps it
+	// out of auth.
+	templateFallbackEnv, templateEnvFallbackWarnings := templateEnvFallback(templateEnv, opts.BrokerMode, opts.Name)
+	warnings = append(warnings, templateEnvFallbackWarnings...)
 
 	// Write the full task to the agent home, and pass a short pointer to
 	// it instead when the task is too large to pass inline.
@@ -2272,6 +2357,9 @@ authDone:
 		}(),
 		Env:             agentEnv,
 		ResolvedSecrets: opts.ResolvedSecrets,
+
+		FallbackEnv:            templateFallbackEnv,
+		SuppressedFallbackKeys: suppressedFallbackKeys,
 		Volumes: func() []api.VolumeMount {
 			var volumes []api.VolumeMount
 			if finalScionCfg != nil {
@@ -2416,6 +2504,11 @@ authDone:
 					l[k] = v
 				}
 			}
+			// The reserved owner label is set last, by the manager only,
+			// so nothing above can set or replace it.
+			for k, v := range m.ownerLabels() {
+				l[k] = v
+			}
 			return l
 		}(),
 		Annotations: projectkeys.ProjectPathLabels(projectDir),
@@ -2423,6 +2516,9 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		// Observes every created resource (flat instance ownership
+		// records) without changing cleanup ownership.
+		ObserveResourceCreated: opts.ObserveResourceCreated,
 	}
 	slog.Info("agent start: pre-runtime provisioning complete", "agent", opts.Name,
 		"elapsed_ms", time.Since(startEntry).Milliseconds())
@@ -2437,26 +2533,15 @@ authDone:
 		// dropCheckedSharedDirs saves the record; nothing reads it after this.
 		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
-	id, err := m.Runtime.Run(ctx, runCfg)
-	if err != nil {
-		// Provisioning writes agent-info.json in "created" state before the
-		// runtime launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom created agent forever.
-		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
-			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
-		}
-		return nil, classifyLaunchRuntimeError(err, resolvedImage)
-	}
-	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
-		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
-	if recordAfterCreate {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-				"agent", opts.Name, "run_id", runID, "error", err)
-		}
-	}
-
+	// Record the running phase, runtime and profile before the container
+	// starts rather than after it: some runtimes do not let the host write
+	// files in the container (ptone/scion#4766). Once up, the container
+	// reports its own phase (sciontool init writes "running"). This covers
+	// only the running-phase write: the "error" write on a failed launch
+	// below, and the run ID record after the create when the pre-start
+	// List failed (recordAfterCreate, moving in ptone/scion#4771), still
+	// write agent-info.json after Run.
+	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
 	// confuses readers that only understand the canonical lifecycle phases
@@ -2467,12 +2552,41 @@ authDone:
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
+	id, err := m.Runtime.Run(ctx, runCfg)
+	if err != nil {
+		// agent-info.json was set to "running" above, before the runtime
+		// launch. If the launch itself fails, keep the provisioned
+		// workspace but flip the local state to "error" so list/status do not
+		// report a phantom agent forever. This write comes after Run, so on a
+		// runtime whose Run fails after creating the container it may run
+		// while the container exists; tracked in ptone/scion#4815.
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+		}
+		return nil, classifyLaunchRuntimeError(err, resolvedImage)
+	}
+	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
+		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	// This write runs while the container may be up; it moves out of
+	// agent-info.json in ptone/scion#4771.
+	if recordAfterCreate {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
+	}
 
 	// Fetch fresh info and verify the container is actually running
-	allAgents, err := m.Runtime.List(ctx, map[string]string{"scion.name": slug})
+	allAgents, err := m.listRuntime(ctx, map[string]string{"scion.name": slug})
 	if err == nil {
 		for _, a := range allAgents {
-			if a.ContainerID == id || strings.EqualFold(a.Name, opts.Name) {
+			matched := a.ContainerID == id || strings.EqualFold(a.Name, opts.Name)
+			// An owned (flat instance) manager matches by name only within
+			// the agent's project, never another project's same-named agent.
+			if matched && m.owner != nil && a.ContainerID != id && !matchAgentProject(a, projectName, projectID) {
+				matched = false
+			}
+			if matched {
 				// Check if the container has already exited
 				if a.Phase == string(state.PhaseStopped) || a.Phase == string(state.PhaseError) {
 					// Try to get logs for diagnosis

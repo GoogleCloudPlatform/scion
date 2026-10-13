@@ -61,6 +61,7 @@ import (
 	scionplugin "github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin/grpcbroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	cloudrunruntime "github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/secretmigration"
@@ -355,8 +356,17 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// 10. Resolve hub endpoint
-	hubEndpoint, hubEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
+	// 10. Resolve hub endpoint: the operator endpoint (environment, flags,
+	// settings.yaml and fallbacks), then the endpoint in effect, which a
+	// server.hub.public_url saved in the settings database can replace
+	// unless an operator setting pins it (ptone/scion#3905). Resolved before
+	// the hub is constructed so every derivation sees the same value.
+	operatorEndpoint, operatorEndpointSrc := resolveServerHubEndpoint(cfg, brokerSettings)
+	hubEndpoints, err := resolveHubEndpoints(ctx, s, operatorHubEndpoint{URL: operatorEndpoint, Source: operatorEndpointSrc})
+	if err != nil {
+		return err
+	}
+	hubEndpoint, hubEndpointSrc := effectiveHubEndpoint(hubEndpoints, operatorEndpointSrc)
 
 	// Parse admin emails
 	adminEmailList := parseAdminEmails(cfg)
@@ -391,7 +401,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if enableHub {
 
 		var hubInitErr error
-		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
+		hubSrv, hubInitErr = initHubServerFn(ctx, cfg, s, entClient, hubEndpoints, devAuthToken, adminEmailList, adminMode, maintenanceMessage, requestLogger, messageLogger, globalDir, pluginMgr, secretBackend)
 		if hubInitErr != nil {
 			// Return rather than log.Fatalf so the deferred cleanups (store
 			// close, plugin shutdown, log flush including Cloud Logging) run.
@@ -496,7 +506,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// Conduit relay (hub.conduit): after operational settings are
 		// loaded (initHubServer) and before the background services start,
 		// which register the registry singleton only when a relay runs.
-		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoint, &wg, errCh); err != nil {
+		if err := startConduit(ctx, cancel, cfg, hubSrv, hubEndpoints.For(hub.HubEndpointForConduitCheck), &wg, errCh); err != nil {
 			return err
 		}
 
@@ -568,6 +578,9 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	}
 
 	// 13. Start Broker
+	// On a Cloud Run service host, warn once that async launches need CPU
+	// allocated outside requests (ptone/scion#4763). No-op elsewhere.
+	cloudrunruntime.WarnCPUAllocationIfNeeded(slog.Default(), os.Getenv, cfg.RuntimeBroker.Enabled)
 	if cfg.RuntimeBroker.Enabled {
 		if err := requireImageRegistryForBroker(); err != nil {
 			return err
@@ -760,7 +773,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 								log.Printf("Warning: failed to generate secret for broker plugin %q: %v", bt, secretErr)
 							} else {
 								hubCreds := map[string]string{
-									"hub_url":     hubEndpoint,
+									"hub_url":     hubSrv.HubEndpointFor(hub.HubEndpointForPluginBrokers),
 									"hmac_key":    secretKey,
 									"broker_id":   brokerID,
 									"plugin_name": bt,
@@ -1851,6 +1864,93 @@ const (
 	hubEndpointSourceLocalhost   hubEndpointSource = "localhost"
 )
 
+// operatorHubEndpoint is the hub's operator endpoint, as resolved by
+// resolveHubEndpointWithSource, and where it came from. The settings
+// database is never consulted for it (ptone/scion#3905).
+type operatorHubEndpoint struct {
+	URL    string
+	Source hubEndpointSource
+}
+
+// sourceLabel names the source of the operator endpoint for logging and the
+// admin settings view: "env", "flag" or "file" for an explicitly configured
+// value, otherwise the fallback that produced it.
+func (e operatorHubEndpoint) sourceLabel() string {
+	switch e.Source {
+	case hubEndpointSourceConfig:
+		if os.Getenv(hubEndpointEnvVar) != "" {
+			return "env"
+		}
+		return "file"
+	case hubEndpointSourceBaseURLFlag:
+		return "flag"
+	case hubEndpointSourceBaseURLEnv:
+		return "env"
+	case hubEndpointSourceBrokerSettings, hubEndpointSourceSettings:
+		return "settings"
+	default:
+		return string(e.Source)
+	}
+}
+
+// hubEndpointEnvVar is the environment variable that sets
+// server.hub.public_url (GlobalConfig hub.endpoint).
+const hubEndpointEnvVar = "SCION_SERVER_HUB_ENDPOINT"
+
+// hubEndpointPin returns the operator setting that pins the hub's public
+// endpoint, or "" when none is set. Any of SCION_SERVER_HUB_ENDPOINT,
+// --base-url and SCION_SERVER_BASE_URL pins it: the hub then uses its
+// operator endpoint and ignores a server.hub.public_url saved in the
+// settings database (ptone/scion#3905).
+func hubEndpointPin() string {
+	switch {
+	case os.Getenv(hubEndpointEnvVar) != "":
+		return hubEndpointEnvVar
+	case webBaseURL != "":
+		return "--base-url"
+	case os.Getenv("SCION_SERVER_BASE_URL") != "":
+		return "SCION_SERVER_BASE_URL"
+	}
+	return ""
+}
+
+// resolveHubEndpoints reads the server.hub.public_url saved in the settings
+// database (hub processes only) and resolves the hub's endpoints from it and
+// the operator endpoint (hub.ResolveHubEndpoints), logging the result.
+func resolveHubEndpoints(ctx context.Context, s store.Store, operator operatorHubEndpoint) (hub.HubEndpoints, error) {
+	base := hub.HubEndpoints{
+		Operator:       operator.URL,
+		OperatorSource: operator.sourceLabel(),
+		Pin:            hubEndpointPin(),
+	}
+	if !enableHub {
+		base.Public, base.PublicSource = base.Operator, base.OperatorSource
+		return base, nil
+	}
+	var dbValue string
+	if st, ok := s.(store.HubSettingStore); ok {
+		v, err := hub.StoredPublicURL(ctx, st)
+		if err != nil {
+			return hub.HubEndpoints{}, err
+		}
+		dbValue = v
+	}
+	return hub.ResolveHubEndpoints(base, dbValue, slog.Default()), nil
+}
+
+// effectiveHubEndpoint returns the hub endpoint in effect for the
+// derivations made in this package (hub.HubEndpointForAgents decides), and
+// the source to report for it. A value that differs from the operator
+// endpoint came from the settings database and counts as explicitly
+// configured.
+func effectiveHubEndpoint(e hub.HubEndpoints, operatorSrc hubEndpointSource) (string, hubEndpointSource) {
+	ep := e.For(hub.HubEndpointForAgents)
+	if ep == e.Operator {
+		return ep, operatorSrc
+	}
+	return ep, hubEndpointSourceConfig
+}
+
 // resolveHubEndpoint determines the Hub's public endpoint URL.
 func resolveHubEndpoint(cfg *config.GlobalConfig, brokerSettings *config.Settings) string {
 	endpoint, _ := resolveHubEndpointWithSource(cfg, brokerSettings)
@@ -2413,8 +2513,9 @@ func wireCloudLoggingHealth(hubSrv *hub.Server, cs *logging.CloudWriteStats) {
 	hubSrv.SetCloudLoggingHealth(func() string { return cs.HealthStatus(time.Now()) })
 }
 
-func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, hubEndpoint, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
-	hubCfg := buildHubServerConfig(cfg, hubEndpoint, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store, entClient *ent.Client, endpoints hub.HubEndpoints, devAuthToken string, adminEmailList []string, adminMode bool, maintenanceMessage string, requestLogger, messageLogger *slog.Logger, globalDir string, pluginMgr *scionplugin.Manager, secretBackend secret.SecretBackend) (*hub.Server, error) {
+	hubCfg := buildHubServerConfig(cfg, endpoints.Operator, devAuthToken, adminEmailList, adminMode, maintenanceMessage, secretBackend)
+	hubCfg.HubEndpoints = &endpoints
 	warnNonConformingHubName(cfg.Hub.HubName)
 
 	// In hosted mode every replica must share the same session secret for
@@ -2486,7 +2587,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		if cfg.Auth.Transport.PlatformAuthSA == "" {
 			return nil, fmt.Errorf("auth.transport.platformAuthSA is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
-		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, hubEndpoint)
+		audience := resolveTransportAudience(cfg.Auth.Transport.OIDCAudience, cfg.Auth.Transport.Mode, endpoints.For(hub.HubEndpointForTransportAudience))
 		if audience == "" {
 			return nil, fmt.Errorf("auth.transport.oidcAudience is required when auth.transport.mode=%q", cfg.Auth.Transport.Mode)
 		}
@@ -3481,33 +3582,33 @@ func resolveBrokerDefaultRuntime(getRuntime func(projectPath, profileName string
 }
 
 func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.GlobalConfig, hubSrv *hub.Server, webSrv *hub.WebServer, s store.Store, hubEndpoint string, hubEndpointSrc hubEndpointSource, devAuthToken string, brokerSettings *config.Settings, brokerDefaultProfile *string, globalDir string, requestLogger, messageLogger *slog.Logger, wg *sync.WaitGroup, errCh chan error) error {
-	// Flat Runtime Broker instances (server.broker.instances): strictly
-	// loaded, and refused before any registration, credential load or
-	// connection unless the Hub runs in this process.
+	// Flat Runtime Broker instances (server.broker.instances), strictly
+	// loaded. A process with instances hosts them through the flat host
+	// (co-located with the Hub, or remote with instance-scoped credentials
+	// validated on every start) and never the legacy identity.
 	flatInstances, err := loadServerRuntimeBrokerInstances(cfg, serverConfigPath)
 	if err != nil {
 		return err
 	}
-	if err := config.CheckRuntimeBrokerInstanceHosting(flatInstances, colocatedBrokerRegisters(cfg, s)); err != nil {
-		return err
-	}
-	flatMode := len(flatInstances) > 0
-
-	var rt runtime.Runtime
-	var flatRuntime *runtime.DockerRuntime
-	if flatMode {
-		// The instance's manager is built from its explicit configuration,
-		// never from Runtime Broker Profile resolution.
-		flatRuntime = runtime.NewDockerRuntime()
-		rt = flatRuntime
-		log.Printf("Runtime broker hosting flat instance %q (runtime target %s); the legacy Runtime Broker identity is not hosted by this process",
-			flatInstances[0].Key, flatInstances[0].RuntimeTarget.Type)
-	} else {
-		warnUnhostedFlatIdentities(globalDir)
-		rt, err = resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
-		if err != nil {
-			return err
+	if len(flatInstances) > 0 {
+		autoProvide := serverAutoProvide
+		if enableHub && !cmd.Flags().Changed("auto-provide") {
+			autoProvide = true
+			if vs, _, vsErr := config.LoadEffectiveSettings(""); vsErr == nil && vs != nil && vs.Server != nil && vs.Server.Broker != nil && vs.Server.Broker.AutoProvide != nil {
+				autoProvide = *vs.Server.Broker.AutoProvide
+			}
 		}
+		return startFlatRuntimeBrokerHost(ctx, flatHostParams{
+			cfg: cfg, hubSrv: hubSrv, webSrv: webSrv, store: s, instances: flatInstances,
+			hubEndpoint: hubEndpoint, hubEndpointSrc: hubEndpointSrc, devAuthToken: devAuthToken,
+			settings: brokerSettings, globalDir: globalDir, autoProvide: autoProvide,
+			requestLogger: requestLogger, messageLogger: messageLogger, wg: wg, errCh: errCh,
+		})
+	}
+	warnUnhostedFlatIdentities(globalDir)
+	rt, err := resolveBrokerDefaultRuntime(runtime.GetRuntime, log.Printf)
+	if err != nil {
+		return err
 	}
 	statelessCloudRunBroker := enableHub && !simulateRemoteBroker && rt != nil && rt.Name() == "cloudrun"
 
@@ -3532,30 +3633,20 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 			return fmt.Errorf("stateless Cloud Run broker requires a derivable broker ID: %w", deriveErr)
 		}
 	}
-	var brokerID, brokerName string
-	if flatMode {
-		// The flat instance's identity comes from its identity file and its
-		// configured name; legacy ID sources are only collision checks.
-		brokerName = flatInstances[0].Name
-	} else {
-		brokerID = resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
-		// Resolve broker name
-		brokerName = resolveBrokerName(cfg, settings, vsBroker)
-	}
+	brokerID := resolveBrokerID(ctx, cfg, settings, vsBroker, globalDir, defaultBrokerID, s)
+	// Resolve broker name
+	brokerName := resolveBrokerName(cfg, settings, vsBroker)
 
 	// If no explicit name was configured and this is a co-located broker,
 	// use a stable human-readable name instead of the hostname fallback.
-	if enableHub && !simulateRemoteBroker && !flatMode {
+	if enableHub && !simulateRemoteBroker {
 		if hostname, err := os.Hostname(); err == nil && brokerName == hostname {
 			brokerName = "Hosted Broker"
 		}
 	}
 
-	// Enrich logger with broker_id (a flat instance's ID is known only after
-	// its identity is loaded, below).
-	if !flatMode {
-		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
-	}
+	// Enrich logger with broker_id
+	slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
 
 	// Resolve hub endpoint for the runtime broker
 	hubEndpointForRH := resolveHubEndpointForBroker(cfg, settings)
@@ -3572,51 +3663,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// Co-located registration and credential generation
 	var inMemoryCreds *brokercredentials.BrokerCredentials
 	var colocatedBrokerRegistered bool
-	var flatStartup *flatInstanceStartup
-	if flatMode {
-		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
-		if cfg.RuntimeBroker.Host == "0.0.0.0" {
-			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
-		}
-		prep, prepErr := prepareFlatInstance(ctx, hubSrv, flatRuntime, flatInstances[0],
-			legacyRuntimeBrokerIDs(cfg, settings, vsBroker, globalDir), globalDir,
-			hub.EmbeddedFlatRegistrationOptions{
-				Endpoint:         rhEndpoint,
-				AutoProvide:      serverAutoProvide,
-				Capabilities:     flatInstanceCapabilities(rt),
-				WorkspaceStorage: loadBrokerRegistrationWorkspaceStorage(),
-			}, nil)
-		if prepErr != nil {
-			// Not activated: no Runtime Broker server, control channel,
-			// heartbeat or dispatch, and no fallback to the legacy identity.
-			// The refusal is reported through EmbeddedBrokerRegistrationFailed
-			// (health and admin summary). The Hub keeps serving.
-			slog.Error("Flat Runtime Broker instance not activated; fix its configuration or registration and restart the server",
-				"instance", flatInstances[0].Key, "error", prepErr)
-			return nil
-		}
-		flatStartup = prep
-		brokerID = prep.identity.RuntimeBrokerID
-		slog.SetDefault(slog.Default().With(slog.String(logging.AttrBrokerID, brokerID)))
-		colocatedBrokerRegistered = true
-		hubSrv.SetLocalImageChecker(rt)
-		log.Printf("Registered flat Runtime Broker %s (%s, runtime target %s, endpoint: %s)", brokerName, brokerID, prep.identity.RuntimeTarget.ID, rhEndpoint)
-		if authSvc := hubSrv.GetBrokerAuthService(); authSvc != nil {
-			secretKeyB64, secretErr := authSvc.GenerateAndStoreSecret(ctx, brokerID)
-			if secretErr != nil {
-				log.Printf("Warning: failed to generate/retrieve secret for the flat Runtime Broker instance: %v", secretErr)
-			} else {
-				inMemoryCreds = &brokercredentials.BrokerCredentials{
-					BrokerID:     brokerID,
-					SecretKey:    secretKeyB64,
-					HubEndpoint:  hubEndpointForRH,
-					RegisteredAt: time.Now(),
-				}
-			}
-		} else {
-			log.Printf("Warning: BrokerAuthService not available, skipping flat Runtime Broker credentials")
-		}
-	} else if colocatedBrokerRegisters(cfg, s) {
+	if colocatedBrokerRegisters(cfg, s) {
 		rhEndpoint := fmt.Sprintf("http://%s:%d", cfg.RuntimeBroker.Host, cfg.RuntimeBroker.Port)
 		if cfg.RuntimeBroker.Host == "0.0.0.0" {
 			rhEndpoint = fmt.Sprintf("http://localhost:%d", cfg.RuntimeBroker.Port)
@@ -3756,6 +3803,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		HubEnabled:           hubEndpointForRH != "",
 		HubToken:             devAuthToken,
 		HostCredentials:      config.HostCredentialsEligible(hostedMode, devAuthToken != ""),
+		WorkstationMode:      !hostedMode,
 		TemplateCacheDir:     templateCacheDir,
 		TemplateCacheMaxSize: templateCacheMax,
 
@@ -3767,15 +3815,6 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		BrokerAuthStrictMode: true,
 	}
 	chRes.applyTo(&rhCfg)
-	if flatStartup != nil {
-		rhCfg.FlatInstance = &runtimebroker.FlatInstanceConfig{
-			Identity:     flatStartup.identity,
-			Instance:     flatStartup.instance,
-			HubInProcess: colocatedBrokerRegisters(cfg, s),
-		}
-		// A flat instance reports no Runtime Broker Profile.
-		rhCfg.DefaultProfile = nil
-	}
 
 	// In co-located mode, hand the broker the Hub's storage backend so that a
 	// local filesystem backend is read directly (zero-copy) instead of being
@@ -3813,7 +3852,7 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 
 	// Wire runtime reload so reloadSettings can swap the broker's container
 	// engine without a full server restart (fixes onboarding wizard flow).
-	if hubSrv != nil && colocatedBrokerRegistered && !flatMode {
+	if hubSrv != nil && colocatedBrokerRegistered {
 		hubSrv.SetRuntimeReloadFunc(func() bool {
 			newRT := runtime.GetRuntime("", "")
 			if newRT.Name() == rhSrv.RuntimeName() {

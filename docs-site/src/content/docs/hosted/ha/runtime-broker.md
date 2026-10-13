@@ -190,18 +190,14 @@ With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of t
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
 
-1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration. `scion hub token create` does not yet offer a hub boundary, so create the token through the API with your CLI session:
+1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration:
 
    ```bash
-   HUB=https://hub.example.com
-   SESSION=$(jq -r --arg hub "$HUB" '.hubs[$hub].accessToken' ~/.scion/credentials.json)
-   curl -sS -X POST "$HUB/api/v1/auth/tokens" \
-     -H "Authorization: Bearer $SESSION" \
-     -H "Content-Type: application/json" \
-     -d '{"name":"build-host-3","boundary":{"kind":"hub"},"scopes":["broker:create","broker:read"],"expiresAt":"2026-12-01T00:00:00Z"}'
+   scion hub token create --boundary hub --name build-host-3 \
+     --scopes broker:create,broker:read --expires 2h
    ```
 
-   The response contains the token value (`scion_pat_...`) once. Choose an `expiresAt` that is shortly after you plan to register.
+   The command prints the token value (`scion_pat_...`) once. Choose an `--expires` that is shortly after you plan to register.
 
 2. **Register on the host** with the broker server running (`scion runtime-broker start`):
 

@@ -546,8 +546,9 @@ func isNilable(v reflect.Value) bool {
 // edit takes effect, not by where it is stored: a provision-rendered key,
 // or a cleared container key, is written to the agent's inline config now
 // but takes effect only at the next reincarnation. A key sent with its
-// current value is in no list. Every list is sorted and is an empty list,
-// never null.
+// current value is in no list, except gcp_identity, which is applied
+// whenever the PATCH records a service-account assignment, the current
+// account included. Every list is sorted and is an empty list, never null.
 type AgentUpdateDisposition struct {
 	// Applied lists the keys whose edit takes effect at the next container
 	// creation (start, restart, resume or reincarnation), or at once for

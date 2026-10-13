@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -569,11 +570,21 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
+	if hubProfileSelected() {
+		return openHubProfileClient()
+	}
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
 		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
 	}
+	return hubClientForEndpoint(settings, endpoint)
+}
 
+// hubClientForEndpoint returns a client for the hub at endpoint, with the
+// credential getHubClient would choose for that endpoint.
+func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
 	// Get auth info for logging
@@ -689,75 +700,60 @@ func getHubEnabledScope(resolvedPath string, isGlobal bool, mergedSettings *conf
 	return result
 }
 
-// hubEndpointScope describes where the hub.endpoint setting comes from.
+// hubEndpointScope describes where the effective hub endpoint comes from.
 type hubEndpointScope struct {
 	// Endpoint is the resolved value.
 	Endpoint string
-	// Source is "flag", "context", "project", "global", "env", or "none".
+	// Source is the JSON source value shared with 'scion use': "flag",
+	// "env", "directory", "project_settings", "context",
+	// "global_settings" or "none".
 	Source string
-	// Inherited is true when a project-scoped invocation uses a global or env setting.
+	// Label is the display label of Source, as 'scion use' shows it.
+	Label string
+	// Inherited is true when a project-scoped invocation uses the global
+	// settings or the environment.
 	Inherited bool
 }
 
-// getHubEndpointScope determines where the hub endpoint comes from.
-func getHubEndpointScope(resolvedPath string, isGlobal bool, settings *config.Settings) hubEndpointScope {
-	// The hub selected with 'scion use' is in hubEndpoint too, but it is not
-	// a --hub flag.
-	if hubSource == targetSourceContext {
-		return hubEndpointScope{Endpoint: hubEndpoint, Source: "context"}
+// getHubEndpointScope determines where the hub endpoint comes from, with
+// the same sources and labels as bare 'scion use' (describeUseTarget).
+func getHubEndpointScope(isGlobal bool, t useTarget) hubEndpointScope {
+	s := hubEndpointScope{Endpoint: t.HubEndpoint, Source: t.HubSource, Label: t.HubLabel}
+	if !isGlobal && (t.HubSource == useSourceGlobalSettings || t.HubSource == useSourceEnv) {
+		s.Inherited = true
 	}
-	// --hub flag takes top priority
-	if hubEndpoint != "" {
-		return hubEndpointScope{Endpoint: hubEndpoint, Source: "flag"}
-	}
-
-	if !isGlobal {
-		// Check if project has its own endpoint
-		projectSettings, err := config.LoadSettingsFromDir(resolvedPath)
-		if err == nil && projectSettings.Hub != nil && projectSettings.Hub.Endpoint != "" {
-			return hubEndpointScope{Endpoint: projectSettings.Hub.Endpoint, Source: "project"}
-		}
-	}
-
-	// Check global settings
-	globalDir, _ := config.GetGlobalDir()
-	if globalDir != "" {
-		globalSettings, _ := config.LoadSettingsFromDir(globalDir)
-		if globalSettings != nil && globalSettings.Hub != nil && globalSettings.Hub.Endpoint != "" {
-			return hubEndpointScope{
-				Endpoint:  globalSettings.Hub.Endpoint,
-				Source:    "global",
-				Inherited: !isGlobal,
-			}
-		}
-	}
-
-	// Check env var
-	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
-		return hubEndpointScope{Endpoint: ep, Source: "env", Inherited: !isGlobal}
-	}
-
-	return hubEndpointScope{Source: "none"}
+	return s
 }
 
 // endpointSourceNote returns the line hub status prints under the endpoint
 // to say where it came from, or "" when nothing is printed.
 func endpointSourceNote(s hubEndpointScope) string {
-	switch {
-	case s.Source == "context":
-		return "            (current context)"
-	case s.Inherited:
-		return fmt.Sprintf("            (inherited from %s)", s.Source)
-	case s.Source == "flag":
-		return "            (from --hub flag)"
+	if s.Source == "" || s.Source == useSourceNone || s.Label == "" {
+		return ""
 	}
-	return ""
+	return fmt.Sprintf("            (%s)", s.Label)
+}
+
+// hubStatusName returns the nickname of the hub at endpoint for hub
+// status, or "-" when the endpoint has no entry in the hub list.
+func hubStatusName(c *config.CLIContext, endpoint string) string {
+	if c != nil {
+		if name, _ := c.HubByEndpoint(endpoint); name != "" {
+			return name
+		}
+	}
+	return "-"
 }
 
 func runHubStatus(cmd *cobra.Command, args []string) error {
 	// Bridge --json flag to global --format
 	if hubOutputJSON {
 		outputFormat = "json"
+	}
+
+	// With a hub profile, report the profile session and gate on it.
+	if hubProfileSelected() {
+		return runHubProfileStatus(cmd)
 	}
 
 	// Resolve project path to find project settings
@@ -775,9 +771,22 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 
 	hubEnabled := settings.IsHubEnabled()
 
+	// The effective target, as bare 'scion use' computes it: the source of
+	// the endpoint, and the project selected with 'scion use' when there
+	// is no directory project.
+	var cliCtx *config.CLIContext
+	if !contextDisabled(resolveMode()) {
+		cliCtx = loadUseContext(cmd.ErrOrStderr())
+	}
+	if cliCtx == nil {
+		cliCtx = &config.CLIContext{}
+	}
+	target := describeUseTarget(cliCtx)
+	hubName := hubStatusName(cliCtx, endpoint)
+
 	// Determine scope of hub settings
 	enabledScope := getHubEnabledScope(resolvedPath, isGlobal, settings)
-	endpointScope := getHubEndpointScope(resolvedPath, isGlobal, settings)
+	endpointScope := getHubEndpointScope(isGlobal, target)
 
 	// Get authentication info
 	authInfo := getAuthInfo(settings, endpoint)
@@ -788,6 +797,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			"enabledScope":      enabledScope.Scope,
 			"enabledInherited":  enabledScope.Inherited,
 			"cliOverride":       noHub,
+			"hub":               hubName,
 			"endpoint":          endpoint,
 			"endpointSource":    endpointScope.Source,
 			"endpointInherited": endpointScope.Inherited,
@@ -805,6 +815,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		// Add auth info to JSON output
 		status["authMethod"] = authInfo.MethodType
 		status["authSource"] = authInfo.Source
+		status["bearerSource"] = bearerSourceLabel(authInfo)
 		status["isDevAuth"] = authInfo.IsDevAuth
 
 		// Try to connect and get health, then verify auth
@@ -844,8 +855,11 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 					}
 
 					// Add project context to JSON output
-					projectContext := getProjectContextJSON(client, resolvedPath, isGlobal, settings, jsonAuthVerified)
-					status["projectContext"] = projectContext
+					if target.ProjectSource == useSourceContext {
+						status["projectContext"] = getContextProjectJSON(client, target, jsonAuthVerified)
+					} else {
+						status["projectContext"] = getProjectContextJSON(client, resolvedPath, isGlobal, settings, jsonAuthVerified)
+					}
 				} else {
 					status["connected"] = false
 					status["error"] = err.Error()
@@ -875,6 +889,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	} else if enabledScope.Inherited {
 		fmt.Printf("            (inherited from global settings)\n")
 	}
+	fmt.Printf("Hub:        %s\n", hubName)
 	fmt.Printf("Endpoint:   %s\n", valueOrNone(endpoint))
 	if note := endpointSourceNote(endpointScope); note != "" {
 		fmt.Println(note)
@@ -919,10 +934,12 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		if meErr != nil {
 			fmt.Println("Status:     Not authenticated")
 			fmt.Printf("Method:     %s (configured but not accepted by server)\n", authInfo.Method)
+			fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 			fmt.Println("            Run 'scion hub auth login' to authenticate.")
 		} else {
 			authVerified = true
 			fmt.Printf("Method:     %s\n", authInfo.Method)
+			fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 			if authInfo.IsDevAuth {
 				fmt.Println("            (development mode - not for production use)")
 			}
@@ -948,6 +965,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		// Can't reach server to verify - show local auth info only
 		fmt.Printf("Method:     %s (not verified - server unreachable)\n", authInfo.Method)
+		fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 		if authInfo.IsDevAuth {
 			fmt.Println("            (development mode - not for production use)")
 		}
@@ -988,8 +1006,13 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 			fmt.Printf("Scion Version (Server): %s\n", valueOrNone(health.ScionVersion))
 			fmt.Printf("Scion Version (Local):  %s\n", version.Short())
 
-			// Show project context if we're in a project
-			printProjectContext(client, resolvedPath, isGlobal, settings, authVerified)
+			// Show project context: the project selected with 'scion use'
+			// outside a project directory, otherwise the directory's.
+			if target.ProjectSource == useSourceContext {
+				printContextProject(client, target, hubName, authVerified)
+			} else {
+				printProjectContext(client, resolvedPath, isGlobal, settings, authVerified)
+			}
 		}
 	}
 
@@ -1097,10 +1120,73 @@ func printProjectContext(client hubclient.Client, projectPath string, isGlobal b
 
 	fmt.Printf("Linked: yes\n")
 	fmt.Printf("Hub Project:  %s (ID: %s)\n", linkedProject.Name, linkedProject.ID)
+	printProjectBrokers(ctx, client, linkedProject.ID)
+}
 
-	// Get runtime brokers for this project
+// printContextProject prints the Project Context section of hub status for
+// the project selected with 'scion use' (no directory project applies).
+func printContextProject(client hubclient.Client, t useTarget, hubName string, authVerified bool) {
+	fmt.Println()
+	fmt.Println("Project Context")
+	fmt.Println("---------------")
+	fmt.Printf("Project:    %s\n", valueOrNone(t.ProjectSlug))
+	fmt.Printf("Type:       hub project (current context)\n")
+	if !authVerified {
+		fmt.Println()
+		fmt.Println("Authenticate with 'scion hub auth login' to view project status.")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	project, err := client.Projects().Get(ctx, t.ProjectID)
+	if err != nil || project == nil {
+		fmt.Println()
+		fmt.Printf("The current project '%s' (hub '%s') was not found; run 'scion use' to pick another.\n", contextProjectDisplayName(t), hubName)
+		return
+	}
+	fmt.Printf("Hub Project:  %s (ID: %s)\n", project.Name, project.ID)
+	printProjectBrokers(ctx, client, project.ID)
+}
+
+// contextProjectDisplayName returns the slug of the context project, or
+// its ID when the slug is not known.
+func contextProjectDisplayName(t useTarget) string {
+	if t.ProjectSlug != "" {
+		return t.ProjectSlug
+	}
+	return t.ProjectID
+}
+
+// getContextProjectJSON returns the projectContext of hub status JSON for
+// the project selected with 'scion use'.
+func getContextProjectJSON(client hubclient.Client, t useTarget, authVerified bool) map[string]interface{} {
+	result := map[string]interface{}{
+		"name":         contextProjectDisplayName(t),
+		"type":         "hub project",
+		"source":       useSourceContext,
+		"hubProjectId": t.ProjectID,
+	}
+	if !authVerified {
+		result["reason"] = "not authenticated"
+		return result
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	project, err := client.Projects().Get(ctx, t.ProjectID)
+	if err != nil || project == nil {
+		result["reason"] = "not found on the hub"
+		return result
+	}
+	result["hubProjectName"] = project.Name
+	addProjectBrokersJSON(ctx, client, project.ID, result)
+	return result
+}
+
+// printProjectBrokers prints the runtime brokers of a hub project for hub
+// status.
+func printProjectBrokers(ctx context.Context, client hubclient.Client, projectID string) {
 	brokersResp, err := client.RuntimeBrokers().List(ctx, &hubclient.ListBrokersOptions{
-		ProjectID: linkedProject.ID,
+		ProjectID: projectID,
 	})
 	if err != nil {
 		fmt.Printf("Brokers:    (error fetching: %s)\n", err)
@@ -1228,14 +1314,19 @@ func getProjectContextJSON(client hubclient.Client, projectPath string, isGlobal
 	result["linked"] = true
 	result["hubProjectId"] = linkedProject.ID
 	result["hubProjectName"] = linkedProject.Name
+	addProjectBrokersJSON(ctx, client, linkedProject.ID, result)
+	return result
+}
 
-	// Get runtime brokers for this project
+// addProjectBrokersJSON adds the runtime brokers of a hub project to a hub
+// status projectContext.
+func addProjectBrokersJSON(ctx context.Context, client hubclient.Client, projectID string, result map[string]interface{}) {
 	brokersResp, err := client.RuntimeBrokers().List(ctx, &hubclient.ListBrokersOptions{
-		ProjectID: linkedProject.ID,
+		ProjectID: projectID,
 	})
 	if err != nil {
 		result["brokersError"] = err.Error()
-		return result
+		return
 	}
 
 	brokers := make([]map[string]interface{}, 0, len(brokersResp.Brokers))
@@ -1247,8 +1338,6 @@ func getProjectContextJSON(client hubclient.Client, projectPath string, isGlobal
 		})
 	}
 	result["brokers"] = brokers
-
-	return result
 }
 
 func runHubProjects(cmd *cobra.Command, args []string) error {
@@ -1316,41 +1405,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Resolve project path to find project settings
-	gp := projectPath
-	if gp == "" && globalMode {
-		gp = "global"
-	}
-
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	// Determine project name from args or current project
-	var projectName string
-	if len(args) > 0 {
-		projectName = args[0]
-	} else {
-		// Use current project name
-		if isGlobal {
-			projectName = "global"
-		} else {
-			gitRemote := util.GetGitRemote()
-			if gitRemote != "" {
-				projectName = util.ExtractRepoName(gitRemote)
-			} else {
-				projectName = config.GetProjectName(resolvedPath)
-			}
-		}
-	}
-
-	client, err := getHubClient(settings)
+	projectName, client, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1490,7 +1545,22 @@ func providerCapacityIndicator(p hubclient.ProjectProvider) string {
 	return fmt.Sprintf(" (agents: %s)", formatProviderCapacity(p))
 }
 
-func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
+// hubProjectsTarget resolves the project named by args (or the current
+// project) and a hub client for 'hub projects info' and 'delete'. With a
+// hub profile the project must be named: no local project is resolved and
+// no local settings are read.
+func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
+	if hubProfileSelected() {
+		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+			return "", nil, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
+		}
+		client, err := openHubProfileClient()
+		if err != nil {
+			return "", nil, err
+		}
+		return args[0], client, nil
+	}
+
 	// Resolve project path to find project settings
 	gp := projectPath
 	if gp == "" && globalMode {
@@ -1499,12 +1569,12 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
+		return "", nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
+		return "", nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
 	// Determine project name from args or current project
@@ -1526,6 +1596,14 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	client, err := getHubClient(settings)
+	if err != nil {
+		return "", nil, err
+	}
+	return projectName, client, nil
+}
+
+func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
+	projectName, client, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -2490,7 +2568,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubProject != nil && hubProject.Name == projectName {
 		// Already linked — still call register so the server can backfill
 		// the membership group if it was created before group support.
-		if _, err := registerProjectOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
+		if _, err := registerProjectOnHub(ctx, client, endpoint, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
 			util.Debugf("Failed to register during re-link (non-fatal): %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "Project '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
@@ -2561,7 +2639,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				// Register with the selected project's ID so the hub creates
 				// the membership group (and adds this user as owner) if it
 				// doesn't already exist.
-				if _, err := registerProjectOnHub(ctx, client, selectedID, projectName, resolvedPath, isGlobal); err != nil {
+				if _, err := registerProjectOnHub(ctx, client, endpoint, selectedID, projectName, resolvedPath, isGlobal); err != nil {
 					util.Debugf("Failed to register during link (non-fatal): %v", err)
 				}
 				// Store the hub project ID separately — don't overwrite the
@@ -2573,7 +2651,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Linked to existing project (ID: %s)\n", selectedID)
 			case hubsync.ProjectChoiceRegisterNew:
 				// Register as a new project on the Hub using the local project_id.
-				hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+				hubProjectID, err := registerProjectOnHub(ctx, client, endpoint, projectID, projectName, resolvedPath, isGlobal)
 				if err != nil {
 					return err
 				}
@@ -2587,7 +2665,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// No matching projects - create new one
-			hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+			hubProjectID, err := registerProjectOnHub(ctx, client, endpoint, projectID, projectName, resolvedPath, isGlobal)
 			if err != nil {
 				return err
 			}
@@ -2629,10 +2707,18 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to save linked state: %w", err)
 	}
 
-	// Save endpoint if provided via flag
-	if err := persistHubFlagEndpoint(resolvedPath, isGlobal); err != nil {
-		return err
+	// Record the link in the hub list: the project resolves to this hub
+	// from now on, whatever hub is current. No hub.endpoint is written to
+	// the project's settings.
+	linkOut := cmd.OutOrStdout()
+	if isJSONOutput() {
+		linkOut = cmd.ErrOrStderr()
 	}
+	linkSlug, linkName := "", projectName
+	if p, err := client.Projects().Get(ctx, effectiveHubProjectID); err == nil && p != nil {
+		linkSlug, linkName = p.Slug, p.Name
+	}
+	recordLinkEntry(linkOut, cmd.ErrOrStderr(), endpoint, effectiveHubProjectID, linkSlug, linkName, resolvedPath)
 
 	if isJSONOutput() {
 		return outputJSON(ActionResult{
@@ -2739,8 +2825,10 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 	})
 }
 
-// registerProjectOnHub registers a new project on the Hub.
-func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
+// registerProjectOnHub registers a new project on the Hub. endpoint is the
+// hub's endpoint, used to choose the registration's labels (see
+// hubsync.LinkedProjectLabels).
+func registerProjectOnHub(ctx context.Context, client hubclient.Client, endpoint, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
 	var gitRemote string
 	if !isGlobal {
 		gitRemote = util.GetGitRemote()
@@ -2751,6 +2839,7 @@ func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectI
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      projectPath,
+		Labels:    hubsync.LinkedProjectLabels(endpoint, gitRemote),
 	}
 
 	resp, err := client.Projects().Register(ctx, req)
@@ -2790,6 +2879,9 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	// project is already unlinked.
 	ownLinked := hubsync.ProjectLinkedSetting(resolvedPath, isGlobal)
 	if !unlinkGateOpen(ownLinked, settings.IsHubEnabled()) {
+		// A link entry left behind (for example by an older unlink) goes
+		// too, so the directory no longer resolves to that hub.
+		removeLinkEntry(cmd.ErrOrStderr(), resolvedPath)
 		fmt.Println("This project is not linked to the Hub.")
 		return nil
 	}
@@ -2826,6 +2918,7 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
 		util.Debugf("Failed to clear hub.projectId: %v", err)
 	}
+	removeLinkEntry(cmd.ErrOrStderr(), resolvedPath)
 
 	message := fmt.Sprintf("Project '%s' has been unlinked from the Hub.", projectName)
 	if !onHub {

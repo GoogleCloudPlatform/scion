@@ -26,7 +26,6 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +37,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -597,13 +597,10 @@ func (ws *WebServer) logger() *slog.Logger {
 
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
 // ::1, or "localhost"). It returns false for non-loopback IPs (including
-// "0.0.0.0" and "::") and for unresolvable hostnames.
+// "0.0.0.0" and "::") and for unresolvable hostnames. It is
+// config.IsLoopbackHost, the rule the public URL check uses too.
 func IsLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return config.IsLoopbackHost(host)
 }
 
 // NewWebServer creates a new web frontend server.

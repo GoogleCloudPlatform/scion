@@ -237,7 +237,7 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 	t.Run("missing SHA256SUMS asset fails before extraction, without downloading the tarball", func(t *testing.T) {
 		var tarballHits int
 		server := newAssetServer(t, "", &tarballHits)
-		executor := &BinaryUpdateExecutor{serviceName: "test-hub"}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{ServiceName: "test-hub"})
 		var logBuf bytes.Buffer
 		params := map[string]string{
 			"target_version": "v9.9.9",
@@ -262,7 +262,7 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 	t.Run("no matching entry fails before extraction, without downloading the tarball", func(t *testing.T) {
 		var tarballHits int
 		server := newAssetServer(t, fmt.Sprintf("%s  some-other-asset.tar.gz\n", correctHash), &tarballHits)
-		executor := &BinaryUpdateExecutor{serviceName: "test-hub"}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{ServiceName: "test-hub"})
 		var logBuf bytes.Buffer
 		params := map[string]string{
 			"target_version": "v9.9.9",
@@ -284,7 +284,7 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 	t.Run("hash mismatch fails before extraction", func(t *testing.T) {
 		wrongHash := strings.Repeat("0", 64)
 		server := newAssetServer(t, fmt.Sprintf("%s  %s\n", wrongHash, assetName), nil)
-		executor := &BinaryUpdateExecutor{serviceName: "test-hub"}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{ServiceName: "test-hub"})
 		var logBuf bytes.Buffer
 		params := map[string]string{
 			"target_version": "v9.9.9",
@@ -305,7 +305,7 @@ func TestBinaryUpdateExecutor_ChecksumVerificationWiring(t *testing.T) {
 
 	t.Run("no checksums_url param derives it from download_url and still verifies", func(t *testing.T) {
 		server := newAssetServer(t, fmt.Sprintf("%s  %s\n", correctHash, assetName), nil)
-		executor := &BinaryUpdateExecutor{serviceName: "test-hub"}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{ServiceName: "test-hub"})
 		var logBuf bytes.Buffer
 		params := map[string]string{
 			"target_version": "v9.9.9",
