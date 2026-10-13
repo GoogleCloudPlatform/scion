@@ -40,13 +40,15 @@ import (
 // as the profile's issuer delegation, keep issued identities in the run
 // cache, and also run in agent mode, but only against a target whose
 // endpoint is not the agent's own hub. delegate is the human consent step
-// on the target: human mode only, never with a profile. web-code is not
-// available with a profile (it is not in hubProfileAllowed).
+// on the target: human mode only, never with a profile. web-code with a
+// profile mints the code through the issuer delegation, for an identity
+// that delegation issued; in agent mode it runs only with such a profile.
 //
 // A token or web-login code is a secret. Without a profile it is written
 // only to the file named by --out, created exclusively (never overwriting
 // an existing path or following a symlink) with mode 0600; with a profile
-// a token goes only to the run cache (0600, exclusive, symlinks refused).
+// a token goes only to the run cache (0600, exclusive, symlinks refused)
+// and a web-login code still only to --out.
 // Standard output and standard error carry only non-secret facts: the
 // identity's ID, email, role, expiry, the code ID and the output file path.
 
@@ -69,8 +71,9 @@ With a target-hub profile (see 'scion hub profile'), the commands act as the
 profile's issuer delegation on another test hub, issued identities go to the
 run cache (issue --as <alias> --run <label>), 'teardown --run <label>'
 removes a whole run, and the commands also run in agent mode, but only
-against a profile for another hub. 'delegate' is the human consent step on
-the target hub. 'web-code' is not available with a profile or in agent mode.
+against a profile for another hub. 'web-code' with a profile mints the code
+through the issuer delegation, for an identity issued through it. 'delegate'
+is the human consent step on the target hub.
 
 Examples:
   # Issue a member identity; its token goes to ./fixture.token
@@ -88,8 +91,10 @@ Examples:
   # Delete a test identity when the run is done
   scion hub test-identity delete <id>
 
-  # With a target-hub profile: issue into the run cache, then tear the run down
+  # With a target-hub profile: issue into the run cache, mint a web-login
+  # code for the identity, then tear the run down
   scion --hub-profile t1 hub test-identity issue --as owner --run r1
+  scion --hub-profile t1 hub test-identity web-code <id> --out ./code.txt
   scion --hub-profile t1 hub test-identity teardown --run r1`,
 }
 
@@ -195,9 +200,16 @@ symlink, or a path under a symlinked directory is refused. The file is
 created with mode 0600 and holds only the code. The code is never printed;
 only the identity ID, the code ID, the code expiry and the file path are.
 
+With a target-hub profile (--hub-profile or SCION_HUB_PROFILE), the code is
+minted on the target hub through the profile's issuer delegation, for a
+member identity issued through that delegation ('scion hub test-identity
+list' shows their IDs); --as does not apply. In agent mode web-code runs
+only with a profile for another hub, never this agent's own.
+
 Examples:
   scion hub test-identity web-code 6f1c... --out ./code.txt
-  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json`,
+  scion hub test-identity web-code 6f1c... --out /tmp/run-42/code.txt --json
+  scion --hub-profile t1 hub test-identity web-code 6f1c... --out ./code.txt`,
 	Args: cobra.ExactArgs(1),
 	RunE: runHubTestIdentityWebCode,
 }
@@ -310,7 +322,9 @@ func runHubTestIdentityToken(cmd *cobra.Command, args []string) error {
 }
 
 func runHubTestIdentityWebCode(cmd *cobra.Command, args []string) error {
-	_, client, err := loadHubClient()
+	// With a profile: the issuer delegation on the target hub (--as is
+	// refused); without one: the CLI's usual hub client.
+	client, err := testIdentityIssuerClient()
 	if err != nil {
 		return err
 	}
