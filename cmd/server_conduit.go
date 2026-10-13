@@ -278,12 +278,13 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 // ""). Strength is checked by HubConduitConfig.Validate. Errors name the
 // setting, never the value.
 func validateConduitPeerSecret(c config.HubConduitConfig, relayRole bool, sessionSecret string) error {
+	secret := c.PeerSecretValue() // a value that is only a newline is unset
 	switch {
-	case c.PeerSecret == "" && relayRole:
+	case secret == "" && relayRole:
 		return errors.New("server.hub.conduit.peer_secret is required on --role relay")
-	case c.PeerSecret == "" && c.ExternalRelay():
+	case secret == "" && c.ExternalRelay():
 		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
-	case c.PeerSecret != "" && sessionSecret != "" && c.PeerSecretValue() == sessionSecret:
+	case secret != "" && sessionSecret != "" && secret == sessionSecret:
 		return errors.New("server.hub.conduit.peer_secret must differ from the session secret")
 	}
 	return nil

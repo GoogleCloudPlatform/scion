@@ -289,7 +289,7 @@ func TestValidatePeerSecretOctets(t *testing.T) {
 		{"32 octets plus one trailing newline", testPeerSecret[:32] + "\n", true},
 		{"31 octets plus one trailing newline", testPeerSecret[:31] + "\n", false},
 		{"31 octets plus two trailing newlines: only one is trimmed", testPeerSecret[:31] + "\n\n", true},
-		{"only a newline", "\n", false},
+		{"only a newline is unset (the required check reports it)", "\n", true},
 		{"a trailing CRLF counts the CR", testPeerSecret[:31] + "\r\n", true},
 		{"multi-byte characters count as octets", strings.Repeat("é", 8) + sixteen, true}, // 16 + 16 octets
 		{"15 distinct octets", strings.Repeat(sixteen[:15], 3), false},
@@ -332,4 +332,29 @@ func TestPeerSecretFileValueSurvivesEmptyEnv(t *testing.T) {
 			assert.Equal(t, testPeerSecret, vsConduit(vs).PeerSecret, "VersionedSettings")
 		})
 	}
+}
+
+// TestPeerSecretOnlyNewlineIsUnset: a peer_secret that is only a newline,
+// from the file or the environment, normalizes to empty and counts as
+// unset.
+func TestPeerSecretOnlyNewlineIsUnset(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, ".scion", "settings.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\nserver:\n  hub:\n    conduit:\n      peer_secret: \"\\n\"\n"), 0o600))
+	gc, err := LoadGlobalConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret, "file")
+	assert.Empty(t, gc.Hub.Conduit.PeerSecretValue(), "file")
+	assert.NoError(t, gc.Hub.Conduit.Validate())
+
+	require.NoError(t, os.WriteFile(path, []byte("schema_version: \"1\"\n"), 0o600))
+	t.Setenv("SCION_SERVER_HUB_CONDUIT_PEERSECRET", "\n")
+	gc, err = LoadGlobalConfig(path)
+	require.NoError(t, err)
+	assert.Equal(t, "\n", gc.Hub.Conduit.PeerSecret, "env")
+	assert.Empty(t, gc.Hub.Conduit.PeerSecretValue(), "env")
+	assert.NoError(t, gc.Hub.Conduit.Validate())
 }

@@ -233,12 +233,13 @@ func (c HubConduitConfig) PeerSecretValue() string {
 // normalized octets: at least ConduitPeerSecretMinBytes of them, and at
 // least ConduitPeerSecretMinDistinct distinct ones. It names the setting
 // and never the value. An empty secret is unset and passes here; the modes
-// that require it check for it separately.
+// that require it check for it separately; so does a value that is only a
+// trailing newline, which normalizes to empty.
 func ValidatePeerSecret(secret string) error {
-	if secret == "" {
+	v := NormalizePeerSecret(secret)
+	if v == "" {
 		return nil
 	}
-	v := NormalizePeerSecret(secret)
 	if len(v) < ConduitPeerSecretMinBytes {
 		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d octets", ConduitPeerSecretMinBytes)
 	}

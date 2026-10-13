@@ -41,8 +41,8 @@ func (c RelayServerConfig) IsZero() bool {
 }
 
 // Validate checks the configured values. Whether a value is required
-// depends on the server role and is checked at startup. An error never
-// carries credentials a rejected URL may contain.
+// depends on the server role and is checked at startup. An error names
+// the key only, never the URL (which may carry credentials).
 func (c RelayServerConfig) Validate() error {
 	var errs []error
 	for _, f := range []struct{ key, v string }{
@@ -53,12 +53,8 @@ func (c RelayServerConfig) Validate() error {
 			continue
 		}
 		u, err := url.Parse(f.v)
-		if err != nil {
-			errs = append(errs, fmt.Errorf("invalid %s: not a URL", f.key))
-			continue
-		}
-		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
-			errs = append(errs, fmt.Errorf("invalid %s %q: want an http(s) URL without query, fragment or credentials", f.key, u.Redacted()))
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.RawQuery != "" || u.Fragment != "" || u.User != nil {
+			errs = append(errs, fmt.Errorf("invalid %s: want an http(s) URL without query, fragment or credentials", f.key))
 		}
 	}
 	return errors.Join(errs...)

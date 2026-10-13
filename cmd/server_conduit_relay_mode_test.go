@@ -53,6 +53,8 @@ func TestValidateConduitPeerSecret(t *testing.T) {
 		{name: "equal to the session secret, in-process", conduit: withSecret(config.HubConduitConfig{}, relayModeTestSessionSecret), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
 		{name: "equal to the session secret after the trailing newline is trimmed", conduit: withSecret(external, relayModeTestSessionSecret+"\n"), session: relayModeTestSessionSecret, wantErr: "must differ from the session secret"},
 		{name: "a second trailing newline is part of the secret", conduit: withSecret(external, relayModeTestSessionSecret+"\n\n"), session: relayModeTestSessionSecret},
+		{name: "only a newline is unset (external)", conduit: withSecret(external, "\n"), wantErr: "server.hub.conduit.peer_secret is required"},
+		{name: "only a newline is unset (relay role)", conduit: withSecret(config.HubConduitConfig{}, "\n"), relayRole: true, wantErr: "server.hub.conduit.peer_secret is required on --role relay"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			err := validateConduitPeerSecret(tc.conduit, tc.relayRole, tc.session)
@@ -81,6 +83,7 @@ func TestValidateServerPreflight_RelayMode(t *testing.T) {
 		{name: "external without peer secret", conduit: config.HubConduitConfig{RelayMode: "external"}, wantErr: "server.hub.conduit.peer_secret is required"},
 		{name: "peer secret equal to the session secret", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestSessionSecret}, wantErr: "must differ from the session secret"},
 		{name: "peer secret too short", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: "short"}, wantErr: "server.hub.conduit.peer_secret"},
+		{name: "peer secret only a newline", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: "\n"}, wantErr: "server.hub.conduit.peer_secret is required"},
 		{name: "unknown relay mode", conduit: config.HubConduitConfig{RelayMode: "sidecar"}, wantErr: "server.hub.conduit.relay_mode"},
 		{name: "external with a peer secret", conduit: config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}},
 	} {
@@ -103,7 +106,7 @@ func TestValidateServerPreflight_RelayMode(t *testing.T) {
 }
 
 // TestStartConduit_ExternalRelayNeedsExperiment: external relay mode with
-// hub.conduit off is a startup error, in and outside hosted HA.
+// hub.conduit off is a startup error.
 func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	srv := conduitHubServer(t, false)

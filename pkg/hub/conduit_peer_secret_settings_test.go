@@ -170,3 +170,43 @@ func TestNeverAPIWritable_EmptyPeerSecretIgnoredInDBAndWorkstationMode(t *testin
 		})
 	}
 }
+
+// TestNeverAPIWritable_OnlyEmptyPeerSecretChangesNothing: a body holding
+// only an empty (or null) peer_secret is accepted and changes nothing.
+func TestNeverAPIWritable_OnlyEmptyPeerSecretChangesNothing(t *testing.T) {
+	for _, workstation := range []bool{false, true} {
+		for name, body := range map[string]string{
+			"empty": `{"server":{"hub":{"conduit":{"peer_secret":""}}}}`,
+			"null":  `{"server":{"hub":{"conduit":{"peer_secret":null}}}}`,
+		} {
+			t.Run(map[bool]string{false: "db", true: "workstation"}[workstation]+"/"+name, func(t *testing.T) {
+				settingsPath := workstationHome(t)
+				before, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				srv, st, _ := newSQLiteHubInMode(t, workstation, nil)
+				revisions := hubSettingRevisions(t, st)
+				rr := putServerConfig(t, srv, body)
+				require.Less(t, rr.Code, 300, rr.Body.String())
+				after, err := os.ReadFile(settingsPath)
+				require.NoError(t, err)
+				assert.Equal(t, string(before), string(after), "settings.yaml unchanged")
+				assert.Equal(t, revisions, hubSettingRevisions(t, st), "no DB row written")
+			})
+		}
+	}
+}
+
+// TestNeverAPIWritable_NullPeerSecretIgnoredInFileMode: a null peer_secret
+// in a file-mode PUT neither errors nor clears the stored secret.
+func TestNeverAPIWritable_NullPeerSecretIgnoredInFileMode(t *testing.T) {
+	settingsPath := writePeerSecretSettings(t)
+	srv := &Server{}
+	rr := httptest.NewRecorder()
+	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config",
+		`{"server":{"hub":{"conduit":{"peer_secret":null,"reconnect_window":"4s"}}}}`))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), peerSecretSettingValue)
+	assert.Contains(t, string(data), "4s")
+}
