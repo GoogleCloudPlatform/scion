@@ -602,7 +602,11 @@ func (svc *ProjectDeletionService) cascadeSecurityState(ctx context.Context, tx 
 	// 1b. Project visitor rules — each rule, with the bindings it created
 	// and its exclusions. The rule rows have no foreign key to the project;
 	// a rule left behind would bind matching visitors at the deleted
-	// project's ID again on their next request.
+	// project's ID again on their next request. Bindings are deleted here
+	// before the rules are locked, while removing or changing one rule
+	// locks the rule before its bindings; both take the project row lock
+	// first (Delete step 6, purgeFixtureProject), so they do not run
+	// interleaved.
 	if n, err := tx.DeleteProjectVisitorRulesByProject(ctx, projectID); err != nil {
 		return cs, fmt.Errorf("cascade project visitor rules: %w", err)
 	} else {

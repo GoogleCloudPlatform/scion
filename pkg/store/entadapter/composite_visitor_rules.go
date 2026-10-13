@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -81,6 +82,26 @@ func (c *CompositeStore) lockProjectVisitorRule(ctx context.Context, id uuid.UUI
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+// lockProjectVisitorRuleForChange locks, in this order, the project row of
+// the rule id (LockProjectForMembership) and then the rule
+// (lockProjectVisitorRule). Project deletion and the fixture purge take the
+// project row lock first too, before they delete the project's bindings and
+// then its rules, so a rule change and a project deletion of the same
+// project run one after the other instead of each holding a row the other
+// needs. A rule whose project row no longer exists is still locked and
+// changed. Call it inside a transaction, before touching the rule's
+// bindings; a missing rule returns store.ErrNotFound.
+func (c *CompositeStore) lockProjectVisitorRuleForChange(ctx context.Context, id uuid.UUID) error {
+	r, err := c.client.ProjectVisitorRule.Get(ctx, id)
+	if err != nil {
+		return mapError(err)
+	}
+	if err := c.LockProjectForMembership(ctx, r.ProjectID); err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	return c.lockProjectVisitorRule(ctx, id)
 }
 
 // CreateProjectVisitorRule creates a project visitor rule (see
@@ -207,7 +228,7 @@ func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id 
 		if !ok {
 			return fmt.Errorf("update project visitor rule window: unexpected transactional store %T", tx)
 		}
-		if err := txc.lockProjectVisitorRule(ctx, uid); err != nil {
+		if err := txc.lockProjectVisitorRuleForChange(ctx, uid); err != nil {
 			return err
 		}
 		ruleUpdate := txc.client.ProjectVisitorRule.UpdateOneID(uid)
@@ -256,7 +277,7 @@ func (c *CompositeStore) DeleteProjectVisitorRule(ctx context.Context, id string
 		if !ok {
 			return fmt.Errorf("delete project visitor rule: unexpected transactional store %T", tx)
 		}
-		if err := txc.lockProjectVisitorRule(ctx, uid); err != nil {
+		if err := txc.lockProjectVisitorRuleForChange(ctx, uid); err != nil {
 			return err
 		}
 		rbs, err := txc.client.RoleBinding.Query().

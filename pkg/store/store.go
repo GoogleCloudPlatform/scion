@@ -276,18 +276,23 @@ type Store interface {
 	// UpdateProjectVisitorRuleWindow replaces the NotBefore and ExpiresAt
 	// of the project visitor rule id (nil clears a bound) and of every
 	// role binding the rule created (SourceRuleID), in one transaction,
-	// and returns the updated rule. The rule row is locked before the
-	// bindings are changed, so a rule binding created concurrently either
-	// is changed too or takes the new window. A missing rule returns ErrNotFound. It
-	// is safe to call on the store passed to WithTx.
+	// and returns the updated rule. The project row (as
+	// LockProjectForMembership does) and then the rule row are locked
+	// before the bindings are changed, so a rule binding created
+	// concurrently either is changed too or takes the new window, and a
+	// concurrent deletion of the project runs before or after it. A
+	// missing rule returns ErrNotFound. It is safe to call on the store
+	// passed to WithTx.
 	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, error)
 
 	// DeleteProjectVisitorRule deletes the project visitor rule id, every
 	// role binding it created (SourceRuleID) and its exclusions, in one
 	// transaction, and returns the deleted bindings. A binding with no
-	// SourceRuleID (a visitor grant by email) is never deleted. The rule
-	// row is locked before the bindings are deleted, so a rule binding
-	// created concurrently is either deleted too or refused. A missing
+	// SourceRuleID (a visitor grant by email) is never deleted. The
+	// project row (as LockProjectForMembership does) and then the rule row
+	// are locked before the bindings are deleted, so a rule binding
+	// created concurrently is either deleted too or refused, and a
+	// concurrent deletion of the project runs before or after it. A missing
 	// rule returns ErrNotFound. It is safe to call on the store passed to
 	// WithTx.
 	DeleteProjectVisitorRule(ctx context.Context, id string) ([]*RoleBinding, error)

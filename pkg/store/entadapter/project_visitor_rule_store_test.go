@@ -18,9 +18,11 @@ package entadapter
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -477,4 +479,61 @@ func TestDeleteInactiveVisitorGrant(t *testing.T) {
 	assert.False(t, removed)
 	_, err = env.cs.GetRoleBinding(ctx, member.ID)
 	assert.NoError(t, err)
+}
+
+// A rule's window change and its removal take the project row lock before
+// the rule lock, the order project deletion uses (project row, then the
+// project's bindings and rules), so the two run one after the other on
+// Postgres. A rule whose project row is missing is still changed.
+func TestProjectVisitorRuleChange_LocksProjectRowFirst(t *testing.T) {
+	env := newVisitorEnv(t)
+	ctx := context.Background()
+	require.NoError(t, env.cs.CreateProject(ctx, &store.Project{ID: env.projectID, Name: "rules", Slug: "rules-" + env.projectID[:8]}))
+
+	var mu sync.Mutex
+	var seen []string
+	record := func(name string) ent.Interceptor {
+		return ent.InterceptFunc(func(next ent.Querier) ent.Querier {
+			return ent.QuerierFunc(func(ctx context.Context, q ent.Query) (ent.Value, error) {
+				mu.Lock()
+				seen = append(seen, name)
+				mu.Unlock()
+				return next.Query(ctx, q)
+			})
+		})
+	}
+	env.cs.client.Project.Intercept(record("project"))
+	env.cs.client.ProjectVisitorRule.Intercept(record("rule"))
+	take := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := seen
+		seen = nil
+		return out
+	}
+
+	rule := env.createVisitorRule(t, testFedIssuer, "corp.com")
+	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	take()
+	_, err := env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &expires)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rule", "project", "rule"}, take(), "window change: rule read, project row lock, rule lock")
+
+	_, err = env.cs.DeleteProjectVisitorRule(ctx, rule.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"rule", "project", "rule"}, take(), "removal: rule read, project row lock, rule lock")
+	_, err = env.cs.GetProjectVisitorRule(ctx, rule.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	orphan := &store.ProjectVisitorRule{ProjectID: uuid.NewString(), Issuer: testFedIssuer, Domain: "corp.com"}
+	require.NoError(t, env.cs.CreateProjectVisitorRule(ctx, orphan))
+	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, orphan.ID, nil, &expires)
+	require.NoError(t, err, "window change of a rule whose project row is missing")
+	_, err = env.cs.DeleteProjectVisitorRule(ctx, orphan.ID)
+	require.NoError(t, err, "removal of a rule whose project row is missing")
+	_, err = env.cs.GetProjectVisitorRule(ctx, orphan.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+
+	_, err = env.cs.DeleteProjectVisitorRule(ctx, uuid.NewString())
+	assert.ErrorIs(t, err, store.ErrNotFound)
 }
