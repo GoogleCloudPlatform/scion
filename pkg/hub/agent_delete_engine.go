@@ -329,7 +329,11 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 // current row. It is skipped where the delete reaches no Runtime Broker or
 // has already torn down: a managed runtime, a soft-deleted row (the claim
 // does not match it), and a finalizing row (its re-claim skips the
-// dispatch, ptone/scion#2890). A row that is gone is left to the claim,
+// dispatch, ptone/scion#2890). A deleting row is skipped too: it reaches
+// the claim only once its lease has expired (an abandoned engine), and the
+// re-claim's dispatch check then refuses it with a rollback that restores
+// its prior phase and intent, where a refusal here would leave it stuck in
+// deleting and stopping. A row that is gone is left to the claim,
 // which then affects nothing. An unpinned agent with no Runtime Broker
 // passes, as before (checkAgentPinnedPlacement).
 func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) error {
@@ -340,7 +344,8 @@ func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) er
 	if err != nil {
 		return err
 	}
-	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() || row.DeletionState == store.DeletionStateFinalizing {
+	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() ||
+		row.DeletionState == store.DeletionStateFinalizing || row.DeletionState == store.DeletionStateDeleting {
 		return nil
 	}
 	_, err = checkAgentPinnedPlacement(ctx, s.store, row)
@@ -747,6 +752,19 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		}
 		s.agentLifecycleLog.Error("Failed to delete managed agent cloud resources", "agent_id", agent.ID, "error", err)
 		return e.rollback(store.DeletionCodeRuntimeError, managedDeleteFailedPrefix+err.Error()), false
+	}
+
+	// Placement check on the claimed snapshot, before the shortcuts below:
+	// the best-effort path finalizes without a dispatch when the Runtime
+	// Broker looks unreachable, so the dispatcher's backstop would never
+	// run for it. A refusal is handled as the backstop's would be (see
+	// below). A store failure is left to the dispatch, as before.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		if refusal, ok := placementRefusalOf(err); ok {
+			s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; not dispatching, not finalizing",
+				"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code, "force", req.Force)
+			return e.rollback(store.DeletionCodeConflict, refusal.Message), false
+		}
 	}
 
 	dispatcher := s.GetDispatcher()

@@ -604,6 +604,30 @@ func TestPlacementGuard_KeysRefusedBeforeDispatch(t *testing.T) {
 	assert.Equal(t, a.ID, d["agentId"])
 }
 
+// reset-auth, exec and logs write the dispatcher's placement refusal as its
+// own 409 and code, not as a 5xx.
+func TestPlacementGuard_ResetAuthExecLogsAnswer409(t *testing.T) {
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.stalePinnedAgent(t, "stale-rel", string(state.PhaseRunning))
+	for _, tc := range []struct {
+		name   string
+		method string
+		path   string
+		body   interface{}
+	}{
+		{"reset-auth", http.MethodPost, "/api/v1/agents/" + a.ID + "/reset-auth", nil},
+		{"exec", http.MethodPost, "/api/v1/agents/" + a.ID + "/exec", map[string]interface{}{"command": []string{"true"}}},
+		{"logs", http.MethodGet, "/api/v1/agents/" + a.ID + "/logs", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doRequest(t, f.srv, tc.method, tc.path, tc.body)
+			d := requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+			requireStalePinDetails(t, d, a, f)
+			assert.False(t, f.client.resetAuthCalled, "nothing is sent")
+		})
+	}
+}
+
 // --- non-dispatcher routes -------------------------------------------------
 
 func TestPlacementGuard_PTYRefusedBeforeUpgrade(t *testing.T) {
@@ -707,6 +731,33 @@ func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
 		assert.Equal(t, http.StatusServiceUnavailable, d.Status)
 		assert.Equal(t, ErrCodeUnavailable, d.Code)
 		assert.Equal(t, ptyReasonRegistryUnavailable, d.Reason)
+	})
+
+	t.Run("PTY, unpinned agent keeps today's decision", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.unpinnedAgentOn(t, "pty-fault-unpinned", f.legacy.ID, string(state.PhaseRunning))
+		f.srv.store = &brokerReadErrStore{Store: f.s, err: boom}
+		t.Cleanup(func() { f.srv.store = f.s })
+		d := f.srv.resolvePTYPath(context.Background(), nil, a)
+		assert.NotEqual(t, ptyReasonRegistryUnavailable, d.Reason, "the placement check fails open for an unpinned agent")
+		assert.NotEqual(t, http.StatusConflict, d.Status)
+	})
+
+	t.Run("conduit grant, unpinned and managed agents are not refused", func(t *testing.T) {
+		cf := newConduitFixture(t)
+		ctx := context.Background()
+		cf.srv.store = &brokerReadErrStore{Store: cf.store, err: boom}
+		t.Cleanup(func() { cf.srv.store = cf.store })
+		mint := func(a *store.Agent) error {
+			_, _, err := cf.srv.mintConduitGrant(ctx, conduitGrantRequest{Identity: cf.owner, Agent: a, Stream: tcpHeader("3000"),
+				Target: grant.Target{Kind: grant.TargetKindAgent, ID: a.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}})
+			return err
+		}
+		unpinned := *cf.agent // on "broker-1", whose row read now fails
+		assert.NoError(t, mint(&unpinned), "an unpinned agent keeps today's path")
+		managed := *cf.agent
+		managed.Runtime = ManagedRuntimePrefix + "test"
+		assert.NoError(t, mint(&managed), "a managed runtime is not checked")
 	})
 
 	t.Run("conduit grant", func(t *testing.T) {
@@ -831,6 +882,17 @@ func TestH1_ProfileDefaultNotWrittenOntoPinnedAgent(t *testing.T) {
 	}
 	if a.AppliedConfig.GCPIdentity != nil {
 		assert.NotEqual(t, sa.ID, a.AppliedConfig.GCPIdentity.ServiceAccountID, "the per-profile default is not applied")
+	}
+
+	// The scheduled create path skips it for a pinned agent too.
+	scheduled := &store.Agent{ID: "s", ProjectID: project.ID, RuntimeBrokerID: f.flat.ID, PinnedRuntimeBrokerID: f.flat.ID,
+		PinnedRuntimeTargetID: f.flat.RuntimeTarget.ID, PinnedRuntimeTargetType: "docker", AppliedConfig: &store.AgentAppliedConfig{}}
+	origin, err := f.srv.applyScheduledProjectDefaultGCPIdentity(ctx, scheduled, project)
+	require.NoError(t, err)
+	assert.NotEqual(t, store.SAAssignmentOriginScheduledProjectProfileDefault, origin)
+	assert.Empty(t, scheduled.AppliedConfig.Profile, "no profile is written onto a pinned scheduled agent")
+	if scheduled.AppliedConfig.GCPIdentity != nil {
+		assert.NotEqual(t, sa.ID, scheduled.AppliedConfig.GCPIdentity.ServiceAccountID)
 	}
 
 	// Both create paths call the pinned-aware helper, never the lookup

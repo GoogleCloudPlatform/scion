@@ -3673,8 +3673,18 @@ func (s *Server) dispatchAgentDeletions(ctx context.Context, agents []store.Agen
 					"agent_id", agent.ID, "error", err)
 			}
 			if err := dispatcher.DispatchAgentDelete(ctx, agent, true, true, false, now); err != nil {
-				s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
-					"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				if refusal, refused := placementRefusalOf(err); refused {
+					// Nothing was sent: the agent's saved placement is
+					// inconsistent. Its workload stays running on the
+					// Runtime Broker with no agent record left.
+					s.agentLifecycleLog.Error("project deletion: agent delete refused for an inconsistent placement; its workload is left running on the Runtime Broker",
+						"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID, "code", refusal.Code,
+						"broker", agent.RuntimeBrokerID, "pinned_runtime_broker_id", agent.PinnedRuntimeBrokerID,
+						"pinned_runtime_target_id", agent.PinnedRuntimeTargetID)
+				} else {
+					s.agentLifecycleLog.Warn("failed to dispatch agent delete during project deletion",
+						"agent_id", agent.ID, "broker", agent.RuntimeBrokerID, "error", err)
+				}
 			}
 		}
 		s.events.PublishAgentDeleted(ctx, agent.ID, agent.ProjectID)

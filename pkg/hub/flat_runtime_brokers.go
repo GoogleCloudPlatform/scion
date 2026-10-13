@@ -704,15 +704,30 @@ func requirePinnedPlacement(ctx context.Context, st store.Store, a *store.Agent)
 // agent. It runs inside the dispatcher method, so it also covers a caller
 // with no handler pre-check and a queued dispatch executed on the node that
 // holds the broker connection.
+//
+// deletePreviousRuns has no backstop of its own: its one caller,
+// DispatchAgentDelete, already ran this one, and a second check after the
+// current run's delete succeeded would read as "nothing was dispatched"
+// and roll back a delete whose current run is gone.
 func (d *HTTPAgentDispatcher) placementBackstop(ctx context.Context, agent *store.Agent) error {
+	if d.store == nil {
+		return errPlacementCheckNoStore
+	}
 	_, err := requirePinnedPlacement(ctx, d.store, agent)
 	return err
 }
+
+// errPlacementCheckNoStore fails a dispatcher with no store closed: the
+// placement cannot be checked, so nothing is dispatched.
+var errPlacementCheckNoStore = errors.New("placement check: the dispatcher has no store")
 
 // keysPlacementBackstop is placementBackstop for DispatchAgentKeys, whose
 // target is not an agent: it loads the agent row, checks it, and requires
 // target to name the agent's current Runtime Broker.
 func (d *HTTPAgentDispatcher) keysPlacementBackstop(ctx context.Context, target agentkeys.Target) error {
+	if d.store == nil {
+		return errPlacementCheckNoStore
+	}
 	agent, err := d.store.GetAgent(ctx, target.AgentID)
 	if err != nil {
 		return fmt.Errorf("load agent %s for the placement check: %w", target.AgentID, err)

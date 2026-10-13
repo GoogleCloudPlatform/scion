@@ -29,7 +29,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -111,7 +113,87 @@ func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.
 	}
 }
 
+// seedAbandonedDeletion puts agent id in deletion state st with an expired
+// lease and a running prior, as an engine that died would leave it.
+func seedAbandonedDeletion(t *testing.T, s store.Store, id, st string) {
+	t.Helper()
+	past := time.Now().Add(-time.Minute)
+	stopping := string(state.PhaseStopping)
+	prior := `{"phase":"running","activity":"working"}`
+	n, err := s.UpdateAgentDeletion(context.Background(), id, store.DeletionPredicate{}, store.DeletionFields{
+		State: &st, BumpClaim: true, LeaseAt: &past, StartedAt: &past, Prior: &prior, Phase: &stopping,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, n)
+}
+
+// The pre-check's skip list. A finalizing row has already torn down: its
+// re-claim finishes without a dispatch even when the pin is stale. A
+// managed runtime reaches no Runtime Broker and is not refused.
+func TestAgentDelete_PlacementPreCheckSkipList(t *testing.T) {
+	t.Run("finalizing row with an expired lease finishes without a broker call", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		a := f.stalePinnedAgent(t, "stale-finalizing", string(state.PhaseRunning))
+		seedAbandonedDeletion(t, f.s, a.ID, store.DeletionStateFinalizing)
+
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.False(t, f.client.deleteCalled, "a finalizing re-claim skips the dispatch")
+		got, err := f.s.GetAgent(context.Background(), a.ID)
+		assert.True(t, errors.Is(err, store.ErrNotFound) || (err == nil && !got.DeletedAt.IsZero()), "the row is finalized (err %v)", err)
+	})
+
+	t.Run("managed runtime is not refused", func(t *testing.T) {
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		// Unpinned on the flat row: refused for any non-managed agent.
+		a := f.unpinnedAgentOnWith(t, "managed-on-flat", f.flat.ID, string(state.PhaseRunning), func(a *store.Agent) {
+			a.Runtime = ManagedRuntimePrefix + "test"
+		})
+		rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+"?force=true", nil)
+		require.Less(t, rec.Code, 300, rec.Body.String())
+		assert.False(t, f.client.deleteCalled, "a managed runtime never reaches a Runtime Broker")
+	})
+}
+
+// An abandoned deleting row (expired lease) of a stale-pinned agent is not
+// refused by the pre-check, where it would stay stuck in deleting and
+// stopping: the re-claim's dispatch check refuses it and the rollback
+// restores the prior phase.
+func TestAgentDelete_AbandonedDeletingRowRollsBack(t *testing.T) {
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.stalePinnedAgent(t, "stale-deleting", string(state.PhaseRunning))
+	seedAbandonedDeletion(t, f.s, a.ID, store.DeletionStateDeleting)
+
+	rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID, nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.False(t, f.client.deleteCalled, "nothing is dispatched")
+	got := mustGetAgent(t, f.s, a.ID)
+	assert.True(t, got.DeletedAt.IsZero(), "the row is kept")
+	assert.Equal(t, store.DeletionStateFailed, got.DeletionState, "no longer stuck in deleting")
+	assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+	assert.Equal(t, string(state.PhaseRunning), got.Phase, "the prior phase is restored, not stopping")
+}
+
 // --- env-gather recreate ---------------------------------------------------------
+
+// Env-gather recreate of a stale-pinned provisioning agent is refused
+// before the old agent's stop intent: 409 with the placement code, nothing
+// dispatched, the row kept.
+func TestEnvGatherRecreate_PlacementPreCheckBeforeIntent(t *testing.T) {
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.stalePinnedAgent(t, "stale-gather", string(state.PhaseProvisioning))
+	before := mustGetAgent(t, f.s, a.ID)
+
+	body := map[string]interface{}{"name": a.Name, "projectId": f.project.ID, "template": "claude", "gatherEnv": true, "cleanupMode": "force"}
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents", body)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	code, _ := errorBody(t, rec)
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, code)
+	assert.False(t, f.client.deleteCalled, "nothing is dispatched")
+	after := mustGetAgent(t, f.s, a.ID)
+	assert.Equal(t, before.RunIntent, after.RunIntent, "no stop intent is recorded")
+	assert.Equal(t, before.Phase, after.Phase)
+}
 
 // envGatherPlacementClient answers every delete with a placement refusal
 // once refuse is set.
@@ -185,7 +267,11 @@ func TestEnvGatherRecreate_PlacementRefusalNotOverriddenByForce(t *testing.T) {
 // and its reservation (design §3.3).
 func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
 	ctx := context.Background()
-	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true,
+		storeWrap: func(inner store.Store, _ *storeFaultSwitch) store.Store {
+			return &stopClaimCountingStore{Store: inner}
+		}})
+	stopClaims := f.storeWrapper.(*stopClaimCountingStore)
 	a := f.pinnedAgent(t, "queued-stop", string(state.PhaseRunning))
 	_, err := f.s.SetAgentRunID(ctx, a.ID, "run-q", nil)
 	require.NoError(t, err)
@@ -214,6 +300,7 @@ func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
 	require.NoError(t, f.s.UpdateAgent(ctx, queued))
 	before := mustGetAgent(t, f.s, a.ID)
 	require.False(t, before.PinValid())
+	claimsBefore := stopClaims.calls.Load()
 
 	f.srv.ReconcileBroker(ctx, f.flat.ID)
 
@@ -230,7 +317,8 @@ func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "stop_queued is kept")
 	assert.Equal(t, offlineStopMessage, got.Message, "the offline-stop message is kept")
 	assert.Equal(t, before.Phase, got.Phase)
-	assert.Equal(t, before.StartClaimID, got.StartClaimID, "the queued stop's claim is never taken")
+	assert.Equal(t, claimsBefore, stopClaims.calls.Load(), "the queued stop's claim is never taken (no ClaimAgentStop call)")
+	assert.Equal(t, before.StartClaimID, got.StartClaimID, "no claim is left held")
 	assert.Equal(t, before.RunIntent, got.RunIntent)
 	assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.flat.ID), "the reservation is kept")
 }
@@ -256,6 +344,18 @@ func TestDrain_UnpinnedAgentRowOfAnotherRuntimeBrokerExecutes(t *testing.T) {
 	assert.False(t, strings.HasPrefix(done.Error, drainPlacementConflictCode), "error: %q", done.Error)
 	assert.True(t, f.client.stopCalled, "the stop is dispatched as today")
 	assert.Equal(t, f.legacy.ID, f.client.lastBrokerID, "against the agent's current Runtime Broker")
+}
+
+// stopClaimCountingStore counts ClaimAgentStop calls, the claim a queued
+// stop is applied under (claimQueuedStop).
+type stopClaimCountingStore struct {
+	store.Store
+	calls atomic.Int64
+}
+
+func (s *stopClaimCountingStore) ClaimAgentStop(ctx context.Context, agentID, owner string, intentAt time.Time, ttl time.Duration) (store.StartClaim, error) {
+	s.calls.Add(1)
+	return s.Store.ClaimAgentStop(ctx, agentID, owner, intentAt, ttl)
 }
 
 // A row queued for another Runtime Broker than the pinned agent's own is

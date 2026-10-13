@@ -309,14 +309,21 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	// authorization result. callAgentControl mints no grant and is not
 	// covered: it only queues a credential refresh on the agent's own
 	// session (Hub-internal credential upkeep).
-	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
-		if _, refused := placementRefusalOf(err); refused {
-			return nil, nil, err
+	// A managed runtime reaches no Runtime Broker and is never pinned, so
+	// it is not checked (as in resolvePTYPath).
+	if !isManagedAgentRuntime(agent.Runtime) {
+		if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+			if _, refused := placementRefusalOf(err); refused {
+				return nil, nil, err
+			}
+			// The check itself could not read the agent's Runtime Broker.
+			// For a pinned agent that is a temporary failure, answered as
+			// routing unavailable (503 registry_unavailable), not as a
+			// grant-key fault. An unpinned agent keeps today's path.
+			if agent.IsPinned() {
+				return nil, nil, fmt.Errorf("%w: agent placement check: %w", router.ErrRegistryUnavailable, err)
+			}
 		}
-		// The check itself could not read the agent's Runtime Broker:
-		// a temporary failure, answered as routing unavailable (503
-		// registry_unavailable), not as a grant-key fault.
-		return nil, nil, fmt.Errorf("%w: agent placement check: %w", router.ErrRegistryUnavailable, err)
 	}
 
 	params, err := conduitStreamParams(req)

@@ -4042,11 +4042,6 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 	if agent.RunID == "" {
 		return nil
 	}
-	// Flat placement backstop, as in DispatchAgentDelete: a previous-run
-	// delete is a delete too.
-	if err := d.placementBackstop(ctx, agent); err != nil {
-		return err
-	}
 	for i := len(agent.PreviousRunIDs) - 1; i >= 0; i-- {
 		prev := agent.PreviousRunIDs[i]
 		if prev == "" || prev == agent.RunID {
