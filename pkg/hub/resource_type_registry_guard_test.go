@@ -338,9 +338,9 @@ func varWrites(body *ast.BlockStmt, obj *ast.Object) (rhs []ast.Expr, ok bool) {
 // built in that constructor, or in a package-level Resource constructor
 // it calls (followed transitively), is recorded. A constructor that
 // reaches no resolved value, or an x.Type assignment the scan does not
-// follow, is reported in unfollowed. A helper argument
-// is never resolved through the helper parameter form; such an argument
-// is unresolved.
+// follow, is reported in unfollowed. A helper argument is never
+// resolved through the helper parameter form; such an argument is
+// unresolved.
 //
 // The guard is type-level only: it checks that each type is one the
 // registry defines, not that each (type, action) pair resolves. Pair
@@ -623,12 +623,16 @@ func collectResourceTypeLiterals(fset *token.FileSet, files map[string]*ast.File
 			}
 			if as, ok := n.(*ast.AssignStmt); ok {
 				for i, lhs := range as.Lhs {
-					sel, ok := lhs.(*ast.SelectorExpr)
+					// A parenthesised operand, as in (r).Type = v or
+					// (r.Type) = v, is the same write.
+					sel, ok := ast.Unparen(lhs).(*ast.SelectorExpr)
 					if !ok || sel.Sel.Name != "Type" {
 						continue
 					}
-					x, ok := sel.X.(*ast.Ident)
+					x, ok := ast.Unparen(sel.X).(*ast.Ident)
 					if !ok || !declaredAsResource(x) {
+						// A Type write on a value not declared as a
+						// Resource fails closed in a followed constructor.
 						if curFn != "" {
 							skippedTypeWrites[curFn] = append(skippedTypeWrites[curFn],
 								posOf(lhs)+": "+types.ExprString(lhs))
@@ -957,7 +961,7 @@ func TestResourceTypeLiterals_AllInRegistry(t *testing.T) {
 		require.NotZero(t, perHelper[method],
 			"no %s argument resolved to a type; the action-map check has nothing to check", method)
 		assert.Equal(t, helperCalls[method], helperTagged[method]+helperUnresolved[method],
-			"each %s call must resolve to a type or be in unresolvedResourceTypeValues", method)
+			"each %s call must be counted once, as resolved or unresolved", method)
 		assert.Zero(t, helperUnresolved[method],
 			"a %s argument is unresolved, so its type cannot be checked against "+
 				"the action map. Pass a string literal, a permissions constant or "+
@@ -1165,6 +1169,7 @@ func g(a *AuthzService) {
 func overriddenResource() Resource {
 	r := innerResource()
 	r.Type = pickType()
+	(r).Type = pickType()
 	return r
 }
 `
@@ -1191,6 +1196,7 @@ func overriddenResource() Resource {
 	assert.Equal(t, []string{
 		"emptyResource, called at sample.go:31",
 		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:38: r.Type",
+		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:39: (r).Type",
 	}, scan.unfollowed,
 		"a constructor that builds no resolved type, or sets Type in a form the scan does not follow, must be reported")
 	assert.Equal(t, []string{"sample.go: a.methodResource()"}, scan.unresolved,
