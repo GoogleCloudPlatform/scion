@@ -341,7 +341,10 @@ func errProjectLinkedElsewhere() error {
 // that differs from its local project ID (a link made before the link state
 // was recorded). A non-empty hub project ID alone does not count: in the v1
 // settings format a project's own local ID is stored as hub.project_id, so
-// every initialised project has one, linked or not.
+// every initialised project has one, linked or not. A link made before the
+// link state was recorded whose hub ID equals the local ID (hub.linked unset)
+// cannot be told apart from a never-linked project, so it is auto-linked on
+// the hub selected with 'scion use' like one.
 func projectWasLinked(projectPath string, isGlobal bool, settings *config.Settings) bool {
 	if linked := ProjectLinkedSetting(projectPath, isGlobal); linked != nil && *linked {
 		return true

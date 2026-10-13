@@ -197,12 +197,14 @@ func TestRequireHub_ContextHubAutoLinksNeverLinkedProject(t *testing.T) {
 	require.Equal(t, targetSourceContext, hubSource)
 	require.Empty(t, projectPath, "the directory project is used")
 
+	// No terminal and no --yes: a link prompt would decline, so one
+	// register call shows the project was linked without one. (The
+	// "Linking project" line goes to hubsync's prompt writer, which is
+	// pinned in hubsync's TestEnsureHubReady_HubFromContextV1Settings.)
 	var ctx *HubContext
 	var err error
-	_, stderr := captureStdIO(t, func() { ctx, err = requireHub(projectPath) })
+	captureStdIO(t, func() { ctx, err = requireHub(projectPath) })
 	require.NoError(t, err)
 	require.NotNil(t, ctx)
 	assert.EqualValues(t, 1, registers.Load(), "linked without a prompt (no terminal, no --yes)")
-	assert.Contains(t, stderr, "Linking project ")
-	assert.NotContains(t, stderr, "Link project with Hub?")
 }

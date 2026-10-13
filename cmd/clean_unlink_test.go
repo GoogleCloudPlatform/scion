@@ -41,6 +41,8 @@ func TestMarkProjectUnlinked(t *testing.T) {
 		{name: "hub.enabled=true stays true",
 			settings:    "project_id: clean-p\nhub:\n  enabled: true\n  linked: true\n  projectId: hub-p\n",
 			wantEnabled: boolPtrForTest(true)},
+		{name: "v1 settings: no hub.enabled key is written",
+			settings: "schema_version: \"1\"\nhub:\n  project_id: clean-p\n  linked: true\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
