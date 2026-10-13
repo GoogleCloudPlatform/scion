@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,7 +32,9 @@ import (
 
 type staticTokenSource struct{ tok string }
 
-func (s staticTokenSource) Token() (string, error) { return s.tok, nil }
+func (s staticTokenSource) Token() (string, error)   { return s.tok, nil }
+func (staticTokenSource) SetToken(string, time.Time) {}
+func (staticTokenSource) Expiry() time.Time          { return time.Time{} }
 
 // newOIDCModeAuth returns an oidc-mode authenticator for selfID whose ID
 // tokens always verify as this node's service account.
