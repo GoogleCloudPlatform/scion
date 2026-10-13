@@ -1826,6 +1826,86 @@ func TestGetServerConfigDB_SupersededKeys_SeededSectionExcluded(t *testing.T) {
 	}
 }
 
+// TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence checks the
+// source reported for superseded keys when the unseeded bootstrap is set,
+// as startup does: a key with both a SCION_SEED_* value and a settings.yaml
+// value is attributed to settings.yaml, which wins over the seed layer; a
+// key with only a seed value or only a settings.yaml value keeps its source;
+// and the public URL keeps its settings.yaml attribution (ptone/scion#4865,
+// ptone/scion#4904).
+func TestGetServerConfigDB_SupersededKeySourceFollowsPrecedence(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_MONITORINGDASHBOARDURL",
+		"SCION_SERVER_AUTH_DEFAULTUSERROLE", "SCION_SERVER_AUTH_AUTHORIZEDDOMAINS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS",
+	} {
+		t.Setenv(name, "")
+	}
+	// Both a seed value and a settings.yaml value.
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL", "https://seed-dash.example.com")
+	t.Setenv("SCION_SEED_SERVER_HUB_ENDPOINT", "https://seed.example.com")
+	// Only a seed value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE", "viewer")
+
+	scionDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(scionDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `schema_version: "1"
+server:
+  hub:
+    admin_emails: ["file@example.com"]
+    monitoring_dashboard_url: https://file-dash.example.com
+    public_url: https://file.example.com
+  auth:
+    authorized_domains: ["file.example.com"]
+`
+	if err := os.WriteFile(filepath.Join(scionDir, "settings.yaml"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	bootK := config.LoadBootstrapKoanf()
+	if got := bootK.Strings("server.hub.admin_emails"); len(got) != 1 || got[0] != "file@example.com" {
+		t.Fatalf("bootstrap admin_emails = %v, want the settings.yaml value over the seed value", got)
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, bootK, emptyKoanf())
+	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"default_user_role":"member","authorized_domains":["db.example.com"]}`), "managed")
+	fakeStore.seedWithOrigin("endpoints", json.RawMessage(`{"monitoring_dashboard_url":"https://db-dash.example.com","public_url":"https://saved.example.com"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, keys := range getServerConfigDB(t, srv, ops).SupersededKeys {
+		for _, sk := range keys {
+			got[sk.Key] = sk.Source
+		}
+	}
+	for key, want := range map[string]string{
+		"server.hub.admin_emails":             "yaml",     // seed and settings.yaml
+		"server.hub.monitoring_dashboard_url": "yaml",     // seed and settings.yaml
+		"server.hub.public_url":               "yaml",     // seed and settings.yaml
+		"server.auth.default_user_role":       "seed_env", // seed only
+		"server.auth.authorized_domains":      "yaml",     // settings.yaml only
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := emptyKoanf()
