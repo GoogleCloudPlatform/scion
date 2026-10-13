@@ -559,8 +559,6 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 		_, _ = fmt.Fprintln(promptOut, "  - 0 agents")
 	case force:
 		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (--force: records removed, runtime deletes are best-effort)\n", agentCount)
-	default:
-		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s): the Hub refuses the delete while agents remain; delete them first, or use --force\n", agentCount)
 	}
 	if providers != nil && providers.ProviderCount() > 0 {
 		_, _ = fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
@@ -569,6 +567,11 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 		}
 	}
 	_, _ = fmt.Fprintln(promptOut)
+	if agentCount > 0 && !force {
+		// Not a removal: without --force the Hub refuses the delete.
+		_, _ = fmt.Fprintf(promptOut, "Warning: the project has %d agent(s). The Hub refuses this delete while agents remain; delete them first, or use --force.\n", agentCount)
+		_, _ = fmt.Fprintln(promptOut)
+	}
 	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
 	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation

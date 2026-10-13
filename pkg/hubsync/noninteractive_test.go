@@ -211,8 +211,8 @@ func TestShowMatchingProjectsPrompt_NoMatchesRegistersNew(t *testing.T) {
 
 // TestShowProjectDeletePrompt_AgentWording checks the agent line follows
 // the hub's project delete rule (ptone/scion#4811): without force the
-// delete is refused while agents remain, with force they are removed
-// best-effort.
+// refusal is a warning after the removal list, not a list item; with force
+// the agents are listed as removed best-effort.
 func TestShowProjectDeletePrompt_AgentWording(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -222,8 +222,8 @@ func TestShowProjectDeletePrompt_AgentWording(t *testing.T) {
 		notWant string
 	}{
 		{name: "no agents", agents: 0, want: "  - 0 agents\n"},
-		{name: "agents without force", agents: 2, want: "2 agent(s): the Hub refuses the delete while agents remain; delete them first, or use --force", notWant: "best-effort"},
-		{name: "agents with force", agents: 2, force: true, want: "2 agent(s) (--force: records removed, runtime deletes are best-effort)", notWant: "refuses"},
+		{name: "agents without force", agents: 2, want: "\nWarning: the project has 2 agent(s). The Hub refuses this delete while agents remain; delete them first, or use --force.\n", notWant: "  - 2 agent(s)"},
+		{name: "agents with force", agents: 2, force: true, want: "  - 2 agent(s) (--force: records removed, runtime deletes are best-effort)\n", notWant: "refuses"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := withPromptIO(t, strings.NewReader(""), false)
