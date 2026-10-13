@@ -413,6 +413,26 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("restore audit: %w", err)
 		}
+		// A purge of the agent's retained files whose hub stopped
+		// mid-dispatch leaves its claim (deleting, lease lapsed) on the
+		// soft-deleted row (retained_files_purge.go, ptone/scion#4744). A
+		// live claim refuses the restore earlier (deleteBlocksStart) or
+		// conflicts with it (the claim bumps state_version); a lapsed one
+		// must not stay on the restored agent.
+		if cur.DeletionState == store.DeletionStateDeleting {
+			lapsedBefore := time.Now()
+			none := store.DeletionStateNone
+			pred := store.DeletionPredicate{States: []string{store.DeletionStateDeleting}, DeletedAtNull: true, LeaseExpiredBefore: &lapsedBefore}
+			set := store.DeletionFields{State: &none, ClearLeaseAt: true, KeepUpdated: true}
+			if _, err := tx.UpdateAgentDeletion(ctx, row.ID, pred, set); err != nil {
+				return fmt.Errorf("restore: clear a lapsed purge claim: %w", err)
+			}
+			fresh, err := tx.GetAgent(ctx, row.ID)
+			if err != nil {
+				return err
+			}
+			row = *fresh
+		}
 		return nil
 	})
 	if err != nil {
