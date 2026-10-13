@@ -30,8 +30,8 @@ import (
 // writes the running phase, runtime and profile to agent-info.json before
 // the container starts, not after it (ptone/scion#4766). This covers the
 // path where the pre-start runtime List succeeds; when it fails, Start still
-// records the run ID after the create (recordAfterCreate), which moves out
-// of agent-info.json in ptone/scion#4771. The fake runtime snapshots the
+// records the run ID after the create (recordAfterCreate), in the host
+// state file, not agent-info.json (ptone/scion#4771). The fake runtime snapshots the
 // file when the container starts; any later host write replaces it
 // (writeAgentInfoFile renames a temp file over it), which the comparison
 // after Start detects.
@@ -48,7 +48,7 @@ func TestStart_ListOK_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				writeRun1AgentInfo(t, agentDir)
+				writeRun1AgentInfo(t, projectScionDir, agentDir)
 			}
 			infoPath := filepath.Join(agentDir, "home", "agent-info.json")
 
