@@ -498,6 +498,17 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 	} else if !r.authorize(ctx, normalizedEmail) {
 		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)
+		// Same audit record as the existing-record branches (auditDenied in
+		// applyLiveSignInPolicy). The decision above stands; the code is
+		// read only for the audit reason, and "" makes the reason follow
+		// the access mode.
+		if r.policyDeps.auditDenied != nil {
+			denial := ""
+			if r.signInDenial != nil {
+				denial = r.signInDenial(ctx, normalizedEmail)
+			}
+			r.policyDeps.auditDenied(ctx, normalizedEmail, denial)
+		}
 		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
 	}
 
