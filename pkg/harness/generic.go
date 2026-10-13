@@ -99,6 +99,11 @@ func (g *Generic) DeliverySpec() api.DeliverySpec {
 	return config.DefaultDeliverySpec()
 }
 
+// ReadySpec returns the default (delay) ready spec; Generic has no config.
+func (g *Generic) ReadySpec() api.ReadySpec {
+	return config.DefaultReadySpec(config.ReadyStrategyDelay)
+}
+
 func (g *Generic) GetHarnessEmbedsFS() (embed.FS, string) {
 	return embed.FS{}, ""
 }
