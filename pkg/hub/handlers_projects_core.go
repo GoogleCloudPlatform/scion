@@ -2951,7 +2951,7 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
-			if (err != nil || agent.ProjectID != projectID) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+			if (errors.Is(err, store.ErrNotFound) || (err == nil && agent.ProjectID != projectID)) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
 				// A visitor gets the one refusal for an unknown agent too
 				// (admitVisitorSubRoute already refused it before here).
 				writeVisitorRefusal(w)

@@ -59,17 +59,20 @@ var offloadMetadataKeys = map[string]bool{
 // after this strip, so a value from any other source never reaches an
 // agent.
 //
-// The visitor sender keys (messages.MetadataSenderVisitor and
-// messages.MetadataSenderIssuer, ptone/scion#4603) are reserved too: the hub
-// sets them on a visitor's message after this strip, so a value from any
-// other source never reaches an agent.
+// The visitor sender keys (messages.MetadataSenderVisitor,
+// MetadataSenderEmail, MetadataSenderIssuer and MetadataSenderDisplay,
+// ptone/scion#4603) are reserved too: the hub sets them on a visitor's
+// message after this strip, so a value from any other source never reaches
+// an agent.
 var reservedMetadataKeys = map[string]bool{
 	MetaBodyOffloaded:              true,
 	MetaBodyChars:                  true,
 	MetaBodySHA256:                 true,
 	artifacts.MessageMetadataKey:   true,
 	messages.MetadataSenderVisitor: true,
+	messages.MetadataSenderEmail:   true,
 	messages.MetadataSenderIssuer:  true,
+	messages.MetadataSenderDisplay: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget

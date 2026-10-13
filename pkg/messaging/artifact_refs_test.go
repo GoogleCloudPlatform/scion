@@ -125,10 +125,13 @@ func TestStripReservedMetadata_StripsVisitorSenderKeys(t *testing.T) {
 	md := map[string]string{
 		"foo":                          "bar",
 		messages.MetadataSenderVisitor: "true",
+		messages.MetadataSenderEmail:   "alice@corp.example",
 		messages.MetadataSenderIssuer:  "issuer.example",
+		messages.MetadataSenderDisplay: "alice@corp.example (visitor via issuer.example)",
 	}
 	out := StripReservedMetadata(md)
-	for _, k := range []string{messages.MetadataSenderVisitor, messages.MetadataSenderIssuer} {
+	for _, k := range []string{messages.MetadataSenderVisitor, messages.MetadataSenderEmail,
+		messages.MetadataSenderIssuer, messages.MetadataSenderDisplay} {
 		if _, ok := out[k]; ok {
 			t.Errorf("%s survived the strip: %v", k, out)
 		}
@@ -148,15 +151,23 @@ func TestRenderDeliveryText_KeepsVisitorSenderKeys(t *testing.T) {
 		MessageID: "5f1c2d3e-0000-4000-8000-0000000000c1",
 		Msg: &messages.StructuredMessage{
 			Version: messages.Version, Timestamp: "2026-10-13T10:00:00Z",
-			Sender: "user:alice@corp.example", Recipient: "agent:dev",
+			Sender: "user:5f1c2d3e-0000-4000-8000-0000000000a1", SenderID: "5f1c2d3e-0000-4000-8000-0000000000a1", Recipient: "agent:dev",
 			Msg: "hi", Type: messages.TypeInstruction,
 			Metadata: map[string]string{
 				messages.MetadataSenderVisitor: "true",
+				messages.MetadataSenderEmail:   "alice@corp.example",
 				messages.MetadataSenderIssuer:  "issuer.example",
+				messages.MetadataSenderDisplay: "alice@corp.example (visitor via issuer.example)",
 			},
 		},
 	})
-	for _, want := range []string{`"from": "user:alice@corp.example"`, `"sender_visitor": "true"`, `"sender_issuer": "issuer.example"`} {
+	for _, want := range []string{
+		`"from": "user:5f1c2d3e-0000-4000-8000-0000000000a1"`,
+		`"sender_visitor": "true"`,
+		`"sender_email": "alice@corp.example"`,
+		`"sender_issuer": "issuer.example"`,
+		`"sender_display": "alice@corp.example (visitor via issuer.example)"`,
+	} {
 		if !strings.Contains(text, want) {
 			t.Errorf("envelope lacks %s:\n%s", want, text)
 		}

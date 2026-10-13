@@ -285,9 +285,10 @@ func assertSameResponse(t *testing.T, want, got *httptest.ResponseRecorder, labe
 
 // A visitor with a grant sends to an agent in the project, by the project
 // form (slug or ID) and the by-ID form, as a user sender keyed by its local
-// account: the message is persisted in the DM keyed by the visitor's
-// account ID, and the envelope shows the issuer-verified email, the visitor
-// marker and the issuer, never the synthetic address.
+// account: the sender address is the visitor's account ID, the message is
+// persisted in the DM keyed by that ID, and the envelope metadata shows the
+// visitor marker, the issuer-verified email, the issuer and the display
+// label, never the synthetic address.
 func TestVisitorMessaging_SendAdmittedWithGrant(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	ctx := context.Background()
@@ -308,20 +309,26 @@ func TestVisitorMessaging_SendAdmittedWithGrant(t *testing.T) {
 		sm := c.StructuredMessage
 		require.NotNil(t, sm)
 		assert.Equal(t, f.agent.ID, c.Agent.ID)
-		assert.Equal(t, "user:alice@corp.example", sm.Sender)
+		assert.Equal(t, "user:"+visitorID, sm.Sender)
 		assert.Equal(t, visitorID, sm.SenderID)
 		assert.Equal(t, "true", sm.Metadata[messages.MetadataSenderVisitor])
+		assert.Equal(t, "alice@corp.example", sm.Metadata[messages.MetadataSenderEmail])
 		assert.Equal(t, "idp-grant.example.com", sm.Metadata[messages.MetadataSenderIssuer])
+		assert.Equal(t, "alice@corp.example (visitor via idp-grant.example.com)", sm.Metadata[messages.MetadataSenderDisplay])
 		require.NotEmpty(t, sm.DeliveryText, "the envelope switch is on")
-		assert.Contains(t, sm.DeliveryText, `"from": "user:alice@corp.example"`)
+		assert.Contains(t, sm.DeliveryText, `"from": "user:`+visitorID+`"`)
 		assert.Contains(t, sm.DeliveryText, `"sender_visitor": "true"`)
+		assert.Contains(t, sm.DeliveryText, `"sender_email": "alice@corp.example"`)
 		assert.Contains(t, sm.DeliveryText, `"sender_issuer": "idp-grant.example.com"`)
+		assert.Contains(t, sm.DeliveryText, `"sender_display": "alice@corp.example (visitor via idp-grant.example.com)"`)
 		assert.NotContains(t, sm.DeliveryText, ".invalid", "never the synthetic address")
 	}
 	// The legacy renderer forwards the same keys.
 	legacy := messages.FormatForDelivery(calls[0].StructuredMessage)
 	assert.Contains(t, legacy, `"sender_visitor": "true"`)
+	assert.Contains(t, legacy, `"sender_email": "alice@corp.example"`)
 	assert.Contains(t, legacy, `"sender_issuer": "idp-grant.example.com"`)
+	assert.Contains(t, legacy, `"sender_display": "alice@corp.example (visitor via idp-grant.example.com)"`)
 
 	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
 	require.NoError(t, err)
@@ -331,7 +338,7 @@ func TestVisitorMessaging_SendAdmittedWithGrant(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, msgs.Items, 3)
 	for _, m := range msgs.Items {
-		assert.Equal(t, "user:alice@corp.example", m.Sender)
+		assert.Equal(t, "user:"+visitorID, m.Sender)
 		assert.Equal(t, visitorID, m.SenderID)
 	}
 }
@@ -492,9 +499,10 @@ func TestVisitorMessaging_OwnDMReadOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// A visitor sends a direct text message only: every other request field is
-// refused with a validation error before anything is written, and its own
-// DM key as thread ID is accepted.
+// A visitor sends a direct text message only: every request field outside
+// the allow-list is refused with a validation error naming it in
+// details.field, before anything is written; its own DM key as thread ID is
+// accepted, and a client timestamp is replaced by the hub's.
 func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	visitorID, token := f.visitor(t, "sub-hal", "hal@corp.example")
@@ -511,6 +519,15 @@ func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 		"wake":                             map[string]interface{}{"message": "hi", "wake": true},
 		"notify":                           map[string]interface{}{"message": "hi", "notify": true},
 		"mentions":                         map[string]interface{}{"message": "hi", "mentions": []string{"sealed"}},
+		"surface":                          map[string]interface{}{"message": "hi", "surface": "slack"},
+		"external_ref":                     map[string]interface{}{"message": "hi", "external_ref": "ext-1"},
+		"parent_ref":                       map[string]interface{}{"message": "hi", "parent_ref": "parent-1"},
+		"structured_message.urgent":        structured(func(sm *messages.StructuredMessage) { sm.Urgent = true }),
+		"structured_message.status":        structured(func(sm *messages.StructuredMessage) { sm.Status = "done" }),
+		"structured_message.recipient_id":  structured(func(sm *messages.StructuredMessage) { sm.RecipientID = tid("some-recipient") }),
+		"structured_message.recipients":    structured(func(sm *messages.StructuredMessage) { sm.Recipients = "agent:helper,agent:sealed" }),
+		"structured_message.broadcasted":   structured(func(sm *messages.StructuredMessage) { sm.Broadcasted = true }),
+		"structured_message.observer_only": structured(func(sm *messages.StructuredMessage) { sm.ObserverOnly = true }),
 		"structured_message.plain":         structured(func(sm *messages.StructuredMessage) { sm.Plain = true }),
 		"structured_message.type":          structured(func(sm *messages.StructuredMessage) { sm.Type = messages.TypeSystem }),
 		"structured_message.attachments":   structured(func(sm *messages.StructuredMessage) { sm.Attachments = []string{"gs://bucket/file"} }),
@@ -528,12 +545,20 @@ func TestVisitorMessaging_RequestFieldsLimited(t *testing.T) {
 		var resp ErrorResponse
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 		assert.Equal(t, field+" is not available to visitors", resp.Error.Message, field)
+		assert.Equal(t, field, resp.Error.Details["field"], field)
 	}
 	assert.Empty(t, f.dispatcher.getCalls(), "no refused request is dispatched")
 
+	const clientTimestamp = "2001-02-03T04:05:06Z"
 	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug),
-		structured(func(sm *messages.StructuredMessage) { sm.ThreadID = ownDM }))
+		structured(func(sm *messages.StructuredMessage) {
+			sm.ThreadID = ownDM
+			sm.Timestamp = clientTimestamp
+		}))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	calls := f.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	assert.NotEqual(t, clientTimestamp, calls[0].StructuredMessage.Timestamp, "the hub sets the timestamp")
 }
 
 // Only the hub sets the visitor sender metadata: a local user's message
@@ -545,7 +570,9 @@ func TestVisitorMessaging_SenderMetadataNotClientSettable(t *testing.T) {
 			Msg: "from the owner", Type: messages.TypeInstruction,
 			Metadata: map[string]string{
 				messages.MetadataSenderVisitor: "true",
+				messages.MetadataSenderEmail:   "spoofed@corp.example",
 				messages.MetadataSenderIssuer:  "spoofed.example",
+				messages.MetadataSenderDisplay: "spoofed@corp.example (visitor via spoofed.example)",
 				"other":                        "kept",
 			},
 		},
@@ -554,46 +581,132 @@ func TestVisitorMessaging_SenderMetadataNotClientSettable(t *testing.T) {
 	calls := f.dispatcher.getCalls()
 	require.Len(t, calls, 1)
 	md := calls[0].StructuredMessage.Metadata
-	assert.NotContains(t, md, messages.MetadataSenderVisitor)
-	assert.NotContains(t, md, messages.MetadataSenderIssuer)
+	for _, k := range []string{messages.MetadataSenderVisitor, messages.MetadataSenderEmail,
+		messages.MetadataSenderIssuer, messages.MetadataSenderDisplay} {
+		assert.NotContains(t, md, k)
+	}
 	assert.Equal(t, "kept", md["other"])
-	assert.NotContains(t, calls[0].StructuredMessage.DeliveryText, "sender_visitor")
+	assert.NotContains(t, calls[0].StructuredMessage.DeliveryText, "spoofed")
 }
 
-// The agent's reply to the visitor, addressed by the visitor's account ID,
-// lands in the same DM and names the visitor by its issuer-verified email.
+// visitorDMMessages returns the messages of the DM between agentID and the
+// user userID.
+func visitorDMMessages(t *testing.T, st store.Store, agentID, userID string) []store.Message {
+	t.Helper()
+	ctx := context.Background()
+	dmKey, err := messages.DMConversationKey("agent", agentID, "user", userID)
+	require.NoError(t, err)
+	conv, err := st.GetConversationByExternalRef(ctx, "native", dmKey)
+	require.NoError(t, err)
+	msgs, err := st.ListMessages(ctx, store.MessageFilter{ConversationID: conv.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	return msgs.Items
+}
+
+// The agent's reply to the address its envelope showed as the sender lands
+// in the visitor's DM, even when a local account has the visitor's email:
+// that account receives nothing.
 func TestVisitorMessaging_AgentReplyLandsInVisitorDM(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	ctx := context.Background()
 	visitorID, token := f.visitor(t, "sub-ida", "ida@corp.example")
+	local := &store.User{
+		ID: tid(t.Name() + "-local"), Email: "ida@corp.example", DisplayName: "Local Ida", Role: "member", Status: "active",
+	}
+	require.NoError(t, f.st.CreateUser(ctx, local))
+	ensureHubMembership(ctx, f.st, local.ID)
+
 	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("question"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	calls := f.dispatcher.getCalls()
+	require.Len(t, calls, 1)
+	shown := calls[0].StructuredMessage.Sender
+	require.Contains(t, calls[0].StructuredMessage.DeliveryText, `"from": "`+shown+`"`)
 
-	rec = postOutboundNoConv(t, f.srv, f.projectID, f.agent.ID, visitorID, "answer")
+	rec = postOutboundTo(t, f.srv, f.projectID, f.agent.ID, shown, "answer")
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
-	require.NoError(t, err)
-	conv, err := f.st.GetConversationByExternalRef(ctx, "native", dmKey)
-	require.NoError(t, err)
-	msgs, err := f.st.ListMessages(ctx, store.MessageFilter{ConversationID: conv.ID}, store.ListOptions{Limit: 10})
-	require.NoError(t, err)
 	var reply *store.Message
-	for i := range msgs.Items {
-		if msgs.Items[i].Msg == "answer" {
-			reply = &msgs.Items[i]
+	msgs := visitorDMMessages(t, f.st, f.agent.ID, visitorID)
+	for i := range msgs {
+		if msgs[i].Msg == "answer" {
+			reply = &msgs[i]
 		}
 	}
 	require.NotNil(t, reply, "the reply is in the visitor's DM")
 	assert.Equal(t, visitorID, reply.RecipientID)
-	assert.Equal(t, "user:ida@corp.example", reply.Recipient, "never the synthetic address")
+	assert.Equal(t, "user:"+visitorID, reply.Recipient, "the visitor's address, never an email")
+	assertNoMessagesFor(t, f.st, local.ID)
 
 	// The visitor reads both messages from its DM.
+	dmKey, err := messages.DMConversationKey("agent", f.agent.ID, "user", visitorID)
+	require.NoError(t, err)
 	rec = f.do(t, token, http.MethodGet, chatDMPath(dmKey, "messages"), nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	var history chatHistoryResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &history))
 	assert.Len(t, history.Messages, 2)
+}
+
+// The visitor's email never addresses the visitor: with no local account of
+// that email the agent's send is refused as an unknown addressee, and
+// nothing reaches the visitor's DM.
+func TestVisitorMessaging_EmailAddressNeverReachesVisitor(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	visitorID, token := f.visitor(t, "sub-kim", "kim@corp.example")
+	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("question"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rec = postOutboundTo(t, f.srv, f.projectID, f.agent.ID, "user:kim@corp.example", "answer")
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeAddrUnknown, resp.Error.Code)
+	assert.Len(t, visitorDMMessages(t, f.st, f.agent.ID, visitorID), 1, "only the visitor's own message")
+}
+
+// An agent sends to a visitor only into a DM the visitor started with that
+// agent. Before the visitor writes, and from another agent after it wrote,
+// a send by account ID or by recipient_id is answered exactly like a send
+// to an unknown user, and nothing is written.
+func TestVisitorMessaging_UnsolicitedAgentSendRefused(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	visitorID, token := f.visitor(t, "sub-lee", "lee@corp.example")
+	unknownID := tid(t.Name() + "-nobody")
+	other := f.sealed // another agent of the project
+
+	// sameAsUnknown asserts that got is the answer to the same send to
+	// unknownID, with the address in the message swapped.
+	sameAsUnknown := func(label string, got, unknown *httptest.ResponseRecorder) {
+		t.Helper()
+		assert.Equal(t, unknown.Code, got.Code, "%s: status", label)
+		assert.Equal(t, unknown.Header(), got.Header(), "%s: headers", label)
+		assert.Equal(t, strings.ReplaceAll(unknown.Body.String(), unknownID, visitorID), got.Body.String(), "%s: body", label)
+	}
+	check := func(label string, agent *store.Agent) {
+		t.Helper()
+		byAddress := postOutboundTo(t, f.srv, f.projectID, agent.ID, "user:"+visitorID, "unsolicited")
+		unknownAddress := postOutboundTo(t, f.srv, f.projectID, agent.ID, "user:"+unknownID, "unsolicited")
+		require.Equal(t, http.StatusBadRequest, unknownAddress.Code, unknownAddress.Body.String())
+		sameAsUnknown(label+" by address", byAddress, unknownAddress)
+
+		byRecipientID := postOutboundRequest(t, f.srv, f.projectID, agent.ID, OutboundMessageRequest{RecipientID: visitorID, Msg: "unsolicited"})
+		unknownRecipientID := postOutboundRequest(t, f.srv, f.projectID, agent.ID, OutboundMessageRequest{RecipientID: unknownID, Msg: "unsolicited"})
+		require.Equal(t, http.StatusBadRequest, unknownRecipientID.Code, unknownRecipientID.Body.String())
+		sameAsUnknown(label+" by recipient_id", byRecipientID, unknownRecipientID)
+	}
+
+	check("before the visitor wrote", f.agent)
+	assertNoMessagesFor(t, f.st, visitorID)
+
+	rec := f.do(t, token, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("question"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	check("another agent", other)
+	assertNoMessagesFor(t, f.st, visitorID)
+
+	// The agent the visitor wrote to may now answer in that DM.
+	rec = postOutboundTo(t, f.srv, f.projectID, f.agent.ID, "user:"+visitorID, "answer")
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 // An unlinked federated user (a verified issuer token with no linked
@@ -612,7 +725,7 @@ func TestVisitorMessaging_UnlinkedFederatedUserUnchanged(t *testing.T) {
 	assert.Empty(t, f.dispatcher.getCalls())
 }
 
-// With the experiment off a granted visitor's token is an ordinary
+// With the experiment off a granted visitor's issuer token is an ordinary
 // federated user: it is not admitted to send.
 func TestVisitorMessaging_ExperimentOffNoVisitorSend(t *testing.T) {
 	f := newVisitorMessagingFixture(t)

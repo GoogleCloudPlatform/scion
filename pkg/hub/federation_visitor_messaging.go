@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"reflect"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -268,79 +269,134 @@ var visitorMessageTypes = map[string]bool{
 	messages.TypeReply:       true,
 }
 
+// visitorRequestFields is the allow-list of the MessageRequest fields, by
+// JSON name, a visitor may set. Every other field set to a non-empty value
+// is refused (visitorMessageRequestRefusal), including fields added later.
+var visitorRequestFields = map[string]bool{
+	"message":            true,
+	"structured_message": true,
+}
+
+// visitorStructuredFields is the allow-list of the StructuredMessage
+// fields, by JSON name, a visitor may set. Every other field set to a
+// non-empty value is refused, including fields added later.
+var visitorStructuredFields = map[string]bool{
+	// Checked by value in visitorMessageRequestRefusal.
+	"msg":       true,
+	"type":      true,
+	"thread_id": true,
+	"recipient": true, // a group recipient is refused; any other value is replaced by the target agent
+	// Validated by messaging.ValidateLegacyMessage (the one version).
+	"version": true,
+	// Set by the hub, whatever the client sends (handleAgentMessage).
+	"timestamp": true,
+	"sender":    true,
+	"sender_id": true,
+}
+
 // visitorMessageRequestRefusal returns the name of the first field of req a
 // visitor may not use when messaging the agent agentID, or "" when req is a
-// direct text message the visitor may send. A visitor sends text only, in
-// its envelope (so the agent sees the sender metadata), to the one agent,
-// in the visitor's own DM with it: no plain delivery, interrupt, wake,
-// notification subscription, mentions, attachments, client metadata
-// (artifact references included), conversation reference, group or
-// multi-recipient addressing, channel, prerendered delivery text, or a
-// thread other than that DM.
+// direct text message the visitor may send. A visitor sends text only, to
+// the one agent, in the visitor's own DM with it: req may set only the
+// fields in visitorRequestFields and its structured message only those in
+// visitorStructuredFields, with a type in visitorMessageTypes, no group
+// recipient, and no thread other than that DM. A refused field is named by
+// its JSON name, prefixed with "structured_message." inside the structured
+// message.
 func visitorMessageRequestRefusal(req *MessageRequest, visitorID, agentID string) string {
-	switch {
-	case req.Plain:
-		return "plain"
-	case req.Interrupt:
-		return "interrupt"
-	case req.Wake:
-		return "wake"
-	case req.Notify:
-		return "notify"
-	case len(req.Mentions) > 0:
-		return "mentions"
+	if field := firstFieldOutside(req, visitorRequestFields); field != "" {
+		return field
 	}
 	sm := req.StructuredMessage
 	if sm == nil {
 		return ""
 	}
+	if field := firstFieldOutside(sm, visitorStructuredFields); field != "" {
+		return "structured_message." + field
+	}
 	ownDM, _ := messages.DMConversationKey("agent", agentID, "user", visitorID)
 	switch {
-	case sm.Plain:
-		return "structured_message.plain"
 	case !visitorMessageTypes[sm.Type]:
 		return "structured_message.type"
-	case len(sm.Attachments) > 0:
-		return "structured_message.attachments"
-	case len(sm.Metadata) > 0:
-		return "structured_message.metadata"
-	case sm.ConversationID != "":
-		return "structured_message.conversation_id"
 	case messages.IsGroupRecipient(sm.Recipient):
 		return "structured_message.recipient"
-	case sm.Recipients != "":
-		return "structured_message.recipients"
-	case sm.Broadcasted:
-		return "structured_message.broadcasted"
-	case sm.ObserverOnly:
-		return "structured_message.observer_only"
-	case sm.Channel != "":
-		return "structured_message.channel"
-	case sm.DeliveryText != "":
-		return "structured_message.delivery_text"
 	case sm.ThreadID != "" && (ownDM == "" || sm.ThreadID != ownDM):
 		return "structured_message.thread_id"
 	}
 	return ""
 }
 
+// firstFieldOutside returns the JSON name of the first field of the struct
+// v points to that is not in allowed and holds a non-empty value (an empty
+// slice or map counts as empty), or "" when there is none. Fields a request
+// can never set (unexported, or tagged json:"-") are skipped.
+func firstFieldOutside(v interface{}, allowed map[string]bool) string {
+	rv := reflect.ValueOf(v).Elem()
+	rt := rv.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		f := rt.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		if allowed[name] {
+			continue
+		}
+		fv := rv.Field(i)
+		if fv.IsZero() || ((fv.Kind() == reflect.Slice || fv.Kind() == reflect.Map) && fv.Len() == 0) {
+			continue
+		}
+		return name
+	}
+	return ""
+}
+
+// userSenderAddress returns the "user:<name>" sender address of a user
+// sender: the account ID for a project visitor (so a reply to the address
+// reaches the visitor, see userAddressName), otherwise the email, or the
+// account ID when it has no email.
+func userSenderAddress(user UserIdentity) string {
+	if isVisitorIdentity(user) {
+		return "user:" + user.ID()
+	}
+	if email := user.Email(); email != "" {
+		return "user:" + email
+	}
+	return "user:" + user.ID()
+}
+
 // stampVisitorSender returns md with the visitor sender metadata set when
-// identity is a *VisitorIdentity: messages.MetadataSenderVisitor "true"
-// and messages.MetadataSenderIssuer the issuer's host name
-// (visitorIssuerLabel). md must already be stripped of hub-reserved keys
-// (messaging.StripReservedMetadata). For any other identity it returns md
-// unchanged. It never mutates md.
+// identity is a *VisitorIdentity: messages.MetadataSenderVisitor "true",
+// messages.MetadataSenderEmail the issuer-verified email,
+// messages.MetadataSenderIssuer the issuer's display name
+// (visitorIssuerLabel) and messages.MetadataSenderDisplay both together,
+// as in "alice@corp.example (visitor via idp.example)". md must already be
+// stripped of hub-reserved keys (messaging.StripReservedMetadata). For any
+// other identity it returns md unchanged. It never mutates md.
 func stampVisitorSender(md map[string]string, identity Identity) map[string]string {
 	visitor, ok := identity.(*VisitorIdentity)
 	if !ok || visitor == nil {
 		return md
 	}
-	out := make(map[string]string, len(md)+2)
+	issuer := visitorIssuerLabel(visitor.IssuerURL())
+	name := visitor.Email()
+	if name == "" {
+		name = visitor.ID()
+	}
+	out := make(map[string]string, len(md)+4)
 	for k, v := range md {
 		out[k] = v
 	}
 	out[messages.MetadataSenderVisitor] = "true"
-	out[messages.MetadataSenderIssuer] = visitorIssuerLabel(visitor.IssuerURL())
+	out[messages.MetadataSenderEmail] = visitor.Email()
+	out[messages.MetadataSenderIssuer] = issuer
+	out[messages.MetadataSenderDisplay] = name + " (visitor via " + issuer + ")"
 	return out
 }
 
@@ -354,15 +410,37 @@ func visitorIssuerLabel(issuerURL string) string {
 }
 
 // userAddressName returns the name of u in a "user:<name>" address: the
-// issuer-verified email of a federated account (never its synthetic
-// address), otherwise the account email, or the account ID when it has no
-// email.
+// account ID of a federated account (a project visitor's address is its
+// account ID, never an email, which could name a local account), otherwise
+// the account email, or the account ID when it has no email.
 func userAddressName(u *store.User) string {
-	if u.IsFederated() && u.FederatedEmail != nil && *u.FederatedEmail != "" {
-		return *u.FederatedEmail
+	if u.IsFederated() {
+		return u.ID
 	}
 	if u.Email != "" {
 		return u.Email
 	}
 	return u.ID
+}
+
+// visitorRecipientRefusal is the agent-to-user send rule for project
+// visitors: agent may send to the user u only when u is not a federated
+// account, or when the DM between agent and u already exists. The DM key
+// names this agent, and an agent can never create it (this rule refuses
+// that send), so it exists only when the visitor started it with this
+// agent. Otherwise it returns store.ErrNotFound, so the caller answers
+// exactly as for an unknown addressee and a visitor hears only from agents
+// it contacted. Any other store error is returned as is.
+func (s *Server) visitorRecipientRefusal(ctx context.Context, agent *store.Agent, u *store.User) error {
+	if !u.IsFederated() {
+		return nil
+	}
+	key, err := messages.DMConversationKey("agent", agent.ID, "user", u.ID)
+	if err != nil {
+		return store.ErrNotFound
+	}
+	if _, err := s.store.GetConversationByExternalRef(ctx, "native", key); err != nil {
+		return err
+	}
+	return nil
 }

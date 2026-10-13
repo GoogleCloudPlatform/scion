@@ -27,14 +27,20 @@ const (
 // Hub-set sender metadata keys for a message from a project visitor (a user
 // of a trusted external issuer, ptone/scion#4603). Only the hub sets them:
 // the hub strips any client-supplied value (messaging.StripReservedMetadata)
-// and sets both on a visitor's message, so the recipient agent can tell a
-// visitor from a local user.
+// and sets all of them on a visitor's message, so the recipient agent can
+// tell a visitor from a local user. The visitor's address (the message
+// sender) is its account ID; these keys name the person.
 const (
 	// MetadataSenderVisitor is "true" on a message whose sender is a
 	// project visitor.
 	MetadataSenderVisitor = "sender_visitor"
-	// MetadataSenderIssuer is the visitor's issuer, by host name.
+	// MetadataSenderEmail is the visitor's email as verified by its issuer.
+	MetadataSenderEmail = "sender_email"
+	// MetadataSenderIssuer is the display name of the visitor's issuer.
 	MetadataSenderIssuer = "sender_issuer"
+	// MetadataSenderDisplay is the visitor's display label, as in
+	// "alice@corp.example (visitor via idp.example)".
+	MetadataSenderDisplay = "sender_display"
 )
 
 // deliveryMetadataAllowlist defines the metadata keys that are forwarded to
@@ -61,7 +67,9 @@ var deliveryMetadataAllowlist = map[string]bool{
 	"body_sha256":    true,
 	// ptone/scion#4603: hub-set only (see MetadataSenderVisitor).
 	MetadataSenderVisitor: true,
+	MetadataSenderEmail:   true,
 	MetadataSenderIssuer:  true,
+	MetadataSenderDisplay: true,
 }
 
 // deliveryMessage is the subset of StructuredMessage fields delivered to the agent.

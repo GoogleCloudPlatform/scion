@@ -290,6 +290,11 @@ func (s *Server) resolveOutboundRouting(
 			// Token is a UUID — direct lookup by primary key.
 			u, err := s.store.GetUser(ctx, identifier)
 			if err == nil {
+				// A project visitor this agent may not send to is
+				// answered as an unknown user (visitorRecipientRefusal).
+				err = s.visitorRecipientRefusal(ctx, agent, u)
+			}
+			if err == nil {
 				recipientID = u.ID
 				recipient = "user:" + userAddressName(u)
 			} else if errors.Is(err, store.ErrNotFound) {
@@ -356,6 +361,11 @@ func (s *Server) resolveOutboundRouting(
 		// and requiring it to be a user would break those paths for no
 		// security benefit.
 		u, err := s.store.GetUser(ctx, recipientID)
+		if err == nil {
+			// A project visitor this agent may not send to is answered
+			// as an unknown user (visitorRecipientRefusal).
+			err = s.visitorRecipientRefusal(ctx, agent, u)
+		}
 		if err == nil {
 			recipientID = u.ID
 			if recipient == "" {
@@ -1832,11 +1842,14 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 
 	// A project visitor sends a direct text message only
 	// (visitorMessageRequestRefusal); every other field is refused before
-	// anything is looked up or written.
+	// anything is looked up or written. The hub sets the timestamp.
 	if visitor, ok := GetIdentityFromContext(ctx).(*VisitorIdentity); ok && visitor != nil {
 		if field := visitorMessageRequestRefusal(&req, visitor.ID(), id); field != "" {
 			ValidationError(w, field+" is not available to visitors", map[string]interface{}{"field": field})
 			return
+		}
+		if req.StructuredMessage != nil {
+			req.StructuredMessage.Timestamp = ""
 		}
 	}
 
@@ -1879,11 +1892,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.SenderID = ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			structuredMsg.SenderID = user.ID()
-			if email := user.Email(); email != "" {
-				structuredMsg.Sender = "user:" + email
-			} else {
-				structuredMsg.Sender = "user:" + user.ID()
-			}
+			structuredMsg.Sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			structuredMsg.SenderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -1905,11 +1914,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		senderID := ""
 		if user := GetUserIdentityFromContext(ctx); user != nil {
 			senderID = user.ID()
-			if email := user.Email(); email != "" {
-				sender = "user:" + email
-			} else {
-				sender = "user:" + user.ID()
-			}
+			sender = userSenderAddress(user)
 		} else if agentIdent := GetAgentIdentityFromContext(ctx); agentIdent != nil {
 			senderID = agentIdent.ID()
 			senderSlug := agentIdent.ID() // fallback to UUID
@@ -2784,7 +2789,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 		// A project visitor's message carries the hub-set visitor sender
 		// metadata (the strip above removed any client value), so the
-		// envelope rendered below shows the agent who sent it.
+		// envelope rendered below tells the agent that a project visitor
+		// sent it.
 		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {

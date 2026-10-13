@@ -322,18 +322,25 @@ func TestFormatForDelivery_ForwardsVisitorSenderKeys(t *testing.T) {
 	msg := &StructuredMessage{
 		Version:   Version,
 		Timestamp: "2026-10-13T10:00:00Z",
-		Sender:    "user:alice@corp.example",
+		Sender:    "user:5f1c2d3e-0000-4000-8000-0000000000a1",
 		Recipient: "agent:dev",
 		Msg:       "hi",
 		Type:      TypeInstruction,
 		Metadata: map[string]string{
 			MetadataSenderVisitor: "true",
+			MetadataSenderEmail:   "alice@corp.example",
 			MetadataSenderIssuer:  "issuer.example",
+			MetadataSenderDisplay: "alice@corp.example (visitor via issuer.example)",
 			"telegram_chat_id":    "123",
 		},
 	}
 	result := FormatForDelivery(msg)
-	for _, want := range []string{`"sender_visitor": "true"`, `"sender_issuer": "issuer.example"`} {
+	for _, want := range []string{
+		`"sender_visitor": "true"`,
+		`"sender_email": "alice@corp.example"`,
+		`"sender_issuer": "issuer.example"`,
+		`"sender_display": "alice@corp.example (visitor via issuer.example)"`,
+	} {
 		if !strings.Contains(result, want) {
 			t.Errorf("delivery lacks %s:\n%s", want, result)
 		}
