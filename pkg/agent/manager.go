@@ -173,6 +173,10 @@ type AgentManager struct {
 	// readyMemos remembers harness-readiness outcomes per init-run nonce.
 	// See readyMemoStore.
 	readyMemos readyMemoStore
+
+	// newHarness constructs the harness deliverImmediate uses for its
+	// interrupt and delivery keys; nil uses harness.New. Tests set it.
+	newHarness func(name string) api.Harness
 }
 
 // defaultBufferDelay is the debounce window for message delivery.
@@ -1315,8 +1319,8 @@ func kubernetesUID(a api.AgentInfo) string {
 type deliveryStepKind int
 
 const (
-	// stepSendKeys runs argv via Exec: an interrupt key, a bare Enter, or one
-	// of the trailing confirmation Enters.
+	// stepSendKeys runs argv via Exec: an interrupt key, or one of the
+	// harness's submit keys (the closing submit or an extra submit).
 	stepSendKeys deliveryStepKind = iota
 	// stepLoadBuffer runs argv via ExecWithStdin, streaming the message body.
 	stepLoadBuffer
@@ -1380,7 +1384,18 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 			}
 		}
 	}
-	h := harness.New(harnessName)
+	newHarness := m.newHarness
+	if newHarness == nil {
+		newHarness = harness.New
+	}
+	h := newHarness(harnessName)
+	ds := h.DeliverySpec()
+	if len(ds.SubmitKeys) == 0 {
+		// Resolved specs always carry at least one key; guard against an
+		// implementation that returns a zero value, which would paste the
+		// message without ever submitting it.
+		ds.SubmitKeys = config.DefaultDeliverySpec().SubmitKeys
+	}
 
 	// 3. Prepare commands
 	var steps []deliveryStep
@@ -1401,9 +1416,20 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	// the load and paste steps, and for cleanup if the paste step fails.
 	var bufName string
 
+	// submitSteps sends each of the harness's submit keys once (by default
+	// a single Enter).
+	submitSteps := func() []deliveryStep {
+		out := make([]deliveryStep, 0, len(ds.SubmitKeys))
+		for _, key := range ds.SubmitKeys {
+			out = append(out, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
+		}
+		return out
+	}
+
 	if message == "" {
-		// Empty messages send a bare Enter keypress to trigger confirmations
-		steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}})
+		// Empty messages send one pass of the submit keys (by default a bare
+		// Enter) to trigger confirmations.
+		steps = append(steps, submitSteps()...)
 	} else {
 		// Use tmux paste buffer with bracketed paste (-p) instead of send-keys.
 		// send-keys simulates typing character-by-character, which allows TUI
@@ -1427,7 +1453,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		bufName = nextMsgBufferName()
 		steps = append(steps, deliveryStep{kind: stepLoadBuffer, argv: loadBufferArgv(bufName)})
 		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv("scion:0", bufName)})
-		steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}})
+		steps = append(steps, submitSteps()...)
 	}
 
 	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
@@ -1473,20 +1499,22 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		}
 	}
 
-	// After sending a message, send two extra Enter keypresses with a brief delay
-	// to ensure the input is accepted by the agent. This runs only once the
-	// message (if any) has already been pasted, so any failure here is
-	// necessarily partial delivery too.
+	// After sending a message, send the submit keys ds.ExtraSubmits more
+	// times, waiting ds.ExtraSubmitDelay before each pass, to ensure the
+	// input is accepted by the agent (by default two extra Enters 300ms
+	// apart). This runs only once the message (if any) has already been
+	// pasted, so any failure here is necessarily partial delivery too.
 	if message != "" {
-		enterCmd := []string{"tmux", "send-keys", "-t", "scion:0", "Enter"}
-		for range 2 {
+		for range ds.ExtraSubmits {
 			select {
 			case <-ctx.Done():
-				return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending Enter to agent '%s': %w", agent.Name, ctx.Err())}
-			case <-time.After(300 * time.Millisecond):
+				return &PartialDeliveryError{Err: fmt.Errorf("context canceled before sending %s to agent '%s': %w", strings.Join(ds.SubmitKeys, " "), agent.Name, ctx.Err())}
+			case <-time.After(ds.ExtraSubmitDelay):
 			}
-			if _, err := m.Runtime.Exec(ctx, agent.ContainerID, enterCmd); err != nil {
-				return &PartialDeliveryError{Err: fmt.Errorf("failed to send Enter to agent '%s': %w", agent.Name, err)}
+			for _, key := range ds.SubmitKeys {
+				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, []string{"tmux", "send-keys", "-t", "scion:0", key}); err != nil {
+					return &PartialDeliveryError{Err: fmt.Errorf("failed to send %s to agent '%s': %w", key, agent.Name, err)}
+				}
 			}
 		}
 	}

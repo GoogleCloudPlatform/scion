@@ -77,6 +77,11 @@ func (d *DeclarativeGenericHarness) GetInterruptSequence() []string {
 	return nil
 }
 
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (d *DeclarativeGenericHarness) DeliverySpec() api.DeliverySpec {
+	return d.entry.ResolvedDelivery()
+}
+
 func (d *DeclarativeGenericHarness) GetHarnessEmbedsFS() (embed.FS, string) {
 	return embed.FS{}, ""
 }

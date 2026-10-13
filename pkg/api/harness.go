@@ -45,6 +45,11 @@ type Harness interface {
 	// GetInterruptKey. Returns nil to fall back to GetInterruptKey.
 	GetInterruptSequence() []string
 
+	// DeliverySpec returns the resolved keys and timing used to submit a
+	// message after it is pasted into the harness's terminal. Defaults are
+	// already applied, so callers can use the value as is.
+	DeliverySpec() DeliverySpec
+
 	// GetHarnessEmbedsFS returns the embedded filesystem containing default harness-config files
 	// and the base path within it (e.g., "embeds").
 	GetHarnessEmbedsFS() (embed.FS, string)
