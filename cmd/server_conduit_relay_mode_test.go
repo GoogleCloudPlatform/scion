@@ -149,7 +149,7 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 
 	var extErr error
 	externalCalls := 0
-	startConduitExternalFn = func(context.Context, *config.GlobalConfig, *hub.Server) error {
+	startConduitExternalFn = func(context.Context, *config.GlobalConfig, *hub.Server, *sync.WaitGroup, chan<- error) error {
 		externalCalls++
 		return extErr
 	}
@@ -166,4 +166,15 @@ func TestStartConduit_ExternalRelayMode(t *testing.T) {
 	err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
 	require.Error(t, err, "a failure is fatal outside hosted HA too")
 	assert.Contains(t, err.Error(), "conduit external relay mode")
+}
+
+// TestStartConduitExternal_RequiresInternalListen: relays call the hub
+// internal API on the internal listener, so external relay mode refuses to
+// start without one.
+func TestStartConduitExternal_RequiresInternalListen(t *testing.T) {
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+	var wg sync.WaitGroup
+	err := startConduitExternal(context.Background(), cfg, nil, &wg, make(chan error, 1))
+	require.ErrorIs(t, err, errConduitExternalNoInternalListen)
 }

@@ -68,6 +68,9 @@ type ConduitExternalOptions struct {
 	// (0 = use it; negative disables the sweep, for tests).
 	AuthzRecheckInterval time.Duration
 
+	// replayStore replaces the shared relay-peer replay store (tests).
+	replayStore relayPeerReplayStore
+
 	// Test seams. RegistryNow is the registry clock (nil = time.Now).
 	Registry    *registry.Registry
 	Store       registry.Store
@@ -81,6 +84,10 @@ type conduitExternalRuntime struct {
 	registry *registry.Registry
 	store    registry.Store
 	now      func() time.Time
+	// peerAuth authenticates relays calling the hub internal API.
+	peerAuth relay.PeerAuth
+	// replay overrides the shared relay-peer replay store (tests).
+	replay relayPeerReplayStore
 }
 
 // StartConduitExternal starts the hub's side of external relay mode: the
@@ -140,7 +147,7 @@ func (s *Server) StartConduitExternal(ctx context.Context, opts ConduitExternalO
 	if err != nil {
 		return err
 	}
-	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now}
+	rt := &conduitExternalRuntime{router: rtr, registry: reg, store: st, now: now, peerAuth: opts.PeerAuth, replay: opts.replayStore}
 	s.conduitEligibleRelays.Store(-1)
 	if !s.conduitExternal.CompareAndSwap(nil, rt) {
 		stopAuthz()

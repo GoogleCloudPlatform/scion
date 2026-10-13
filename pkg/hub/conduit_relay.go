@@ -275,11 +275,17 @@ func (s *Server) ConduitRelayFatal() <-chan error {
 	return nil
 }
 
-// ConduitInternalHandler serves the internal relay API. It is mounted only
-// on the internal listener, never on the public mux, and answers 503 while
-// no relay is published (not yet started, or its start failed).
+// ConduitInternalHandler serves the internal relay API, or in external
+// relay mode the hub internal API. It is mounted only on the internal
+// listener, never on the public mux, and answers 503 while no runtime is
+// published (not yet started, or its start failed).
 func (s *Server) ConduitInternalHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ext := s.conduitExternal.Load(); ext != nil {
+			// External relay mode: the hub internal API relays call.
+			s.serveHubInternal(w, r, ext)
+			return
+		}
 		rt := s.conduit.Load()
 		if rt == nil {
 			http.Error(w, "conduit relay not running", http.StatusServiceUnavailable)

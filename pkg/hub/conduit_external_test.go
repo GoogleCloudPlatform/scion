@@ -54,6 +54,15 @@ func externalOptions(t *testing.T, f *externalFixture) ConduitExternalOptions {
 	return ConduitExternalOptions{InstanceID: "hub-ext", PeerAuth: auth, Store: f.regStore, Registry: f.reg, Clock: clock.NewFake(time.Now())}
 }
 
+// externalRelayAuth is the relay-peer authenticator of a relay calling the
+// fixture hub.
+func externalRelayAuth(t *testing.T, self string) relay.PeerAuth {
+	t.Helper()
+	auth, err := relay.NewHMACPeerAuthFromPeerSecret(relay.HMACPeerAuthConfig{Secret: append([]byte(nil), externalPeerSecret...), SelfID: self})
+	require.NoError(t, err)
+	return auth
+}
+
 func newExternalFixture(t *testing.T) *externalFixture {
 	t.Helper()
 	f := &externalFixture{conduitFixture: newConduitFixture(t)}
@@ -77,9 +86,15 @@ func TestConduitExternal_NoRelayOfItsOwn(t *testing.T) {
 	assert.Nil(t, f.srv.conduit.Load(), "no in-process relay")
 	assert.True(t, f.srv.ConduitExternal())
 
-	rec := httptest.NewRecorder()
-	f.srv.ConduitInternalHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, relay.InternalPathPrefix+"self", nil))
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "no in-process relay routes")
+	// The internal listener serves the hub internal API: a relay-peer
+	// request for an in-process relay route finds nothing there.
+	internal := httptest.NewServer(f.srv.ConduitInternalHandler())
+	t.Cleanup(internal.Close)
+	hc := &relay.HubClient{BaseURL: internal.URL, Auth: externalRelayAuth(t, "relay-0")}
+	err = hc.Call(context.Background(), relay.InternalPathPrefix+"self", map[string]string{}, nil)
+	var refusal *relay.HubRefusal
+	require.ErrorAs(t, err, &refusal)
+	assert.Equal(t, http.StatusNotFound, refusal.Status, "no in-process relay routes")
 
 	assert.False(t, f.srv.conduitServing(), "agents are not told to dial conduit")
 	assert.False(t, slices.Contains(f.srv.dispatchExperiments(), conduitExperiment))
