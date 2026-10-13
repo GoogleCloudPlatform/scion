@@ -915,7 +915,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | Ephemeral storage (disk) | Supported (requests + limits) |
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
-| PriorityClassName | Supported (runtime default and per-template/agent override; the class must already exist on the cluster) |
+| PriorityClassName | Supported (runtime default and per-agent override; the class must already exist on the cluster) |
 | Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on a template/agent) |
 | NodeSelector | Supported |
 | Tolerations | Supported |

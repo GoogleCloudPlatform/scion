@@ -12,7 +12,7 @@ These flags are available on all commands:
 - `--global`: Use the global project (equivalent to `--project global`).
 - `-p, --profile <name>`: Configuration profile to use.
 - `--format <string>`: Output format (`json` or `plain`).
-- `--hub <url>`: Hub API endpoint URL (overrides `SCION_HUB_ENDPOINT`).
+- `--hub <url|name>`: Hub API endpoint URL, or the nickname of a Hub in the hub list (`scion hub list`). Overrides `SCION_HUB_ENDPOINT`. An unknown nickname is an error that lists the registered names.
 - `--no-hub`: Disable Hub integration for this invocation (local-only mode).
 - `--hub-profile <name>`: Use a target-hub profile (overrides `SCION_HUB_PROFILE`). See `scion hub profile` and [Test identities on another test hub](/scion/hosted/user/test-identity-target-hubs/).
 - `-y, --yes`: Answer Yes to every confirmation prompt, including destructive ones whose interactive default is No. Required to confirm when stdin is not a terminal.
@@ -36,7 +36,16 @@ Human-readable times use a 24-hour clock and always include a zone. `--tz` and `
 1. The `-g` / `--project` or `--global` flag.
 2. Inside a Hub-connected agent container only: the agent's own project (`SCION_PROJECT_ID`).
 3. The project `.scion` directory found from the current directory.
-4. The global project (`~/.scion`).
+4. The current project selected with [`scion use`](#scion-project) on the current Hub, for commands that need a project. Not used inside agent containers.
+5. The global project (`~/.scion`).
+
+**Hub resolution order.** The Hub is chosen the same way: the `--hub` flag, then
+`SCION_HUB_ENDPOINT` / `SCION_HUB_URL`, then the directory project (its link entry from
+`scion hub link`, then its `hub.endpoint` setting), then the current Hub selected with
+`scion use`, then `hub.endpoint` in the global settings. Inside a scion project directory,
+commands keep targeting that project and its Hub whatever `scion use` selected. The hub list and
+current context live in the per-user file `~/.scion/context.yaml` (mode `0600`); agent
+containers never read it.
 
 A context is Hub-connected when `SCION_HUB_ENDPOINT`, `SCION_HUB_URL` or `SCION_PROJECT_ID` is set
 in the environment, as in an agent container. Enabling the Hub in a workstation's settings does not
@@ -845,6 +854,13 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List the projects on all registered hubs, each with its hub, merged with the project directories on this machine (a linked directory shows its local path; an unlinked one shows hub `-`). Offline unless `--refresh` is given.
     - Flags: `--hub <hub>` (only that hub's projects; a nickname or URL), `--refresh` (fetch the project list of each logged-in hub, or of `--hub`, first), `--local` (list the project directories on this machine instead, with their type, agent count, status and workspace path).
     - Scripts that parse `scion project list` should use `scion project list --local`, which keeps the earlier output, JSON included.
+- `scion project use [project]` (alias `scion use`): Show or select the current project, the Hub project that commands target when they run outside a scion project directory.
+    - `scion use` shows the effective Hub and project and where each came from.
+    - `scion use <project>` selects the project and the Hub it lives on. `<project>` is a slug, name, UUID or git URL, as for `--project`. It is looked up in the known-project list (`scion project list`) first, and on every registered Hub when it is not known there or with `--refresh`. When several Hubs have the project, you pick one; without a terminal, or with `--non-interactive`, the command fails and lists the `--hub` value of each candidate.
+    - `scion use <project> --hub <hub>` selects the project on that Hub. `scion use --hub <hub>` makes the Hub current (a nickname or URL) and restores the project last selected there. A Hub URL that is not in the hub list yet is added with a nickname derived from its host.
+    - `scion use --clear` forgets the current project; the Hub stays current.
+    - Flags: `--clear`, `--refresh`, `--force` (replace an unreadable `~/.scion/context.yaml`).
+    - The selection is saved per user in `~/.scion/context.yaml`. Flags, environment variables and the project of the current directory take precedence over it.
 - `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist, or whose recorded workspace is itself a scion `.scion` directory. This stops any running containers associated with orphaned projects before cleaning up. A git project configuration with no agents and no recorded workspace path shows as `unverified` in `scion project list --local` and is never removed.
 - `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
     - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
@@ -1087,7 +1103,13 @@ Manages connection to and interaction with a Scion Hub. Authentication lives und
     - `delete <token-id>`: Permanently delete a token.
 - `scion hub status`: Show the current Hub connection status, including where the bearer comes from (`Source`: `OAuth`, `agent-token`, `env`, `dev`, `transport` or `none`; `bearerSource` in `--json`). With a hub profile selected it shows the profile instead: endpoint, bearer source (`profile:issuer` or `profile:<alias>`), the identity (email, kind, tier, expiry) and the transport principal and audience, all decoded locally (no token is printed). It probes the target with the profile credential and exits non-zero when the request sent did not carry the profile's bearer (or carried another credential), when the transport principal is not the profile's IAP service account, or when the target refuses the credential. In agent mode it runs only with a target-hub profile.
 - `scion hub notifications`: **Deprecated**. This command has been moved to the top-level `scion notifications` command group.
-- `scion hub link`: Link the current local project to the Hub. The project is created on the Hub if it does not exist, or, after a prompt, linked to an existing project with the same name (the repository name from the git remote, or the directory name). With no Hub endpoint configured, the command fails with one line: start the local Hub with `scion server start` (the first run opens setup), or set a remote Hub with `scion config set hub.endpoint <url>`. On the local workstation Hub the link confirmation is skipped; a remote Hub still asks (or needs `--yes`). The prompt to pick among matching projects and the offer to sync local agents after linking appear on both.
+- `scion hub add <name> <url>`: Add a Hub to the hub list under a nickname (lowercase letters, digits and `-`, at most 63 characters). Each Hub URL can be added once. The nickname then works anywhere `--hub` takes a URL. The Hub's health is checked, but an unreachable Hub is still added with a warning. `--use` also makes it the current Hub.
+- `scion hub list`: List the Hubs in the hub list, marking the current Hub. `AUTH` shows how the CLI would authenticate to each Hub, from local state only. `--check` also reports whether each Hub responds (`REACHABLE`) and accepts the CLI's credential for it (`VERIFIED`); each Hub is sent only its own credential, and tokens from the environment are never sent.
+- `scion hub rename <old> <new>`: Rename a Hub in the hub list. The current Hub and the projects known on that Hub follow the new name; logins are unaffected.
+- `scion hub remove <name>`: Remove a Hub from the hub list, together with the projects known on it. If it was the current Hub, no Hub is current afterwards. The stored login is kept unless you pass `--logout`.
+    - `add`, `rename` and `remove` accept `--force` to replace an unreadable `~/.scion/context.yaml`. The hub list commands are not available inside an agent.
+    - `scion server start` adds the local workstation Hub to the hub list as `local`, and makes it the current Hub when no Hub is current and the global settings name no other Hub. A successful `scion hub auth login` to a Hub URL given with `--hub-url` or `--hub` adds that Hub with a nickname derived from its host.
+- `scion hub link`: Link the current local project to the Hub. The link is recorded as a link entry in the hub list (`~/.scion/context.yaml`), not as a `hub.endpoint` in the project's settings, so the project keeps resolving to that Hub after you switch Hubs with `scion use`. The project is created on the Hub if it does not exist, or, after a prompt, linked to an existing project with the same name (the repository name from the git remote, or the directory name). With no Hub endpoint configured, the command fails with one line: start the local Hub with `scion server start` (the first run opens setup), or set a remote Hub with `scion config set hub.endpoint <url>`. On the local workstation Hub the link confirmation is skipped; a remote Hub still asks (or needs `--yes`). The prompt to pick among matching projects and the offer to sync local agents after linking appear on both.
 - `scion hub unlink`: Unlink the current project from the Hub locally. It marks the project unlinked (`hub.linked: false`) and clears its Hub project ID; it does not turn Hub mode off (`hub.enabled` is left as it is) and does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse with a pointer to `scion hub link`.
 - `scion hub projects` (alias `project`): List all projects registered on the Hub.
     - `create [git-url]`: Create a project on the Hub. With a git URL, the project is anchored to that repository. Without one, a Hub-managed project without git is created; `--name` is then required and `--branch` is not allowed.
