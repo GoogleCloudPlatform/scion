@@ -239,6 +239,7 @@ func TestVisitorDomainAllowedByIssuer(t *testing.T) {
 		{name: "bare wildcard", emails: []string{"*"}, domain: "corp.example", want: true},
 		{name: "exact address only", emails: []string{"ann@corp.example"}, domain: "corp.example"},
 		{name: "wildcard of another domain", emails: []string{"*@other.example"}, domain: "corp.example"},
+		{name: "pattern with a leading space, as the per-email check reads it", emails: []string{" *@corp.example"}, domain: "corp.example"},
 		{name: "both set, both pass", emails: []string{"*@corp.example"}, domains: []string{"corp.example"}, domain: "corp.example", want: true},
 		{name: "both set, domains fail", emails: []string{"*@corp.example"}, domains: []string{"other.example"}, domain: "corp.example"},
 	} {
