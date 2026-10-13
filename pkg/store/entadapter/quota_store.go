@@ -16,6 +16,8 @@ package entadapter
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -328,9 +330,27 @@ func (q *QuotaStore) CreateUsageReservation(ctx context.Context, reservation *st
 
 	created, err := builder.Save(ctx)
 	if err != nil {
-		return nil, mapError(err)
+		mapped := mapError(err)
+		if errors.Is(mapped, store.ErrAlreadyExists) && isActiveReservationViolation(reservation, err) {
+			return nil, store.ErrActiveReservationExists
+		}
+		return nil, mapped
 	}
 	return entUsageReservationToStore(created), nil
+}
+
+// isActiveReservationViolation reports whether a unique violation from
+// CreateUsageReservation came from the unique active (limit_definition_id,
+// resource_id) index. The table has two unique indexes, that one and the
+// primary key. With a generated ID only the former can be violated; with a
+// caller-supplied ID, the error text names the index's resource_id column
+// (SQLite lists the columns; Postgres names the index after them), which a
+// primary key violation does not.
+func isActiveReservationViolation(reservation *store.UsageReservation, err error) bool {
+	if reservation.ID == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "resource_id")
 }
 
 // CountActiveReservations counts non-released reservations for a specific
@@ -373,6 +393,26 @@ func (q *QuotaStore) HasActiveReservation(ctx context.Context, limitDefinitionID
 		return false, mapError(err)
 	}
 	return count > 0, nil
+}
+
+// GetActiveReservation returns resourceID's non-released reservation for
+// the given limit, whatever its scope, or store.ErrNotFound when none.
+func (q *QuotaStore) GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*store.UsageReservation, error) {
+	ldUID, err := parseUUID(limitDefinitionID)
+	if err != nil {
+		return nil, err
+	}
+	r, err := q.client.UsageReservation.Query().
+		Where(
+			usagereservation.LimitDefinitionIDEQ(ldUID),
+			usagereservation.ResourceIDEQ(resourceID),
+			usagereservation.ReleasedAtIsNil(),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entUsageReservationToStore(r), nil
 }
 
 // ReleaseReservation releases a reservation by setting released_at.

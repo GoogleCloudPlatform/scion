@@ -34,6 +34,14 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrActiveReservationExists is returned by CreateUsageReservation when
+	// the resource already holds an active (released_at IS NULL)
+	// reservation for the same limit definition: the unique active
+	// (limit_definition_id, resource_id) index refused the insert. It wraps
+	// ErrAlreadyExists. A caller that loses this race reads the winner with
+	// GetActiveReservation to tell a retry from a conflict.
+	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -3878,7 +3886,9 @@ type QuotaStore interface {
 	DeleteEntitlementBinding(ctx context.Context, id string) error
 
 	// Usage reservations
-	// CreateUsageReservation creates a new usage reservation.
+	// CreateUsageReservation creates a new usage reservation. When the
+	// resource already holds an active reservation for the same limit
+	// definition, it returns ErrActiveReservationExists and writes nothing.
 	CreateUsageReservation(ctx context.Context, reservation *UsageReservation) (*UsageReservation, error)
 
 	// CountActiveReservations counts non-released reservations for a specific
@@ -3914,6 +3924,12 @@ type QuotaStore interface {
 	// re-reserving on agent start/resume must not create a second active
 	// reservation for an agent that already holds one.
 	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
+
+	// GetActiveReservation returns resourceID's non-released reservation
+	// for the given limit, whatever its scope, or ErrNotFound when there is
+	// none. At most one exists (the unique active (limit_definition_id,
+	// resource_id) index). Released reservations are never returned.
+	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
 }
 
 // =============================================================================
