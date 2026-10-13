@@ -210,3 +210,37 @@ func TestNewChannelRegistry_ReturnsSkippedIndexes(t *testing.T) {
 	assert.Equal(t, []int{0, 2}, skipped)
 	assert.Equal(t, 1, reg.Len())
 }
+
+// A save that writes another section as well as an unbuildable federation
+// configuration keeps the stored federation in use: the other section's
+// self-apply rebuilds the stored row's authenticator, and the federation
+// write then keeps it. The report is mixed: hub_name applied, the changed
+// federation key skipped (ptone/scion#4466).
+func TestPutServerConfigDB_CombinedSaveKeepsStoredFederation(t *testing.T) {
+	srv, _, ops := newTestDBServer(t)
+	ops.server = srv // the write self-applies, as on a running hub
+	srv.federationClient = &http.Client{Timeout: time.Second}
+
+	// A buildable stored row: a hub issuer with an https URL and an
+	// expected audience builds without network I/O.
+	rr := putHubNameServerConfigDB(t, srv, ops, `{"federation":{"enabled":true,"trusted_issuers":[
+		{"issuer_url":"https://issuer-4466.example.com","expected_audience":"https://hub.example.com"}]}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	require.NotNil(t, srv.federationAuth.Load())
+
+	// One save: hub_name plus an issuer a hosted hub refuses to build.
+	rr = putHubNameServerConfigDB(t, srv, ops, `{
+		"server":{"hub":{"hub_name":"fed-combined-hub"}},
+		"federation":{"enabled":true,"trusted_issuers":[{"issuer_url":"http://issuer-4466.example.com"}]}}`)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	rep := skippedReport(t, rr.Body.Bytes())
+	assert.Equal(t, []string{"server.hub.hub_name"}, rep.AppliedKeys)
+	assert.Equal(t, []skippedKey{
+		{Key: "server.federation.trusted_issuers", Reason: federationSkipBuildFailed},
+	}, rep.Skipped, "only trusted_issuers changed; enabled was already true")
+	auth := srv.federationAuth.Load()
+	require.NotNil(t, auth, "the stored federation stays in use")
+	_, ok := auth.IssuerConfig("https://issuer-4466.example.com")
+	assert.True(t, ok, "the authenticator in use is built from the stored row")
+}
