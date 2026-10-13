@@ -2685,11 +2685,7 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		}
 	}
 
-	// Resolve the hub's GCP project ID once for service account minting
-	// and the Policy Troubleshooter quota project. An explicit
-	// cfg.Hub.GCPProjectID wins; otherwise it is auto-detected from the
-	// metadata server only when running on GCP, so a host without one does
-	// not stall startup on metadata dial retries.
+	// Resolved once for service account minting and the Policy Troubleshooter.
 	gcpProjectID, gcpProjectErr := hub.ResolveGCPProjectID(ctx, cfg.Hub.GCPProjectID)
 
 	// Initialize GCP IAM admin client for minting service accounts.
