@@ -27,11 +27,16 @@
   method (405), interactive session or dev credential
   (`requireSessionCredentialFor`, `GOV_PENDING`), project, then
   `project.manage_visitors` on the project (project owners and admins;
-  `hub-admin` revision 8 adds it, so hub admins can list and revoke on any
-  project). Grant and window change also
-  apply non-amplification (the actor holds every permission of the
+  `hub-admin` revision 8 adds it, so hub admins can list, shorten and
+  revoke on any project). A grant, and a `PATCH` that extends the window
+  (an earlier or cleared start, or a later or cleared expiry), also apply
+  non-amplification (the actor holds every permission of the
   `project-visitor` role on the project; an unscoped local platform admin
-  passes, as in `CanDelegate`).
+  passes, as in `CanDelegate`). Shortening and revoking never do. The
+  `PATCH` reads the actor's permissions before the transaction and
+  compares the new window with the binding read inside it
+  (`visitorWindowExtends`), so a concurrent change cannot turn a
+  shortening into an extension.
 - **Grant.** Issuer must be trusted with `allow_visitor_grants` and a user
   or hub type; the email (lower-cased) must pass `allowed_emails` and
   `allowed_domains`; otherwise 400 with `details.field` and a neutral
@@ -97,10 +102,11 @@ binding gets an exclusion row instead).
 - Done: turning `allow_visitor_grants` off now also refuses already
   linked visitors at the request path (see "Issuer check on every
   request").
-- A hub admin can list and revoke visitor grants on any project, but can
-  grant or change a window only when it also holds every
-  `project-visitor` permission on the project (non-amplification). Whether
-  hub admins should grant without that is open.
+- Decided (design §4.3, "Who can grant"): hub admins get no exemption
+  from non-amplification. A hub admin can list, shorten and revoke visitor
+  grants on any project, but can grant or extend a window only when it
+  also holds every `project-visitor` permission on the project; the
+  super-admin grants through the platform-admin check.
 - A pending account whose last grant is revoked stays (pending); first
   contact still links it, with no grant.
 - Admin tooling to suspend a federated account does not exist yet.

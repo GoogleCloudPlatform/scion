@@ -29,8 +29,8 @@ import (
 
 const projectVisitorJSON = `{"id":"v-1","bindingId":"rb-1","email":"alice@corp.example","issuer":"https://hub-a.example.com","status":"pending","issuerAccepted":true,"grantedBy":"u-1","expiresAt":"2026-11-01T00:00:00Z","createdAt":"2026-10-13T00:00:00Z"}`
 
-// visitorProjectID needs escaping in a path, so the tests also check that
-// the project ID is escaped.
+// visitorProjectID contains a space, so the tests also check that the
+// project ID is percent-encoded in the path.
 const visitorProjectID = "proj a"
 
 const visitorBasePath = "/api/v1/projects/proj%20a/visitors"

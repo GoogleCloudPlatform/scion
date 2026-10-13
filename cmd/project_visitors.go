@@ -53,8 +53,10 @@ and the email must pass the issuer's allowed_emails and allowed_domains.
 A visitor stays pending until their first request from that issuer with
 the granted email.
 
-Requires project owner or admin, an interactive session (not a user access
-credential), and the federation.project_visitors experiment on the Hub.`,
+Requires project owner or admin or hub admin, an interactive session (not a
+user access credential), and the federation.project_visitors experiment on
+the Hub. Granting and extending a window also need every permission of the
+project-visitor role on the project.`,
 }
 
 var projectVisitorsListCmd = &cobra.Command{
