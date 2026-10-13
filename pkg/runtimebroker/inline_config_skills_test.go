@@ -86,7 +86,7 @@ func TestApplyInlineConfigUpdate_RepeatedStartsDoNotGrowSkills(t *testing.T) {
 	}
 
 	for i := 0; i < 3; i++ { // start, restart, restart
-		srv.applyInlineConfigUpdate(agentName, projectDir, inline, false)
+		srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, inline, false)
 		got := readAgentSkills(t, cfgPath)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("after apply #%d: skills changed\n got: %+v\nwant: %+v", i+1, got, want)
@@ -108,7 +108,7 @@ func TestApplyInlineConfigUpdate_CollapsesExistingDuplicates(t *testing.T) {
 		Skills: []api.SkillReference{alpha, beta, alpha, beta, alpha, beta},
 	})
 
-	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{
 		Skills: []api.SkillReference{{URI: alpha.URI}, {URI: beta.URI}},
 	}, false)
 
@@ -135,7 +135,7 @@ func TestApplyInlineConfigUpdate_HubEntryReplacesExisting(t *testing.T) {
 		},
 	})
 
-	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{
 		Skills: []api.SkillReference{
 			{URI: "skill://scion/global/alpha", Optional: true, Scope: "project"},
 			// A lower-ranked scope than the existing entry still replaces it.
@@ -301,7 +301,7 @@ func TestApplyInlineConfigUpdate_VersionCollapse(t *testing.T) {
 		{URI: "gh://example/repo/skills/x@v2", Scope: "template"},
 	}
 	for i := 0; i < 3; i++ { // start, restart, restart
-		srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+		srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{
 			Skills: []api.SkillReference{{URI: "gh://example/repo/skills/x@v2"}},
 		}, false)
 		got := readAgentSkills(t, cfgPath)
@@ -422,7 +422,7 @@ func TestApplyInlineConfigUpdate_PrunesAndReplacesHubSkills(t *testing.T) {
 		},
 	})
 
-	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{
 		Skills: []api.SkillReference{
 			{URI: "skill://scion/global/bumped@2.0", Scope: "hub"},
 			{URI: "skill://scion/global/kept-user", Scope: "user"},
@@ -454,7 +454,7 @@ func TestApplyInlineConfigUpdate_NoSkillsLeavesSkillsUnchanged(t *testing.T) {
 	}
 	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Skills: skills})
 
-	srv.applyInlineConfigUpdate(agentName, projectDir, &api.ScionConfig{MaxTurns: 5}, false)
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectDir, &api.ScionConfig{MaxTurns: 5}, false)
 
 	if got := readAgentSkills(t, cfgPath); !reflect.DeepEqual(got, skills) {
 		t.Fatalf("skills changed\n got: %+v\nwant: %+v", got, skills)

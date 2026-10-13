@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -91,7 +92,7 @@ func TestApplyInlineConfigUpdate_RepoRootOverrideIsInert(t *testing.T) {
 		t.Fatalf("unmarshal untrusted inline config: %v", err)
 	}
 
-	srv.applyInlineConfigUpdate(agentName, projectScionDir, &untrustedInline, false)
+	srv.applyInlineConfigUpdate(context.Background(), agentName, projectScionDir, &untrustedInline, false)
 
 	// scion-agent.json should have picked up the legitimate field
 	// (MaxTurns), proving the update actually ran, not merely no-oped.

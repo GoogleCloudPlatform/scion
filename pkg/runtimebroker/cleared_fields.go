@@ -37,26 +37,24 @@ import (
 // every start gives the same result.
 //
 // The inherited value is what provisioning derived from the agent's
-// template chain (see clearedFieldsInheritance):
-//   - A template resolved by name: GetAgent merges the same chain again
-//     under the persisted config at every start and restart, so a cleared
-//     key is removed and the chain's value (or, when the chain sets none,
-//     the start-time defaults) applies, following later template changes.
-//   - A template hydrated from the content-addressed cache: GetAgent does
-//     not re-merge it, so each cleared key is copied from the resolved
-//     chain instead, a key the chain leaves unset is removed.
-//   - A chain that does not resolve (a cache miss, a template name that no
-//     longer resolves, an unreadable layer): the cleared keys keep their
-//     current value, so a clear never removes a limit, and the clear takes
-//     effect at the agent's next reincarnation.
+// template chain (see clearedFieldsInheritance), and each cleared key is
+// copied from it, a key the chain leaves unset is removed. So a cleared key
+// behaves like a key that was never set: it holds the template's value in
+// the persisted config, whether GetAgent re-merges the chain at start (a
+// template resolved by name) or not (a template hydrated from the
+// content-addressed cache), and it keeps that value if the template is
+// later renamed or deleted. When the chain does not resolve (a cache miss,
+// a template name that no longer resolves, an unreadable layer), the
+// cleared keys keep their current value, so a clear never removes a limit,
+// and the clear takes effect at the agent's next reincarnation.
 //
 // Env keys (env.KEY) are always removed: a template's env is applied at
 // start as a final fill, whichever way the template resolves.
-func (s *Server) applyClearedFields(merged *api.ScionConfig, projectPath, projectDir, agentName string, paths []string) {
+func (s *Server) applyClearedFields(ctx context.Context, merged *api.ScionConfig, projectPath, projectDir, agentName string, paths []string) {
 	if len(paths) == 0 {
 		return
 	}
-	inherit, err := s.clearedFieldsInheritance(projectPath, projectDir, agentName)
+	inherit, err := s.clearedFieldsInheritance(ctx, projectPath, projectDir, agentName)
 	if err != nil {
 		var kept, applied []string
 		for _, p := range paths {
@@ -89,13 +87,11 @@ func (s *Server) applyClearedFields(merged *api.ScionConfig, projectPath, projec
 // (config.StripTemplateEnvironmentKeys, without env), as at provision, so a
 // template's resources are never introduced.
 //
-// It returns the merged chain for a hydrated template, whose values the
-// caller copies, and nil for a template resolved by name, whose cleared
-// keys the caller removes because GetAgent re-merges the chain at start.
-// err is set when the chain does not resolve.
-func (s *Server) clearedFieldsInheritance(projectPath, projectDir, agentName string) (*api.ScionConfig, error) {
+// It returns the merged chain, whose values the caller copies; err is set
+// when the chain does not resolve.
+func (s *Server) clearedFieldsInheritance(ctx context.Context, projectPath, projectDir, agentName string) (*api.ScionConfig, error) {
 	templateRef := "default"
-	if vs, _, _ := config.LoadEffectiveSettingsFor(context.Background(), projectDir); vs != nil && vs.DefaultTemplate != "" {
+	if vs, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); vs != nil && vs.DefaultTemplate != "" {
 		templateRef = vs.DefaultTemplate
 	}
 	var hash string
@@ -112,8 +108,7 @@ func (s *Server) clearedFieldsInheritance(projectPath, projectDir, agentName str
 			}
 		}
 	}
-	hydrated := hash != ""
-	if hydrated {
+	if hash != "" {
 		if s.cache == nil {
 			return nil, errors.New("no template cache")
 		}
@@ -140,9 +135,6 @@ func (s *Server) clearedFieldsInheritance(projectPath, projectDir, agentName str
 		job := *stripped
 		job.Env = nil
 		inherited = config.MergeScionConfig(inherited, &job)
-	}
-	if !hydrated {
-		return nil, nil
 	}
 	return inherited, nil
 }
