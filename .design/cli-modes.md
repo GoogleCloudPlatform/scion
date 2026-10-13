@@ -216,6 +216,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `shared-dir info` | Y | Y |
 | `ssh` | Y | - |
 | `ssh-config` | Y | - |
+| `vscode` | Y | - |
 | `start` | Y | Y |
 | `stop` | Y | Y |
 | `sync` | Y | - |

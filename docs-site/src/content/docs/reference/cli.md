@@ -1155,6 +1155,23 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
 
+### `scion vscode`
+
+Open VS Code Remote-SSH on an agent's `/workspace` through the Hub, without editing `~/.ssh/config`. It sits alongside `scion ssh-config` and does not replace it. Requires the `hub.conduit` [experiment](/scion/reference/experiments/) on the Hub. Not available in agent mode.
+
+**Usage:** `scion vscode <agent> [--path <dir>] [--prune]`
+
+- **Flags:**
+    - `--path <dir>`: Remote folder to open. Default: `/workspace`.
+    - `--prune`: Also remove the Host blocks and pins of this Hub's agents that no longer exist, from a complete listing only. The agent named is still written and opened; with an incomplete listing nothing is changed and VS Code is not started.
+
+The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`. Each run writes the agent's Host block and pinned host key into `~/.scion/vscode/ssh_config` and `~/.scion/vscode/known_hosts` and keeps every other agent's entries. It checks the agent with one SSH tunnel, then runs `code --user-data-dir ~/.scion/vscode/user-data --remote ssh-remote+scion.<hub-label>.<project>.<agent> <path>`, where `<hub-label>` is the Hub label `scion ssh-config` uses. That user data directory's `settings.json` sets `remote.SSH.configFile`, which is application-scoped and cannot be set per profile; your own VS Code settings are never changed, and extensions are shared. The command never prompts. Exit codes are those of `scion tunnel`; `1` when `code` is missing or fails to start, or when the user data `settings.json` has comments and does not already hold the value (the error names the file).
+
+```bash
+scion vscode my-agent
+scion vscode my-project/my-agent --path /workspace/web
+```
+
 ### `scion expose` / `scion unexpose`
 
 Register or remove an agent-local HTTP port with the Hub's port forwarding proxy. Run these inside an agent container: they act as the calling agent, using its own Hub identity, and fail with `must be run inside an agent container with a hub connection` anywhere else. Available in agent mode. They need no local project. See [Manual Port Management](/scion/hosted/user/port-forwarding/#manual-port-management).
