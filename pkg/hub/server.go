@@ -1654,6 +1654,9 @@ type Server struct {
 	// (conduit_admission.go), derived once.
 	conduitAdmissionKeyOnce  sync.Once
 	conduitAdmissionKeyBytes []byte
+	// conduitRenewal verifies latest grants and mints renewal grants for
+	// relay stream re-checks (conduit_renewal.go); nil until set.
+	conduitRenewal atomic.Pointer[conduitRenewalGrants]
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]

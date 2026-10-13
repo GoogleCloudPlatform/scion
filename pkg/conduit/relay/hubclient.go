@@ -306,3 +306,45 @@ type HubSessionRecheckResult struct {
 
 // MaxHubRecheckBatch bounds the items of one re-check call.
 const MaxHubRecheckBatch = 64
+
+// HubStreamRecheckRequest asks the hub to re-check relay-held user streams
+// and renew their authorization (POST streams/recheck; design §3.9
+// "Active authorization").
+type HubStreamRecheckRequest struct {
+	Items []HubStreamRecheckItem `json:"items"`
+}
+
+// HubStreamRecheckItem is one stream: the user session holding its leaf
+// (with that session's admission token), the stream as the target sees it
+// (TargetStream), the open grant's jti, and the stream's latest hub-signed
+// grant (the open grant or the latest renewal), stored and passed back
+// unchanged and unparsed. Trigger names what scheduled the re-check, for
+// the hub's log and metrics.
+type HubStreamRecheckItem struct {
+	UserSessionID   string `json:"user_session_id"`
+	AdmissionToken  string `json:"admission_token"`
+	TargetSessionID string `json:"target_session_id"`
+	TargetStreamID  uint32 `json:"target_stream_id"`
+	OpenJTI         string `json:"open_jti"`
+	LatestGrant     []byte `json:"latest_grant"`
+	Trigger         string `json:"trigger,omitempty"`
+}
+
+// HubStreamRecheckResponse has one result per item, in item order.
+type HubStreamRecheckResponse struct {
+	Results []HubStreamRecheckResult `json:"results"`
+}
+
+// HubStreamRecheckResult is one stream's re-check: Renew (send
+// RenewalGrant to the target unchanged as AuthRefresh{target stream id};
+// AuthzUntil is the new deadline), Close (close the stream with CloseCode),
+// or neither (not evaluated: nothing is renewed and the stream ends at its
+// deadline unless a later re-check renews it).
+type HubStreamRecheckResult struct {
+	Renew        bool      `json:"renew,omitempty"`
+	RenewalGrant []byte    `json:"renewal_grant,omitempty"`
+	AuthzUntil   time.Time `json:"authz_until,omitzero"`
+	Close        bool      `json:"close,omitempty"`
+	CloseCode    uint32    `json:"close_code,omitempty"`
+	Reason       string    `json:"reason,omitempty"`
+}
