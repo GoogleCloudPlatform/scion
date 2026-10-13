@@ -155,6 +155,7 @@ server:
         allowed_emails: [a@example.com]
         allowed_gcp_projects: [gp]
         allowed_domains: [example.com]
+        accept_user_tokens: true
     algorithms: [RS256]
     refresh_interval: 1h
     debounce_interval: 30s
@@ -220,6 +221,7 @@ func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 		{"federation trusted issuer without issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - jwks_url: https://x\n", "server/federation/trusted_issuers/0"},
 		{"federation trusted issuer empty issuer_url", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: \"\"\n", "trusted_issuers/0/issuer_url"},
 		{"federation unknown issuer_type", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: https://x\n        issuer_type: robot\n", "trusted_issuers/0/issuer_type"},
+		{"federation accept_user_tokens not a boolean", "server:\n  federation:\n    trusted_issuers:\n      - issuer_url: https://x\n        accept_user_tokens: \"yes\"\n", "trusted_issuers/0/accept_user_tokens"},
 		{"federation unsupported algorithm", "server:\n  federation:\n    algorithms: [HS256]\n", "server/federation/algorithms/0"},
 		{"federation refresh_interval without unit", "server:\n  federation:\n    refresh_interval: \"3600\"\n", "server/federation/refresh_interval"},
 		{"federation refresh_interval unquoted non-zero integer", "server:\n  federation:\n    refresh_interval: 5\n", "server/federation/refresh_interval"},

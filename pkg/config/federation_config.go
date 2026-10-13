@@ -77,6 +77,15 @@ type TrustedIssuerConfig struct {
 	// this field is set. Never consulted for a service-account principal:
 	// those are admitted by AllowedGCPProjects instead.
 	AllowedDomains []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+
+	// AcceptUserTokens admits user access credentials (scion_token_kind
+	// "user") from this issuer. Only applicable to issuer_type "hub" (a
+	// peer Scion Hub); default false, which refuses them. A user credential
+	// must carry a verified email and no agent claims, and is subject to
+	// AllowedEmails and AllowedDomains (exact, case-insensitive domain
+	// match). Agent tokens from the issuer are unaffected. The hub reads
+	// the flag from the current configuration on every request.
+	AcceptUserTokens bool `json:"accept_user_tokens,omitempty" yaml:"accept_user_tokens,omitempty" koanf:"accept_user_tokens"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
@@ -126,6 +135,16 @@ func isGoogleIssuerURL(issuerURL string) bool {
 // config no request path will ever enforce.
 func isActiveGoogleUserIssuer(issuer TrustedIssuerConfig) bool {
 	return isGoogleIssuerURL(issuer.IssuerURL) && issuer.IssuerType == "user" && issuer.ExpectedAudience != ""
+}
+
+// isHubUserTokenIssuer reports whether issuer is a peer hub issuer
+// (issuer_type "hub", or empty, which defaults to it) that accepts user
+// access credentials (AcceptUserTokens). AllowedDomains constrains those
+// credentials (pkg/hub/federation_auth.go), so Validate admits it on this
+// shape. The Google issuer is never a peer hub and is excluded.
+func isHubUserTokenIssuer(issuer TrustedIssuerConfig) bool {
+	isHub := issuer.IssuerType == "" || issuer.IssuerType == "hub"
+	return isHub && issuer.AcceptUserTokens && !isGoogleIssuerURL(issuer.IssuerURL)
 }
 
 // appendGoogleUserOnlyFieldError appends a validation error for a
@@ -261,10 +280,23 @@ func (c *FederationConfig) Validate() []error {
 		}
 
 		// Rule 10: AllowedDomains (user-principal email-domain constraint)
-		// is validated identically to AllowedGCPProjects
-		// above — it only does anything on an ACTIVE Google user issuer.
-		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) {
-			errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")
+		// is validated like AllowedGCPProjects above — it only does
+		// anything on an ACTIVE Google user issuer — with one more shape:
+		// a hub issuer that accepts user access credentials
+		// (isHubUserTokenIssuer), where it constrains those credentials.
+		if len(issuer.AllowedDomains) > 0 && !isActiveGoogleUserIssuer(issuer) && !isHubUserTokenIssuer(issuer) {
+			if !isGoogleIssuerURL(issuer.IssuerURL) && !isNonHub {
+				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_domains is only applicable to the Google issuer (%q), or to a hub issuer with accept_user_tokens", i, issuer.IssuerURL))
+			} else {
+				errs = appendGoogleUserOnlyFieldError(errs, i, issuer, "allowed_domains")
+			}
+		}
+
+		// Rule 12: AcceptUserTokens selects how a hub issuer's tokens are
+		// read (pkg/hub/federation_auth.go); no other issuer type reads it,
+		// so setting it there is rejected rather than silently ignored.
+		if isNonHub && issuer.AcceptUserTokens {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: accept_user_tokens is not applicable for issuer_type %q (only \"hub\")", i, issuer.IssuerType))
 		}
 
 		// Rule 11: each allowed_domains entry must be a shape that

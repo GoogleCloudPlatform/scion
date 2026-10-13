@@ -715,6 +715,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					IssuerType:       "hub",
 					DefaultRole:      "",
 					AllowedEmails:    nil,
+					AcceptUserTokens: true,
 				},
 				{
 					IssuerURL:        "https://accounts.google.com",
@@ -759,6 +760,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, ti0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, ti0.DefaultScopes)
 	assert.Equal(t, "hub", ti0.IssuerType)
+	assert.True(t, ti0.AcceptUserTokens)
+	assert.False(t, gc.Federation.TrustedIssuers[1].AcceptUserTokens)
 
 	ti1 := gc.Federation.TrustedIssuers[1]
 	assert.Equal(t, "https://accounts.google.com", ti1.IssuerURL)
@@ -792,6 +795,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, vi0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, vi0.DefaultScopes)
 	assert.Equal(t, "hub", vi0.IssuerType)
+	assert.True(t, vi0.AcceptUserTokens)
+	assert.False(t, v1Back.Federation.TrustedIssuers[1].AcceptUserTokens)
 
 	vi1 := v1Back.Federation.TrustedIssuers[1]
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)

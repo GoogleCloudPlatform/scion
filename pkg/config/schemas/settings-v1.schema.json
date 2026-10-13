@@ -2418,7 +2418,11 @@
         "default_role": { "type": "string" },
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
-        "allowed_domains": { "type": "array", "items": { "type": "string" } }
+        "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "accept_user_tokens": {
+          "type": "boolean",
+          "description": "issuer_type hub only: accept user access credentials (scion_token_kind user) from this peer hub. Default false."
+        }
       },
       "additionalProperties": false
     }
