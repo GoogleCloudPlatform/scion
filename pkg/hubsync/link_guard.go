@@ -16,7 +16,6 @@ package hubsync
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -45,7 +44,12 @@ func RefuseGlobalFallbackLink(isGlobal, explicitTarget bool) error {
 	if err != nil || root == "" {
 		return nil
 	}
-	if _, err := os.Lstat(filepath.Join(root, config.DotScion)); err == nil {
+	// Resolution fell back to the global project, so any .scion at the
+	// repository root is either the global project itself (the home
+	// directory is the repository) or one resolution skipped as broken (a
+	// dangling symlink, or a marker whose external directory is missing).
+	// Only the first may link the global project.
+	if config.IsGlobalProjectDir(filepath.Join(root, config.DotScion)) {
 		return nil
 	}
 	return ErrGitRepoNotProject

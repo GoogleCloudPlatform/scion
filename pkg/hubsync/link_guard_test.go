@@ -51,6 +51,7 @@ func TestRefuseGlobalFallbackLink(t *testing.T) {
 	home := clearHubCredentialEnv(t)
 
 	t.Run("outside a git repository", func(t *testing.T) {
+		t.Setenv("GIT_CEILING_DIRECTORIES", filepath.Dir(home))
 		t.Chdir(home)
 		if err := RefuseGlobalFallbackLink(true, false); err != nil {
 			t.Errorf("err = %v, want nil", err)
@@ -70,11 +71,34 @@ func TestRefuseGlobalFallbackLink(t *testing.T) {
 		}
 	})
 
-	t.Run("git repository with its own .scion", func(t *testing.T) {
+	// With global resolution, a .scion at the repository root that is not
+	// the global project is one resolution skipped as broken: still refused.
+	t.Run("git repository with a broken .scion", func(t *testing.T) {
 		home := clearHubCredentialEnv(t)
-		gitRepoUnderHome(t, home, true)
+		repo := gitRepoUnderHome(t, home, false)
+		if err := os.Symlink(filepath.Join(home, "missing"), filepath.Join(repo, ".scion")); err != nil {
+			t.Fatal(err)
+		}
+		if err := RefuseGlobalFallbackLink(true, false); !errors.Is(err, ErrGitRepoNotProject) {
+			t.Errorf("dangling .scion symlink: err = %v, want ErrGitRepoNotProject", err)
+		}
+	})
+
+	t.Run("home directory is the git repository", func(t *testing.T) {
+		home := clearHubCredentialEnv(t)
+		if err := os.MkdirAll(filepath.Join(home, ".scion"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.Command("git", "-C", home, "init", "-q").CombinedOutput(); err != nil {
+			t.Fatalf("git init: %v: %s", err, out)
+		}
+		sub := filepath.Join(home, "notes")
+		if err := os.MkdirAll(sub, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		t.Chdir(sub)
 		if err := RefuseGlobalFallbackLink(true, false); err != nil {
-			t.Errorf("err = %v, want nil", err)
+			t.Errorf("err = %v, want nil (the repository's .scion is the global project)", err)
 		}
 	})
 }
