@@ -276,6 +276,7 @@ var nonForSettingsLoaders = map[string]bool{
 // nonForLoadAllowList is every reviewed non-For settings load in pkg/agent,
 // keyed "file func loader", with the reason it needs no flat policy.
 var nonForLoadAllowList = map[string]string{
+	"kept_agent_dir.go resolveKeptAgentDirRetention LoadGlobalSettings":    "reads only server.hub.soft_delete_retention, which has no profile tier",
 	"list.go lazyHubProjectID LoadEffectiveSettings":                       "listing: reads only the project's hub settings",
 	"nfs_worktree.go nfsExportWorkspaceOnAnyRuntime LoadEffectiveSettings": "reads only server.workspace_storage, which has no profile tier",
 	"run.go AgentManager.Start LoadSettings":                               "reads only the project's hub settings (legacy settings type)",
