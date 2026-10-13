@@ -537,16 +537,18 @@ func TestStart_TemplateEnvClaudeAuthFileAltEnvKeySuppressed(t *testing.T) {
 	for _, k := range restartAuthEnvKeys {
 		t.Setenv(k, "")
 	}
+	// Resolve the real claude bundle before the fixture changes the working
+	// directory to its temp dir.
+	src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	project := templateEnvStart{tplEnv: map[string]string{
 		"GOOGLE_APPLICATION_CREDENTIALS": "/template/adc.json",
 		"ANTHROPIC_API_KEY":              "template-key",
 		"TPL_TOOL":                       "ok",
 	}}.fixture(t)
 	// Swap the fixture's test-harness for a copy of the real claude bundle.
-	src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "claude"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	hcDir := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness")
 	if err := os.RemoveAll(hcDir); err != nil {
 		t.Fatal(err)
