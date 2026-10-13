@@ -137,7 +137,7 @@ Without a Hub there is no `TZ` chain, no Hub default timezone and no display pre
   - the harness-config `env` in `settings.yaml`, including a profile's `harness_overrides` entry for that harness config;
   - an inline config passed with `scion create --config`.
 
-  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over a template or inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when a template or inline config sets one, and the container uses the image default (UTC). With no `TZ` in any of them, the container uses the image default (UTC).
+  An empty `TZ: ""` in an inline config passes your machine's `TZ` through; in a template it is skipped with a warning (template env is literal and only a fallback). A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over a template or inline-config `TZ`. If it is empty, it is a passthrough marker like any empty local env value, even when a template or inline config sets `TZ`: your machine's `TZ` is used, and if your machine has none, the start fails with a missing-variable error. With no `TZ` in any of them, the container uses the image default (UTC).
 - **CLI display** uses your local zone, with `--tz` and `--utc` as above.
 
 A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.
