@@ -330,34 +330,9 @@ var catalogResourceOperations = []OperationSpec{
 	// selector on a hub boundary. The other branches of the same routes
 	// are separate operations.
 	// =====================================================================
+
 	{
-		ID:          "template.delete.user",
-		Domain:      "template",
-		Description: "Delete one of the caller's own user-scope templates through /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary",
-		EntryPoints: []EntryPoint{
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "DELETE", Variant: "scope=user"},
-		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
-		ResourceResolver: "self-principal",
-		BasePermission:   "template.delete",
-		Effects:          []SecurityEffect{EffectDeleteResource},
-		DelegationKind:   DelegationNone,
-		AuthorityEval:    AuthorityEvalNone,
-		AuditObligation: &AuditObligation{
-			EventType:     "template.delete",
-			ContextFields: []string{"actor_id"},
-			BeforeFields:  []string{"template_id", "template_name"},
-			Atomic:        true,
-		},
-		DenialCodes: []DenialCode{DenialForbidden},
-		TestRefs: []TestRef{
-			{Package: "pkg/hub", Function: "TestUserTemplateWrite_RequiresTemplateSelector"},
-		},
-		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
-	},
-	{
-		ID:          "template.clone.user",
+		ID:          "template.user.clone",
 		Domain:      "template",
 		Description: "Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination",
 		EntryPoints: []EntryPoint{
@@ -377,7 +352,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "skill.create.user",
+		ID:          "skill.user.create",
 		Domain:      "skill",
 		Description: "Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary",
 		EntryPoints: []EntryPoint{
@@ -398,7 +373,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "harnessconfig.clone.user",
+		ID:          "harnessconfig.user.clone",
 		Domain:      "harnessconfig",
 		Description: "Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination",
 		EntryPoints: []EntryPoint{
@@ -418,7 +393,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "harnessconfig.delete.user",
+		ID:          "harnessconfig.user.delete",
 		Domain:      "harnessconfig",
 		Description: "Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token",
 		EntryPoints: []EntryPoint{
@@ -444,7 +419,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "harnessconfig.reimport.user",
+		ID:          "harnessconfig.user.reimport",
 		Domain:      "harnessconfig",
 		Description: "Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token",
 		EntryPoints: []EntryPoint{
@@ -464,7 +439,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "resource.import.user.template",
+		ID:          "template.user.import",
 		Domain:      "template",
 		Description: "Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary",
 		EntryPoints: []EntryPoint{
@@ -486,7 +461,7 @@ var catalogResourceOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "resource.import.user.harnessconfig",
+		ID:          "harnessconfig.user.import",
 		Domain:      "harnessconfig",
 		Description: "Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary",
 		EntryPoints: []EntryPoint{

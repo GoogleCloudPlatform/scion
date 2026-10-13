@@ -623,12 +623,12 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}: {"id": f.harnessConfigDel},
 		// User-scope branches address the caller's user-scope records; a
 		// clone copies the global fixture into the caller's user scope.
-		{"user.template.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
-		{"template.delete.user", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
-		{"template.clone.user", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
-		{"harnessconfig.clone.user", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
-		{"harnessconfig.delete.user", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
-		{"harnessconfig.reimport.user", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
+		{"template.user.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
+		{"template.user.delete", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
+		{"harnessconfig.user.delete", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
+		{"harnessconfig.user.reimport", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
@@ -949,15 +949,15 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
 		// User-scope writes: valid bodies, so the probes reach the
 		// user-scope branch past body validation.
-		{"user.template.create", "/api/v1/users/me/templates"}:               {"name": "li-user-template-created"},
-		{"user.template.update", "/api/v1/users/me/templates/{id}"}:          {"name": "li-user-template-renamed"},
-		{"template.clone.user", "/api/v1/templates/{id}/clone"}:              {"name": "li-user-template-clone", "scope": "user"},
-		{"harnessconfig.clone.user", "/api/v1/harness-configs/{id}/clone"}:   {"name": "li-user-hc-clone", "scope": "user"},
-		{"skill.create.user", "/api/v1/skills"}:                              {"name": "li-user-skill", "scope": "user"},
-		{"resource.import.user.template", "/api/v1/resources/import"}:        {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
-		{"resource.import.user.template", "/api/v1/resources/discover"}:      {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
-		{"resource.import.user.harnessconfig", "/api/v1/resources/import"}:   {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
-		{"resource.import.user.harnessconfig", "/api/v1/resources/discover"}: {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"template.user.create", "/api/v1/users/me/templates"}:             {"name": "li-user-template-created"},
+		{"template.user.update", "/api/v1/users/me/templates/{id}"}:        {"name": "li-user-template-renamed"},
+		{"template.user.clone", "/api/v1/templates/{id}/clone"}:            {"name": "li-user-template-clone", "scope": "user"},
+		{"harnessconfig.user.clone", "/api/v1/harness-configs/{id}/clone"}: {"name": "li-user-hc-clone", "scope": "user"},
+		{"skill.user.create", "/api/v1/skills"}:                            {"name": "li-user-skill", "scope": "user"},
+		{"template.user.import", "/api/v1/resources/import"}:               {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"template.user.import", "/api/v1/resources/discover"}:             {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/import"}:          {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"harnessconfig.user.import", "/api/v1/resources/discover"}:        {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
 	}
 }
 

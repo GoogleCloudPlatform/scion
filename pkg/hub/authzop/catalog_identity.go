@@ -888,8 +888,8 @@ var identityOperations = []OperationSpec{
 		Bearer: BearerDisposition{Kind: BearerAdmitSelf, SelfFilter: BearerSelfFilterNone, Pin: "TestUserInjectedSkillsList_AnyTokenReadsOwnEntries"},
 	},
 	{
-		ID:          "user.template.read",
-		Domain:      "user.template",
+		ID:          "template.user.read",
+		Domain:      "template",
 		Description: "List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "GET"},
@@ -910,8 +910,8 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "user.template.create",
-		Domain:      "user.template",
+		ID:          "template.user.create",
+		Domain:      "template",
 		Description: "Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates", Method: "POST"},
@@ -931,8 +931,8 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "user.template.update",
-		Domain:      "user.template",
+		ID:          "template.user.update",
+		Domain:      "template",
 		Description: "Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "PUT"},
@@ -954,11 +954,12 @@ var identityOperations = []OperationSpec{
 		Bearer: AdmitOn(BearerTargetCatalogRecord, BearerBoundaryHub),
 	},
 	{
-		ID:          "user.template.delete",
-		Domain:      "user.template",
-		Description: "Delete one of the caller's own user-scope templates. A user access token needs template:delete on a hub boundary",
+		ID:          "template.user.delete",
+		Domain:      "template",
+		Description: "Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/users/me/templates/{id}", Method: "DELETE"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/templates/{id}", Method: "DELETE", Variant: "scope=user"},
 		},
 		Principals:       []PrincipalKind{PrincipalUser},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT},
