@@ -181,7 +181,7 @@ const journey: {
   ids: Partial<Record<IdentityKey, Identity>>;
   projects: { home?: string; side?: string };
   bindings: Array<{ project: 'home' | 'side'; projectId: string; key: IdentityKey; id: string }>;
-  artifact?: { id: string; title: string; ownerRefAtPublish?: string };
+  artifact?: { id: string; title: string; ownerRefAtPublish?: string | undefined };
   /** Set when a precondition failure stops the remaining rows. */
   stopped?: string;
   rows: Record<string, RowRecord>;
