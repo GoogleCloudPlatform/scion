@@ -88,8 +88,8 @@ func TestSyncCreate_RequestEndsDuringSupersedeWait_409(t *testing.T) {
 	if ran.Load() {
 		t.Error("Start ran for a create whose request ended during the supersede wait")
 	}
-	if rec := registryRecord(srv, key); rec != old {
-		t.Errorf("registry holds %+v after the refused create, want the earlier start's record back", rec)
+	if rec := registryRecord(srv, key); rec != nil {
+		t.Errorf("registry still holds %+v for the refused create", rec)
 	}
 }
 
