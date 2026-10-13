@@ -60,7 +60,8 @@ const (
 )
 
 // visitorGrantNonAmplificationMessage is the 403 message of a grant or
-// window change refused by visitorGrantNonAmplification.
+// window extension by an actor who does not hold every project-visitor
+// permission on the project.
 const visitorGrantNonAmplificationMessage = "You can grant visitor access only when you hold every permission it gives on this project"
 
 // maxVisitorRequestBytes caps a visitor grant request body.
@@ -117,6 +118,11 @@ var (
 	// federated account; the grant transaction is retried once.
 	errVisitorAccountRace = errors.New("federated account created concurrently")
 )
+
+// errVisitorWindowNotAmplifiable marks a window change that extends a grant
+// by an actor who does not hold every project-visitor permission; the
+// update handler answers it with 403.
+var errVisitorWindowNotAmplifiable = errors.New("window extension needs the project-visitor permissions")
 
 // handleProjectVisitors serves /api/v1/projects/{id}/visitors[/{visitorId}].
 // rest is the path after "visitors".
@@ -328,23 +334,47 @@ func (s *Server) grantProjectVisitor(ctx context.Context, projectID, actorID, is
 
 // visitorGrantNonAmplification is the grant's non-amplification rule: the
 // actor must hold every permission of the project-visitor role on the
-// project, so a grant never passes on authority the actor lacks. An
-// unscoped local platform admin passes, as in CanDelegate. It writes a 403
-// and returns false when the actor does not.
+// project, so a grant never passes on authority the actor lacks. It writes
+// a 403 and returns false when the actor does not.
 func (s *Server) visitorGrantNonAmplification(w http.ResponseWriter, ctx context.Context, actor UserIdentity, projectID string) bool {
-	if IsUnscopedLocalPlatformAdmin(actor) {
-		return true
-	}
-	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	holdsAll, err := s.actorHoldsVisitorPermissions(ctx, actor, projectID)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return false
 	}
-	if d := s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID); !d.Allowed {
+	if !holdsAll {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorGrantNonAmplificationMessage, nil)
 		return false
 	}
 	return true
+}
+
+// actorHoldsVisitorPermissions reports whether actor holds every
+// permission of the project-visitor role on projectID. An unscoped local
+// platform admin does, as in CanDelegate.
+func (s *Server) actorHoldsVisitorPermissions(ctx context.Context, actor UserIdentity, projectID string) (bool, error) {
+	if IsUnscopedLocalPlatformAdmin(actor) {
+		return true, nil
+	}
+	rd, err := s.store.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	if err != nil {
+		return false, err
+	}
+	return s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID).Allowed, nil
+}
+
+// visitorWindowExtends reports whether the window (newNotBefore,
+// newExpiresAt) admits any time the window (oldNotBefore, oldExpiresAt)
+// does not: an earlier or cleared start, or a later or cleared expiry. A
+// nil bound is open.
+func visitorWindowExtends(oldNotBefore, oldExpiresAt, newNotBefore, newExpiresAt *time.Time) bool {
+	if oldNotBefore != nil && (newNotBefore == nil || newNotBefore.Before(*oldNotBefore)) {
+		return true
+	}
+	if oldExpiresAt != nil && (newExpiresAt == nil || newExpiresAt.After(*oldExpiresAt)) {
+		return true
+	}
+	return false
 }
 
 // handleUpdateProjectVisitor answers PATCH /visitors/{visitorId}.
@@ -360,14 +390,22 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		ValidationError(w, msg, map[string]interface{}{"field": "expiresAt"})
 		return
 	}
-	if !s.visitorGrantNonAmplification(w, ctx, actor, project.ID) {
+	// Only an extension needs non-amplification; shortening never does.
+	// The permissions are read before the transaction (authz reads through
+	// s.store), and the window is compared with the binding read inside it.
+	holdsAll, err := s.actorHoldsVisitorPermissions(ctx, actor, project.ID)
+	if err != nil {
+		writeErrorFromErr(w, err, "")
 		return
 	}
 	var out ProjectVisitor
-	err := s.store.WithTx(ctx, func(tx store.Store) error {
+	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		u, before, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
 		if err != nil {
 			return err
+		}
+		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
+			return errVisitorWindowNotAmplifiable
 		}
 		updated, err := tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
 		if err != nil {
@@ -384,6 +422,10 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		out = s.projectVisitorResponse(u, updated)
 		return nil
 	})
+	if errors.Is(err, errVisitorWindowNotAmplifiable) {
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorGrantNonAmplificationMessage, nil)
+		return
+	}
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return

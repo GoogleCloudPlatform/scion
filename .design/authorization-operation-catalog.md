@@ -1249,7 +1249,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
+- Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; granting also needs every permission of the project-visitor role on the project. A visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
 
 ### Invariants
 
@@ -1301,14 +1301,14 @@
 ### Delegation
 
 - **Kind:** `conditional_on_increase`
-- A window change can extend the grant, so the actor must hold every permission of the project-visitor role on the project, as for a grant
+- Only a window change that extends the grant (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project, as for a grant; shortening never does
 
 **Authority Evaluation:** `before_and_after`
 
 ### Governance
 
 - **Kind:** peer_superior
-- Holders of project.manage_visitors (project owners and admins, and hub admins) change any visitor grant of the project.
+- Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor grant of the project; extending one also needs every permission of the project-visitor role on the project.
 
 ### Audit
 
@@ -1324,6 +1324,7 @@
 
 - `pkg/hub:TestProjectVisitors_WindowHonoured`
 - `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
 
 ---
 
@@ -1368,6 +1369,7 @@
 ### Tests
 
 - `pkg/hub:TestProjectVisitors_RevokeRefusesNextRequest`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
 
 ---
 

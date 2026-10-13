@@ -361,17 +361,43 @@ func (f *visitorGrantFixture) bindCustomProjectRole(t *testing.T, name, userID s
 	require.NoError(t, err)
 }
 
+// listedVisitor returns the listed grant of visitor id, and whether it is
+// listed.
+func (f *visitorGrantFixture) listedVisitor(t *testing.T, id string) (ProjectVisitor, bool) {
+	t.Helper()
+	for _, v := range f.list(t) {
+		if v.ID == id {
+			return v, true
+		}
+	}
+	return ProjectVisitor{}, false
+}
+
+// grantWithExpiry grants email of issuer as the owner, expiring at
+// expiresAt.
+func (f *visitorGrantFixture) grantWithExpiry(t *testing.T, issuer, email string, expiresAt time.Time) ProjectVisitor {
+	t.Helper()
+	rec := f.grant(t, f.owner, map[string]interface{}{"issuer": issuer, "email": email, "expiresAt": expiresAt})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var v ProjectVisitor
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v))
+	return v
+}
+
 // Project admins hold project.manage_visitors as owners do; the
 // super-admin holds it through its system-scope role (every permission,
 // role_binding.create included), with no special case. A hub admin holds
-// it through the hub-admin role, so it may list and revoke the grants of
-// any project, but granting needs every permission of the project-visitor
-// role on the project too, which hub-admin alone does not give.
-func TestProjectVisitors_AdminAndSuperAdminMayGrant(t *testing.T) {
+// it through the hub-admin role, so it may list, revoke and shorten the
+// grants of any project, but granting or extending a window needs every
+// permission of the project-visitor role on the project too, which
+// hub-admin alone does not give.
+func TestProjectVisitors_WhoMayGrant(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	ctx := context.Background()
 	rec := f.grant(t, f.admin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "dan@any.example"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var dan ProjectVisitor
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &dan))
 
 	superID := tid(t.Name() + "-super")
 	createTestUserWithRole(t, f.st, superID, superID+"@test.com", "admin", store.SystemRoleSuperAdmin)
@@ -380,7 +406,10 @@ func TestProjectVisitors_AdminAndSuperAdminMayGrant(t *testing.T) {
 	require.NoError(t, err)
 	rec = f.grant(t, super, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "erin@any.example"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	assert.Len(t, f.list(t), 2)
+
+	expiry := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	fern := f.grantWithExpiry(t, grantTestOtherIssuer, "fern@any.example", expiry)
+	assert.Len(t, f.list(t), 3)
 
 	hubAdminID := tid(t.Name() + "-hubadmin")
 	createTestUserWithRole(t, f.st, hubAdminID, hubAdminID+"@test.com", "member", store.SystemRoleHubAdmin)
@@ -388,31 +417,63 @@ func TestProjectVisitors_AdminAndSuperAdminMayGrant(t *testing.T) {
 	hubAdmin, err := f.st.GetUser(ctx, hubAdminID)
 	require.NoError(t, err)
 
+	// hub-admin alone: list, extend (refused), shorten, revoke, grant
+	// (refused).
 	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodGet, f.visitorsPath(), nil)
 	assert.Equal(t, http.StatusOK, rec.Code, "a hub admin may list: %s", rec.Body.String())
-	rec = f.grant(t, hubAdmin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "gil@any.example"})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodPatch, f.visitorsPath()+"/"+fern.ID,
+		map[string]interface{}{"expiresAt": expiry.Add(24 * time.Hour)})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a hub admin may not extend: %s", rec.Body.String())
 	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	listed, ok := f.listedVisitor(t, fern.ID)
+	require.True(t, ok)
+	require.NotNil(t, listed.ExpiresAt)
+	assert.WithinDuration(t, expiry, *listed.ExpiresAt, time.Second, "the window is unchanged")
+	assert.Empty(t, f.audits(t, mutationTypeProjectVisitorUpdate))
+
+	shorter := expiry.Add(-12 * time.Hour)
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodPatch, f.visitorsPath()+"/"+fern.ID,
+		map[string]interface{}{"expiresAt": shorter})
+	assert.Equal(t, http.StatusOK, rec.Code, "a hub admin may shorten: %s", rec.Body.String())
+	listed, ok = f.listedVisitor(t, fern.ID)
+	require.True(t, ok)
+	require.NotNil(t, listed.ExpiresAt)
+	assert.WithinDuration(t, shorter, *listed.ExpiresAt, time.Second)
+	assert.Len(t, f.audits(t, mutationTypeProjectVisitorUpdate), 1)
+
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodDelete, f.visitorsPath()+"/"+dan.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "a hub admin may revoke: %s", rec.Body.String())
+	_, ok = f.listedVisitor(t, dan.ID)
+	assert.False(t, ok, "the revoked grant is gone")
+	assert.Len(t, f.audits(t, mutationTypeProjectVisitorRevoke), 1)
+
+	rec = f.grant(t, hubAdmin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "gil@any.example"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "a hub admin may not grant: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	assert.Len(t, f.list(t), 2)
 
 	// With the project-visitor permissions on the project, the hub admin's
-	// project.manage_visitors (from hub-admin) lets it grant and revoke.
+	// project.manage_visitors (from hub-admin) lets it grant and extend.
 	f.bindCustomProjectRole(t, "visitor-permissions-only", hubAdminID, projectVisitorPermissionIDs())
 	rec = f.grant(t, hubAdmin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "gil@any.example"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var gil ProjectVisitor
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &gil))
-	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodDelete, f.visitorsPath()+"/"+gil.ID, nil)
-	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
-	assert.Len(t, f.list(t), 2)
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodPatch, f.visitorsPath()+"/"+fern.ID, map[string]interface{}{})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	listed, ok = f.listedVisitor(t, fern.ID)
+	require.True(t, ok)
+	assert.Nil(t, listed.ExpiresAt, "the expiry is cleared")
+	assert.Len(t, f.list(t), 3)
 }
 
 // Non-amplification: an actor that holds project.manage_visitors but not
-// every permission of the project-visitor role may list grants, but may
-// neither grant nor change a grant's window.
+// every permission of the project-visitor role may list grants and shorten
+// their windows, but may neither grant nor extend a grant's window.
 func TestProjectVisitors_GrantNeedsEveryVisitorPermission(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	ctx := context.Background()
-	existing := f.grantOK(t, grantTestOtherIssuer, "hana@any.example")
+	expiry := time.Now().Add(24 * time.Hour).UTC().Truncate(time.Second)
+	existing := f.grantWithExpiry(t, grantTestOtherIssuer, "hana@any.example", expiry)
 
 	partialID := tid(t.Name() + "-partial")
 	require.NoError(t, f.st.CreateUser(ctx, &store.User{
@@ -434,15 +495,59 @@ func TestProjectVisitors_GrantNeedsEveryVisitorPermission(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNotFound, "no pending account was created")
 	assert.Len(t, f.audits(t, mutationTypeProjectVisitorGrant), 1, "only the owner's grant was audited")
 
-	rec = doRequestAsUser(t, f.srv, partial, http.MethodPatch, f.visitorsPath()+"/"+existing.ID,
-		map[string]interface{}{"expiresAt": time.Now().Add(24 * time.Hour)})
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	// Extending the window (a later expiry, or clearing it) is refused.
+	for _, body := range []map[string]interface{}{
+		{"expiresAt": expiry.Add(24 * time.Hour)},
+		{},
+	} {
+		rec = doRequestAsUser(t, f.srv, partial, http.MethodPatch, f.visitorsPath()+"/"+existing.ID, body)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "extension %v: %s", body, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	}
 	listed := f.list(t)
 	require.Len(t, listed, 1)
 	assert.Equal(t, existing.BindingID, listed[0].BindingID)
-	assert.Nil(t, listed[0].ExpiresAt, "the window is unchanged")
+	require.NotNil(t, listed[0].ExpiresAt)
+	assert.WithinDuration(t, expiry, *listed[0].ExpiresAt, time.Second, "the window is unchanged")
 	assert.Empty(t, f.audits(t, mutationTypeProjectVisitorUpdate))
+
+	// Shortening it is allowed.
+	shorter := expiry.Add(-12 * time.Hour)
+	rec = doRequestAsUser(t, f.srv, partial, http.MethodPatch, f.visitorsPath()+"/"+existing.ID,
+		map[string]interface{}{"expiresAt": shorter})
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	listed = f.list(t)
+	require.Len(t, listed, 1)
+	require.NotNil(t, listed[0].ExpiresAt)
+	assert.WithinDuration(t, shorter, *listed[0].ExpiresAt, time.Second)
+	assert.Len(t, f.audits(t, mutationTypeProjectVisitorUpdate), 1)
+}
+
+func TestVisitorWindowExtends(t *testing.T) {
+	now := time.Now()
+	at := func(d time.Duration) *time.Time { v := now.Add(d); return &v }
+	for _, tc := range []struct {
+		name             string
+		oldStart, oldEnd *time.Time
+		newStart, newEnd *time.Time
+		extends          bool
+	}{
+		{name: "open stays open"},
+		{name: "same window", oldStart: at(time.Hour), oldEnd: at(2 * time.Hour), newStart: at(time.Hour), newEnd: at(2 * time.Hour)},
+		{name: "expiry added", newEnd: at(time.Hour)},
+		{name: "start added", newStart: at(time.Hour)},
+		{name: "shorter expiry", oldEnd: at(2 * time.Hour), newEnd: at(time.Hour)},
+		{name: "later expiry", oldEnd: at(time.Hour), newEnd: at(2 * time.Hour), extends: true},
+		{name: "expiry cleared", oldEnd: at(time.Hour), extends: true},
+		{name: "later start", oldStart: at(time.Hour), newStart: at(2 * time.Hour)},
+		{name: "earlier start", oldStart: at(2 * time.Hour), newStart: at(time.Hour), extends: true},
+		{name: "start cleared", oldStart: at(time.Hour), extends: true},
+		{name: "start cleared, expiry shortened", oldStart: at(time.Hour), oldEnd: at(3 * time.Hour), newEnd: at(2 * time.Hour), extends: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.extends, visitorWindowExtends(tc.oldStart, tc.oldEnd, tc.newStart, tc.newEnd))
+		})
+	}
 }
 
 // A grant authorizes only inside its window: a start in the future or an
