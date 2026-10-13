@@ -24,6 +24,10 @@
 # Several jobs can share one workload (the pkg/hub shards): give them the
 # same workload name, and save from only one of them (see save-go-cache).
 #
+# No workload name may be another's name followed by "-" (for example
+# hub-shard and hub-shard-plan): the restore-keys' bare prefix would
+# restore the other workload's cache. The first step checks this.
+#
 #   - name: Setup Go
 #     id: go
 #     uses: ./.github/actions/setup-go-cache
@@ -64,6 +68,31 @@ runs:
       with:
         go-version-file: ${{ inputs.go-version-file }}
         cache: false
+
+    # The restore-keys end in a bare prefix (go-...-<workload>-), which
+    # also matches every workload whose name is this one plus "-..." (a
+    # hub-shard workload restored hub-shard-plan's 11 MB cache that way).
+    # So no workload name may be another's name followed by "-". This
+    # check fails the job when that happens among the workloads named in
+    # .github/workflows (literal names only; one built from an
+    # expression is checked as this job's resolved name).
+    - name: Check the Go cache workload name
+      shell: bash
+      env:
+        WORKLOAD: ${{ inputs.workload }}
+      run: |
+        set -euo pipefail
+        names=$( { echo "$WORKLOAD"; grep -hE '^[[:space:]]+workload:[[:space:]]*[^[:space:]$]+[[:space:]]*$' "$GITHUB_WORKSPACE"/.github/workflows/*.yml | sed -E 's/^[[:space:]]+workload:[[:space:]]*//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//'; } | sort -u)
+        bad=0
+        while IFS= read -r a; do
+          while IFS= read -r b; do
+            if [ "$a" != "$b" ] && [ "${b#"$a"-}" != "$b" ]; then
+              echo "::error title=setup-go-cache::Go cache workload '$b' starts with '$a-', so the '$a' workload's restore-keys would also restore '$b' caches; rename one of them."
+              bad=1
+            fi
+          done <<< "$names"
+        done <<< "$names"
+        exit "$bad"
 
     - name: Compute the Go cache key
       id: key
