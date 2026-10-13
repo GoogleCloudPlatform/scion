@@ -594,7 +594,7 @@ func (s *Server) handleBrokerJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Determine hub endpoint
-	hubEndpoint := s.config.HubEndpoint
+	hubEndpoint := s.HubEndpointFor(HubEndpointForJoinResponse)
 	if hubEndpoint == "" {
 		// Fall back to constructing from request
 		scheme := "http"

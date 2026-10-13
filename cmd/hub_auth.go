@@ -239,13 +239,20 @@ var errLoginHubKnown = errors.New("hub already registered")
 
 // recordLoginEndpoint makes a successful login usable by the rest of the
 // CLI. When the hub came from the current context ('scion use'; no
-// --hub-url, --hub or environment variable chose it), the settings are left
-// alone: the context already targets that hub, and writing it to the global
-// hub.endpoint would make the workstation server advertise it. Otherwise
+// --hub-url, --hub or environment variable chose it), or from the link
+// entry of the directory project, the settings are left alone: the hub
+// list already targets that hub, and writing it to the global hub.endpoint
+// would make the workstation server advertise it. Otherwise
 // persistLoginEndpointForInvocation saves the endpoint as before.
 func recordLoginEndpoint(cmd *cobra.Command, hubURL string) {
 	if hubAuthHubURL == "" && hubSource == targetSourceContext {
 		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (current hub, selected with 'scion use'); settings unchanged.\n", hubURL)
+		return
+	}
+	// The hub of a linked directory comes from its link entry in the hub
+	// list, so it is not written to settings either.
+	if hubAuthHubURL == "" && hubSource == targetSourceDirectory {
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Logged in to %s (the hub this directory is linked to); settings unchanged.\n", hubURL)
 		return
 	}
 	persistLoginEndpointForInvocation(cmd, hubURL)

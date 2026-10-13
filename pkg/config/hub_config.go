@@ -1767,7 +1767,36 @@ func serverEnvToOpsettingsKey(envKey string) string {
 		firstSeg = key[:dot]
 	}
 	if serverSubKeys[firstSeg] {
-		return "server." + key
+		return aliasOpsettingsEnvKey("server." + key)
+	}
+	return aliasOpsettingsEnvKey(key)
+}
+
+// seedEnvToOpsettingsKey maps a SCION_SEED_* env var key (after prefix
+// stripping) to the opsettings koanf keyspace. Server keys carry an explicit
+// SERVER_ segment (SCION_SEED_SERVER_HUB_ADMINEMAILS).
+func seedEnvToOpsettingsKey(envKey string) string {
+	return aliasOpsettingsEnvKey(envKeyToOpsettingsKey(envKey))
+}
+
+// opsettingsEnvKeyAliases maps an env-derived opsettings key to the key the
+// variable actually sets, for settings whose env variable name is not the
+// spelling derived from the koanf path. An empty target drops the variable.
+//
+// server.hub.public_url is set by SCION_SERVER_HUB_ENDPOINT, the variable
+// the hub's own endpoint resolution reads (GlobalConfig hub.endpoint), so the
+// opsettings layer and the admin UI see the same variable the hub uses. The
+// derived spelling SCION_SERVER_HUB_PUBLICURL is not read by the hub, so it
+// is dropped here and reported as unmatched at startup. The reverse mapping
+// for display lives in opsettings (koanfKeyToEnvSuffix).
+var opsettingsEnvKeyAliases = map[string]string{
+	"server.hub.endpoint":   PublicURLKey,
+	"server.hub.public_url": "",
+}
+
+func aliasOpsettingsEnvKey(key string) string {
+	if target, ok := opsettingsEnvKeyAliases[key]; ok {
+		return target
 	}
 	return key
 }
@@ -1831,7 +1860,7 @@ func LoadEnvKoanf() *koanf.Koanf {
 // e.g. SCION_SEED_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails
 func LoadSeedEnvKoanf() *koanf.Koanf {
 	k := koanf.New(".")
-	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", envKeyToOpsettingsKey), nil)
+	_ = k.Load(nonEmptyEnvProvider("SCION_SEED_", seedEnvToOpsettingsKey), nil)
 	return k
 }
 

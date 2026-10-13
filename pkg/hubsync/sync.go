@@ -246,6 +246,12 @@ type EnsureHubReadyOptions struct {
 	// register it: it returns the "project must be linked" error, so the
 	// context's hub never rewrites the project's link.
 	HubFromContext bool
+	// RecordLink, when set, is called after EnsureHubReady registered or
+	// linked the project at projectPath on the hub at endpoint, with the
+	// ID the hub knows the project by. The CLI uses it to record the link
+	// in its hub list when the hub came from its current context, so the
+	// project keeps resolving to that hub after a hub switch.
+	RecordLink func(endpoint, hubProjectID, projectPath string, isGlobal bool)
 }
 
 // ErrProjectUnlinked is returned by EnsureHubReady for a project whose
@@ -618,6 +624,9 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		}
 		if settings.Hub != nil {
 			hubCtx.BrokerID = settings.Hub.BrokerID
+		}
+		if opts.RecordLink != nil && hubCtx.ProjectID != "" {
+			opts.RecordLink(endpoint, hubCtx.ProjectID, resolvedPath, isGlobal)
 		}
 	}
 

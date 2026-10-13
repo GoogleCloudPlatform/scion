@@ -94,6 +94,8 @@ func TestApplyRolePlanTx_OnlyCalledFromSetMemberRoles(t *testing.T) {
 	// recursive walk already includes pkg/hub/apierr.
 	// pkgmove:scan-covers pkg/hub/internal/principal
 	// recursive walk already includes pkg/hub/internal/principal.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (skips only testdata and vendor).
 	err := filepath.Walk(hubDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr

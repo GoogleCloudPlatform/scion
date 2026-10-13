@@ -281,7 +281,10 @@ func TestHubTestIdentityWebCodeCmd_HumanModeOnly(t *testing.T) {
 	const p = "hub.test-identity.web-code"
 	require.NotNil(t, resolveCommandPath(rootCmd, p), "%s must exist in the real command tree", p)
 	assert.False(t, agentAllowed[p], "%s must not be allowed in agent mode", p)
-	assert.False(t, agentAllowed["hub.test-identity"], "the test-identity subtree must not be allowed in agent mode")
+	// The test-identity parent is agent-allowed for target-hub profiles
+	// (ptone/scion#4240: issue/token/list/delete/teardown run in agent mode
+	// only against a profile for another hub); web-code itself is not.
+	assert.True(t, agentAllowed["hub.test-identity"], "the test-identity parent is agent-allowed for target-hub profiles")
 	for _, tc := range []struct {
 		mode    string
 		present bool
@@ -299,6 +302,10 @@ func TestHubTestIdentityWebCodeCmd_HumanModeOnly(t *testing.T) {
 			if tc.present {
 				assert.NotNil(t, resolveCommandPath(root, p))
 			} else {
+				// The parent and a sibling stay (target-hub profiles), so
+				// web-code is removed by its own path, not with its parent.
+				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity"))
+				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity.issue"))
 				assert.Nil(t, resolveCommandPath(root, p))
 			}
 		})
