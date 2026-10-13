@@ -752,6 +752,9 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -763,13 +766,6 @@ jobs:
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
-
-      # CI-only: no fsync, no synchronous commit, no full-page writes
-      # (throwaway database; see the action for why).
-      - name: Tune CI Postgres
-        uses: ./.github/actions/postgres-ci-tune
-        with:
-          container: ${{ job.services.postgres.id }}
 
       - name: Setup Go
         uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -801,6 +797,16 @@ jobs:
         env:
           SHARD: ${{ matrix.shard }}
         run: make vet-hub-shard SHARD="$SHARD"
+
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why). Here, just before the
+      # one step that uses Postgres, so that a failure to tune it does not
+      # skip the SQLite and no_sqlite shard tests above.
+      - name: Tune CI Postgres
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/postgres-ci-tune
+        with:
+          container: ${{ job.services.postgres.id }}
 
       # The default-tag pkg/hub Postgres tests that live in this shard: the
       # web chat store tests (own SQL, read SCION_TEST_POSTGRES_DSN) and the
@@ -843,6 +849,9 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -940,6 +949,9 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
@@ -1007,6 +1019,9 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
