@@ -38,6 +38,7 @@ import (
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/backoff"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/dirfd"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
@@ -1131,22 +1132,24 @@ const (
 
 // tokenRefreshBackoff returns the delay before the next refresh retry after the
 // given number of consecutive failures, using exponential backoff (starting at
-// base, doubling each attempt) capped at max.
-func tokenRefreshBackoff(consecutiveFailures int, base, max time.Duration) time.Duration {
-	if consecutiveFailures < 1 {
-		consecutiveFailures = 1
-	}
-	delay := base
+// base, doubling each attempt) capped at limit. It is the delay the refresh
+// loop gets from the shared backoff helper after that many failures. Unlike
+// the helper-free version it replaced, it returns base when limit < base and
+// starts from the helper's default base when base <= 0; the loop reaches
+// neither case (its base is always positive and its limit at least its base).
+func tokenRefreshBackoff(consecutiveFailures int, base, limit time.Duration) time.Duration {
+	b := newTokenRefreshBackoff(base, limit)
+	d := b.Failure()
 	for i := 1; i < consecutiveFailures; i++ {
-		delay *= 2
-		if delay >= max {
-			return max
-		}
+		d = b.Failure()
 	}
-	if delay > max {
-		delay = max
-	}
-	return delay
+	return d
+}
+
+// newTokenRefreshBackoff returns the refresh loop's retry policy: doubling
+// from base to limit, without jitter.
+func newTokenRefreshBackoff(base, limit time.Duration) *backoff.Backoff {
+	return &backoff.Backoff{Base: base, Max: limit}
 }
 
 // StartTokenRefresh starts a background goroutine that refreshes the agent token
@@ -1214,6 +1217,7 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 		// adjustRefreshForTransportTokens picks the earlier deadline.
 		refreshAt = c.adjustRefreshForTransportTokens(refreshAt)
 		consecutiveFailures := 0
+		retry := newTokenRefreshBackoff(retryBase, retryMax)
 		authLostNotified := false
 
 		for {
@@ -1273,13 +1277,14 @@ func (c *Client) StartTokenRefresh(ctx context.Context, config *TokenRefreshConf
 				}
 
 				consecutiveFailures++
-				refreshAt = clk.Now().Add(tokenRefreshBackoff(consecutiveFailures, retryBase, retryMax))
+				refreshAt = clk.Now().Add(retry.Failure())
 				continue
 			}
 
 			// Successful refresh: reset failure tracking and clear any prior
 			// auth-lost state so a later loss is reported again.
 			consecutiveFailures = 0
+			retry.Reset()
 			authLostNotified = false
 			tokenExpiry = newExpiry
 
