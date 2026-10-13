@@ -333,12 +333,14 @@ describe('share dialog', () => {
     expect(grants[2].querySelector('sl-select')).toBeNull();
     expect(button(el, 'Remove', grants[2])).not.toBeNull();
     const menus = $$(el, 'sl-select[aria-label="Permission"]');
-    expect(menus).toHaveLength(2); // the Add row and Priya's grant
+    expect(menus).toHaveLength(3); // the Add row, the home grant and Priya's grant
     for (const select of menus) {
       const values = Array.from(select.querySelectorAll('sl-option')).map((o) =>
         o.getAttribute('value')
       );
-      expect(values).toEqual(['read', 'write', 'admin']);
+      // The home grant offers read or write (ptone/scion#4582); the rest add admin.
+      const isHome = grants[0].contains(select);
+      expect(values).toEqual(isHome ? ['read', 'write'] : ['read', 'write', 'admin']);
     }
   });
 
