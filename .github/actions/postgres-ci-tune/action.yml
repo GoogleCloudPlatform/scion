@@ -1,8 +1,9 @@
 # Turns off Postgres durability in a CI service container: fsync,
 # synchronous_commit and full_page_writes (ptone/scion#4251, option D).
 # The service's data directory is also on tmpfs (see the service options in
-# each job; the tmpfs path is PGDATA of the postgres image up to 17). CI databases are thrown away with the job, so crash safety buys
-# nothing there, and the test workload is DDL-heavy (a schema is created,
+# each job; the tmpfs path is PGDATA of the postgres image up to 17). CI
+# databases are thrown away with the job, so crash safety buys nothing
+# there, and the test workload is DDL-heavy (a schema is created,
 # migrated and dropped per test), so commit and checkpoint fsyncs are a real
 # share of its time. Query results and transaction semantics do not change:
 # these settings only decide when data reaches the disk.
@@ -61,20 +62,22 @@ runs:
           sleep 1
         done
         if [ -z "$altered" ]; then
-          echo "::error title=Tune CI Postgres::ALTER SYSTEM failed for 30 s"
+          echo "::error title=Tune CI Postgres::ALTER SYSTEM failed on all 30 attempts (1 s apart)"
           exit 1
         fi
         # pg_reload_conf() only signals the server; wait for the reload (and
         # for the real server, if the settings went to the init-time one).
-        query="SELECT count(*) FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') AND setting = 'off'"
+        where="WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes')"
+        query="SELECT count(*) FROM pg_settings $where AND setting = 'off'"
+        show="SELECT name || ' = ' || setting FROM pg_settings $where ORDER BY name"
         for _ in $(seq 1 60); do
           if [ "$(psql -Atc "$query" || true)" = 3 ]; then
-            psql -Atc "SELECT name || ' = ' || setting FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') ORDER BY name"
+            psql -Atc "$show"
             docker exec "$PG_CONTAINER" sh -c 'df -h "$PGDATA"'
             exit 0
           fi
           sleep 0.5
         done
         echo "::error title=Tune CI Postgres::fsync, synchronous_commit and full_page_writes are not all off after pg_reload_conf()"
-        psql -Atc "SELECT name || ' = ' || setting FROM pg_settings WHERE name IN ('fsync', 'synchronous_commit', 'full_page_writes') ORDER BY name"
+        psql -Atc "$show"
         exit 1
