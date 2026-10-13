@@ -198,6 +198,12 @@ type RunConfig struct {
 	// reported handles (the async launch's CleanupLaunch). When it is nil,
 	// the runtime cleans up as on the synchronous path, whether or not
 	// Checkpoint is set. Callers set both hooks together.
+	//
+	// A runtime whose identity is known before the create may report the
+	// handle before issuing it, provided its DeleteResource never treats a
+	// not-yet-materialised create as gone (see the runtime's notes; the
+	// cloudrun-sandbox runtime reports after its Starting state entry is
+	// written and before `sandbox run`).
 	Checkpoint        func(ctx context.Context, step string) error
 	OnResourceCreated func(api.ResourceHandle)
 	// Progress is an async launch's non-blocking step hook (design wave 3
@@ -249,6 +255,9 @@ const (
 	CheckpointStepSecrets   = api.LaunchStepSecrets
 	CheckpointStepPodCreate = api.LaunchStepPodCreate
 	CheckpointStepLaunching = api.LaunchStepLaunching
+	// CheckpointStepSandboxLayout precedes the cloudrun-sandbox runtime's
+	// host directory layout (prepareScionLayout).
+	CheckpointStepSandboxLayout = "sandbox_layout"
 	// CheckpointStepPreClean precedes a name-based delete of a stale
 	// resource left by an earlier agent of the same name.
 	CheckpointStepPreClean = api.LaunchStepPreClean
