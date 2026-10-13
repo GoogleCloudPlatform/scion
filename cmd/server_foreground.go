@@ -158,8 +158,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	// Server secrets are now in memory; remove them from the process env
-	// before anything below can start a child process. On macOS the
-	// container runtime probe during logging setup above runs earlier.
+	// before anything below can start a child process. Two earlier
+	// spawns remain: on macOS the container runtime probe during logging
+	// setup, and the legacy settings migration's git ls-files during
+	// config load (pkg/config gitTracked), which runs with these names
+	// filtered out of its env.
 	scrubServerSecretEnv()
 	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
 	// precedence. The level filter and the cloud, request and message

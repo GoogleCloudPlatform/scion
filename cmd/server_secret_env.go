@@ -27,8 +27,8 @@ const (
 // serverSecretEnvNames are the server secret env names that
 // scrubServerSecretEnv removes from the process env once their values are in
 // memory, so that no child process (git, container CLIs, plugins, agents)
-// inherits them. Both peer secret spellings are listed; the conduit config is
-// read from them by loadAndReconcileConfig, before the scrub.
+// inherits them. Both conduit peer secret spellings are listed so that no
+// child inherits them either.
 var serverSecretEnvNames = []string{
 	sessionSecretEnv,
 	legacySessionSecretEnv,
