@@ -15,6 +15,7 @@ package store
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -152,4 +153,30 @@ func TestAgentAppliedConfigResponseViewRedactsCreateInputs(t *testing.T) {
 			t.Errorf("expected nil CreateInputs, got %+v", view.CreateInputs)
 		}
 	})
+}
+
+// TestAgentAppliedConfigResponseViewDropsClearedFields: the inline config's
+// cleared_fields is hub-internal and can name env keys, so no viewer gets
+// it, and the stored config keeps it.
+func TestAgentAppliedConfigResponseViewDropsClearedFields(t *testing.T) {
+	for _, canAttach := range []bool{false, true} {
+		original := &AgentAppliedConfig{InlineConfig: &api.ScionConfig{
+			MaxTurns:      3,
+			ClearedFields: []string{"env.SECRET_NAME", "max_turns"},
+		}}
+		view := original.ResponseView(canAttach)
+		data, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(data), "cleared_fields") || strings.Contains(string(data), "SECRET_NAME") {
+			t.Errorf("canAttach=%v: response carries cleared_fields: %s", canAttach, data)
+		}
+		if view.InlineConfig.MaxTurns != 3 {
+			t.Errorf("canAttach=%v: other inline fields must be kept, got %+v", canAttach, view.InlineConfig)
+		}
+		if len(original.InlineConfig.ClearedFields) != 2 {
+			t.Errorf("canAttach=%v: the stored list must be unchanged, got %v", canAttach, original.InlineConfig.ClearedFields)
+		}
+	}
 }
