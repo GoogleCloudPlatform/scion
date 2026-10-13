@@ -187,6 +187,17 @@ func TestLinkedProjectInitDir_SkipsOwnGlobalDir(t *testing.T) {
 		assert.False(t, ok, "path %q is this process's global directory and is not initialized", path)
 		assert.Empty(t, dir, "path %q", path)
 	}
+	// A symbolic link to the home is another spelling of the same global
+	// directory.
+	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
+	link := filepath.Join(t.TempDir(), "home-link")
+	require.NoError(t, os.Symlink(home, link))
+	for _, path := range []string{link, filepath.Join(link, ".scion")} {
+		dir, ok := linkedProjectInitDir(path)
+		assert.False(t, ok, "path %q links to this process's global directory and is not initialized", path)
+		assert.Empty(t, dir, "path %q", path)
+	}
+
 	repo := filepath.Join(home, "repo")
 	for _, path := range []string{repo, filepath.Join(repo, ".scion")} {
 		dir, ok := linkedProjectInitDir(path)
