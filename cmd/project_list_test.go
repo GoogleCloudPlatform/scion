@@ -304,3 +304,39 @@ func TestProjectList_EnvEndpointKeepsLinkedRow(t *testing.T) {
 	assert.Equal(t, "p-foo", got[0]["id"])
 	assert.Equal(t, filepath.Join(os.Getenv("HOME"), "src", "foo"), got[0]["local_path"])
 }
+
+// --refresh leaves the hubs' global projects out of the known-project
+// list and of the list across hubs.
+func TestProjectList_RefreshLeavesOutHubGlobalProject(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects(prodFoo, hubGlobalProject("p-global"))
+	staging.setProjects(hubGlobalProject("s-global"), stagingFoo)
+
+	stdout, _, err := runScion(t, "project", "list", "--refresh", "--format", "json")
+	require.NoError(t, err)
+	var got []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+	var ids []string
+	for _, r := range got {
+		if r["hub"] != nil { // rows of directories on this machine have no hub
+			ids = append(ids, r["id"].(string))
+		}
+	}
+	assert.ElementsMatch(t, []string{"p-foo", "s-foo"}, ids, stdout)
+	var known []string
+	for _, p := range readTestContext(t).Projects {
+		known = append(known, p.ID)
+	}
+	assert.ElementsMatch(t, []string{"p-foo", "s-foo"}, known)
+}
+
+// A hub that refuses the credential during --refresh is named as such.
+func TestProjectList_RefreshNamesRefusedHub(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.refuse.Store(true)
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: login refused")
+	assert.NotEmpty(t, prod.authHeaders(), "the refusing hub was asked")
+	assert.Positive(t, staging.lists.Load())
+}

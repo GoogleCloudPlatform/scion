@@ -269,6 +269,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
 		Classification: RouteAuthenticated,
 	},
+	"/api/v1/thread-groups": {
+		Pattern: "/api/v1/thread-groups", RouteID: "threadGroups.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups/": {
+		Pattern: "/api/v1/thread-groups/", RouteID: "threadGroups.byId",
+		Classification: RouteAuthenticated,
+	},
 
 	// Cross-project messaging (Phase 3)
 	"/api/v1/messaging/capabilities": {
@@ -1052,7 +1060,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
 	// scope, admitting a hub-boundary token carrying test_identity:issue.
 	// The handlers return 404 unless the hub runs with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	// -------------------------------------------------------------------------
 	"POST /api/v1/test-identities": {
 		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",

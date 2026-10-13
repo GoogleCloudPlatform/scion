@@ -423,6 +423,10 @@ type TelemetryTLS struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty"`
+	// CertFile and KeyFile are paths, inside the agent container, to a
+	// PEM-encoded client certificate and key for OTLP mTLS. Set both or neither.
+	CertFile string `json:"cert_file,omitempty" yaml:"cert_file,omitempty"`
+	KeyFile  string `json:"key_file,omitempty" yaml:"key_file,omitempty"`
 }
 
 // TelemetryBatch holds batch export settings.
@@ -1358,6 +1362,14 @@ type StartOptions struct {
 	// start's cleanup: the runtime then skips its own start cleanup and
 	// leaves the reported resources to the caller. Set both hooks together.
 	OnResourceCreated func(ResourceHandle)
+	// Progress, when set, is called by the runtime when an async launch
+	// reaches a new step (a LaunchStep* value) between resource-creating
+	// calls, e.g. while a pod is scheduled or its container is created
+	// (design wave 3 §3 E-b, ptone/scion#4670). message is fixed text for
+	// the step and never carries runtime detail. The hook must not block:
+	// the runtime calls it inline. Nil (the synchronous path) means no
+	// progress is reported.
+	Progress func(step, message string)
 
 	// ObserveResourceCreated, when set, is also called after each true
 	// create of a launch resource (on the synchronous path as well). It

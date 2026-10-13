@@ -37,6 +37,15 @@ interrupt_sequence:
   - Escape
   - C-c
 interrupt_signal: sequence
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: hook
+  settle: 1.5s
+  timeout: 90s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .claude/CLAUDE.md
 system_prompt_file: .claude/system-prompt.md
 system_prompt_mode: native
