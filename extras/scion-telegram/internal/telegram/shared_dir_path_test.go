@@ -76,7 +76,7 @@ func downloadTestFile(t *testing.T) (string, error) {
 	b := newTestBrokerV2(t, newFakeTGServerV2(t))
 	b.downloadsPath = ""
 	tgMsg := &TGMessage{Document: &TGDocument{FileID: "doc1", FileUniqueID: "u1", FileName: "note.txt", FileSize: 10}}
-	agentPath, _, err := b.downloadTelegramFile(context.Background(), tgMsg, "my-project", sharedDirTestProjectID)
+	agentPath, _, err := b.downloadTelegramFile(context.Background(), b.api, tgMsg, "my-project", sharedDirTestProjectID)
 	return agentPath, err
 }
 
@@ -243,7 +243,7 @@ func TestHandleGroupMessage_AttachmentErrorTextHasNoDetails(t *testing.T) {
 
 	msg := plainGroupMessage(456, "")
 	msg.Document = &TGDocument{FileID: "doc1", FileUniqueID: "u1", FileName: "note.txt", FileSize: 10}
-	b.handleGroupMessage(msg)
+	b.handleGroupMessage(b.gen, msg)
 
 	sent := tgSrv.getSentMessages()
 	require.Len(t, sent, 1, "the sender is told the attachment failed")

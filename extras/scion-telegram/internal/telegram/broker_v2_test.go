@@ -445,8 +445,8 @@ func newTestBrokerV2WithHub(t *testing.T, tgSrv *fakeTGServerV2, hub *fakeHubCli
 	t.Helper()
 	b := newTestBrokerV2(t, tgSrv)
 	b.hubClient = hub
-	b.commands = NewCommandHandler(b.store, b.api, hub, b.botInfo.Username, b.log)
-	b.callbacks = NewCallbackHandler(b.store, b.api, hub, b.log)
+	b.gen.commands = NewCommandHandler(b.store, b.api, hub, b.botInfo.Username, b.log)
+	b.gen.callbacks = NewCallbackHandler(b.store, b.api, hub, b.log)
 	return b
 }
 
@@ -477,9 +477,9 @@ func TestV2_Configure(t *testing.T) {
 	assert.NotNil(t, b.botInfo)
 	assert.Equal(t, "test_bot", b.botInfo.Username)
 	assert.NotNil(t, b.store)
-	assert.NotNil(t, b.commands)
-	assert.NotNil(t, b.callbacks)
-	assert.NotNil(t, b.registration)
+	assert.NotNil(t, b.gen.commands)
+	assert.NotNil(t, b.gen.callbacks)
+	assert.NotNil(t, b.gen.registration)
 }
 
 func TestV2_Configure_AgentCacheTTL(t *testing.T) {
@@ -619,7 +619,7 @@ func TestV2_HandleIncoming_BotEchoFiltering(t *testing.T) {
 	}
 
 	// Message from the bot itself (ID 100 matches test bot).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 100, Username: "test_bot", IsBot: true},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -639,7 +639,7 @@ func TestV2_HandleIncoming_EmptyText(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -654,7 +654,7 @@ func TestV2_HandleIncoming_DMHelp(t *testing.T) {
 	b := newTestBrokerV2(t, tgSrv)
 
 	// DMs have positive chat IDs. Non-command DMs get a help message.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: 456, Type: "private"},
@@ -675,7 +675,7 @@ func TestV2_HandleIncoming_CommandDispatch(t *testing.T) {
 	b := newTestBrokerV2WithHub(t, tgSrv, hub)
 
 	// /help command in DM.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: 456, Type: "private"},
@@ -699,7 +699,7 @@ func TestV2_HandleIncoming_UnlinkedGroupIgnored(t *testing.T) {
 	}
 
 	// Group message with bot mention but no group link.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -756,7 +756,7 @@ func TestV2_HandleGroupMessage_BotMentionDefaultAgent(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -815,7 +815,7 @@ func TestV2_HandleGroupMessage_DirectAgentMention(t *testing.T) {
 		mu.Unlock()
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -866,7 +866,7 @@ func TestV2_HandleGroupMessage_AllMention(t *testing.T) {
 		mu.Unlock()
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -902,7 +902,7 @@ func TestV2_HandleGroupMessage_NoMention(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -950,7 +950,7 @@ func TestV2_HandleGroupMessage_UserMappingResolution(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1016,7 +1016,7 @@ func TestV2_HandleGroupMessage_SenderIDUsesHubUserID(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1071,7 +1071,7 @@ func TestV2_HandleGroupMessage_ConversationContextSaved(t *testing.T) {
 		}
 	}
 
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1137,7 +1137,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage(t *testing.T) {
 
 	// Simulate replying to a bot message from the "reviewer" agent.
 	// No @-mention in the user's reply text — routing should use reply-to fallback.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1216,7 +1216,7 @@ func TestV2_HandleGroupMessage_ReplyToBot_ConcurrentBotInfoRefresh(t *testing.T)
 	}()
 
 	for i := 0; i < 20; i++ {
-		b.handleGroupMessage(&TGMessage{
+		b.handleGroupMessage(b.gen, &TGMessage{
 			MessageID: int64(100 + i),
 			From:      &TGUser{ID: 456, Username: "alice"},
 			Chat:      TGChat{ID: -200, Type: "group"},
@@ -1271,7 +1271,7 @@ func TestV2_HandleGroupMessage_ReplyToBotMessage_MentionTakesPriority(t *testing
 	}
 
 	// Reply to a reviewer message BUT explicitly mention @coder — mention wins.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1342,7 +1342,7 @@ func TestV2_HandleGroupMessage_ReplyConversationContextFallback(t *testing.T) {
 
 	// Reply to a bot message that has no parseable agent slug (e.g. a system message).
 	// Should fall back to conversation context.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 99,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -1580,7 +1580,7 @@ func TestV2_HandleCallback_AskUserResponse(t *testing.T) {
 		}
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-1",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -1625,7 +1625,7 @@ func TestV2_HandleCallback_RetiredCommentarySettingIsNoOp(t *testing.T) {
 		Active: true, ShowAgentToAgent: true,
 	}))
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:      "cb-com",
 		From:    &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{MessageID: 51, Chat: TGChat{ID: -200, Type: "group"}},
@@ -1689,7 +1689,7 @@ func TestV2_HandleCallback_AskUserWithMapping(t *testing.T) {
 		}
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-2",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -1728,7 +1728,7 @@ func TestV2_HandleCallback_ExpiredRequest(t *testing.T) {
 		atomic.AddInt32(&received, 1)
 	}
 
-	b.handleCallbackQuery(ctx, &CallbackQuery{
+	b.handleCallbackQuery(ctx, b.gen, &CallbackQuery{
 		ID:   "cb-3",
 		From: &TGUser{ID: 456, Username: "alice"},
 		Message: &TGMessage{
@@ -2854,7 +2854,7 @@ func TestV2_HandleIncoming_PhotoMessageNotDropped(t *testing.T) {
 	}
 
 	// Photo-only message (no text, no caption).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2919,7 +2919,7 @@ func TestV2_HandleIncoming_DocumentWithCaption(t *testing.T) {
 		}
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 43,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2958,7 +2958,7 @@ func TestV2_HandleIncoming_EmptyMessageDropped(t *testing.T) {
 	}
 
 	// No text, no caption, no photo, no document, no audio, no video.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 1,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -2990,7 +2990,7 @@ func TestV2_DownloadTelegramFile_PhotoPicksLargest(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	// With downloads_path set via the test helper, agentPath uses that dir
 	// rather than the legacy /workspace/downloads/ prefix.
@@ -3018,7 +3018,7 @@ func TestV2_DownloadTelegramFile_DocumentFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "docuniq99")
 	assert.Contains(t, placeholder, "Document attached")
@@ -3039,7 +3039,7 @@ func TestV2_DownloadTelegramFile_TooLarge(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
+	_, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "file too large")
 }
@@ -3051,7 +3051,7 @@ func TestV2_DownloadTelegramFile_NoAttachment(t *testing.T) {
 	ctx := context.Background()
 	tgMsg := &TGMessage{Text: "just text"}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
+	_, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no downloadable attachment")
 }
@@ -3089,7 +3089,7 @@ func TestV2_DownloadTelegramFile_DownloadFailure(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "test-slug", "test-project-id")
+	_, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "test-slug", "test-project-id")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "download file")
 }
@@ -3112,7 +3112,7 @@ func TestV2_DownloadTelegramFile_AudioWithFilename(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "song.mp3")
 	assert.Contains(t, placeholder, "Audio attached")
@@ -3137,7 +3137,7 @@ func TestV2_DownloadTelegramFile_AudioFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "My Song.ogg")
 	assert.Contains(t, placeholder, "Audio attached")
@@ -3152,7 +3152,7 @@ func TestV2_DownloadTelegramFile_AudioFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath2, _, err := b.downloadTelegramFile(ctx, tgMsg2, slug, "")
+	agentPath2, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg2, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath2, "audio_audiouniq3.ogg")
 }
@@ -3177,7 +3177,7 @@ func TestV2_DownloadTelegramFile_Video(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "clip.mp4")
 	assert.Contains(t, placeholder, "Video attached")
@@ -3202,7 +3202,7 @@ func TestV2_DownloadTelegramFile_VideoFallbackName(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	assert.Contains(t, agentPath, "video_viduniq2.mp4")
 }
@@ -3217,7 +3217,7 @@ func TestV2_HandleIncoming_StickerSkipped(t *testing.T) {
 	}
 
 	// Sticker-only message — should be silently dropped (debug log).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 10,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3242,7 +3242,7 @@ func TestV2_HandleIncoming_AnimationSkipped(t *testing.T) {
 	}
 
 	// Animation-only message — should be silently dropped (debug log).
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 11,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3297,7 +3297,7 @@ func TestV2_HandleIncoming_AudioMessageDelivered(t *testing.T) {
 		}
 	}
 
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 50,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3345,7 +3345,7 @@ func TestV2_DownloadTelegramFile_ConfiguredDownloadsPath(t *testing.T) {
 		},
 	}
 
-	_, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
+	_, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "any-slug", "test-project-id")
 	require.NoError(t, err)
 
 	// Verify the file was saved in the custom directory.
@@ -3396,7 +3396,7 @@ func TestV2_HandleGroupMessage_CodeSpanPreserved(t *testing.T) {
 
 	// Simulate: user typed "check the `config` file" in Telegram.
 	// Telegram strips backticks and puts formatting in entities.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 42,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3455,7 +3455,7 @@ func TestV2_HandleGroupMessage_MultipleCodeSpans(t *testing.T) {
 	}
 
 	// Simulate: "run foo and bar" where foo and bar were in backticks.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 43,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3515,7 +3515,7 @@ func TestV2_HandleGroupMessage_PreBlockPreserved(t *testing.T) {
 	}
 
 	// Simulate: user sent a code block (triple backticks) in Telegram.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 44,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3574,7 +3574,7 @@ func TestV2_HandleGroupMessage_PreBlockWithLanguage(t *testing.T) {
 	}
 
 	// Simulate: user sent ```go\nfmt.Println("hello")\n``` in Telegram.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 45,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3636,7 +3636,7 @@ func TestV2_HandleIncoming_CaptionlessAudioRoutesToDefaultAgent(t *testing.T) {
 	}
 
 	// Audio with NO caption and NO @mention — must route via Fallback 3.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 60,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3702,7 +3702,7 @@ func TestV2_HandleIncoming_CaptionlessVideoRoutesToDefaultAgent(t *testing.T) {
 	}
 
 	// Video with NO caption and NO @mention — must route via Fallback 3.
-	b.handleIncomingMessageV2(&TGMessage{
+	b.handleIncomingMessageV2(b.gen, &TGMessage{
 		MessageID: 61,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
@@ -3748,7 +3748,7 @@ func TestV2_DownloadTelegramFile_AudioTitlePathTraversal(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 	// The path-traversal components must be stripped — the file should be
 	// named "passwd.ogg" (filepath.Base of "../../etc/passwd.ogg"), not
@@ -3779,7 +3779,7 @@ func TestV2_DownloadTelegramFile_ConfiguredDownloadsPathAgentPath(t *testing.T) 
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "any-slug", "test-project-id")
+	agentPath, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "any-slug", "test-project-id")
 	require.NoError(t, err)
 
 	// agentPath must start with the custom downloads path, NOT /workspace/downloads.
@@ -3811,7 +3811,7 @@ func TestV2_DownloadTelegramFile_SharedDirPath(t *testing.T) {
 		},
 	}
 
-	agentPath, placeholder, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
+	agentPath, placeholder, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
 	require.NoError(t, err)
 
 	// Agent path should use the shared dir prefix.
@@ -3855,7 +3855,7 @@ func TestV2_DownloadTelegramFile_EmptyProjectID_LegacyPath(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, slug, "")
+	agentPath, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, slug, "")
 	require.NoError(t, err)
 
 	// Legacy agent path should be /workspace/downloads/<name>.
@@ -3884,7 +3884,7 @@ func TestV2_DownloadTelegramFile_DownloadsPathOverridesSharedDir(t *testing.T) {
 		},
 	}
 
-	agentPath, _, err := b.downloadTelegramFile(ctx, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
+	agentPath, _, err := b.downloadTelegramFile(ctx, b.api, tgMsg, "my-project", "abcd1234-ef56-7890-abcd-ef1234567890")
 	require.NoError(t, err)
 
 	// Agent path should use the custom downloads path, not shared dir.
@@ -3932,7 +3932,7 @@ func TestV2_HandleGroupMessage_CodeSpanWithDefaultAgent(t *testing.T) {
 	}
 
 	// No mention — routes to default agent. Code span should be preserved.
-	b.handleGroupMessage(&TGMessage{
+	b.handleGroupMessage(b.gen, &TGMessage{
 		MessageID: 46,
 		From:      &TGUser{ID: 456, Username: "alice"},
 		Chat:      TGChat{ID: -200, Type: "group"},
