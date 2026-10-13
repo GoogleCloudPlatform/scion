@@ -481,7 +481,32 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, "custom operator note", got.Message, "a non-generic message must not be overwritten")
 	})
 
-	t.Run("an already-stored ExitReason is not overwritten", func(t *testing.T) {
+	t.Run("an already-stored platform reason is not overwritten", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "error"
+		agent.ExitReason = "preempted"
+		agent.Message = "Agent pod was preempted"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 0
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "error",
+			ExitCode:   &ec,
+			ExitReason: "evicted",
+		})
+		assert.Equal(t, http.StatusOK, code)
+
+		got := getAgentState(t, s, agentSlug, projectID)
+		assert.Equal(t, "preempted", got.ExitReason, "a stored platform reason must win over a later heartbeat's reason")
+		assert.Equal(t, "Agent pod was preempted", got.Message)
+	})
+
+	t.Run("a stored crash reason gives way to the runtime's disruption", func(t *testing.T) {
+		// A crash reason can come from the agent's own report; the agent
+		// runtime's disruption is the platform's finding and is recorded.
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
 		agent := getAgentState(t, s, agentSlug, projectID)
@@ -500,8 +525,8 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 
 		got := getAgentState(t, s, agentSlug, projectID)
-		assert.Equal(t, "crashed", got.ExitReason, "a stored reason must win over a later heartbeat's reason")
-		assert.Equal(t, "Agent crashed with exit code 1", got.Message)
+		assert.Equal(t, "evicted", got.ExitReason)
+		assert.Equal(t, "Agent crashed with exit code 1", got.Message, "a specific message is kept")
 	})
 
 	t.Run("a nil heartbeat ExitCode falls back to the stored one in the message", func(t *testing.T) {

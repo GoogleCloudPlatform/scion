@@ -89,11 +89,19 @@ func (f haltFixture) selfReport(t *testing.T, runID string, body map[string]any)
 	return rec.Code
 }
 
-// halt puts the fixture's agent in phase halted directly (a hub restore).
+// halt puts the fixture's agent in phase halted directly, with a platform
+// reason (a restore write marked as the runtime's, so the reason is kept).
 func (f haltFixture) halt(t *testing.T, reason string) {
 	t.Helper()
-	require.NoError(t, f.s.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{
+	setHalted(t, f.s, f.agent.ID, reason)
+}
+
+// setHalted writes phase halted and reason onto an agent row directly.
+func setHalted(t *testing.T, s store.Store, id, reason string) {
+	t.Helper()
+	require.NoError(t, s.UpdateAgentStatus(context.Background(), id, store.AgentStatusUpdate{
 		Phase: string(state.PhaseHalted), Restore: true, ExitReason: reason,
+		ReportSource: store.StatusReportSourceRuntime,
 	}))
 }
 
@@ -196,7 +204,8 @@ func TestHalted_Guard0e(t *testing.T) {
 		guardAgentPhaseTransition(halted, &status)
 		assert.Equal(t, tc.wantPhase, status.Phase, "%+v", tc.in)
 		assert.Empty(t, status.Activity, "%+v", tc.in)
-		assert.Equal(t, tc.in.ExitReason, status.ExitReason, "the exit reason refinement is kept")
+		assert.Empty(t, status.ExitReason, "the agent's own report never changes a halted reason")
+		assert.Nil(t, status.ExitCode)
 		assert.Equal(t, tc.in.Message, status.Message, "the message is kept")
 	}
 }
@@ -217,9 +226,27 @@ func TestHalted_SelfReportWireDrop(t *testing.T) {
 	assert.Equal(t, "running", f.get(t).Phase, "restore is not on the wire")
 }
 
-func TestHalted_SelfReportHaltsWithEvidence(t *testing.T) {
+func TestHalted_SelfReportNeverHalts(t *testing.T) {
+	// A self-report carrying every halt-related field, including the
+	// heartbeat flag sciontool sends: the agent's own report is never
+	// evidence of a halt, and the platform reason is not recorded.
 	f := newHaltFixture(t)
-	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "error", "exitReason": "oom_killed", "exitCode": 137}))
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{
+		"phase": "error", "exitReason": "oom_killed", "exitCode": 137, "heartbeat": true,
+		"reportSource": "runtime", "restore": true, "containerStatus": "exited (137)",
+	}))
+	got := f.get(t)
+	assert.Equal(t, "error", got.Phase)
+	assert.Empty(t, got.ExitReason)
+}
+
+func TestHalted_SelfReportedStopThenRuntimeReasonHalts(t *testing.T) {
+	// A self-report never suppresses the runtime's later halt: the plain
+	// stop sciontool reports on SIGTERM, then the broker's disruption.
+	f := newHaltFixture(t)
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{"phase": "stopped", "exitCode": 0}))
+	require.Equal(t, "stopped", f.get(t).Phase)
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", RunID: "run-1"})
 	assert.Equal(t, "halted", f.get(t).Phase)
 }
 
@@ -229,7 +256,8 @@ func TestHalted_HubInternalWritesNeverHalt(t *testing.T) {
 	t.Run("restart stop leg", func(t *testing.T) {
 		f := newHaltFixture(t)
 		// A disruption reason recorded while the pod still ran.
-		require.NoError(t, f.s.UpdateAgentStatus(ctx, f.agent.ID, store.AgentStatusUpdate{ExitReason: "preempted"}))
+		f.heartbeat(t, brokerAgentHeartbeat{Phase: "running", ExitReason: "preempted", RunID: "run-1"})
+		require.Equal(t, "preempted", f.get(t).ExitReason)
 		require.True(t, f.srv.recordRestartStopped(ctx, f.agent.ID, "run-1"))
 		assert.Equal(t, "stopped", f.get(t).Phase)
 	})
@@ -265,7 +293,7 @@ func TestHalted_HubInternalWritesNeverHalt(t *testing.T) {
 		_, _, agent := setupOfflineBrokerAgent(t, s, "halt-q")
 		_, err := s.SetRunIntent(ctx, agent.ID, store.RunIntentRunning)
 		require.NoError(t, err)
-		require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: "halted", Restore: true, ExitReason: "preempted"}))
+		setHalted(t, s, agent.ID, "preempted")
 
 		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/stop", nil)
 		require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
@@ -276,10 +304,12 @@ func TestHalted_HubInternalWritesNeverHalt(t *testing.T) {
 	})
 }
 
-func TestHalted_StartCostB_Pinned(t *testing.T) {
-	// An old-run self-report moved the halted row to running between the
-	// caller's read and the start's provisional write: the conditional
-	// write fails with errStartingWrite (409), nothing is written.
+func TestHalted_BeginStartDispatchRefusesMovedRow(t *testing.T) {
+	// The provisional starting write is conditional on the phase the start
+	// read (halted): a row that moved on since fails it with
+	// errStartingWrite, and nothing is written. The full scenario, through
+	// the start handler with a claim held, is
+	// TestHaltedStart_SelfReportBeforeProvisionalWrite.
 	ctx := context.Background()
 	f := newHaltFixture(t)
 	f.halt(t, "preempted")
@@ -308,7 +338,7 @@ func TestHalted_UserStartAndStop(t *testing.T) {
 	srv, s := testServer(t)
 	srv.SetDispatcher(&runIntentDispatcher{})
 	_, _, agent := setupOnlineBrokerAgent(t, s, "halt-lc")
-	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: "halted", Restore: true, ExitReason: "preempted"}))
+	setHalted(t, s, agent.ID, "preempted")
 	path := "/api/v1/agents/" + agent.ID
 
 	rec := doRequest(t, srv, http.MethodPost, path+"/start", nil)
@@ -318,7 +348,7 @@ func TestHalted_UserStartAndStop(t *testing.T) {
 	assert.Equal(t, "running", got.Phase)
 	assert.Empty(t, got.ExitReason)
 
-	require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: "halted", Restore: true, ExitReason: "preempted"}))
+	setHalted(t, s, agent.ID, "preempted")
 	rec = doRequest(t, srv, http.MethodPost, path+"/stop", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	got, err = s.GetAgent(ctx, agent.ID)

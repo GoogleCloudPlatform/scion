@@ -43,6 +43,7 @@ func TestClassifyVar(t *testing.T) {
 		{"untrusted: AGENT_NAME", "AGENT_NAME", Untrusted},
 		{"untrusted: TASK_SUMMARY", "TASK_SUMMARY", Untrusted},
 		{"untrusted: ERROR_MSG", "ERROR_MSG", Untrusted},
+		{"untrusted: EXIT_REASON", "EXIT_REASON", Untrusted},
 
 		// Unknown defaults to untrusted
 		{"unknown: CUSTOM_VAR", "CUSTOM_VAR", Untrusted},

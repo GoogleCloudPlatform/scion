@@ -4396,20 +4396,13 @@ type getProjectErrStore struct {
 // regardless of how many callers need it, no read at all when nothing needs
 // it, and a failed read that the handler recovers from without crashing.
 //
-// getRuntimeBrokerErrBroker, when set alongside getRuntimeBrokerErr, is
-// returned together with the error, simulating a store call that returns a
-// (non-nil but unreliable) value in the same breath as an error. This proves
-// a caller actually gates on the error rather than trusting whatever value
-// came back whenever one happens to be present.
-//
 // updateRuntimeBrokerCalls counts broker row writes, so a test can prove the
 // heartbeat handler writes the row only when the refreshed state changed.
 type countingBrokerLoadStore struct {
 	store.Store
-	getRuntimeBrokerCalls     int
-	getRuntimeBrokerErr       error
-	getRuntimeBrokerErrBroker *store.RuntimeBroker
-	updateRuntimeBrokerCalls  int
+	getRuntimeBrokerCalls    int
+	getRuntimeBrokerErr      error
+	updateRuntimeBrokerCalls int
 }
 
 func setupScheduledEventTest(t *testing.T) (*Server, store.Store, string) {
@@ -5980,7 +5973,7 @@ func (s *countingBrokerLoadStore) UpdateRuntimeBroker(ctx context.Context, broke
 func (s *countingBrokerLoadStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
 	s.getRuntimeBrokerCalls++
 	if s.getRuntimeBrokerErr != nil {
-		return s.getRuntimeBrokerErrBroker, s.getRuntimeBrokerErr
+		return nil, s.getRuntimeBrokerErr
 	}
 	return s.Store.GetRuntimeBroker(ctx, id)
 }

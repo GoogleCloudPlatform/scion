@@ -915,12 +915,17 @@ func checkDoctorAgentHealth(hubEP string, hubConnected bool, client hubclient.Cl
 		}
 	}
 
-	// The same policy as the Hub's health summary: agents in phase stopped
-	// are not considered, and stalled agents are not a health signal. The
-	// counts here are exclusive: an agent counts once, as errored (phase
-	// error) before crashed before offline (activity). The summary's
-	// problem groups can overlap instead (an agent in phase error with
-	// activity crashed is in both groups).
+	// Mostly the same policy as the Hub's health summary: agents in phase
+	// stopped are not considered, and stalled agents are not a health
+	// signal. One difference: this local check also leaves out halted
+	// agents. A halt is not a fault of the agent or of this machine's setup
+	// (the platform ended the run, and a start resumes it), so it is not a
+	// doctor finding, while the Hub's summary counts halted agents as
+	// needing attention so operators see them. The counts here are
+	// exclusive: an agent counts once, as errored (phase error) before
+	// crashed before offline (activity). The summary's problem groups can
+	// overlap instead (an agent in phase error with activity crashed is in
+	// both groups).
 	considered, errored, crashed, offline := 0, 0, 0, 0
 	for _, agent := range resp.Agents {
 		if agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseHalted) {

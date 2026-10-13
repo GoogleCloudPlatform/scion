@@ -194,6 +194,28 @@ func TestDispatchHalted_CreatorFallback(t *testing.T) {
 		assert.Equal(t, []string{"ERROR"}, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
 	})
 
+	t.Run("creator subscribed without HALTED gets none (opt-out)", func(t *testing.T) {
+		e := setupHaltNotify(t)
+		e.createUser(t, "creator-user")
+		e.watched.CreatedBy = "creator-user"
+		e.subscribe(t, store.SubscriberTypeUser, "creator-user", "COMPLETED")
+		e.nd.dispatchHalted(ctx, e.watched, "stopped")
+		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+	})
+
+	t.Run("creator with a project subscription without HALTED gets none", func(t *testing.T) {
+		e := setupHaltNotify(t)
+		e.createUser(t, "creator-user")
+		e.watched.CreatedBy = "creator-user"
+		require.NoError(t, e.store.CreateNotificationSubscription(ctx, &store.NotificationSubscription{
+			ID: api.NewUUID(), Scope: store.SubscriptionScopeProject, SubscriberType: store.SubscriberTypeUser,
+			SubscriberID: "creator-user", ProjectID: e.project.ID, TriggerActivities: []string{"COMPLETED"},
+			CreatedAt: time.Now().Add(-time.Minute), CreatedBy: "test",
+		}))
+		e.nd.dispatchHalted(ctx, e.watched, "stopped")
+		assert.Empty(t, e.statuses(t, store.SubscriberTypeUser, "creator-user"))
+	})
+
 	t.Run("deleted creator agent gets none", func(t *testing.T) {
 		e := setupHaltNotify(t)
 		e.watched.CreatedBy = e.subscriber.ID
@@ -297,6 +319,23 @@ func TestRetrySubscription_CreatorFallback(t *testing.T) {
 	assert.Equal(t, "parent", sub.SubscriberID)
 	assert.Equal(t, store.SubscriberTypeAgent, sub.SubscriberType)
 	assert.Equal(t, "p1", sub.ProjectID)
+}
+
+func TestHaltedNotificationMessage_ReasonLabels(t *testing.T) {
+	for reason, label := range map[string]string{
+		"preempted":         "preempted",
+		"evicted":           "evicted",
+		"oom_killed":        "out of memory",
+		"container_missing": "container lost",
+		"":                  "signal",
+		"bogus\x1b[31m":     "unknown",
+	} {
+		a := &store.Agent{Slug: "a", Runtime: "docker", ExitReason: reason,
+			Message: "free text that must not appear"}
+		msg := haltedNotificationMessage(a)
+		assert.Equal(t, "a was halted by the platform ("+label+"). Workspace kept. Resume: scion start a.", msg, "reason %q", reason)
+		assert.NotContains(t, msg, "free text")
+	}
 }
 
 func TestHaltedWorkspaceWording(t *testing.T) {

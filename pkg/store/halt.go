@@ -16,6 +16,19 @@ package store
 
 import "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 
+// StatusReportSource identifies which hub handler built a status update
+// from a report about an agent's run (AgentStatusUpdate.ReportSource).
+type StatusReportSource string
+
+const (
+	// StatusReportSourceRuntime is the broker heartbeat handler: the agent
+	// runtime's own view of the container.
+	StatusReportSourceRuntime StatusReportSource = "runtime"
+	// StatusReportSourceAgent is the agent's status endpoint: a report the
+	// agent (sciontool, or any holder of its token) sent about itself.
+	StatusReportSourceAgent StatusReportSource = "agent"
+)
+
 // AgentStatusResult is what UpdateAgentStatus reports back to its caller
 // through AgentStatusUpdate.Result. It is filled only on success.
 type AgentStatusResult struct {

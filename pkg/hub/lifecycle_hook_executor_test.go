@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1196,4 +1197,47 @@ type rewritingDialer struct {
 
 func (d *rewritingDialer) DialContext(ctx context.Context, network, _ string) (net.Conn, error) {
 	return d.inner.DialContext(ctx, network, d.target)
+}
+
+// TestLifecycleHookExecutor_HaltedCarriesReasonAsData pins that a halted
+// hook gets the exit reason as a JSON-encoded body value (EXIT_REASON) and
+// does not get the agent's free-text message (ptone/scion#4853).
+func TestLifecycleHookExecutor_HaltedCarriesReasonAsData(t *testing.T) {
+	s := executorTestStore(t)
+	projID := seedExecutorProject(t, s, "test-project")
+	saID := seedExecutorSA(t, s, projID, "sa@p.iam.gserviceaccount.com")
+
+	var receivedBody []byte
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedBody, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+
+	executor := newTestExecutor(s, &mockTokenGenerator{accessToken: "tok", email: "hub@sa.com"}, newCapturingAuditLogger(), slog.Default())
+	hook := makeTestHook(saID, &store.LifecycleHookAction{
+		Type:                 store.LifecycleHookActionHTTP,
+		Method:               "POST",
+		URL:                  ts.URL + "/halted",
+		Headers:              map[string]string{"Content-Type": "application/json"},
+		Body:                 `{"agent":"${AGENT_ID}","reason":"${EXIT_REASON}","message":"${ERROR_MSG}"}`,
+		AllowedUntrustedVars: []string{"EXIT_REASON", "ERROR_MSG"},
+		TimeoutSeconds:       5,
+	})
+	agent := makeTestAgent(projID)
+	agent.Phase = "halted"
+	agent.ExitReason = "preempted"
+	agent.Message = `free "text" from the agent`
+
+	require.NoError(t, executor.Execute(context.Background(), hook, agent, store.LifecycleHookTriggerHalted))
+
+	var payload map[string]string
+	require.NoError(t, json.Unmarshal(receivedBody, &payload), "the body stays valid JSON: %s", receivedBody)
+	assert.Equal(t, "preempted", payload["reason"], "the reason is a data field")
+	assert.Equal(t, agent.ID, payload["agent"])
+	assert.NotContains(t, string(receivedBody), "free", "a halted hook does not carry the agent's message")
+
+	vars := executor.buildRenderVars(context.Background(), hook, &store.Agent{ID: "a", ExitReason: "bogus\x1b[31m"}, store.LifecycleHookTriggerHalted, "")
+	_, ok := vars["EXIT_REASON"]
+	assert.False(t, ok, "a value outside the known reasons is never passed")
 }

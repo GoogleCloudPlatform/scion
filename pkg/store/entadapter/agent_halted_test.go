@@ -12,9 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Halted phase store tests (ptone/scion#4853). Named TestAgentHalted_* so
-// the Postgres CI job (make test-store-postgres) runs them against Postgres
-// as well as SQLite.
+// Halted phase store tests (ptone/scion#4853). Like the rest of the
+// entadapter suite they run against SQLite, and against Postgres in the
+// Postgres CI job (make test-store-postgres-entadapter).
 
 package entadapter
 
@@ -89,12 +89,14 @@ func newHaltAgent(t *testing.T, ctx context.Context, s *AgentStore, projectID, s
 
 // heartbeat returns a broker heartbeat status update for the row's run.
 func heartbeat(phase, reason string, code *int) store.AgentStatusUpdate {
-	return store.AgentStatusUpdate{Phase: phase, ExitReason: reason, ExitCode: code, Heartbeat: true, ReportRunID: "run-1"}
+	return store.AgentStatusUpdate{Phase: phase, ExitReason: reason, ExitCode: code, Heartbeat: true,
+		ReportSource: store.StatusReportSourceRuntime, ReportRunID: "run-1"}
 }
 
 // selfReport returns an agent self-report status update for the row's run.
 func selfReport(phase, activity string) store.AgentStatusUpdate {
-	return store.AgentStatusUpdate{Phase: phase, Activity: activity, GuardReincarnation: true, ReportRunID: "run-1"}
+	return store.AgentStatusUpdate{Phase: phase, Activity: activity, GuardReincarnation: true,
+		ReportSource: store.StatusReportSourceAgent, ReportRunID: "run-1"}
 }
 
 // apply runs UpdateAgentStatus with a fresh Result and returns it.
@@ -106,7 +108,7 @@ func apply(t *testing.T, ctx context.Context, s *AgentStore, id string, su store
 	return res
 }
 
-func TestAgentHalted_EA_HeartbeatPreempted(t *testing.T) {
+func TestAgentHalted_HeartbeatPreemptedHalts(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	id := newHaltAgent(t, ctx, s, projectID, "ea", defaultHaltRow())
@@ -133,7 +135,7 @@ func TestAgentHalted_EA_HeartbeatPreempted(t *testing.T) {
 	}
 }
 
-func TestAgentHalted_ED_TombstoneAfterStop(t *testing.T) {
+func TestAgentHalted_ReasonAfterPlainStopHalts(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	r := defaultHaltRow()
@@ -149,7 +151,7 @@ func TestAgentHalted_ED_TombstoneAfterStop(t *testing.T) {
 	assert.Equal(t, "preempted", got.ExitReason)
 }
 
-func TestAgentHalted_ED_OOMAfterCrash(t *testing.T) {
+func TestAgentHalted_OOMAfterCrashHalts(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	r := defaultHaltRow()
@@ -164,7 +166,7 @@ func TestAgentHalted_ED_OOMAfterCrash(t *testing.T) {
 	assert.Equal(t, "oom_killed", got.ExitReason)
 }
 
-func TestAgentHalted_ED_EmptyDirUpgradeHaltedFromError(t *testing.T) {
+func TestAgentHalted_ErrorUpgradeOverStopHaltsFromError(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 	r := defaultHaltRow()
@@ -204,15 +206,14 @@ func TestAgentHalted_NoHalt(t *testing.T) {
 		{"clean stop, no code, then evicted exit 0", stopped(nil), heartbeat("", "evicted", intp(0)), "stopped"},
 		{"intent stopped", running(func(r *haltRow) { r.intent = store.RunIntentStopped }), heartbeat("stopped", "preempted", nil), "stopped"},
 		{"no intent recorded", running(func(r *haltRow) { r.intent = "" }), heartbeat("stopped", "preempted", nil), "stopped"},
-		{"limits on the update", running(nil), func() store.AgentStatusUpdate {
-			su := heartbeat("stopped", "preempted", nil)
-			su.Activity = "limits_exceeded"
-			return su
-		}(), "stopped"},
-		{"limits on the row (E-d)", stopped(func(r *haltRow) { r.activity = "limits_exceeded" }), heartbeat("", "preempted", nil), "stopped"},
 		{"no evidence", running(nil), heartbeat("stopped", "", intp(0)), "stopped"},
 		{"crash is not evidence", running(nil), heartbeat("error", "crashed", intp(1)), "error"},
-		{"other reason already recorded (E-d)", stopped(func(r *haltRow) { r.exitReason = "limits_exceeded" }), heartbeat("", "preempted", nil), "stopped"},
+		{"platform reason already recorded", stopped(func(r *haltRow) { r.exitReason = "evicted" }), heartbeat("", "preempted", nil), "stopped"},
+		{"limits stop with no runtime reason", running(nil), func() store.AgentStatusUpdate {
+			su := selfReport("stopped", "limits_exceeded")
+			su.ExitReason = "limits_exceeded"
+			return su
+		}(), "stopped"},
 		{"suspended row", running(func(r *haltRow) { r.phase, r.activity = "suspended", "" }), heartbeat("stopped", "preempted", nil), "stopped"},
 		{"report of a running phase", stopped(nil), heartbeat("running", "preempted", nil), "running"},
 	}
@@ -230,7 +231,7 @@ func TestAgentHalted_NoHalt(t *testing.T) {
 	}
 }
 
-func TestAgentHalted_H5_Runtimes(t *testing.T) {
+func TestAgentHalted_Runtimes(t *testing.T) {
 	for _, rt := range []string{"", "cloudrun-sandbox", "cloudrun", "substrate", "managed:x"} {
 		t.Run("runtime="+rt, func(t *testing.T) {
 			ctx := context.Background()
@@ -257,7 +258,7 @@ func TestAgentHalted_H5_Runtimes(t *testing.T) {
 	}
 }
 
-func TestAgentHalted_H3_ClaimBlocks(t *testing.T) {
+func TestAgentHalted_StartClaimBlocks(t *testing.T) {
 	// Any start claim blocks a halt: a start's, a restart's (its stop leg),
 	// or the reaper's stop-kind claim; the store does not tell them apart.
 	ctx := context.Background()
@@ -273,8 +274,17 @@ func TestAgentHalted_H3_ClaimBlocks(t *testing.T) {
 	assert.Equal(t, "stopped", got.Phase)
 	assert.Equal(t, "preempted", got.ExitReason)
 
+	// Once the claim is released, a later same-run report of the reason
+	// does not halt that row: a platform reason is already recorded.
+	clearClaim(t, ctx, s, id)
+	res = apply(t, ctx, s, id, heartbeat("", "preempted", nil))
+	assert.False(t, res.Halted, "a recorded platform reason blocks the later upgrade")
+	got, err = s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+
 	// Partly self-healing: a run that stopped plainly under the claim is
-	// halted by a same-run reason (E-d) that arrives after the release.
+	// halted by a same-run reason that arrives after the release.
 	r2 := defaultHaltRow()
 	r2.claimID = "claim-2"
 	id2 := newHaltAgent(t, ctx, s, projectID, "h3b", r2)
@@ -282,7 +292,7 @@ func TestAgentHalted_H3_ClaimBlocks(t *testing.T) {
 	assert.False(t, res.Halted)
 	clearClaim(t, ctx, s, id2)
 	res = apply(t, ctx, s, id2, heartbeat("", "preempted", nil))
-	assert.True(t, res.Halted, "E-d still halts once the claim is gone")
+	assert.True(t, res.Halted, "the same-run reason still halts once the claim is gone")
 }
 
 func clearClaim(t *testing.T, ctx context.Context, s *AgentStore, id string) {
@@ -306,6 +316,7 @@ func TestAgentHalted_HubInternalWritesNeverHalt(t *testing.T) {
 	got, err := s.GetAgent(ctx, id)
 	require.NoError(t, err)
 	assert.Equal(t, "stopped", got.Phase)
+	assert.Empty(t, got.ExitReason, "only the agent runtime's report records a platform reason")
 
 	// A Restore write puts halted back, and is itself never a halt.
 	res = apply(t, ctx, s, id, store.AgentStatusUpdate{Phase: "halted", Restore: true})
@@ -404,6 +415,119 @@ func TestAgentHalted_Sticky_ReasonRefinementApplies(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "halted", got.Phase)
 	assert.Equal(t, "oom_killed", got.ExitReason)
+
+	// Only the runtime's halt evidence refines it: a crash or limits reason
+	// from the runtime, and any reason or code the agent reports, is not
+	// recorded on a halted row.
+	for _, su := range []store.AgentStatusUpdate{
+		heartbeat("error", "crashed", intp(1)),
+		heartbeat("stopped", "limits_exceeded", intp(0)),
+		func() store.AgentStatusUpdate {
+			su := selfReport("error", "")
+			su.ExitReason = "crashed"
+			su.ExitCode = intp(2)
+			return su
+		}(),
+		func() store.AgentStatusUpdate {
+			su := selfReport("stopped", "")
+			su.ExitReason = "preempted"
+			return su
+		}(),
+	} {
+		apply(t, ctx, s, id, su)
+		got, err := s.GetAgent(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, "halted", got.Phase)
+		assert.Equal(t, "oom_killed", got.ExitReason, "%+v", su)
+		require.NotNil(t, got.ExitCode)
+		assert.Equal(t, 137, *got.ExitCode, "%+v", su)
+	}
+}
+
+func TestAgentHalted_ReasonIsAClosedSet(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	r := defaultHaltRow()
+	r.phase, r.activity = "stopped", ""
+	id := newHaltAgent(t, ctx, s, projectID, "closed", r)
+
+	for _, reason := range []string{"bogus", "preempted\x1b[31m", "evicted\nwith a newline", "<b>preempted</b>"} {
+		self := selfReport("", "")
+		self.ExitReason = reason
+		hb := heartbeat("", reason, nil)
+		for _, su := range []store.AgentStatusUpdate{self, hb} {
+			res := apply(t, ctx, s, id, su)
+			assert.False(t, res.Halted)
+			got, err := s.GetAgent(ctx, id)
+			require.NoError(t, err)
+			assert.Empty(t, got.ExitReason, "reason %q is not stored", reason)
+			assert.Equal(t, "stopped", got.Phase)
+		}
+	}
+}
+
+func TestAgentHalted_SelfReportNeverHalts(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+	id := newHaltAgent(t, ctx, s, projectID, "self", defaultHaltRow())
+
+	// Every halt-related field a report can carry, from the agent's own
+	// endpoint (a heartbeat-flagged one, as sciontool sends): never a halt,
+	// and the platform reasons are not recorded.
+	su := selfReport("stopped", "")
+	su.Heartbeat = true
+	su.ExitReason = "oom_killed"
+	su.ExitCode = intp(137)
+	res := apply(t, ctx, s, id, su)
+	assert.False(t, res.Halted)
+	got, err := s.GetAgent(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, "stopped", got.Phase)
+	assert.Empty(t, got.ExitReason)
+}
+
+func TestAgentHalted_SelfReportDoesNotSuppressLaterHalt(t *testing.T) {
+	newRow := func(t *testing.T, mut func(r *haltRow)) (*AgentStore, context.Context, string) {
+		ctx := context.Background()
+		s, projectID := newTestAgentStore(t)
+		r := defaultHaltRow()
+		if mut != nil {
+			mut(&r)
+		}
+		return s, ctx, newHaltAgent(t, ctx, s, projectID, "suppress", r)
+	}
+
+	t.Run("limits activity then a runtime disruption", func(t *testing.T) {
+		s, ctx, id := newRow(t, nil)
+		lim := selfReport("stopped", "limits_exceeded")
+		lim.ExitReason = "limits_exceeded"
+		apply(t, ctx, s, id, lim)
+		assert.True(t, apply(t, ctx, s, id, heartbeat("", "preempted", nil)).Halted)
+	})
+	t.Run("exit code 0 after a runtime crash code, then a runtime disruption", func(t *testing.T) {
+		s, ctx, id := newRow(t, func(r *haltRow) { r.phase, r.activity, r.exitCode = "error", "", intp(137) })
+		zero := selfReport("stopped", "")
+		zero.ExitCode = intp(0)
+		apply(t, ctx, s, id, zero)
+		assert.True(t, apply(t, ctx, s, id, heartbeat("", "preempted", nil)).Halted)
+	})
+	t.Run("a self-reported platform reason, then the runtime's", func(t *testing.T) {
+		s, ctx, id := newRow(t, nil)
+		fake := selfReport("stopped", "")
+		fake.ExitReason = "preempted"
+		apply(t, ctx, s, id, fake)
+		assert.True(t, apply(t, ctx, s, id, heartbeat("", "evicted", nil)).Halted)
+	})
+	t.Run("a plain stop, then the runtime's reason", func(t *testing.T) {
+		s, ctx, id := newRow(t, nil)
+		apply(t, ctx, s, id, selfReport("stopped", ""))
+		assert.True(t, apply(t, ctx, s, id, heartbeat("", "preempted", nil)).Halted)
+	})
+	t.Run("completed, then the runtime's reason", func(t *testing.T) {
+		s, ctx, id := newRow(t, nil)
+		apply(t, ctx, s, id, selfReport("stopped", "completed"))
+		assert.True(t, apply(t, ctx, s, id, heartbeat("", "preempted", nil)).Halted)
+	})
 }
 
 func TestAgentHalted_Sticky_ClaimHeld(t *testing.T) {

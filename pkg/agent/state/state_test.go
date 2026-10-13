@@ -669,3 +669,21 @@ func TestReadyTiming(t *testing.T) {
 		t.Errorf("readiness timing changed: settle=%s deadline=%s", ReadySettleSession, ReadyDeadline)
 	}
 }
+
+func TestExitReasonLabel(t *testing.T) {
+	cases := map[ExitReason]string{
+		ExitReasonPreempted:        "preempted",
+		ExitReasonEvicted:          "evicted",
+		ExitReasonOOMKilled:        "out of memory",
+		ExitReasonContainerMissing: "container lost",
+		ExitReasonCrashed:          "crashed",
+		ExitReasonLimitsExceeded:   "limits exceeded",
+		"":                         "signal",
+		"something-else":           "unknown",
+	}
+	for r, want := range cases {
+		if got := r.Label(); got != want {
+			t.Errorf("ExitReason(%q).Label() = %q, want %q", r, got, want)
+		}
+	}
+}

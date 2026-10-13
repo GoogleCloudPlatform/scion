@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -26,6 +27,20 @@ import (
 // NotificationStatusHalted is the notification trigger and status of an
 // agent halted by the platform (ptone/scion#4853).
 const NotificationStatusHalted = "HALTED"
+
+// reportOfOtherRun reports whether a status report from run reportRunID is
+// about a run other than the agent's current run rowRunID. The store then
+// applies nothing of it but the last-seen time (AgentStatusUpdate.ReportRunID),
+// so the handlers skip their own phase-driven side effects for it too. A
+// report without a run (an older broker or token) is not one.
+func reportOfOtherRun(reportRunID, rowRunID string) bool {
+	return reportRunID != "" && reportRunID != rowRunID
+}
+
+// haltedDispatchTimeout bounds one halt's notifications and hooks: well
+// above a subscriber agent's 30s delivery retry and the hooks' own
+// timeouts, so only a stuck store or delivery hits it.
+const haltedDispatchTimeout = 5 * time.Minute
 
 // onAgentHalted runs once for each halt, on the hub instance whose write
 // moved the agent into phase halted (the store reports it through
@@ -39,12 +54,17 @@ const NotificationStatusHalted = "HALTED"
 // halted events, which every instance receives.
 //
 // The notifications and hooks run in the background, on a context detached
-// from the caller's: a subscriber agent's delivery retries for up to 30s,
-// which must not hold up the heartbeat or status report that halted the
-// agent. Delivery is at-most-once, as for the bus.
-func (s *Server) onAgentHalted(ctx context.Context, agent *store.Agent, haltedFrom string) {
+// from the caller's and bounded by haltedDispatchTimeout: a subscriber
+// agent's delivery retries for up to 30s, which must not hold up the
+// heartbeat or status report that halted the agent. Delivery is
+// at-most-once, as for the bus. The returned channel is closed when they
+// are done (at once when there is nothing to run); s.haltedDispatches
+// tracks them too.
+func (s *Server) onAgentHalted(ctx context.Context, agent *store.Agent, haltedFrom string) <-chan struct{} {
+	done := make(chan struct{})
 	if agent == nil {
-		return
+		close(done)
+		return done
 	}
 	s.agentLifecycleLog.Warn("agent halted by the platform",
 		"agent_id", agent.ID, "agent", agent.Slug, "project_id", agent.ProjectID,
@@ -54,36 +74,42 @@ func (s *Server) onAgentHalted(ctx context.Context, agent *store.Agent, haltedFr
 	ev := s.lifecycleHookEvaluator
 	s.mu.RUnlock()
 	if nd == nil && ev == nil {
-		return
+		close(done)
+		return done
 	}
-	ctx = context.WithoutCancel(ctx)
 	snapshot := *agent
+	s.haltedDispatches.Add(1)
 	go func() {
+		defer s.haltedDispatches.Done()
+		defer close(done)
 		defer func() {
 			if rec := recover(); rec != nil {
 				s.agentLifecycleLog.Error("halted agent notification panicked",
 					"agent_id", snapshot.ID, "panic", fmt.Sprint(rec))
 			}
 		}()
+		dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), haltedDispatchTimeout)
+		defer cancel()
 		if nd != nil {
-			nd.dispatchHalted(ctx, &snapshot, haltedFrom)
+			nd.dispatchHalted(dctx, &snapshot, haltedFrom)
 		}
 		if ev != nil {
-			ev.fireHalted(ctx, &snapshot, haltedFrom)
+			ev.fireHalted(dctx, &snapshot, haltedFrom)
 		}
 	}()
+	return done
 }
 
 // haltedNotificationMessage is the text of a HALTED notification:
 // what happened, what happens to the workspace on the next start, and how
 // to resume.
+//
+// The reason is its fixed display label (state.ExitReason.Label), and the
+// agent's free-text message is not included: the sentence is attributed to
+// the platform, so it holds only values the hub controls.
 func haltedNotificationMessage(agent *store.Agent) string {
-	reason := agent.ExitReason
-	if reason == "" {
-		reason = "signal"
-	}
 	return fmt.Sprintf("%s was halted by the platform (%s). %s. Resume: scion start %s.",
-		agent.Slug, reason, haltedWorkspaceWording(agent), agent.Slug)
+		agent.Slug, state.ExitReason(agent.ExitReason).Label(), haltedWorkspaceWording(agent), agent.Slug)
 }
 
 // haltedWorkspaceWording says what a start does to a halted agent's
@@ -127,10 +153,12 @@ func (nd *NotificationDispatcher) dispatchHalted(ctx context.Context, agent *sto
 
 	message := haltedNotificationMessage(agent)
 	seen := make(map[string]bool)
+	subscribed := make(map[string]bool)
 	allSubs := append(agentSubs, projectSubs...)
 	for i := range allSubs {
 		sub := &allSubs[i]
 		key := sub.SubscriberType + ":" + sub.SubscriberID
+		subscribed[key] = true
 		if seen[key] {
 			continue
 		}
@@ -148,7 +176,7 @@ func (nd *NotificationDispatcher) dispatchHalted(ctx context.Context, agent *sto
 		seen[key] = true
 		nd.storeAndDispatchMessage(ctx, sub, haltedEvent(agent, status), agent, message)
 	}
-	nd.notifyHaltedCreator(ctx, agent, message, seen)
+	nd.notifyHaltedCreator(ctx, agent, message, subscribed)
 }
 
 // haltedEvent is the event a halt's notification is built from.
@@ -162,13 +190,15 @@ func haltedEvent(agent *store.Agent, status string) AgentStatusEvent {
 }
 
 // notifyHaltedCreator sends one HALTED notification to agent's creator
-// when no subscription of the creator matched (seen holds the subscribers
-// already notified for this halt, keyed by type and ID). A user creator is
+// when the creator has no subscription to the agent or its project
+// (subscribed holds every subscriber of either, keyed by type and ID): a
+// creator who subscribed chose their triggers, and gets HALTED only by
+// selecting it. A user creator is
 // addressed by user ID; an agent creator by its slug, and only while it is
 // live in the same project (the agent delivery resolves the subscriber by
 // slug in the project). Otherwise nothing is sent. The notification row has
 // no subscription (store.CreatorFallbackSubscriptionID).
-func (nd *NotificationDispatcher) notifyHaltedCreator(ctx context.Context, agent *store.Agent, message string, seen map[string]bool) {
+func (nd *NotificationDispatcher) notifyHaltedCreator(ctx context.Context, agent *store.Agent, message string, subscribed map[string]bool) {
 	if agent.CreatedBy == "" {
 		return
 	}
@@ -198,7 +228,7 @@ func (nd *NotificationDispatcher) notifyHaltedCreator(ctx context.Context, agent
 		sub.SubscriberType = store.SubscriberTypeAgent
 		sub.SubscriberID = creator.Slug
 	}
-	if seen[sub.SubscriberType+":"+sub.SubscriberID] {
+	if subscribed[sub.SubscriberType+":"+sub.SubscriberID] {
 		return
 	}
 	nd.storeAndDispatchMessage(ctx, &sub, haltedEvent(agent, NotificationStatusHalted), agent, message)

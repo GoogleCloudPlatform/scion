@@ -175,19 +175,23 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 		// between the read above and that write, the store's Guard 0b drops
 		// the phase, so a reservation can be released for a phase that is
 		// never persisted. The periodic quota reconciler corrects the drift,
-		// as it does for the deletion guard's equivalent window.
-		s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+		// as it does for the deletion guard's equivalent window. A report of
+		// another run changes nothing (the store's run check), so it is
+		// skipped here too.
+		if !reportOfOtherRun(presentedAgentTokenRunID(ctx), agent.RunID) {
+			s.reconcileBrokerQuotaOnPhaseChange(ctx, agent, oldPhase, status.Phase)
+		}
 	}
 
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	// The report is the agent's own (set here, never from the body): it is
+	// subject to the run check and halted's stickiness, and never halts.
+	status.ReportSource = store.StatusReportSourceAgent
 	// The run of the token that sent this report: the store drops a report
-	// of another run, and tells this handler whether the write halted the
-	// agent (ptone/scion#4853).
+	// of another run (ptone/scion#4853).
 	status.ReportRunID = presentedAgentTokenRunID(ctx)
-	var statusResult store.AgentStatusResult
-	status.Result = &statusResult
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -199,9 +203,6 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
 			s.events.PublishAgentStatus(ctx, agent)
-			if statusResult.Halted {
-				s.onAgentHalted(ctx, agent, statusResult.HaltedFrom)
-			}
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
@@ -262,10 +263,11 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
 // The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
-// GuardReincarnation, ReportRunID and Restore, and the output Result: they
-// only condition the write (StartWrite selects the delete guard;
-// GuardReincarnation turns on the store's reincarnation guard; ReportRunID
-// selects the run check; Restore only qualifies a Phase) or report on it,
+// GuardReincarnation, ReportSource, ReportRunID and Restore, and the output
+// Result: they only condition the write (StartWrite selects the delete
+// guard; GuardReincarnation turns on the store's reincarnation guard;
+// ReportSource and ReportRunID select the report rules; Restore only
+// qualifies a Phase) or report on it,
 // and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
@@ -350,8 +352,9 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	// leaves halted. The one exception is a starting/running report (with
 	// its activity) while a start claim is held: that is the new run of a
 	// start whose outcome was in doubt, restored to halted by its rollback.
-	// The store applies the same rule on the locked row. Exit reason and
-	// message refinements still apply.
+	// The store applies the same rule on the locked row. The agent's own
+	// report never changes why the run ended either: its exit reason and
+	// code are dropped (only the agent runtime's report may refine them).
 	if currentPhase == state.PhaseHalted {
 		p := state.Phase(status.Phase)
 		if agent.StartClaimID != "" && (p == state.PhaseStarting || p == state.PhaseRunning) {
@@ -359,6 +362,8 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 		}
 		status.Phase = ""
 		status.Activity = ""
+		status.ExitReason = ""
+		status.ExitCode = nil
 		return
 	}
 

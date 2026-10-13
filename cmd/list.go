@@ -762,6 +762,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		OwnerID:           a.OwnerID,
 		StateVersion:      a.StateVersion,
 		ProvisionedOnly:   a.ProvisionedOnly,
+		ExitCode:          a.ExitCode,
+		ExitReason:        a.ExitReason,
 	}
 
 	// Fall back to AppliedConfig fields if top-level fields are empty
@@ -790,15 +792,6 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 
 // displayAgents displays agents in the requested format
 // hubMode indicates if the listing is from Hub (shows BROKER column)
-// haltedPhaseLabel shows why a halted agent was halted next to its phase,
-// e.g. "halted (preempted)"; any other phase is returned unchanged.
-func haltedPhaseLabel(phase, exitReason string) string {
-	if phase == string(state.PhaseHalted) && exitReason != "" {
-		return phase + " (" + exitReason + ")"
-	}
-	return phase
-}
-
 // filterRunningAgents returns only agents whose phase is not stopped, error
 // or halted.
 func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
@@ -811,6 +804,16 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 		filtered = append(filtered, a)
 	}
 	return filtered
+}
+
+// haltedPhaseLabel shows why a halted agent was halted next to its phase,
+// e.g. "halted (preempted)", using the reason's fixed display label; any
+// other phase is returned unchanged.
+func haltedPhaseLabel(phase, exitReason string) string {
+	if phase == string(state.PhaseHalted) && exitReason != "" {
+		return phase + " (" + state.ExitReason(exitReason).Label() + ")"
+	}
+	return phase
 }
 
 // validateListFlags checks that filter and sort flag values are valid.

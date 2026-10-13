@@ -134,6 +134,50 @@ func TestWaitForLifecycleOutcome_ErrorPhaseWithoutFailedRow(t *testing.T) {
 	assert.Contains(t, err.Error(), "agent entered error phase during start")
 }
 
+// A halted agent (the platform ended the run) fails a start or stop wait
+// like the error phase, with its own message (ptone/scion#4853).
+func TestWaitForLifecycleOutcome_HaltedPhaseFailsStart(t *testing.T) {
+	setLifecycleTimings(t, 0, 0, 20*time.Millisecond)
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "starting", "", nil)
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during start")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseFailsStop(t *testing.T) {
+	setLifecycleTimings(t, 0, 0, 20*time.Millisecond)
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, noRowStore(), "d-1", "stop", isStopTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during stop")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
+	// The dispatch row has already finished: the halted phase is the
+	// outcome at once, with no grace wait, as for the error phase.
+	setLifecycleTimings(t, 0, 0, 200*time.Millisecond)
+	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
+		"d-1": {ID: "d-1", State: store.DispatchStateFailed, Error: "broker refused the start"},
+	}}
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "agent entered halted phase during start")
+}
+
 func TestWaitForLifecycleOutcome_RollingReset(t *testing.T) {
 	// Interim status events keep the wait alive past one rolling window.
 	setLifecycleTimings(t, 50*time.Millisecond, 0, 0)

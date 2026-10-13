@@ -306,6 +306,31 @@ func (r ExitReason) IsValid() bool {
 	return false
 }
 
+// exitReasonLabels are the display labels of the exit reasons, so text
+// shown to users names a reason from a fixed set and never repeats a
+// reported value verbatim.
+var exitReasonLabels = map[ExitReason]string{
+	ExitReasonCrashed:          "crashed",
+	ExitReasonLimitsExceeded:   "limits exceeded",
+	ExitReasonPreempted:        "preempted",
+	ExitReasonEvicted:          "evicted",
+	ExitReasonOOMKilled:        "out of memory",
+	ExitReasonContainerMissing: "container lost",
+}
+
+// Label returns the display label of r: a fixed phrase for each known
+// reason, "signal" for none (a run ended by a signal with no other
+// reason), and "unknown" for any other value.
+func (r ExitReason) Label() string {
+	if r == "" {
+		return "signal"
+	}
+	if l, ok := exitReasonLabels[r]; ok {
+		return l
+	}
+	return "unknown"
+}
+
 // ExitReasonContainerMissing is set by the Hub when the agent's runtime
 // broker keeps reporting a complete runtime inventory that no longer contains
 // the agent's container (for example a Kubernetes pod removed by a node
