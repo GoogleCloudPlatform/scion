@@ -37,6 +37,12 @@ func TestMain(m *testing.M) {
 	}
 	testLogPath = filepath.Join(dir, "agent.log")
 	log.SetLogPath(testLogPath)
+	// Info explicitly, so assertions on Info lines do not depend on an
+	// ambient SCION_LOG_LEVEL or SCION_DEBUG.
+	if err := log.ApplyLogLevel("info"); err != nil {
+		fmt.Fprintln(os.Stderr, "hooks tests: setting log level:", err)
+		os.Exit(1)
+	}
 	code := m.Run()
 	_ = os.RemoveAll(dir)
 	os.Exit(code)

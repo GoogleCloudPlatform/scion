@@ -84,7 +84,8 @@ const (
 // stopping).
 //
 //   - Hook mode: ready once the marker is seen and Settle has passed since
-//     its mtime, or since the watcher first saw it if that is earlier. A readiness hook event writes its activity to the local
+//     its mtime, or since the watcher first saw it if that is earlier. A
+//     readiness hook event writes its activity to the local
 //     agent-info.json and only then the ready marker (the marker is a
 //     handler registered right after the status handler in `sciontool
 //     hook`), and its hub handler reports that activity. So when the watcher
