@@ -76,11 +76,12 @@ func (f *relayIAPFixture) assertion(t *testing.T, kp *testKeyPair, aud string, e
 // trusted-proxy setting covering the forwarded address.
 func TestRelayAdmit_IAPAssertion(t *testing.T) {
 	f := newRelayIAPFixture(t)
-	before := time.Now()
 	adm := f.mustAdmit(t, f.assertion(t, f.kp, relayIAPAudience, time.Now().Add(10*time.Minute)), "s-iap")
 	assert.Equal(t, f.cf.owner.ID(), adm.PrincipalID)
+	// The hub reads the admission time from its conduit clock (the
+	// fixture's, fixed), not from the assertion.
 	maxAge := f.cf.srv.conduitProxySessionMaxAge()
-	assert.WithinRange(t, adm.CredentialExpiry, before.Add(maxAge).Add(-time.Second), time.Now().Add(maxAge).Add(time.Second),
+	assert.Equal(t, f.cf.clock.Now().Add(maxAge).Unix(), adm.CredentialExpiry.Unix(),
 		"admission plus proxy_session_max_age, not the assertion's expiry")
 
 	other := newTestKeyPair(t, "iap-kid")
@@ -168,7 +169,9 @@ func TestRelayIAPSession_UserStateRecheckedAndExpiryFixed(t *testing.T) {
 
 	t.Run("re-issue before the cap keeps the cap", func(t *testing.T) {
 		f := newRelayIAPFixture(t)
-		now := relayClock(t, time.Now())
+		// The admission token clock starts at the conduit clock, so the
+		// token and the credential expiry share one time line.
+		now := relayClock(t, f.cf.clock.Now())
 		adm := f.mustAdmit(t, f.assertion(t, f.kp, relayIAPAudience, time.Now().Add(10*time.Minute)), "s-iap")
 		capAt := adm.CredentialExpiry
 		require.False(t, capAt.IsZero())

@@ -525,7 +525,8 @@ func TestRelayAdmit_BrokerHMAC(t *testing.T) {
 
 	res := sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-broker", AdmissionToken: adm.AdmissionToken})
 	require.True(t, res[0].OK)
-	_, err = srv.brokerAuthService.GenerateAndStoreSecret(ctx, brokerID)
+	// GenerateAndStoreSecret returns an existing secret unchanged; rotate.
+	_, err = srv.brokerAuthService.RotateBrokerSecret(ctx, brokerID, 0)
 	require.NoError(t, err)
 	res = sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-broker", AdmissionToken: adm.AdmissionToken})
 	assert.True(t, res[0].Close, "a rotated broker secret closes the session")
