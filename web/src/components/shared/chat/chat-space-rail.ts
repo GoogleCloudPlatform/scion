@@ -2761,11 +2761,12 @@ export class ScionChatSpaceRail extends LitElement {
       // Project groups load per space, with its threads: until every space's
       // have loaded, an unloaded space's groups would all look stale. The
       // hidden personal groups stay valid too, so turning the flag off
-      // restores their collapse state with them. Spaces start collapsed, so
-      // in practice pruning is deferred until the user has opened every
-      // space; until then the stored list only grows, up to
-      // GROUP_COLLAPSE_STORAGE_LIMIT. Pruning nothing is the safe failure
-      // (a collapse ID does not say which space it belongs to).
+      // restores their collapse state with them. Groups load only for spaces
+      // whose threads load: every space under activity sort without
+      // per-space activity (background loads), otherwise only the spaces the
+      // user has opened. Until then pruning waits and the stored list only
+      // grows, up to GROUP_COLLAPSE_STORAGE_LIMIT. Pruning nothing is the
+      // safe failure (a collapse ID does not say which space it belongs to).
       if (this.spaces.some((space) => !this.projectGroups.has(space.projectId))) return;
       for (const group of Object.values(this.prefs.threadGroups ?? {}).flat()) {
         validIds.add(group.id);
