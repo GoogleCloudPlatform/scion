@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -105,7 +105,7 @@ HUB_PKG := github.com/GoogleCloudPlatform/scion/pkg/hub
 non_hub_pkgs = go list -tags '$(1)' ./... | grep -vx '$(HUB_PKG)'
 
 # SHARD selects the pkg/hub test shard (1..N, N from
-# go run ./hack/hubshard -shards) for test-hub-shard, build-hub-shard,
+# hack/hubshard/hubshard.sh -shards) for test-hub-shard, build-hub-shard,
 # vet-hub-shard and test-hub-postgres.
 SHARD ?= 1
 
@@ -158,10 +158,11 @@ test-cmd-sqlite:
 ## hubshard-parity: Check the pkg/hub test shards: every test runs in exactly one shard, every shard compiles (parse only)
 # Also fails if a hubshard tag or a generated imports file is committed:
 # the tags exist only in the overlay hack/hubshard writes on every run.
-# go run ./hack/hubshard prints the shard sizes; -untag strips tags an
-# older generator committed. See hack/hubshard/README.md.
+# hubshard prints the shard sizes; -untag strips tags an older generator
+# committed. hack/hubshard/hubshard.sh builds the tool into a temp dir and
+# runs it (as go run would). See hack/hubshard/README.md.
 hubshard-parity:
-	@go run ./hack/hubshard -parity
+	@./hack/hubshard/hubshard.sh -parity
 
 ## testpart-selftest: Test hack/testpart.sh, which splits the T1 entadapter Postgres tests over CI jobs (bash only)
 testpart-selftest:
@@ -175,10 +176,10 @@ test-hub-shard:
 	@./hack/hubshard/shard.sh test $(SHARD) $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race)
 
 ## test-hub-shards: Run every pkg/hub test shard in turn (NOSQLITE=1, RACE=1 as for test-hub-shard)
-# The shard list comes from go run ./hack/hubshard -shards. Every shard
+# The shard list comes from hack/hubshard/hubshard.sh -shards. Every shard
 # runs even when an earlier one fails; the target fails if any did.
 test-hub-shards:
-	@shards=$$(go run ./hack/hubshard -shards) || exit 1; \
+	@shards=$$(./hack/hubshard/hubshard.sh -shards) || exit 1; \
 	failed=; \
 	for k in $$shards; do \
 		./hack/hubshard/shard.sh test $$k $(if $(NOSQLITE),--nosqlite) $(if $(RACE),--race) || failed="$$failed $$k"; \
@@ -583,7 +584,7 @@ test-hub-postgres-integration: test-hub-postgres-env-check
 ## hub-postgres-integration-shards: Print the pkg/hub shards that hold a HUB_INTEGRATION_POSTGRES_TESTS test, one per line (CI's shard plan)
 # Fails if a listed test is in no test file (hubshard -locate).
 hub-postgres-integration-shards:
-	@located=$$(go run ./hack/hubshard -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
+	@located=$$(./hack/hubshard/hubshard.sh -tags integration -locate $(HUB_INTEGRATION_POSTGRES_TESTS)) || exit 1; \
 	echo "$$located" | awk '{print $$2}' | sort -nu
 
 ## test-webchat-postgres: Run the pkg/hub web chat store Postgres tests against a real server
@@ -929,12 +930,15 @@ proto:
 ## ent-check: Verify generated ent code (pkg/ent) matches pkg/ent/schema
 # Regenerates in place, then fails if anything under pkg/ent (tracked diff
 # or new untracked files -- a new schema adds new directories, which
-# git diff alone does not see) or go.mod/go.sum changed. The generator runs
-# with -mod=mod, so a codegen dependency missing from go.sum shows up as a
-# go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
+# git diff alone does not see) or go.mod/go.sum changed. The generator is
+# declared as a module tool (the tool directive in go.mod) and runs through
+# go tool ent, so go mod tidy keeps the go.sum lines it needs (see tidy-check;
+# ptone/scion#4799). Run on a clean pkg/ent tree:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
 # Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
-# make as "Error 3".
+# make as "Error 3". Besides a schema compile or module download error, exit 3
+# also covers a go.sum entry the generator needs but is missing: go tool runs
+# read-only, so it fails instead of adding it (run make tidy-check).
 # Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
 # it greps for the "go generate ./pkg/ent failed (not drift)" line below.
 ent-check:
@@ -947,6 +951,25 @@ ent-check:
 		exit 1; \
 	fi; \
 	echo "ent generated code is up to date."
+
+## tidy-check: Verify go.mod/go.sum are tidy (go mod tidy would change nothing)
+# Uses go mod tidy -diff, which prints the edits tidy would make and changes no
+# files, so it does not depend on the state of the working tree. Catches a
+# go.mod/go.sum that disagrees with tidy, for example go.sum lines that a tool
+# or generator needs but tidy would drop (ptone/scion#4799).
+# Exit codes: 1 = not tidy; 3 = go mod tidy itself failed (not drift), shown by
+# make as "Error 3".
+# Keep in sync with the tidy-check step in .github/workflows/ci.yml: it greps
+# for the "go mod tidy -diff failed (not drift)" line below.
+tidy-check:
+	@echo "Checking go.mod/go.sum are tidy..."
+	@out="$$(mktemp)"; \
+	go mod tidy -diff >"$$out"; rc=$$?; \
+	if [ "$$rc" -eq 0 ]; then rm -f "$$out"; echo "go.mod/go.sum are tidy."; exit 0; fi; \
+	if [ ! -s "$$out" ]; then rm -f "$$out"; echo "go mod tidy -diff failed (not drift)"; exit 3; fi; \
+	cat "$$out"; rm -f "$$out"; \
+	echo "go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."; \
+	exit 1
 
 ## proto-check: Verify generated protobuf code is up to date
 proto-check:

@@ -26,7 +26,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -2907,6 +2909,17 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	})
 }
 
+// ErrAgentInfoNotDurable marks a writeAgentInfoFile failure after the
+// rename: the new content is in place, but syncing the parent directory
+// failed, so the change may not survive a crash. Repeating the write is
+// safe.
+var ErrAgentInfoNotDurable = errors.New("agent file replaced but the change may not be durable")
+
+// writeAgentInfoFile replaces path with data through a temp file in the
+// same directory, syncing the contents before the rename and the parent
+// directory after it. An error wrapping ErrAgentInfoNotDurable means the
+// content was replaced but may not survive a crash; any other error means
+// path was left untouched.
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -2924,10 +2937,60 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Flush the contents before the rename, so a crash cannot leave a
+	// truncated file under the final name (#4821).
+	if err := agentInfoFileSync(tmp); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	// Sync the parent directory so the rename itself survives a crash.
+	dir := filepath.Dir(path)
+	if err := syncAgentInfoDir(dir); err != nil {
+		return fmt.Errorf("%w: sync directory %s: %w", ErrAgentInfoNotDurable, dir, err)
+	}
+	return nil
+}
+
+// Test seams for writeAgentInfoFile's disk syncs.
+var (
+	// agentInfoFileSync flushes the temp file's contents to disk.
+	agentInfoFileSync = func(f *os.File) error { return f.Sync() }
+	// agentInfoDirSync flushes the parent directory, opened by
+	// syncAgentInfoDir, after the rename.
+	agentInfoDirSync = func(d *os.File) error { return d.Sync() }
+	// agentInfoDirOpen opens the parent directory for that sync.
+	agentInfoDirOpen = openAgentInfoDir
+)
+
+// syncAgentInfoDir fsyncs dir, as pkg/config's syncDir does. Windows cannot
+// fsync a directory, so it is a no-op there. A directory that cannot be
+// opened, or whose filesystem reports directory fsync as unsupported
+// (EINVAL, ENOTSUP, errors.ErrUnsupported), is skipped: the new content is
+// already in place.
+func syncAgentInfoDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
+	d, err := agentInfoDirOpen(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := agentInfoDirSync(d); err != nil && !isDirSyncUnsupported(err) {
+		return err
+	}
+	return nil
+}
+
+// isDirSyncUnsupported reports whether err is a filesystem saying it does
+// not support fsync on a directory.
+func isDirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, errors.ErrUnsupported)
 }
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the

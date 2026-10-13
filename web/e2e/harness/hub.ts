@@ -68,8 +68,9 @@ export interface StartHubOptions {
   /** Pass --enable-test-login (and the fixed --session-secret). Default true. */
   testLogin?: boolean;
   /**
-   * Start a member-level test hub: --enable-test-identities, a random hub
-   * id, the test infrastructure marker written by
+   * Start a member-level test hub: --test-mode=member:<hub id> with a random
+   * hub id, server.hub.class: test (SCION_SERVER_HUB_CLASS), the test
+   * infrastructure marker written by
    * `scion server test-infra mark` into the temp database before start, and
    * a private HOME and SCION_*-free environment under the temp dir.
    * Default false.
@@ -216,7 +217,9 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     hubId = crypto.randomBytes(6).toString('hex');
     homeDir = path.join(dbDir, 'home');
     fs.mkdirSync(homeDir, { mode: 0o700 });
-    env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId });
+    // --test-mode=member requires the hub class "test" and the marker for
+    // this hub id (written below); the hub id binding is in the flag value.
+    env = isolatedEnv(homeDir, { SCION_SERVER_HUB_HUBID: hubId, SCION_SERVER_HUB_CLASS: 'test' });
     console.info(`[hub] Marking ${dbPath} as test infrastructure for hub ${hubId}...`);
     const markOut = execFileSync(
       HUB_BINARY,
@@ -260,7 +263,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
     '--dev-auth',
   ];
   if (testLogin) args.push('--enable-test-login', '--session-secret', E2E_SESSION_SECRET);
-  if (testIdentities) args.push('--enable-test-identities');
+  if (testIdentities) args.push(`--test-mode=member:${hubId}`);
   args.push('--db', dbPath, '--web-assets-dir', webAssetsDir);
   const hubProcess = spawn(HUB_BINARY, args, {
     cwd: homeDir ?? WORKSPACE_ROOT,

@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID, hubFlagName = "", "", "", ""
+	hubSource, projectSource, contextProjectID, contextProjectSlug, hubFlagName = "", "", "", "", ""
 	contextWarned = false
 }
 
@@ -245,8 +245,35 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want: hubOnly,
 		},
 		{
-			name: "hub-only command gets the hub but no project",
+			name: "tunnel gets the hub and the project",
 			cmd:  []string{"tunnel"},
+			want: filled,
+		},
+		{
+			name: "ssh gets the hub and the project",
+			cmd:  []string{"ssh"},
+			want: filled,
+		},
+		{
+			name: "ssh-config gets the hub and the project",
+			cmd:  []string{"ssh-config"},
+			want: filled,
+		},
+		{
+			name:  "tunnel in a directory project gets no context project",
+			setup: func(t *testing.T) { makeDirProject(t, "") },
+			cmd:   []string{"tunnel"},
+			want:  hubOnly,
+		},
+		{
+			name:  "ssh with --project keeps the flag",
+			setup: func(t *testing.T) { projectPath = "bar" },
+			cmd:   []string{"ssh"},
+			want:  want{hub: ctxTestHub, hubSource: targetSourceContext, project: "bar"},
+		},
+		{
+			name: "expose gets the hub but no project",
+			cmd:  []string{"expose"},
 			want: hubOnly,
 		},
 		{

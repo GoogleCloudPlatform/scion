@@ -47,6 +47,9 @@ var (
 	// contextProjectID is the hub project UUID resolveInvocationTarget
 	// injected as projectPath, or "".
 	contextProjectID string
+	// contextProjectSlug is the slug of the contextProjectID project, as
+	// recorded in the context, or "". It is for messages only.
+	contextProjectSlug string
 	// hubFlagName is the hub nickname given with --hub, which
 	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
 	hubFlagName string
@@ -139,6 +142,16 @@ var contextSkippedSubtrees = map[string]bool{
 	"runtime-broker": true,
 }
 
+// contextProjectCommands are hub-only commands (see hubOnlyCommands), by
+// command path, that take the context's project like the project-scoped
+// commands do, although they need no local project. expose and unexpose
+// act as the calling agent and stay out.
+var contextProjectCommands = map[string]bool{
+	"scion tunnel":     true,
+	"scion ssh":        true,
+	"scion ssh-config": true,
+}
+
 // importGlobalHubSettings turns on the one-time import of the global
 // settings' hub.endpoint into the hub list when the context is read. It is
 // always on in the CLI; only the cmd tests' TestMain turns it off (see
@@ -221,6 +234,8 @@ func hubWithoutEndpointError(name string) error {
 //     effective hub, when no --project, no --global and no filesystem
 //     project apply and the command needs a project. A UUID is used rather
 //     than the slug because it can never be mistaken for a local directory.
+//     tunnel, ssh and ssh-config need no project but take this one too
+//     (contextProjectCommands).
 //
 // It records hubSource and projectSource. A context file that cannot be
 // read is a warning, and the invocation proceeds without it, unless --hub
@@ -229,6 +244,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	hubSource = ""
 	projectSource = ""
 	contextProjectID = ""
+	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
 	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
@@ -254,7 +270,8 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	// config subcommands act on local settings files, never on a hub
 	// project, so they never get an injected project (they still see the
 	// context hub). commandRequiresProject alone does not exempt them.
-	projectScoped := projectPath == "" && !globalMode && commandRequiresProject(cmd) && !commandInSubtree(cmd, "config")
+	wantsProject := commandRequiresProject(cmd) || contextProjectCommands[cmd.CommandPath()]
+	projectScoped := projectPath == "" && !globalMode && wantsProject && !commandInSubtree(cmd, "config")
 	if projectScoped && hubFlagEndpoint() != "" {
 		warnHubFlagMismatch(cmd.ErrOrStderr(), ctx)
 	}
@@ -299,6 +316,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 			projectPath = p.ID
 			projectSource = targetSourceContext
 			contextProjectID = p.ID
+			contextProjectSlug = p.Slug
 		}
 	}
 	return nil

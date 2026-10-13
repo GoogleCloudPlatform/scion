@@ -2386,6 +2386,10 @@ type V1TelemetryTLSConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty" koanf:"insecure_skip_verify"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// CertFile and KeyFile are paths, inside the agent container, to a
+	// PEM-encoded client certificate and key for OTLP mTLS. Set both or neither.
+	CertFile string `json:"cert_file,omitempty" yaml:"cert_file,omitempty" koanf:"cert_file"`
+	KeyFile  string `json:"key_file,omitempty" yaml:"key_file,omitempty" koanf:"key_file"`
 }
 
 // V1TelemetryBatchConfig holds batch export settings.
@@ -3028,13 +3032,26 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		tls := settings.Telemetry.Cloud.TLS
-		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
-			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		if err := validateTelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
 		}
 	}
 
 	return settings, nil
+}
+
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
+// plaintext together with verification or client certificate options, and
+// a client certificate without its key (or the reverse).
+func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
+	clientCert := tls.CertFile != "" || tls.KeyFile != ""
+	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
+		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
+	}
+	if (tls.CertFile == "") != (tls.KeyFile == "") {
+		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
+	}
+	return nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3490,6 +3507,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
 //	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
+//	"cert_file" -> "telemetry.cloud.tls.cert_file"
+//	"key_file" -> "telemetry.cloud.tls.key_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
 	case "endpoint":
@@ -3504,6 +3523,10 @@ func mapOtelEnvKey(key string) string {
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"
+	case "cert_file":
+		return "telemetry.cloud.tls.cert_file"
+	case "key_file":
+		return "telemetry.cloud.tls.key_file"
 	default:
 		return "telemetry.cloud." + key
 	}

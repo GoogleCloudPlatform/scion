@@ -144,38 +144,44 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
 
-	// Create hub client (unauthenticated for initial OAuth)
-	client, err := hubclient.New(hubURL, hubclient.WithTimeout(30*time.Second))
-	if err != nil {
-		return fmt.Errorf("failed to create Hub client: %w", err)
-	}
-
-	var tokenResp *hubclient.CLITokenResponse
 	provider, err := cmd.Flags().GetString("provider")
 	if err != nil {
 		return fmt.Errorf("failed to read provider flag: %w", err)
+	}
+	tokenResp, err := hubAuthLoginFlow(cmd, hubURL, provider)
+	if err != nil {
+		return err
+	}
+	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+}
+
+// hubAuthLoginFlow runs the OAuth login to the hub at hubURL: the browser
+// flow, or the device flow with --no-browser or in a headless environment.
+// It returns the token and stores nothing. extra adds client options, such
+// as the transport auth for a hub the CLI picked itself.
+func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubclient.Option) (*hubclient.CLITokenResponse, error) {
+	// Create hub client (unauthenticated for initial OAuth)
+	opts := append([]hubclient.Option{hubclient.WithTimeout(30 * time.Second)}, extra...)
+	client, err := hubclient.New(hubURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
 		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Device authorization flow for headless environments
 		deviceAuth := newDeviceFlowAuth(client.Auth(), provider)
-		tokenResp, err = deviceAuth.Authenticate(cmd.Context())
+		tokenResp, err := deviceAuth.Authenticate(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("device flow authentication failed: %w", err)
+			return nil, fmt.Errorf("device flow authentication failed: %w", err)
 		}
-	} else {
-		// Browser-based OAuth flow
-		tokenResp, err = runBrowserAuthFlow(cmd, client, provider)
-		if err != nil {
-			return err
-		}
+		return tokenResp, nil
 	}
-
-	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+	// Browser-based OAuth flow
+	return runBrowserAuthFlow(cmd, client, provider)
 }
 
 // finishHubAuthLogin completes a successful login: it stores the

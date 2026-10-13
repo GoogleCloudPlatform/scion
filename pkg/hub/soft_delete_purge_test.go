@@ -53,19 +53,25 @@ func (p *purgeCountingStore) counts() (agents, events int) {
 	return len(p.agentCutoffs), p.eventCalls
 }
 
-// The scheduled-event purge keeps its startup gate: a hub started with no
-// soft-delete retention does not purge old scheduled events, even after a
-// retention is saved; a hub started with one does (ptone/scion#3904).
-func TestPurgeHandler_ScheduledEventPurgeKeepsStartupGate(t *testing.T) {
+// The scheduled-event purge runs on every tick, whatever the soft-delete
+// retention, while the agent purge follows the live retention: a hub
+// started with retention 0 purges old scheduled events but no agents until
+// a retention is saved (ptone/scion#4517).
+func TestPurgeHandler_ScheduledEventPurgeIgnoresRetention(t *testing.T) {
 	st := &purgeCountingStore{}
 	srv := &Server{store: st}
 	srv.recordStartupLayer1Values() // startup retention 0
-	ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "1h"})
 
 	srv.purgeHandler()(context.Background())
 	agents, events := st.counts()
+	assert.Equal(t, 0, agents, "retention 0 does not purge soft-deleted agents")
+	assert.Equal(t, 1, events, "a hub started with retention 0 purges old scheduled events")
+
+	ApplySnapshot(srv, Layer1Snapshot{SoftDeleteRetention: "1h"})
+	srv.purgeHandler()(context.Background())
+	agents, events = st.counts()
 	assert.Equal(t, 1, agents, "the saved retention runs the agent purge")
-	assert.Equal(t, 0, events, "no scheduled-event purge on a hub started with retention 0")
+	assert.Equal(t, 2, events, "the scheduled-event purge runs on every tick")
 
 	st2 := &purgeCountingStore{}
 	srv2 := &Server{store: st2}

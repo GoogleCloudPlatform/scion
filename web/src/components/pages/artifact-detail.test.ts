@@ -69,6 +69,8 @@ interface MockOptions {
   agentStatus?: number;
   /** Versions listed by GET .../versions (default: meta's version). */
   versions?: ArtifactVersion[];
+  /** crossProjectSharing in GET .../grants (default: off). */
+  crossProjectSharing?: boolean;
   /** Discarded versions listed by GET .../versions (default: none). */
   discarded?: DiscardedVersion[];
   /**
@@ -108,6 +110,10 @@ function mockFetch(
         return Promise.resolve(
           opts.write ? opts.write(method, url) : new Response(null, { status: 500 })
         );
+      }
+      if (url.endsWith('/grants')) {
+        const grants = { grants: [], crossProjectSharing: !!opts.crossProjectSharing };
+        return Promise.resolve(new Response(JSON.stringify(grants), { status: 200 }));
       }
       if (url.startsWith('/api/v1/agents/')) {
         const status = opts.agentStatus ?? 404;
@@ -250,6 +256,65 @@ describe('artifact page', () => {
     )!;
     expect(open.getAttribute('href')).toBe(VIEW_URL);
     expect(open.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('offers Move… only while cross-project sharing is on, and opens the moved artifact', async () => {
+    const moveButton = (el: ScionPageArtifactDetail): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Move…')
+      ) as HTMLElement | undefined;
+
+    // Without canManage: no Move…, and the grants are never requested, even
+    // while cross-project sharing is on.
+    const urls = mockFetch(artifact('notes.md', 'text/markdown'), '# Hello', {
+      crossProjectSharing: true,
+    });
+    let el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-move-dialog')).toBeNull();
+    expect(urls.filter((u) => u.endsWith('/grants'))).toEqual([]);
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    // The hub refuses every move while cross-project sharing is off.
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true }, '# Hello', {
+      crossProjectSharing: true,
+    });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      open: boolean;
+      homeDeleted: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.homeDeleted).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    moveButton(el)!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const moved = { ...artifact('notes.md', 'text/markdown').artifact, scopeRef: 'p-2' };
+      dialog.dispatchEvent(
+        new CustomEvent('artifact-moved', { detail: moved, bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/projects/p-2/artifacts/${ID}`]);
+    expect(dialog.open).toBe(false);
   });
 
   it('shows 404 when the hub answers 404', async () => {

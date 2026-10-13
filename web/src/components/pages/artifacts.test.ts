@@ -576,8 +576,10 @@ describe('artifacts list page sharing', () => {
 
     const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
       open: boolean;
+      homeDeleted: boolean;
     };
     expect(dialog.open).toBe(false);
+    expect(dialog.homeDeleted).toBe(true);
     (r1.querySelector('a.move') as HTMLElement).click();
     await settle(el);
     expect(dialog.open).toBe(true);

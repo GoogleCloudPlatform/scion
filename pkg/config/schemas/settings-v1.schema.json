@@ -1239,7 +1239,7 @@
         },
         "class": {
           "type": "string",
-          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the test admin identity gate (--enable-test-admin-identities). Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
+          "description": "Deploy-time class of this hub. The only recognised value is \"test\"; unset means the hub is not a test hub. Read once at startup by the --test-mode gate: every level other than off requires \"test\". Settable only in the settings file or environment: the server-config API refuses this key in every mode.",
           "x-env-var": "SCION_SERVER_HUB_CLASS"
         },
         "test_identities": {
@@ -2062,6 +2062,18 @@
           "type": "string",
           "description": "Path to a PEM-encoded CA bundle used to verify the OTLP endpoint certificate.",
           "x-env-var": "SCION_OTEL_CA_FILE",
+          "x-since": "1"
+        },
+        "cert_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to a PEM-encoded client certificate for OTLP mTLS. Must be set together with key_file. Cannot be set when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_CERT_FILE",
+          "x-since": "1"
+        },
+        "key_file": {
+          "type": "string",
+          "description": "Path, inside the agent container, to the PEM-encoded private key for cert_file. Must be set together with cert_file. Cannot be set when tls.enabled is false.",
+          "x-env-var": "SCION_OTEL_KEY_FILE",
           "x-since": "1"
         }
       },
