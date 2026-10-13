@@ -186,7 +186,7 @@ func startAgentPluginsWarning(recordHas, includePlugins bool, harnessName string
 	case !recordHas:
 		return ""
 	case !includePlugins:
-		return "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"
+		return "agent_plugins: ignored: experiment hub.agent_plugins is off; plugins Scion installed earlier, if any, are removed"
 	case agentPluginsCapabilityMissing(h):
 		return unsupportedAgentPluginsMessage(harnessName, h)
 	}

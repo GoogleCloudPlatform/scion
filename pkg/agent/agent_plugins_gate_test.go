@@ -282,7 +282,7 @@ func TestStartAgentPluginsWarning(t *testing.T) {
 	}{
 		{"no plugins recorded", false, true, absent, ""},
 		{"no plugins recorded, gate off", false, false, yes, ""},
-		{"gate off", true, false, yes, "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"},
+		{"gate off", true, false, yes, "agent_plugins: ignored: experiment hub.agent_plugins is off; plugins Scion installed earlier, if any, are removed"},
 		{"supported", true, true, yes, ""},
 		{"capability absent", true, true, absent, `agent_plugins: harness-config "hc" predates Agent Plugins support; plugins staged but not installed (reinstall it with scion harness-config install --force)`},
 		{"capability no", true, true, no, `agent_plugins: harness "hc" does not support Agent Plugins; plugins staged but not installed (r)`},

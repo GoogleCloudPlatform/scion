@@ -140,7 +140,7 @@ func TestProvisionAgent_AgentPluginsGateOnStagesAndRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start (off): %v", err)
 	}
-	gateOff := "agent_plugins: ignored: experiment hub.agent_plugins is off; previously installed plugins are removed"
+	gateOff := "agent_plugins: ignored: experiment hub.agent_plugins is off; plugins Scion installed earlier, if any, are removed"
 	if n := countWarning(info.Warnings, gateOff); n != 1 {
 		t.Errorf("start warnings = %v, want %q once", info.Warnings, gateOff)
 	}

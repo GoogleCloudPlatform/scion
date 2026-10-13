@@ -26,8 +26,8 @@ import (
 
 // Limits bounds a bundle copy.
 type Limits struct {
-	// MaxFiles caps the number of copied entries (regular files and
-	// directories).
+	// MaxFiles caps the number of entries: copied regular files and
+	// directories, plus skipped symlinks and special files.
 	MaxFiles int
 	// MaxBytes caps the total size of copied regular files.
 	MaxBytes int64
@@ -124,6 +124,11 @@ func (c *treeCopier) copyDir(src, dst, rel string, depth int) error {
 		}
 		switch {
 		case fi.Mode()&os.ModeSymlink != 0, !fi.IsDir() && !fi.Mode().IsRegular():
+			// Skipped entries count toward MaxFiles too, so a bundle cannot
+			// carry an unbounded number of them.
+			if err := c.count(); err != nil {
+				return err
+			}
 			c.rep.Skipped = append(c.rep.Skipped, r)
 		case fi.IsDir():
 			if c.lim.MaxDepth > 0 && depth+1 > c.lim.MaxDepth {

@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,7 +248,7 @@ func TestStageSymlinkInsideBundleWarns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(res.Diagnostics) != 1 || res.Diagnostics[0].String() != `agent_plugins: plugin "p": skipped symlink or special file pw (not followed)` {
+	if len(res.Diagnostics) != 1 || res.Diagnostics[0].String() != `agent_plugins: plugin "p": skipped 1 symlink(s) or special file(s) (not followed): pw` {
 		t.Fatalf("diagnostics = %v", res.Diagnostics)
 	}
 	if res.Index.Plugins[0].SkillsDirConflict {
@@ -284,5 +285,34 @@ func TestStageSmokeFixture(t *testing.T) {
 	fi, err := os.Stat(filepath.Join(home, InputsRel, PluginsDirName, "scion-smoke", "bin", "stdio-mcp"))
 	if err != nil || fi.Mode().Perm() != 0o755 {
 		t.Fatalf("stdio-mcp staged as %v (err %v)", fi, err)
+	}
+}
+
+// Many skipped entries give one diagnostic, and they count toward MaxFiles.
+func TestStageManySymlinksOneDiagnosticAndCapped(t *testing.T) {
+	base := t.TempDir()
+	writeFiles(t, base, map[string]string{"tpl/p/plugin.json": manifestFor("p", "1")})
+	for i := 0; i < 8; i++ {
+		if err := os.Symlink("plugin.json", filepath.Join(base, "tpl/p", fmt.Sprintf("l%d", i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ref := []TemplateSource{{Name: "tpl", Dir: filepath.Join(base, "tpl"), Refs: []api.AgentPluginReference{{Path: "p"}}}}
+	res, err := Stage(context.Background(), StageRequest{Chain: ref, AgentHome: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `agent_plugins: plugin "p": skipped 8 symlink(s) or special file(s) (not followed): l0, l1, l2, l3, l4, and 3 more`
+	if len(res.Diagnostics) != 1 || res.Diagnostics[0].String() != want {
+		t.Fatalf("diagnostics = %v, want [%s]", res.Diagnostics, want)
+	}
+	if got := res.Index.Plugins[0].Diagnostics; len(got) != 1 {
+		t.Fatalf("index diagnostics = %v", got)
+	}
+	// 1 file + 8 skipped entries is over a MaxFiles of 5.
+	_, err = Stage(context.Background(), StageRequest{Chain: ref, AgentHome: t.TempDir(),
+		Limits: Limits{MaxFiles: 5, MaxBytes: 1 << 20, MaxDepth: 4}})
+	if err == nil || err.Error() != `plugin "p": bundle exceeds 5 files` {
+		t.Fatalf("err = %v", err)
 	}
 }

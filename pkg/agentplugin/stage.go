@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -211,8 +212,8 @@ func stageOne(home *os.Root, pluginsRel string, c *candidate, reserved map[strin
 		return nil, fmt.Errorf("copy bundle: %w", err)
 	}
 	diags := append([]Diagnostic(nil), c.diags...)
-	for _, s := range rep.Skipped {
-		diags = append(diags, warning("skipped symlink or special file %s (not followed)", s))
+	if d, ok := skippedDiagnostic(rep.Skipped); ok {
+		diags = append(diags, d)
 	}
 	if err := home.RemoveAll(finalRel); err != nil {
 		_ = home.RemoveAll(tmpRel)
@@ -273,4 +274,23 @@ func writeIndex(home *os.Root, indexRel string, idx *Index) error {
 		return fmt.Errorf("write plugin index: %w", err)
 	}
 	return nil
+}
+
+// maxSkippedListed is how many skipped paths one diagnostic names.
+const maxSkippedListed = 5
+
+// skippedDiagnostic is one warning for every symlink and special file a
+// bundle copy skipped, naming the first few.
+func skippedDiagnostic(skipped []string) (Diagnostic, bool) {
+	if len(skipped) == 0 {
+		return Diagnostic{}, false
+	}
+	list := skipped
+	more := ""
+	if len(list) > maxSkippedListed {
+		list = list[:maxSkippedListed]
+		more = fmt.Sprintf(", and %d more", len(skipped)-maxSkippedListed)
+	}
+	return warning("skipped %d symlink(s) or special file(s) (not followed): %s%s",
+		len(skipped), strings.Join(list, ", "), more), true
 }

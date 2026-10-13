@@ -15,12 +15,14 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 )
 
 func TestMergeScionConfig_AgentPlugins(t *testing.T) {
@@ -118,5 +120,27 @@ func TestLoadVersionedSettings_LocalExperiments(t *testing.T) {
 	}
 	if !slices.Equal(vs.LocalExperiments, []string{"hub.agent_plugins", "hub.not_registered"}) {
 		t.Fatalf("LocalExperiments = %v", vs.LocalExperiments)
+	}
+}
+
+// The local_experiments item pattern in the settings schema is a copy of
+// experiments.NamePattern; keep them identical.
+func TestLocalExperimentsPattern_MatchesNamePattern(t *testing.T) {
+	raw, err := GetSettingsSchemaJSON("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root struct {
+		Properties map[string]struct {
+			Items struct {
+				Pattern string `json:"pattern"`
+			} `json:"items"`
+		} `json:"properties"`
+	}
+	if err := json.Unmarshal(raw, &root); err != nil {
+		t.Fatal(err)
+	}
+	if got := root.Properties["local_experiments"].Items.Pattern; got != experiments.NamePattern {
+		t.Fatalf("local_experiments pattern = %q, want experiments.NamePattern %q", got, experiments.NamePattern)
 	}
 }
