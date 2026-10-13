@@ -482,7 +482,7 @@ func runTestLaunch(t *testing.T, name string, start func(ctx context.Context, op
 	srv, rtb := newAsyncTestServer(t, mgr)
 	srv.launchTimingOverride = fastLaunchTimings(time.Hour)
 	key := launchKey{Slug: "agent-" + name}
-	env := &launchTestEnv{rtb: rtb, stop: func() { srv.cancelLocalLaunch(key) }}
+	env := &launchTestEnv{rtb: rtb, stop: func() { srv.cancelLocalLaunch(key, "agent-"+name) }}
 	mgr.start = func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 		return start(ctx, opts, env)
 	}
