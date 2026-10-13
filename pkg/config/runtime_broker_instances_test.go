@@ -445,6 +445,7 @@ func TestRuntimeBrokerInstances_SchemaMatchesValidator(t *testing.T) {
 		"k8s bad priority":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, priority_class_name: High_Priority}}"), false},
 		"k8s num priority":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, priority_class_name: 7}}"), false},
 		"k8s string gke":    {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, gke: \"yes\"}}"), false},
+		"k8s string evict":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, safe_to_evict: \"false\"}}"), false},
 		"k8s bad backend":   {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_backend: gcs}}"), false},
 		"k8s bad dir name":  {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_backends: {Bad_Dir: local}}}"), false},
 		"k8s bad dir value": {instancesYAML("- {key: a, name: x, runtime_target: {type: kubernetes, shared_dir_storage_backends: {data: gcs}}}"), false},

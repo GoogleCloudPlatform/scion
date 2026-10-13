@@ -406,6 +406,15 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
 				return err
 			}
+			// The YAML decoder would turn a string such as "yes" into a
+			// bool; only a YAML boolean (or null) is accepted.
+			for _, k := range []string{"gke", "safe_to_evict"} {
+				if v, present := tm[k]; present && v != nil {
+					if _, isBool := v.(bool); !isBool {
+						return fmt.Errorf("%s.runtime_target.%s must be true or false", p, k)
+					}
+				}
+			}
 		}
 	}
 	return nil

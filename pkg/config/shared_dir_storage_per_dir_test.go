@@ -416,7 +416,7 @@ func TestSettingsSchema_SharedDirStorageBackendsPatternMatchesConstant(t *testin
 		}
 	}
 	walk(doc)
-	require.Len(t, patterns, 2, "runtime and profile entries")
+	require.Len(t, patterns, 3, "runtime, profile and flat Runtime Broker instance entries")
 	for _, p := range patterns {
 		assert.Equal(t, SharedDirNamePattern, p)
 	}
