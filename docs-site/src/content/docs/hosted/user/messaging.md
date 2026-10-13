@@ -520,7 +520,7 @@ The workspace part says what `scion start` does with the workspace: `Workspace k
 
 Who receives it:
 
-* **The agent's creator**, always: the user who created the agent, or the agent that created it (while that agent still exists in the same project), even without a subscription.
+* **The agent's creator**, when they have no subscription to the agent or its project: the user who created the agent, or the agent that created it (while that agent still exists in the same project). A creator who has a subscription gets `HALTED` only if that subscription selects it.
 * **Subscribers with the `HALTED` trigger.** `HALTED` is one of the default triggers of the subscription recorded when an agent is created with notify on, and one of the Web Dashboard's default and selectable triggers. The default triggers of `scion notifications subscribe` do not include it; add it with `--triggers`.
 * **Subscribers with only the `ERROR` trigger**, when the halt replaced what would have been an `error` (for example a preempted pod whose workspace did not survive). They receive it with status `ERROR`, as they would have without the halt.
 

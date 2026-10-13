@@ -251,7 +251,8 @@ are subject to strict encoding rules.
 | `AGENT_NAME`   | Agent display name  |
 | `TASK_SUMMARY` | Agent task summary  |
 | `AGENT_STATUS` | Agent phase string  |
-| `ERROR_MSG`    | Agent error message |
+| `ERROR_MSG`    | Agent error message (not set for `halted`) |
+| `EXIT_REASON`  | Agent exit reason, one of a fixed set (for example `preempted`, `oom_killed`) |
 
 Security rules for untrusted variables:
 

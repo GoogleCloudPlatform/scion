@@ -106,13 +106,13 @@ The `error` phase is **restartable**: running `scion start` clears the error and
 | `oom_killed` | The container was killed for exceeding its memory limit. |
 | `container_missing` | The agent runtime kept reporting a complete inventory without the agent's container. |
 
-An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, it did not stop on a configured limit, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. A clean exit (code 0) is never upgraded to `halted`.
+Only the agent runtime's own observations (its reports of the container, and the Hub's check of its inventory) can halt an agent; a status report an agent sends about itself never does, and never sets one of these reasons. An agent is halted only when all of these hold: it was meant to be running (it was started and not stopped since), no start, restart or stop of it is in progress, and its agent runtime is Docker, Podman, Apple container, or Kubernetes. Otherwise the same run ends `stopped` or `error`, as before. A clean exit (code 0) that the agent runtime observed is never upgraded to `halted`.
 
 `halted` is terminal, like `stopped`: the agent has no container and does not count toward the agent quota. It stays `halted` until you act on it. Status reports from the old run do not move it.
 
 To continue, run `scion start <agent>`. It starts the agent the way a start from `stopped` does. Whether the workspace survives depends on where it lives: a workspace on the agent's own pod storage (a Kubernetes EmptyDir) is re-cloned, and other workspaces are kept. `scion stop` on a halted agent records it as `stopped`.
 
-`scion list` shows the reason next to the phase, for example `halted (preempted)`. In Hosted mode, the agent's creator is notified once per halt, and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
+`scion list` shows the reason next to the phase, for example `halted (preempted)` or `halted (out of memory)`. In Hosted mode, the agent's creator is notified once per halt (unless they chose their own notification triggers by subscribing), and so is anyone subscribed to the `HALTED` notification trigger (see [Messaging & Notifications](/scion/hosted/user/messaging/#halted-agent-notifications)). Lifecycle hooks can use the `halted` trigger (see [Lifecycle Hooks](/scion/hosted/ha/lifecycle-hooks/#triggers)).
 
 Local mode never records `halted`.
 
