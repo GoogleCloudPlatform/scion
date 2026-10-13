@@ -6,6 +6,10 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
+
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -46,6 +50,70 @@ type QuotaService struct {
 	// a limit, Reserve keeps counting (reservations, release, reconcile and
 	// backfill are unaffected) but no longer rejects the create.
 	enforced func(limitName string) bool
+
+	// scopeConflictMetrics counts reservation scope conflicts; nil until
+	// Server.SetQuotaScopeConflictMetrics.
+	scopeConflictMetrics atomic.Pointer[OTelQuotaScopeConflictMetrics]
+}
+
+// Sites of a reservation scope conflict, the site attribute of
+// scion.hub.quota.reservation_scope_conflicts.
+const (
+	// scopeConflictSiteReserve: Reserve refused a request (HTTP 409).
+	scopeConflictSiteReserve = "reserve"
+	// scopeConflictSiteReassert: a restart's re-assert found the agent's
+	// reservation on another broker and left it.
+	scopeConflictSiteReassert = "reassert"
+	// scopeConflictSiteBackfill: the reconcile backfill found the agent's
+	// reservation on another broker and left it.
+	scopeConflictSiteBackfill = "backfill"
+	// scopeConflictSiteSweep: the reconcile release pass found a pinned
+	// agent's reservation on another broker and left it.
+	scopeConflictSiteSweep = "sweep"
+)
+
+// OTelQuotaScopeConflictMetrics counts reservation scope conflicts (an
+// agent's active max_agents_per_broker reservation on a broker other than
+// the one it is admitted on or assigned to) as
+// scion.hub.quota.reservation_scope_conflicts, with attribute site
+// (reserve, reassert, backfill or sweep). The reconcile sites count a
+// conflict that persists once per pass.
+type OTelQuotaScopeConflictMetrics struct {
+	total metric.Int64Counter
+}
+
+// NewOTelQuotaScopeConflictMetrics creates the counter.
+func NewOTelQuotaScopeConflictMetrics(mp metric.MeterProvider) (*OTelQuotaScopeConflictMetrics, error) {
+	if mp == nil {
+		return nil, errors.New("otel quota scope conflict metrics: nil MeterProvider")
+	}
+	c, err := mp.Meter(instrumentationScope).Int64Counter("scion.hub.quota.reservation_scope_conflicts",
+		metric.WithUnit("{conflict}"))
+	if err != nil {
+		return nil, err
+	}
+	return &OTelQuotaScopeConflictMetrics{total: c}, nil
+}
+
+// RecordScopeConflict counts one conflict at site.
+func (m *OTelQuotaScopeConflictMetrics) RecordScopeConflict(site string) {
+	m.total.Add(context.Background(), 1, metric.WithAttributes(attribute.String("site", site)))
+}
+
+// SetQuotaScopeConflictMetrics wires the
+// scion.hub.quota.reservation_scope_conflicts counter. Until it is set,
+// conflicts are logged but not counted.
+func (s *Server) SetQuotaScopeConflictMetrics(m *OTelQuotaScopeConflictMetrics) {
+	if s.quotaService != nil {
+		s.quotaService.scopeConflictMetrics.Store(m)
+	}
+}
+
+// recordScopeConflict counts one reservation scope conflict at site.
+func (qs *QuotaService) recordScopeConflict(site string) {
+	if m := qs.scopeConflictMetrics.Load(); m != nil {
+		m.RecordScopeConflict(site)
+	}
 }
 
 // isEnforced reports whether limitName should be rejected once exhausted.
@@ -77,6 +145,32 @@ func (qs *QuotaService) lockForScope(limitName, scopeType, scopeID string) *sync
 	return m
 }
 
+// ErrReservationScopeConflict is the sentinel a ReservationScopeConflictError
+// unwraps to.
+var ErrReservationScopeConflict = errors.New("quota: resource holds an active reservation in another scope")
+
+// ErrCodeBrokerReservationScopeConflict is the API error code of a request
+// refused with a ReservationScopeConflictError (HTTP 409).
+const ErrCodeBrokerReservationScopeConflict = "broker_reservation_scope_conflict"
+
+// ReservationScopeConflictError is returned by Reserve for a broker-scoped
+// request when the resource already holds an active reservation for the
+// limit on another broker. The held reservation is kept, no reservation is
+// made in the requested scope, and nothing is moved or released.
+type ReservationScopeConflictError struct {
+	Limit            string
+	ResourceID       string
+	HeldScopeID      string
+	RequestedScopeID string
+}
+
+func (e *ReservationScopeConflictError) Error() string {
+	return fmt.Sprintf("quota: %s: resource %s holds an active reservation on %s; it cannot be reserved on %s",
+		e.Limit, e.ResourceID, e.HeldScopeID, e.RequestedScopeID)
+}
+
+func (e *ReservationScopeConflictError) Unwrap() error { return ErrReservationScopeConflict }
+
 // ErrQuotaLockContention is returned when the advisory lock cannot be acquired,
 // indicating another concurrent request is checking the same quota scope.
 // Callers may retry.
@@ -95,9 +189,12 @@ func (qs *QuotaService) CheckAndReserve(ctx context.Context, limitName string, s
 // Reserve is CheckAndReserve that also reports whether this call created a
 // new reservation (ptone/scion#1978). created is false when no limit is
 // defined, the limit is unlimited, the resource already held an active
-// reservation for this limit, or err is non-nil. Callers that roll back a
-// reservation after a failed operation must only do so when created is
-// true; otherwise they would release a reservation an earlier call made.
+// reservation for this limit, or err is non-nil. For a broker-scoped
+// request, an active reservation on another broker is refused with a
+// *ReservationScopeConflictError whatever the cap or enforcement setting.
+// Callers that roll back a reservation after a failed operation must only do
+// so when created is true; otherwise they would release a reservation an
+// earlier call made.
 func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID string, scopeType string, scopeID string, resourceID string) (created bool, err error) {
 	// 1. Look up LimitDefinition by name.
 	limitDef, err := qs.store.GetLimitDefinitionByName(ctx, limitName)
@@ -111,6 +208,21 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 	if limitDef == nil {
 		// No limit defined — no enforcement.
 		return false, nil
+	}
+
+	// 1b. Placement invariant (broker scope): an active reservation in
+	// another broker's scope never satisfies this request, and one in this
+	// scope is an idempotent retry. Checked before the unlimited short-circuit
+	// and independent of enforcement, so neither an unlimited cap nor
+	// enforcement being off turns a mismatched reservation into a success.
+	if scopeType == store.QuotaScopeBroker {
+		held, err := qs.store.GetActiveReservation(ctx, limitDef.ID, resourceID)
+		switch {
+		case err == nil:
+			return false, qs.classifyHeldReservation(limitName, held, scopeType, scopeID)
+		case !errors.Is(err, store.ErrNotFound):
+			return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
+		}
 	}
 
 	// 2. Resolve effective limit for the subject, consulting limitOverride
@@ -173,13 +285,17 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 	// counted (e.g. a fresh create, or start called again on an already-
 	// running agent) — silently consume extra quota slots for one resource.
 	// Checked under the advisory lock so a concurrent release can't race this
-	// read.
-	alreadyReserved, err := qs.store.HasActiveReservation(ctx, limitDef.ID, resourceID)
-	if err != nil {
-		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
-	}
-	if alreadyReserved {
+	// read. A broker-scoped row is classified as in step 1b: another goroutine
+	// of this process may have reserved it since.
+	held, err := qs.store.GetActiveReservation(ctx, limitDef.ID, resourceID)
+	switch {
+	case err == nil:
+		if scopeType == store.QuotaScopeBroker {
+			return false, qs.classifyHeldReservation(limitName, held, scopeType, scopeID)
+		}
 		return false, nil
+	case !errors.Is(err, store.ErrNotFound):
+		return false, fmt.Errorf("quota: check existing reservation for %q: %w", limitName, err)
 	}
 
 	// 5. Count active reservations.
@@ -212,11 +328,64 @@ func (qs *QuotaService) Reserve(ctx context.Context, limitName string, subjectID
 		ResourceID:        resourceID,
 		Reserved:          1,
 	}
+	if scopeType == store.QuotaScopeBroker {
+		return qs.insertBrokerReservation(ctx, limitName, reservation)
+	}
 	if _, err := qs.store.CreateUsageReservation(ctx, reservation); err != nil {
 		return false, fmt.Errorf("quota: create reservation for %q: %w", limitName, err)
 	}
 
 	return true, nil
+}
+
+// maxBrokerReservationInserts bounds insertBrokerReservation: the first
+// insert, plus one retry when the racing winner was released before it could
+// be read back.
+const maxBrokerReservationInserts = 2
+
+// insertBrokerReservation inserts a broker-scoped reservation. The unique
+// active (limit_definition_id, resource_id) index is the serializer: when a
+// racing insert won (another Hub replica, or a request for another broker,
+// whose scope locks differ from this one's), the winner is read back and
+// classified as in Reserve's step 1b, a retry in the same scope
+// (created=false) or a ReservationScopeConflictError. When the winner was
+// released before the read, the insert is retried once; losing that race
+// again returns ErrQuotaLockContention.
+func (qs *QuotaService) insertBrokerReservation(ctx context.Context, limitName string, reservation *store.UsageReservation) (bool, error) {
+	for attempt := 0; attempt < maxBrokerReservationInserts; attempt++ {
+		_, err := qs.store.CreateUsageReservation(ctx, reservation)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, store.ErrActiveReservationExists) {
+			return false, fmt.Errorf("quota: create reservation for %q: %w", limitName, err)
+		}
+		held, err := qs.store.GetActiveReservation(ctx, reservation.LimitDefinitionID, reservation.ResourceID)
+		if err == nil {
+			return false, qs.classifyHeldReservation(limitName, held, reservation.ScopeType, reservation.ScopeID)
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return false, fmt.Errorf("quota: read racing reservation for %q: %w", limitName, err)
+		}
+	}
+	return false, ErrQuotaLockContention
+}
+
+// classifyHeldReservation classifies a resource's active reservation against
+// a request in (scopeType, scopeID): nil when it is in that scope (an
+// idempotent retry, which creates nothing), a *ReservationScopeConflictError
+// otherwise. A conflict is counted at site "reserve".
+func (qs *QuotaService) classifyHeldReservation(limitName string, held *store.UsageReservation, scopeType, scopeID string) error {
+	if held.ScopeType == scopeType && held.ScopeID == scopeID {
+		return nil
+	}
+	qs.recordScopeConflict(scopeConflictSiteReserve)
+	return &ReservationScopeConflictError{
+		Limit:            limitName,
+		ResourceID:       held.ResourceID,
+		HeldScopeID:      held.ScopeID,
+		RequestedScopeID: scopeID,
+	}
 }
 
 // effectiveLimitForReserve resolves the limit Reserve should enforce for

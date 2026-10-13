@@ -114,6 +114,8 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 // that took the freed slot in between can leave the broker one over its cap
 // until a slot frees; that is accepted, rather than refusing a restart whose
 // container is already stopped. Reports whether it created a reservation.
+// An active reservation on another broker is never overwritten or moved: it
+// is reported as a scope conflict (log and metric, site "reassert").
 // Best-effort: failures are logged.
 func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Agent) bool {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
@@ -127,20 +129,30 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 		}
 		return false
 	}
-	has, err := s.store.HasActiveReservation(ctx, def.ID, agent.ID)
-	if err != nil || has {
-		if err != nil {
-			s.agentLifecycleLog.Warn("quota: restart re-assert: reservation check failed",
-				"agent_id", agent.ID, "error", err)
+	held, err := s.store.GetActiveReservation(ctx, def.ID, agent.ID)
+	switch {
+	case err == nil:
+		if held.ScopeID != agent.RuntimeBrokerID {
+			s.reportBrokerScopeConflict(scopeConflictSiteReassert, agent, held.ScopeID)
 		}
 		return false
+	case !errors.Is(err, store.ErrNotFound):
+		s.agentLifecycleLog.Warn("quota: restart re-assert: reservation check failed",
+			"agent_id", agent.ID, "error", err)
+		return false
 	}
-	if err := s.recordBrokerReservationUnchecked(ctx, def.ID, agent.RuntimeBrokerID, agent.ID); err != nil {
+	created, err := s.recordBrokerReservationUnchecked(ctx, def.ID, agent.RuntimeBrokerID, agent.ID)
+	if err != nil {
+		var conflict *ReservationScopeConflictError
+		if errors.As(err, &conflict) {
+			s.reportBrokerScopeConflict(scopeConflictSiteReassert, agent, conflict.HeldScopeID)
+			return false
+		}
 		s.agentLifecycleLog.Warn("quota: restart re-assert failed",
 			"agent_id", agent.ID, "error", err)
 		return false
 	}
-	return true
+	return created
 }
 
 // recordBrokerReservationUnchecked records agentID's max_agents_per_broker
@@ -148,16 +160,56 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 // of the reconcile backfill and the restart's re-assert
 // (reassertBrokerReservation): accounting for a slot that is already in
 // use, not an admission decision.
-func (s *Server) recordBrokerReservationUnchecked(ctx context.Context, limitDefID, brokerID, agentID string) error {
-	_, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
-		LimitDefinitionID: limitDefID,
-		SubjectID:         brokerID,
-		ScopeType:         store.QuotaScopeBroker,
-		ScopeID:           brokerID,
-		ResourceID:        agentID,
-		Reserved:          1,
-	})
-	return err
+//
+// A racing insert is classified as in QuotaService.Reserve: when the agent
+// already holds an active reservation, created is false and err is nil if it
+// is on brokerID, or a *ReservationScopeConflictError if it is on another
+// broker (left as it is). When the winner was released before it could be
+// read, the insert is retried once.
+func (s *Server) recordBrokerReservationUnchecked(ctx context.Context, limitDefID, brokerID, agentID string) (bool, error) {
+	for attempt := 0; attempt < maxBrokerReservationInserts; attempt++ {
+		_, err := s.store.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: limitDefID,
+			SubjectID:         brokerID,
+			ScopeType:         store.QuotaScopeBroker,
+			ScopeID:           brokerID,
+			ResourceID:        agentID,
+			Reserved:          1,
+		})
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, store.ErrActiveReservationExists) {
+			return false, err
+		}
+		held, err := s.store.GetActiveReservation(ctx, limitDefID, agentID)
+		if err == nil {
+			if held.ScopeType == store.QuotaScopeBroker && held.ScopeID == brokerID {
+				return false, nil
+			}
+			return false, &ReservationScopeConflictError{
+				Limit:            store.LimitMaxAgentsPerBroker,
+				ResourceID:       agentID,
+				HeldScopeID:      held.ScopeID,
+				RequestedScopeID: brokerID,
+			}
+		}
+		if !errors.Is(err, store.ErrNotFound) {
+			return false, err
+		}
+	}
+	return false, ErrQuotaLockContention
+}
+
+// reportBrokerScopeConflict logs and counts, at site, an agent whose active
+// max_agents_per_broker reservation is on heldBrokerID rather than its
+// Runtime Broker. The reservation is left as it is: never moved, released or
+// replaced.
+func (s *Server) reportBrokerScopeConflict(site string, agent *store.Agent, heldBrokerID string) {
+	s.quotaService.recordScopeConflict(site)
+	s.agentLifecycleLog.Warn("quota: agent's broker reservation is on another Runtime Broker; left unchanged",
+		"site", site, "agent_id", agent.ID, "pinned", agent.IsPinned(),
+		"runtime_broker_id", agent.RuntimeBrokerID, "reservation_broker_id", heldBrokerID)
 }
 
 // reconcileBrokerQuotaOnPhaseChange updates agent's max_agents_per_broker
@@ -215,6 +267,12 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //     not a new admission decision; see checkAndReserveBrokerQuota for the
 //     cap-enforced path used at start/resume). Covers legacy agents created
 //     before max_agents_per_broker existed, which hold no reservation at all.
+//   - Scope conflicts: a pinned agent whose active reservation is on a broker
+//     other than its Runtime Broker is neither released, moved nor
+//     backfilled; it is reported (log and metric, sites "sweep" and
+//     "backfill") and shown with scopeConflict on the admin usage view. An
+//     unpinned agent's row on another broker is released by the phase rule
+//     above as before, and its backfill is refused and reported the same way.
 //
 // Idempotent both ways: releasing an already-released reservation and
 // re-running the backfill after a prior successful pass are no-ops (the
@@ -258,8 +316,19 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		return
 	}
 	reservationsByBroker := groupReservationsByScopeID(allReservations)
+	// heldBroker maps each reserved agent to the broker its active row is on,
+	// so a backfill can see a row held on another broker.
+	heldBroker := make(map[string]string, len(allReservations))
+	for _, res := range allReservations {
+		heldBroker[res.ResourceID] = res.ScopeID
+	}
 
-	var checked, released, backfilled int
+	listedBrokers := make(map[string]bool, len(brokers.Items))
+	for _, broker := range brokers.Items {
+		listedBrokers[broker.ID] = true
+	}
+
+	var checked, released, backfilled, conflicts int
 	for _, broker := range brokers.Items {
 		reservations := reservationsByBroker[broker.ID]
 
@@ -293,6 +362,13 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				released++
 				continue
 			}
+			if agent.IsPinned() && agent.RuntimeBrokerID != res.ScopeID {
+				// A pinned agent's row on another broker: report it, never
+				// release or move it.
+				s.reportBrokerScopeConflict(scopeConflictSiteSweep, agent, res.ScopeID)
+				conflicts++
+				continue
+			}
 			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
 				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, agent.ID)
 				released++
@@ -312,17 +388,36 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 			if reservedIDs[agent.ID] || !isBrokerQuotaCountedPhase(agent.Phase) {
 				continue
 			}
-			if err := s.recordBrokerReservationUnchecked(ctx, limitDef.ID, broker.ID, agent.ID); err != nil {
+			if held, ok := heldBroker[agent.ID]; ok && agent.IsPinned() {
+				// A pinned agent holding a row on another broker is not
+				// backfilled here. The release pass above reports it when
+				// that broker is listed; report it here when it is not.
+				if !listedBrokers[held] {
+					s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, held)
+					conflicts++
+				}
+				continue
+			}
+			created, err := s.recordBrokerReservationUnchecked(ctx, limitDef.ID, broker.ID, agent.ID)
+			if err != nil {
+				var conflict *ReservationScopeConflictError
+				if errors.As(err, &conflict) {
+					s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, conflict.HeldScopeID)
+					conflicts++
+					continue
+				}
 				s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
 					"agent_id", agent.ID, "broker_id", broker.ID, "error", err)
 				continue
 			}
-			backfilled++
+			if created {
+				backfilled++
+			}
 		}
 	}
 
-	if released > 0 || backfilled > 0 {
+	if released > 0 || backfilled > 0 || conflicts > 0 {
 		s.agentLifecycleLog.Info("quota reconcile: reconciled max_agents_per_broker reservations",
-			"checked", checked, "released", released, "backfilled", backfilled)
+			"checked", checked, "released", released, "backfilled", backfilled, "scope_conflicts", conflicts)
 	}
 }

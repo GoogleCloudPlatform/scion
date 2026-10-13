@@ -939,9 +939,16 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 }
 
 // writeQuotaReserveError writes the response for a failed quota reservation
-// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+// of limitName: 409 broker_reservation_scope_conflict when the resource
+// holds an active reservation on another Runtime Broker, 429 at the limit or
+// on lock contention, 500 otherwise.
 func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
+	var conflict *ReservationScopeConflictError
 	switch {
+	case errors.As(err, &conflict):
+		writeError(w, http.StatusConflict, ErrCodeBrokerReservationScopeConflict,
+			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			quotaExceededMessage(limitName), nil)
