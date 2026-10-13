@@ -264,10 +264,15 @@ describe('artifact page', () => {
         b.textContent!.includes('Move…')
       ) as HTMLElement | undefined;
 
-    mockFetch(artifact('notes.md', 'text/markdown'));
+    // Without canManage: no Move…, and the grants are never requested, even
+    // while cross-project sharing is on.
+    const urls = mockFetch(artifact('notes.md', 'text/markdown'), '# Hello', {
+      crossProjectSharing: true,
+    });
     let el = await mount(true);
     expect(moveButton(el)).toBeUndefined();
     expect(el.shadowRoot!.querySelector('scion-artifact-move-dialog')).toBeNull();
+    expect(urls.filter((u) => u.endsWith('/grants'))).toEqual([]);
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
 
