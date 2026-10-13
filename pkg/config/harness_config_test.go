@@ -107,6 +107,9 @@ auth:
 	}
 }
 
+// An unknown top-level field is a load warning, not an error, so older
+// binaries accept configs written for newer ones; an unknown field inside a
+// known block still fails validation (ptone/scion#4975).
 func TestLoadHarnessConfigDir_InvalidUnknownField(t *testing.T) {
 	tmpDir := t.TempDir()
 	configDir := filepath.Join(tmpDir, "claude")
@@ -116,8 +119,19 @@ func TestLoadHarnessConfigDir_InvalidUnknownField(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("harness: claude\nunknown: true\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	hc, err := LoadHarnessConfigDir(configDir)
+	if err != nil {
+		t.Fatalf("unknown top-level field must not fail the load: %v", err)
+	}
+	if len(hc.Warnings) != 1 || !strings.Contains(hc.Warnings[0], "unknown") {
+		t.Fatalf("expected one warning naming the field, got %q", hc.Warnings)
+	}
+
+	if err := os.WriteFile(filepath.Join(configDir, "config.yaml"), []byte("harness: claude\nauth:\n  unknown: true\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := LoadHarnessConfigDir(configDir); err == nil {
-		t.Fatal("expected invalid harness config to fail validation")
+		t.Fatal("expected an unknown field inside a known block to fail validation")
 	}
 }
 
