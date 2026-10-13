@@ -768,13 +768,17 @@ export class ScionPageAdminMaintenance extends LitElement {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: newValue }),
       });
-      if (res.ok) {
-        const data = (await res.json()) as MaintenanceStateResponse;
-        this.maintenanceEnabled = data.enabled;
-        this.maintenanceBreakGlass = data.break_glass === true;
+      if (!res.ok) {
+        throw new Error(await extractApiError(res, `HTTP ${res.status}`));
       }
-    } catch {
-      // Silently ignore — keep current state on failure.
+      const data = (await res.json()) as MaintenanceStateResponse;
+      this.maintenanceEnabled = data.enabled;
+      this.maintenanceBreakGlass = data.break_glass === true;
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Failed to update maintenance mode');
+      // The toggle renders from maintenanceEnabled, which is set only from a
+      // server response; re-read it so the toggle shows the saved state.
+      await this.fetchMaintenanceState();
     }
   }
 
@@ -989,7 +993,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start migration:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start migration';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start migration');
     } finally {
       this.runInProgress = false;
     }
@@ -1023,7 +1029,9 @@ export class ScionPageAdminMaintenance extends LitElement {
       this.startPolling();
     } catch (err) {
       console.error('Failed to start operation:', err);
-      this.error = err instanceof Error ? err.message : 'Failed to start operation';
+      // The page stays as it is; a failed action is reported as a toast.
+      // The dialog stays open so the user can retry or cancel.
+      showToast(err instanceof Error ? err.message : 'Failed to start operation');
     } finally {
       this.runInProgress = false;
     }
