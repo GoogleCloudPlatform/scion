@@ -768,3 +768,39 @@ func TestUpdateTemplateContent_LeavesMetadataColumns(t *testing.T) {
 	assert.Equal(t, "base-2", got.BaseTemplate)
 	assert.Equal(t, ownerID, got.OwnerID)
 }
+
+// TestUpdateTemplateContent_LeavesConfig: a commit never writes the stored
+// Config (ptone/scion#4223). A commit computed from a row that carries a
+// different, or no, Config leaves the stored value as it was.
+func TestUpdateTemplateContent_LeavesConfig(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	stored := &store.TemplateConfig{Model: "stored-model", Env: map[string]string{"K": "v"}}
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "cfg", Slug: "cfg", Harness: "claude", Scope: store.TemplateScopeGlobal,
+		Status: store.TemplateStatusPending, Config: stored,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+
+	enabled := true
+	commit := *tmpl
+	commit.Config = &store.TemplateConfig{Model: "commit-model", Telemetry: &api.TelemetryConfig{Enabled: &enabled}}
+	commit.Files = []store.TemplateFile{{Path: "a.md", Size: 1, Hash: "sha256:a"}}
+	commit.ContentHash = "sha256:h1"
+	commit.Status = store.TemplateStatusActive
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &commit, store.TemplateContentPrecondition{}))
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:h1", got.ContentHash, "precondition: the commit wrote its columns")
+	assert.Equal(t, stored, got.Config, "a commit must not write Config")
+
+	cleared := *got
+	cleared.Config = nil
+	cleared.ContentHash = "sha256:h2"
+	require.NoError(t, ts.UpdateTemplateContent(ctx, &cleared, store.TemplateContentPrecondition{ContentHash: "sha256:h1"}))
+	got, err = ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.Equal(t, stored, got.Config, "a commit from a row without Config must not clear it")
+}

@@ -1080,9 +1080,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
-	// The handler further limits the code to the identity's issuer or an
-	// unscoped platform admin session (canManageTestIdentity) and to hubs
-	// where test identity web sessions are available.
+	// The handler further limits the code to the identity's issuer, a
+	// workload delegation for the member-tier identities it issued, or an
+	// unscoped platform admin session (canManageTestIdentity,
+	// workloadWebCodeAdmitted) and to hubs where test identity web sessions
+	// are available.
 	"POST /api/v1/test-identities/{id}/web-login-code": {
 		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
 		Classification: RouteHubAdmin,

@@ -22,8 +22,9 @@ import (
 )
 
 // remoteHubAgentDefaults converts the hub's operational agent_defaults section
-// into the wire form sent to a runtime broker, or nil when the hub has no
-// limit/resource or auto-expose defaults to send.
+// into the wire form sent to a runtime broker. It returns nil only when none
+// of its inputs is set: no limit/resource default, no auto-expose default, no
+// enabled dispatch experiment and no telemetry default.
 //
 // Only the four limit/resource fields cross here. default_template and
 // default_harness_config are resolved hub-side (they need ID/hash stamping) and
@@ -39,7 +40,8 @@ import (
 // snapshot is empty in file mode, the four limit/resource fields are zero
 // there, so the broker-side limit rung never fires — no file-mode branch
 // needed anywhere. That is rejected alternative A7. With no auto-expose
-// default either, this returns nil and the wire field is omitted.
+// default, experiment or telemetry default either, this returns nil and the
+// wire field is omitted.
 //
 // autoExposePorts is the hub's auto-expose-ports default. Unlike the four
 // limit/resource fields it is sent in file mode too: no broker reads it from

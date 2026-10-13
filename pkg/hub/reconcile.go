@@ -70,6 +70,15 @@ func (s *Server) drainBrokerDispatch(ctx context.Context, brokerID string, only 
 		if only != nil && !only(d.Op) {
 			continue
 		}
+		// Once hub shutdown has begun, claim nothing more: the broker's
+		// tunnel is about to close, so a claimed row would only fail.
+		// Unclaimed rows stay pending and drain on the next connect
+		// (ptone/scion#4869).
+		if s.brokerWork.closing() {
+			s.agentLifecycleLog.Info("reconcile: hub is shutting down; leaving the remaining dispatches pending",
+				"brokerID", brokerID, "remaining", len(dispatches)-i)
+			return
+		}
 		claimed, err := s.store.ClaimBrokerDispatch(ctx, d.ID, s.instanceID)
 		if err != nil {
 			s.agentLifecycleLog.Error("reconcile: claim dispatch failed", "id", d.ID, "error", err)

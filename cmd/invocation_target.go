@@ -142,14 +142,6 @@ var contextSkippedSubtrees = map[string]bool{
 	"runtime-broker": true,
 }
 
-// contextIgnoredCommands are commands, by command path, that resolve their
-// hub exactly as without a current context: they would save the resolved
-// endpoint into settings, and the context's hub never reaches a settings
-// file. 'hub shadow' pins its endpoint in the shadow's settings.
-var contextIgnoredCommands = map[string]bool{
-	"scion hub shadow": true,
-}
-
 // contextProjectCommands are hub-only commands (see hubOnlyCommands), by
 // command path, that take the context's project like the project-scoped
 // commands do, although they need no local project. expose and unexpose
@@ -263,12 +255,6 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	if noHub {
 		return nil
 	}
-	// The commands that ignore the context read it only to resolve an
-	// explicit --hub nickname.
-	ignored := contextIgnoredCommands[cmd.CommandPath()]
-	if ignored && !isHubNickname(hubEndpoint) {
-		return nil
-	}
 	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
 	if err != nil {
 		if isHubNickname(hubEndpoint) {
@@ -278,13 +264,8 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 		contextWarned = true
 		return nil
 	}
-	// An explicit nickname is an explicit --hub, also for the commands
-	// that otherwise ignore the context.
 	if err := resolveHubNickname(ctx); err != nil {
 		return err
-	}
-	if ignored {
-		return nil
 	}
 	// config subcommands act on local settings files, never on a hub
 	// project, so they never get an injected project (they still see the
