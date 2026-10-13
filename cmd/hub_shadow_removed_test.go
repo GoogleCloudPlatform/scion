@@ -104,23 +104,32 @@ func runShadowRoot(t *testing.T, args ...string) (stdout, stderr string, err err
 }
 
 // TestHubShadowStub: 'scion hub shadow' is a hidden command that names
-// 'scion use' and fails, with any arguments and flags, outside any project;
-// 'hub unshadow' no longer exists and 'hub --help' lists neither.
+// 'scion use' and fails, with any arguments and flags, outside any project
+// and inside a shadow directory (where it prints no notice: it skips root's
+// hook), without a usage block; 'hub unshadow' no longer exists and
+// 'hub --help' lists neither.
 func TestHubShadowStub(t *testing.T) {
 	setupContextTest(t)
 	for _, args := range [][]string{
 		{"hub", "shadow"},
 		{"hub", "shadow", "my-project", "--hub", "https://hub.example.com", "--unknown"},
 	} {
-		_, stderr, err := runShadowRoot(t, args...)
+		_, _, err := runShadowRoot(t, args...)
 		require.ErrorIs(t, err, errHubShadowRemoved, "%v", args)
 		assert.Contains(t, err.Error(), "scion use <project>")
-		assert.NotContains(t, stderr, shadowNoticeMarker)
 	}
+
+	dir, _ := makeShadowDir(t, "https://hub.example.com")
+	t.Chdir(dir)
+	stdout, stderr, err := runShadowRoot(t, "hub", "shadow", "my-project")
+	require.ErrorIs(t, err, errHubShadowRemoved)
+	assert.NotContains(t, stderr, shadowNoticeMarker)
+	assert.NotContains(t, stdout, shadowNoticeMarker)
 
 	stub := findCommand(t, "hub", "shadow")
 	assert.Same(t, hubShadowRemovedCmd, stub)
 	assert.True(t, stub.Hidden)
+	assert.False(t, showUsageForError(stub, errHubShadowRemoved, true), "no usage block under the pointer")
 	for _, c := range hubCmd.Commands() {
 		assert.NotEqual(t, "unshadow", c.Name(), "hub unshadow is removed")
 	}
@@ -137,8 +146,9 @@ func TestShadowDir_ListRoutesToHubProjectWithNotice(t *testing.T) {
 	dir, _ := makeShadowDir(t, srv.URL)
 	t.Chdir(dir)
 
-	_, stderr, err := runShadowRoot(t, "list")
+	stdout, stderr, err := runShadowRoot(t, "list")
 	require.NoError(t, err)
+	assert.NotContains(t, stdout, shadowNoticeMarker, "the notice never goes to stdout")
 
 	assert.Contains(t, paths(), "GET /api/v1/projects/"+shadowTestProjectID+"/agents",
 		"list asks the shadow's hub for the shadow's project")
@@ -150,17 +160,22 @@ func TestShadowDir_ListRoutesToHubProjectWithNotice(t *testing.T) {
 
 // TestPrintShadowNotice covers when root's pre-run hook prints the notice:
 // in a shadow directory and below it (naming the marker's relative path),
-// and not with --global, in a directory project, or in a non-shadow marker
+// and while the marker remains after its external settings were deleted;
+// not with --global, in a directory project, or in a non-shadow marker
 // directory.
 func TestPrintShadowNotice(t *testing.T) {
-	preRun := func(t *testing.T) string {
+	preRunCmd := func(t *testing.T, args ...string) string {
 		t.Helper()
-		c := findCommand(t, "list")
+		c := findCommand(t, args...)
 		restoreSilenceUsage(t, c)
 		var err error
 		stderr := captureStderr(t, func() { err = rootCmd.PersistentPreRunE(c, nil) })
 		require.NoError(t, err)
 		return stderr
+	}
+	preRun := func(t *testing.T) string {
+		t.Helper()
+		return preRunCmd(t, "list")
 	}
 
 	t.Run("subdirectory names the marker's relative path", func(t *testing.T) {
@@ -172,6 +187,15 @@ func TestPrintShadowNotice(t *testing.T) {
 		stderr := preRun(t)
 		assert.Equal(t, 1, strings.Count(stderr, shadowNoticeMarker), "stderr:\n%s", stderr)
 		assert.Contains(t, stderr, "Delete "+filepath.Join("..", "..", config.DotScion)+" and run")
+	})
+
+	t.Run("a marker without its external settings still prints it", func(t *testing.T) {
+		setupNoProjectPreRun(t)
+		dir, configDir := makeShadowDir(t, "https://hub.example.com")
+		require.NoError(t, os.RemoveAll(filepath.Dir(configDir)))
+		t.Chdir(dir)
+		stderr := preRunCmd(t, "hub", "status")
+		assert.Equal(t, 1, strings.Count(stderr, shadowNoticeMarker), "stderr:\n%s", stderr)
 	})
 
 	t.Run("--global prints nothing", func(t *testing.T) {

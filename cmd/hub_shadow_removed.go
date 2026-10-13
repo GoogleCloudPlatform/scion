@@ -34,6 +34,8 @@ var hubShadowRemovedCmd = &cobra.Command{
 	Use:                "shadow",
 	Hidden:             true,
 	DisableFlagParsing: true,
+	// Root's hook, which sets SilenceUsage, does not run for the stub.
+	SilenceUsage: true,
 	// Skip root's pre-run hook: the stub reads no project, settings or
 	// current context, so it gives the same answer everywhere.
 	PersistentPreRunE: func(*cobra.Command, []string) error { return nil },
