@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,12 +32,14 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relayrole/relayserver"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // conduitAlwaysOn is a relay's hub.conduit reader that reads on.
@@ -56,15 +59,19 @@ type separateRelayWorld struct {
 	userTokenB           string
 	relay                *relayserver.Server
 	release              chan struct{} // feeds the app's event stream
+
+	mu          sync.Mutex
+	agentOpened []uint32 // ids of the streams opened on the agent's session
 }
 
-func freeLocalAddr(t *testing.T) string {
+// lastAgentStream returns the id of the last stream opened on the agent's
+// session, as the agent saw its StreamOpen.
+func (w *separateRelayWorld) lastAgentStream(t *testing.T) uint32 {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	addr := ln.Addr().String()
-	require.NoError(t, ln.Close())
-	return addr
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	require.NotEmpty(t, w.agentOpened, "no stream reached the agent")
+	return w.agentOpened[len(w.agentOpened)-1]
 }
 
 func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
@@ -116,10 +123,12 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 	internalA := httptest.NewServer(cf.srv.ConduitInternalHandler())
 	t.Cleanup(internalA.Close)
 
-	addr := freeLocalAddr(t)
+	publicLn, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := publicLn.Addr().String()
 	w.relay, err = relayserver.Start(ctx, relayserver.Config{
 		InstanceID: "relay-0", PublicURL: "http://" + addr, HubInternalURL: internalA.URL,
-		PublicListen: addr, InternalListen: "127.0.0.1:0",
+		PublicListener: publicLn, InternalListen: "127.0.0.1:0",
 		PeerAuth: externalRelayAuth(t, "relay-0"), Registry: regStore, Experiment: conduitAlwaysOn{},
 	})
 	require.NoError(t, err)
@@ -133,6 +142,14 @@ func newSeparateRelayWorld(t *testing.T) *separateRelayWorld {
 		relayFixture: &relayFixture{conduitFixture: cf, regStore: regStore, launched: launched},
 		app:          app,
 		base:         "http://" + addr,
+		agentSession: conduit.Config{Interceptor: func(dir conduit.Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+			if open := f.GetStreamOpen(); dir == conduit.Inbound && open != nil {
+				w.mu.Lock()
+				w.agentOpened = append(w.agentOpened, open.GetStreamId())
+				w.mu.Unlock()
+			}
+			return []*conduitv1.Frame{f}
+		}},
 	}
 	w.startAgent(t)
 
@@ -195,8 +212,7 @@ func TestSeparateRelay_AgentReachedThroughAnotherHub(t *testing.T) {
 	require.Len(t, tracked, 1)
 	assert.Equal(t, w.launched.ID, tracked[0].AgentID)
 	assert.Equal(t, sessions[0].SessionID, tracked[0].SessionID, "the agent's own session id")
-	assert.NotZero(t, tracked[0].StreamID)
-	assert.NotEqual(t, uint32(1), tracked[0].StreamID, "the agent-side stream id, not the hop's")
+	assert.Equal(t, w.lastAgentStream(t), tracked[0].StreamID, "the stream id on the agent's session, not the hop's")
 
 	// The agent is deleted: hub B's re-check closes the leaf it holds.
 	ended := make(chan error, 1)

@@ -4,7 +4,7 @@ description: Run conduit relays as their own processes with scion server --role 
 ---
 
 :::caution[Development and test hubs only]
-Separate relays need the `hub.conduit` [experiment](/scion/reference/experiments/). Until their production gates are met, run them on development and test hubs only.
+Separate relays need the `hub.conduit` [experiment](/scion/reference/experiments/). A separate relay requires targets (agents and Runtime Brokers) on version X or later. Until then, and until the other production gates are met, run separate relays on development and test hubs only.
 :::
 
 ## Overview
