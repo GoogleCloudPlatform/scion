@@ -16,6 +16,7 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
@@ -29,27 +30,25 @@ import (
 // same file and checks the web BrokerCapabilities type against it.
 const brokerCapabilitiesFieldsFixture = "testdata/broker_capabilities_fields.json"
 
-// brokerCapabilitiesJSONFields returns the JSON object keys encoding/json
-// uses for BrokerCapabilities, following its tag rules: options after the
-// first comma are stripped, a "-" tag skips the field, an empty name falls
-// back to the Go field name, and unexported fields are not encoded.
-func brokerCapabilitiesJSONFields(t *testing.T) []string {
-	t.Helper()
-	// runtimebroker.BrokerCapabilities also declares exec. The hub sends
-	// store.BrokerCapabilities, which does not carry exec, so exec is not
-	// part of the hub API and is not in the fixture.
-	typ := reflect.TypeOf(BrokerCapabilities{})
-	var names []string
+// structJSONFields returns the JSON object keys encoding/json uses for the
+// struct type typ, following its tag rules: options after the first comma
+// are stripped, a "-" tag skips the field, an empty name falls back to the
+// Go field name, and unexported fields are not encoded. It also returns a
+// problem for each field this check does not support: an embedded field, an
+// unexported field with a json tag, and two fields with the same JSON name
+// (encoding/json leaves both off the wire when they conflict at one depth).
+func structJSONFields(typ reflect.Type) (names, problems []string) {
+	goField := map[string]string{}
 	for i := 0; i < typ.NumField(); i++ {
 		f := typ.Field(i)
 		tag, hasTag := f.Tag.Lookup("json")
 		if f.Anonymous {
-			t.Errorf("BrokerCapabilities.%s: embedded fields are not supported by this check", f.Name)
+			problems = append(problems, fmt.Sprintf("%s.%s: embedded fields are not supported by this check", typ.Name(), f.Name))
 			continue
 		}
 		if !f.IsExported() {
 			if hasTag {
-				t.Errorf("BrokerCapabilities.%s: unexported field has json tag %q, which encoding/json ignores", f.Name, tag)
+				problems = append(problems, fmt.Sprintf("%s.%s: unexported field has json tag %q, which encoding/json ignores", typ.Name(), f.Name, tag))
 			}
 			continue
 		}
@@ -60,9 +59,36 @@ func brokerCapabilitiesJSONFields(t *testing.T) []string {
 		if name == "" {
 			name = f.Name
 		}
+		if prev, ok := goField[name]; ok {
+			problems = append(problems, fmt.Sprintf("%s.%s and %s.%s both use JSON name %q", typ.Name(), prev, typ.Name(), f.Name, name))
+			continue
+		}
+		goField[name] = f.Name
 		names = append(names, name)
 	}
-	return names
+	return names, problems
+}
+
+// TestStructJSONFieldsDuplicateName checks that structJSONFields reports two
+// fields with the same JSON name and names both Go fields.
+func TestStructJSONFieldsDuplicateName(t *testing.T) {
+	type dup struct {
+		First  bool `json:"same"`
+		Second bool `json:"same,omitempty"`
+		Other  bool `json:"other"`
+	}
+	names, problems := structJSONFields(reflect.TypeOf(dup{}))
+	if len(problems) != 1 {
+		t.Fatalf("problems = %q, want exactly one", problems)
+	}
+	for _, want := range []string{"dup.First", "dup.Second", `"same"`} {
+		if !strings.Contains(problems[0], want) {
+			t.Errorf("problem %q does not name %s", problems[0], want)
+		}
+	}
+	if got := strings.Join(names, ","); got != "same,other" {
+		t.Errorf("names = %q, want \"same,other\"", got)
+	}
 }
 
 // TestBrokerCapabilitiesFieldsFixture requires the fixture to list exactly
@@ -93,8 +119,15 @@ func TestBrokerCapabilitiesFieldsFixture(t *testing.T) {
 		}
 	}
 
+	// runtimebroker.BrokerCapabilities also declares exec. The hub sends
+	// store.BrokerCapabilities, which does not carry exec, so exec is not
+	// part of the hub API and is not in the fixture.
+	structNames, problems := structJSONFields(reflect.TypeOf(BrokerCapabilities{}))
+	for _, p := range problems {
+		t.Error(p)
+	}
 	inStruct := map[string]bool{}
-	for _, name := range brokerCapabilitiesJSONFields(t) {
+	for _, name := range structNames {
 		inStruct[name] = true
 	}
 

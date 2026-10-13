@@ -48,7 +48,7 @@ const UNDECLARED_ALLOWED: readonly string[] = [
   'templateTiers',
 ];
 
-const serverFields: readonly string[] = (fixture as { fields: string[] }).fields;
+const serverFields: readonly string[] = fixture.fields;
 const serverSet = new Set(serverFields);
 const webKeys: readonly string[] = Object.keys(WEB_KEYS);
 const webSet = new Set(webKeys);
