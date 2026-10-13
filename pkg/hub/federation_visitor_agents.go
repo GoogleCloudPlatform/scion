@@ -72,12 +72,23 @@ func visitorAgentView(a *store.Agent) VisitorAgentView {
 // reads the project's agents with; it reads every page.
 const visitorAgentListPageSize = 500
 
+// visitorMessageableParam is the query parameter that limits a visitor's
+// agent list to the agents the visitor may message now.
+const visitorMessageableParam = "messageable"
+
 // listProjectAgentsForVisitor answers a visitor's GET {projectId}/agents:
 // every agent of the project that is not deleted, newest first, in the
-// visitor view. Query parameters are ignored. admitVisitorSubRoute has
-// already checked the grant and agent.list for this request.
+// visitor view. With ?messageable=true the list holds only the agents the
+// visitor may message now: ComputeMessageability, the same decision
+// (authorizeAgentMessage) that admits a send, evaluated per agent; a
+// store or authorization error in that decision leaves the agent out.
+// Every other query parameter, and any other value of messageable, is
+// ignored. admitVisitorSubRoute has already checked the grant and
+// agent.list for this request.
 func (s *Server) listProjectAgentsForVisitor(w http.ResponseWriter, r *http.Request, projectID string) {
 	ctx := r.Context()
+	visitor, _ := GetIdentityFromContext(ctx).(*VisitorIdentity)
+	messageableOnly := r.URL.Query().Get(visitorMessageableParam) == "true"
 	views := []VisitorAgentView{}
 	cursor := ""
 	for {
@@ -91,6 +102,9 @@ func (s *Server) listProjectAgentsForVisitor(w http.ResponseWriter, r *http.Requ
 			if page.Items[i].ProjectID != projectID {
 				continue
 			}
+			if messageableOnly && !s.visitorMayMessageAgent(ctx, visitor, &page.Items[i]) {
+				continue
+			}
 			views = append(views, visitorAgentView(&page.Items[i]))
 		}
 		if page.NextCursor == "" || page.NextCursor == cursor {
@@ -101,14 +115,25 @@ func (s *Server) listProjectAgentsForVisitor(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, ListVisitorAgentsResponse{Agents: views})
 }
 
+// visitorMayMessageAgent reports whether the visitor may message agent
+// now (ComputeMessageability). It is false for a nil visitor, and for any
+// store or authorization error, which the decision treats as a denial.
+func (s *Server) visitorMayMessageAgent(ctx context.Context, visitor *VisitorIdentity, agent *store.Agent) bool {
+	if visitor == nil {
+		return false
+	}
+	m := s.ComputeMessageability(ctx, visitor, agent)
+	return m != nil && m.CanMessage
+}
+
 // getProjectAgentForVisitor answers a visitor's GET
 // {projectId}/agents/{agentId} (an agent ID or slug) with the agent's
-// visitor view. An agent that is not found in the project gets the
-// uniform refusal. admitVisitorSubRoute has already checked the grant and
-// agent.read for this request.
+// visitor view. An agent that is not found in the project, or is deleted,
+// gets the uniform refusal, by ID as by slug. admitVisitorSubRoute has
+// already checked the grant and agent.read for this request.
 func (s *Server) getProjectAgentForVisitor(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	agent, err := s.resolveProjectAgent(r.Context(), projectID, agentID)
-	if errors.Is(err, store.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !agent.DeletedAt.IsZero()) {
 		writeVisitorRefusal(w)
 		return
 	}
@@ -145,11 +170,14 @@ func (s *Server) visitorMayListProjectAgents(ctx context.Context, visitor *Visit
 	return decision.Allowed, nil
 }
 
-// visitorMayReadAgent reports whether the visitor may read agent: it
-// holds a current project-visitor grant on the agent's project
-// (visitorHoldsActiveGrant) and agent.read on the agent. The agent's
-// message mode does not matter.
+// visitorMayReadAgent reports whether the visitor may read agent: the
+// agent is not deleted, and the visitor holds a current project-visitor
+// grant on the agent's project (visitorHoldsActiveGrant) and agent.read on
+// the agent. The agent's message mode does not matter.
 func (s *Server) visitorMayReadAgent(ctx context.Context, visitor *VisitorIdentity, agent *store.Agent) (bool, error) {
+	if !agent.DeletedAt.IsZero() {
+		return false, nil
+	}
 	granted, err := s.visitorHoldsActiveGrant(ctx, visitor.ID(), agent.ProjectID)
 	if err != nil || !granted {
 		return false, err
@@ -261,8 +289,8 @@ func visitorGrantStatus(rb *store.RoleBinding, now time.Time) string {
 // the caller's own project-visitor grants, read on every request. Only a
 // project visitor (a *VisitorIdentity, which exists only while the
 // federation.project_visitors experiment is on) is answered; any other
-// identity gets 404, as for a route that does not exist, and a visitor
-// while the experiment is off gets the uniform refusal. routeGuard admits
+// identity gets 404 Not Found, and a visitor while the experiment is off
+// gets the uniform refusal. routeGuard admits
 // a visitor on GET only. A grant whose project no longer exists is left
 // out.
 func (s *Server) handleUserMeVisitorGrants(w http.ResponseWriter, r *http.Request) {
@@ -332,9 +360,9 @@ type ListVisitorOwnDMsResponse struct {
 //     (authorizeAgentMessage), the same check that admits the DM read
 //     routes, so every listed DM is one the visitor can read.
 //
-// Only a project visitor is answered; any other identity gets 404, as for
-// a route that does not exist, and a visitor while the
-// federation.project_visitors experiment is off gets the uniform refusal.
+// Only a project visitor is answered; any other identity gets 404 Not
+// Found, and a visitor while the federation.project_visitors experiment
+// is off gets the uniform refusal.
 // routeGuard admits a visitor on GET only.
 func (s *Server) handleUserMeVisitorDMs(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()

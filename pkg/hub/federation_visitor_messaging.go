@@ -222,10 +222,10 @@ var errVisitorTargetRefused = errors.New("visitor target refused")
 //   - visitorAccessAgentList: the named project exists, the visitor holds
 //     a current grant on it and agent.list there
 //     (visitorMayListProjectAgents);
-//   - visitorAccessAgentRead: the named agent exists in the named project,
-//     the visitor holds a current grant on that project and agent.read on
-//     the agent (visitorMayReadAgent); the agent's message mode does not
-//     matter.
+//   - visitorAccessAgentRead: the named agent exists in the named project
+//     and is not deleted, the visitor holds a current grant on that project
+//     and agent.read on the agent (visitorMayReadAgent); the agent's
+//     message mode does not matter.
 //
 // Otherwise it writes the uniform refusal (writeVisitorRefusal) and
 // returns false; a store error other than not-found is written as such.
@@ -277,7 +277,7 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 			return false
 		}
 		if !allowed {
-			return refuse("no current grant with agent.read")
+			return refuse("deleted agent, or no current grant with agent.read")
 		}
 		return true
 	}

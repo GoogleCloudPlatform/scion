@@ -19,10 +19,12 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -512,4 +514,188 @@ func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
 		assert.Empty(t, id, name)
 		assert.Empty(t, key, name)
 	}
+}
+
+// A deleted agent is gone for a visitor: absent from the list, and its
+// read by ID and by slug both give 5A's refusal, byte for byte. Admission
+// and the handler each refuse it.
+func TestVisitorAgents_DeletedAgentRefused(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
+	list := f.projectAgentsPath(f.projectID)
+
+	gone := &store.Agent{
+		ID: tid(t.Name() + "-gone"), Name: "gone", Slug: "gone", ProjectID: f.projectID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID, Phase: "running", MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, f.st.CreateAgent(ctx, gone))
+	rec := f.do(t, alice, http.MethodGet, list+"/"+gone.ID, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "readable before deletion: %s", rec.Body.String())
+
+	row, err := f.st.GetAgent(ctx, gone.ID)
+	require.NoError(t, err)
+	row.DeletedAt = time.Now()
+	require.NoError(t, f.st.UpdateAgent(ctx, row))
+
+	reference := f.do(t, alice, http.MethodPost, f.projectMessagePath("no-such-agent"), visitorTextBody("x"))
+	assertVisitorRefusal(t, reference, "5A refusal")
+
+	rec = f.do(t, alice, http.MethodGet, list, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var listed ListVisitorAgentsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listed))
+	assert.NotEmpty(t, listed.Agents)
+	for _, v := range listed.Agents {
+		assert.NotEqual(t, gone.Slug, v.Slug, "a deleted agent is not listed")
+	}
+
+	for _, ref := range []string{gone.ID, gone.Slug} {
+		rec := f.do(t, alice, http.MethodGet, list+"/"+ref, nil)
+		assertVisitorRefusal(t, rec, "read deleted agent: "+ref)
+		assertSameResponse(t, reference, rec, "read deleted agent: "+ref)
+	}
+
+	// Each check alone refuses the deleted agent.
+	deleted, err := f.st.GetAgent(ctx, gone.ID)
+	require.NoError(t, err)
+	require.False(t, deleted.DeletedAt.IsZero())
+	visitor := NewVisitorIdentity(tid("deleted-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
+	allowed, err := f.srv.visitorMayReadAgent(ctx, visitor, deleted)
+	require.NoError(t, err)
+	assert.False(t, allowed, "admission refuses a deleted agent")
+
+	direct := httptest.NewRecorder()
+	f.srv.getProjectAgentForVisitor(direct, httptest.NewRequest(http.MethodGet, list+"/"+gone.ID, nil), f.projectID, gone.ID)
+	assertVisitorRefusal(t, direct, "handler: deleted agent by ID")
+}
+
+// With ?messageable=true a visitor's list holds only the agents the
+// visitor may message now: not the agent in message mode none, nor the
+// lineage agent a visitor cannot reach. Without the flag, or with any
+// other value, the list is unchanged.
+func TestVisitorAgents_MessageableFilter(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
+	list := f.projectAgentsPath(f.projectID)
+
+	lineal := &store.Agent{
+		ID: tid(t.Name() + "-lineal"), Name: "lineal", Slug: "lineal", ProjectID: f.projectID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID, Phase: "running", MessageMode: store.MessageModeLineage,
+	}
+	require.NoError(t, f.st.CreateAgent(ctx, lineal))
+
+	slugs := func(path string) []string {
+		t.Helper()
+		rec := f.do(t, alice, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		var top map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+		var items []json.RawMessage
+		require.NoError(t, json.Unmarshal(top["agents"], &items))
+		for _, item := range items {
+			assert.ElementsMatch(t, visitorAgentViewFields, objectFields(t, item), string(item))
+		}
+		var resp ListVisitorAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		out := []string{}
+		for _, v := range resp.Agents {
+			out = append(out, v.Slug)
+		}
+		return out
+	}
+
+	all := []string{f.agent.Slug, f.sealed.Slug, lineal.Slug}
+	assert.ElementsMatch(t, all, slugs(list), "unfiltered")
+	assert.ElementsMatch(t, []string{f.agent.Slug}, slugs(list+"?messageable=true"), "filtered")
+	assert.ElementsMatch(t, all, slugs(list+"?messageable=false"), "other value")
+	assert.ElementsMatch(t, all, slugs(list+"?messageable=1"), "other value")
+
+	// The filter agrees with the send: the listed agent accepts a message,
+	// the others are refused.
+	rec := f.do(t, alice, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("hi"))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, slug := range []string{f.sealed.Slug, lineal.Slug} {
+		assertVisitorRefusal(t, f.do(t, alice, http.MethodPost, f.projectMessagePath(slug), visitorTextBody("hi")), "send to "+slug)
+	}
+}
+
+// errVisitorMessageableFault is returned by visitorMessageableFaultStore's
+// role binding loads while it is failing.
+var errVisitorMessageableFault = errors.New("injected role binding load fault")
+
+// visitorMessageableFaultStore fails every role binding load once an
+// agent list has been read while armOnList is set, so the request's
+// admission succeeds and only the per-agent messaging decisions after
+// the list read see the fault.
+type visitorMessageableFaultStore struct {
+	store.Store
+	armOnList atomic.Bool
+	failing   atomic.Bool
+	failed    atomic.Int32
+}
+
+func (s *visitorMessageableFaultStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
+	res, err := s.Store.ListAgents(ctx, filter, opts)
+	if s.armOnList.Load() {
+		s.failing.Store(true)
+	}
+	return res, err
+}
+
+func (s *visitorMessageableFaultStore) ListRoleBindingsForPrincipal(ctx context.Context, principalType, principalID string) ([]*store.RoleBinding, error) {
+	if s.failing.Load() {
+		s.failed.Add(1)
+		return nil, errVisitorMessageableFault
+	}
+	return s.Store.ListRoleBindingsForPrincipal(ctx, principalType, principalID)
+}
+
+func (s *visitorMessageableFaultStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
+	if s.failing.Load() {
+		s.failed.Add(1)
+		return nil, errVisitorMessageableFault
+	}
+	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
+}
+
+// A store error in an agent's messaging decision leaves that agent out of
+// the filtered list (deny on error); the request still succeeds, and the
+// unfiltered list is unaffected.
+func TestVisitorAgents_MessageableFilterDeniesOnError(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
+	list := f.projectAgentsPath(f.projectID)
+
+	origStore, origAuthzStore := f.srv.store, f.srv.authzService.store
+	faulty := &visitorMessageableFaultStore{Store: origStore}
+	f.srv.store = faulty
+	f.srv.authzService.store = faulty
+	t.Cleanup(func() {
+		f.srv.store = origStore
+		f.srv.authzService.store = origAuthzStore
+	})
+
+	get := func(path string) ListVisitorAgentsResponse {
+		t.Helper()
+		faulty.failing.Store(false)
+		rec := f.do(t, alice, http.MethodGet, path, nil)
+		require.Equal(t, http.StatusOK, rec.Code, "%s: %s", path, rec.Body.String())
+		var resp ListVisitorAgentsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp
+	}
+
+	clean := get(list + "?messageable=true")
+	require.Len(t, clean.Agents, 1, "without the fault the messageable agent is listed")
+	assert.Equal(t, f.agent.Slug, clean.Agents[0].Slug)
+
+	faulty.armOnList.Store(true)
+	faulted := get(list + "?messageable=true")
+	assert.Positive(t, faulty.failed.Load(), "the messaging decision observed the fault")
+	assert.Empty(t, faulted.Agents, "an agent whose messaging decision errored is left out")
+
+	unfiltered := get(list)
+	assert.Len(t, unfiltered.Agents, 2, "the unfiltered list makes no messaging decision")
 }
