@@ -327,7 +327,7 @@ func TestHaltedNotificationMessage_ReasonLabels(t *testing.T) {
 		"evicted":           "evicted",
 		"oom_killed":        "out of memory",
 		"container_missing": "container lost",
-		"":                  "signal",
+		"":                  "unknown",
 		"bogus\x1b[31m":     "unknown",
 	} {
 		a := &store.Agent{Slug: "a", Runtime: "docker", ExitReason: reason,
@@ -344,7 +344,7 @@ func TestHaltedWorkspaceWording(t *testing.T) {
 	assert.Equal(t, "Workspace may be re-cloned", haltedWorkspaceWording(&store.Agent{Runtime: "kubernetes"}))
 	assert.Equal(t, "Workspace may be re-cloned", haltedWorkspaceWording(&store.Agent{}))
 	assert.Equal(t, "Workspace kept", haltedWorkspaceWording(&store.Agent{Runtime: "docker"}))
-	assert.Equal(t, "a was halted by the platform (signal). Workspace kept. Resume: scion start a.",
+	assert.Equal(t, "a was halted by the platform (unknown). Workspace kept. Resume: scion start a.",
 		haltedNotificationMessage(&store.Agent{Slug: "a", Runtime: "docker"}))
 }
 

@@ -807,10 +807,10 @@ func filterRunningAgents(agents []api.AgentInfo) []api.AgentInfo {
 }
 
 // haltedPhaseLabel shows why a halted agent was halted next to its phase,
-// e.g. "halted (preempted)", using the reason's fixed display label; any
-// other phase is returned unchanged.
+// e.g. "halted (preempted)", using the reason's fixed display label
+// ("unknown" when none is recorded); any other phase is returned unchanged.
 func haltedPhaseLabel(phase, exitReason string) string {
-	if phase == string(state.PhaseHalted) && exitReason != "" {
+	if phase == string(state.PhaseHalted) {
 		return phase + " (" + state.ExitReason(exitReason).Label() + ")"
 	}
 	return phase

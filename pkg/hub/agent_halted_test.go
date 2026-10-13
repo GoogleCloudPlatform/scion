@@ -240,6 +240,24 @@ func TestHalted_SelfReportNeverHalts(t *testing.T) {
 	assert.Empty(t, got.ExitReason)
 }
 
+func TestHalted_SelfReportedLimitsThenRuntimeReasonHalts(t *testing.T) {
+	// A limits stop the agent reports itself (activity and reason) does
+	// not keep the agent runtime's later disruption of the same run from
+	// halting the terminal row.
+	f := newHaltFixture(t)
+	require.Equal(t, http.StatusOK, f.selfReport(t, "run-1", map[string]any{
+		"phase": "stopped", "activity": "limits_exceeded", "exitReason": "limits_exceeded", "exitCode": 0,
+	}))
+	got := f.get(t)
+	require.Equal(t, "stopped", got.Phase)
+	require.Equal(t, "limits_exceeded", got.ExitReason)
+
+	f.heartbeat(t, brokerAgentHeartbeat{Phase: "stopped", ExitReason: "preempted", RunID: "run-1"})
+	got = f.get(t)
+	assert.Equal(t, "halted", got.Phase)
+	assert.Equal(t, "preempted", got.ExitReason)
+}
+
 func TestHalted_SelfReportedStopThenRuntimeReasonHalts(t *testing.T) {
 	// A self-report never suppresses the runtime's later halt: the plain
 	// stop sciontool reports on SIGTERM, then the broker's disruption.

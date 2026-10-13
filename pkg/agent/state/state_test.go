@@ -678,7 +678,7 @@ func TestExitReasonLabel(t *testing.T) {
 		ExitReasonContainerMissing: "container lost",
 		ExitReasonCrashed:          "crashed",
 		ExitReasonLimitsExceeded:   "limits exceeded",
-		"":                         "signal",
+		"":                         "unknown",
 		"something-else":           "unknown",
 	}
 	for r, want := range cases {

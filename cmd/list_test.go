@@ -474,7 +474,7 @@ func TestHaltedPhaseLabel(t *testing.T) {
 	assert.Equal(t, "halted (preempted)", haltedPhaseLabel("halted", "preempted"))
 	assert.Equal(t, "halted (out of memory)", haltedPhaseLabel("halted", "oom_killed"))
 	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", "evil\x1b[2J"), "only fixed labels are shown")
-	assert.Equal(t, "halted", haltedPhaseLabel("halted", ""))
+	assert.Equal(t, "halted (unknown)", haltedPhaseLabel("halted", ""))
 	assert.Equal(t, "stopped", haltedPhaseLabel("stopped", "preempted"), "only halted shows its reason")
 }
 

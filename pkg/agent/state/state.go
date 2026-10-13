@@ -306,9 +306,10 @@ func (r ExitReason) IsValid() bool {
 	return false
 }
 
-// exitReasonLabels are the display labels of the exit reasons, so text
-// shown to users names a reason from a fixed set and never repeats a
-// reported value verbatim.
+// exitReasonLabels are the display labels of the exit reasons a halted
+// agent can carry (and of the other known reasons), so text shown to users
+// names a reason from a fixed set and never repeats a reported value
+// verbatim.
 var exitReasonLabels = map[ExitReason]string{
 	ExitReasonCrashed:          "crashed",
 	ExitReasonLimitsExceeded:   "limits exceeded",
@@ -318,13 +319,10 @@ var exitReasonLabels = map[ExitReason]string{
 	ExitReasonContainerMissing: "container lost",
 }
 
-// Label returns the display label of r: a fixed phrase for each known
-// reason, "signal" for none (a run ended by a signal with no other
-// reason), and "unknown" for any other value.
+// Label returns the display label of r for a halted agent: a fixed phrase
+// for each known reason, and "unknown" for anything else, including no
+// reason (a halt always records one).
 func (r ExitReason) Label() string {
-	if r == "" {
-		return "signal"
-	}
 	if l, ok := exitReasonLabels[r]; ok {
 		return l
 	}
