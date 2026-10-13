@@ -786,6 +786,7 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 	hmacKey := b.hmacKey
 	brokerID := b.brokerID
 	pluginName := b.pluginName
+	httpClient := b.httpClient
 	b.mu.RUnlock()
 
 	// Prefer the in-process handler if set (testing mode)
@@ -836,7 +837,7 @@ func (b *TelegramBroker) deliverInbound(topic string, msg *messages.StructuredMe
 		}
 	}
 
-	resp, err := b.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		b.log.Error("Failed to deliver inbound message", "error", err, "topic", topic)
 		return nil

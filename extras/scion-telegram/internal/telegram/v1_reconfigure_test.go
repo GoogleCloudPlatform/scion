@@ -38,6 +38,7 @@ import (
 type v1PollServer struct {
 	srv   *httptest.Server
 	polls chan struct{}
+	quit  chan struct{} // closed in Cleanup to end pending long-polls
 
 	mu    sync.Mutex
 	calls int
@@ -45,7 +46,7 @@ type v1PollServer struct {
 
 func newV1PollServer(t *testing.T) *v1PollServer {
 	t.Helper()
-	f := &v1PollServer{polls: make(chan struct{}, 16)}
+	f := &v1PollServer{polls: make(chan struct{}, 16), quit: make(chan struct{})}
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -74,12 +75,18 @@ func newV1PollServer(t *testing.T) *v1PollServer {
 			case f.polls <- struct{}{}:
 			default:
 			}
-			<-r.Context().Done()
+			select {
+			case <-r.Context().Done():
+			case <-f.quit:
+			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}))
+	// Cleanups run last-in first-out: end pending long-polls, then close
+	// the server, which waits for outstanding requests.
 	t.Cleanup(f.srv.Close)
+	t.Cleanup(func() { close(f.quit) })
 	return f
 }
 
