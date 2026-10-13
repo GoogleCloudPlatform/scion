@@ -275,7 +275,12 @@ const inFlightStartStopWait = 45 * time.Second
 
 // shutdownDeadline bounds Shutdown's two waits together: for cancelled
 // starts to finish their cleanup, then for the HTTP server to drain.
-const shutdownDeadline = 30 * time.Second
+const shutdownDeadline = ShutdownDeadline
+
+// ShutdownDeadline is the bound on a Runtime Broker's shutdown drain (starts
+// in flight, then HTTP requests). A host that owns the listener for several
+// instances uses the same bound for its own drain.
+const ShutdownDeadline = 30 * time.Second
 
 // cancelInFlightStart cancels the tracked starts of key and waits, bounded
 // by ctx and inFlightStartStopWait, for their cleanup.

@@ -1027,7 +1027,7 @@ func (s *Server) handleInstallSelfManaged(w http.ResponseWriter, r *http.Request
 			InternalError(w)
 			return
 		}
-		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.config.HubEndpoint); err != nil {
+		if err := createBridgeConfigTemplate(name, bridgeConfigPath, s.HubEndpointFor(HubEndpointForChatBridge)); err != nil {
 			slog.Error("Failed to create bridge config template", "plugin", name, "error", err)
 			InternalError(w)
 			return
@@ -1543,8 +1543,8 @@ func (s *Server) getPluginHubCreds(ctx context.Context, name string) map[string]
 	creds := make(map[string]string)
 
 	// hub_url: from the server config (same value that startup resolves).
-	if s.config.HubEndpoint != "" {
-		creds["hub_url"] = s.config.HubEndpoint
+	if hubURL := s.HubEndpointFor(HubEndpointForPluginBrokers); hubURL != "" {
+		creds["hub_url"] = hubURL
 	}
 
 	// broker_id: deterministic UUIDv5 — same namespace and seed as startup.

@@ -120,6 +120,7 @@ const (
 	ErrCodeRuntimeTargetChanged             = "runtime_target_changed"               // 409
 	ErrCodeRuntimeBrokerNotFlat             = "runtime_broker_not_flat"              // 409
 	ErrCodeRuntimeBrokerNameConflict        = "runtime_broker_name_conflict"         // 409
+	ErrCodeRuntimeTargetInUse               = "runtime_target_in_use"                // 409
 	ErrCodeRuntimeTargetMoveUnsupported     = "runtime_target_move_unsupported"      // 409
 	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
