@@ -235,9 +235,10 @@ func TestCheckAuthentication_ProxyVersusHubRejection(t *testing.T) {
 		{
 			name: "hub",
 			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
 				w.Header().Set("Content-Type", "application/json")
 				w.WriteHeader(http.StatusUnauthorized)
-				_, _ = fmt.Fprint(w, `{"error":{"code":"unauthorized","message":"invalid agent token"}}`)
+				_, _ = fmt.Fprint(w, `{"error":{"code":"invalid_token","message":"invalid token"}}`+"\n")
 			},
 			wantBy:      rejectedByHub,
 			wantRemedy:  "signing key",

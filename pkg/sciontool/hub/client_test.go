@@ -758,8 +758,10 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 		expiredToken := makeJWTWithExpiry(t, time.Now().Add(-time.Minute))
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte("invalid agent token: failed to verify token"))
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_token","message":"invalid token"}}` + "\n"))
 		}))
 		defer server.Close()
 
