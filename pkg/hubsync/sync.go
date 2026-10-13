@@ -525,6 +525,12 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, errProjectMustBeLinked()
 		}
 
+		// Do not auto-link the global project from a git repository that
+		// is not a scion project.
+		if err := RefuseGlobalFallbackLink(isGlobal, explicitTarget); err != nil {
+			return nil, err
+		}
+
 		// Get project name for the prompt
 		projectName := getProjectName(resolvedPath, isGlobal)
 

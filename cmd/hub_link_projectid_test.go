@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -156,6 +158,62 @@ func TestPromptHubRegistration_AlwaysWritesHubProjectID(t *testing.T) {
 	merged, err := config.LoadSettings(scionDir)
 	require.NoError(t, err)
 	assert.Equal(t, localID, merged.GetHubProjectID(), "merged settings resolve to the project")
+}
+
+// TestRunHubLink_RefusesGlobalFallbackInGitRepo checks 'scion hub link' in
+// a git repository with no .scion under HOME, where resolution falls back to
+// the global project: it refuses with the 'scion init' pointer, before any
+// hub request and without writing settings. With --global it links the
+// global project. (A repository with its own .scion links normally; see
+// TestRunHubLink_RelinkWithLinkedGlobalKeepsProjectHubID.)
+func TestRunHubLink_RefusesGlobalFallbackInGitRepo(t *testing.T) {
+	clearHubEnvForUnlinkTest(t)
+	origProjectPath, origGlobal, origYes, origFormat := projectPath, globalMode, autoConfirm, outputFormat
+	origOffer := offerTemplateSyncOnLinkFn
+	t.Cleanup(func() {
+		projectPath, globalMode, autoConfirm, outputFormat = origProjectPath, origGlobal, origYes, origFormat
+		offerTemplateSyncOnLinkFn = origOffer
+	})
+	offerTemplateSyncOnLinkFn = func(_, _, _ string, _ bool) {}
+
+	server, requests := roundTripHub(t)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".scion")
+	require.NoError(t, os.MkdirAll(globalDir, 0o755))
+	globalSettings := filepath.Join(globalDir, "settings.yaml")
+	require.NoError(t, os.WriteFile(globalSettings, []byte(
+		"schema_version: \"1\"\nhub:\n  enabled: true\n  endpoint: \""+server.URL+"\"\n"), 0o644))
+	repo := filepath.Join(home, "src", "fresh-clone")
+	require.NoError(t, os.MkdirAll(repo, 0o755))
+	gitRun(t, repo, "init", "-q")
+	t.Chdir(repo)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	projectPath, globalMode, outputFormat, autoConfirm = "", false, "json", true
+
+	before, err := os.ReadFile(globalSettings)
+	require.NoError(t, err)
+	var linkErr error
+	captureStderr(t, func() {
+		captureStdout(t, func() { linkErr = runHubLink(hubLinkCmd, nil) })
+	})
+	require.Error(t, linkErr)
+	assert.True(t, errors.Is(linkErr, hubsync.ErrGitRepoNotProject), "error = %v", linkErr)
+	assert.Contains(t, linkErr.Error(), "run 'scion init' here first")
+	assert.Contains(t, linkErr.Error(), "--global")
+	assert.Zero(t, requests.Load(), "the refusal makes no hub request")
+	after, err := os.ReadFile(globalSettings)
+	require.NoError(t, err)
+	assert.Equal(t, string(before), string(after), "the refusal writes no settings")
+	_, statErr := os.Stat(filepath.Join(repo, ".scion"))
+	assert.True(t, os.IsNotExist(statErr), "no .scion is created in the repository")
+
+	// --global names the global project explicitly: it links.
+	globalMode = true
+	runHubLinkQuiet(t)
+	linked := hubsync.ProjectLinkedSetting(globalDir, true)
+	require.NotNil(t, linked)
+	assert.True(t, *linked, "--global links the global project")
 }
 
 // nameKeepingHub is a local workstation hub that remembers the ID and name
