@@ -4674,6 +4674,54 @@ describe('save report', () => {
     expect(shadowText(element)).toContain('Reloaded: log_level');
   });
 
+  it('lists skipped keys with their reasons apart from the applied keys', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'notifications'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name'],
+      pending_restart: [],
+      skipped: [
+        {
+          key: 'server.notification_channels',
+          reason: 'Notification channel 2 of 2 failed validation and is not in use.',
+        },
+      ],
+    });
+    const skipped = query(element, '.reload-info .skipped-keys');
+    expect(skipped).not.toBeNull();
+    expect(skipped!.textContent).toContain('Saved but not applied');
+    expect(skipped!.textContent).toContain('server.notification_channels');
+    expect(skipped!.textContent).toContain('Notification channel 2 of 2 failed validation');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).not.toContain('server.notification_channels');
+  });
+
+  it('shows no "Applied now" line when every changed key was skipped', async () => {
+    element = await saveWith({
+      applied: ['federation'],
+      requires_restart: [],
+      applied_keys: [],
+      pending_restart: [],
+      skipped: [{ key: 'server.federation.enabled', reason: 'Could not be applied.' }],
+    });
+    expect(query(element, '.reload-info .applied-keys')).toBeNull();
+    expect(query(element, '.reload-info .skipped-keys')).not.toBeNull();
+  });
+
+  it('shows no skipped notice when nothing was skipped', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      skipped: [],
+    });
+    expect(query(element, '.reload-info .skipped-keys')).toBeNull();
+  });
+
   it('shows no restart notice when every changed key applied live', async () => {
     element = await saveWith({
       applied: ['lifecycle'],

@@ -1570,9 +1570,11 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		// installed, whatever the stored settings say. Startup refuses such
 		// a snapshot (cmd); this keeps a later reload from installing one.
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason(federationSkipTestAdminTier)
 		logTestAdminFederationSkipped()
 	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
+		s.setFederationSkipReason("")
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
 		}
@@ -1581,6 +1583,7 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		if errs := snap.FederationConfig.Validate(); len(errs) > 0 {
 			slog.Error("Federation config validation failed during apply, keeping old config",
 				"errors", fmt.Sprintf("%v", errs))
+			s.setFederationSkipReason(federationSkipInvalid)
 		} else {
 			// Derive federation mode using the same pattern as New().
 			federationMode := s.config.Mode
@@ -1606,8 +1609,10 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 			if err != nil {
 				slog.Error("Federation authenticator rebuild failed, keeping old config",
 					"error", err)
+				s.setFederationSkipReason(federationSkipBuildFailed)
 			} else {
 				s.federationAuth.Store(newAuth)
+				s.setFederationSkipReason("")
 				slog.Info("Federation authenticator hot-reloaded",
 					"trusted_issuers", len(snap.FederationConfig.TrustedIssuers),
 					"enabled", snap.FederationConfig.Enabled)

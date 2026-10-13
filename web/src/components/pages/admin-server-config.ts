@@ -442,6 +442,11 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
+interface SkippedKey {
+  key: string;
+  reason: string;
+}
+
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
@@ -450,6 +455,10 @@ interface ReloadResult {
   // a hub restart (registry restart_required flag).
   applied_keys?: string[];
   pending_restart?: string[];
+  // Changed keys that were saved but are not in use (for example a
+  // notification channel that fails validation), each with a reason. They
+  // are not in applied_keys (ptone/scion#4466).
+  skipped?: SkippedKey[];
   // Workstation hubs: the settings.yaml changes applied live (also listed
   // in applied, next to the section names).
   file_applied?: string[];
@@ -1278,6 +1287,15 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     .reload-info .restart {
       color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped {
+      color: var(--scion-warning-text, #92400e);
+    }
+
+    .reload-info .skipped ul {
+      margin: 0.25rem 0 0;
+      padding-left: 1.25rem;
     }
 
     .loading-container {
@@ -3366,6 +3384,14 @@ export class ScionPageAdminServerConfig extends LitElement {
         ${r.pending_restart && r.pending_restart.length > 0
           ? html`<div class="restart pending-restart">
               Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
+          : nothing}
+        ${r.skipped && r.skipped.length > 0
+          ? html`<div class="skipped skipped-keys">
+              Saved but not applied:
+              <ul>
+                ${r.skipped.map((s) => html`<li><code>${s.key}</code>: ${s.reason}</li>`)}
+              </ul>
             </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0

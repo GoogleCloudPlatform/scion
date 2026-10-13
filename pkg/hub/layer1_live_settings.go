@@ -137,11 +137,13 @@ func (s *Server) currentChannelRegistry() *ChannelRegistry {
 }
 
 // notificationChannelsApplyState records the notification channels the
-// running registry was last built from.
+// running registry was last built from, and the indexes of those it
+// skipped because they failed validation.
 type notificationChannelsApplyState struct {
 	mu       sync.Mutex
 	applied  bool
 	channels []config.V1NotificationChannelConfig
+	skipped  []int
 }
 
 // applyNotificationChannels rebuilds the notification channel registry from
@@ -159,9 +161,64 @@ func (s *Server) applyNotificationChannels(channels []config.V1NotificationChann
 	if st.applied && reflect.DeepEqual(st.channels, channels) {
 		return false
 	}
-	registry := NewChannelRegistryFromSettings(channels)
+	var registry *ChannelRegistry
+	var skipped []int
+	if len(channels) > 0 {
+		registry, skipped = newChannelRegistry(notificationChannelConfigs(channels), logging.Subsystem("hub.notification-channels"))
+	}
 	s.SetChannelRegistry(registry)
 	st.applied = true
 	st.channels = append([]config.V1NotificationChannelConfig(nil), channels...)
+	st.skipped = skipped
 	return true
+}
+
+// Reasons a federation configuration was not installed by ApplySnapshot.
+// They name no configured value.
+const (
+	federationSkipInvalid       = "The federation settings failed validation; the previous federation configuration is still in use."
+	federationSkipBuildFailed   = "The federation settings could not be applied; the previous federation configuration is still in use."
+	federationSkipTestAdminTier = "Federation is not in use while the test admin tier is on."
+)
+
+// federationApplyState records why the federation configuration of the
+// last ApplySnapshot was not installed; skipReason is empty when it was
+// installed or federation is off.
+type federationApplyState struct {
+	mu         sync.Mutex
+	skipReason string
+}
+
+func (s *Server) setFederationSkipReason(reason string) {
+	s.federationApply.mu.Lock()
+	s.federationApply.skipReason = reason
+	s.federationApply.mu.Unlock()
+}
+
+// layer1ApplySkips is what the last ApplySnapshot did not apply
+// (ptone/scion#4466).
+type layer1ApplySkips struct {
+	// ChannelCount is the number of notification channels last applied,
+	// and SkippedChannels the indexes of those that were skipped.
+	ChannelCount    int
+	SkippedChannels []int
+	// FederationReason is set when the federation configuration was not
+	// installed.
+	FederationReason string
+}
+
+// layer1ApplySkips returns the items the last ApplySnapshot skipped.
+func (s *Server) layer1ApplySkips() layer1ApplySkips {
+	var out layer1ApplySkips
+	st := &s.notificationApply
+	st.mu.Lock()
+	if st.applied {
+		out.ChannelCount = len(st.channels)
+		out.SkippedChannels = append([]int(nil), st.skipped...)
+	}
+	st.mu.Unlock()
+	s.federationApply.mu.Lock()
+	out.FederationReason = s.federationApply.skipReason
+	s.federationApply.mu.Unlock()
+	return out
 }
