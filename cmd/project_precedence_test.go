@@ -21,6 +21,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -385,6 +387,11 @@ func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
 // settings. With --global or --project <dir>, the request goes to that
 // project's own ID, not SCION_PROJECT_ID from the environment; without a
 // flag the environment still wins (ptone/scion#3251).
+//
+// The --project <dir> case sets the root --project state that loadHubClient
+// reads, as hub secret, hub env and the service account commands see it; it
+// is not a "project messaging --project" invocation, whose own --project
+// flag names a hub project ID or slug instead.
 func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
 	const (
 		envProjectID  = "env-project-id"
@@ -399,15 +406,26 @@ func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
 		wantID string
 	}{
 		{name: "--global beats env", flag: "global", wantID: globalLocalID},
+		// Root --project state (hub secret, hub env, service accounts),
+		// not "project messaging --project".
 		{name: "--project dir beats env", flag: "dir", wantID: dirLocalID},
 		{name: "no flag, env wins", flag: "", wantID: envProjectID},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			var gotPath string
+			// Every messaging-policy request is recorded, so an extra
+			// request cannot hide behind the one asserted on.
+			var (
+				mu          sync.Mutex
+				policyPaths []string
+			)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				gotPath = r.URL.Path
+				if strings.HasSuffix(r.URL.Path, "/messaging-policy") {
+					mu.Lock()
+					policyPaths = append(policyPaths, r.URL.Path)
+					mu.Unlock()
+				}
 				_ = json.NewEncoder(w).Encode(hubclient.ProjectMessagingPolicy{CrossProjectInbound: "none"})
 			}))
 			defer server.Close()
@@ -430,7 +448,9 @@ func TestLoadHubClient_ProjectFlagPrecedence(t *testing.T) {
 			hubOutputJSON, projectMessagingProject = true, ""
 
 			require.NoError(t, projectMessagingGetCmd.RunE(projectMessagingGetCmd, nil))
-			assert.Equal(t, "/api/v1/projects/"+tc.wantID+"/messaging-policy", gotPath)
+			mu.Lock()
+			defer mu.Unlock()
+			assert.Equal(t, []string{"/api/v1/projects/" + tc.wantID + "/messaging-policy"}, policyPaths)
 		})
 	}
 }
