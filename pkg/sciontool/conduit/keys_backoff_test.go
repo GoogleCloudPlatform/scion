@@ -25,27 +25,35 @@ import (
 )
 
 // TestNewKeyRetryBackoffReset: for each interval, Reset after the delay
-// has reached its cap returns to the first delay, min(keyRetryMin,
-// interval). TestKeyRetryBackoff pins the delay sequences themselves.
+// has reached its cap returns to the first delay. TestKeyRetryBackoff and
+// TestKeyRetryLoop_DelaySequence pin the delay sequences themselves.
 func TestNewKeyRetryBackoffReset(t *testing.T) {
-	for _, interval := range []time.Duration{KeyRefreshInterval, 45 * time.Second, 10 * time.Second} {
-		b := newKeyRetryBackoff(interval)
+	tests := []struct {
+		interval, first, cap time.Duration
+	}{
+		{KeyRefreshInterval, 30 * time.Second, 5 * time.Minute},
+		{45 * time.Second, 30 * time.Second, 45 * time.Second},
+		{10 * time.Second, 10 * time.Second, 10 * time.Second},
+	}
+	for _, tt := range tests {
+		b := newKeyRetryBackoff(tt.interval)
 		for i := 0; i < 8; i++ {
 			b.Failure()
 		}
-		if got, want := b.Failure(), min(keyRetryMax, interval); got != want {
-			t.Fatalf("interval %v: capped delay %v, want %v", interval, got, want)
+		if got := b.Failure(); got != tt.cap {
+			t.Fatalf("interval %v: capped delay %v, want %v", tt.interval, got, tt.cap)
 		}
 		b.Reset()
-		if got, want := b.Failure(), min(keyRetryMin, interval); got != want {
-			t.Fatalf("interval %v: after Reset got %v, want %v", interval, got, want)
+		if got := b.Failure(); got != tt.first {
+			t.Fatalf("interval %v: after Reset got %v, want %v", tt.interval, got, tt.first)
 		}
 	}
 }
 
-// TestKeyRetryResetsAfterSuccess: in the loop, a successful fetch ends
-// the backoff, so the next failure is retried after keyRetryMin again.
-func TestKeyRetryResetsAfterSuccess(t *testing.T) {
+// TestKeyRetryLoop_DelaySequence pins the loop's exact retry deadlines:
+// consecutive failures wait 30s, 1m, 2m, 4m, then 5m (the cap), a success
+// restores the normal interval, and the next failure waits 30s again.
+func TestKeyRetryLoop_DelaySequence(t *testing.T) {
 	h := newFakeHub(t, newTestKey(t, "k1").public)
 	var failing atomic.Bool
 	serve := h.srv.Config.Handler
@@ -76,23 +84,33 @@ func TestKeyRetryResetsAfterSuccess(t *testing.T) {
 		wait time.Duration // delay before this fetch
 	}{
 		{true, KeyRefreshInterval},
-		{true, keyRetryMin},
-		{false, 2 * keyRetryMin},
+		{true, 30 * time.Second},
+		{true, time.Minute},
+		{true, 2 * time.Minute},
+		{true, 4 * time.Minute},
+		{true, 5 * time.Minute},
+		{false, 5 * time.Minute},
 		{true, KeyRefreshInterval},
-		{true, keyRetryMin},
-		{true, 2 * keyRetryMin},
+		{true, 30 * time.Second},
 	}
+	now := clk.Now()
 	for i, step := range steps {
-		failing.Store(step.fail)
-		waitPending(t, clk, 1)
-		clk.Advance(step.wait - time.Millisecond)
+		// The timer is armed only once the previous fetch has finished,
+		// so the next answer can be switched safely after it.
+		if !clk.WaitForTimer(waitTimeout, now.Add(step.wait)) {
+			t.Fatalf("fetch %d: no timer armed for %v after the previous fetch", i+1, step.wait)
+		}
 		if n := h.keyHits.Load(); n != int64(i) {
-			t.Fatalf("fetch %d: fetched before %v (%d fetches)", i+1, step.wait, n)
+			t.Fatalf("fetch %d: %d fetches before it, want %d", i+1, n, i)
 		}
-		clk.Advance(time.Millisecond)
-		waitPending(t, clk, 1)
-		if n := h.keyHits.Load(); n != int64(i+1) {
-			t.Fatalf("fetch %d: no fetch after %v (%d fetches)", i+1, step.wait, n)
-		}
+		failing.Store(step.fail)
+		clk.Advance(step.wait)
+		now = now.Add(step.wait)
+	}
+	if !clk.WaitForTimer(waitTimeout, now.Add(time.Minute)) {
+		t.Fatalf("no 1m retry armed after fetch %d", len(steps))
+	}
+	if n := h.keyHits.Load(); n != int64(len(steps)) {
+		t.Fatalf("%d fetches, want %d", n, len(steps))
 	}
 }
