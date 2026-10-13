@@ -181,6 +181,9 @@ func TestVSCode_ReusesIncludeFileLabel(t *testing.T) {
 func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 	p := vscodePaths{home: t.TempDir()}
 	const n = 8
+	userSettings := `{"editor.fontSize": 13, "terminal.integrated.profiles.linux": {"My shell": {"path": "/usr/bin/fish"}}}`
+	require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+	require.NoError(t, os.WriteFile(p.settings(), []byte(userSettings), 0o600))
 	start := make(chan struct{})
 	errs := make(chan error, n)
 	var wg sync.WaitGroup
@@ -213,6 +216,20 @@ func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 	}
 	assert.Len(t, blocks, n)
 	assert.Len(t, keys, n)
+
+	// settings.json, updated by every run under the same lock, is valid
+	// JSON with the managed values and the user's own key and profile.
+	settings, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+	require.NoError(t, err, "settings.json must stay valid JSON")
+	assert.Equal(t, json.Number("13"), settings["editor.fontSize"], "the user key is kept")
+	assert.Equal(t, p.sshConfig(), settings["remote.SSH.configFile"])
+	assert.Equal(t, "Scion agent", settings["terminal.integrated.defaultProfile.linux"])
+	assert.Equal(t, true, settings["terminal.integrated.sendKeybindingsToShell"])
+	profiles := settings["terminal.integrated.profiles.linux"].(map[string]any)
+	assert.Equal(t, map[string]any{"path": "/usr/bin/fish"}, profiles["My shell"], "the user profile is kept")
+	for name, want := range vscodeTerminalProfiles() {
+		assert.Equal(t, want, profiles[name], name)
+	}
 }
 
 // --prune drops only this hub's agents that a complete listing no longer
