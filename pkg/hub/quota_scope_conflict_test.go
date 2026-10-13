@@ -171,6 +171,17 @@ func TestReserve_AtoBConflict_AUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Zero(t, n, "no reservation is made on B")
 	assert.EqualValues(t, 1, conflicts(scopeConflictSiteReserve))
+
+	// The conflict is answered before B's scope is locked: with B's
+	// advisory lock held elsewhere it is still a conflict, not contention.
+	locker := s.(store.AdvisoryLocker)
+	acquired, release, err := locker.TryAdvisoryLockObject(context.Background(), store.LockQuotaEnforcement, store.StableProjectHash("broker-b"))
+	require.NoError(t, err)
+	require.True(t, acquired)
+	defer func() { _ = release() }()
+	_, err = reserveOn(qs, scopeTestLimit, "broker-b", "agent-1")
+	requireScopeConflict(t, err, "agent-1", "broker-a", "broker-b")
+	assert.EqualValues(t, 2, conflicts(scopeConflictSiteReserve))
 }
 
 // insertBarrierStore holds every armed CreateUsageReservation until all the
