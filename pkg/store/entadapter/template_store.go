@@ -16,7 +16,6 @@ package entadapter
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -318,8 +317,9 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 // The updated precondition means a metadata edit that commits between the
 // read and the UPDATE wins: nothing is written and the edit's updated time
 // is kept, instead of being rolled back to the value read
-// (ptone/scion#4674). As in DeactivateDelegationEdgeGuarded, updated is
-// compared as the exact stored value: on SQLite the column is TEXT, and the
+// (ptone/scion#4674). As in DeactivateDelegationEdgeGuarded (see
+// rawStoredText), updated is compared as the exact stored value: on SQLite
+// the column is TEXT, and the
 // stored form (Go's time.String text, possibly with a monotonic-clock
 // suffix or a non-UTC offset) never equals a bound time.Time read back from
 // it, so the raw text is read first and bound as a string; on Postgres the
@@ -337,7 +337,7 @@ func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, c
 	var rawUpdated string
 	if !pg {
 		var found bool
-		rawUpdated, found, err = s.rawTemplateUpdatedText(ctx, uid)
+		rawUpdated, found, err = rawStoredText(ctx, s.client.Driver(), enttemplate.Table, enttemplate.FieldID, enttemplate.FieldUpdated, uid)
 		if err != nil {
 			return false, err
 		}
@@ -364,9 +364,7 @@ func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, c
 	noSnapshot := enttemplate.Or(enttemplate.AgentConfigEQ(""), enttemplate.AgentConfigIsNil())
 	unchanged := enttemplate.UpdatedEQ(current.Updated)
 	if !pg {
-		unchanged = predicate.Template(func(sel *entsql.Selector) {
-			sel.Where(entsql.EQ(sel.C(enttemplate.FieldUpdated), rawUpdated))
-		})
+		unchanged = predicate.Template(storedTextEQ(enttemplate.FieldUpdated, rawUpdated))
 	}
 
 	n, err := s.client.Template.Update().
@@ -378,33 +376,6 @@ func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, c
 		return false, mapError(err)
 	}
 	return n > 0, nil
-}
-
-// rawTemplateUpdatedText returns the stored text of the updated column of
-// template uid on SQLite, read through s.client so that inside WithTx it
-// runs on the transaction's connection. found is false when no row has that
-// ID (or its updated is NULL).
-func (s *TemplateStore) rawTemplateUpdatedText(ctx context.Context, uid uuid.UUID) (text string, found bool, err error) {
-	rows := &entsql.Rows{}
-	query := "SELECT CAST(" + enttemplate.FieldUpdated + " AS TEXT) FROM " + enttemplate.Table + " WHERE " + enttemplate.FieldID + " = ?"
-	if err := s.client.Driver().Query(ctx, query, []any{uid}, rows); err != nil {
-		return "", false, mapError(err)
-	}
-	defer func() { _ = rows.Close() }()
-	if !rows.Next() {
-		return "", false, mapError(rows.Err())
-	}
-	var raw sql.NullString
-	if err := rows.Scan(&raw); err != nil {
-		return "", false, mapError(err)
-	}
-	if err := rows.Err(); err != nil {
-		return "", false, mapError(err)
-	}
-	if !raw.Valid {
-		return "", false, nil
-	}
-	return raw.String, true, nil
 }
 
 // DeleteTemplate removes a template by ID.
