@@ -723,9 +723,11 @@ func TestTelemetryDispatch_Units(t *testing.T) {
 	// on create and on start/restart.
 	h := remoteHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, wt)
 	require.NotNil(t, h)
+	require.NotNil(t, h.Telemetry)
 	assert.Equal(t, tiersHubEndpoint, h.Telemetry.Cloud.Endpoint)
 	sh := startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, wt)
 	require.NotNil(t, sh)
+	require.NotNil(t, sh.Telemetry)
 	assert.Equal(t, tiersHubEndpoint, sh.Telemetry.Cloud.Endpoint)
 	assert.Nil(t, startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, nil, nil, nil))
 	require.NotNil(t, capable.telemetryPolicy())
