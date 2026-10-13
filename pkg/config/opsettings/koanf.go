@@ -97,6 +97,9 @@ var layer0Prefixes = []string{
 	// Agent port proxy settings — the response header bound is read into
 	// ServerConfig at startup.
 	"server.hub.port_proxy",
+	// Separate relay process settings (scion server --role relay) — read
+	// at startup.
+	"server.relay",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0

@@ -690,6 +690,7 @@ var startupCheckedFileBlocks = []struct {
 }{
 	{[]string{"server", "hub", "conduit"}, func(gc *config.GlobalConfig) error { return gc.Hub.Conduit.Validate() }},
 	{[]string{"server", "hub", "port_proxy"}, func(gc *config.GlobalConfig) error { return gc.Hub.PortProxy.Validate() }},
+	{[]string{"server", "relay"}, func(gc *config.GlobalConfig) error { return gc.Relay.Validate() }},
 }
 
 // validateStartupCheckedFileBlocks checks each startupCheckedFileBlocks

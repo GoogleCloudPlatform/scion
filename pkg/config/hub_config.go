@@ -861,6 +861,10 @@ type GlobalConfig struct {
 	// Hub API server settings
 	Hub HubServerConfig `json:"hub" yaml:"hub" koanf:"hub"`
 
+	// Relay holds the settings of a separate relay process (scion server
+	// --role relay; server.relay).
+	Relay RelayServerConfig `json:"relay,omitzero" yaml:"relay,omitempty" koanf:"relay"`
+
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
 
@@ -1720,6 +1724,9 @@ var camelCaseFields = map[string]string{
 // Handles camelCase conversion for known fields like clientId, clientSecret.
 // Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
 func envKeyToConfigKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.GlobalConfig
+	}
 	// Split by underscore, convert each part
 	parts := strings.Split(strings.ToLower(envKey), "_")
 	for i, part := range parts {
@@ -1758,6 +1765,7 @@ var serverSubKeys = map[string]bool{
 	"mode": true, "env": true, "federation": true,
 	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
 	"scheduler": true, "oidc_login": true, "oidc": true,
+	"relay": true,
 }
 
 // serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
@@ -1766,6 +1774,9 @@ var serverSubKeys = map[string]bool{
 // so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
 // Non-server keys (e.g. telemetry, default_template) pass through unchanged.
 func serverEnvToOpsettingsKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.Path
+	}
 	key := envKeyToOpsettingsKey(envKey)
 	firstSeg := key
 	if dot := strings.Index(key, "."); dot >= 0 {

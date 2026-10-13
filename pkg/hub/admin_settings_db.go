@@ -218,6 +218,10 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	// this body back must not send them.
 	resp.Server.Hub.HubClass = ""
 	resp.Server.Hub.TestIdentities = nil
+	// Nor is the relay-peer secret, which is never returned.
+	if c := resp.Server.Hub.Conduit; c != nil {
+		c.PeerSecret = ""
+	}
 
 	// Build section metadata from the cache.
 	resp.SectionMeta = s.buildSectionMetadata(ctx, ops)

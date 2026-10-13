@@ -74,6 +74,25 @@ const (
 	ConduitMaxStreamAuthzMax = 7 * 24 * time.Hour
 )
 
+// Conduit relay modes of the hub (server.hub.conduit.relay_mode).
+const (
+	// ConduitRelayModeInProcess: every hub process runs its own relay (the
+	// default).
+	ConduitRelayModeInProcess = "in_process"
+	// ConduitRelayModeExternal: the hub runs no relay; separate relay
+	// processes (scion server --role relay) hold the conduit sessions
+	// (design §3.9 "Separate relay").
+	ConduitRelayModeExternal = "external"
+)
+
+// ConduitPeerSecretMinBytes is the shortest accepted
+// server.hub.conduit.peer_secret, in bytes (design §3.9).
+const ConduitPeerSecretMinBytes = 32
+
+// ConduitPeerSecretKey is the settings key of the relay-peer secret. No
+// settings API reads or writes it.
+const ConduitPeerSecretKey = "server.hub.conduit.peer_secret"
+
 // ConduitMaxInstanceIDLen is the longest accepted instance_id.
 const ConduitMaxInstanceIDLen = 128
 
@@ -135,6 +154,16 @@ type HubConduitConfig struct {
 	// it, the hub re-checks the principal and renews the stream or closes
 	// it.
 	StreamAuthzMax HubConduitStreamAuthzMax `json:"streamAuthzMax,omitzero" yaml:"streamAuthzMax,omitempty" koanf:"streamAuthzMax"`
+	// RelayMode is "in_process" (or "", the default) or "external": in
+	// external mode the hub runs no relay and separate relay processes
+	// hold the conduit sessions (design §3.9).
+	RelayMode string `json:"relayMode,omitempty" yaml:"relayMode,omitempty" koanf:"relayMode"`
+	// PeerSecret is the dedicated relay-peer secret (design §3.9): the
+	// HMAC key of every relay-peer call is derived from it wherever a
+	// separate relay runs. It is required in external mode and on
+	// --role relay, independent of the session secret, and never logged,
+	// stored in the database or returned by any API ("" = unset).
+	PeerSecret string `json:"peerSecret,omitempty" yaml:"peerSecret,omitempty" koanf:"peerSecret"`
 }
 
 // HubConduitStreamAuthzMax holds the stream authorization interval per
@@ -166,7 +195,37 @@ func (c HubConduitConfig) IsZero() bool {
 	return c.GrantKeyActivation == "" && len(c.TCPAllowedPorts) == 0 && c.InternalListen == "" &&
 		c.InternalAdvertise == "" && c.PeerAuth == "" && len(c.PeerServiceAccounts) == 0 && c.PeerAudience == "" &&
 		c.ReconnectWindow == "" && c.InstanceID == "" && c.AuthzRecheckInterval == "" && c.LifetimeCap == "" &&
-		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero()
+		c.ShutdownGrace == "" && c.ProxySessionMaxAge == "" && c.StreamAuthzMax.IsZero() &&
+		c.RelayMode == "" && c.PeerSecret == ""
+}
+
+// RelayModeValue returns the relay mode with the default applied.
+func (c HubConduitConfig) RelayModeValue() string {
+	if c.RelayMode == "" {
+		return ConduitRelayModeInProcess
+	}
+	return c.RelayMode
+}
+
+// ExternalRelay reports whether the hub is in external-relay mode.
+func (c HubConduitConfig) ExternalRelay() bool {
+	return c.RelayModeValue() == ConduitRelayModeExternal
+}
+
+// ValidatePeerSecret checks a relay-peer secret's strength. It names the
+// setting and never the value. An empty secret is unset and passes here;
+// the modes that require it check for it separately.
+func ValidatePeerSecret(secret string) error {
+	if secret == "" {
+		return nil
+	}
+	if len(secret) < ConduitPeerSecretMinBytes {
+		return fmt.Errorf("invalid server.hub.conduit.peer_secret: shorter than %d bytes", ConduitPeerSecretMinBytes)
+	}
+	if strings.Count(secret, secret[:1]) == len(secret) {
+		return errors.New("invalid server.hub.conduit.peer_secret: one repeated character")
+	}
+	return nil
 }
 
 // LifetimeCapDuration parses LifetimeCap ("" = ConduitDefaultLifetimeCap).
@@ -380,6 +439,14 @@ func (c HubConduitConfig) Validate() error {
 		if len(id) > ConduitMaxInstanceIDLen || strings.IndexFunc(id, func(r rune) bool { return r <= ' ' || r > '~' }) >= 0 {
 			errs = append(errs, fmt.Errorf("invalid server.hub.conduit.instance_id %q: want at most %d printable ASCII characters without spaces", id, ConduitMaxInstanceIDLen))
 		}
+	}
+	switch c.RelayModeValue() {
+	case ConduitRelayModeInProcess, ConduitRelayModeExternal:
+	default:
+		errs = append(errs, fmt.Errorf("invalid server.hub.conduit.relay_mode %q: want in_process or external", c.RelayMode))
+	}
+	if err := ValidatePeerSecret(c.PeerSecret); err != nil {
+		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
 }

@@ -106,6 +106,8 @@ Settings for the in-process conduit relay and its stream grants. They take effec
 | `proxy_session_max_age` | duration | `"1h"` | How long a user's Conduit session admitted through trusted-proxy authentication (no bearer credential, so no expiry of its own) may open new tunnels, counted from admission. After it, a new tunnel request on that session is refused with `401`; tunnels already open are unaffected. Between `"5m"` and `"1h"`. Env: `SCION_SERVER_HUB_CONDUIT_PROXYSESSIONMAXAGE`. |
 | `stream_authz_max` | object | see description | Authorization interval of open streams, per originating principal kind (`user`, `broker`, `agent`). When a stream reaches its interval, the hub re-checks the principal: if the permission still holds, the stream is renewed for one more interval; if not, it is closed with `4401 authz_expired` (`4404 target_not_found` if the agent is gone). If the check cannot be evaluated (for example a store outage), the stream is never renewed or closed early; it is closed with `4401 authz_expired` at the end of its current interval. Revocations and the `authz_recheck_interval` sweep close a revoked stream sooner, but never extend it. Defaults: `user` `"8h"`, `broker` `"24h"`, `agent` `"24h"`, each between `"1m"` and `"168h"`. Only `user` is enforced today (port proxy streams, terminal attach streams on the agent's Conduit session, and `scion tunnel` streams); the `broker` and `agent` values are validated but not yet applied. Flag: `--conduit-stream-authz-max-user`. Env: `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_USER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_BROKER`, `SCION_SERVER_HUB_CONDUIT_STREAMAUTHZMAX_AGENT`. |
 | `instance_id` | string | see description | This node's relay instance id. It must be unique among live hub processes: a relay that starts with an id already in use takes it over from the other process. Up to 128 printable ASCII characters, no spaces. Default: `POD_NAME` when set, else the host name plus a random per-process suffix. Env: `SCION_SERVER_HUB_CONDUIT_INSTANCEID`. |
+| `relay_mode` | string | `"in_process"` | Where conduit sessions are held. `in_process` runs a relay in every hub process. `external` runs none: separate relay processes (`scion server --role relay`, see [Relay Settings](#relay-settings-serverrelay)) hold the sessions, and the hub serves no conduit sessions itself. External mode requires `peer_secret` and the `hub.conduit` experiment; startup fails without them. Layer 0 (bootstrap); read at startup, restart required. Env: `SCION_SERVER_HUB_CONDUIT_RELAYMODE` (or `SCION_SERVER_HUB_CONDUIT_RELAY_MODE`). |
+| `peer_secret` | string (secret) | | Dedicated relay-peer secret: the HMAC key of every call between the hub and separate relays, and between relays, is derived from it. At least 32 bytes, and not one repeated character. Required in external relay mode and on `--role relay`, where startup fails without it; the hub also refuses to start if it equals the session secret. It is independent of the session secret: a relay never holds the session secret. Never stored in the database, never returned or accepted by the server-config API, never logged, and never passed into agent or workload environments. Prefer a file-mounted `settings.yaml` over the environment. Layer 0 (bootstrap); read at startup, restart required. Env: `SCION_SERVER_HUB_CONDUIT_PEERSECRET` (or `SCION_SERVER_HUB_CONDUIT_PEER_SECRET`). |
 
 **Rotating grant keys.** `POST /api/v1/admin/conduit/grant-keys/rotate` (unscoped Hub administrators only, `hub.conduit_grant_keys.execute`) prunes expired grant signing keys and rotates in a new one with an overlap window: grants signed with the outgoing key stay valid until the earlier of their own expiry and the outgoing key's `NotAfter`. The response lists only key IDs and timestamps.
 
@@ -188,6 +190,17 @@ server:
 **Cardinality and privacy.** Phase names, store methods, endpoint classes and audit outcomes are fixed sets. No path, query, ID, name, email, token, secret or configuration value is logged or used as a label.
 
 **Overhead.** With tracing off, no middleware or decorator is installed, and each recording point in the list handlers is one context lookup that finds nothing. With tracing on, each recorded phase or store read adds two clock reads and an uncontended lock, plus a few hundred bytes and one log line per request.
+
+### Relay Settings (`server.relay`)
+
+Settings of a separate relay process, `scion server --role relay` (external relay mode, `server.hub.conduit.relay_mode: external`). Settings the relay shares with the hub's relay, such as `internal_listen`, `peer_auth`, `peer_secret` and `lifetime_cap`, stay under [`server.hub.conduit`](#conduit-serverhubconduit). All of them are Layer 0 (bootstrap) and read at startup, so a change needs a restart.
+
+The separate relay requires targets on version X or later. Until the production gates of the separate relay are met, it runs on development and test hubs only.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `hub_internal_url` | string | | Base URL (`http(s)://host:port`) of the hub internal API the relay calls for admission, RPCs and re-checks. Any hub replica serves it, so it may be a load-balanced internal address; it must be reachable only inside the cluster or VPC. Layer 0; restart required. Env: `SCION_SERVER_RELAY_HUBINTERNALURL` (or `SCION_SERVER_RELAY_HUB_INTERNAL_URL`). |
+| `public_url` | string | | The relay's own public URL, recorded as its `relay_instances.public_endpoint`. Layer 0; restart required. Env: `SCION_SERVER_RELAY_PUBLICURL` (or `SCION_SERVER_RELAY_PUBLIC_URL`). |
 
 ### Broker Settings (`server.broker`)
 
@@ -1179,6 +1192,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |
 | Conduit relay | `hub.conduit.*` |
+| Separate relay | `relay.*` |
 | Port proxy | `hub.port_proxy.*` |
 
 ### Layer 1 — Operational (`hub_settings` table)

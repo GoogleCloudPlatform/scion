@@ -64,6 +64,7 @@
           "x-since": "1"
         },
         "hub": { "$ref": "#/$defs/serverHub" },
+        "relay": { "$ref": "#/$defs/serverRelay" },
         "broker": { "$ref": "#/$defs/serverBroker" },
         "database": { "$ref": "#/$defs/serverDatabase" },
         "auth": { "$ref": "#/$defs/serverAuth" },
@@ -1264,6 +1265,25 @@
         "disk": { "type": "string" }
       }
     },
+    "serverRelay": {
+      "type": "object",
+      "description": "Settings of a separate relay process (scion server --role relay). Settings shared with the hub's own relay stay under server.hub.conduit. Read at startup.",
+      "additionalProperties": false,
+      "properties": {
+        "hub_internal_url": {
+          "type": "string",
+          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'http://hub-internal.scion.svc:9811').",
+          "x-env-var": "SCION_SERVER_RELAY_HUBINTERNALURL",
+          "x-since": "1"
+        },
+        "public_url": {
+          "type": "string",
+          "description": "The relay's own public URL, recorded as its relay_instances.public_endpoint.",
+          "x-env-var": "SCION_SERVER_RELAY_PUBLICURL",
+          "x-since": "1"
+        }
+      }
+    },
     "serverHub": {
       "type": "object",
       "description": "Hub API server settings (for running scion-server).",
@@ -1506,6 +1526,20 @@
               "type": "string",
               "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
+              "x-since": "1"
+            },
+            "relay_mode": {
+              "type": "string",
+              "enum": ["in_process", "external"],
+              "description": "Where conduit sessions are held: 'in_process' (default) runs a relay in every hub process; 'external' runs none, and separate relay processes (scion server --role relay) hold the sessions. External mode requires peer_secret and the hub.conduit experiment. Read at startup.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_RELAYMODE",
+              "x-since": "1"
+            },
+            "peer_secret": {
+              "type": "string",
+              "description": "Dedicated relay-peer secret, at least 32 bytes: the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",
+              "x-sensitive": true,
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSECRET",
               "x-since": "1"
             },
             "proxy_session_max_age": {

@@ -28,11 +28,13 @@ import (
 // are API-writable), for any caller. They are deploy-time inputs of the test
 // identity tiers (ptone/scion#4240): the hub class of the admin tier gate
 // (phase A0) and the workload issuer allowlist (phase X2, whose trust set
-// must not grow through the API). A key matches itself and every key nested
-// under it.
+// must not grow through the API), and the relay-peer secret (design §3.9:
+// never stored in the database or returned by the API). A key matches
+// itself and every key nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.TestIdentitiesKey,
+	config.ConduitPeerSecretKey,
 }
 
 // testAdminTierRefusedSettingsKeys are settings keys refused by every

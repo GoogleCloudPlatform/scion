@@ -458,6 +458,10 @@ func buildServerConfigFileResponse() (*ServerConfigResponse, error) {
 	if resp.Server != nil && resp.Server.Hub != nil {
 		resp.Server.Hub.HubClass = ""
 		resp.Server.Hub.TestIdentities = nil
+		// Nor is the relay-peer secret, which is never returned.
+		if c := resp.Server.Hub.Conduit; c != nil {
+			c.PeerSecret = ""
+		}
 	}
 
 	// Env overrides — detect SCION_SERVER_* env vars so the admin UI can
