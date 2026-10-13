@@ -416,7 +416,7 @@ func ensureActorTemplate(ctx context.Context, client ateapipb.ControlClient, ate
 			if _, delErr := client.DeleteActorTemplate(ctx, &ateapipb.DeleteActorTemplateRequest{
 				ActorTemplate: &ateapipb.ObjectRef{Atespace: atespace, Name: templateName},
 			}); delErr != nil && status.Code(delErr) != codes.NotFound {
-				runtimeLog.Warn("substrate: failed to clean up a failed golden-snapshot template",
+				runtimeLog().Warn("substrate: failed to clean up a failed golden-snapshot template",
 					"atespace", atespace, "template", templateName, "error", delErr)
 			}
 			return fmt.Errorf("substrate: actor template %s/%s golden snapshot failed: %s", atespace, templateName, msg)

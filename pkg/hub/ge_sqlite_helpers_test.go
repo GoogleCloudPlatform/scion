@@ -48,11 +48,6 @@ type signInPolicyHarness struct {
 // audit) as interactive login.
 func newSignInPolicyHarness(t *testing.T, cfg ServerConfig, validator GoogleCredentialValidator) *signInPolicyHarness {
 	t.Helper()
-	driverName := sqliteDriverName()
-	if driverName == "" {
-		t.Skip("skipping: requires SQLite driver (excluded by no_sqlite build tag)")
-	}
-
 	dbPath := t.TempDir() + "/signin-policy-test.db"
 	// Opens through entc.OpenSQLite (not a raw sql.Open) so the store
 	// boundary gets the same "_timezone=UTC" DSN option and UTC mutation

@@ -30,6 +30,10 @@
 //     and points the Ent client's search_path at it, so every test gets a fresh,
 //     empty set of tables and cannot observe rows created by other tests. The
 //     schema is dropped (CASCADE) on test cleanup.
+//   - Each schema is migrated by replaying a snapshot of the statements one
+//     real entc.AutoMigrate run executed (captured once per test process; see
+//     schema_snapshot_postgres.go). Set SCION_TEST_POSTGRES_AUTOMIGRATE=1 to
+//     run entc.AutoMigrate for every schema instead.
 package enttest
 
 import (
@@ -155,7 +159,7 @@ func newClient(t *testing.T) *ent.Client {
 		}
 	})
 
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+	if err := migrateSchema(context.Background(), client); err != nil {
 		t.Fatalf("enttest: migrating postgres ent client: %v", err)
 	}
 	return client
@@ -176,6 +180,8 @@ func Active() bool { return active }
 // connection-pool stress tests (custom MaxOpenConns) and the multi-process tests
 // (a stable DSN shared with a forked child process). The schema is migrated once
 // here so every client opened against the returned URL sees the full table set.
+// Like NewClient, it migrates by replaying the schema snapshot (see
+// schema_snapshot_postgres.go).
 //
 // It skips the calling test when the Postgres backend is inactive.
 func NewSchemaURL(t *testing.T) string {
@@ -188,7 +194,7 @@ func NewSchemaURL(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("enttest: opening migrate client for schema %s: %v", schema, err)
 	}
-	if err := entc.AutoMigrate(context.Background(), client); err != nil {
+	if err := migrateSchema(context.Background(), client); err != nil {
 		_ = client.Close()
 		t.Fatalf("enttest: migrating schema %s: %v", schema, err)
 	}

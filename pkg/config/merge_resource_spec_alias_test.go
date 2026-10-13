@@ -21,7 +21,8 @@ import (
 )
 
 // TestMergeResourceSpec_ReturnsBaseWhenOverrideNil guards the aliasing hazard
-// that the defensive copy in pkg/agent/provision.go's hub agent_defaults block
+// that the defensive copy of the hub agent_defaults tier in
+// pkg/agent/agent_environment.go's resolveEnvironmentResources
 // (`base := *hd.Resources`) exists to avoid, and it
 // works by inverting the usual direction: it does not assert that the copy is
 // present, it asserts that the copy is still NECESSARY.
@@ -29,14 +30,14 @@ import (
 // The hazard: MergeResourceSpec returns its base argument ITSELF — the same
 // pointer, not a clone — when override is nil. The hub agent_defaults tier
 // passes the context's *api.ResourceSpec in base position, so without a copy
-// first it would publish that pointer into the agent's persisted config.
+// first it would publish that pointer into the agent's effective config.
 //
 // WHY THIS TEST LIVES IN pkg/config AND NOT NEXT TO THE CODE IT PROTECTS.
 // This is deliberate and it must not be "tidied up" by moving it into
 // pkg/agent's Resources test family. Aliasing is a POINTER IDENTITY property,
-// and ProvisionAgent reloads its config from disk near its end
-// (`finalScionCfg = updatedCfg`). That round trip PRESERVES VALUES AND DESTROYS
-// IDENTITY. So any version of this test routed through ProvisionAgent — or
+// and ProvisionAgent reloads its config from disk near its end and re-attaches
+// copies of the effective environment values. That PRESERVES VALUES AND
+// DESTROYS IDENTITY. So any version of this test routed through ProvisionAgent — or
 // asserting on the written scion-agent.json, whose serialization launders
 // identity the same way — passes whether or not the defensive copy exists. It
 // was tried and measured; it cannot discriminate from there. Calling
@@ -52,7 +53,7 @@ func TestMergeResourceSpec_ReturnsBaseWhenOverrideNil(t *testing.T) {
 	base := &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}}
 	if got := MergeResourceSpec(base, nil); got != base {
 		t.Fatal("MergeResourceSpec no longer returns its base argument when override is nil. " +
-			"The defensive copy in pkg/agent/provision.go (base := *hd.Resources) exists solely because it did; " +
+			"The defensive copy in pkg/agent/agent_environment.go (base := *hd.Resources) exists solely because it did; " +
 			"re-derive whether it is still needed before removing it.")
 	}
 }
