@@ -94,7 +94,7 @@ async function newHubContext(browser: Browser): Promise<BrowserContext> {
 test('adds the driver token to same-origin requests only', async ({ browser }) => {
   const context = await newHubContext(browser);
   const token = syntheticToken('one', Date.now() + 3600_000);
-  await installIapDriver(context, { baseURL: hub.url, token: async () => token });
+  await installIapDriver(context, { baseURL: hub.url, token: () => Promise.resolve(token) });
   const page = await context.newPage();
 
   await page.goto('/page-1');
@@ -145,11 +145,11 @@ test('refreshes the token through the callback before it expires', async ({ brow
     baseURL: hub.url,
     now: () => clock,
     refreshBeforeMs: 60_000,
-    token: async () => {
+    token: () => {
       calls++;
       const t = syntheticToken(`t${calls}`, clock + 120_000);
       issued.push(t);
-      return t;
+      return Promise.resolve(t);
     },
   });
   const page = await context.newPage();
@@ -173,11 +173,13 @@ test('keeps an Authorization header the page set itself', async ({ browser }) =>
   const context = await newHubContext(browser);
   await installIapDriver(context, {
     baseURL: hub.url,
-    token: async () => syntheticToken('d', Date.now() + 3600_000),
+    token: () => Promise.resolve(syntheticToken('d', Date.now() + 3600_000)),
   });
   const page = await context.newPage();
   await page.goto('/page-x');
-  await page.evaluate(() => fetch('/api/explicit', { headers: { Authorization: 'Bearer page-set' } }));
+  await page.evaluate(() =>
+    fetch('/api/explicit', { headers: { Authorization: 'Bearer page-set' } })
+  );
   expect(authFor(hub, '/api/explicit')).toEqual(['Bearer page-set']);
   await context.close();
 });
@@ -199,12 +201,8 @@ test('never logs or stores the token, and aborts when the callback fails', async
       baseURL: hub.url,
       now: () => clock,
       refreshBeforeMs: 60_000,
-      token: async () => {
-        if (fail) {
-          throw new Error('synthetic callback failure');
-        }
-        return token;
-      },
+      token: () =>
+        fail ? Promise.reject(new Error('synthetic callback failure')) : Promise.resolve(token),
     });
     const page = await context.newPage();
     const pageLogs: string[] = [];
@@ -237,11 +235,13 @@ test('never logs or stores the token, and aborts when the callback fails', async
   }
 });
 
-test('uninstall stops adding the header; a missing or invalid baseURL is refused', async ({ browser }) => {
+test('uninstall stops adding the header; a missing or invalid baseURL is refused', async ({
+  browser,
+}) => {
   const context = await newHubContext(browser);
   const uninstall = await installIapDriver(context, {
     baseURL: hub.url,
-    token: async () => syntheticToken('u', Date.now() + 3600_000),
+    token: () => Promise.resolve(syntheticToken('u', Date.now() + 3600_000)),
   });
   const page = await context.newPage();
   await page.goto('/page-u1');
@@ -254,7 +254,9 @@ test('uninstall stops adding the header; a missing or invalid baseURL is refused
 
   const bare = await browser.newContext();
   for (const baseURL of ['', 'not a url', 'data:,x']) {
-    await expect(installIapDriver(bare, { baseURL, token: async () => 'x' })).rejects.toThrow(/baseURL/);
+    await expect(
+      installIapDriver(bare, { baseURL, token: () => Promise.resolve('x') })
+    ).rejects.toThrow(/baseURL/);
   }
   await bare.close();
 });

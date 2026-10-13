@@ -274,6 +274,7 @@
         "testHubAdmin:boolean",
         "testIdentities:boolean",
         "testIdentityWebSessions:boolean",
+        "testIdentityWebSessionsUnavailableReason:string",
         "testIssuerAudience:string",
         "testSuperAdmin:boolean"
       ]
