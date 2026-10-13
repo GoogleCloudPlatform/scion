@@ -72,6 +72,16 @@ type RouteMetadata struct {
 	// interactive session or dev credential with a session-only refusal
 	// (session_only_gate.go), before the permission decision.
 	SessionOnly authzop.SessionOnlyReason
+	// VisitorAllowed admits a visitor (a request whose identity is a
+	// *VisitorIdentity) on the route. routeGuard refuses a visitor on every
+	// route that does not set it, with 403 and visitorRouteRefusalMessage,
+	// before the handler runs (refuseVisitorRequest); an admitted visitor
+	// then passes the classification's guard like any other identity. The
+	// flag admits every method the pattern serves, so set it only on a
+	// route whose handler is safe for a visitor on each of them.
+	// validateVisitorAllowedRoutes limits it to authenticated and policy
+	// routes.
+	VisitorAllowed bool
 }
 
 // routeMetadataTable maps every registered mux pattern to its authorization metadata.
@@ -176,6 +186,9 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/auth/me": {
 		Pattern: "/api/v1/auth/me", RouteID: "auth.me",
 		Classification: RouteAuthenticated,
+		// handleAuthMe reads the caller's own profile and writes nothing,
+		// for every method.
+		VisitorAllowed: true,
 	},
 	"/api/v1/experiments": {
 		Pattern: "/api/v1/experiments", RouteID: "experiments.resolved",
@@ -1367,10 +1380,10 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
 		}
-		// A visitor (a federated account, VisitorIdentity) is refused on
-		// every route, whatever its classification, until per-route
-		// visitor admission replaces this check.
-		if refuseVisitorRequest(w, r) {
+		// A visitor (a federated account, VisitorIdentity) is admitted
+		// only on routes that set VisitorAllowed, whatever the route's
+		// classification; every other route refuses it here.
+		if refuseVisitorRequest(w, r, meta) {
 			return
 		}
 		// An agent delegated credential is admitted only on the routes in

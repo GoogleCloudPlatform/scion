@@ -2153,6 +2153,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if err := validateSessionOnlyRoutes(startupRouteMetadata()); err != nil {
 		return nil, err
 	}
+	if err := validateVisitorAllowedRoutes(startupRouteMetadata()); err != nil {
+		return nil, err
+	}
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {

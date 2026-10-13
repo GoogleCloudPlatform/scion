@@ -807,6 +807,84 @@ func TestProjectVisitors_VisitorIsRefusedOnTheRoutes(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
 }
 
+// federatedGet sends GET path with token as the federation credential
+// through the full server handler.
+func (f *visitorGrantFixture) federatedGet(t *testing.T, path, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set(FederationTokenHeader, token)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return rec
+}
+
+// A linked visitor reads its own profile on GET /api/v1/auth/me (a
+// VisitorAllowed route): the federated account's ID and the email the
+// issuer verified. The same credential is refused on a route without the
+// flag.
+func TestVisitorAllowed_AuthMeReturnsVisitorOwnProfile(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	v := f.grantOK(t, grantTestIssuer, "ada@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-ada", "ada@corp.example", boolPtr(true))
+
+	rec := f.federatedGet(t, "/api/v1/auth/me", token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var me UserResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
+	assert.Equal(t, v.ID, me.ID, "the visitor's own federated account")
+	assert.Equal(t, "ada@corp.example", me.Email)
+	assert.Equal(t, "viewer", me.Role)
+
+	rec = f.federatedGet(t, "/api/v1/users/me/groups", token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
+}
+
+// With allow_visitor_grants off for the issuer, a linked visitor is
+// refused on the VisitorAllowed route too, with the uniform refusal.
+func TestVisitorAllowed_AuthMeRefusedWhileIssuerFlagOff(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	f.grantOK(t, grantTestIssuer, "bea@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-bea", "bea@corp.example", boolPtr(true))
+	rec := f.federatedGet(t, "/api/v1/auth/me", token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	f.setIssuerAcceptsVisitors(t, grantTestIssuer, false)
+	rec = f.federatedGet(t, "/api/v1/auth/me", token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+	assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "the uniform refusal")
+}
+
+// An unlinked federated user (no grant, so no federated account) is not a
+// visitor: it gets the same responses with the visitor experiment on as
+// with it off, on the VisitorAllowed route and on a route without the flag.
+func TestVisitorAllowed_UnlinkedFederatedUserUnchanged(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	token := f.token(t, grantTestOtherIssuer, "sub-cyd", "cyd@other.example", boolPtr(true))
+	identity, _, code := f.identityThroughMiddleware(t, token)
+	require.Equal(t, http.StatusOK, code)
+	require.IsType(t, &FederatedUserIdentity{}, identity)
+
+	for _, path := range []string{"/api/v1/auth/me", "/api/v1/users/me/groups"} {
+		visitorSetExperiment(t, f.srv, true)
+		on := f.federatedGet(t, path, token)
+		visitorSetExperiment(t, f.srv, false)
+		off := f.federatedGet(t, path, token)
+		assert.Equal(t, off.Code, on.Code, "%s", path)
+		assert.Equal(t, off.Body.String(), on.Body.String(), "%s", path)
+		assert.NotContains(t, on.Body.String(), visitorRouteRefusalMessage, "%s", path)
+	}
+
+	rec := f.federatedGet(t, "/api/v1/auth/me", token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var me UserResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &me))
+	assert.Equal(t, grantTestOtherIssuer+":sub-cyd", me.ID, "the verified identity, not a local account")
+}
+
 // allow_visitor_grants is checked on every visitor request: turning it off
 // refuses a linked, granted visitor with the uniform refusal and keeps the
 // grant; turning it back on admits the visitor again with no grant change.

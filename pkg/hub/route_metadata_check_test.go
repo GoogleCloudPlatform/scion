@@ -156,3 +156,77 @@ func TestNewRefusesInvalidSessionOnlyRoute(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateVisitorAllowedRoutes(t *testing.T) {
+	base := RouteMetadata{Pattern: "/api/v1/test/visitor", RouteID: "test.visitor", VisitorAllowed: true}
+	for _, tc := range []struct {
+		c       RouteClassification
+		allowed bool
+	}{
+		{RouteAuthenticated, true},
+		{RoutePolicy, true},
+		{RoutePublic, false},
+		{RouteHubAdmin, false},
+		{RouteWorkstation, false},
+		{RouteBrokerHMAC, false},
+		{RouteAgentToken, false},
+		{RouteWebhook, false},
+	} {
+		t.Run(string(tc.c), func(t *testing.T) {
+			m := base
+			m.Classification = tc.c
+			err := validateVisitorAllowedRoutes(map[string]RouteMetadata{m.Pattern: m})
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("err = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("err = nil, want a visitor-allowed metadata error")
+			}
+			for _, w := range []string{`"/api/v1/test/visitor" (test.visitor)`, "visitor-allowed", `classification "` + string(tc.c) + `"`} {
+				if !strings.Contains(err.Error(), w) {
+					t.Errorf("err = %v; want it to contain %q", err, w)
+				}
+			}
+		})
+	}
+	m := base
+	m.Classification, m.VisitorAllowed = RouteHubAdmin, false
+	if err := validateVisitorAllowedRoutes(map[string]RouteMetadata{m.Pattern: m}); err != nil {
+		t.Fatalf("a route without the flag: err = %v, want nil", err)
+	}
+}
+
+// TestRouteMetadataTableVisitorAllowedRoutesAreValid: the route table
+// passes the visitor-allowed startup check.
+func TestRouteMetadataTableVisitorAllowedRoutesAreValid(t *testing.T) {
+	if err := validateVisitorAllowedRoutes(routeMetadataTable); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNewRefusesInvalidVisitorAllowedRoute: New refuses to start when a
+// route the guard would not authorize for a visitor sets VisitorAllowed.
+func TestNewRefusesInvalidVisitorAllowedRoute(t *testing.T) {
+	const pattern = "/healthz"
+	table := maps.Clone(routeMetadataTable)
+	m, ok := table[pattern]
+	if !ok {
+		t.Fatalf("no route %q in the table", pattern)
+	}
+	m.VisitorAllowed = true
+	table[pattern] = m
+	prev := startupRouteMetadata
+	startupRouteMetadata = func() map[string]RouteMetadata { return table }
+	t.Cleanup(func() { startupRouteMetadata = prev })
+
+	srv, err := New(ServerConfig{}, nil)
+	if err == nil || srv != nil {
+		t.Fatalf("New = %v, %v; want a refusal", srv, err)
+	}
+	if !strings.Contains(err.Error(), "visitor-allowed") || !strings.Contains(err.Error(), pattern) {
+		t.Fatalf("err = %v; want it to name the visitor-allowed route %q", err, pattern)
+	}
+}

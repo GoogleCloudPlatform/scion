@@ -62,3 +62,31 @@ func validateSessionOnlyRoutes(table map[string]RouteMetadata) error {
 	}
 	return nil
 }
+
+// validateVisitorAllowedRoutes checks every route that sets VisitorAllowed.
+// A visitor admitted by routeGuard still passes the route's classification
+// guard, so the flag is accepted only on an authenticated or policy route,
+// where that guard admits a user identity and the handler authorizes it.
+// (Session-only routes are hub-admin routes, so they are excluded too.) It
+// returns every violation, sorted by pattern; New refuses to start on any.
+func validateVisitorAllowedRoutes(table map[string]RouteMetadata) error {
+	patterns := make([]string, 0, len(table))
+	for p, meta := range table {
+		if meta.VisitorAllowed {
+			patterns = append(patterns, p)
+		}
+	}
+	sort.Strings(patterns)
+	var errs []error
+	for _, p := range patterns {
+		meta := table[p]
+		if meta.Classification != RouteAuthenticated && meta.Classification != RoutePolicy {
+			errs = append(errs, fmt.Errorf("route %q (%s): visitor-allowed: classification %q (want %q or %q)",
+				p, meta.RouteID, meta.Classification, RouteAuthenticated, RoutePolicy))
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("invalid visitor-allowed route metadata: %w", errors.Join(errs...))
+	}
+	return nil
+}
