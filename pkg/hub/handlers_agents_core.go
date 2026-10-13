@@ -5695,15 +5695,6 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 	})
 }
 
-func isContainerNameConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return (strings.Contains(msg, "container name") && strings.Contains(msg, "already in use")) ||
-		strings.Contains(msg, "is already in use by container")
-}
-
 // skillResolutionErrorCode is the broker's code for a required-skill
 // resolution failure.
 const skillResolutionErrorCode = api.BrokerErrCodeSkillResolution
@@ -5730,6 +5721,9 @@ const harnessConfigUnusableErrorCode = api.BrokerErrCodeHarnessConfigUnusable
 // A required-skill resolution failure is relayed verbatim: the broker's
 // status, message, details and Retry-After, with no hub prefix (#2546 R2).
 //
+// A broker 409 conflict, such as an agent name still held by a stopped
+// container, is relayed as a 409 by relayBrokerRefusal (ptone/scion#3501).
+//
 // Any other failure gets the generic 502. When the broker answered
 // runtime_error with a well-formed details.cause code, details.cause
 // carries that code and nothing else (brokerRuntimeCauseDetails).
@@ -5753,8 +5747,6 @@ func dispatchCreateErrorResponse(w http.ResponseWriter, err error, agentID strin
 	}
 
 	switch {
-	case isContainerNameConflict(err):
-		Conflict(w, "Agent name is already in use by a stopped container. Please delete the existing agent or choose a different name.")
 	case relayDispatchRefusal(w, err):
 		// Response already written.
 	case relayWorkspaceStorageUnconfigured(w, err):
@@ -5833,9 +5825,10 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 }
 
 // relayBrokerRefusal writes a broker 4xx refusal of a dispatch -- 422
-// harness_config_unusable, 403 forbidden or 400 validation_error -- with the
-// broker's status, code and message instead of the generic 502, and reports
-// whether it did. For any other error it writes nothing and returns false.
+// harness_config_unusable, 403 forbidden, 400 validation_error or 409
+// conflict / name_in_use -- with the broker's status, code and message
+// instead of the generic 502, and reports whether it did. For any other
+// error it writes nothing and returns false.
 //
 // The 422 harness_config_unusable and 403 forbidden answers are the broker's
 // refusal of the harness-config a dispatch would run: its provisioner cannot
@@ -5847,6 +5840,15 @@ func relayWorkspaceStorageUnconfigured(w http.ResponseWriter, err error) bool {
 // answers it for a request it refuses as invalid (its ValidationError
 // helper and the start-context checks), usually a request the caller must
 // fix, so it is not a "runtime broker failed" 502 (ptone/scion#2666).
+//
+// The 409 conflict is the broker's answer when the agent name is still held
+// by a stopped container: the broker maps every runtime's name-in-use error
+// to agent.ErrContainerNameInUse and answers 409 conflict with that fixed
+// text. Its other 409 conflicts (a run holding the name, a create already in
+// progress, a refused re-provision) are conflicts for the caller to resolve
+// as well, so the status and code are keyed on, never the message text
+// (ptone/scion#3501). name_in_use is the code the broker gives the same
+// conflict on an asynchronous launch; it is accepted here too.
 func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	var se *brokerStatusError
 	if !errors.As(err, &se) {
@@ -5856,6 +5858,7 @@ func relayBrokerRefusal(w http.ResponseWriter, err error) bool {
 	switch {
 	case se.StatusCode == http.StatusBadRequest && code == ErrCodeValidationError:
 	case se.StatusCode == http.StatusUnprocessableEntity && code == harnessConfigUnusableErrorCode:
+	case se.StatusCode == http.StatusConflict && (code == ErrCodeConflict || code == api.LaunchCodeNameInUse):
 	case se.StatusCode == http.StatusForbidden && code == ErrCodeForbidden:
 		// Harness-config policy is today the broker's only producer of a
 		// 403 "forbidden". If the broker ever sends 403 forbidden with a
