@@ -147,7 +147,7 @@ Switches for the Hub's own metrics export (Cloud Monitoring) and trace export (C
 ```text
 Hub trace export: off (server.hub.observability.tracing_enabled unset; off because SCION_TRACING_ENABLED is not set)
 Hub metrics export: on (project: my-project (source: metadata); server.hub.observability.metrics_enabled=true)
-WARNING: Hub metrics export: off (server.hub.observability.metrics_enabled=true but no export project resolved (...); starting without the exporter. Set server.hub.gcp_project_id or run on GCP)
+WARNING: Hub metrics export: off (server.hub.observability.metrics_enabled=true but no export project resolved (...); starting without the exporter. Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud)
 ```
 
 Metrics are exported every 60 seconds and every trace is sampled. Neither can be configured.

@@ -99,6 +99,12 @@ type ProjectInputs struct {
 
 // ResolveProject returns the export project: the operator-set project ID
 // when present, else the metadata-server project.
+//
+// A configured project ID is trimmed, and a whitespace-only value counts as
+// not set. This is intended: such a value names no usable project, so with
+// the switches unset metrics export stays off (where the code before the
+// switches tried to export to the blank project), and a true switch falls
+// through to the metadata-server project.
 func ResolveProject(in ProjectInputs) Project {
 	if id := strings.TrimSpace(in.Configured); id != "" {
 		if strings.TrimSpace(in.EnvValue) != "" {
@@ -250,7 +256,7 @@ func decideFromSetting(d Decision, on bool, project Project) Decision {
 			detail = "no export project"
 		}
 		d.Reason = fmt.Sprintf("%s=true but no export project resolved (%s); starting without the exporter. "+
-			"Set %s or run on GCP", key, detail, projectIDKey)
+			"Set %s or run on Google Cloud", key, detail, ProjectIDEnv)
 		return d
 	}
 	d.Basis = BasisSetting

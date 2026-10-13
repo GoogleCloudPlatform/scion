@@ -180,6 +180,25 @@ func TestDecision_SettingIsCopied(t *testing.T) {
 	}
 }
 
+// TestDecision_BlankProjectIDUnsetSwitch records the intended trim: a
+// whitespace-only project ID (for example SCION_SERVER_HUB_GCPPROJECTID=" ")
+// counts as not set, so with the switches unset neither exporter runs, even
+// though a metadata-server project resolves.
+func TestDecision_BlankProjectIDUnsetSwitch(t *testing.T) {
+	project := ResolveProject(ProjectInputs{
+		Configured: " ",
+		EnvValue:   " ",
+		Metadata:   func() (string, error) { return "meta-project", nil },
+	})
+	if project.Source != SourceMetadata || project.operatorSet() {
+		t.Fatalf("ResolveProject = %+v, want the metadata project, not operator-set", project)
+	}
+	checkDecision(t, DecideMetrics(nil, project), Metrics, false, BasisLegacy, "",
+		"off because server.hub.gcp_project_id is not set")
+	checkDecision(t, DecideTracing(nil, true, project), Tracing, false, BasisLegacy, "",
+		"SCION_TRACING_ENABLED is set but server.hub.gcp_project_id is not")
+}
+
 func TestDecision_LogLines(t *testing.T) {
 	cases := map[string]Decision{
 		"Hub metrics export: on (project: file-project (source: file); server.hub.observability.metrics_enabled=true)":               DecideMetrics(boolp(true), projFile),
@@ -192,7 +211,7 @@ func TestDecision_LogLines(t *testing.T) {
 		}
 	}
 	warn := DecideTracing(boolp(true), false, projNone).LogLine()
-	for _, sub := range []string{"WARNING: Hub trace export: off (", "server.hub.observability.tracing_enabled=true", "no export project resolved", "starting without the exporter"} {
+	for _, sub := range []string{"WARNING: Hub trace export: off (", "server.hub.observability.tracing_enabled=true", "no export project resolved", "starting without the exporter", "Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud"} {
 		if !strings.Contains(warn, sub) {
 			t.Errorf("warning line %q does not contain %q", warn, sub)
 		}
