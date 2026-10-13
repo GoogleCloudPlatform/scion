@@ -557,7 +557,12 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(scope, ""), globalWriteAction(scope, ActionCreate))
+		// A global or core skill is a new record in the hub catalog: the
+		// check is skill.create_global on a collection-level request at the
+		// hub scope, so a user access token needs skill:create_global on a
+		// hub boundary.
+		decision := s.authzService.CheckAccessWithEvidence(ctx, userIdent, skillScopeResource(scope, ""),
+			globalWriteAction(scope, ActionCreate), hubCollectionEvidence("skill.create_global"))
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create global skills", nil)
 			return
@@ -1599,8 +1604,15 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 	// (no token minted) and needs no check. Evaluated once, up front, and only
 	// when the request actually contains a gh:// URI.
 	ghProjectAllowed := true
+	ghDeniedMessage := "you do not have permission to resolve GitHub skills for this project"
 	if req.ProjectID != "" && hasGitHubSkillRef(req.Skills) {
 		ghProjectAllowed = s.canUseProjectGitHubToken(ctx, req.ProjectID)
+	} else if hasGitHubSkillRef(req.Skills) {
+		// With no ProjectID the Hub fetches public repositories and writes
+		// its resolution cache on the caller's behalf: a user access token
+		// needs skill:read on a hub boundary.
+		ghProjectAllowed = s.tokenMayResolvePublicGitHubSkills(r)
+		ghDeniedMessage = "you do not have permission to resolve GitHub skills"
 	}
 
 	// Per-request memo for (owner,repo,ref,tokenScope) → commitSHA.
@@ -1614,7 +1626,7 @@ func (s *Server) handleSkillsResolve(w http.ResponseWriter, r *http.Request) {
 			if !ghProjectAllowed {
 				resolveErrors = append(resolveErrors, ResolveSkillError{
 					URI: skillRef.URI, Code: agent.SkillErrCodeForbidden,
-					Message: "you do not have permission to resolve GitHub skills for this project",
+					Message: ghDeniedMessage,
 				})
 				continue
 			}
@@ -1889,6 +1901,23 @@ func (s *Server) canUseProjectGitHubToken(ctx context.Context, projectID string)
 		return false
 	}
 	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeProject, projectID), ActionRead).Allowed
+}
+
+// tokenMayResolvePublicGitHubSkills reports whether a request may have the
+// Hub resolve gh:// skills from public repositories with no project
+// credentials. A user access token needs skill.read on the global catalog,
+// which resolves to the hub scope, so the token needs skill:read on a hub
+// boundary. The check applies to user access token requests.
+func (s *Server) tokenMayResolvePublicGitHubSkills(r *http.Request) bool {
+	ctx := r.Context()
+	userIdent := GetUserIdentityFromContext(ctx)
+	if userIdent == nil || !isUserAccessTokenRequest(r, userIdent) {
+		return true
+	}
+	if s.authzService == nil {
+		return false
+	}
+	return s.authzService.CheckAccess(ctx, userIdent, skillScopeResource(store.SkillScopeGlobal, ""), ActionRead).Allowed
 }
 
 // resolveGitHubToken determines the GitHub token scope and mints a token if needed.

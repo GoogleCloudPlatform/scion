@@ -484,11 +484,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/skill-registries", RouteID: "skillRegistries.list",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 	"/api/v1/skill-registries/": {
 		Pattern: "/api/v1/skill-registries/", RouteID: "skillRegistries.byId",
 		Classification: RouteHubAdmin,
 		Permission:     "skill.register", Resource: "skill", Action: "register",
+		BearerTarget: "hub_instance",
 	},
 
 	// -------------------------------------------------------------------------

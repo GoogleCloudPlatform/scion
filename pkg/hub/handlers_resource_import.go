@@ -281,15 +281,15 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 	var projectID, scope string
 	switch req.Scope {
 	case "global", "":
-		// Global import is hub-admin only. CheckAccess on an ownerless,
-		// parentless global resource grants only on admin bypass (or an explicit
-		// hub-wide policy), which is exactly the hub-admin gate we want.
+		// Global import is hub-admin only. The create check on an ownerless,
+		// parentless resource at the hub scope grants only through hub-wide
+		// authority, which is exactly the hub-admin gate we want.
 		userIdent := GetUserIdentityFromContext(ctx)
 		if userIdent == nil {
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		decision := s.globalImportDecision(ctx, userIdent, authzType)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to import global "+kind.noun, nil)
@@ -503,6 +503,26 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 		projectCollectionEvidence(permissionID, projectID))
 }
 
+// globalImportDecision decides whether a user may discover or import
+// resources of authzResourceType ("template" or "harness_config") into the
+// global catalog. The check is the resource's create permission
+// (template.create or harness_config.create) on a collection-level request at
+// the hub scope, so a user access token needs that selector on a hub
+// boundary. Any other resource type is refused.
+func (s *Server) globalImportDecision(ctx context.Context, user UserIdentity, authzResourceType string) Decision {
+	var permissionID string
+	switch authzResourceType {
+	case "template":
+		permissionID = "template.create"
+	case "harness_config":
+		permissionID = "harness_config.create"
+	default:
+		return Decision{Allowed: false, Reason: "unsupported import resource type"}
+	}
+	return s.authzService.CheckAccessWithEvidence(ctx, user, Resource{Type: authzResourceType}, ActionCreate,
+		hubCollectionEvidence(permissionID))
+}
+
 // DiscoverResourcesRequest is the body for discover endpoints. Exactly one of
 // SourceURL or WorkspacePath should be provided.
 type DiscoverResourcesRequest struct {
@@ -675,7 +695,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
-		decision := s.authzService.CheckAccess(ctx, userIdent, Resource{Type: authzType}, ActionCreate)
+		decision := s.globalImportDecision(ctx, userIdent, authzType)
 		if !decision.Allowed {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You don't have permission to discover global "+kind.noun, nil)

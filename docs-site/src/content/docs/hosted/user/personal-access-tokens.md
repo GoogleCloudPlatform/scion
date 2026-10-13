@@ -235,6 +235,13 @@ The same per-request checks apply, with these limits:
   configurations for your user scope needs `template:create` or `harness_config:create`. A
   project token is refused for all of these, because these records belong to no project. Any
   token can list your injected skills.
+- **Global catalog and skill registries.** Creating a global skill needs `skill:create_global`,
+  and managing skill registries needs `skill:register`; both can be selected only on a hub
+  token. Importing or discovering templates or harness configurations for the global catalog
+  needs `template:create` or `harness_config:create` on a hub token. Discovering skills for a
+  project needs `skill:create` on a token whose boundary contains the project; discovering
+  them with no project needs `skill:create_global` on a hub token. Resolving `gh://` skill
+  references with no project needs `skill:read` on a hub token.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
