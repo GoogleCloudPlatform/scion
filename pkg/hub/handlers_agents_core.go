@@ -5109,11 +5109,11 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
 			continue
 		}
+		// The stored event is already cancelled above, so only the
+		// in-memory timer is left to stop. CancelEvent would try to cancel
+		// the stored event again and fail with ErrNotFound.
 		if s.scheduler != nil {
-			if cancelErr := s.scheduler.CancelEvent(ctx, evt.ID); cancelErr != nil {
-				s.agentLifecycleLog.Warn("Failed to cancel in-memory scheduler timer",
-					"event_id", evt.ID, "error", cancelErr)
-			}
+			s.scheduler.StopEventTimer(evt.ID)
 		}
 		cancelled++
 	}
