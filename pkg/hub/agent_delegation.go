@@ -70,6 +70,10 @@ const (
 	// again.
 	delegatedLastSeenInterval = time.Minute
 
+	// agentCredentialLastSeenInterval coalesces agent credential
+	// last_seen_at writes on agent-token verification the same way.
+	agentCredentialLastSeenInterval = time.Minute
+
 	// revokeReasonReservedIdentity is the revoke reason when a grant's
 	// issuer turns out to be a reserved platform identity.
 	revokeReasonReservedIdentity = "reserved_identity"

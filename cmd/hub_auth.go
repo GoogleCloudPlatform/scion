@@ -142,47 +142,53 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("hub URL not specified, use --hub-url, --hub, SCION_HUB_ENDPOINT, hub.endpoint in settings or SCION_HUB_URL")
 	}
 
-	fmt.Printf("Authenticating with Hub at %s\n", hubURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", hubURL)
 
-	// Create hub client (unauthenticated for initial OAuth)
-	client, err := hubclient.New(hubURL, hubclient.WithTimeout(30*time.Second))
-	if err != nil {
-		return fmt.Errorf("failed to create Hub client: %w", err)
-	}
-
-	var tokenResp *hubclient.CLITokenResponse
 	provider, err := cmd.Flags().GetString("provider")
 	if err != nil {
 		return fmt.Errorf("failed to read provider flag: %w", err)
+	}
+	tokenResp, err := hubAuthLoginFlow(cmd, hubURL, provider)
+	if err != nil {
+		return err
+	}
+	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+}
+
+// hubAuthLoginFlow runs the OAuth login to the hub at hubURL: the browser
+// flow, or the device flow with --no-browser or in a headless environment.
+// It returns the token and stores nothing. extra adds client options, such
+// as the transport auth for a hub the CLI picked itself.
+func hubAuthLoginFlow(cmd *cobra.Command, hubURL, provider string, extra ...hubclient.Option) (*hubclient.CLITokenResponse, error) {
+	// Create hub client (unauthenticated for initial OAuth)
+	opts := append([]hubclient.Option{hubclient.WithTimeout(30 * time.Second)}, extra...)
+	client, err := hubclient.New(hubURL, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Hub client: %w", err)
 	}
 
 	if hubAuthNoBrowser || util.IsHeadlessEnvironment() {
 		provider, err := resolveExplicitDeviceFlowProvider(cmd.Context(), client.Auth(), provider)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Device authorization flow for headless environments
 		deviceAuth := newDeviceFlowAuth(client.Auth(), provider)
-		tokenResp, err = deviceAuth.Authenticate(cmd.Context())
+		tokenResp, err := deviceAuth.Authenticate(cmd.Context())
 		if err != nil {
-			return fmt.Errorf("device flow authentication failed: %w", err)
+			return nil, fmt.Errorf("device flow authentication failed: %w", err)
 		}
-	} else {
-		// Browser-based OAuth flow
-		tokenResp, err = runBrowserAuthFlow(cmd, client, provider)
-		if err != nil {
-			return err
-		}
+		return tokenResp, nil
 	}
-
-	return finishHubAuthLogin(cmd, hubURL, tokenResp)
+	// Browser-based OAuth flow
+	return runBrowserAuthFlow(cmd, client, provider)
 }
 
 // finishHubAuthLogin completes a successful login: it stores the
 // credential, adds a URL given explicitly with --hub-url or --hub to the
 // hub list, and records the endpoint in settings where that applies.
 func finishHubAuthLogin(cmd *cobra.Command, hubURL string, tokenResp *hubclient.CLITokenResponse) error {
-	if err := storeTokenAndPrintResult(hubURL, tokenResp); err != nil {
+	if err := storeTokenAndPrintResult(cmd.OutOrStdout(), hubURL, tokenResp); err != nil {
 		return err
 	}
 	if loginHubURLGivenExplicitly() {
@@ -294,14 +300,15 @@ func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedPr
 	}
 
 	// Open browser
-	fmt.Println("Opening browser for authentication...")
+	out := cmd.OutOrStdout()
+	_, _ = fmt.Fprintln(out, "Opening browser for authentication...")
 	if err := util.OpenBrowser(authResp.URL); err != nil {
-		fmt.Printf("\nCould not open browser automatically.\n")
-		fmt.Printf("Please open this URL in your browser:\n\n  %s\n\n", authResp.URL)
+		_, _ = fmt.Fprintf(out, "\nCould not open browser automatically.\n")
+		_, _ = fmt.Fprintf(out, "Please open this URL in your browser:\n\n  %s\n\n", authResp.URL)
 	}
 
 	// Wait for callback
-	fmt.Println("Waiting for authentication...")
+	_, _ = fmt.Fprintln(out, "Waiting for authentication...")
 	code, err := authServer.WaitForCode(cmd.Context())
 	if err != nil {
 		return nil, fmt.Errorf("authentication failed: %w", err)
@@ -317,8 +324,8 @@ func runBrowserAuthFlow(cmd *cobra.Command, client hubclient.Client, requestedPr
 }
 
 // storeTokenAndPrintResult stores the token response as credentials and prints
-// the login result to the terminal.
-func storeTokenAndPrintResult(hubURL string, tokenResp *hubclient.CLITokenResponse) error {
+// the login result to out.
+func storeTokenAndPrintResult(out io.Writer, hubURL string, tokenResp *hubclient.CLITokenResponse) error {
 	credToken := &credentials.TokenResponse{
 		AccessToken:  tokenResp.AccessToken,
 		RefreshToken: tokenResp.RefreshToken,
@@ -337,12 +344,12 @@ func storeTokenAndPrintResult(hubURL string, tokenResp *hubclient.CLITokenRespon
 		return fmt.Errorf("failed to store credentials: %w", err)
 	}
 
-	fmt.Println("\nAuthentication successful!")
+	_, _ = fmt.Fprintln(out, "\nAuthentication successful!")
 	if credToken.User != nil {
 		if credToken.User.Role != "" {
-			fmt.Printf("Logged in as: %s (%s) [%s]\n", credToken.User.DisplayName, credToken.User.Email, credToken.User.Role)
+			_, _ = fmt.Fprintf(out, "Logged in as: %s (%s) [%s]\n", credToken.User.DisplayName, credToken.User.Email, credToken.User.Role)
 		} else {
-			fmt.Printf("Logged in as: %s (%s)\n", credToken.User.DisplayName, credToken.User.Email)
+			_, _ = fmt.Fprintf(out, "Logged in as: %s (%s)\n", credToken.User.DisplayName, credToken.User.Email)
 		}
 	}
 
