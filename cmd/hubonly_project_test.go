@@ -138,6 +138,14 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			wantHub: ctxTestHub,
 		},
 		{
+			name: "a linked versioned directory project without hub.project_id ignores a top-level project_id",
+			setup: func(t *testing.T) {
+				makeHubOnlyDirProject(t, "schema_version: \"1\"\nproject_id: "+hubOnlyLocalID+"\nhub:\n  linked: true\n")
+			},
+			want:    hubOnlyProject{unlinkedDir: "myrepo"},
+			wantHub: ctxTestHub,
+		},
+		{
 			name: "an unlinked versioned directory project sends no id",
 			setup: func(t *testing.T) {
 				makeHubOnlyDirProject(t, "schema_version: \"1\"\nhub:\n  project_id: "+hubOnlyLocalID+"\n")

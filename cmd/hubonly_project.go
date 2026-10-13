@@ -16,6 +16,7 @@ package cmd
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -106,19 +107,40 @@ func ownProjectIDs(dir string) (hubID, localID string) {
 		dirs = append(dirs, ext)
 	}
 	for _, d := range dirs {
+		versioned := isVersionedSettingsDir(d)
 		if s, err := config.LoadSettingsFromDir(d); err == nil && s != nil {
 			if s.Hub != nil && s.Hub.ProjectID != "" {
 				hubID = s.Hub.ProjectID
 			}
-			if s.ProjectID != "" {
+			// A versioned file keeps the id at hub.project_id only; a
+			// top-level project_id left in it does not count.
+			if !versioned && s.ProjectID != "" {
 				localID = s.ProjectID
 			}
 		}
-		if vs, err := config.LoadSingleFileVersioned(d); err == nil && vs != nil && vs.Hub != nil && vs.Hub.ProjectID != "" {
-			localID = vs.Hub.ProjectID
+		if versioned {
+			localID = ""
+			if vs, err := config.LoadSingleFileVersioned(d); err == nil && vs != nil && vs.Hub != nil {
+				localID = vs.Hub.ProjectID
+			}
 		}
 	}
 	return hubID, localID
+}
+
+// isVersionedSettingsDir reports whether dir's settings file is in the
+// versioned format.
+func isVersionedSettingsDir(dir string) bool {
+	path := config.GetSettingsPath(dir)
+	if path == "" {
+		return false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	version, _ := config.DetectSettingsFormat(data)
+	return version != ""
 }
 
 // describe names the project and its source for messages.
