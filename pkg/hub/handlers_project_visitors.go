@@ -59,6 +59,10 @@ const (
 	visitorEmailNotAcceptedMessage  = "This hub does not accept that email for visitors from that issuer"
 )
 
+// visitorGrantNonAmplificationMessage is the 403 message of a grant or
+// window change refused by visitorGrantNonAmplification.
+const visitorGrantNonAmplificationMessage = "You can grant visitor access only when you hold every permission it gives on this project"
+
 // maxVisitorRequestBytes caps a visitor grant request body.
 const maxVisitorRequestBytes = 16 * 1024
 
@@ -74,11 +78,15 @@ type ProjectVisitor struct {
 	Issuer string `json:"issuer"`
 	// Status is the account's status: pending until the visitor's first
 	// request links the account, then active, or suspended.
-	Status    string     `json:"status"`
-	GrantedBy string     `json:"grantedBy,omitempty"`
-	NotBefore *time.Time `json:"notBefore,omitempty"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-	CreatedAt time.Time  `json:"createdAt"`
+	Status string `json:"status"`
+	// IssuerAccepted reports whether the hub accepts visitors from Issuer
+	// now (visitorGrantIssuer). While it is false the grant is kept but
+	// the visitor's requests are refused.
+	IssuerAccepted bool       `json:"issuerAccepted"`
+	GrantedBy      string     `json:"grantedBy,omitempty"`
+	NotBefore      *time.Time `json:"notBefore,omitempty"`
+	ExpiresAt      *time.Time `json:"expiresAt,omitempty"`
+	CreatedAt      time.Time  `json:"createdAt"`
 }
 
 // ListProjectVisitorsResponse is the GET /visitors response.
@@ -200,7 +208,7 @@ func (s *Server) handleListProjectVisitors(w http.ResponseWriter, r *http.Reques
 		if !ok || !u.IsFederated() {
 			continue
 		}
-		resp.Visitors = append(resp.Visitors, projectVisitorView(u, b))
+		resp.Visitors = append(resp.Visitors, s.projectVisitorResponse(u, b))
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -225,7 +233,7 @@ func (s *Server) handleAddProjectVisitor(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if msg := validateVisitorWindow(req.NotBefore, req.ExpiresAt, time.Now()); msg != "" {
-		ValidationError(w, msg, nil)
+		ValidationError(w, msg, map[string]interface{}{"field": "expiresAt"})
 		return
 	}
 	if field, msg := s.visitorGrantRefusal(issuer, email); msg != "" {
@@ -312,7 +320,7 @@ func (s *Server) grantProjectVisitor(ctx context.Context, projectID, actorID, is
 			visitorAuditSummary(u, rb, subject)); err != nil {
 			return err
 		}
-		out = projectVisitorView(u, rb)
+		out = s.projectVisitorResponse(u, rb)
 		return nil
 	})
 	return out, err
@@ -333,8 +341,7 @@ func (s *Server) visitorGrantNonAmplification(w http.ResponseWriter, ctx context
 		return false
 	}
 	if d := s.authzService.actorHoldsAllPermissions(ctx, actor, rd.Permissions, store.RoleScopeProject, projectID); !d.Allowed {
-		writeError(w, http.StatusForbidden, ErrCodeForbidden,
-			"You can grant visitor access only when you hold every permission it gives on this project", nil)
+		writeError(w, http.StatusForbidden, ErrCodeForbidden, visitorGrantNonAmplificationMessage, nil)
 		return false
 	}
 	return true
@@ -350,7 +357,7 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if msg := validateVisitorWindow(req.NotBefore, req.ExpiresAt, time.Now()); msg != "" {
-		ValidationError(w, msg, nil)
+		ValidationError(w, msg, map[string]interface{}{"field": "expiresAt"})
 		return
 	}
 	if !s.visitorGrantNonAmplification(w, ctx, actor, project.ID) {
@@ -374,7 +381,7 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 			visitorAuditSummary(u, before, subject), visitorAuditSummary(u, updated, subject)); err != nil {
 			return err
 		}
-		out = projectVisitorView(u, updated)
+		out = s.projectVisitorResponse(u, updated)
 		return nil
 	})
 	if err != nil {
@@ -442,7 +449,8 @@ func writeVisitorItemError(w http.ResponseWriter, err error) {
 }
 
 // validateVisitorWindow returns why a grant window is refused, or "": an
-// expiry must be in the future and after the start.
+// expiry must be in the future and after the start. Either refusal is of
+// the expiresAt field.
 func validateVisitorWindow(notBefore, expiresAt *time.Time, now time.Time) string {
 	if expiresAt == nil {
 		return ""
@@ -518,6 +526,15 @@ func projectVisitorView(u *store.User, rb *store.RoleBinding) ProjectVisitor {
 	if u.HomeIssuer != nil {
 		v.Issuer = *u.HomeIssuer
 	}
+	return v
+}
+
+// projectVisitorResponse renders a visitor grant as the visitor routes
+// return it: projectVisitorView plus whether the hub accepts visitors from
+// its issuer now.
+func (s *Server) projectVisitorResponse(u *store.User, rb *store.RoleBinding) ProjectVisitor {
+	v := projectVisitorView(u, rb)
+	_, v.IssuerAccepted = s.visitorGrantIssuer(v.Issuer)
 	return v
 }
 

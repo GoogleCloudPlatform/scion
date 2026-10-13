@@ -160,7 +160,7 @@ func TestLinkPendingFederatedUser_Refusals(t *testing.T) {
 	}{
 		"human account":       {human.ID, testFedIssuer, "sub-dave", "dave@corp.com", store.ErrInvalidInput},
 		"other issuer":        {pending.ID, "https://hub-b.example.com", "sub-alice", "alice@corp.com", store.ErrInvalidInput},
-		"other email":         {pending.ID, testFedIssuer, "sub-alice", "mallory@corp.com", store.ErrInvalidInput},
+		"other email":         {pending.ID, testFedIssuer, "sub-alice", "other@corp.com", store.ErrInvalidInput},
 		"no subject":          {pending.ID, testFedIssuer, " ", "alice@corp.com", store.ErrInvalidInput},
 		"no email":            {pending.ID, testFedIssuer, "sub-alice", "", store.ErrInvalidInput},
 		"active not pending":  {active.ID, testFedIssuer, "sub-bob", "bob@corp.com", store.ErrInvalidInput},

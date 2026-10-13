@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -47,15 +48,22 @@ const (
 // does not), and a project with an owner, an admin and a member.
 type visitorGrantFixture struct {
 	*visitorFixture
+	fedConfig config.FederationConfig
 	projectID string
 	owner     *store.User
 	admin     *store.User
 	member    *store.User
 }
 
-func newVisitorGrantFixture(t *testing.T) *visitorGrantFixture {
+// newVisitorGrantFixture builds the fixture. Each install runs right after
+// the server is constructed and before any setup, which is where
+// installStoreFault must be called.
+func newVisitorGrantFixture(t *testing.T, install ...func(srv *Server)) *visitorGrantFixture {
 	t.Helper()
 	srv, st := testServer(t)
+	for _, in := range install {
+		in(srv)
+	}
 	key, jwksSrv, kid := setupFederationTestServer(t)
 	cfg := config.FederationConfig{
 		Enabled: true,
@@ -88,11 +96,47 @@ func newVisitorGrantFixture(t *testing.T) *visitorGrantFixture {
 	}
 	return &visitorGrantFixture{
 		visitorFixture: &visitorFixture{srv: srv, st: st, auth: auth, key: key, kid: kid},
+		fedConfig:      cfg,
 		projectID:      projectID,
 		owner:          get(ownerID),
 		admin:          get(adminID),
 		member:         get(memberID),
 	}
+}
+
+// setIssuerAcceptsVisitors replaces the server's federation authenticator
+// with one built from the fixture's configuration with issuer's
+// allow_visitor_grants set to on, as a configuration reload does.
+func (f *visitorGrantFixture) setIssuerAcceptsVisitors(t *testing.T, issuer string, on bool) {
+	t.Helper()
+	cfg := f.fedConfig
+	cfg.TrustedIssuers = append([]config.TrustedIssuerConfig(nil), f.fedConfig.TrustedIssuers...)
+	found := false
+	for i := range cfg.TrustedIssuers {
+		if cfg.TrustedIssuers[i].IssuerURL == issuer {
+			cfg.TrustedIssuers[i].AllowVisitorGrants = on
+			found = true
+		}
+	}
+	require.True(t, found, "issuer %s is not in the fixture", issuer)
+	auth, err := NewFederationAuthenticator(cfg, grantTestAudience,
+		&http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
+	require.NoError(t, err)
+	f.srv.federationAuth.Store(auth)
+}
+
+// middlewareResponse runs token through the server's auth middleware and
+// returns the response; the next handler answers 200 when it runs.
+func (f *visitorGrantFixture) middlewareResponse(t *testing.T, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	h := UnifiedAuthMiddleware(f.srv.authConfig)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	req.Header.Set(FederationTokenHeader, token)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }
 
 func (f *visitorGrantFixture) visitorsPath() string {
@@ -160,8 +204,6 @@ func (f *visitorGrantFixture) audits(t *testing.T, mutationType string) []*store
 	return recs
 }
 
-func boolPtr(b bool) *bool { return &b }
-
 func TestProjectVisitors_AddListRemove(t *testing.T) {
 	f := newVisitorGrantFixture(t)
 	ctx := context.Background()
@@ -171,6 +213,7 @@ func TestProjectVisitors_AddListRemove(t *testing.T) {
 	assert.Equal(t, grantTestIssuer, v.Issuer)
 	assert.Equal(t, store.UserStatusPending, v.Status)
 	assert.Equal(t, f.owner.ID, v.GrantedBy)
+	assert.True(t, v.IssuerAccepted)
 
 	// One transaction wrote a pending federated account and its binding.
 	acct, err := f.st.GetFederatedUserByEmail(ctx, grantTestIssuer, "alice@corp.example")
@@ -195,6 +238,7 @@ func TestProjectVisitors_AddListRemove(t *testing.T) {
 	assert.Equal(t, v.ID, listed[0].ID)
 	assert.Equal(t, "alice@corp.example", listed[0].Email)
 	assert.Equal(t, store.UserStatusPending, listed[0].Status)
+	assert.True(t, listed[0].IssuerAccepted)
 
 	// Re-adding the same visitor is a conflict, not a second grant.
 	rec := f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestIssuer, "email": "alice@corp.example"})
@@ -245,8 +289,8 @@ func TestProjectVisitors_GrantRefusals(t *testing.T) {
 		"missing issuer":         {map[string]interface{}{"email": "carol@corp.example"}, "issuer"},
 		"invalid email":          {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol"}, "email"},
 		"synthetic email":        {map[string]interface{}{"issuer": grantTestIssuer, "email": "fed+x@corp.example.invalid"}, "email"},
-		"expiry in the past":     {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol@corp.example", "expiresAt": time.Now().Add(-time.Hour)}, ""},
-		"expiry before start":    {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol@corp.example", "notBefore": time.Now().Add(48 * time.Hour), "expiresAt": time.Now().Add(24 * time.Hour)}, ""},
+		"expiry in the past":     {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol@corp.example", "expiresAt": time.Now().Add(-time.Hour)}, "expiresAt"},
+		"expiry before start":    {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol@corp.example", "notBefore": time.Now().Add(48 * time.Hour), "expiresAt": time.Now().Add(24 * time.Hour)}, "expiresAt"},
 		"expiry not a timestamp": {map[string]interface{}{"issuer": grantTestIssuer, "email": "carol@corp.example", "expiresAt": "30d"}, ""},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -299,22 +343,106 @@ func TestProjectVisitors_GrantRefusals(t *testing.T) {
 	assert.Empty(t, f.audits(t, mutationTypeProjectVisitorGrant))
 }
 
+// bindCustomProjectRole binds userID to a new project role named name,
+// holding perms, on the fixture's project.
+func (f *visitorGrantFixture) bindCustomProjectRole(t *testing.T, name, userID string, perms []string) {
+	t.Helper()
+	ctx := context.Background()
+	rd, err := f.st.CreateRoleDefinition(ctx, &store.RoleDefinition{Name: name, ScopeType: store.RoleScopeProject, Permissions: perms})
+	require.NoError(t, err)
+	_, err = f.st.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeProject,
+		ScopeID:          f.projectID,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
+}
+
 // Project admins hold project.manage_visitors as owners do; the
 // super-admin holds it through its system-scope role (every permission,
-// role_binding.create included), with no special case.
+// role_binding.create included), with no special case. A hub admin holds
+// it through the hub-admin role, so it may list and revoke the grants of
+// any project, but granting needs every permission of the project-visitor
+// role on the project too, which hub-admin alone does not give.
 func TestProjectVisitors_AdminAndSuperAdminMayGrant(t *testing.T) {
 	f := newVisitorGrantFixture(t)
+	ctx := context.Background()
 	rec := f.grant(t, f.admin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "dan@any.example"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
 	superID := tid(t.Name() + "-super")
 	createTestUserWithRole(t, f.st, superID, superID+"@test.com", "admin", store.SystemRoleSuperAdmin)
-	ensureHubMembership(context.Background(), f.st, superID)
-	super, err := f.st.GetUser(context.Background(), superID)
+	ensureHubMembership(ctx, f.st, superID)
+	super, err := f.st.GetUser(ctx, superID)
 	require.NoError(t, err)
 	rec = f.grant(t, super, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "erin@any.example"})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	assert.Len(t, f.list(t), 2)
+
+	hubAdminID := tid(t.Name() + "-hubadmin")
+	createTestUserWithRole(t, f.st, hubAdminID, hubAdminID+"@test.com", "member", store.SystemRoleHubAdmin)
+	ensureHubMembership(ctx, f.st, hubAdminID)
+	hubAdmin, err := f.st.GetUser(ctx, hubAdminID)
+	require.NoError(t, err)
+
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodGet, f.visitorsPath(), nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "a hub admin may list: %s", rec.Body.String())
+	rec = f.grant(t, hubAdmin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "gil@any.example"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+
+	// With the project-visitor permissions on the project, the hub admin's
+	// project.manage_visitors (from hub-admin) lets it grant and revoke.
+	f.bindCustomProjectRole(t, "visitor-permissions-only", hubAdminID, projectVisitorPermissionIDs())
+	rec = f.grant(t, hubAdmin, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "gil@any.example"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var gil ProjectVisitor
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &gil))
+	rec = doRequestAsUser(t, f.srv, hubAdmin, http.MethodDelete, f.visitorsPath()+"/"+gil.ID, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Len(t, f.list(t), 2)
+}
+
+// Non-amplification: an actor that holds project.manage_visitors but not
+// every permission of the project-visitor role may list grants, but may
+// neither grant nor change a grant's window.
+func TestProjectVisitors_GrantNeedsEveryVisitorPermission(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	ctx := context.Background()
+	existing := f.grantOK(t, grantTestOtherIssuer, "hana@any.example")
+
+	partialID := tid(t.Name() + "-partial")
+	require.NoError(t, f.st.CreateUser(ctx, &store.User{
+		ID: partialID, Email: partialID + "@test.com", DisplayName: "Partial", Role: "member", Status: "active",
+	}))
+	ensureHubMembership(ctx, f.st, partialID)
+	f.bindCustomProjectRole(t, "visitor-manager-partial", partialID,
+		[]string{"project.manage_visitors", "agent.list", "agent.read"})
+	partial, err := f.st.GetUser(ctx, partialID)
+	require.NoError(t, err)
+
+	rec := doRequestAsUser(t, f.srv, partial, http.MethodGet, f.visitorsPath(), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "project.manage_visitors admits the actor: %s", rec.Body.String())
+
+	rec = f.grant(t, partial, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "ines@any.example"})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	_, err = f.st.GetFederatedUserByEmail(ctx, grantTestOtherIssuer, "ines@any.example")
+	assert.ErrorIs(t, err, store.ErrNotFound, "no pending account was created")
+	assert.Len(t, f.audits(t, mutationTypeProjectVisitorGrant), 1, "only the owner's grant was audited")
+
+	rec = doRequestAsUser(t, f.srv, partial, http.MethodPatch, f.visitorsPath()+"/"+existing.ID,
+		map[string]interface{}{"expiresAt": time.Now().Add(24 * time.Hour)})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorGrantNonAmplificationMessage)
+	listed := f.list(t)
+	require.Len(t, listed, 1)
+	assert.Equal(t, existing.BindingID, listed[0].BindingID)
+	assert.Nil(t, listed[0].ExpiresAt, "the window is unchanged")
+	assert.Empty(t, f.audits(t, mutationTypeProjectVisitorUpdate))
 }
 
 // A grant authorizes only inside its window: a start in the future or an
@@ -328,7 +456,7 @@ func TestProjectVisitors_WindowHonoured(t *testing.T) {
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var v ProjectVisitor
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &v))
-	require.NotNil(t, v.NotBefore)
+	assert.NotNil(t, v.NotBefore)
 
 	token := f.token(t, grantTestIssuer, "sub-fay", "fay@corp.example", boolPtr(true))
 	assert.NotContains(t, f.visitorPermissions(t, token), "agent.message", "a grant that has not started does not authorize")
@@ -463,28 +591,29 @@ func TestFederatedVisitor_FirstContactRefusals(t *testing.T) {
 	assert.Empty(t, f.audits(t, mutationTypeVisitorLinked))
 }
 
-// staleFirstContactStore answers the first subject lookup with not found
-// and the first email lookup with the account as it was before a
+// staleFirstContactStore passes every call through until stale is set.
+// From then on it answers the first subject lookup with not found and the
+// first email lookup with stale, the account as it was before a
 // concurrent first contact linked it: the view of the request that loses
 // the race.
 type staleFirstContactStore struct {
 	store.Store
-	stale        *store.User
+	stale        atomic.Pointer[store.User]
 	subjectCalls atomic.Int32
 	emailCalls   atomic.Int32
 }
 
 func (s *staleFirstContactStore) GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*store.User, error) {
-	if s.subjectCalls.Add(1) == 1 {
+	if s.stale.Load() != nil && s.subjectCalls.Add(1) == 1 {
 		return nil, store.ErrNotFound
 	}
 	return s.Store.GetFederatedUserBySubject(ctx, issuer, subject)
 }
 
 func (s *staleFirstContactStore) GetFederatedUserByEmail(ctx context.Context, issuer, email string) (*store.User, error) {
-	if s.emailCalls.Add(1) == 1 {
-		stale := *s.stale
-		return &stale, nil
+	if stale := s.stale.Load(); stale != nil && s.emailCalls.Add(1) == 1 {
+		c := *stale
+		return &c, nil
 	}
 	return s.Store.GetFederatedUserByEmail(ctx, issuer, email)
 }
@@ -493,7 +622,12 @@ func (s *staleFirstContactStore) GetFederatedUserByEmail(ctx context.Context, is
 // account already linked (ErrAlreadyExists), reads it again by subject and
 // continues as the visitor; the database holds one link.
 func TestFederatedVisitor_ConcurrentFirstContact(t *testing.T) {
-	f := newVisitorGrantFixture(t)
+	var wrapped *staleFirstContactStore
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		wrapped, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *staleFirstContactStore {
+			return &staleFirstContactStore{Store: inner}
+		})
+	})
 	ctx := context.Background()
 	v := f.grantOK(t, grantTestIssuer, "kim@corp.example")
 	before, err := f.st.GetUser(ctx, v.ID)
@@ -504,9 +638,7 @@ func TestFederatedVisitor_ConcurrentFirstContact(t *testing.T) {
 	_, err = f.st.LinkPendingFederatedUser(ctx, v.ID, grantTestIssuer, "sub-kim", "kim@corp.example")
 	require.NoError(t, err)
 
-	wrapped, _ := installStoreFault(t, f.srv, func(inner store.Store, _ *storeFaultSwitch) *staleFirstContactStore {
-		return &staleFirstContactStore{Store: inner, stale: before}
-	})
+	wrapped.stale.Store(before)
 	identity, _, code := f.identityThroughMiddleware(t, f.token(t, grantTestIssuer, "sub-kim", "kim@corp.example", boolPtr(true)))
 	require.Equal(t, http.StatusOK, code)
 	visitor, ok := identity.(*VisitorIdentity)
@@ -568,4 +700,120 @@ func TestProjectVisitors_VisitorIsRefusedOnTheRoutes(t *testing.T) {
 	f.srv.Handler().ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
+}
+
+// allow_visitor_grants is checked on every visitor request: turning it off
+// refuses a linked, granted visitor with the uniform refusal and keeps the
+// grant; turning it back on admits the visitor again with no grant change.
+func TestFederatedVisitor_IssuerFlagCheckedOnEveryRequest(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	v := f.grantOK(t, grantTestIssuer, "uma@corp.example")
+	token := f.token(t, grantTestIssuer, "sub-uma", "uma@corp.example", boolPtr(true))
+	identity, _, code := f.identityThroughMiddleware(t, token)
+	require.Equal(t, http.StatusOK, code)
+	require.IsType(t, &VisitorIdentity{}, identity)
+
+	f.setIssuerAcceptsVisitors(t, grantTestIssuer, false)
+	rec := f.middlewareResponse(t, token)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, ErrCodeForbidden, resp.Error.Code)
+	assert.Equal(t, visitorRouteRefusalMessage, resp.Error.Message, "the uniform refusal")
+
+	listed := f.list(t)
+	require.Len(t, listed, 1)
+	assert.Equal(t, v.BindingID, listed[0].BindingID, "the grant is kept")
+	assert.False(t, listed[0].IssuerAccepted)
+	rec = f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestIssuer, "email": "vic@corp.example"})
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "no new grant for the issuer while it is off: %s", rec.Body.String())
+
+	f.setIssuerAcceptsVisitors(t, grantTestIssuer, true)
+	identity, _, code = f.identityThroughMiddleware(t, token)
+	require.Equal(t, http.StatusOK, code)
+	visitor, ok := identity.(*VisitorIdentity)
+	require.True(t, ok, "identity = %T, want *VisitorIdentity", identity)
+	assert.Equal(t, v.ID, visitor.ID())
+	listed = f.list(t)
+	require.Len(t, listed, 1)
+	assert.Equal(t, v.BindingID, listed[0].BindingID, "no grant change in between")
+	assert.True(t, listed[0].IssuerAccepted)
+}
+
+// errVisitorAuditFault is visitorAuditFaultStore's injected failure.
+var errVisitorAuditFault = errors.New("injected visitor audit write fault")
+
+// visitorAuditFaultStore fails the audit write of a visitor grant, revoke
+// or first-contact link, inside transactions too, once its switch is
+// armed.
+type visitorAuditFaultStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *visitorAuditFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&visitorAuditFaultStore{Store: tx, fault: s.fault})
+	})
+}
+
+func (s *visitorAuditFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
+	if s.fault.Active() {
+		switch r.MutationType {
+		case mutationTypeProjectVisitorGrant, mutationTypeProjectVisitorRevoke, mutationTypeVisitorLinked:
+			return errVisitorAuditFault
+		}
+	}
+	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+// A grant, a revoke and a first-contact link each write their audit record
+// in the transaction of their change: when the audit write fails, nothing
+// of the change remains.
+func TestProjectVisitors_AuditFailureLeavesNoChange(t *testing.T) {
+	var fault *storeFaultSwitch
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *visitorAuditFaultStore {
+			return &visitorAuditFaultStore{Store: inner, fault: sw}
+		})
+	})
+	ctx := context.Background()
+	kept := f.grantOK(t, grantTestIssuer, "olga@corp.example")
+	pending := f.grantOK(t, grantTestIssuer, "pia@corp.example")
+	fault.Arm()
+
+	t.Run("grant", func(t *testing.T) {
+		rec := f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestIssuer, "email": "quinn@corp.example"})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		_, err := f.st.GetFederatedUserByEmail(ctx, grantTestIssuer, "quinn@corp.example")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no pending account remains")
+		bindings, err := f.st.ListVisitorRoleBindings(ctx, f.projectID)
+		require.NoError(t, err)
+		assert.Len(t, bindings, 2, "no binding remains")
+	})
+
+	t.Run("first contact", func(t *testing.T) {
+		rec := f.middlewareResponse(t, f.token(t, grantTestIssuer, "sub-pia", "pia@corp.example", boolPtr(true)))
+		assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+		acct, err := f.st.GetUser(ctx, pending.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.UserStatusPending, acct.Status, "the account stays pending")
+		_, err = f.st.GetFederatedUserBySubject(ctx, grantTestIssuer, "sub-pia")
+		assert.ErrorIs(t, err, store.ErrNotFound, "the subject is not linked")
+		links, err := f.st.GetExternalIdentitiesByUserID(ctx, pending.ID)
+		require.NoError(t, err)
+		assert.Empty(t, links)
+	})
+
+	t.Run("revoke", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+kept.ID, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		bindings, err := f.st.ListVisitorRoleBindings(ctx, f.projectID)
+		require.NoError(t, err)
+		ids := make([]string, 0, len(bindings))
+		for _, b := range bindings {
+			ids = append(ids, b.ID)
+		}
+		assert.Contains(t, ids, kept.BindingID, "the binding remains")
+	})
 }

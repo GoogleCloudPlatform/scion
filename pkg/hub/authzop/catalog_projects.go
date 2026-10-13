@@ -211,7 +211,7 @@ var projectOperations = []OperationSpec{
 		DelegationDescription: "The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)",
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "Holders of project.manage_visitors (project owners and admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.",
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		Invariants: []Invariant{
@@ -224,8 +224,12 @@ var projectOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialPrincipalIneligible, DenialConflict},
-		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AddListRemove"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_AuditFailureLeavesNoChange"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 	{
 		ID:          "project.visitors.update",
@@ -243,7 +247,7 @@ var projectOperations = []OperationSpec{
 		DelegationDescription: "A window change can extend the grant, so the actor must hold every permission of the project-visitor role on the project, as for a grant",
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "Holders of project.manage_visitors (project owners and admins) change any visitor grant of the project.",
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) change any visitor grant of the project.",
 		},
 		AuthorityEval: AuthorityEvalBeforeAndAfter,
 		AuditObligation: &AuditObligation{
@@ -254,8 +258,11 @@ var projectOperations = []OperationSpec{
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialForbidden, DenialCredentialInsufficient, DenialResourceNotFound},
-		TestRefs:    []TestRef{{Package: "pkg/hub", Function: "TestProjectVisitors_WindowHonoured"}},
-		Bearer:      SessionOnly(ReasonGovernancePending),
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestProjectVisitors_WindowHonoured"},
+			{Package: "pkg/hub", Function: "TestProjectVisitors_GrantNeedsEveryVisitorPermission"},
+		},
+		Bearer: SessionOnly(ReasonGovernancePending),
 	},
 	{
 		ID:          "project.visitors.remove",
@@ -272,7 +279,7 @@ var projectOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		Governance: &GovernancePolicy{
 			Kind:        GovernancePeerSuperior,
-			Description: "Holders of project.manage_visitors (project owners and admins) revoke any visitor grant of the project.",
+			Description: "Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.",
 		},
 		AuthorityEval: AuthorityEvalNone,
 		AuditObligation: &AuditObligation{

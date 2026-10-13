@@ -61,7 +61,9 @@ func visitorSetExperiment(t *testing.T, srv *Server, on bool) {
 }
 
 // visitorFixture is a test server whose federation authenticator trusts a
-// user-type issuer and a hub-type issuer, both signing with key/kid.
+// user-type issuer (with allow_visitor_grants on, so its linked active
+// accounts act as visitors) and a hub-type issuer, both signing with
+// key/kid.
 type visitorFixture struct {
 	srv  *Server
 	st   store.Store
@@ -77,7 +79,8 @@ func newVisitorFixture(t *testing.T) *visitorFixture {
 	cfg := config.FederationConfig{
 		Enabled: true,
 		TrustedIssuers: []config.TrustedIssuerConfig{
-			{IssuerURL: visitorTestUserIssuer, IssuerType: string(IssuerTypeUser), JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience},
+			{IssuerURL: visitorTestUserIssuer, IssuerType: string(IssuerTypeUser), JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience,
+				AllowVisitorGrants: true},
 			{IssuerURL: visitorTestHubIssuer, JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience},
 		},
 	}

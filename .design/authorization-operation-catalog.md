@@ -1249,7 +1249,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- Holders of project.manage_visitors (project owners and admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
+- Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; a visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
 
 ### Invariants
 
@@ -1269,6 +1269,8 @@
 ### Tests
 
 - `pkg/hub:TestProjectVisitors_AddListRemove`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_AuditFailureLeavesNoChange`
 
 ---
 
@@ -1306,7 +1308,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- Holders of project.manage_visitors (project owners and admins) change any visitor grant of the project.
+- Holders of project.manage_visitors (project owners and admins, and hub admins) change any visitor grant of the project.
 
 ### Audit
 
@@ -1321,6 +1323,7 @@
 ### Tests
 
 - `pkg/hub:TestProjectVisitors_WindowHonoured`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
 
 ---
 
@@ -1351,7 +1354,7 @@
 ### Governance
 
 - **Kind:** peer_superior
-- Holders of project.manage_visitors (project owners and admins) revoke any visitor grant of the project.
+- Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.
 
 ### Audit
 

@@ -265,7 +265,7 @@ func TestProjectVisitor_GeneralBindingPathRefusesVisitorRole(t *testing.T) {
 
 // The seeded project-visitor role holds exactly agent.message, agent.list
 // and agent.read and does not confer membership; project.manage_visitors
-// is on the owner and admin roles only.
+// is on the owner, admin and hub-admin roles only (and the super-admin's).
 func TestBuiltInRoles_ProjectVisitorAndManageVisitors(t *testing.T) {
 	var visitor *BuiltInRole
 	for _, role := range BuiltInRoles() {
@@ -280,7 +280,7 @@ func TestBuiltInRoles_ProjectVisitorAndManageVisitors(t *testing.T) {
 			}
 		}
 		switch role.Name {
-		case store.ProjectRoleOwner, store.ProjectRoleAdmin:
+		case store.ProjectRoleOwner, store.ProjectRoleAdmin, store.SystemRoleHubAdmin:
 			assert.True(t, holds, "%s holds project.manage_visitors", role.Name)
 		case store.SystemRoleSuperAdmin:
 			// super-admin holds every non-reserved permission.

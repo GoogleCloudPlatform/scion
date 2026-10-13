@@ -35,6 +35,15 @@ var errFederatedVisitorRefused = errors.New("federated account may not act")
 // errFederatedVisitorRefused.
 const visitorAccountRefusedMessage = "This account may not access this hub"
 
+// errFederatedVisitorIssuerNotAccepted is resolveFederatedVisitor's refusal
+// of a linked, active federated account whose issuer the hub no longer
+// accepts visitors from (visitorGrantIssuer fails: allow_visitor_grants is
+// off, or the issuer_type is one the flag does not apply to). The auth
+// middleware answers it with 403 and visitorRouteRefusalMessage. The
+// account and its grants are kept, so accepting the issuer again restores
+// access with no grant change.
+var errFederatedVisitorIssuerNotAccepted = errors.New("hub does not accept visitors from the account's issuer")
+
 // resolveFederatedVisitor is the auth middleware's federated visitor
 // lookup (AuthConfig.ResolveFederatedVisitor). After the federation
 // authenticator has verified a token, it returns the VisitorIdentity of the
@@ -46,7 +55,10 @@ const visitorAccountRefusedMessage = "This account may not access this hub"
 //     federated account whose status is active, or it is not linked and
 //     first contact (linkPendingVisitor) links it to a pending account.
 //
-// Status policy: an active account acts as its visitor identity; a
+// Status policy: an active account acts as its visitor identity while the
+// hub accepts visitors from its issuer, and is refused otherwise
+// (errFederatedVisitorIssuerNotAccepted; the issuer configuration is read
+// on every request, so a configuration change applies to the next one); a
 // suspended account is refused (errFederatedVisitorRefused), whatever its
 // grants; a pending account never acts as a visitor until first contact
 // links and activates it, so a linked account still pending keeps the
@@ -75,6 +87,9 @@ func (s *Server) resolveFederatedVisitor(ctx context.Context, identity Federated
 	}
 	switch u.Status {
 	case store.UserStatusActive:
+		if _, ok := s.visitorGrantIssuer(store.NormalizeFederatedIssuer(fu.IssuerURL())); !ok {
+			return nil, errFederatedVisitorIssuerNotAccepted
+		}
 	case store.UserStatusSuspended:
 		return nil, errFederatedVisitorRefused
 	default:
