@@ -164,7 +164,11 @@ func TestWaitForLifecycleOutcome_HaltedPhaseFailsStop(t *testing.T) {
 func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
 	// The dispatch row has already finished: the halted phase is the
 	// outcome at once, with no grace wait, as for the error phase.
-	setLifecycleTimings(t, 0, 0, 200*time.Millisecond)
+	// A long grace and a short context: an outcome that fell back to the
+	// grace wait would fail on the context instead of passing slowly.
+	setLifecycleTimings(t, 0, 0, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
 		"d-1": {ID: "d-1", State: store.DispatchStateDone},
 	}}
@@ -173,7 +177,7 @@ func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
 		sendStatus(ch, "halted", "", nil)
 	}()
 
-	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	err := waitForLifecycleOutcome(ctx, ch, func() {}, ds, "d-1", "start", isStartTerminal)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent entered halted phase during start")
 }
@@ -181,7 +185,11 @@ func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
 func TestWaitForLifecycleOutcome_HaltedPhaseWithFailedRow(t *testing.T) {
 	// The executor failed the dispatch row: the row's own failure wins over
 	// the halted phase, as for the error phase.
-	setLifecycleTimings(t, 0, 0, 200*time.Millisecond)
+	// A long grace and a short context: an outcome that fell back to the
+	// grace wait would fail on the context instead of passing slowly.
+	setLifecycleTimings(t, 0, 0, 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
 		"d-1": {ID: "d-1", State: store.DispatchStateFailed, Error: "broker refused the start"},
 	}}
@@ -190,7 +198,7 @@ func TestWaitForLifecycleOutcome_HaltedPhaseWithFailedRow(t *testing.T) {
 		sendStatus(ch, "halted", "", nil)
 	}()
 
-	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	err := waitForLifecycleOutcome(ctx, ch, func() {}, ds, "d-1", "start", isStartTerminal)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "broker refused the start")
 	assert.NotContains(t, err.Error(), "halted phase")

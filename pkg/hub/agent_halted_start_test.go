@@ -94,10 +94,11 @@ func TestHaltedCrossNodeStart_FailureRestoresHalted(t *testing.T) {
 }
 
 // The rare window between a start taking its claim and its provisional
-// starting write: an agent report of running with no run (an older token)
-// moves the halted row (the claim-held exception), the start's conditional write then fails
-// and answers 409, and the claim stays unconfirmed for the reaper, so a
-// retry is refused with start_in_progress until it is settled.
+// starting write: an agent report of running with no run (an older
+// token) moves the halted row (the claim-held exception), the start's
+// conditional write then fails and answers 409, and the claim stays
+// unconfirmed for the reaper, so a retry is refused with
+// start_in_progress until it is settled.
 func TestHaltedStart_SelfReportBeforeProvisionalWrite(t *testing.T) {
 	f, d, a := newClaimFixture(t)
 	setHalted(t, f.s, a.ID, "preempted")
