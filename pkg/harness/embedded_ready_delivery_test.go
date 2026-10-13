@@ -124,10 +124,12 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 
 // TestEmbeddedHarnessConfigs_AgentPluginsCapability pins the agent_plugins
 // capability of the bundles that declare it: codex installs natively
-// (partial: sse skipped); the harnesses without native support say no.
+// (partial: sse skipped); claude installs a skills-dir plugin (partial:
+// wrapper and skip rule); the harnesses without native support say no.
 func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 	want := map[string]api.SupportLevel{
 		"codex":       api.SupportPartial,
+		"claude":      api.SupportPartial,
 		"gemini-cli":  api.SupportNo,
 		"grok-build":  api.SupportNo,
 		"antigravity": api.SupportNo,
