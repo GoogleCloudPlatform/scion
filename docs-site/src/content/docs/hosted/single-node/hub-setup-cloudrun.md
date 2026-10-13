@@ -294,7 +294,10 @@ a project, then **New Agent**, pick a harness (e.g. Claude), and start it.
 :::note[IAP authentication for API and scripted access]
 If you access the Hub API programmatically (scripts, CI, or `curl`), authenticate
 through IAP with an access token or an OIDC identity token. For identity tokens,
-the audience **must** be the IAP OAuth client ID (not the resource path):
+the audience **must** be the IAP OAuth client ID (not the resource path).
+
+The deploy script prints this ID in step 6 as `IAP OAuth client ID: ...`. If it
+reports that the ID could not be determined automatically, look it up yourself:
 
 ```bash
 # Discover the auto-generated IAP OAuth client ID
