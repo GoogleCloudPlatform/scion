@@ -141,6 +141,10 @@ func captureSchemaSnapshot(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("building snapshot schema URL: %w", err)
 	}
+	// The capture client is opened directly rather than with entc.OpenPostgres
+	// because the recording driver has to wrap the ent driver. It lacks
+	// OpenPostgres's keepalive GUCs, connect timeout, uuid type registration
+	// and UTC hook; none of them affects the DDL AutoMigrate plans.
 	db, err := sql.Open("pgx", clientURL)
 	if err != nil {
 		return "", fmt.Errorf("opening snapshot schema connection: %w", err)
@@ -308,6 +312,10 @@ type recordingTx struct {
 	dialect.Tx
 	rec   *statementRecorder
 	start int
+	// done is set once the transaction has ended, so a Rollback after a
+	// Commit (the common defer tx.Rollback() pattern) does not discard
+	// statements that were committed.
+	done bool
 }
 
 func (t *recordingTx) Exec(ctx context.Context, query string, args, v any) error {
@@ -317,6 +325,10 @@ func (t *recordingTx) Exec(ctx context.Context, query string, args, v any) error
 }
 
 func (t *recordingTx) Commit() error {
+	if t.done {
+		return t.Tx.Commit()
+	}
+	t.done = true
 	err := t.Tx.Commit()
 	if err != nil {
 		t.rec.rollback(t.start)
@@ -328,6 +340,9 @@ func (t *recordingTx) Commit() error {
 
 func (t *recordingTx) Rollback() error {
 	err := t.Tx.Rollback()
-	t.rec.rollback(t.start)
+	if !t.done {
+		t.done = true
+		t.rec.rollback(t.start)
+	}
 	return err
 }

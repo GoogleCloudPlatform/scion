@@ -102,6 +102,29 @@ func TestSchemaSnapshot_MatchesAutoMigrate(t *testing.T) {
 	if diffFacts(ref, catalogFacts(t, snapSchema)) == "" {
 		t.Fatalf("catalog comparison did not notice the dropped index %s", index)
 	}
+
+	// The same for column facts: drop one column default on a fresh
+	// snapshot schema and expect a diff.
+	colURL, colSchema := newEmptySchema(t)
+	if err := migrateSchema(ctx, openTestClient(t, colURL)); err != nil {
+		t.Fatalf("replaying the snapshot: %v", err)
+	}
+	if diff := diffFacts(ref, catalogFacts(t, colSchema)); diff != "" {
+		t.Fatalf("second snapshot-provisioned schema differs from the AutoMigrate one:\n%s", diff)
+	}
+	var table, column string
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT table_name, column_name FROM information_schema.columns
+		 WHERE table_schema = $1 AND column_default IS NOT NULL AND is_identity = 'NO'
+		 ORDER BY table_name, column_name LIMIT 1`, colSchema).Scan(&table, &column); err != nil {
+		t.Fatalf("finding a column with a default: %v", err)
+	}
+	if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s.%q ALTER COLUMN %q DROP DEFAULT`, colSchema, table, column)); err != nil {
+		t.Fatalf("dropping the default of %s.%s: %v", table, column, err)
+	}
+	if diffFacts(ref, catalogFacts(t, colSchema)) == "" {
+		t.Fatalf("catalog comparison did not notice the dropped default of %s.%s", table, column)
+	}
 }
 
 // TestSchemaSnapshot_ForceAutoMigrateEnv checks the values that switch the
@@ -157,6 +180,42 @@ func TestStatementRecorder(t *testing.T) {
 		}
 	})
 
+	t.Run("rollback after commit keeps committed statements", func(t *testing.T) {
+		r := &statementRecorder{}
+		tx := &recordingTx{Tx: fakeTx{}, rec: r, start: r.begin()}
+		if err := tx.Exec(context.Background(), `CREATE TABLE "a" ("id" bigint)`, []any{}, nil); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+		_ = tx.Rollback() // the defer tx.Rollback() pattern
+		got, err := r.script()
+		if err != nil {
+			t.Fatalf("script: %v", err)
+		}
+		if want := `CREATE TABLE "a" ("id" bigint);` + "\n"; got != want {
+			t.Fatalf("script = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("rollback discards the transaction", func(t *testing.T) {
+		r := &statementRecorder{}
+		r.exec(`CREATE TABLE "a" ("id" bigint)`, []any{}, nil)
+		tx := &recordingTx{Tx: fakeTx{}, rec: r, start: r.begin()}
+		if err := tx.Exec(context.Background(), `CREATE TABLE "b" ("id" bigint)`, []any{}, nil); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		_ = tx.Rollback()
+		got, err := r.script()
+		if err != nil {
+			t.Fatalf("script: %v", err)
+		}
+		if want := `CREATE TABLE "a" ("id" bigint);` + "\n"; got != want {
+			t.Fatalf("script = %q, want %q", got, want)
+		}
+	})
+
 	t.Run("bind arguments", func(t *testing.T) {
 		r := &statementRecorder{}
 		r.exec("INSERT INTO ent_types (type) VALUES ($1)", []any{"agents"}, nil)
@@ -180,6 +239,15 @@ func TestStatementRecorder(t *testing.T) {
 		}
 	})
 }
+
+// fakeTx is a dialect.Tx whose statements always succeed, for exercising
+// recordingTx without a database.
+type fakeTx struct{}
+
+func (fakeTx) Exec(context.Context, string, any, any) error  { return nil }
+func (fakeTx) Query(context.Context, string, any, any) error { return nil }
+func (fakeTx) Commit() error                                 { return nil }
+func (fakeTx) Rollback() error                               { return nil }
 
 // openTestClient opens a small Ent client on dsn, closed on cleanup.
 func openTestClient(t *testing.T, dsn string) *ent.Client {
