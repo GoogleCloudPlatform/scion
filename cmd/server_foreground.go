@@ -3804,6 +3804,10 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 	// In co-located mode on any DB-backed Hub, install the global settings
 	// overlay so the broker sees the Hub's stored runtimes, profiles,
 	// harness_configs and image_registry (see installColocatedSettingsOverlay).
+	// Ordering invariant: the broker's default runtime (rt, from
+	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
+	// exists, so it comes from the settings file and startup never sees an
+	// overlay-only active_profile error.
 	installColocatedSettingsOverlay(cfg, hubSrv)
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)

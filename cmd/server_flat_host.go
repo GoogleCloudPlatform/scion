@@ -700,7 +700,9 @@ func flatHostHealth(ctx context.Context, host *brokerhost.Host) interface{} {
 // colocatedSettingsOverlayEnabled reports whether a co-located broker reads
 // the Hub's stored runtimes, profiles, harness_configs and image_registry
 // through the global settings overlay: true for every DB-backed Hub, SQLite
-// or Postgres (ptone/scion#3906).
+// or Postgres (ptone/scion#3906). The driver list must track the store-open
+// driver switch in initStore (server_foreground.go): a driver added there
+// and not here would silently get no overlay.
 func colocatedSettingsOverlayEnabled(cfg *config.GlobalConfig, hubSrv *hub.Server) bool {
 	if hubSrv == nil || cfg == nil {
 		return false
