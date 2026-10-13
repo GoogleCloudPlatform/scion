@@ -88,6 +88,13 @@ type Role struct {
 	mu       sync.Mutex
 	sessions map[string]*heldSession
 
+	// recheckMu guards the coalescing of re-check runs: recheckRunning is
+	// set while one runs, and recheckPending holds the trigger of the one
+	// run queued behind it ("" when none).
+	recheckMu      sync.Mutex
+	recheckRunning bool
+	recheckPending string
+
 	// Streams schedules the re-checks of the user streams this relay holds.
 	Streams *StreamScheduler
 }

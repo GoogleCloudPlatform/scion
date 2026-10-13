@@ -35,6 +35,7 @@ type streamRecorder struct {
 	mu      sync.Mutex
 	renewed [][]byte
 	closed  []uint32
+	reasons []string
 }
 
 func (r *streamRecorder) Renew(grant []byte) error {
@@ -44,10 +45,11 @@ func (r *streamRecorder) Renew(grant []byte) error {
 	return nil
 }
 
-func (r *streamRecorder) close(code uint32, _ string) {
+func (r *streamRecorder) close(code uint32, reason string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closed = append(r.closed, code)
+	r.reasons = append(r.reasons, reason)
 }
 
 func (r *streamRecorder) closes() []uint32 {
@@ -239,11 +241,56 @@ func TestStreamRecheckTriggers(t *testing.T) {
 		t.Fatalf("after a reconnect: %d re-checks, want 2", n)
 	}
 	events.ch <- "conduit.authz.changed"
-	deadline := time.Now().Add(10 * time.Second)
-	for hub.count("streams/recheck") < 3 {
-		if time.Now().After(deadline) {
-			t.Fatalf("no re-check after a revocation event (%d)", hub.count("streams/recheck"))
-		}
-		time.Sleep(10 * time.Millisecond)
+	hub.waitCalls("streams/recheck", 3)
+}
+
+// TestStreamTargetGoneCloses4404: a re-check that finds the target gone
+// closes the stream with 4404 and the target_not_found reason.
+func TestStreamTargetGoneCloses4404(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(func(path string, body []byte) hubAnswer {
+		return hubAnswer{status: http.StatusOK, body: relay.HubStreamRecheckResponse{Results: []relay.HubStreamRecheckResult{{Close: true, CloseCode: relay.CloseTargetNotFound, Reason: "target_not_found"}}}}
+	})
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+	clk.Advance(8 * time.Minute)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.closed) != 1 || rec.closed[0] != relay.CloseTargetNotFound || rec.reasons[0] != relay.ReasonTargetNotFound {
+		t.Fatalf("closes %v %v, want [4404] %s", rec.closed, rec.reasons, relay.ReasonTargetNotFound)
+	}
+}
+
+// TestRecheckRunsCoalesce: triggers arriving while a re-check runs leave at
+// most one run pending, which starts when the running one ends.
+func TestRecheckRunsCoalesce(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	release := make(chan struct{})
+	renew := renewAnswer("renewal", t0.Add(20*time.Minute))
+	var first sync.Once
+	hub.setAnswer(func(path string, body []byte) hubAnswer {
+		first.Do(func() { <-release }) // the first run blocks at the hub
+		return renew(path, body)
+	})
+	rec := &streamRecorder{}
+	defer trackStream(ro, rec)()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ro.recheckAll(context.Background(), TriggerSweep)
+	}()
+	hub.waitCalls("streams/recheck", 1)
+	for i := 0; i < 5; i++ {
+		ro.recheckAll(context.Background(), TriggerNotify) // returns at once: coalesced
+	}
+	close(release)
+	<-done
+	if n := hub.count("streams/recheck"); n != 2 {
+		t.Fatalf("%d re-check runs, want 2 (the running one and one pending)", n)
 	}
 }

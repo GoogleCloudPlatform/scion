@@ -281,10 +281,26 @@ func TestSessionRecheckUnavailableKeeps(t *testing.T) {
 	f.admitAs(registry.PrincipalAgent, "tok-1", nil) // re-checks get 503
 	ls, _ := f.mustDialAgent(t)
 	f.role.RecheckSessions(context.Background(), TriggerSweep)
+	if n := f.hub.count("sessions/recheck"); n != 1 {
+		t.Fatalf("%d re-check calls, want 1", n)
+	}
+	assertOpen(t, ls)
+}
+
+// assertOpen checks that ls is still open: a round trip through the relay
+// after the action under test (a close the relay sent before it arrives
+// first), then a non-blocking check of Done.
+func assertOpen(t *testing.T, ls conduit.LocalSession) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := ls.Call(ctx, &conduitv1.RpcRequest{RequestId: "round-trip", Method: http.MethodGet, Path: "/v1/round-trip"}); err != nil {
+		t.Fatalf("round trip: %v (session err %v)", err, ls.Err())
+	}
 	select {
 	case <-ls.Done():
 		t.Fatalf("session closed: %v", ls.Err())
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 }
 
@@ -312,13 +328,25 @@ func TestRefreshForwarded(t *testing.T) {
 		if err := ls.RefreshAuth([]byte("new-credential"), 0); err != nil {
 			t.Fatal(err)
 		}
-		waitFor(t, func() bool { return f.hub.count("refresh") == 1 })
+		f.hub.waitCalls("refresh", 1)
 		var req relay.HubRefreshRequest
 		f.hub.last("refresh", &req)
 		if req.AdmissionToken != "tok-1" || string(req.Credential) != "new-credential" {
 			t.Fatalf("refresh request %+v", req)
 		}
-		waitFor(t, func() bool { return f.role.token(wel.GetSessionId()) == "tok-2" })
+		// Refreshes are checked one at a time: the second reaches the hub
+		// only after the first was handled, and presents its new token.
+		if err := ls.RefreshAuth([]byte("newer-credential"), 0); err != nil {
+			t.Fatal(err)
+		}
+		f.hub.waitCalls("refresh", 2)
+		f.hub.last("refresh", &req)
+		if req.AdmissionToken != "tok-2" {
+			t.Fatalf("second refresh presented %q, want the replaced token", req.AdmissionToken)
+		}
+		if got := f.role.token(wel.GetSessionId()); got != "tok-2" {
+			t.Fatalf("held token %q", got)
+		}
 	})
 
 	t.Run("refused", func(t *testing.T) {
@@ -336,12 +364,12 @@ func TestRefreshForwarded(t *testing.T) {
 		f.admitAs(registry.PrincipalAgent, "tok-1", refreshWith(http.StatusServiceUnavailable, ""))
 		ls, _ := f.mustDialAgent(t)
 		_ = ls.RefreshAuth([]byte("new-credential"), 0)
-		waitFor(t, func() bool { return f.hub.count("refresh") == 1 })
-		select {
-		case <-ls.Done():
-			t.Fatalf("session closed on a hub outage: %v", ls.Err())
-		case <-time.After(200 * time.Millisecond):
-		}
+		f.hub.waitCalls("refresh", 1)
+		// A refusal would close the session and stop refreshing; a second
+		// refresh reaching the hub shows the first was handled and kept it.
+		_ = ls.RefreshAuth([]byte("newer-credential"), 0)
+		f.hub.waitCalls("refresh", 2)
+		assertOpen(t, ls)
 	})
 }
 
@@ -373,16 +401,5 @@ func TestRPCForwardedForUserSession(t *testing.T) {
 	f.hub.last("rpc", &req)
 	if req.AdmissionToken != "tok-user" {
 		t.Fatalf("forwarded with token %q", req.AdmissionToken)
-	}
-}
-
-func waitFor(t *testing.T, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatal("condition not met")
-		}
-		time.Sleep(10 * time.Millisecond)
 	}
 }

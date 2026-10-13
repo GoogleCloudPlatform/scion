@@ -166,6 +166,24 @@ func TestRelayIAPSession_UserStateRecheckedAndExpiryFixed(t *testing.T) {
 		assert.Equal(t, uint32(4401), res[0].CloseCode)
 	})
 
+	t.Run("re-issue before the cap keeps the cap", func(t *testing.T) {
+		f := newRelayIAPFixture(t)
+		now := relayClock(t, time.Now())
+		adm := f.mustAdmit(t, f.assertion(t, f.kp, relayIAPAudience, time.Now().Add(10*time.Minute)), "s-iap")
+		capAt := adm.CredentialExpiry
+		require.False(t, capAt.IsZero())
+		// Past half of the token's lifetime, before the cap.
+		*now = now.Add(capAt.Sub(*now) * 2 / 3)
+		require.True(t, now.Before(capAt))
+		res := sessionRecheck(t, f.hub, relay.HubSessionRecheckItem{SessionID: "s-iap", AdmissionToken: adm.AdmissionToken})
+		require.True(t, res[0].OK)
+		require.NotEmpty(t, res[0].AdmissionToken, "re-issued past half of its lifetime")
+		c, err := f.cf.srv.verifyAdmissionToken(res[0].AdmissionToken, admissionCheck{sessionID: "s-iap", relay: "relay-0", relayGen: f.relayGen, allowExpired: true}, *now)
+		require.NoError(t, err)
+		assert.Equal(t, capAt.Unix(), c.CredentialExpiry, "the credential expiry is unchanged")
+		assert.LessOrEqual(t, c.Expiry, capAt.Unix(), "the re-issued token ends at or before the cap")
+	})
+
 	t.Run("expiry fixed at admission", func(t *testing.T) {
 		f := newRelayIAPFixture(t)
 		now := relayClock(t, time.Now())

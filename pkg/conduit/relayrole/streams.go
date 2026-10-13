@@ -259,7 +259,7 @@ func (s *StreamScheduler) recheck(ctx context.Context, trigger string, batch []*
 			st.closed = true
 			stopTimers(st)
 			st.mu.Unlock()
-			st.Close(res.CloseCode, "authz_expired")
+			st.Close(res.CloseCode, closeReasonFor(res.CloseCode))
 		case res.Renew:
 			st.mu.Lock()
 			if st.closed {

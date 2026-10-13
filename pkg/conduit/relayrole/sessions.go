@@ -86,10 +86,30 @@ func (ro *Role) Start(ctx context.Context) {
 	}()
 }
 
-// recheckAll re-checks every held session and every held stream.
+// recheckAll re-checks every held session and every held stream. Runs are
+// coalesced: while one runs, later triggers leave at most one run pending,
+// which starts when the current one ends (with the latest trigger).
 func (ro *Role) recheckAll(ctx context.Context, trigger string) {
-	ro.RecheckSessions(ctx, trigger)
-	ro.Streams.RecheckAll(ctx, trigger)
+	ro.recheckMu.Lock()
+	if ro.recheckRunning {
+		ro.recheckPending = trigger
+		ro.recheckMu.Unlock()
+		return
+	}
+	ro.recheckRunning = true
+	ro.recheckMu.Unlock()
+	for {
+		ro.RecheckSessions(ctx, trigger)
+		ro.Streams.RecheckAll(ctx, trigger)
+		ro.recheckMu.Lock()
+		trigger, ro.recheckPending = ro.recheckPending, ""
+		if trigger == "" || ctx.Err() != nil {
+			ro.recheckRunning = false
+			ro.recheckMu.Unlock()
+			return
+		}
+		ro.recheckMu.Unlock()
+	}
 }
 
 // RecheckSessions asks the hub to re-check every held session, in batches,

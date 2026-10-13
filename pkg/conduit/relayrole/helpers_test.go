@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"google.golang.org/protobuf/proto"
 
@@ -52,11 +53,14 @@ type fakeHub struct {
 	calls    map[string]int
 	requests map[string][][]byte
 	answer   func(path string, body []byte) hubAnswer
+	// called is signalled after every recorded call (coalesced: waiters
+	// re-read the counts).
+	called chan struct{}
 }
 
 func newFakeHub(t *testing.T) *fakeHub {
 	t.Helper()
-	h := &fakeHub{t: t, calls: map[string]int{}, requests: map[string][][]byte{}}
+	h := &fakeHub{t: t, calls: map[string]int{}, requests: map[string][][]byte{}, called: make(chan struct{}, 1)}
 	h.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		key := pathKey(r.URL.Path)
@@ -65,6 +69,10 @@ func newFakeHub(t *testing.T) *fakeHub {
 		h.requests[key] = append(h.requests[key], body)
 		answer := h.answer
 		h.mu.Unlock()
+		select {
+		case h.called <- struct{}{}:
+		default:
+		}
 		a := hubAnswer{status: http.StatusServiceUnavailable}
 		if answer != nil {
 			a = answer(key, body)
@@ -109,6 +117,21 @@ func (h *fakeHub) count(path string) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.calls[path]
+}
+
+// waitCalls waits until the hub has received at least n calls to path.
+// It is signalled by each call; the timeout only bounds a failing test.
+func (h *fakeHub) waitCalls(path string, n int) {
+	h.t.Helper()
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	for h.count(path) < n {
+		select {
+		case <-h.called:
+		case <-timeout.C:
+			h.t.Fatalf("%d %s calls, want %d", h.count(path), path, n)
+		}
+	}
 }
 
 // last decodes the last request body sent to path into v.
