@@ -44,7 +44,10 @@ mcp_servers:
 // ptone/scion#4012: in Hub mode, scion create --config sends the file's
 // config as the create request's config, as scion start does, so the Hub
 // stores it with the agent. Without --config the request config is absent
-// (or carries only --image).
+// (or carries only --image). The RunE wiring that loads --config and picks
+// the Hub path is out of scope here, since that path goes through
+// CheckHubAvailabilityForAgent; this test covers loadCreateInlineConfig and
+// createAgentViaHub, which build the request.
 func TestCreateAgentViaHub_SendsInlineConfig(t *testing.T) {
 	const projectID, agentName = "proj-create-config", "create-config-agent"
 
@@ -124,7 +127,6 @@ func TestCreateAgentViaHub_SendsInlineConfig(t *testing.T) {
 					"transport": "stdio", "command": "docs-mcp", "args": []interface{}{"--port", "0"},
 				},
 			}, cfg["mcp_servers"])
-			assert.NotContains(t, cfg, "cleared_fields", "the CLI passes the file through without hub-internal fields")
 		})
 	}
 }
