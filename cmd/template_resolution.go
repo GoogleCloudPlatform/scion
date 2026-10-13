@@ -103,6 +103,15 @@ func ResolveTemplateForHub(ctx context.Context, hubCtx *HubContext, templateName
 		return nil, fmt.Errorf("failed to search Hub for template: %w", err)
 	}
 
+	// With a target-hub profile only the target's templates count: no
+	// local template is read, compared or uploaded (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		if hubTemplate == nil {
+			return nil, fmt.Errorf("template %q was not found on the target hub of profile %q; with a hub profile, local templates are not uploaded: name a template that exists on the target hub", templateName, hubCtx.TargetProfile)
+		}
+		return &TemplateResolutionResult{TemplateID: hubTemplate.ID, TemplateName: hubTemplate.Name}, nil
+	}
+
 	// Step 2: Check if template exists locally
 	localTemplate, _ := config.FindTemplate(name)
 
