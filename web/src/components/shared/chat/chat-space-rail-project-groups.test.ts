@@ -703,7 +703,10 @@ describe('project thread groups — flag on', () => {
     await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
     await settle(el);
 
-    expect(showToastMock).toHaveBeenCalledWith('This group has reached its thread limit', 'warning');
+    expect(showToastMock).toHaveBeenCalledWith(
+      'This group has reached its thread limit',
+      'warning'
+    );
     expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3']);
     expect(groupsOf(el)).toEqual({ Shared: ['t1', 't3'] });
     // No order was saved for the refused move: t4 is still first.
@@ -861,7 +864,9 @@ describe('project thread groups — flag on', () => {
 
     // Once they load, saving works again and the stored personal groups
     // document goes back byte for byte.
-    const personalDoc = JSON.stringify({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }] });
+    const personalDoc = JSON.stringify({
+      [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }],
+    });
     hub.prefs['user-a'] = { ...personalPrefs({}), threadGroups: personalDoc };
     hub.prefsDown = false;
     await el.reload();
@@ -972,7 +977,10 @@ describe('project thread groups — flag on', () => {
     // The migration writes Q's group position and publishes the group.
     const migratedQ = ['t1', 'srv-q', 't2'];
     hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2', 't3', 't4'], [Q]: migratedQ });
-    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+    el.applyThreadGroupEvent(Q, 'created', {
+      ...wire(hubGroup('srv-q', 'Q group', [])),
+      projectId: Q,
+    });
 
     await el.moveThread('t4', P, -1);
     await settle(el);
@@ -988,7 +996,10 @@ describe('project thread groups — flag on', () => {
 
     const migratedQ = ['t1', 'srv-q'];
     hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 't2'], [Q]: migratedQ });
-    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+    el.applyThreadGroupEvent(Q, 'created', {
+      ...wire(hubGroup('srv-q', 'Q group', [])),
+      projectId: Q,
+    });
 
     await el.applySpaceOrder([Q, P]);
     await settle(el);

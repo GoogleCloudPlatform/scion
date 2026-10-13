@@ -3091,7 +3091,11 @@ export class ScionChatSpaceRail extends LitElement {
     // the space's stored order does not record may have just been written
     // into it (the migration, design 5a rule 6, for a new or a reused
     // group). See `_prefsStale`.
-    if (live && this.hasExplicitOrder(space) && !this.prefs.threadOrder?.[space]?.includes(pg.group.id)) {
+    if (
+      live &&
+      this.hasExplicitOrder(space) &&
+      !this.prefs.threadOrder?.[space]?.includes(pg.group.id)
+    ) {
       this.markPrefsStale();
     }
     if (!this.projectGroups.has(space)) return;
