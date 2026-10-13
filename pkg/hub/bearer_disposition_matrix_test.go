@@ -459,12 +459,6 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
 	{"hub.metrics.read", http.MethodGet, "/api/v1/admin/metrics-dashboard"}: {
 		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
-	{"template.user.read", http.MethodGet, "/api/v1/users/me/templates/{id}/download"}: {
-		http.StatusBadGateway, "the test server configures no template storage"},
-	{"template.user.update", http.MethodPost, "/api/v1/users/me/templates/{id}/upload"}: {
-		http.StatusBadGateway, "the test server configures no template storage"},
-	{"template.user.update", http.MethodPost, "/api/v1/users/me/templates/{id}/finalize"}: {
-		http.StatusBadGateway, "the test server configures no template storage"},
 	{"hub.githubapp.update", http.MethodPut, "/api/v1/github-app/installations/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/installations/discover"}: {
