@@ -833,14 +833,21 @@ func TestPlacementGuard_WorkspaceTunnelRefusedBeforeSend(t *testing.T) {
 	err := tunnelAgentWorkspaceRequest(context.Background(), f.s, nil, stale, http.MethodPost, "/api/v1/workspace/upload", nil, nil)
 	requirePlacementRefusal(t, err, ErrCodeRuntimeTargetPinStale)
 
-	// Every agent workspace request goes through the wrapper: no caller
-	// tunnels to agent.RuntimeBrokerID directly.
+	// Every agent workspace request goes through the wrapper: outside the
+	// wrapper's own body (which delegates to tunnelWorkspaceRequest), no
+	// caller tunnels to agent.RuntimeBrokerID directly, and the three callers
+	// (sync-to-hub upload, apply, stop sync-back) call the wrapper.
 	direct := regexp.MustCompile(`tunnelWorkspaceRequest\([^)]*agent\.RuntimeBrokerID`)
+	wrapperFunc := regexp.MustCompile(`(?s)\nfunc tunnelAgentWorkspaceRequest\(.*?\n}\n`)
+	wrapped := 0
 	for _, file := range []string{"workspace_handlers.go", "handlers_projects_core.go"} {
 		src, err := os.ReadFile(file)
 		require.NoError(t, err)
-		assert.Empty(t, direct.FindAllString(string(src), -1), "%s tunnels an agent workspace request without the placement wrapper", file)
+		outside := wrapperFunc.ReplaceAllString(string(src), "\n")
+		assert.Empty(t, direct.FindAllString(outside, -1), "%s tunnels an agent workspace request without the placement wrapper", file)
+		wrapped += strings.Count(outside, "tunnelAgentWorkspaceRequest(")
 	}
+	assert.Equal(t, 3, wrapped, "the sync-to-hub upload, the apply and the stop sync-back call the wrapper")
 }
 
 // --- guidance ----------------------------------------------------------------
