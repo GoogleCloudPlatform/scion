@@ -93,8 +93,9 @@ type ProjectDeleteDecision struct {
 	Reason     string
 	HTTPStatus int
 	// Details carries structured denial context. The credential refusal
-	// sets the session-only reason fields (session_only_gate.go); every
-	// other denial leaves it nil.
+	// sets the session-only reason fields (session_only_gate.go), and the
+	// 409 refusal while agents remain sets agents and truncated
+	// (project_delete_agents_guard.go); every other denial leaves it nil.
 	Details map[string]interface{}
 }
 

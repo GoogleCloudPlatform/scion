@@ -222,7 +222,7 @@ func TestShowProjectDeletePrompt_AgentWording(t *testing.T) {
 		notWant string
 	}{
 		{name: "no agents", agents: 0, want: "  - 0 agents\n"},
-		{name: "agents without force", agents: 2, want: "\nWarning: the project has 2 agent(s). The Hub refuses this delete while agents remain; delete them first, or use --force.\n", notWant: "  - 2 agent(s)"},
+		{name: "agents without force", agents: 2, want: "\nWarning: the project has 2 agent record(s). The Hub refuses this delete if any of these agents is not deleted yet; delete them first, or use --force.\n", notWant: "  - 2 agent(s)"},
 		{name: "agents with force", agents: 2, force: true, want: "  - 2 agent(s) (--force: records removed, runtime deletes are best-effort)\n", notWant: "refuses"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

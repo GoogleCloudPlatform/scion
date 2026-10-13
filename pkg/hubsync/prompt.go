@@ -545,10 +545,11 @@ type ProjectProviders interface {
 }
 
 // ShowProjectDeletePrompt displays the project deletion confirmation.
+// agentCount is the project's agent count, soft-deleted agents included.
 // force reports whether the delete is forced: without it the Hub refuses
-// while agents remain, with it their records are removed and their runtime
-// deletes are best-effort. Returns true if the user confirms, false
-// otherwise.
+// while agents that are not deleted remain, with it their records are
+// removed and their runtime deletes are best-effort. Returns true if the
+// user confirms, false otherwise.
 func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, force, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
@@ -568,8 +569,10 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 	}
 	_, _ = fmt.Fprintln(promptOut)
 	if agentCount > 0 && !force {
-		// Not a removal: without --force the Hub refuses the delete.
-		_, _ = fmt.Fprintf(promptOut, "Warning: the project has %d agent(s). The Hub refuses this delete while agents remain; delete them first, or use --force.\n", agentCount)
+		// Not a removal: without --force the Hub refuses the delete while
+		// any agent is not deleted. agentCount also counts soft-deleted
+		// agents, which do not block, so the warning is conditional.
+		_, _ = fmt.Fprintf(promptOut, "Warning: the project has %d agent record(s). The Hub refuses this delete if any of these agents is not deleted yet; delete them first, or use --force.\n", agentCount)
 		_, _ = fmt.Fprintln(promptOut)
 	}
 	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
