@@ -356,8 +356,13 @@ func (s *Server) SyncAllHarnessConfigsFromStorage(ctx context.Context) {
 // GCS content for all active templates. With hub-namespaced storage paths,
 // cross-hub interference is eliminated; this sync handles legitimate
 // single-hub mismatches only (interrupted uploads, manual edits, etc.).
+//
+// It then backfills the AgentConfig snapshot of rows that have none
+// (BackfillTemplateAgentConfigs, ptone/scion#4222), after the repair so a
+// row the repair just rewrote is read as rewritten.
 func (s *Server) SyncAllTemplatesFromStorage(ctx context.Context) {
 	s.syncAllResourcesFromStorage(ctx, storage.ResourceKindTemplate)
+	s.BackfillTemplateAgentConfigs(ctx)
 }
 
 func (s *Server) syncAllResourcesFromStorage(ctx context.Context, kind storage.ResourceKind) {

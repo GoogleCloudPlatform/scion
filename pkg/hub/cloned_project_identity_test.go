@@ -660,10 +660,12 @@ func TestHandleProjectCacheNotify_KeepsHubWorkspaceIdentity(t *testing.T) {
 //     workspace, and from nowhere else.
 func TestHubWorkspaceDownloads_UseIdentityKeepingHelper(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards SyncFromGCS and hub workspace downloader uses, which identity.go and identity_credential.go do not contain.
-	files, err := filepath.Glob("*.go")
+	// scanned through guardScanSubdirs; guards SyncFromGCS and hub workspace downloader uses.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards SyncFromGCS and hub workspace downloader uses.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var gcpRefs []string

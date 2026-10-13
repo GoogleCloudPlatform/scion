@@ -120,6 +120,13 @@ func TestPutServerConfigDB_SharedDirStorageBackends_NFSWithoutBlock(t *testing.T
 // writeUnloadableGlobalSettings writes a global settings file that parses
 // as YAML but cannot be loaded as settings, so handlers cannot read the
 // current shared_dir_storage block.
+//
+// The file must stay valid YAML: the file-mode PUT merges the request into
+// it and returns 500 when it does not parse. A wrong-typed value in a
+// versioned file no longer works, because that loader falls back to the
+// default for the key and the load succeeds. The file is therefore in the
+// legacy format (a harnesses key, no schema_version), whose loader still
+// fails on a value that does not decode.
 func writeUnloadableGlobalSettings(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -129,7 +136,7 @@ func writeUnloadableGlobalSettings(t *testing.T) string {
 		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "settings.yaml")
-	content := "schema_version: \"1\"\nserver:\n  shared_dir_storage:\n    backend: [1, 2]\n"
+	content := "harnesses:\n  claude: {}\nactive_profile: [1, 2]\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}

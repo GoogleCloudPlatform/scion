@@ -1093,20 +1093,14 @@ hub:
 				_ = os.Remove(devTokenPath)
 			}
 
-			// Capture stderr
-			oldStderr := os.Stderr
-			r, w, _ := os.Pipe()
-			os.Stderr = w
-
-			// Call the function (use empty project path as settings won't load in test env)
-			printDevAuthWarningIfNeeded("")
-
-			// Restore stderr and read output
-			_ = w.Close()
-			os.Stderr = oldStderr
-
+			// The warning goes to the writer it is given (the command's
+			// stderr), and never to stdout.
 			var buf bytes.Buffer
-			_, _ = buf.ReadFrom(r)
+			stdout := captureStdout(t, func() {
+				// Use empty project path as settings won't load in test env
+				printDevAuthWarningIfNeeded(&buf, "")
+			})
+			assert.Empty(t, stdout, "the dev auth warning must not go to stdout")
 			output := buf.String()
 
 			if tt.expectWarning {

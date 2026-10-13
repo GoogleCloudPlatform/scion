@@ -118,6 +118,38 @@ func TestCrossNodeStop_ReturnsTypedFailure(t *testing.T) {
 	assert.Less(t, time.Since(began), 3*time.Second)
 }
 
+// crossNodeStopRunMismatchBody is the broker's run_mismatch 404 body for a
+// stop naming run-1 while run-2 holds the agent's name.
+const crossNodeStopRunMismatchBody = `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"Agent not found for the requested run","details":{"runId":"run-1","currentRunId":"run-2"}}}`
+
+// A cross-node run-scoped stop that the owning broker answers with its
+// run_mismatch 404 (ErrStopRunNotFound on the owning node,
+// ptone/scion#3079) fails the dispatch row, and the requester's wait ends
+// as soon as the row fails, with the broker's 404, instead of waiting for
+// a stopped phase that will not come.
+func TestCrossNodeStop_RunMismatch404ReleasesWait(t *testing.T) {
+	ownerErr := stopAgentError(&brokerStatusError{StatusCode: http.StatusNotFound, Body: crossNodeStopRunMismatchBody}, "run-1")
+	require.ErrorIs(t, ownerErr, ErrStopRunNotFound, "fixture: the owner's error is the run-scoped stop's 404")
+	f := newCrossNodeFixture(t, ownerErr, true)
+	f.agent.RunID = "run-1"
+
+	began := time.Now()
+	err := f.requester.DispatchAgentStop(crossNodeCtx(t), f.agent)
+	elapsed := time.Since(began)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded, "the wait ran to the caller's deadline")
+	require.NotErrorIs(t, err, ErrDispatchFailed, "the wait ran out its rolling window")
+	var se *brokerStatusError
+	require.True(t, errors.As(err, &se), "error is not the broker's status error: %v", err)
+	assert.Equal(t, http.StatusNotFound, se.StatusCode)
+	current, ok := brokerRunMismatch(err)
+	assert.True(t, ok, "error is not the broker's run_mismatch 404: %v", err)
+	assert.Equal(t, "run-2", current)
+	assert.Less(t, elapsed, 3*time.Second)
+	assert.Equal(t, int32(1), f.ownerDisp.stopCalled.Load(), "the owning node sent the stop once")
+}
+
 // An error phase that reaches the requester before the done event (a stale
 // status, or a status from another node) does not hide the typed error.
 func TestCrossNodeStart_ErrorPhaseBeforeDone(t *testing.T) {

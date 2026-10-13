@@ -273,6 +273,10 @@ type HubContext struct {
 	// (hubsync.CredentialKindUnknown) on any HubContext not built via
 	// CheckHubAvailability* (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
+	// TargetProfile names the target-hub profile this context was built
+	// from (profileAgentHubContext), or is empty. A profile context has no
+	// local project: commands using it touch no local project state.
+	TargetProfile string
 }
 
 // getHubAccessToken returns an access token for authenticating to the Hub over
@@ -358,6 +362,11 @@ func CheckHubAvailabilityForAgent(projectPath, targetAgent string, skipSync bool
 // All target agents are excluded from sync requirements so batch operations are not blocked
 // by sync drift on the exact agents being modified.
 func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
+	// A target-hub profile names the hub and, with --project, the project
+	// on it: no hub sync and no local project (ptone/scion#4240).
+	if hubProfileSelected() {
+		return profileAgentHubContext()
+	}
 	targetAgent := ""
 	if len(excludedAgents) > 0 {
 		targetAgent = excludedAgents[0] // compatibility field for older internals
@@ -378,6 +387,12 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
+		// A project registered or linked on the hub selected with 'scion
+		// use' gets a link entry, so it stays on that hub after a hub
+		// switch. Both writers are stderr: this runs before commands that
+		// print JSON on stdout. (The context hub always has an entry, so
+		// no new-hub line is printed here.)
+		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
 		// On the local workstation hub, link an unregistered project
 		// without prompting; a remote hub keeps the prompt.
 		AutoLinkLocal: true,
@@ -415,7 +430,15 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 
 // errHubNotConfigured is returned by requireHub when the command needs a hub
 // but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured = errors.New("this command needs a hub; run 'scion server start' or 'scion hub enable'")
+var errHubNotConfigured error = hubNotConfiguredError{}
+
+// hubNotConfiguredError is the type of errHubNotConfigured. Its message is
+// a full sentence that names the ways to select a hub.
+type hubNotConfiguredError struct{}
+
+func (hubNotConfiguredError) Error() string {
+	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
+}
 
 // requireHub is CheckHubAvailability for commands that only work against a
 // hub. It never returns a nil HubContext without an error: when no hub is in
@@ -779,6 +802,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	agentName := api.Slugify(args[0])
 	task := strings.Join(args[1:], " ")
 
+	// A target-hub profile refuses the flags that need local state before
+	// anything else (ptone/scion#4240).
+	if err := checkProfileAgentFlags(cmd); err != nil {
+		return err
+	}
+
 	// Reject --format json with --attach (mutually exclusive)
 	if isJSONOutput() && attach {
 		return newUsageError("--format json and --attach are mutually exclusive")
@@ -826,9 +855,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 		return asUsageError(err)
 	}
 
-	// Pre-flight: verify .scion/agents/ is gitignored (once, before any provisioning).
-	if err := CheckAgentsGitignore(projectPath); err != nil {
-		return err
+	// Pre-flight: verify .scion/agents/ is gitignored (once, before any
+	// provisioning). A target-hub profile has no local project.
+	if !hubProfileSelected() {
+		if err := CheckAgentsGitignore(projectPath); err != nil {
+			return err
+		}
 	}
 
 	// Check if Hub should be used, excluding the target agent from sync requirements.
@@ -1190,6 +1222,11 @@ func printHubWorkspaceSource(project *hubclient.Project) {
 		fmt.Fprintf(os.Stderr, "  (agents mount the project's shared workspace on the runtime broker; no per-agent clone)\n")
 		return
 	}
+	if project.Labels[store.LabelWorkspaceMode] == store.WorkspaceModeWorktreePerAgent {
+		fmt.Fprintf(os.Stderr, "Using hub, git worktree per agent for repo %s\n", project.GitRemote)
+		fmt.Fprintf(os.Stderr, "  (for a checkout linked on this machine, each agent gets a worktree of it under .scion/agents/<name>/workspace; otherwise the runtime broker makes per-agent worktrees of its own clone)\n")
+		return
+	}
 	cloneURL := util.ResolveCloneURL(project.Labels[store.LabelCloneURL], project.GitRemote)
 	fmt.Fprintf(os.Stderr, "Using hub, cloning repo %s\n", cloneURL)
 	fmt.Fprintf(os.Stderr, "  (%s; local worktrees are not used)\n", hubCloneTransportNote(cloneURL))
@@ -1387,6 +1424,13 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		AcceptAsyncLaunch: true,
 	}
 
+	// With a target-hub profile, nothing is gathered from the local
+	// environment for another hub: the env-gather flow is off
+	// (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		req.GatherEnv = false
+	}
+
 	// Wire --service-account flag into the GCP identity assignment.
 	applyServiceAccountFlag(req, serviceAccountFlag)
 
@@ -1518,6 +1562,15 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		if apiErr, ok := asIncompleteCreate(err); ok {
 			return incompleteCreateError(agentName, apiErr)
 		}
+		// A create that failed in transport (for example the client
+		// timeout) may still be running on the Hub, which carries on
+		// without the client: say so when the agent now exists
+		// (ptone/scion#4007). Nothing is deleted here.
+		if unknownErr := createOutcomeUnknownError(agentName, err, existingPhase != "", func(ctx context.Context) (*hubclient.Agent, error) {
+			return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+		}); unknownErr != nil {
+			return wrapHubError(unknownErr)
+		}
 		printDeleteInProgressWarnings(os.Stderr, err)
 		return wrapHubError(fmt.Errorf("failed to start agent via Hub: %w", err))
 	}
@@ -1556,7 +1609,9 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			envGatherAgentID = resp.EnvGather.AgentID
 		}
 
-		// cleanupProvisioningAgent removes a partially-created agent from the Hub.
+		// cleanupProvisioningAgent removes a partially-created agent from the
+		// Hub. It runs only through cleanup, which skips it once the env has
+		// been submitted: the submit is where the Hub launches the agent.
 		cleanupProvisioningAgent := func() {
 			if envGatherAgentID == "" {
 				return
@@ -1573,8 +1628,12 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			}
 		}
 
+		cleanup := newEnvGatherCleanup(cleanupProvisioningAgent)
+
 		// Install a signal handler so Ctrl+C during interactive prompting
-		// still cleans up the provisioning agent instead of leaving it orphaned.
+		// still cleans up the provisioning agent instead of leaving it
+		// orphaned. Once the env has been submitted the agent may be
+		// starting, so it is left alone.
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
@@ -1583,22 +1642,36 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		go func() {
 			select {
 			case <-sigCh:
-				fmt.Fprintln(os.Stderr, "\nInterrupted. Cleaning up provisioning agent...")
-				cleanupProvisioningAgent()
+				fmt.Fprintln(os.Stderr, "\nInterrupted.")
+				if cleanup.cleanupIfUnsubmitted() {
+					fmt.Fprintln(os.Stderr, "Cleaned up the provisioning agent.")
+				} else {
+					fmt.Fprintf(os.Stderr, "The env was already submitted; agent '%s' may be starting and was not deleted.\n", agentName)
+				}
 				os.Exit(130) // 128 + SIGINT(2)
 			case <-envGatherDone:
 				// Normal completion — goroutine exits.
 			}
 		}()
 
-		submitResp, err := gatherAndSubmitEnv(ctx, hubCtx, projectID, resp)
+		submitResp, err := gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, cleanup)
 
 		// Stop the signal handler and goroutine now that env-gather is done.
 		signal.Stop(sigCh)
 		close(envGatherDone)
 
 		if err != nil {
-			cleanupProvisioningAgent()
+			// Delete only when nothing was submitted or the Hub definitely
+			// refused the submit; otherwise the launch may be running on
+			// the Hub, so report that instead (ptone/scion#4007).
+			if !envGatherCleanupSafe(err) {
+				return wrapHubError(envSubmitOutcomeUnknownError(agentName, err, func(ctx context.Context) (*hubclient.Agent, error) {
+					return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
+				}))
+			}
+			// cleanupAfterFailure re-checks envGatherCleanupSafe so the
+			// guard is safe on its own; the check is pure and cheap.
+			cleanup.cleanupAfterFailure(err)
 			return fmt.Errorf("env-gather failed: %w", err)
 		}
 		// Replace response with the finalized one
@@ -2106,6 +2179,19 @@ const (
 // gatherAndSubmitEnv handles the env-gather flow: checks the local environment
 // for missing keys and submits gathered values back to the Hub.
 func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse) (*hubclient.CreateAgentResponse, error) {
+	return gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, resp, nil)
+}
+
+// gatherAndSubmitEnvGuarded is gatherAndSubmitEnv that marks cleanup
+// submitted just before the env submit is sent. A submit failure is
+// returned as an *envSubmitError.
+func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectID string, resp *hubclient.CreateAgentResponse, cleanup *envGatherCleanup) (*hubclient.CreateAgentResponse, error) {
+	// With a target-hub profile the request asked for no env-gather; if
+	// the target asks anyway, nothing is gathered from the local
+	// environment.
+	if hubCtx.profileLocalOnly() {
+		return nil, fmt.Errorf("the target hub of profile %q asked for environment values (%s); with a hub profile nothing is gathered from the local environment: set them as secrets or env on the target hub", hubCtx.TargetProfile, strings.Join(resp.EnvGather.Needs, ", "))
+	}
 	gather := resp.EnvGather
 	agentID := gather.AgentID
 	if agentID == "" && resp.Agent != nil {
@@ -2268,12 +2354,20 @@ func gatherAndSubmitEnv(ctx context.Context, hubCtx *HubContext, projectID strin
 
 	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
 
-	// Submit gathered env to Hub
+	// Submit gathered env to Hub. From here the Hub may launch the agent.
+	// A context that already ended sends nothing: report it as a failure
+	// before the submit, so the agent is cleaned up as before.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("env submit not sent: %w", err)
+	}
+	if !cleanup.markSubmitted() {
+		return nil, errEnvGatherInterrupted
+	}
 	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to submit gathered env: %w", err)
+		return nil, &envSubmitError{err: err}
 	}
 
 	if debugMode {

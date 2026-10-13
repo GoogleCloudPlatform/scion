@@ -983,12 +983,7 @@ func (ps *PreviewService) getBasePermissions(
 		}
 		// Check activation.
 		cb := &CandidateBinding{BindingID: b.ID}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
+		cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 		activation := evaluateActivation(cb, now)
 		if !activation.Active {
 			continue

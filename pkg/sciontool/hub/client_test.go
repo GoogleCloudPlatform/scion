@@ -31,6 +31,7 @@ import (
 	"time"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -58,17 +59,7 @@ func makeJWTWithExpiry(t *testing.T, exp time.Time) string {
 // real Hub when tests run inside an agent container. See issue #123.
 func scrubHubEnv(t *testing.T) {
 	t.Helper()
-	for _, key := range []string{
-		EnvHubEndpoint,
-		EnvHubURL,
-		EnvHubToken,
-		EnvAgentID,
-		EnvAgentMode,
-		transportauth.EnvTransportToken,
-		transportauth.EnvTransportTokenFile,
-	} {
-		t.Setenv(key, "")
-	}
+	testutil.ScrubHubEnv(t)
 	t.Cleanup(SetHubTestSandboxed())
 }
 
@@ -767,8 +758,10 @@ func TestClient_StartTokenRefresh(t *testing.T) {
 		expiredToken := makeJWTWithExpiry(t, time.Now().Add(-time.Minute))
 
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte("invalid agent token: failed to verify token"))
+			_, _ = w.Write([]byte(`{"error":{"code":"invalid_token","message":"invalid token"}}` + "\n"))
 		}))
 		defer server.Close()
 

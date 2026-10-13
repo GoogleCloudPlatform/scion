@@ -48,6 +48,48 @@ type dispatchProfileSelection struct {
 	// the mapping and namespace for such a broker are read from the
 	// runtimes: entry keyed by that type name.
 	RuntimeEntryName string
+	// InstanceKey and RuntimeTargetID identify a flat instance's selection
+	// (flatDispatchSelection): its instance and persisted runtime target.
+	// They are empty for a legacy selection, and ProfileName and
+	// RuntimeEntryName are empty for a flat one.
+	InstanceKey     string
+	RuntimeTargetID string
+}
+
+// The remedies of the start/restart identity refusals: the legacy one names
+// the profile and runtime settings a selection comes from; a flat
+// instance's selection is fixed by its instance and runtime target instead.
+const (
+	legacyIdentityChangeRemedy = "recreate the agent, or restore the profile or runtime settings it was resolved with"
+	flatIdentityChangeRemedy   = "recreate the agent, or start it on the Runtime Broker instance and runtime target it was resolved for"
+)
+
+// isFlat reports whether the selection is a flat instance's
+// (flatDispatchSelection).
+func (sel dispatchProfileSelection) isFlat() bool {
+	return sel.InstanceKey != "" || sel.RuntimeTargetID != ""
+}
+
+// identityChangeWording names the selections a start/restart identity
+// refusal compares, each with its two parts joined by joiner, and returns
+// the remedy. When neither is a flat instance's selection, both are named
+// by profile and runtime entry with the legacy remedy. When either is,
+// both are named in flat terms (a flat selection by its instance key and
+// runtime target ID, any other as having no Runtime Broker instance, never
+// as empty profile and runtime entry names) with the flat remedy.
+func identityChangeWording(was, late dispatchProfileSelection, joiner string) (wasText, lateText, remedy string) {
+	if !was.isFlat() && !late.isFlat() {
+		return fmt.Sprintf("profile %q%sruntime entry %q", was.ProfileName, joiner, was.RuntimeEntryName),
+			fmt.Sprintf("profile %q%sruntime entry %q", late.ProfileName, joiner, late.RuntimeEntryName),
+			legacyIdentityChangeRemedy
+	}
+	flatText := func(sel dispatchProfileSelection) string {
+		if !sel.isFlat() {
+			return "no Runtime Broker instance"
+		}
+		return fmt.Sprintf("Runtime Broker instance %q%sruntime target %q", sel.InstanceKey, joiner, sel.RuntimeTargetID)
+	}
+	return flatText(was), flatText(late), flatIdentityChangeRemedy
 }
 
 // resolveDispatchProfileSelection returns the profile and runtime entry
@@ -68,9 +110,10 @@ func (s *Server) resolveDispatchProfileSelection(opts api.StartOptions) dispatch
 // resolveDispatchProfileSelectionWithError is resolveDispatchProfileSelection
 // returning the project settings load error instead of logging it.
 func (s *Server) resolveDispatchProfileSelectionWithError(opts api.StartOptions) (dispatchProfileSelection, error) {
-	// A flat instance selects no profile and no settings runtime entry.
+	// A flat instance selects no profile and no settings runtime entry:
+	// its selection is its own instance.
 	if s.isFlat() {
-		return dispatchProfileSelection{}, nil
+		return s.flatDispatchSelection(), nil
 	}
 	if _, forced := s.forcedRuntime(); forced {
 		return dispatchProfileSelection{RuntimeEntryName: s.config.ForceRuntime}, nil
@@ -161,6 +204,10 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 			Status:  http.StatusInternalServerError,
 			Message: fmt.Sprintf("loading the project's settings to select the profile and runtime entry for GCP identity mode %q: %v", store.GCPMetadataModeAssign, err),
 		}
+	}
+
+	if s.isFlat() {
+		return s.resolveFlatKubernetesAssignIdentity(in, saEmail, projectID, sel)
 	}
 
 	// ProjectSettingsHasKubernetesServiceAccountMappings reads the project's
@@ -263,6 +310,53 @@ func (s *Server) resolveKubernetesAssignIdentity(ctx context.Context, in startCo
 		ProjectID: projectID,
 		Selection: sel,
 	}, nil
+}
+
+// resolveFlatKubernetesAssignIdentity is resolveKubernetesAssignIdentity
+// for a flat instance: the GSA-to-KSA mapping is the instance's own
+// (flatKubernetesIdentityPolicy) and the namespace is the instance's
+// activated namespace. No profile, runtime entry, Hub overlay or project
+// setting is read. The refusals are the legacy path's: an unmapped or
+// invalid entry, an explicit ServiceAccount that differs from the mapped
+// one, and an explicit namespace other than the instance's.
+func (s *Server) resolveFlatKubernetesAssignIdentity(in startContextInputs, saEmail, projectID string, sel dispatchProfileSelection) (kubernetesAssignIdentity, *startContextError) {
+	ksaName, mapped := s.flatK8sIdentity.mappedServiceAccount(saEmail)
+	if !mapped {
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"GCP identity mode %q on the Kubernetes runtime has no Kubernetes ServiceAccount mapped for %q; add it to kubernetes_service_account_mappings in this flat Runtime Broker instance's runtime_target",
+				store.GCPMetadataModeAssign, saEmail),
+			Code:    ErrCodeIdentityNotMapped,
+			Details: s.identityMappingErrorDetails(saEmail, sel),
+		}
+	}
+	if err := config.ValidateKubernetesServiceAccountMappings(map[string]string{saEmail: ksaName}); err != nil {
+		return kubernetesAssignIdentity{}, &startContextError{Status: http.StatusBadRequest, Message: err.Error()}
+	}
+	explicitKSA, explicitNamespace := explicitKubernetesIdentity(in)
+	if explicitKSA != "" && explicitKSA != ksaName {
+		details := s.identityMappingErrorDetails(saEmail, sel)
+		details[api.BrokerErrDetailRequestedKSA] = explicitKSA
+		details[api.BrokerErrDetailMappedKSA] = ksaName
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"explicit Kubernetes ServiceAccount %q does not match the ServiceAccount %q mapped to %q; remove the explicit serviceAccountName or update this instance's kubernetes_service_account_mappings",
+				explicitKSA, ksaName, saEmail),
+			Code:    ErrCodeIdentityKSAMismatch,
+			Details: details,
+		}
+	}
+	if ns := s.flatInstanceNamespace(); explicitNamespace != "" && explicitNamespace != ns {
+		return kubernetesAssignIdentity{}, &startContextError{
+			Status: http.StatusBadRequest,
+			Message: fmt.Sprintf(
+				"explicit Kubernetes namespace %q does not match this flat Runtime Broker instance's namespace %q for GCP identity mode %q; remove the explicit namespace",
+				explicitNamespace, ns, store.GCPMetadataModeAssign),
+		}
+	}
+	return kubernetesAssignIdentity{KSAName: ksaName, SAEmail: saEmail, ProjectID: projectID, Selection: sel}, nil
 }
 
 // assignDiscoveryTimeout bounds the ServiceAccount list discoverAssignKSA
@@ -447,8 +541,8 @@ func (s *Server) forcedRuntime() (scionrt.Runtime, bool) {
 	if s.config.ForceRuntime == "" {
 		return nil, false
 	}
-	if s.config.ForceRuntime == s.runtime.Name() {
-		return s.runtime, true
+	if rt := s.currentRuntime(); s.config.ForceRuntime == rt.Name() {
+		return rt, true
 	}
 	if aux, ok := s.findAuxiliaryRuntimeByType(s.config.ForceRuntime); ok {
 		return aux.Runtime, true
@@ -490,7 +584,6 @@ func explicitKubernetesIdentity(in startContextInputs) (serviceAccountName, name
 // Running either dispatch would not apply the assigned identity as
 // configured, so it is refused before any side effect.
 func rejectKubernetesAssignRuntimeChange(opts api.StartOptions, early *dispatchProfileSelection, resolvedRuntimeType string, lateSelection func() dispatchProfileSelection) *startContextError {
-	const remedy = "recreate the agent, or restore the profile or runtime settings it was resolved with"
 	lateIsKubernetes := isKubernetesRuntimeName(resolvedRuntimeType)
 	var msg string
 	switch {
@@ -500,21 +593,23 @@ func rejectKubernetesAssignRuntimeChange(opts api.StartOptions, early *dispatchP
 			was = *early
 		}
 		if !lateIsKubernetes {
+			wasText, _, remedy := identityChangeWording(was, dispatchProfileSelection{}, ", ")
 			msg = fmt.Sprintf(
-				"GCP identity mode %q was resolved for the Kubernetes runtime (profile %q, runtime entry %q), but this dispatch now resolves to runtime %q; %s",
-				store.GCPMetadataModeAssign, was.ProfileName, was.RuntimeEntryName, resolvedRuntimeType, remedy)
+				"GCP identity mode %q was resolved for the Kubernetes runtime (%s), but this dispatch now resolves to runtime %q; %s",
+				store.GCPMetadataModeAssign, wasText, resolvedRuntimeType, remedy)
 		} else if early != nil {
 			if late := lateSelection(); late != was {
+				wasText, lateText, remedy := identityChangeWording(was, late, " and ")
 				msg = fmt.Sprintf(
-					"GCP identity mode %q was resolved for profile %q and runtime entry %q, but this dispatch now resolves to profile %q and runtime entry %q; %s",
-					store.GCPMetadataModeAssign, was.ProfileName, was.RuntimeEntryName, late.ProfileName, late.RuntimeEntryName, remedy)
+					"GCP identity mode %q was resolved for %s, but this dispatch now resolves to %s; %s",
+					store.GCPMetadataModeAssign, wasText, lateText, remedy)
 			}
 		}
 	case opts.Env["SCION_METADATA_MODE"] == store.GCPMetadataModeAssign:
 		if lateIsKubernetes {
 			msg = fmt.Sprintf(
 				"GCP identity mode %q was resolved for a non-Kubernetes runtime, but this dispatch now resolves to the Kubernetes runtime %q; %s",
-				store.GCPMetadataModeAssign, resolvedRuntimeType, remedy)
+				store.GCPMetadataModeAssign, resolvedRuntimeType, legacyIdentityChangeRemedy)
 		}
 	}
 	if msg == "" {

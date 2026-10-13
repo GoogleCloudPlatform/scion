@@ -79,6 +79,7 @@ const (
 	ErrCodeRuntimeBrokerAmbiguous           = apierr.ErrCodeRuntimeBrokerAmbiguous
 	ErrCodeRuntimeBrokerLinkPathUnsupported = apierr.ErrCodeRuntimeBrokerLinkPathUnsupported
 	ErrCodeRuntimeBrokerNameConflict        = apierr.ErrCodeRuntimeBrokerNameConflict
+	ErrCodeRuntimeTargetInUse               = apierr.ErrCodeRuntimeTargetInUse
 	ErrCodeRuntimeBrokerNotFlat             = apierr.ErrCodeRuntimeBrokerNotFlat
 	ErrCodeRuntimeBrokerNotFound            = apierr.ErrCodeRuntimeBrokerNotFound
 	ErrCodeRuntimeBrokerNotLinked           = apierr.ErrCodeRuntimeBrokerNotLinked

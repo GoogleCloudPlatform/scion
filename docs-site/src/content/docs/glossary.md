@@ -60,7 +60,7 @@ The helper utility injected into every agent container for status reporting, met
 ## Runtime & Workspace
 
 ### Agent Port Forwarding
-A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket reverse tunnel.
+A feature that allows exposing local HTTP ports running inside an agent container through the Hub as authenticated, reverse-proxied URLs. Built on an outbound WebSocket connection from the container. Do not call it a tunnel: for raw TCP or SSH access through `scion tunnel`, see [Tunnel (Conduit user tunnel)](#tunnel-conduit-user-tunnel).
 
 ### Runtime
 The container technology that executes an agent's container: Docker, Podman, Apple Container, Kubernetes, Cloud Run Instances, or Substrate (Agent Substrate actors on GKE).
@@ -146,7 +146,10 @@ A server process running both the Hub and Runtime Broker components together (th
 A credential made available to an agent at runtime (e.g. API keys, tokens). A harness-config's `secrets` field *declares* which secrets an agent needs; the **Secret Backend** — a pluggable store (local SQLite for development, GCP Secret Manager in production, selected via `SCION_SERVER_SECRETS_BACKEND`) — *stores and resolves* them, scoped by user, project, runtime broker, or hub, and injects them into the container.
 
 ### Port Forwarding
-The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated WebSocket-based reverse tunnel established from within the container to the Hub.
+The feature that allows users, developers, and external systems to access HTTP services running inside agent containers securely via the Hub's reverse proxy. Requests are routed over a persistent, authenticated outbound WebSocket connection from the container to the Hub. Do not call it a tunnel; that term is reserved for [Tunnel (Conduit user tunnel)](#tunnel-conduit-user-tunnel). The route `/ports/tunnel` and its error text keep their legacy names.
+
+### Tunnel (Conduit user tunnel)
+A raw TCP or SSH connection from a user's machine to a port or the SSH service inside an agent, opened with [`scion tunnel`](/scion/hosted/user/port-forwarding/#tunnels-from-your-machine-scion-tunnel) over a Conduit session with the Hub (behind the `hub.conduit` experiment). The local end is a `127.0.0.1` listener or stdin/stdout. Distinct from Port Forwarding, which serves HTTP through the Hub's proxy URLs.
 
 ### Auto-Expose
 A sub-feature of port forwarding where `sciontool` periodically scans for listening TCP sockets inside the agent container (by reading `/proc/net/tcp` and `/proc/net/tcp6`), filters them by policy, and registers them with the Hub using the `auto-scan` label. Stale registrations are automatically cleaned up when the service stops listening.
@@ -174,7 +177,7 @@ _See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
 
 ### Group
-A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients), from a **Thread Group** (a set of a project's chat threads) and from a **Project**.
 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
@@ -242,7 +245,10 @@ The default message mode. Any user with the `agent:message` permission in the pr
 A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging.
 
 ### Message Group
-A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users).
+A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users) and from a **Thread Group**.
+
+### Thread Group
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Managed with [`scion conversation group`](/scion/reference/cli/#scion-conversation-group), behind the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/). Distinct from **Group** (Hub users) and from a **Message Group** (the recipients of one send).
 
 ### Notification
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion start`.

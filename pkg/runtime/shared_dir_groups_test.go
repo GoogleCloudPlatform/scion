@@ -270,9 +270,7 @@ func TestPodmanRun_SharedDirLeafGroups(t *testing.T) {
 
 	// Rootless: the leaf gid is not mapped in the user namespace; warn and skip.
 	logs := &bytes.Buffer{}
-	prev := runtimeLog
-	runtimeLog = slog.New(slog.NewTextHandler(logs, nil))
-	t.Cleanup(func() { runtimeLog = prev })
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 	out, err = (&PodmanRuntime{Command: cmd, Rootless: true}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
 	require.NoError(t, err)
 	args = argsBeforeImage(t, out, "test-image")
@@ -299,9 +297,7 @@ func TestDockerRun_SharedDirLeafGroups_SecretValueReplaced(t *testing.T) {
 // Apple's container CLI has no --group-add: warn and start unchanged.
 func TestAppleRun_SharedDirLeafGroups_Skipped(t *testing.T) {
 	logs := &bytes.Buffer{}
-	prev := runtimeLog
-	runtimeLog = slog.New(slog.NewTextHandler(logs, nil))
-	t.Cleanup(func() { runtimeLog = prev })
+	setRuntimeLogHandler(t, slog.NewTextHandler(logs, nil))
 
 	out, err := (&AppleContainerRuntime{Command: writeEchoCommand(t)}).Run(context.Background(), sharedDirGroupsRunConfig(4242))
 	require.NoError(t, err)

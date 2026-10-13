@@ -67,8 +67,8 @@ func newRefFixture(t *testing.T) *refFixture {
 		func(inner store.Store, fault *storeFaultSwitch) *refFaultStore {
 			return &refFaultStore{Store: inner, fault: fault}
 		})
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	as, err := NewLocalDiskAttachmentStore(t.TempDir())

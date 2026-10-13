@@ -551,6 +551,89 @@ func TestDisplayAgentsRunningFlag(t *testing.T) {
 	}
 }
 
+// TestDisplayAgentsStartingPhase (ptone/scion#4756): an agent whose runtime
+// reports Phase and ContainerStatus "starting" is shown as starting in both
+// the local table and the hub table (via hubAgentToAgentInfo), and --running
+// keeps it.
+func TestDisplayAgentsStartingPhase(t *testing.T) {
+	local := api.AgentInfo{
+		Name:            "starting-local",
+		Template:        "default",
+		Runtime:         "cloudrun-sandbox",
+		Project:         "my-project",
+		Phase:           "starting",
+		ContainerStatus: "starting",
+	}
+	hub := hubAgentToAgentInfo(hubclient.Agent{
+		ID:              "agent-starting-hub",
+		Name:            "starting-hub",
+		Template:        "default",
+		Phase:           "starting",
+		ContainerStatus: "starting",
+	})
+	if hub.Phase != "starting" || hub.Activity != "" {
+		t.Fatalf("hubAgentToAgentInfo phase/activity = %q/%q, want starting/empty", hub.Phase, hub.Activity)
+	}
+	// Fill the columns left of CONTAINER so the row splits into fields
+	// that line up with the header.
+	hub.Runtime = "cloudrun-sandbox"
+	hub.Project = "my-project"
+	hub.RuntimeBrokerName = "broker-1"
+
+	listRunning = true
+	defer func() { listRunning = false }()
+
+	for _, tc := range []struct {
+		name    string
+		agent   api.AgentInfo
+		hubMode bool
+	}{
+		{name: "local", agent: local, hubMode: false},
+		{name: "hub", agent: hub, hubMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			old := os.Stdout
+			r, w, _ := os.Pipe()
+			os.Stdout = w
+
+			err := displayAgents([]api.AgentInfo{tc.agent}, false, tc.hubMode)
+			_ = w.Close()
+			os.Stdout = old
+			if err != nil {
+				t.Fatalf("displayAgents returned error: %v", err)
+			}
+
+			var buf bytes.Buffer
+			_, _ = buf.ReadFrom(r)
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if len(lines) != 2 {
+				t.Fatalf("expected header + 1 agent row, got %d lines: %s", len(lines), buf.String())
+			}
+			header, row := strings.Fields(lines[0]), strings.Fields(lines[1])
+			// col maps header words to row fields by position: every column
+			// up to CONTAINER is one non-empty word; LAST ACTIVITY is
+			// multi-word and must stay last.
+			col := func(name string) string {
+				for i, h := range header {
+					if h == name && i < len(row) {
+						return row[i]
+					}
+				}
+				return ""
+			}
+			if row[0] != tc.agent.Name {
+				t.Errorf("NAME = %q, want %q: %s", row[0], tc.agent.Name, lines[1])
+			}
+			if got := col("PHASE"); got != "starting" {
+				t.Errorf("PHASE = %q, want starting: %s", got, lines[1])
+			}
+			if got := col("CONTAINER"); got != "starting" {
+				t.Errorf("CONTAINER = %q, want starting: %s", got, lines[1])
+			}
+		})
+	}
+}
+
 func TestHubAgentToAgentInfo_HarnessConfigTopLevelTakesPrecedence(t *testing.T) {
 	// When both are set, top-level harnessConfig takes precedence
 	a := hubclient.Agent{

@@ -54,10 +54,6 @@ const (
 	// assignment. The message names what is missing and who grants it.
 	// Status 403.
 	ErrCodeIdentityAssignDenied = "identity_assign_denied"
-
-	// ErrCodeIdentityModeUnsupported: the requested GCP identity mode is not
-	// available where it was asked for. Status 400.
-	ErrCodeIdentityModeUnsupported = "identity_mode_unsupported"
 )
 
 // identityVerifyRemedy is the remedy shared by every not-verified message.

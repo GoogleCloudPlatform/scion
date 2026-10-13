@@ -317,17 +317,29 @@ func listArtifactVersions(ctx context.Context, svc hubclient.ArtifactService, ou
 	if err != nil {
 		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
 	}
-	versions, err := svc.ListVersions(ctx, id)
+	versions, discarded, err := svc.ListVersionHistory(ctx, id)
 	if err != nil {
 		return fmt.Errorf("list versions: %w%s", err, artifactErrorHint(err, false))
 	}
-	if len(versions) == 0 {
+	if len(versions) == 0 && len(discarded) == 0 {
 		_, _ = fmt.Fprintf(out, "%s has no published version\n", artifacts.FormatRef(id, 0))
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "  REF\tKIND\tPUBLISHED\tBY\tFILES\tSIZE\tNOTE")
+	// Discarded versions are listed among the ready ones by number, so a
+	// gap in the numbering is explained (ptone/scion#4577). They show only
+	// their number, the time the number was taken and why.
+	d := 0
+	printDiscarded := func(above int) {
+		for ; d < len(discarded) && discarded[d].Seq > above; d++ {
+			x := discarded[d]
+			_, _ = fmt.Fprintf(tw, "  %s\tdiscarded\t%s\t-\t-\t-\t%s\n", artifacts.FormatRef(id, x.Seq),
+				clitime.Format(x.CreatedAt, clitime.Minute), discardReasonText(x.Reason))
+		}
+	}
 	for _, v := range versions {
+		printDiscarded(v.Seq)
 		mark := " "
 		if v.Seq == meta.Artifact.CurrentSeq {
 			mark = "*"
@@ -339,7 +351,24 @@ func listArtifactVersions(ctx context.Context, svc hubclient.ArtifactService, ou
 		_, _ = fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%d\t%s\t%s\n", mark, artifacts.FormatRef(id, v.Seq), v.Kind,
 			clitime.Format(v.CreatedAt, clitime.Minute), by, v.FileCount, humanBytes(v.TotalBytes), noteOneLine(v.Note))
 	}
+	printDiscarded(0)
 	return tw.Flush()
+}
+
+// discardReasonText describes a discarded version's reason code.
+func discardReasonText(reason string) string {
+	switch reason {
+	case artifacts.FailReasonUnmarkedChanges:
+		return "discarded: the review changed text outside its marks"
+	case artifacts.FailReasonStaleReview:
+		return "discarded: the review was of an older version"
+	case artifacts.FailReasonNewerPublishPending:
+		return "discarded: a newer version was being published"
+	case artifacts.FailReasonExpired:
+		return "discarded: the upload was not finished in time"
+	default:
+		return "discarded: no reason recorded"
+	}
 }
 
 func humanBytes(n int64) string {

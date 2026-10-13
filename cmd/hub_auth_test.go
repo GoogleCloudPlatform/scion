@@ -15,13 +15,17 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockHubAuthService struct {
@@ -246,4 +250,23 @@ func TestNewDeviceFlowAuth_ImplicitProviderUsesFallbackPath(t *testing.T) {
 	if authSvc.polledProviders[0] != "github" {
 		t.Fatalf("expected github polling provider, got %v", authSvc.polledProviders)
 	}
+}
+
+// The login result goes to the writer given, the command's output, and the
+// credential is stored.
+func TestStoreTokenAndPrintResult_WritesToOut(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	var out bytes.Buffer
+	stdout, _ := captureStdoutStderr(t, func() {
+		require.NoError(t, storeTokenAndPrintResult(&out, "https://hub.example.com", &hubclient.CLITokenResponse{
+			AccessToken: "tok",
+			ExpiresIn:   3600,
+			User:        &hubclient.User{Email: "alice@example.com", DisplayName: "Alice", Role: "member"},
+		}))
+	})
+	assert.Equal(t, "\nAuthentication successful!\nLogged in as: Alice (alice@example.com) [member]\n", out.String())
+	assert.Empty(t, stdout, "nothing on the process's stdout")
+	cred, err := credentials.Load("https://hub.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, "tok", cred.AccessToken)
 }

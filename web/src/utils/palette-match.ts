@@ -63,9 +63,81 @@ export function normalizeMatchText(input: string): string {
   return input.normalize('NFC').toLowerCase().normalize('NFC');
 }
 
-/** Normalize a query: NFC + lowercase, with edges trimmed. A whitespace-only query is empty. */
+/**
+ * Normalize a query: NFC + lowercase, with edges trimmed and every inner run
+ * of whitespace collapsed to a single space, so each space separates two
+ * query words. A whitespace-only query is empty.
+ */
 export function normalizeQuery(input: string): string {
-  return normalizeMatchText(input.trim());
+  return normalizeMatchText(input.trim()).replace(/\s+/g, ' ');
+}
+
+const SPACE = 0x20;
+const HYPHEN = 0x2d;
+const UNDERSCORE = 0x5f;
+
+/**
+ * True when query character code `q` matches field character code `f`.
+ *
+ * A space in the query stands for any word separator in the field: a space,
+ * a hyphen or an underscore. Slugs join words with hyphens and some names use
+ * underscores, so "native chat" matches "native-chat". Characters that give a
+ * field its structure (".", "/", "@" in paths, hosts and emails) are not word
+ * separators. Every other character matches only itself, so a query with no
+ * space matches exactly as plain string comparison does.
+ */
+function codesMatch(q: number, f: number): boolean {
+  return q === f || (q === SPACE && (f === HYPHEN || f === UNDERSCORE));
+}
+
+/** True when `query[qStart, qEnd)` matches `field` starting at `at`. Compares char codes, so it allocates nothing. */
+function matchesAt(
+  field: string,
+  at: number,
+  query: string,
+  qStart: number,
+  qEnd: number
+): boolean {
+  if (at + (qEnd - qStart) > field.length) return false;
+  for (let k = 0; k < qEnd - qStart; k++) {
+    if (!codesMatch(query.charCodeAt(qStart + k), field.charCodeAt(at + k))) return false;
+  }
+  return true;
+}
+
+/** First index in `field` where `query[qStart, qEnd)` matches contiguously, or -1. */
+function indexOfRange(field: string, query: string, qStart: number, qEnd: number): number {
+  const last = field.length - (qEnd - qStart);
+  for (let i = 0; i <= last; i++) {
+    if (matchesAt(field, i, query, qStart, qEnd)) return i;
+  }
+  return -1;
+}
+
+/**
+ * First index in `field` where `query` matches contiguously, or -1. A query
+ * with no space goes straight to `String.prototype.indexOf`.
+ */
+function indexOfQuery(field: string, query: string): number {
+  if (!query.includes(' ')) return field.indexOf(query);
+  return indexOfRange(field, query, 0, query.length);
+}
+
+/**
+ * True when every word of a multi-word `query` occurs somewhere in `field`,
+ * in any order. Walks the query's word boundaries in place rather than
+ * splitting it, so it allocates nothing.
+ */
+// Each word is checked on its own, so a repeated query word can match one occurrence.
+function containsEveryWord(query: string, field: string): boolean {
+  let start = 0;
+  while (start < query.length) {
+    let end = query.indexOf(' ', start);
+    if (end === -1) end = query.length;
+    if (end > start && indexOfRange(field, query, start, end) === -1) return false;
+    start = end + 1;
+  }
+  return true;
 }
 
 /** A normalized field plus, for every character of `normalized`, the [start, end) span in the original string its source grapheme cluster occupies. */
@@ -214,11 +286,15 @@ function* graphemeClusters(
   }
 }
 
-/** True when every character of `needle` appears in `haystack`, in order (not necessarily contiguous). */
+/**
+ * True when every character of `needle` appears in `haystack`, in order (not
+ * necessarily contiguous). A space in `needle` matches a word separator, as
+ * in {@link codesMatch}.
+ */
 function isSubsequence(needle: string, haystack: string): boolean {
   let i = 0;
   for (let j = 0; j < haystack.length && i < needle.length; j++) {
-    if (haystack[j] === needle[i]) i++;
+    if (codesMatch(needle.charCodeAt(i), haystack.charCodeAt(j))) i++;
   }
   return i === needle.length;
 }
@@ -233,10 +309,21 @@ function isSubsequence(needle: string, haystack: string): boolean {
 export function classifyMatch(query: string, field: string): MatchTier | null {
   if (query === '') return 0;
   const normalizedField = normalizeMatchText(field);
-  if (normalizedField === query) return 0;
-  if (normalizedField.startsWith(query)) return 1;
-  if (normalizedField.includes(query)) return 2;
+  if (!query.includes(' ')) {
+    if (normalizedField === query) return 0;
+    if (normalizedField.startsWith(query)) return 1;
+    if (normalizedField.includes(query)) return 2;
+    if (isSubsequence(query, normalizedField)) return 3;
+    return null;
+  }
+  // A multi-word query whose words, joined by word separators, occur
+  // together in the field keeps the exact / prefix / substring tiers. Words
+  // found apart, or out of order, are a looser match in the last tier.
+  const index = indexOfRange(normalizedField, query, 0, query.length);
+  if (index === 0) return normalizedField.length === query.length ? 0 : 1;
+  if (index !== -1) return 2;
   if (isSubsequence(query, normalizedField)) return 3;
+  if (containsEveryWord(query, normalizedField)) return 3;
   return null;
 }
 
@@ -295,16 +382,18 @@ export function mergeAdjacent(ranges: HighlightRange[]): HighlightRange[] {
 /**
  * Compute highlight ranges (in original-string coordinates) for the matched
  * code points of `query` within `field`. Returns `[]` for an empty query or
- * no match. Exact/prefix/substring matches produce one contiguous range;
- * subsequence matches produce one range per matched character, merged where
- * adjacent.
+ * no match. Exact/prefix/substring matches produce one contiguous range,
+ * which covers any separator a query space matched; subsequence matches
+ * produce one range per matched character, merged where adjacent; a
+ * multi-word query whose words occur out of order produces one range per
+ * word, at that word's first occurrence.
  */
 export function highlightRangesFor(query: string, field: string): HighlightRange[] {
   const q = normalizeQuery(query);
   if (!q) return [];
   const { normalized, starts, ends } = buildNormalizedField(field);
 
-  const idx = normalized.indexOf(q);
+  const idx = indexOfQuery(normalized, q);
   if (idx !== -1) {
     return [{ start: starts[idx], end: ends[idx + q.length - 1] }];
   }
@@ -312,12 +401,27 @@ export function highlightRangesFor(query: string, field: string): HighlightRange
   const ranges: HighlightRange[] = [];
   let qi = 0;
   for (let ni = 0; ni < normalized.length && qi < q.length; ni++) {
-    if (normalized[ni] === q[qi]) {
+    if (codesMatch(q.charCodeAt(qi), normalized.charCodeAt(ni))) {
       ranges.push({ start: starts[ni], end: ends[ni] });
       qi++;
     }
   }
-  return qi === q.length ? mergeAdjacent(ranges) : [];
+  if (qi === q.length) return mergeAdjacent(ranges);
+  if (!q.includes(' ')) return [];
+
+  const wordRanges: HighlightRange[] = [];
+  let start = 0;
+  while (start < q.length) {
+    let end = q.indexOf(' ', start);
+    if (end === -1) end = q.length;
+    if (end > start) {
+      const at = indexOfRange(normalized, q, start, end);
+      if (at === -1) return [];
+      wordRanges.push({ start: starts[at], end: ends[at + (end - start) - 1] });
+    }
+    start = end + 1;
+  }
+  return mergeAdjacent(wordRanges);
 }
 
 /**

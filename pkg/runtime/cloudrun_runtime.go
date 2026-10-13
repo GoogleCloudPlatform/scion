@@ -288,7 +288,7 @@ func (r *CloudRunRuntime) Run(ctx context.Context, cfg RunConfig) (string, error
 		runKey := sanitizeGCPLabelKey(api.LabelRunID)
 		if want := sanitizeGCPLabelValue(cfg.Labels[api.LabelRunID]); want != "" {
 			if run := existing.GetLabels()[runKey]; run != "" && run != want {
-				runtimeLog.Info("Cloud Run instance of another run holds the agent's instance ID; not reusing it",
+				runtimeLog().Info("Cloud Run instance of another run holds the agent's instance ID; not reusing it",
 					"instance", instanceID, "run_id", want, "instance_run_id", run)
 				return "", fmt.Errorf("instance %s belongs to run %q, not %q: %w", instanceID, run, want, ErrRunConflict)
 			}
@@ -351,6 +351,18 @@ func (r *CloudRunRuntime) buildCloudRunInstance(cfg RunConfig, uid, gid int, nfs
 		Name:   "SCION_HOST_GID",
 		Values: &runpb.EnvVar_Value{Value: fmt.Sprintf("%d", gid)},
 	})
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only names no source above set (env-type secrets are already folded
+	// into cfg.Env), never a suppressed key.
+	emitted := make(map[string]bool, len(envVars))
+	for _, ev := range envVars {
+		emitted[ev.GetName()] = true
+	}
+	for _, e := range FallbackEnvEntries(cfg.FallbackEnv, cfg.SuppressedFallbackKeys, emitted) {
+		k, v, _ := strings.Cut(e, "=")
+		envVars = append(envVars, &runpb.EnvVar{Name: k, Values: &runpb.EnvVar_Value{Value: v}})
+	}
 
 	var volumes []*runpb.Volume
 	var volumeMounts []*runpb.VolumeMount
@@ -850,7 +862,7 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 			return fmt.Errorf("failed to %s instance: %w", verb, lastErr)
 		}
 		if run := inst.GetLabels()[runKey]; run != "" && run != want {
-			runtimeLog.Info("Left a Cloud Run instance of another run untouched",
+			runtimeLog().Info("Left a Cloud Run instance of another run untouched",
 				"instance", name, "verb", verb, "run_id", ref.RunID, "instance_run_id", run)
 			return fmt.Errorf("instance %s belongs to run %q, not %q: %w", cloudRunShortInstanceID(name), run, want, ErrRunMismatch)
 		}
@@ -860,7 +872,7 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 			if code := status.Code(err); code == codes.Aborted || code == codes.FailedPrecondition {
 				// The instance may have changed after the read: re-read
 				// and re-check.
-				runtimeLog.Info("Cloud Run refused a run-checked call; re-checking",
+				runtimeLog().Info("Cloud Run refused a run-checked call; re-checking",
 					"instance", name, "verb", verb, "run_id", ref.RunID, "attempt", attempt+1, "error", err)
 				lastErr = err
 				continue

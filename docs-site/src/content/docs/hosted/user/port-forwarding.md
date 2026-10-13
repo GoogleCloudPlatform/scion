@@ -5,26 +5,26 @@ description: Learn how to access HTTP services running inside agent containers s
 
 Scion's **port forwarding** feature allows users, developers, and integrations to access HTTP services running inside agent containers—such as web servers, developer APIs, or debugging interfaces—securely through the Hub's reverse proxy. 
 
-Instead of opening container ports to the public internet or managing complex VPNs/ingress rules, Scion establishes a secure WebSocket-based reverse tunnel between the agent container and the Hub, routing incoming traffic on-demand.
+Instead of opening container ports to the public internet or managing complex VPNs/ingress rules, Scion keeps a secure outbound WebSocket connection from the agent container to the Hub and routes incoming traffic over it on demand.
 
 ---
 
 ## How It Works
 
-Port forwarding in Scion relies on a **reverse tunnel architecture**:
+Port forwarding in Scion relies on an **outbound WebSocket connection** from the container:
 
-1. **Tunnel Establishment**: When an agent container boots, `sciontool` (the in-container agent helper) establishes a persistent WebSocket connection to the Hub's tunnel registration endpoint:
+1. **Connection Establishment**: When an agent container boots, `sciontool` (the in-container agent helper) opens a persistent outbound WebSocket connection to the Hub's port-forward endpoint (the route keeps its legacy name):
    ```
    GET /api/v1/agents/{agentID}/ports/tunnel
    ```
    This connection is authenticated using the agent's unique `X-Scion-Agent-Token`.
 2. **Port Registration**: A port must be registered with the Hub before it can receive forwarded traffic. Ports can be registered manually via the CLI/API or automatically detected via **Auto-Expose**.
 3. **Request Proxying**: When a user or system sends an HTTP request to the Hub proxy URL for a specific agent port, the Hub encapsulates the request headers, method, path, query parameters, and body into a multiplexed control message.
-4. **Local Forwarding**: The Hub sends this message over the WebSocket tunnel to the agent's in-container tunnel manager. The manager unwraps the request and makes a standard HTTP request to the local loopback address (`127.0.0.1` or `localhost`) on the specified port.
-5. **Response Delivery**: The local service's response is streamed back over the WebSocket tunnel, reconstructed by the Hub, and returned to the caller.
+4. **Local Forwarding**: The Hub sends this message over the WebSocket connection to the agent's in-container port-forward manager. The manager unwraps the request and makes a standard HTTP request to the local loopback address (`127.0.0.1` or `localhost`) on the specified port.
+5. **Response Delivery**: The local service's response is streamed back over the WebSocket connection, reconstructed by the Hub, and returned to the caller.
 
 :::note[Conduit transport (experimental)]
-When the `hub.conduit` [experiment](/scion/reference/experiments/) is on and the Hub runs the conduit relay (see [Conduit settings](/scion/reference/server-config/#conduit-serverhubconduit)), `sciontool` also connects to the relay at `GET /api/v1/conduit`, reconnecting with backoff. The Hub then proxies requests for loopback ports over the agent's conduit session, and admits only a session from the agent's current run. An agent without a conduit session, such as one running an older `sciontool`, still uses the tunnel described above. If the agent has neither, the request fails with `503` and error code `agent_offline`. A TCP stream over the conduit session connects to `127.0.0.1:<port>` inside the container and, only if that connection is refused, tries `[::1]:<port>` once, so a service listening only on the IPv6 loopback address is reachable too. With the experiment off, nothing changes.
+When the `hub.conduit` [experiment](/scion/reference/experiments/) is on and the Hub runs the conduit relay (see [Conduit settings](/scion/reference/server-config/#conduit-serverhubconduit)), `sciontool` also connects to the relay at `GET /api/v1/conduit`, reconnecting with backoff. The Hub then proxies requests for loopback ports over the agent's conduit session, and admits only a session from the agent's current run. An agent without a conduit session, such as one running an older `sciontool`, still uses the WebSocket connection described above. If the agent has neither, the request fails with `503` and error code `agent_offline`. A TCP stream over the conduit session connects to `127.0.0.1:<port>` inside the container and, only if that connection is refused, tries `[::1]:<port>` once, so a service listening only on the IPv6 loopback address is reachable too. With the experiment off, nothing changes.
 :::
 
 :::note[Proxied responses are sandboxed]
@@ -53,7 +53,7 @@ hub: "Scion Hub (Reverse Proxy)" {
 
 agent: "Agent Container" {
   class: box
-  sciontool: "sciontool Tunnel Manager" {
+  sciontool: "sciontool Port-Forward Manager" {
     style.fill: "#e0f2fe"
   }
   service: "Local Service\n(e.g., Python Web Server on :8000)" {
@@ -62,7 +62,7 @@ agent: "Agent Container" {
 }
 
 user -> hub: "1. GET /api/v1/.../ports/8000/proxy/"
-hub <-> agent.sciontool: "2. Secure WebSocket Reverse Tunnel"
+hub <-> agent.sciontool: "2. Outbound WebSocket Connection"
 agent.sciontool <-> agent.service: "3. Local Loopback request\n(127.0.0.1:8000)"
 hub -> user: "4. HTTP Response"
 ```
@@ -91,13 +91,17 @@ will forward a local request to `http://127.0.0.1:8000/api/v1/metrics?raw=true`.
 
 ## Manual Port Management
 
-You can manually manage exposed ports using the `sciontool` CLI from inside the agent container, or via the Hub API.
+You can manually manage exposed ports using the `scion` CLI from inside the agent container, or via the Hub API. The commands act as the calling agent, using its own Hub identity, so they only work inside an agent container with a Hub connection.
+
+:::note
+These commands were previously `sciontool expose` and `sciontool unexpose`. The `sciontool` forms now print a message pointing to `scion expose` and `scion unexpose` and exit with an error.
+:::
 
 ### Exposing a Port
-To expose a local port manually, run `sciontool expose` with the target port:
+To expose a local port manually, run `scion expose` with the target port:
 
 ```bash
-sciontool expose 8080 --label "my-web-app"
+scion expose 8080 --label "my-web-app"
 ```
 
 Options:
@@ -108,15 +112,15 @@ Options:
 To stop exposing a port, run:
 
 ```bash
-sciontool unexpose 8080
+scion unexpose 8080
 ```
-This operation is idempotent; if the port is not currently exposed, the command completes successfully and silently.
+This operation is idempotent; if the port is not currently exposed, the command completes successfully.
 
 ### Listing Exposed Ports
 To list all currently exposed ports for the agent, run:
 
 ```bash
-sciontool expose --list
+scion expose --list
 ```
 This outputs the current port number, label, and full proxy URL.
 
@@ -155,6 +159,41 @@ SCION_AUTO_EXPOSE_PORTS=true
 SCION_AUTO_EXPOSE_MODE=allowlist
 SCION_AUTO_EXPOSE_PORTS_LIST=8000,8080,3000
 ```
+
+---
+
+## Tunnels from your machine (`scion tunnel`)
+
+With the `hub.conduit` [experiment](/scion/reference/experiments/) on, `scion tunnel` connects a local port, or stdin and stdout, to an agent through the Hub. Unlike the HTTP proxy URLs above, a tunnel carries raw TCP, so it works for any protocol (WebSockets, database clients, debuggers) and for SSH.
+
+```bash
+# Forward a local port (random, printed on stderr) to port 5173 inside the agent
+scion tunnel my-agent --port 5173
+
+# Pick the local port
+scion tunnel my-agent --port 5173 --local-port 8080
+
+# Show the tunnels your running scion tunnel processes hold
+scion tunnel status
+```
+
+The local listener binds to `127.0.0.1` only. The tunnel stays open until you stop the command (Ctrl-C) or the session to the Hub is lost (exit code 6).
+
+**How it works.** The CLI opens one Conduit session to the Hub (`GET /api/v1/conduit`, with your usual Hub credential) and asks for each tunnel over it. The Hub checks each tunnel on its own and connects it to the agent's own Conduit session, so the agent's ports are never opened to the network. A `scion tunnel` process targets one agent; its session carries one tunnel per accepted local connection, up to the session's limit. Closing a tunnel closes only that tunnel.
+
+**Who may open a tunnel.** A TCP tunnel needs `agent.port_access` on the agent, and the target must be an agent-local port you may reach: an exposed port or one the operator allow-listed, never [the reserved ports](#2-infrastructure-reserved-ports-denylist). An SSH tunnel needs `agent.attach` and `agent.port_access`. The agent must be running and have a Conduit session; otherwise the command exits with a specific code (see [`scion tunnel`](/scion/reference/cli/#scion-tunnel)). Open tunnels are re-checked like other Conduit user streams (see [`authz_recheck_interval` and `stream_authz_max`](/scion/reference/server-config/#conduit-serverhubconduit)) and close when your access is withdrawn.
+
+### SSH into an agent
+
+`sciontool` in the agent runs an embedded SSH server that is reachable only through a Conduit tunnel; it never listens on a network port. It offers a shell, `exec`, `sftp` and forwarding to the agent's loopback addresses (except [the reserved ports](#2-infrastructure-reserved-ports-denylist)) and Unix sockets. Unlike a TCP tunnel, SSH forwarding does not require the port to be exposed or allow-listed. Remote forwarding, agent forwarding and X11 are refused. Every session runs as the container user, whatever user name you give. The Hub authorizes the tunnel, so the SSH connection itself needs no key.
+
+Use `scion tunnel --ssh --stdio` as an ssh `ProxyCommand`:
+
+```bash
+ssh -o ProxyCommand="scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my-agent" scion@my-agent
+```
+
+Each agent run generates its own SSH host key. The agent reports it to the Hub, which returns it as `sshHostKey` in the agent's details (`GET /api/v1/agents/:id`), so you can pin it in `known_hosts`.
 
 ---
 
@@ -219,7 +258,7 @@ Certain infrastructure and internal control-plane ports are reserved for system 
 | `9810` | Scion Hub API | Protects the Hub's local control API from external exposure. |
 | `18380` | Scion Metadata Server | Protects the agent's internal instance identity metadata server. |
 
-*Note: Port `8080` is intentionally permitted. Because the reverse tunnel operates over an established connection, the agent-side port never collides with the Hub's HTTP listeners, making it safe to expose user services on `8080`.*
+*Note: Port `8080` is intentionally permitted. Because traffic travels over the container's established outbound WebSocket connection, the agent-side port never collides with the Hub's HTTP listeners, making it safe to expose user services on `8080`.*
 
 ### 3. Authentication & Authorization
 Access to the proxy and port registration APIs requires authentication, verified under the unified permission policy:
@@ -240,13 +279,13 @@ Access to the proxy and port registration APIs requires authentication, verified
 
 ## Browser vs. Non-Browser Error Handling
 
-When an unexposed port is accessed, or when the agent container's reverse tunnel is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
+When an unexposed port is accessed, or when the agent container's WebSocket connection is temporarily offline, the Hub reverse proxy performs smart **content negotiation** based on the request's `Accept` header:
 
 ### Browser Requests (`Accept: text/html`)
 If the request is initiated from a web browser, the proxy returns a friendly, self-contained **HTML error page** containing troubleshooting guidance:
 
 * **Port Not Exposed**: Returns an `HTTP 404 Not Found` page stating that the requested port has not been registered on this agent.
-* **Tunnel Offline**: Returns an `HTTP 503 Service Unavailable` page indicating that the reverse tunnel is disconnected, and the agent may not be running or is starting up.
+* **Connection Offline**: Returns an `HTTP 503 Service Unavailable` page indicating that the agent's WebSocket connection is disconnected, and the agent may not be running or is starting up.
 
 ### API / Programmatic Requests (Other headers)
 For CLI, script, or webhook requests, the proxy bypasses the HTML template and returns standard, machine-readable **JSON error responses**:

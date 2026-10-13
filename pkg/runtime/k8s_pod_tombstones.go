@@ -403,7 +403,7 @@ func (r *KubernetesRuntime) reconcilePodTombstones(ctx context.Context, snap uin
 			info:      info,
 			created:   now,
 		}
-		runtimeLog.Info("Agent pod removed by a disruption before it was listed as terminal",
+		runtimeLog().Info("Agent pod removed by a disruption before it was listed as terminal",
 			"pod", p.name, "namespace", p.namespace, "exit_reason", d.reason)
 	}
 
@@ -484,7 +484,7 @@ func (r *KubernetesRuntime) warnEventLookupFailed(p *trackedPod, err error) {
 	}
 	t.mu.Unlock()
 	if log {
-		runtimeLog.Warn("Failed to list events for a vanished agent pod; a preemption or eviction may not be reported",
+		runtimeLog().Warn("Failed to list events for a vanished agent pod; a preemption or eviction may not be reported",
 			"pod", p.name, "namespace", p.namespace, "error", err)
 	}
 }

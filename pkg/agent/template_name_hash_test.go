@@ -40,7 +40,10 @@ type hashTemplateEnv struct {
 	agentHome string
 }
 
-const localWebDevImage = "local-web-dev:1"
+// localWebDevModel marks a merge of the local web-dev template. It is a job
+// key: a template's own image is an ignored environment key
+// (ptone/scion#4524), so it cannot serve as the marker.
+const localWebDevModel = "local-web-dev-model"
 
 func newHashTemplateEnv(t *testing.T) hashTemplateEnv {
 	t.Helper()
@@ -58,7 +61,7 @@ func newHashTemplateEnv(t *testing.T) hashTemplateEnv {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(webDev, "scion-agent.json"),
-		[]byte(`{"image":"`+localWebDevImage+`"}`), 0o644); err != nil {
+		[]byte(`{"model":"`+localWebDevModel+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -138,7 +141,7 @@ func TestGetAgent_HashTemplateInAgentInfo(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetAgent: %v", err)
 			}
-			if cfg.Image == localWebDevImage {
+			if cfg.Model == localWebDevModel {
 				t.Fatalf("GetAgent merged the local %q template by name; the loaded template must not change", "web-dev")
 			}
 			if cfg.Info == nil {
@@ -170,8 +173,8 @@ func TestGetAgent_AgentInfoWithoutTemplateHashUnchanged(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetAgent: %v", err)
 			}
-			if cfg.Image != localWebDevImage {
-				t.Errorf("cfg.Image = %q, want %q from the local template", cfg.Image, localWebDevImage)
+			if cfg.Model != localWebDevModel {
+				t.Errorf("cfg.Model = %q, want %q from the local template", cfg.Model, localWebDevModel)
 			}
 			if cfg.Info == nil || cfg.Info.Template != "web-dev" || cfg.Info.TemplateHash != "" {
 				t.Errorf("Info = %+v, want template web-dev and no template hash", cfg.Info)

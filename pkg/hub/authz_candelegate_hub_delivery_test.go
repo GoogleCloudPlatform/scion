@@ -99,6 +99,8 @@ func (f canDelegateParityFixture) identities() map[string]Identity {
 		"FederatedServiceIdentity": NewFederatedServiceIdentity("https://issuer.example", "parity-sa-sub",
 			"parity-sa@example.com", nil),
 		"DelegatedAgentIdentity": adtTestIdentity(tid("candelegate-parity-delegated-agent"), f.projectID),
+		"VisitorIdentity": NewVisitorIdentity(tid("candelegate-parity-visitor"), "https://issuer.example",
+			"parity-visitor-sub", "parity-visitor@example.com", "Parity Visitor"),
 	}
 }
 
@@ -158,6 +160,13 @@ var canDelegateParityExpected = map[string]map[GrantType]canDelegateOutcome{
 	// An agent delegated credential delegates nothing onward
 	// (.design/agent-delegation.md §12.3); its deny arm runs before every
 	// allow path, like the hub_delivery arm.
+	"VisitorIdentity": {
+		GrantTypeRoleBinding:       {false, "visitor cannot delegate"},
+		GrantTypeGroupMembership:   {false, "visitor cannot delegate"},
+		GrantTypeAgentDelegation:   {false, "visitor cannot delegate"},
+		GrantTypeCustomRole:        {false, "visitor cannot delegate"},
+		GrantTypeProjectMembership: {false, "visitor cannot delegate"},
+	},
 	"DelegatedAgentIdentity": {
 		GrantTypeRoleBinding:       {false, "delegated credential cannot delegate"},
 		GrantTypeGroupMembership:   {false, "delegated credential cannot delegate"},

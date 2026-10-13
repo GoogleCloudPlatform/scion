@@ -339,16 +339,16 @@ func (r *KubernetesRuntime) deletePodRunObjects(ctx context.Context, namespace, 
 	r.deleteAgentSecretsBySelector(ctx, namespace, podName, api.LabelRunID+"="+podRun,
 		func(string, metav1.Object) bool { return true },
 		func(kind, name string, err error) {
-			runtimeLog.Warn("Failed to delete per-run object",
+			runtimeLog().Warn("Failed to delete per-run object",
 				"kind", kind, "name", name, "agent", podName, "namespace", namespace, "run_id", podRun, "error", err)
 		},
 		func(kind, name string, err error) {
 			if err != nil {
-				runtimeLog.Info("Per-run object already gone or replaced; kept",
+				runtimeLog().Info("Per-run object already gone or replaced; kept",
 					"kind", kind, "name", name, "namespace", namespace, "agent", podName, "object_run_id", podRun, "error", err)
 				return
 			}
-			runtimeLog.Info(reason, "kind", kind, "name", name, "namespace", namespace,
+			runtimeLog().Info(reason, "kind", kind, "name", name, "namespace", namespace,
 				"agent", podName, "object_run_id", podRun)
 		})
 }
@@ -367,17 +367,17 @@ func (r *KubernetesRuntime) previousPodGone(ctx context.Context, namespace, podN
 	case k8serrors.IsNotFound(err):
 		return true
 	case err != nil:
-		runtimeLog.Warn("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
+		runtimeLog().Warn("Cannot confirm the previous pod is gone; keeping its run's per-run objects",
 			"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun, "error", err)
 		return false
 	case p.UID != uid && p.Labels[api.LabelRunID] != podRun:
 		return true
 	case p.UID != uid:
-		runtimeLog.Info("Previous pod replaced by a pod of the same run; keeping that run's per-run objects",
+		runtimeLog().Info("Previous pod replaced by a pod of the same run; keeping that run's per-run objects",
 			"pod", podName, "namespace", namespace, "pod_uid", uid, "replacement_pod_uid", p.UID, "object_run_id", podRun)
 		return false
 	}
-	runtimeLog.Warn("Previous pod still present; keeping its run's per-run objects",
+	runtimeLog().Warn("Previous pod still present; keeping its run's per-run objects",
 		"pod", podName, "namespace", namespace, "pod_uid", uid, "object_run_id", podRun)
 	return false
 }

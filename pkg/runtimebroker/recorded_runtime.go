@@ -132,7 +132,8 @@ func runtimeAllowed(ctx context.Context, rt scionrt.Runtime) bool {
 // defaultRuntimeAllowed reports whether the broker's default runtime may hold
 // the agent of a request carrying ctx.
 func (s *Server) defaultRuntimeAllowed(ctx context.Context) bool {
-	return runtimeAllowed(ctx, s.runtime)
+	defRT := s.currentRuntime()
+	return runtimeAllowed(ctx, defRT)
 }
 
 // sortedAuxiliaryRuntimesFor is sortedAuxiliaryRuntimes restricted to the

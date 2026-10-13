@@ -181,3 +181,51 @@ func TestLoadServerMode_TypoFailsValidation(t *testing.T) {
 		t.Errorf("legacy production must stay valid: %v", err)
 	}
 }
+
+// In workstation mode, --host moves only the hub and web listeners through
+// the real config path; the co-located broker stays on loopback unless
+// server.broker.host is set explicitly (ptone/scion#3990).
+func TestLoadAndReconcileConfig_WorkstationHostFlagKeepsBrokerLoopback(t *testing.T) {
+	for _, tc := range []struct {
+		name, settings, wantBroker string
+	}{
+		{
+			name:       "broker host unset",
+			settings:   "schema_version: \"1\"\nserver:\n  mode: workstation\n",
+			wantBroker: "127.0.0.1",
+		},
+		{
+			name:       "broker host set explicitly",
+			settings:   "schema_version: \"1\"\nserver:\n  mode: workstation\n  broker:\n    host: 192.168.1.10\n",
+			wantBroker: "192.168.1.10",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hostFlag := serverStartCmd.Flags().Lookup("host")
+			t.Cleanup(func() {
+				hostFlag.Changed = false
+				resetServerFlags()
+			})
+			resetServerFlags()
+			t.Setenv("SCION_SERVER_MODE", "")
+			t.Setenv("SCION_SERVER_HUB_HOST", "")
+			t.Setenv("SCION_SERVER_BROKER_HOST", "")
+			t.Setenv("SCION_SERVER_RUNTIMEBROKER_HOST", "")
+			writeServerSettings(t, tc.settings)
+			if err := serverStartCmd.Flags().Set("host", "0.0.0.0"); err != nil {
+				t.Fatal(err)
+			}
+
+			cfg, err := loadAndReconcileConfig(serverStartCmd)
+			if err != nil {
+				t.Fatalf("loadAndReconcileConfig: %v", err)
+			}
+			if cfg.Hub.Host != "0.0.0.0" {
+				t.Errorf("hub host = %q, want 0.0.0.0", cfg.Hub.Host)
+			}
+			if cfg.RuntimeBroker.Host != tc.wantBroker {
+				t.Errorf("broker host = %q, want %s", cfg.RuntimeBroker.Host, tc.wantBroker)
+			}
+		})
+	}
+}

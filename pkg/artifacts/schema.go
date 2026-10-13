@@ -364,3 +364,18 @@ CREATE TABLE IF NOT EXISTS artifact_event (
 CREATE INDEX IF NOT EXISTS idx_artifact_event_artifact
     ON artifact_event (artifact_id, at);
 `
+
+// migrationVersionFailReason records why a version stopped being pending
+// without becoming ready (ptone/scion#4577): artifact_version.fail_reason,
+// one of the FailReason codes. The column is nullable and nothing is
+// backfilled; a failed version without a reason is reported as
+// FailReasonDiscarded.
+const migrationVersionFailReason = "0008_version_fail_reason"
+
+const sqliteVersionFailReason = `
+ALTER TABLE artifact_version ADD COLUMN fail_reason TEXT;
+`
+
+const postgresVersionFailReason = `
+ALTER TABLE artifact_version ADD COLUMN IF NOT EXISTS fail_reason TEXT;
+`

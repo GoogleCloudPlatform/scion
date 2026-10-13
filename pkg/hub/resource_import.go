@@ -25,8 +25,10 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/templateimport"
+	"github.com/GoogleCloudPlatform/scion/pkg/ghauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -92,6 +94,10 @@ type ResourceImportEvent struct {
 	Name string `json:"name,omitempty"`
 	// Reason carries the failure/skip explanation on failed/skipped/error.
 	Reason string `json:"reason,omitempty"`
+	// Code is the machine-readable error code on an error event, when the
+	// failure has one: harness_config_unusable for a refused harness-config,
+	// matching the non-streaming import answer.
+	Code string `json:"code,omitempty"`
 	// Completed is the monotonic count of finished resources (any terminal
 	// status) at the time of the event; set on completed/failed.
 	Completed int `json:"completed,omitempty"`
@@ -179,6 +185,16 @@ func (s *Server) harnessConfigImportKind() resourceImportKind {
 // the filter are imported; all others are skipped. When nil or empty, all
 // discovered resources are imported (backward compatible).
 func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, nameFilter []string) ([]string, error) {
+	return s.importFromRemoteSelected(ctx, projectID, sourceURL, scope, kind, progress,
+		func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+			return applyNameFilter(dirs, skipped, nameFilter)
+		}, fmt.Sprintf("no scion %s matched the requested names", kind.noun))
+}
+
+// importFromRemoteSelected is importFromRemote with a caller-supplied selection
+// of the discovered dirs; dirs it drops must be appended to skipped. noMatch is
+// the error message returned when the selection keeps no dirs.
+func (s *Server) importFromRemoteSelected(ctx context.Context, projectID, sourceURL, scope string, kind resourceImportKind, progress importProgressFunc, selectDirs func([]resourceDir, []skippedDir) ([]resourceDir, []skippedDir), noMatch string) ([]string, error) {
 	if !config.IsRemoteURI(sourceURL) {
 		return nil, fmt.Errorf("source must be a remote URI (http://, https://, or rclone)")
 	}
@@ -200,9 +216,9 @@ func (s *Server) importFromRemote(ctx context.Context, projectID, sourceURL, sco
 		return nil, fmt.Errorf("no scion %s found at %s", kind.noun, sourceURL)
 	}
 
-	dirs, skipped = applyNameFilter(dirs, skipped, nameFilter)
+	dirs, skipped = selectDirs(dirs, skipped)
 	if len(dirs) == 0 {
-		return nil, fmt.Errorf("no scion %s matched the requested names", kind.noun)
+		return nil, errors.New(noMatch)
 	}
 
 	if err := checkResourceDirsContent(dirs, kind); err != nil {
@@ -282,41 +298,81 @@ func checkResourceDirsContent(dirs []resourceDir, kind resourceImportKind) error
 }
 
 // fetchRemoteForImport fetches a remote source URL to a local cache directory,
-// authenticating against GitHub when possible. It first tries a GitHub App
-// installation token for the project, then falls back to the project's
-// GITHUB_TOKEN secret. The fallback applies to both resource kinds — closing the
-// gap where harness-config remote import previously skipped the secret fallback.
-// The caller owns the returned cache path and must remove it.
-//
-// projectID may be "" for global-scope (hub-level) imports, which have no project
-// to authenticate against; in that case the fetch is unauthenticated.
+// authenticating against GitHub with the credential importCredential selects.
+// It applies to both resource kinds (templates and harness-configs) and to
+// skill directory discovery. The caller owns the returned cache path and must
+// remove it.
 func (s *Server) fetchRemoteForImport(ctx context.Context, projectID, sourceURL string) (string, error) {
-	var authToken string
+	return config.FetchRemoteTemplate(ctx, sourceURL, s.importCredential(ctx, projectID, sourceURL))
+}
 
-	if projectID != "" {
-		// Prefer a GitHub App installation token if the project has one.
-		project, err := s.store.GetProject(ctx, projectID)
-		if err == nil && project != nil && project.GitHubInstallationID != nil {
-			if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
-				authToken = token
-			}
+// importCredential returns the GitHub credential for fetching sourceURL on
+// behalf of projectID, or "" to fetch unauthenticated. For a GitHub folder URL
+// it mirrors the skill resolver's project-scope cascade:
+//
+//  1. The repo-specific project secret GH_{OWNER}__{REPO}, then the
+//     owner-level GH_{OWNER} (see pkg/ghauth).
+//  2. A GitHub App installation token for the project, if it has one.
+//  3. The project's GITHUB_TOKEN secret.
+//
+// Other sources (archives, even on github.com, rclone and other hosts) get
+// "": FetchRemoteTemplate sends a credential only for GitHub folders, so
+// neither an App token is minted nor a secret read for them. projectID may
+// be "" for global-scope (hub-level) imports, which have no project to
+// authenticate against; those fetches are unauthenticated too. Credential
+// values are never logged; only the secret name is.
+func (s *Server) importCredential(ctx context.Context, projectID, sourceURL string) string {
+	if projectID == "" {
+		return ""
+	}
+	owner, repo, ok := config.GitHubRepoForURL(sourceURL)
+	if !ok {
+		return ""
+	}
+
+	for _, key := range []string{ghauth.RepoKey(owner, repo), ghauth.OwnerKey(owner)} {
+		if val := s.projectSecretForImport(ctx, projectID, key); val != "" {
+			s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", key)
+			return val
+		}
+	}
+
+	// Prefer a GitHub App installation token if the project has one.
+	project, err := s.store.GetProject(ctx, projectID)
+	if err == nil && project != nil && project.GitHubInstallationID != nil {
+		if token, _, mintErr := s.MintGitHubAppTokenForProject(ctx, project); mintErr == nil && token != "" {
+			return token
 		}
 	}
 
 	// Fall back to the project GITHUB_TOKEN secret if no App token was minted.
-	if authToken == "" && projectID != "" {
-		if sb := s.GetSecretBackend(); sb != nil {
-			sec, secErr := sb.Get(ctx, "GITHUB_TOKEN", secret.ScopeProject, projectID)
-			if secErr == nil && sec != nil && sec.Value != "" {
-				authToken = sec.Value
-				s.resourceLog.Info("using project GITHUB_TOKEN for resource import", "projectID", projectID)
-			} else if secErr != nil && !errors.Is(secErr, store.ErrNotFound) {
-				s.resourceLog.Warn("Failed to retrieve GITHUB_TOKEN from secret backend", "projectID", projectID, "error", secErr)
-			}
-		}
+	if val := s.projectSecretForImport(ctx, projectID, ghauth.DefaultKey); val != "" {
+		s.resourceLog.Info("using project credential for resource import", "projectID", projectID, "secret", ghauth.DefaultKey)
+		return val
 	}
+	return ""
+}
 
-	return config.FetchRemoteTemplate(ctx, sourceURL, authToken)
+// projectSecretForImport returns the value of the project secret named key,
+// or "" if it is unset, empty, or no secret backend is configured. A lookup
+// failure other than not-found is logged (without any value) and treated as
+// unset, so the cascade falls through to the next source.
+func (s *Server) projectSecretForImport(ctx context.Context, projectID, key string) string {
+	sb := s.GetSecretBackend()
+	if sb == nil {
+		return ""
+	}
+	sec, err := sb.Get(ctx, key, secret.ScopeProject, projectID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.resourceLog.Warn("Failed to retrieve project secret for resource import", "projectID", projectID, "secret", key, "error", err)
+		}
+		return ""
+	}
+	if sec == nil {
+		return ""
+	}
+	return sec.Value
 }
 
 // discoverResourceDirs returns the resource directories at root, classifying by
@@ -507,6 +563,21 @@ func applyNameFilter(dirs []resourceDir, skipped []skippedDir, filter []string) 
 			filtered = append(filtered, d)
 		} else {
 			skipped = append(skipped, skippedDir{d.name, "not in requested names"})
+		}
+	}
+	return filtered, skipped
+}
+
+// applySlugFilter restricts dirs to those whose names slugify to slug, the
+// key under which ResourceStore.Bootstrap persists them. Filtered-out dirs are
+// appended to skipped.
+func applySlugFilter(dirs []resourceDir, skipped []skippedDir, slug string) ([]resourceDir, []skippedDir) {
+	var filtered []resourceDir
+	for _, d := range dirs {
+		if api.Slugify(d.name) == slug {
+			filtered = append(filtered, d)
+		} else {
+			skipped = append(skipped, skippedDir{d.name, fmt.Sprintf("does not match slug %q", slug)})
 		}
 	}
 	return filtered, skipped

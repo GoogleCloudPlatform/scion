@@ -158,6 +158,11 @@ const (
 	// the agent the grant is bound to, and the grant issuer is the
 	// authorizing user. Only *DelegatedAgentIdentity classifies to it.
 	PrincipalKindAgentDelegated PrincipalKind = "agent_delegated"
+	// PrincipalKindVisitor classifies a *VisitorIdentity: a user of a
+	// trusted external issuer linked to an active local federated account.
+	// Its ID is that account's local user ID, and NormalizePrincipalType
+	// maps it to the store principal type "user" for binding lookups.
+	PrincipalKindVisitor PrincipalKind = "visitor"
 )
 
 // PrincipalContext identifies the authenticated actor for an authorization request.
@@ -1211,6 +1216,10 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 				decision.DeniedBy = DeniedByDelegationCeiling
 				decision.DenyCause = ceilingCause
 				decision.adoptionRemediable = ceilingCause == DenyCauseCeilingUnrecorded && hopNote.adoptable
+			} else if strings.HasSuffix(ceilingReason, "("+descendantReadReasonMarker+")") {
+				// Record in the decision that the ceiling admitted a
+				// descendant status read (authz_launcher_read.go).
+				decision.Reason += " (" + descendantReadReasonMarker + ")"
 			}
 		}
 	}
@@ -1808,7 +1817,7 @@ func agentScopeRestriction(agent AgentIdentity, resource Resource) Restriction {
 			}
 			// agent.read has no agent scope. The launcher status read
 			// (authz_launcher_read.go) admits it for one stored target.
-			if permissionID == permissionAgentRead && launcherStatusReadHolds(agent, resource, ActionRead, permissionID) {
+			if permissionID == permissionAgentRead && descendantStatusReadHolds(agent, resource, ActionRead, permissionID) {
 				return true
 			}
 			_, ok := allowed[permissionID]
@@ -2139,7 +2148,7 @@ func isRecognizedPrincipalKind(kind PrincipalKind) bool {
 	switch kind {
 	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
 		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev,
-		PrincipalKindAgentDelegated:
+		PrincipalKindAgentDelegated, PrincipalKindVisitor:
 		return true
 	default:
 		return false
@@ -2305,6 +2314,8 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		principal.Kind = PrincipalKindFederatedAgent
 	case *FederatedServiceIdentity:
 		principal.Kind = PrincipalKindFederatedService
+	case *VisitorIdentity:
+		principal.Kind = PrincipalKindVisitor
 	case *brokerIdentityImpl:
 		principal.Kind = PrincipalKindBroker
 	case *DelegatedAgentIdentity:
@@ -2377,7 +2388,7 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	case *hubDeliveryIdentity:
 		// No ID: a delivery credential carries no JTI.
 		return CredentialContext{Kind: CredentialKindHubDelivery}
-	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
+	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity, *VisitorIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
 	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
@@ -2523,16 +2534,14 @@ func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName
 	return false
 }
 
-// isBindingActive checks whether a store RoleBinding is currently active
-// based on its notBefore/expiresAt fields. R-2 fix.
+// isBindingActive checks whether a store RoleBinding is active at now
+// based on its notBefore/expiresAt fields. It delegates to
+// bindingActivationOK so it applies exactly the kernel's rule
+// (evaluateActivation): an unset bound is unbounded, notBefore is
+// inclusive, expiresAt is exclusive, and a zero now with any bound set is
+// inactive.
 func isBindingActive(b *store.RoleBinding, now time.Time) bool {
-	if b.NotBefore != nil && now.Before(*b.NotBefore) {
-		return false
-	}
-	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
-		return false
-	}
-	return true
+	return bindingActivationOK(b, now)
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group.
@@ -2689,7 +2698,8 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 }
 
 // activeDirectProjectRoles returns the role names of userID's active
-// (isBindingActive), direct user-principal bindings on projectID, read
+// (isBindingActive), direct user-principal bindings on projectID of roles
+// that confer membership (ConfersProjectMembership), read
 // through st. With clamp set the bindings are passed through the test
 // identity clamps with authz's wiring (clampBindingsForUser), for a store
 // handle outside the authorization service; without it st must be the
@@ -2719,7 +2729,10 @@ func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzS
 		if err != nil {
 			return nil, err
 		}
-		if rd != nil {
+		// Callers decide membership and ownership from these names, so a
+		// role that does not confer membership (project-visitor) is left
+		// out.
+		if rd.ConfersProjectMembership() {
 			roles[rd.Name] = true
 		}
 	}
@@ -2834,12 +2847,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		cb := &CandidateBinding{
 			BindingID: b.ID,
 		}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
+		cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 		activation := evaluateActivation(cb, now)
 		if !activation.Active {
 			continue

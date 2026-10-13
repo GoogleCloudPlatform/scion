@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,8 +38,8 @@ func TestHubEndpointScope_Context(t *testing.T) {
 			setupContextTest(t)
 			saveTestContext(t, ctxTestHub, ctxTestProjectID)
 			hubEndpoint = tc.flag
-			resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman)
-			scope := getHubEndpointScope("", true, nil)
+			require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
+			scope := getHubEndpointScope(true, describeUseTarget(&config.CLIContext{}))
 			assert.Equal(t, tc.wantSource, scope.Source)
 			assert.False(t, scope.Inherited)
 		})
@@ -46,11 +47,17 @@ func TestHubEndpointScope_Context(t *testing.T) {
 }
 
 func TestEndpointSourceNote(t *testing.T) {
-	assert.Equal(t, "            (current context)", endpointSourceNote(hubEndpointScope{Source: "context"}))
-	assert.Equal(t, "            (from --hub flag)", endpointSourceNote(hubEndpointScope{Source: "flag"}))
-	assert.Equal(t, "            (inherited from global)", endpointSourceNote(hubEndpointScope{Source: "global", Inherited: true}))
-	assert.Empty(t, endpointSourceNote(hubEndpointScope{Source: "project"}))
-	assert.Empty(t, endpointSourceNote(hubEndpointScope{Source: "none"}))
+	for label, scope := range map[string]hubEndpointScope{
+		"current context":             {Source: "context", Label: "current context"},
+		"--hub flag":                  {Source: "flag", Label: "--hub flag"},
+		"SCION_HUB_ENDPOINT":          {Source: "env", Label: "SCION_HUB_ENDPOINT", Inherited: true},
+		"directory link":              {Source: "directory", Label: "directory link"},
+		"project settings: ~/src/foo": {Source: "project_settings", Label: "project settings: ~/src/foo"},
+		"global settings":             {Source: "global_settings", Label: "global settings", Inherited: true},
+	} {
+		assert.Equal(t, "            ("+label+")", endpointSourceNote(scope))
+	}
+	assert.Empty(t, endpointSourceNote(hubEndpointScope{Source: "none", Label: "none"}))
 }
 
 // TestHubStatusJSON_ContextSource: 'scion hub status --format json' with
@@ -63,7 +70,7 @@ func TestHubStatusJSON_ContextSource(t *testing.T) {
 	srv.Close()
 	saveTestContext(t, url, ctxTestProjectID)
 	status := findCommand(t, "hub", "status")
-	resolveInvocationTarget(status, ModeHuman)
+	require.NoError(t, resolveInvocationTarget(status, ModeHuman))
 	outputFormat = "json"
 
 	out := captureStdout(t, func() { require.NoError(t, runHubStatus(status, nil)) })

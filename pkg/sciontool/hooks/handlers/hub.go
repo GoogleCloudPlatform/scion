@@ -137,6 +137,19 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 	case hooks.EventToolStart:
 		// Claude-specific: ExitPlanMode and AskUserQuestion mean waiting for user
 		if isClaudeUserWaitTool(event) {
+			// A sub-agent's question during a wait the agent set itself
+			// leaves that wait in place locally; sending a new
+			// waiting_for_input would replace the agent's own message.
+			if isSubagentEvent(event) && h.isLocalWaitAgentSet() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (agent-set wait kept)")
+				return nil
+			}
+			// It also leaves blocked, completed, limits_exceeded and
+			// crashed in place locally; the Hub follows.
+			if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+				log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+				return nil
+			}
 			message := "Waiting on parent"
 			if event.Data.ToolName == "ExitPlanMode" {
 				message = "Waiting for plan approval"
@@ -151,11 +164,13 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			break
 		}
 
-		// Tool-start clears waiting_for_input (user has responded) but
-		// preserves completed (tools may fire after task_completed as wrap-up).
-		localActivity := readLocalActivity()
-		if localActivity == string(state.ActivityCompleted) || localActivity == string(state.ActivityLimitsExceeded) {
-			log.Debug("Hub: Skipping executing (completed is sticky, post-completion tool)")
+		// The Hub follows the local result. The StatusHandler has already
+		// replaced a waiting_for_input (the user has responded) and kept
+		// every other held status: completed (tools may fire after
+		// task_completed as wrap-up), blocked, limits_exceeded and crashed.
+		// A held local status means no executing update.
+		if h.isLocalActivitySticky() {
+			log.Debug("Hub: Skipping executing (local activity is sticky)")
 			return nil
 		}
 
@@ -190,7 +205,44 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			Message:  "Ready",
 		})
 
+	case hooks.EventSubagentEnd:
+		// The StatusHandler cleared a sub-agent-held wait to working when
+		// this SubagentStop was its last owner, and marked that write. Any
+		// other SubagentStop, and any parent event, changed nothing the Hub
+		// shows, so nothing is sent. The marker stays until the next local
+		// write, so a second SubagentStop before then re-sends working,
+		// which is harmless.
+		if !isSubagentEvent(event) || !isLocalSubagentEndRelease() {
+			return nil
+		}
+		log.Debug("Hub: Reporting working (sub-agent wait released)")
+		as := state.AgentState{Phase: state.PhaseRunning, Activity: state.ActivityWorking}
+		err = h.client.UpdateStatus(ctx, hub.StatusUpdate{
+			Activity: state.ActivityWorking,
+			Status:   as.DisplayStatus(),
+			Message:  "Ready",
+		})
+
 	case hooks.EventNotification:
+		// A Notification during a wait the agent set itself leaves that
+		// wait in place locally; sending a new waiting_for_input would
+		// replace the agent's own message.
+		if h.isLocalWaitAgentSet() {
+			log.Debug("Hub: Skipping waiting_for_input (agent-set wait kept)")
+			return nil
+		}
+		// A sub-agent's Notification leaves blocked, completed,
+		// limits_exceeded and crashed in place locally; the Hub follows.
+		if isSubagentEvent(event) && h.isLocalHeldNonWaiting() {
+			log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
+			return nil
+		}
+		// Any Notification, the parent's included, leaves limits_exceeded
+		// and crashed in place locally; the Hub follows.
+		if h.isLocalTerminal() {
+			log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
+			return nil
+		}
 		// Agent is waiting for input
 		message := "Waiting on parent"
 		if event.Data.Message != "" {
@@ -263,16 +315,53 @@ func (h *HubHandler) isLocalActivitySticky() bool {
 	return isStickyActivity(activity)
 }
 
-// readLocalActivity reads the current activity from the local agent-info.json file.
+// isLocalWaitAgentSet reports whether the local agent-info.json holds a
+// waiting_for_input that the agent set itself (no notification marker).
+func (h *HubHandler) isLocalWaitAgentSet() bool {
+	return isAgentSetWaiting(readLocalAgentInfo())
+}
+
+// isLocalSubagentEndRelease reports whether the local agent-info.json holds
+// the working activity that the last owner's SubagentStop wrote when it
+// released a sub-agent-held wait.
+func isLocalSubagentEndRelease() bool {
+	info := readLocalAgentInfo()
+	activity, _ := info["activity"].(string)
+	source, _ := info[activitySourceKey].(string)
+	return activity == string(state.ActivityWorking) && source == activitySourceSubagentEnd
+}
+
+// isLocalHeldNonWaiting reports whether the local agent-info.json holds
+// blocked, completed, limits_exceeded or crashed.
+func (h *HubHandler) isLocalHeldNonWaiting() bool {
+	return isHeldNonWaitingActivity(readLocalActivity())
+}
+
+// isLocalTerminal reports whether the local agent-info.json holds a
+// terminal activity: limits_exceeded or crashed (state.Activity.IsTerminal).
+func (h *HubHandler) isLocalTerminal() bool {
+	return state.Activity(readLocalActivity()).IsTerminal()
+}
+
+// readLocalActivity returns the activity recorded in the local
+// agent-info.json, or "" when it cannot be read (see readLocalAgentInfo).
+func readLocalActivity() string {
+	activity, _ := readLocalAgentInfo()["activity"].(string)
+	return activity
+}
+
+// readLocalAgentInfo reads the local agent-info.json into a map.
 //
 // The read goes through dirfd.ReadFileNoFollow with agentInfoMaxBytes, the
 // same bounded, no-follow read StatusHandler.readAgentInfoMap uses on this
 // file: a symlink at any path component, a FIFO, a hardlinked file, or a
 // file over the size cap is refused rather than followed or read in full.
-// A missing file returns "" silently, as before. A refusal also returns ""
-// (not sticky), the same fail-open result an unreadable file always gave,
-// and logs only the reason at debug level, never the file's contents.
-func readLocalActivity() string {
+// A missing file returns an empty map silently. A refusal or invalid JSON
+// also returns an empty map (activity "", not sticky), the same fail-open
+// result an unreadable file always gave, and a refusal logs only the reason
+// at debug level, never the file's contents.
+func readLocalAgentInfo() map[string]interface{} {
+	info := map[string]interface{}{}
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/home/scion"
@@ -282,18 +371,16 @@ func readLocalActivity() string {
 	data, err := dirfd.ReadFileNoFollow(statusPath, agentInfoMaxBytes)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
-			log.Debug("Hub: not reading local activity: %v", err)
+			log.Debug("Hub: not reading local agent-info: %v", err)
 		}
-		return ""
+		return info
 	}
 
-	var info map[string]interface{}
-	if err := json.Unmarshal(data, &info); err != nil {
-		return ""
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(data, &parsed); err != nil || parsed == nil {
+		return info
 	}
-
-	activity, _ := info["activity"].(string)
-	return activity
+	return parsed
 }
 
 // ReportWaitingForInput sends a waiting-for-input status to the Hub.

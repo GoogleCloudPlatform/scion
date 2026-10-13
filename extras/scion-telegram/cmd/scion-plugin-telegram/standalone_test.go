@@ -70,6 +70,19 @@ func TestEmptyModeAccepted(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+// TestStandaloneEnvKeys_CoverWebhookSettings pins the runtime environment
+// merge the standalone webhook settings rely on: there is no separate
+// fallback to TELEGRAM_WEBHOOK_URL or TELEGRAM_WEBHOOK_SECRET.
+func TestStandaloneEnvKeys_CoverWebhookSettings(t *testing.T) {
+	envNames := make(map[string]string, len(standaloneEnvKeys))
+	for _, key := range standaloneEnvKeys {
+		envNames[standaloneEnvPrefix+"_"+strings.ToUpper(key)] = key
+	}
+	assert.Equal(t, "webhook_url", envNames["TELEGRAM_WEBHOOK_URL"])
+	assert.Equal(t, "webhook_secret", envNames["TELEGRAM_WEBHOOK_SECRET"])
+	assert.Equal(t, "webhook_listen", envNames["TELEGRAM_WEBHOOK_LISTEN"])
+}
+
 // isStandaloneRequested checks env vars for standalone mode (extracted for testing).
 func isStandaloneRequested() bool {
 	return strings.EqualFold(envOrEmpty("TELEGRAM_STANDALONE"), "true") ||

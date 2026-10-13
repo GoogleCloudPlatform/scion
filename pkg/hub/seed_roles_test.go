@@ -1041,10 +1041,12 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.delete", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.set_message_mode", "agent.stop_all", "agent.update",
+				"agent.delegation.credential.revoke", "agent.delegation.list",
+				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
 				"harness_config.create", "harness_config.delete",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.delete", "project.list", "project.manage",
+				"project.delete", "project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.set_messaging_policy", "project.update",
 				"scheduled_event.create", "scheduled_event.delete",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1062,10 +1064,12 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"agent.create", "agent.lifecycle", "agent.list",
 				"agent.message", "agent.port_access", "agent.read",
 				"agent.stop_all", "agent.update",
+				"agent.delegation.credential.revoke", "agent.delegation.list",
+				"agent.delegation.read", "agent.delegation.revoke",
 				"gcp_service_account.assign",
 				"harness_config.create",
 				"harness_config.list", "harness_config.read", "harness_config.update",
-				"project.list", "project.manage",
+				"project.list", "project.manage", "project.manage_visitors",
 				"project.read", "project.secret_read", "project.update",
 				"scheduled_event.create",
 				"scheduled_event.list", "scheduled_event.read", "scheduled_event.update",
@@ -1089,6 +1093,11 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 				"template.create", "template.list", "template.read",
 			},
 		},
+		{
+			name:  "project-visitor",
+			perms: projectVisitorPermissionIDs(),
+			want:  []string{"agent.list", "agent.message", "agent.read"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1101,9 +1110,10 @@ func TestProjectRoleExactPermissionSets(t *testing.T) {
 // TestProjectRoleRevisions verifies the current revision of each project role.
 func TestProjectRoleRevisions(t *testing.T) {
 	wantRevisions := map[string]int{
-		store.ProjectRoleOwner:  7,
-		store.ProjectRoleAdmin:  6,
-		store.ProjectRoleMember: 5,
+		store.ProjectRoleOwner:   9,
+		store.ProjectRoleAdmin:   8,
+		store.ProjectRoleMember:  5,
+		store.ProjectRoleVisitor: 1,
 	}
 	for _, role := range BuiltInRoles() {
 		if role.ScopeType != store.RoleScopeProject {
@@ -1126,9 +1136,10 @@ func TestProjectRoleReconciliationConverges(t *testing.T) {
 		revision    int
 		permissions func() []string
 	}{
-		{store.ProjectRoleOwner, 7, projectOwnerPermissionIDs},
-		{store.ProjectRoleAdmin, 6, projectAdminPermissionIDs},
+		{store.ProjectRoleOwner, 9, projectOwnerPermissionIDs},
+		{store.ProjectRoleAdmin, 8, projectAdminPermissionIDs},
 		{store.ProjectRoleMember, 5, projectMemberCuratedPermissionIDs},
+		{store.ProjectRoleVisitor, 1, projectVisitorPermissionIDs},
 	}
 
 	for _, pr := range projectRoles {

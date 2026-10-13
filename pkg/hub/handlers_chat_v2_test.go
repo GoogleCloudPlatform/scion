@@ -34,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // ---------------------------------------------------------------------------
@@ -544,8 +543,8 @@ func TestChatV2_CreateThread_AndList(t *testing.T) {
 	}
 
 	// Ensure WebChatStore is set up.
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -604,8 +603,8 @@ func TestChatV2_CreateThread_Validation(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -641,8 +640,8 @@ func TestChatV2_CreateThread_DuplicateNameCaseInsensitive_Returns400(t *testing.
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -670,8 +669,8 @@ func TestChatV2_PatchThread(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -718,8 +717,8 @@ func TestChatV2_PatchThread_RenameToExistingName_Returns400(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -760,8 +759,8 @@ func TestChatV2_PatchThread_GeneralRenameAllowed(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -789,8 +788,8 @@ func TestChatV2_DeleteThread(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -839,8 +838,8 @@ func TestChatV2_DeleteThread_LastThreadGuard(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -863,8 +862,8 @@ func TestChatV2_ConversationRead(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1262,8 +1261,8 @@ func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T)
 func TestChatV2_DMs_Empty(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1286,8 +1285,8 @@ func TestChatV2_DMs_Empty(t *testing.T) {
 func TestChatV2_UserPrefs_GetDefault(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1310,8 +1309,8 @@ func TestChatV2_UserPrefs_GetDefault(t *testing.T) {
 func TestChatV2_UserPrefs_PutAndGet(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1368,8 +1367,8 @@ func TestChatV2_SpaceRead(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2416,8 +2415,8 @@ func TestChatV2_ConversationReadState_ReportsPeerWatermark(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2464,8 +2463,8 @@ func TestChatV2_ConversationReadState_TopicHasNoPeer(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2513,8 +2512,8 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2614,7 +2613,7 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -2889,7 +2888,7 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -2988,7 +2987,7 @@ func TestDEF96_PromoteDM_Atomicity(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -3090,7 +3089,7 @@ func TestDEF96_PromoteDM_RefusesOnLookupError(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3231,7 +3230,7 @@ func TestDEF96_PromoteDM_ProceedsOnErrNotFound(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3546,7 +3545,7 @@ func setupEditDeleteTest(t *testing.T) (*Server, store.Store, WebChatStore, stri
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -4072,8 +4071,8 @@ func setupDEF31(t *testing.T) def31Fixture {
 		}
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}

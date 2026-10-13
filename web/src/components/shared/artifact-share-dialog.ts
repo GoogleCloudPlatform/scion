@@ -26,7 +26,9 @@
  * hub reports canGrantReview for (the delegating user of the agent that
  * owns the artifact, the project owners and admins of its home project,
  * and super-admins; design D24, ptone/scion#4014): only the people search,
- * offering users, with the permission fixed to write. It loads neither the
+ * offering users, with the permission fixed to review (ptone/scion#4538: a
+ * user who can already read the artifact may then publish reviews of it,
+ * and nothing else; the grant gives no read access). It loads neither the
  * grants nor the share links (both admin-only) and shows the grants it
  * made, not a grant list.
  */
@@ -41,6 +43,7 @@ import {
   DEFAULT_LINK_HOURS,
   LINK_LIFETIMES,
   PERMISSION_LABELS,
+  SELECTABLE_PERMISSIONS,
   createLink,
   deleteGrant,
   expiryImpact,
@@ -110,6 +113,9 @@ export function expiryWarning(linksCutShort: number, grantsRemoved: number): str
   }
   return parts.join(' and ');
 }
+
+/** The permissions the home project's grant may have (the API refuses admin). */
+const HOME_GRANT_PERMISSIONS: readonly GrantPermission[] = ['read', 'write'];
 
 @customElement('scion-artifact-share-dialog')
 export class ScionArtifactShareDialog extends LitElement {
@@ -350,7 +356,7 @@ export class ScionArtifactShareDialog extends LitElement {
     this.query = '';
     this.suggestions = [];
     this.subject = null;
-    this.permission = this.reviewOnly ? 'write' : 'read';
+    this.permission = this.reviewOnly ? 'review' : 'read';
     this.retention = this.artifact?.expiresAt ? 'current' : 'never';
     this.reviewers = [];
     if (this.reviewOnly) {
@@ -525,7 +531,7 @@ export class ScionArtifactShareDialog extends LitElement {
     }
   }
 
-  /** Review mode's Add: a write grant to the picked user, and nothing else. */
+  /** Review mode's Add: a review grant to the picked user, and nothing else. */
   private async grantReview(): Promise<void> {
     const a = this.artifact;
     const s = this.subject;
@@ -534,7 +540,7 @@ export class ScionArtifactShareDialog extends LitElement {
     this.adding = true;
     this.error = null;
     try {
-      await putGrant(a.id, 'principal', s.subjectRef, 'write');
+      await putGrant(a.id, 'principal', s.subjectRef, 'review');
       this.reviewers = [...this.reviewers.filter((r) => r !== s.label), s.label];
       this.subject = null;
       this.query = '';
@@ -806,14 +812,14 @@ export class ScionArtifactShareDialog extends LitElement {
     return html`
       <section aria-labelledby="review-heading">
         <p class="hint" id="review-heading">
-          Give a person review access to “${a.title}”. They will be able to read it and publish new
-          versions, including reviews.
+          Give a person who can already read “${a.title}” review access. They will be able to
+          publish reviews of it, and nothing else.
         </p>
         ${this.reviewers.map(
           (r) =>
             html`<sl-alert class="granted" variant="success" open>
               <sl-icon slot="icon" name="check-circle-fill"></sl-icon>
-              <strong>${r}</strong> can now edit and review.
+              <strong>${r}</strong> can now review.
             </sl-alert>`
         )}
         <div class="row">
@@ -841,7 +847,7 @@ export class ScionArtifactShareDialog extends LitElement {
                 </ul>`
               : nothing}
           </div>
-          <span class="muted permission">Permission: ${PERMISSION_LABELS.write}</span>
+          <span class="muted permission">Permission: ${PERMISSION_LABELS.review}</span>
           <sl-button
             size="small"
             ?disabled=${!this.subject}
@@ -857,7 +863,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private renderPermissionSelect(
     value: GrantPermission,
     disabled: boolean,
-    onChange: (p: GrantPermission) => void
+    onChange: (p: GrantPermission) => void,
+    options: readonly GrantPermission[] = SELECTABLE_PERMISSIONS
   ): TemplateResult {
     return html`<sl-select
       size="small"
@@ -867,9 +874,7 @@ export class ScionArtifactShareDialog extends LitElement {
       @sl-change=${(e: Event): void =>
         onChange((e.target as HTMLInputElement).value as GrantPermission)}
     >
-      ${(Object.keys(PERMISSION_LABELS) as GrantPermission[]).map(
-        (p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`
-      )}
+      ${options.map((p) => html`<sl-option value=${p}>${PERMISSION_LABELS[p]}</sl-option>`)}
     </sl-select>`;
   }
 
@@ -883,12 +888,24 @@ export class ScionArtifactShareDialog extends LitElement {
       who = kind ? this.label(kind, ref) : g.subjectRef;
     }
     if (g.home) {
+      // The home project's grant may be read or write, never admin
+      // (ptone/scion#4582); it is never removed here.
       return html`<div class="grant">
         <sl-icon name="folder"></sl-icon>
         <span class="who"><strong>${who}</strong> <span class="muted">(home project)</span></span>
-        <span class="muted">${PERMISSION_LABELS[g.permission]}</span>
+        ${this.renderPermissionSelect(
+          g.permission,
+          !!this.busyId,
+          (p) => {
+            void this.changePermission(g, p);
+          },
+          HOME_GRANT_PERMISSIONS
+        )}
       </div>`;
     }
+    // While cross-project sharing is off, a grant to another project can
+    // still be removed but not changed (ptone/scion#4586).
+    const locked = isScope && !this.crossProjectSharing;
     return html`<div class="grant">
       <sl-icon name=${isScope ? 'folder' : 'person'}></sl-icon>
       <span class="who">
@@ -896,10 +913,17 @@ export class ScionArtifactShareDialog extends LitElement {
         ${isScope && this.crossProjectSharing
           ? html`<small>Cross-project sharing is on for this hub</small>`
           : nothing}
+        ${locked
+          ? html`<small
+              >Cross-project sharing is off: this grant can be removed but not changed</small
+            >`
+          : nothing}
       </span>
-      ${this.renderPermissionSelect(g.permission, !!this.busyId, (p) => {
-        void this.changePermission(g, p);
-      })}
+      ${g.permission === 'review'
+        ? html`<span class="muted">${PERMISSION_LABELS.review}</span>`
+        : this.renderPermissionSelect(g.permission, !!this.busyId || locked, (p) => {
+            void this.changePermission(g, p);
+          })}
       <sl-button
         size="small"
         variant="text"

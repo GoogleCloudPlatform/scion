@@ -308,3 +308,174 @@ func TestHarnessConfigImport_RejectsUnusableProvisionerAllOrNothing(t *testing.T
 	assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
 		"a refused import must not write to storage")
 }
+
+// reimportSiblingSource is a source holding the reimport target "claude" and
+// an unusable sibling "zzz-bad".
+func reimportSiblingSource(claudeBlock string) map[string]string {
+	return map[string]string{
+		"claude/config.yaml":  "name: claude\nharness: claude\n" + claudeBlock,
+		"claude/README.md":    "replacement",
+		"zzz-bad/config.yaml": "name: zzz-bad\nharness: claude\n" + unusableProvisionerCases[0].block,
+	}
+}
+
+// Reimport validates and imports only the target config, so an unusable
+// sibling in the same source neither blocks it nor gets imported
+// (ptone/scion#4213).
+func TestHarnessConfigReimport_IgnoresUnusableSibling(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+
+	src := tarGzFilesServer(t, reimportSiblingSource(""))
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": src.URL + "/configs/multi.tar.gz"})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp ImportHarnessConfigsResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, []string{"claude"}, resp.HarnessConfigs)
+
+	after := globalClaude(t, s)
+	require.NotNil(t, after)
+	assert.Equal(t, hc.ID, after.ID, "reimport must update the existing config")
+	assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport must replace the files")
+
+	_, err := s.GetHarnessConfigBySlug(context.Background(), "zzz-bad", store.HarnessConfigScopeGlobal, "")
+	assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import a sibling config")
+}
+
+// Reimport still refuses an unusable target when the source also holds
+// other configs, and changes nothing.
+func TestHarnessConfigReimport_RejectsUnusableTargetWithSiblings(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	stor := srv.GetStorage().(*mockStorage)
+	before := storageSnapshot(stor)
+
+	files := reimportSiblingSource(unusableProvisionerCases[1].block)
+	files["aaa-good/config.yaml"] = "name: aaa-good\nharness: claude\n"
+	src := tarGzFilesServer(t, files)
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": src.URL + "/configs/multi.tar.gz"})
+	msg := assertUnusableProvisionerAnswer(t, rec, unusableProvisionerCases[1].wantReason)
+	assert.Contains(t, msg, `harness-config "claude"`)
+	assert.NotContains(t, msg, "zzz-bad", "only the target is validated")
+
+	after := globalClaude(t, s)
+	require.NotNil(t, after)
+	assert.Equal(t, hc.ContentHash, after.ContentHash, "a refused reimport must not change the content hash")
+	assert.True(t, maps.EqualFunc(before, storageSnapshot(stor), bytes.Equal),
+		"a refused reimport must not change stored files")
+	for _, slug := range []string{"aaa-good", "zzz-bad"} {
+		_, err := s.GetHarnessConfigBySlug(context.Background(), slug, store.HarnessConfigScopeGlobal, "")
+		assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import %s", slug)
+	}
+}
+
+// Reimport selects the target by its slug, not its display name: after the
+// target is renamed so its Name equals a sibling's name, the sibling is neither
+// validated nor imported (ptone/scion#4213).
+func TestHarnessConfigReimport_RenamedTargetIgnoresNameSibling(t *testing.T) {
+	for _, tc := range []struct{ name, siblingBlock string }{
+		{"usable sibling", ""},
+		{"unusable sibling", unusableProvisionerCases[0].block},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, s := testInstallSourceServer(t)
+			ctx := context.Background()
+			hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+			hc.Name = "renamed-target"
+			require.NoError(t, s.UpdateHarnessConfig(ctx, hc))
+
+			src := tarGzFilesServer(t, map[string]string{
+				"claude/config.yaml":         "name: claude\nharness: claude\n",
+				"claude/README.md":           "replacement",
+				"renamed-target/config.yaml": "name: renamed-target\nharness: claude\n" + tc.siblingBlock,
+			})
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+				map[string]interface{}{"sourceUrl": src.URL + "/configs/multi.tar.gz"})
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			var resp ImportHarnessConfigsResponse
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, []string{"claude"}, resp.HarnessConfigs)
+
+			after := globalClaude(t, s)
+			require.NotNil(t, after)
+			assert.Equal(t, hc.ID, after.ID, "reimport must update the existing config")
+			assert.NotEqual(t, hc.ContentHash, after.ContentHash, "reimport must replace the files")
+
+			_, err := s.GetHarnessConfigBySlug(ctx, "renamed-target", store.HarnessConfigScopeGlobal, "")
+			assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import the sibling named like the target")
+		})
+	}
+}
+
+// Reimport from a source with no entry for the target's slug is refused with
+// a message naming that slug, and changes nothing (ptone/scion#4213).
+func TestHarnessConfigReimport_NoMatchingSlug(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+
+	src := tarGzFilesServer(t, map[string]string{
+		"other/config.yaml": "name: other\nharness: claude\n",
+	})
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hc.ID+"/reimport",
+		map[string]interface{}{"sourceUrl": src.URL + "/configs/other.tar.gz"})
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	var resp struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, `no harness-config in the source matches slug "claude"`, resp.Error.Message)
+
+	after := globalClaude(t, s)
+	require.NotNil(t, after)
+	assert.Equal(t, hc.ContentHash, after.ContentHash, "a refused reimport must not change the content hash")
+	_, err := s.GetHarnessConfigBySlug(context.Background(), "other", store.HarnessConfigScopeGlobal, "")
+	assert.ErrorIs(t, err, store.ErrNotFound, "reimport must not import a non-matching config")
+}
+
+// A refused config in the import stream yields an error event carrying the
+// harness_config_unusable code and the same public message as the
+// non-streaming 422 answer (ptone/scion#4214).
+func TestHarnessConfigImportStream_RefusalCarriesCode(t *testing.T) {
+	srv, s := testInstallSourceServer(t)
+	src := tarGzFilesServer(t, multiConfigSource)
+	importReq := ImportResourcesRequest{
+		Kind: "harness-config", Scope: "global", SourceURL: src.URL + "/configs/multi.tar.gz",
+	}
+
+	plain := doRequest(t, srv, http.MethodPost, "/api/v1/resources/import", importReq)
+	wantMsg := assertUnusableProvisionerAnswer(t, plain, `harness-config "zzz-bad"`)
+
+	hc := installClaudeViaHub(t, srv, s, installPinnedClaudeURL)
+	badClaude := tarGzFilesServer(t, map[string]string{
+		"config.yaml": "name: claude\nharness: claude\n" + unusableProvisionerCases[0].block,
+	})
+
+	for _, tc := range []struct {
+		name, path string
+		body       interface{}
+		wantMsg    string
+	}{
+		{"import", "/api/v1/resources/import", importReq, wantMsg},
+		{"reimport", "/api/v1/harness-configs/" + hc.ID + "/reimport",
+			map[string]interface{}{"sourceUrl": badClaude.URL + "/configs/claude.tar.gz"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doStreamRequestWithToken(t, srv, testDevToken, http.MethodPost, tc.path, tc.body)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			events := parseImportEvents(t, rec.Body.String())
+			require.NotEmpty(t, events)
+			last := events[len(events)-1]
+			require.Equal(t, ImportEventError, last.Type, rec.Body.String())
+			assert.Equal(t, harnessConfigUnusableErrorCode, last.Code)
+			if tc.wantMsg != "" {
+				assert.Equal(t, tc.wantMsg, last.Reason, "the stream must carry the non-streaming public message")
+			} else {
+				assert.Contains(t, last.Reason, unusableProvisionerCases[0].wantReason)
+			}
+		})
+	}
+}
