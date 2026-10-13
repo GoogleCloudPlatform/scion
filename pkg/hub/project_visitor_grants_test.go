@@ -807,7 +807,7 @@ func TestProjectVisitors_VisitorIsRefusedOnTheRoutes(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), visitorRouteRefusalMessage)
 }
 
-// federatedGet sends GET path with token as the federation credential
+// federatedGet sends GET path with the issuer token as the federation credential
 // through the full server handler.
 func (f *visitorGrantFixture) federatedGet(t *testing.T, path, token string) *httptest.ResponseRecorder {
 	t.Helper()
