@@ -75,15 +75,17 @@ func TestHarnessDeliveryConfig_Validate(t *testing.T) {
 	}
 
 	valid := map[string]HarnessDeliveryConfig{
-		"empty":          {},
-		"zero submits":   {ExtraSubmits: intPtr(0)},
-		"five submits":   {ExtraSubmits: intPtr(5)},
-		"four keys":      {SubmitKeys: []string{"Escape", "Enter", "C-m", "C-j"}},
-		"inner dash key": {SubmitKeys: []string{"M-Enter"}},
-		"zero delay":     {ExtraSubmitDelay: "0s"},
-		"max delay":      {ExtraSubmitDelay: "5s"},
-		"32-byte key":    {SubmitKeys: []string{strings.Repeat("k", 32)}},
-		"defaults spelt": {SubmitKeys: []string{"Enter"}, ExtraSubmits: intPtr(2), ExtraSubmitDelay: "300ms"},
+		"empty":               {},
+		"zero submits":        {ExtraSubmits: intPtr(0)},
+		"five submits":        {ExtraSubmits: intPtr(5)},
+		"four keys":           {SubmitKeys: []string{"Escape", "Enter", "C-m", "C-j"}},
+		"inner dash key":      {SubmitKeys: []string{"M-Enter"}},
+		"inner semicolon key": {SubmitKeys: []string{"a;b"}},
+		"one-byte key":        {SubmitKeys: []string{"q"}},
+		"zero delay":          {ExtraSubmitDelay: "0s"},
+		"max delay":           {ExtraSubmitDelay: "5s"},
+		"32-byte key":         {SubmitKeys: []string{strings.Repeat("k", 32)}},
+		"defaults spelt":      {SubmitKeys: []string{"Enter"}, ExtraSubmits: intPtr(2), ExtraSubmitDelay: "300ms"},
 	}
 	for name, cfg := range valid {
 		t.Run("valid/"+name, func(t *testing.T) {
@@ -97,18 +99,20 @@ func TestHarnessDeliveryConfig_Validate(t *testing.T) {
 		cfg     HarnessDeliveryConfig
 		wantErr string
 	}{
-		"six submits":       {HarnessDeliveryConfig{ExtraSubmits: intPtr(6)}, "delivery.extra_submits must be between 0 and 5"},
-		"negative submits":  {HarnessDeliveryConfig{ExtraSubmits: intPtr(-1)}, "delivery.extra_submits must be between 0 and 5"},
-		"five keys":         {HarnessDeliveryConfig{SubmitKeys: []string{"a", "b", "c", "d", "e"}}, "delivery.submit_keys must have 1 to 4 entries"},
-		"key with a space":  {HarnessDeliveryConfig{SubmitKeys: []string{"C-m Enter"}}, "must not contain whitespace"},
-		"key with a tab":    {HarnessDeliveryConfig{SubmitKeys: []string{"C-m\tx"}}, "must not contain whitespace"},
-		"key with control":  {HarnessDeliveryConfig{SubmitKeys: []string{"C-m\x1b"}}, "control characters"},
-		"empty key":         {HarnessDeliveryConfig{SubmitKeys: []string{"Enter", ""}}, "delivery.submit_keys[1]"},
-		"33-byte key":       {HarnessDeliveryConfig{SubmitKeys: []string{strings.Repeat("k", 33)}}, "1 to 32 bytes"},
-		"leading dash key":  {HarnessDeliveryConfig{SubmitKeys: []string{"Enter", "-R"}}, `must not start with "-"`},
-		"6s delay":          {HarnessDeliveryConfig{ExtraSubmitDelay: "6s"}, "delivery.extra_submit_delay must be between"},
-		"negative delay":    {HarnessDeliveryConfig{ExtraSubmitDelay: "-1ms"}, "delivery.extra_submit_delay must be between"},
-		"unparseable delay": {HarnessDeliveryConfig{ExtraSubmitDelay: "fast"}, "invalid duration"},
+		"six submits":            {HarnessDeliveryConfig{ExtraSubmits: intPtr(6)}, "delivery.extra_submits must be between 0 and 5"},
+		"negative submits":       {HarnessDeliveryConfig{ExtraSubmits: intPtr(-1)}, "delivery.extra_submits must be between 0 and 5"},
+		"five keys":              {HarnessDeliveryConfig{SubmitKeys: []string{"a", "b", "c", "d", "e"}}, "delivery.submit_keys must have 1 to 4 entries"},
+		"key with a space":       {HarnessDeliveryConfig{SubmitKeys: []string{"C-m Enter"}}, "must not contain whitespace"},
+		"key with a tab":         {HarnessDeliveryConfig{SubmitKeys: []string{"C-m\tx"}}, "must not contain whitespace"},
+		"key with control":       {HarnessDeliveryConfig{SubmitKeys: []string{"C-m\x1b"}}, "control characters"},
+		"empty key":              {HarnessDeliveryConfig{SubmitKeys: []string{"Enter", ""}}, "delivery.submit_keys[1]"},
+		"33-byte key":            {HarnessDeliveryConfig{SubmitKeys: []string{strings.Repeat("k", 33)}}, "1 to 32 bytes"},
+		"leading dash key":       {HarnessDeliveryConfig{SubmitKeys: []string{"Enter", "-R"}}, `must not start with "-"`},
+		"trailing semicolon key": {HarnessDeliveryConfig{SubmitKeys: []string{"Enter;"}}, `must not end with ";"`},
+		"lone semicolon key":     {HarnessDeliveryConfig{SubmitKeys: []string{"Enter", ";"}}, `delivery.submit_keys[1]: key ";" must not end with ";"`},
+		"6s delay":               {HarnessDeliveryConfig{ExtraSubmitDelay: "6s"}, "delivery.extra_submit_delay must be between"},
+		"negative delay":         {HarnessDeliveryConfig{ExtraSubmitDelay: "-1ms"}, "delivery.extra_submit_delay must be between"},
+		"unparseable delay":      {HarnessDeliveryConfig{ExtraSubmitDelay: "fast"}, "invalid duration"},
 	}
 	for name, tc := range invalid {
 		t.Run("invalid/"+name, func(t *testing.T) {
@@ -238,10 +242,13 @@ func TestValidateHarnessConfig_ReadyDeliveryBlocks(t *testing.T) {
 	accepted := map[string]string{
 		"both blocks": "harness: x\nready:\n  strategy: hook\n  settle: 1.5s\n  timeout: 90s\n" +
 			"delivery:\n  submit_keys: [Enter]\n  extra_submits: 2\n  extra_submit_delay: 300ms\n",
-		"empty blocks":      "harness: x\nready: {}\ndelivery: {}\n",
-		"delay only":        "harness: x\nready:\n  strategy: delay\n  settle: 8s\n",
-		"zero extra":        "harness: x\ndelivery:\n  submit_keys: [C-m]\n  extra_submits: 0\n",
-		"compound duration": "harness: x\nready:\n  strategy: hook\n  timeout: 1m30s\n",
+		"empty blocks":        "harness: x\nready: {}\ndelivery: {}\n",
+		"delay only":          "harness: x\nready:\n  strategy: delay\n  settle: 8s\n",
+		"zero extra":          "harness: x\ndelivery:\n  submit_keys: [C-m]\n  extra_submits: 0\n",
+		"compound duration":   "harness: x\nready:\n  strategy: hook\n  timeout: 1m30s\n",
+		"one-char key":        "harness: x\ndelivery:\n  submit_keys: [q]\n",
+		"inner semicolon key": "harness: x\ndelivery:\n  submit_keys: ['a;b']\n",
+		"inner dash key":      "harness: x\ndelivery:\n  submit_keys: [M-Enter]\n",
 	}
 	for name, doc := range accepted {
 		t.Run("accepted/"+name, func(t *testing.T) {
@@ -256,23 +263,25 @@ func TestValidateHarnessConfig_ReadyDeliveryBlocks(t *testing.T) {
 	}
 
 	rejected := map[string]string{
-		"ready.bogus":             "harness: x\nready:\n  bogus: 1\n",
-		"delivery.bogus":          "harness: x\ndelivery:\n  bogus: 1\n",
-		"pane strategy (P5)":      "harness: x\nready:\n  strategy: pane\n",
-		"pane_regex (P5)":         "harness: x\nready:\n  pane_regex: '>'\n",
-		"hook_events (unbuilt)":   "harness: x\nready:\n  hook_events: [SessionStart]\n",
-		"verify (deferred)":       "harness: x\ndelivery:\n  verify: true\n",
-		"settle not duration":     "harness: x\nready:\n  settle: soon\n",
-		"settle negative":         "harness: x\nready:\n  settle: -1s\n",
-		"settle integer":          "harness: x\nready:\n  settle: 8\n",
-		"extra_submits 6":         "harness: x\ndelivery:\n  extra_submits: 6\n",
-		"extra_submits string":    "harness: x\ndelivery:\n  extra_submits: two\n",
-		"submit_keys empty list":  "harness: x\ndelivery:\n  submit_keys: []\n",
-		"submit_keys five":        "harness: x\ndelivery:\n  submit_keys: [a, b, c, d, e]\n",
-		"submit key with space":   "harness: x\ndelivery:\n  submit_keys: ['C-m Enter']\n",
-		"submit key too long":     "harness: x\ndelivery:\n  submit_keys: [" + strings.Repeat("k", 33) + "]\n",
-		"submit key leading dash": "harness: x\ndelivery:\n  submit_keys: ['-X']\n",
-		"ready not object":        "harness: x\nready: hook\n",
+		"ready.bogus":                   "harness: x\nready:\n  bogus: 1\n",
+		"delivery.bogus":                "harness: x\ndelivery:\n  bogus: 1\n",
+		"pane strategy (P5)":            "harness: x\nready:\n  strategy: pane\n",
+		"pane_regex (P5)":               "harness: x\nready:\n  pane_regex: '>'\n",
+		"hook_events (unbuilt)":         "harness: x\nready:\n  hook_events: [SessionStart]\n",
+		"verify (deferred)":             "harness: x\ndelivery:\n  verify: true\n",
+		"settle not duration":           "harness: x\nready:\n  settle: soon\n",
+		"settle negative":               "harness: x\nready:\n  settle: -1s\n",
+		"settle integer":                "harness: x\nready:\n  settle: 8\n",
+		"extra_submits 6":               "harness: x\ndelivery:\n  extra_submits: 6\n",
+		"extra_submits string":          "harness: x\ndelivery:\n  extra_submits: two\n",
+		"submit_keys empty list":        "harness: x\ndelivery:\n  submit_keys: []\n",
+		"submit_keys five":              "harness: x\ndelivery:\n  submit_keys: [a, b, c, d, e]\n",
+		"submit key with space":         "harness: x\ndelivery:\n  submit_keys: ['C-m Enter']\n",
+		"submit key too long":           "harness: x\ndelivery:\n  submit_keys: [" + strings.Repeat("k", 33) + "]\n",
+		"submit key leading dash":       "harness: x\ndelivery:\n  submit_keys: ['-X']\n",
+		"submit key trailing semicolon": "harness: x\ndelivery:\n  submit_keys: ['Enter;']\n",
+		"submit key lone semicolon":     "harness: x\ndelivery:\n  submit_keys: [';']\n",
+		"ready not object":              "harness: x\nready: hook\n",
 	}
 	for name, doc := range rejected {
 		t.Run("rejected/"+name, func(t *testing.T) {

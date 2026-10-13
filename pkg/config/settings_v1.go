@@ -2934,14 +2934,19 @@ func (d *HarnessDeliveryConfig) submitKeys() ([]string, error) {
 }
 
 // validateSubmitKey checks one tmux key name: 1 to 32 bytes with no
-// whitespace or control characters and no leading "-", so it is passed to
-// send-keys as exactly one key rather than parsed as a send-keys option.
+// whitespace or control characters, no leading "-" and no trailing ";", so it
+// is passed to send-keys as exactly one key. tmux would parse a leading "-"
+// as a send-keys option, and it strips a trailing ";" from an argument and
+// treats it as a command separator, so the key would be cut short or lost.
 func validateSubmitKey(key string) error {
 	if key == "" || len(key) > maxDeliverySubmitKeyBytes {
 		return fmt.Errorf("key must be 1 to %d bytes, got %d", maxDeliverySubmitKeyBytes, len(key))
 	}
 	if strings.HasPrefix(key, "-") {
 		return fmt.Errorf("key %q must not start with \"-\"", key)
+	}
+	if strings.HasSuffix(key, ";") {
+		return fmt.Errorf("key %q must not end with \";\"", key)
 	}
 	for _, r := range key {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {

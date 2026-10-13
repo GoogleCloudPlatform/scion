@@ -301,6 +301,9 @@ passes. The defaults give paste, Enter, then two more Enters 300ms apart.
 
 Each key must be 1 to 32 bytes, with no whitespace or control characters,
 and must not start with `-` (tmux would read it as a `send-keys` option).
+It must not end with `;` either: tmux strips a trailing `;` from the
+argument and treats it as a command separator, so `Enter;` would arrive as
+`Enter` and `;` would send nothing, with no error.
 Message delivery reads the embedded bundle's `delivery` block, the same as
 the interrupt keys. Project, template and hub harness-config overrides do not
 change it yet.
