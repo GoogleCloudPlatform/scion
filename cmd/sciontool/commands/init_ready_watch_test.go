@@ -363,6 +363,41 @@ func TestWatchHarnessReady_HookOldMarkerReadyAtOnce(t *testing.T) {
 	}
 }
 
+// Hook mode: a marker whose mtime is in the future is clamped to when the
+// watcher first saw it, so readiness comes about Settle later, not never.
+func TestWatchHarnessReady_HookFutureMarkerMtimeClamped(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.Settle = 200 * time.Millisecond
+	cfg.Deadline = 10 * time.Second
+	var seenAt time.Time
+	afterFirstPoll(t, &cfg, func() {
+		writeMarker(t, nonce)
+		future := time.Now().Add(time.Minute)
+		if err := os.Chtimes(harnessReadyFilePath, future, future); err != nil {
+			t.Fatal(err)
+		}
+		seenAt = time.Now()
+	})
+	done := make(chan readyWatchOutcome, 1)
+	go func() { done <- watchHarnessReady(context.Background(), cfg) }()
+	select {
+	case got := <-done:
+		if got != readyOutcomeHookMarker {
+			t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watcher still waiting 5s after a future-dated marker; want ready about Settle after it was seen")
+	}
+	if waited := time.Since(seenAt); waited < cfg.Settle {
+		t.Errorf("ready %s after the marker was written, before Settle %s", waited, cfg.Settle)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityWorking}) {
+		t.Errorf("hub reports = %v, want [working]", r)
+	}
+}
+
 // Hook mode: the deadline comes from the spec, not state.ReadyDeadline.
 func TestWatchHarnessReady_SpecDeadline(t *testing.T) {
 	f := newReadyWatchFixture(t)

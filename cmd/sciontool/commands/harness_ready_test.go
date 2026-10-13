@@ -381,30 +381,29 @@ func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 	type tc struct {
 		name      string
 		dialect   string
-		harness   string // the harness the case stands for; the hook writes the marker whatever the init-run spec
 		yaml      string // repo-relative dialect.yaml to stage; "" = built-in
 		payload   func(t *testing.T) []byte
 		wantReady bool
 	}
 	raw := func(s string) func(*testing.T) []byte { return func(*testing.T) []byte { return []byte(s) } }
 	cases := []tc{
-		{"claude startup", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
-		{"claude resume", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"resume","session_id":"s1"}`), true},
-		{"claude clear", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
-		{"claude compact", "claude", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"compact","session_id":"s1"}`), false},
-		{"gemini startup", "gemini", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
-		{"gemini clear", "gemini", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
-		{"grok-build source new", "grok-build", "grok-build", "harnesses/grok-build/dialect.yaml", raw(`{"hookEventName": "SessionStart", "source": "new"}`), true},
-		{"copilot source new", "copilot", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
+		{"claude startup", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
+		{"claude resume", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"resume","session_id":"s1"}`), true},
+		{"claude clear", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
+		{"claude compact", "claude", "", raw(`{"hook_event_name":"SessionStart","source":"compact","session_id":"s1"}`), false},
+		{"gemini startup", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}`), true},
+		{"gemini clear", "gemini", "", raw(`{"hook_event_name":"SessionStart","source":"clear","session_id":"s1"}`), false},
+		{"grok-build source new", "grok-build", "harnesses/grok-build/dialect.yaml", raw(`{"hookEventName": "SessionStart", "source": "new"}`), true},
+		{"copilot source new", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
 			return positionalEventData("sessionStart", []byte(`{"timestamp":1700000000000,"cwd":"/workspace","source":"new","initialPrompt":""}`))
 		}, true},
-		{"copilot source startup", "copilot", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
+		{"copilot source startup", "copilot", "harnesses/copilot/dialect.yaml", func(*testing.T) []byte {
 			return positionalEventData("sessionStart", []byte(`{"sessionId":"s1","source":"startup"}`))
 		}, true},
-		{"opencode session.created capture", "opencode", "opencode", "harnesses/opencode/dialect.yaml", func(t *testing.T) []byte {
+		{"opencode session.created capture", "opencode", "harnesses/opencode/dialect.yaml", func(t *testing.T) []byte {
 			return firstJSONLLine(t, repoPath(t, "pkg/sciontool/hooks/dialects/testdata/opencode/hook-payloads-1.18.33.jsonl"))
 		}, true},
-		{"muse-code SessionStart", "muse-code", "muse-code", "harnesses/muse-code/dialect.yaml", raw(`{"hook_event_name":"SessionStart"}`), true},
+		{"muse-code SessionStart", "muse-code", "harnesses/muse-code/dialect.yaml", raw(`{"hook_event_name":"SessionStart"}`), true},
 	}
 
 	for _, c := range cases {

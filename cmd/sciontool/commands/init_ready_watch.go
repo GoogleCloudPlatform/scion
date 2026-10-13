@@ -84,7 +84,7 @@ const (
 // stopping).
 //
 //   - Hook mode: ready once the marker is seen and Settle has passed since
-//     its mtime. A readiness hook event writes its activity to the local
+//     its mtime, or since the watcher first saw it if that is earlier. A readiness hook event writes its activity to the local
 //     agent-info.json and only then the ready marker (the marker is a
 //     handler registered right after the status handler in `sciontool
 //     hook`), and its hub handler reports that activity. So when the watcher
@@ -138,13 +138,22 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 	first := true
 	markerAtStart := false
 	markerSeen := false
+	var firstSeenAt time.Time
 	for {
 		now := time.Now()
 		var markerAt time.Time
 		if hookMode {
 			markerAt, markerSeen = cfg.MarkerTime(cfg.Nonce)
-			if first && markerSeen {
-				markerAtStart = true
+			if markerSeen && firstSeenAt.IsZero() {
+				firstSeenAt = now
+				markerAtStart = first
+			}
+			// The signal is the marker's mtime, but never later than when
+			// the watcher first saw it: a future mtime (a clock anomaly, or
+			// the agent user touching its own marker) must not hold
+			// readiness past firstSeenAt + Settle.
+			if markerSeen && markerAt.After(firstSeenAt) {
+				markerAt = firstSeenAt
 			}
 		}
 		switch {
