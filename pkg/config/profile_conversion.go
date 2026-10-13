@@ -122,7 +122,6 @@ var (
 // convProfile is one profile in scope, with its folded instance values.
 type convProfile struct {
 	name   string
-	rtKey  string
 	typ    string // docker or kubernetes once the target is supported
 	scope  string
 	ctx    string
@@ -338,7 +337,7 @@ func foldProfile(st *convState, vs *VersionedSettings, name string, prof V1Profi
 		return nil
 	}
 
-	cp := &convProfile{name: name, rtKey: rtKey, typ: typ, fields: map[string]convValue{}}
+	cp := &convProfile{name: name, typ: typ, fields: map[string]convValue{}}
 	if typ == RuntimeTargetTypeKubernetes {
 		cp.ctx, cp.ns = strings.TrimSpace(rt.Context), strings.TrimSpace(rt.Namespace)
 		cp.scope = "kubernetes\x00" + cp.ctx + "\x00" + cp.ns
