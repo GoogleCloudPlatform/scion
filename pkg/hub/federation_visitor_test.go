@@ -94,7 +94,8 @@ func (f *visitorFixture) userToken(t *testing.T, subject, email string) string {
 	claims := validFederationClaims(visitorTestUserIssuer, visitorTestAudience)
 	claims.Subject = subject
 	claims.Email = email
-	claims.EmailVerified = true
+	verified := true
+	claims.EmailVerified = &verified
 	claims.Name = "Visitor " + subject
 	claims.ProjectID, claims.AgentName, claims.RootUser, claims.Ancestry = "", "", "", nil
 	return signFederationToken(t, f.key, f.kid, claims)
