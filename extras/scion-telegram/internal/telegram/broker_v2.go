@@ -2058,9 +2058,17 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, api *TelegramAPIClient,
 			continue
 		}
 
+		// Stop between updates once cancelled: the next loop fetches the
+		// rest of the batch again, as lastOffset has not passed them. A
+		// handler gets a context the cancel does not reach, so an update
+		// being handled when the loop is stopped (for example by a
+		// reconfigure) still finishes.
 		for _, update := range updates {
+			if ctx.Err() != nil {
+				return
+			}
 			b.lastOffset = update.UpdateID
-			b.handlePolledUpdate(ctx, update)
+			b.handlePolledUpdate(context.WithoutCancel(ctx), update)
 		}
 	}
 }
