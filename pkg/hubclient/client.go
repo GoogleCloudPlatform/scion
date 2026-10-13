@@ -133,8 +133,17 @@ type Client interface {
 	// TestIdentities returns the hub test identity operations interface.
 	TestIdentities() TestIdentityService
 
+	// TestIdentityDelegations returns the workload issuer delegation
+	// operations interface.
+	TestIdentityDelegations() TestIdentityDelegationService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
+
+	// HealthSummary returns the admin health summary (GET
+	// /api/v1/admin/health/summary), the data behind the health dashboard.
+	// It needs hub.health.read and a user identity.
+	HealthSummary(ctx context.Context) (*HealthSummary, error)
 }
 
 // client is the concrete implementation of Client.
@@ -165,6 +174,7 @@ type client struct {
 	messaging             *messagingService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
+	testIdentityDelegs    *testIdentityDelegationService
 }
 
 // New creates a new Hub API client.
@@ -221,6 +231,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.messaging = &messagingService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
+	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
 
 	return c, nil
 }
@@ -363,6 +374,10 @@ func (c *client) Artifacts() ArtifactService {
 // TestIdentities returns the hub test identity operations interface.
 func (c *client) TestIdentities() TestIdentityService {
 	return c.testIdentities
+}
+
+func (c *client) TestIdentityDelegations() TestIdentityDelegationService {
+	return c.testIdentityDelegs
 }
 
 // get performs an HTTP GET request.

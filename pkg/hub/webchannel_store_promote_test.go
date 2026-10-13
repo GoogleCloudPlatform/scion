@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -22,7 +22,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -30,7 +29,7 @@ import (
 // includes a messages table (Ent-managed in production, manually created here).
 func newPromoteTestStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create the Ent messages table manually — in production it's managed by Ent.
 	_, err := db.Exec(`
@@ -52,7 +51,7 @@ CREATE TABLE IF NOT EXISTS messages (
 `)
 	require.NoError(t, err)
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	return store, db
@@ -388,36 +387,4 @@ func TestPromoteDM_ThreadIDIndex(t *testing.T) {
 	err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_messages_thread_id'").Scan(&count)
 	require.NoError(t, err)
 	require.Equal(t, 1, count, "idx_messages_thread_id index should exist")
-}
-
-// TestTitleCase verifies the titleCase helper function.
-func TestTitleCase(t *testing.T) {
-	tests := []struct {
-		input    string
-		expected string
-	}{
-		{"code-reviewer", "Code Reviewer"},
-		{"my_agent", "My Agent"},
-		{"simple", "Simple"},
-		{"multi-word-agent", "Multi Word Agent"},
-		{"already Title", "Already Title"},
-	}
-	for _, tc := range tests {
-		got := titleCase(tc.input)
-		require.Equal(t, tc.expected, got, "titleCase(%q)", tc.input)
-	}
-}
-
-// TestDMPromotedEvent verifies the DMPromotedEvent struct serialization.
-func TestDMPromotedEvent(t *testing.T) {
-	evt := DMPromotedEvent{
-		OldConversationKey: "dm:agent:a1:user:u1",
-		NewTopic: WebChatTopic{
-			ID:        "topic-1",
-			ProjectID: "proj-1",
-			Name:      "Test Thread",
-		},
-	}
-	require.Equal(t, "dm:agent:a1:user:u1", evt.OldConversationKey)
-	require.Equal(t, "topic-1", evt.NewTopic.ID)
 }

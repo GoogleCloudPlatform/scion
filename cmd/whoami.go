@@ -16,6 +16,8 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -52,10 +54,56 @@ type WhoamiResult struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 	Ancestry    []string          `json:"ancestry,omitempty"`
 	TaskSummary string            `json:"taskSummary,omitempty"`
+	MessageMode string            `json:"messageMode,omitempty"` // effective message mode (none, lineage, branch, project, hub)
+
+	// Scopes are the scopes of the agent's current hub token, read from
+	// the token itself (only with --full). They show whether, for example,
+	// the artifact scopes were issued (ptone/scion#4569).
+	Scopes []string `json:"scopes,omitempty"`
+
+	// Experiments are the hub experiments that are on now, read live from
+	// GET /api/v1/experiments (only with --full; absent when the hub could
+	// not be asked, an empty list when none is on). That endpoint reports
+	// the experiments with a web layer, which include server-checked ones
+	// such as hub.artifacts. SCION_HUB_EXPERIMENTS, by contrast, lists only
+	// the experiments dispatched to the agent, fixed at start
+	// (ptone/scion#4573).
+	Experiments *[]string `json:"experiments,omitempty"`
 }
 
 // whoamiFull controls whether the --full flag was set.
 var whoamiFull bool
+
+// whoamiToken returns the agent's current hub token: the canonical token
+// file, or SCION_AUTH_TOKEN before the file exists. Overridden in tests.
+var whoamiToken = func() string {
+	if tok := sciontoolhub.ReadTokenFile(); tok != "" {
+		return tok
+	}
+	return os.Getenv(sciontoolhub.EnvHubToken)
+}
+
+// tokenScopes returns the scopes claim of an agent JWT, decoded without
+// verifying the signature: it describes the caller's own credential and
+// grants nothing (the hub verifies the token on every request). It returns
+// nil when the token is not a JWT or carries no scopes.
+func tokenScopes(token string) []string {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil
+	}
+	var claims struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return nil
+	}
+	return claims.Scopes
+}
 
 // newHubClient is the default Hub client factory. Overridden in tests.
 var newHubClient = func() *sciontoolhub.Client {
@@ -83,8 +131,10 @@ When run outside an agent container, falls back to the system whoami command.`,
 
 		result := buildWhoamiResult(slug, name)
 
-		// Enrich with Hub data when --full is requested.
+		// Enrich with the token's scopes and Hub data when --full is
+		// requested.
 		if whoamiFull {
+			result.Scopes = tokenScopes(whoamiToken())
 			enrichFromHub(cmd, &result)
 		}
 
@@ -159,6 +209,14 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 	result.Annotations = self.Annotations
 	result.Ancestry = self.Ancestry
 	result.TaskSummary = self.TaskSummary
+	result.MessageMode = self.MessageMode
+
+	enabled, err := client.GetExperiments(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: Hub experiments query failed: %v; experiments omitted\n", err)
+		return
+	}
+	result.Experiments = &enabled
 }
 
 // printFullPlainText prints a human-readable multi-line summary of all available fields.
@@ -195,8 +253,21 @@ func printFullPlainText(r WhoamiResult) {
 	if r.Activity != "" {
 		fmt.Printf("Activity: %s\n", r.Activity)
 	}
+	if r.MessageMode != "" {
+		fmt.Printf("Msg Mode: %s\n", r.MessageMode)
+	}
 	if r.HubURL != "" {
 		fmt.Printf("Hub:      %s\n", r.HubURL)
+	}
+	if len(r.Scopes) > 0 {
+		fmt.Printf("Scopes:   %s\n", strings.Join(r.Scopes, ", "))
+	}
+	if r.Experiments != nil {
+		list := strings.Join(*r.Experiments, ", ")
+		if list == "" {
+			list = "(none)"
+		}
+		fmt.Printf("Experiments: %s\n", list)
 	}
 }
 
@@ -214,5 +285,5 @@ func runSystemWhoami() error {
 func init() {
 	rootCmd.AddCommand(whoamiCmd)
 	whoamiCmd.Flags().BoolVar(&whoamiFull, "full", false,
-		"Include enriched fields from the Hub (phase, activity, labels, ancestry)")
+		"Include the token's scopes and enriched fields from the Hub (phase, activity, message mode, labels, ancestry, enabled experiments)")
 }

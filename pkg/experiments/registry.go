@@ -157,10 +157,35 @@ const AgentEdit = "web.agent_edit"
 // refused. Turning it off suspends stored grants; it does not revoke them.
 const AgentDelegation = "hub.agent_delegation"
 
+// FederationProjectVisitors gates project access for users of trusted
+// external issuers (ptone/scion#4603). While it is off, a verified
+// federated user token always yields the same federated user identity as
+// before; while it is on, a token whose (issuer, subject) is linked to an
+// active federated account yields that account's visitor identity.
+const FederationProjectVisitors = "federation.project_visitors"
+
+// ChatThreadGroups gates project-scoped chat thread groups
+// (ptone/scion#4424): the hub's /api/v1/thread-groups routes (404 while
+// off), the threadGroupId field on conversation create, the migration of
+// personal groups into project groups, and the web rail's project groups.
+// Turning it off hides the feature but keeps every stored group.
+const ChatThreadGroups = "hub.chat_thread_groups"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        FederationProjectVisitors,
+		Title:       "Project visitors from trusted issuers",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor). While off, federated user tokens behave exactly as before; stored accounts are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4603",
+		Owner:       "federation",
+		ReviewBy:    "2027-01-12",
+	},
 	{
 		Name:        AgentDelegation,
 		Title:       "Agent delegation",
@@ -270,6 +295,17 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#3952",
 		Owner:       "web",
 		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        ChatThreadGroups,
+		Title:       "Project thread groups in chat",
+		Description: "Makes chat thread groups belong to the project, so every project member (user or agent) sees the same groups and can file threads into them; each user keeps their own sidebar order. Gates the web rail (LayerWeb) and the hub's /api/v1/thread-groups routes, which answer 404 while it is off, plus the copy of personal groups into project groups (LayerServer). Turning it off hides project groups and restores personal groups; no data is deleted.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4424",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-11",
 	},
 }
 

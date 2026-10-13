@@ -41,6 +41,7 @@ func warnRemovedMode(source string) {
 var agentAllowed = map[string]bool{
 	"create":                      true,
 	"delete":                      true,
+	"expose":                      true, // acts only as the calling agent (ptone/scion#4728)
 	"keys":                        true,
 	"list":                        true,
 	"logs":                        true,
@@ -51,6 +52,7 @@ var agentAllowed = map[string]bool{
 	"start":                       true,
 	"stop":                        true,
 	"suspend":                     true,
+	"unexpose":                    true, // acts only as the calling agent (ptone/scion#4728)
 	"version":                     true,
 	"whoami":                      true,
 	"global-flags":                true,
@@ -140,6 +142,27 @@ var agentAllowed = map[string]bool{
 	"artifact.publish":              true,
 	"artifact.get":                  true,
 	"artifact.versions":             true,
+	// artifact share and artifact delete are human-only and deliberately
+	// absent (ptone/scion#4529): agents may not share or delete artifacts.
+	// Target-hub profiles and test identities (ptone/scion#4240).
+	// These run in agent mode only against a target-hub profile whose
+	// endpoint is not the agent's own hub; the run-time refusal is in
+	// checkHubProfileGate and the profile commands (hub_profile.go).
+	// Every other hub child stays removed, and hub.test-identity.delegate
+	// (the human consent step) is human only.
+	"hub":                        true,
+	"hub.status":                 true,
+	"hub.profile":                true,
+	"hub.profile.add":            true,
+	"hub.profile.list":           true,
+	"hub.profile.show":           true,
+	"hub.profile.remove":         true,
+	"hub.test-identity":          true,
+	"hub.test-identity.issue":    true,
+	"hub.test-identity.token":    true,
+	"hub.test-identity.list":     true,
+	"hub.test-identity.delete":   true,
+	"hub.test-identity.teardown": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.
@@ -158,7 +181,13 @@ func resolveMode() CLIMode {
 		}
 	}
 
-	settings, err := config.LoadSettings("")
+	// With a hub profile selected, read only the global settings: a
+	// profile command never reads local project settings.
+	settingsPath := ""
+	if hubProfileRequested() {
+		settingsPath = "global"
+	}
+	settings, err := config.LoadSettings(settingsPath)
 	if err == nil && settings != nil && settings.CLI != nil && settings.CLI.Mode != "" {
 		switch CLIMode(settings.CLI.Mode) {
 		case ModeHuman, ModeAgent:

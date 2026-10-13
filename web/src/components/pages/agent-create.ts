@@ -62,6 +62,7 @@ import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
+import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
 import type { AgentOtherInlineConfig, ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
@@ -903,7 +904,13 @@ export class ScionPageAgentCreate extends LitElement {
       const result = (await response.json()) as {
         agent?: { id: string; status?: string; phase?: AgentPhase; launch?: AgentLaunch };
         id?: string;
+        warnings?: string[];
       };
+      // The hub's create warnings (for example, a token issued without
+      // the artifact scopes); the toast stack outlives the navigation. The
+      // start response may repeat one; `shownWarnings` toasts it once.
+      const shownWarnings = new Set<string>();
+      showResponseWarnings(result, shownWarnings);
       const agent = result.agent;
       const agentId = agent?.id || result.id;
 
@@ -933,6 +940,8 @@ export class ScionPageAgentCreate extends LitElement {
           if (!startResp.ok) {
             const fallback = `HTTP ${startResp.status}`;
             startError = (await parseApiError(startResp, fallback)).message;
+          } else {
+            await showResponseBodyWarnings(startResp, shownWarnings);
           }
         } catch (startErr) {
           startError =

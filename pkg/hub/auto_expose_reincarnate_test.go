@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -28,7 +28,8 @@ import (
 
 // Auto-expose at reincarnate (ptone/scion#2562 §3.6, AC8). The fresh
 // generation starts from the explicit record only and re-derives the project
-// and template tiers through the create pipeline; the hub default is never
+// tier through the create pipeline (a template is not a tier,
+// ptone/scion#4222); the hub default is never
 // written to the record (it rides HubAgentDefaults at dispatch).
 
 // autoExposeReincarnateAgent is the outgoing generation's state.
@@ -93,8 +94,9 @@ func TestReincarnate_AutoExposeRederivesProjectTier(t *testing.T) {
 	}{
 		{name: "annotation flipped false to true", projectAnno: "true", want: "true"},
 		{name: "annotation removed: falls back to inherited", projectAnno: "", want: ""},
-		{name: "annotation removed: template tier re-derived", templateEnv: map[string]string{aeKey: "false"}, want: "false"},
-		{name: "annotation beats template", projectAnno: "true", templateEnv: map[string]string{aeKey: "false"}, want: "true"},
+		// A template is not a tier (ptone/scion#4222): its value is ignored.
+		{name: "annotation removed: template value ignored", templateEnv: map[string]string{aeKey: "false"}, want: ""},
+		{name: "annotation applies, template ignored", projectAnno: "true", templateEnv: map[string]string{aeKey: "false"}, want: "true"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

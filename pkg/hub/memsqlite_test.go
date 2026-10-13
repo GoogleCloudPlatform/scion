@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_6
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -150,10 +148,12 @@ func collectStringConsts(decl ast.Decl, into map[string]string) {
 // ptone/scion#2312.
 func TestNoRawMemorySQLiteOpen(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards in-memory sql.Open/ent.Open in test files, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards in-memory sql.Open/ent.Open in test files.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards in-memory sql.Open/ent.Open in test files (no test file moves), which identity.go and identity_credential.go do not contain.
-	names, err := filepath.Glob("*_test.go")
+	// scanned through guardScanSubdirs; guards in-memory sql.Open/ent.Open in test files.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards in-memory sql.Open/ent.Open in test files.
+	names, err := globGuardScanDirs(".", "*_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,29 +190,29 @@ const (
 	implicitDSN
 )
 
-func drv() string { return "sqlite3" }
+func drv() string { return "sqlite" }
 
-func openTestMemorySQLite() { _, _ = sql.Open("sqlite3", ":memory:") } // exempt
+func openTestMemorySQLite() { _, _ = sql.Open("sqlite", ":memory:") } // exempt
 
 func bad() {
 	const localDSN = "file:x?mode=memory"
-	_, _ = sql.Open("sqlite3", ":memory:")
-	_, _ = sql.Open("sqlite3", memDSN)
+	_, _ = sql.Open("sqlite", ":memory:")
+	_, _ = sql.Open("sqlite", memDSN)
 	_, _ = sql.Open(
-		"sqlite3",
+		"sqlite",
 		":memory:",
 	)
 	_, _ = sql.Open(drv(), ":memory:")
-	_, _ = sql.Open("sqlite3", localDSN)
-	_, _ = ent.Open("sqlite3", "file::memory:?_fk=1")
-	_, _ = sql.Open("sqlite3", implicitDSN)
+	_, _ = sql.Open("sqlite", localDSN)
+	_, _ = ent.Open("sqlite", "file::memory:?_fk=1")
+	_, _ = sql.Open("sqlite", implicitDSN)
 }
 
 func good() {
-	// _, _ = sql.Open("sqlite3", ":memory:")
-	_, _ = sql.Open("sqlite3", "file::memory:?cache=shared")
-	_, _ = sql.Open("sqlite3", "file:x?mode=memory&cache=shared")
-	_, _ = sql.Open("sqlite3", "/tmp/db.sqlite")
+	// _, _ = sql.Open("sqlite", ":memory:")
+	_, _ = sql.Open("sqlite", "file::memory:?cache=shared")
+	_, _ = sql.Open("sqlite", "file:x?mode=memory&cache=shared")
+	_, _ = sql.Open("sqlite", "/tmp/db.sqlite")
 }
 `
 	got, err := rawMemorySQLiteOpens(map[string][]byte{"probe_test.go": []byte(src)})
@@ -222,5 +222,21 @@ func good() {
 	if len(got) != 7 {
 		t.Fatalf("want 7 offenders (literal, const, multi-line, paren arg, local mode=memory const, ent, implicit const), got %d:\n  %s",
 			len(got), strings.Join(got, "\n  "))
+	}
+}
+
+// TestGoModHasNoAlternateSQLiteDriver keeps the module on the one SQLite
+// driver production uses, modernc.org/sqlite ("sqlite"). Tests used to open
+// SQLite through mattn/go-sqlite3 ("sqlite3"), which differs in time
+// handling, DSN options and error types, so a test could pass where
+// production fails (ptone/scion#4694). With the module not requiring it, an
+// import of that driver does not compile.
+func TestGoModHasNoAlternateSQLiteDriver(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "github.com/mattn/go-sqlite3") {
+		t.Fatal("go.mod requires github.com/mattn/go-sqlite3; open SQLite with the production driver \"sqlite\" (modernc.org/sqlite) instead")
 	}
 }

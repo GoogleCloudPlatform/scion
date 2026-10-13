@@ -25,6 +25,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // GetRuntime returns the appropriate Runtime implementation based on environment,
@@ -94,7 +95,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 			// Cloud Run Instance detection: CLOUD_RUN_INSTANCE is set on Instances
 			// (unlike K_SERVICE, which is NOT set). Probe the sandbox binary to
 			// distinguish cloudrun-sandbox from cloudrun-instances.
-			if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+			if cloudrunenv.IsInstance() {
 				if SandboxLauncherAvailable() {
 					runtimeType = "cloudrun-sandbox"
 					util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher, using cloudrun-sandbox runtime")
@@ -102,7 +103,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 					runtimeType = "cloudrun-instances"
 					util.Debugf("GetRuntime: Cloud Run Instance detected without sandbox launcher, using cloudrun-instances runtime")
 				}
-			} else if os.Getenv("K_SERVICE") != "" {
+			} else if cloudrunenv.IsService() {
 				runtimeType = "cloudrun"
 				util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), using cloudrun runtime")
 			} else if _, err := exec.LookPath("podman"); err == nil {
@@ -130,7 +131,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 	case "docker":
 		// On Cloud Run Instances the docker daemon is unavailable.
 		// CLOUD_RUN_INSTANCE is set on Instances (K_SERVICE is NOT).
-		if os.Getenv("CLOUD_RUN_INSTANCE") != "" {
+		if cloudrunenv.IsInstance() {
 			if SandboxLauncherAvailable() {
 				util.Debugf("GetRuntime: Cloud Run Instance detected with sandbox launcher (docker override), using cloudrun-sandbox runtime")
 				return NewCloudRunSandboxRuntime(rtConfig.CloudRunSandbox)
@@ -154,7 +155,7 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		// On Cloud Run the docker daemon is unavailable regardless of
 		// whether the CLI binary exists in the container image.
-		if os.Getenv("K_SERVICE") != "" {
+		if cloudrunenv.IsService() {
 			util.Debugf("GetRuntime: Cloud Run environment detected (K_SERVICE set), docker daemon unavailable — using cloudrun runtime")
 			cfg := rtConfig.CloudRun
 			if cfg == nil {
@@ -190,19 +191,14 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return pr
 	case "kubernetes", "k8s":
-		k8sClient, err := k8s.NewClientWithContext(os.Getenv("KUBECONFIG"), rtConfig.Context)
+		rt, err := NewKubernetesRuntimeFromConfig(os.Getenv("KUBECONFIG"), rtConfig)
 		if err != nil {
 			return &ErrorRuntime{Err: err}
 		}
-		if err := k8sClient.Verify(); err != nil {
-			return &ErrorRuntime{Err: err}
-		}
-		rt := NewKubernetesRuntime(k8sClient)
-		applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
-		if cfg == nil && os.Getenv("K_SERVICE") != "" {
+		if cfg == nil && cloudrunenv.IsService() {
 			// Auto-detected Cloud Run environment with no explicit config
 			// from settings. Create a default config; project/region will
 			// be discovered from GCP metadata when API calls are made.
@@ -275,6 +271,36 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 // connection.
 func kubernetesIsGKE(rtConfig config.V1RuntimeConfig, client *k8s.Client) bool {
 	return !rtConfig.GKE && client.IsGKE()
+}
+
+// NewKubernetesRuntimeFromConfig builds a Kubernetes runtime from an
+// explicit kubeconfig path (empty: the default loading rules, then in-cluster
+// config) and a runtime config entry: it creates the client for
+// rtConfig.Context, verifies the connection, then applies the namespace,
+// GKE (explicit or auto-detected), listing and priority class settings. It
+// is the body of GetRuntime's kubernetes case, which wraps its error in an
+// ErrorRuntime; it has no side effects beyond building the client, so it is
+// safe to call more than once per process (a flat Runtime Broker host builds
+// one runtime per configured Kubernetes instance).
+func NewKubernetesRuntimeFromConfig(kubeconfigPath string, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	k8sClient, err := k8s.NewClientWithContext(kubeconfigPath, rtConfig.Context)
+	if err != nil {
+		return nil, err
+	}
+	return NewKubernetesRuntimeFromClient(k8sClient, rtConfig)
+}
+
+// NewKubernetesRuntimeFromClient builds a Kubernetes runtime on an already
+// constructed client: it verifies the connection, then applies rtConfig's
+// namespace, GKE (explicit or auto-detected), listing and priority class
+// settings. Its only error is the connection check's.
+func NewKubernetesRuntimeFromClient(k8sClient *k8s.Client, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	if err := k8sClient.Verify(); err != nil {
+		return nil, err
+	}
+	rt := NewKubernetesRuntime(k8sClient)
+	applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
+	return rt, nil
 }
 
 // applyKubernetesRuntimeConfig applies rtConfig's Kubernetes-specific fields

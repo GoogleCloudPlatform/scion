@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -182,6 +182,9 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.resolve":             {"project:read"},
 	"inbox.notification.subscription.create": {"project:read"},
 	"inbox.notification.template.create":     {"project:read"},
+	"inbox.threadgroup.create":               {"project:read"},
+	"inbox.threadgroup.update":               {"project:read"},
+	"inbox.threadgroup.delete":               {"project:read"},
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through

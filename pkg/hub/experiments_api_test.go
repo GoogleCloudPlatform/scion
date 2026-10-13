@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 // API tests for GET /api/v1/experiments and GET|PUT|DELETE
 // /api/v1/admin/experiments (ptone/scion#2217). The HTTP tests in this file
@@ -1178,5 +1178,26 @@ func TestHandleAdminServerConfigSectionReset_RejectsExperiments(t *testing.T) {
 	}
 	if _, err := s.GetHubSetting(context.Background(), "messaging"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("expected the messaging row to be gone after reset, got err=%v", err)
+	}
+}
+
+// TestHandleExperiments_IncludesServerExperiments: the resolved map
+// includes a server-checked experiment such as hub.artifacts while it is
+// on, as scion whoami --full reports it (ptone/scion#4573).
+func TestHandleExperiments_IncludesServerExperiments(t *testing.T) {
+	srv, s := testServer(t)
+	enableArtifactsForTest(t, srv)
+	agent := createTestAgent(t, s)
+
+	rec := doAgentReadRequest(t, srv, agent.ID, agent.ProjectID, "/api/v1/experiments", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var body experimentsResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if v, ok := body.Experiments[experiments.Artifacts]; !ok || !v {
+		t.Errorf("expected %s=true in the resolved map, got %v (present=%v)", experiments.Artifacts, v, ok)
 	}
 }

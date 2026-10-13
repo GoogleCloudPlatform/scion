@@ -120,7 +120,7 @@ func tailEntrypointLogWithHooks(ctx context.Context, logPath, slug, agentID, pro
 		data, err := json.Marshal(out)
 		if err != nil {
 			// Should never happen with string fields; log and continue.
-			runtimeLog.Warn("entrypoint-log-tailer: failed to marshal JSON",
+			runtimeLog().Warn("entrypoint-log-tailer: failed to marshal JSON",
 				"error", err, "sandbox", slug)
 			return
 		}
@@ -229,7 +229,7 @@ func tailEntrypointLogWithHooks(ctx context.Context, logPath, slug, agentID, pro
 			// deletion is invisible to the reader on POSIX (the fd keeps
 			// the inode alive); context cancellation is the exit mechanism
 			// when the sandbox is torn down.
-			runtimeLog.Warn("entrypoint-log-tailer: read error",
+			runtimeLog().Warn("entrypoint-log-tailer: read error",
 				"path", logPath, "error", readErr, "sandbox", slug)
 			flushPartial(lineBuf, emit)
 			return
@@ -323,7 +323,7 @@ func seekToOffset(f *os.File, offset int64, slug string, emit func(string, strin
 	if err != nil {
 		// Can't stat the open file — unusual but not fatal. Start from
 		// current position (0 after open).
-		runtimeLog.Warn("entrypoint-log-tailer: stat after open failed",
+		runtimeLog().Warn("entrypoint-log-tailer: stat after open failed",
 			"error", err, "sandbox", slug)
 		return 0
 	}
@@ -341,7 +341,7 @@ func seekToOffset(f *os.File, offset int64, slug string, emit func(string, strin
 
 	pos, err := f.Seek(offset, io.SeekStart)
 	if err != nil {
-		runtimeLog.Warn("entrypoint-log-tailer: seek failed, reading from current position",
+		runtimeLog().Warn("entrypoint-log-tailer: seek failed, reading from current position",
 			"offset", offset, "error", err, "sandbox", slug)
 		return 0
 	}
@@ -373,7 +373,7 @@ func checkTruncation(f *os.File, pos int64, logPath, slug string, emit func(stri
 				st.Size(), pos),
 			map[string]string{"truncation_detected": "true"})
 		if _, err := f.Seek(0, io.SeekStart); err != nil {
-			runtimeLog.Warn("entrypoint-log-tailer: seek-to-0 after truncation failed",
+			runtimeLog().Warn("entrypoint-log-tailer: seek-to-0 after truncation failed",
 				"error", err, "sandbox", slug)
 		}
 		return 0

@@ -129,6 +129,11 @@ func (c *ContainerScriptHarness) GetInterruptSequence() []string {
 	return nil
 }
 
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
+	return c.entry.ResolvedDelivery()
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
@@ -391,12 +396,14 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// runs and the translation must happen here on the Go side.
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
+		region := claudeVertexRegion(resolved.EnvVars)
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential, but
-			// only when no higher-priority credential is present. This
-			// matches the provisioner's AUTH order (provision.py): api-key,
-			// oauth-token, auth-file, then vertex-ai (ptone/scion#2071).
-			if auth.GoogleCloudProject != "" && !hasHigherPriorityClaudeAuth(auth) {
+			// Infer vertex-ai only when a GCP project and a region are both
+			// present and no higher-priority credential is. This matches the
+			// provisioner (provision.py): AUTH order api-key, oauth-token,
+			// auth-file, then vertex-ai (ptone/scion#2071), and vertex-ai
+			// requires the project plus a region (ptone/scion#4557).
+			if auth.GoogleCloudProject != "" && region != "" && !hasHigherPriorityClaudeAuth(auth) {
 				selectedAuth = "vertex-ai"
 			}
 		}
@@ -404,8 +411,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 			if proj := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; proj != "" {
 				resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] = proj
 			}
-			if region := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; region != "" {
+			if region != "" {
 				resolved.EnvVars["CLOUD_ML_REGION"] = region
+			} else {
+				// An explicit selection is kept; report what is missing.
+				slog.Warn("claude vertex-ai auth selected but no region is set; set GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION")
 			}
 			resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"] = "1"
 		}
@@ -415,6 +425,21 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// claudeVertexRegionKeys are the region env names provision.py's vertex-ai
+// method accepts (any_of), in its precedence order.
+var claudeVertexRegionKeys = []string{"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"}
+
+// claudeVertexRegion returns the first non-empty value among
+// claudeVertexRegionKeys in env, or "" when none is set.
+func claudeVertexRegion(env map[string]string) string {
+	for _, k := range claudeVertexRegionKeys {
+		if v := env[k]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // hasHigherPriorityClaudeAuth reports whether auth carries a Claude

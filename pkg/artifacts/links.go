@@ -178,55 +178,90 @@ func (s *Service) canAdminister(ctx context.Context, b backend, a *Artifact) (bo
 // canAdministerWith is canAdminister with a's grants read through grants,
 // which is called only when the decision needs them.
 func (s *Service) canAdministerWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (bool, error) {
+	authority, err := s.adminAuthorityWith(ctx, a, grants)
+	return authority != "", err
+}
+
+// adminAuthorityWith is canAdministerWith reporting the authority the
+// caller administers a by: AuthorityOwner, AuthorityAdminGrant, or ""
+// when it may not. Events record it.
+func (s *Service) adminAuthorityWith(ctx context.Context, a *Artifact, grants func() ([]Grant, error)) (string, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok || kind != PrincipalKindUser {
-		return false, nil
+		return "", nil
 	}
 	if !s.host.Permits(ctx, a.ScopeRef, PermissionManage) {
-		return false, nil
+		return "", nil
 	}
 	if kind == a.OwnerKind && ref == a.OwnerRef {
-		return true, nil
+		return AuthorityOwner, nil
 	}
 	gs, err := grants()
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return grantAllows(ctx, s.host, a, gs, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false), nil
+	if grantAllows(ctx, s.host, a, gs, time.Now(), kind, ref, grantsForAdmin, PermissionManage, false) {
+		return AuthorityAdminGrant, nil
+	}
+	return "", nil
+}
+
+// callerActor is the event actor for the caller of ctx acting by
+// authority.
+func (s *Service) callerActor(ctx context.Context, authority string) *Actor {
+	kind, ref, _, _ := s.host.Principal(ctx)
+	return &Actor{Kind: kind, Ref: ref, Authority: authority}
 }
 
 // adminArtifact loads an artifact the caller may administer (see
 // canAdminister). An artifact the caller cannot read answers 404 like a
 // missing one (the read check runs first); one it can read but not
 // administer answers 403.
-func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
-	b, a, ok := s.readableArtifact(w, r, id)
+//
+// actor is the caller, with the authority it administers the artifact by,
+// for the events the change records.
+func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id string) (b backend, a *Artifact, actor *Actor, ok bool) {
+	b, a, ok = s.readableArtifact(w, r, id)
 	if !ok {
-		return b, nil, false
+		return b, nil, nil, false
 	}
-	allowed, err := s.canAdminister(r.Context(), b, a)
+	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
-		return b, nil, false
+		return b, nil, nil, false
 	}
-	if !allowed {
-		writeAdminForbidden(w)
-		return b, nil, false
+	if authority == "" {
+		s.writeAdminForbidden(w, r)
+		return b, nil, nil, false
 	}
-	return b, a, true
+	return b, a, s.callerActor(r.Context(), authority), true
 }
 
-// adminForbiddenMessage is the text of every 403 for a caller that may read
+// adminForbiddenMessage is the text of every 403 for a user that may read
 // an artifact but not administer it. It states the rule, the same for every
 // artifact and every refusal, and never why this caller was refused.
 const adminForbiddenMessage = "only the artifact's owner or a user with an admin grant may share or change it; " +
 	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 
+// agentAdminForbiddenMessage is the same 403's text for an agent, which may
+// never administer an artifact, its own included (sharing is user-only), so
+// the user text would read as if it were not the owner (ptone/scion#4576).
+// It too is the same for every artifact and every refusal.
+const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
+	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
+	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
+
 // writeAdminForbidden writes the 403 of a caller that may read an artifact
-// but not administer it.
-func writeAdminForbidden(w http.ResponseWriter) {
-	writeError(w, http.StatusForbidden, "forbidden", adminForbiddenMessage)
+// but not administer it: the agent text for an agent, the user text
+// otherwise. Its callers run it only after the read check, so a caller that
+// cannot read the artifact still gets the 404 of a missing one.
+func (s *Service) writeAdminForbidden(w http.ResponseWriter, r *http.Request) {
+	msg := adminForbiddenMessage
+	if kind, _, _, ok := s.host.Principal(r.Context()); ok && kind == PrincipalKindAgent {
+		msg = agentAdminForbiddenMessage
+	}
+	writeError(w, http.StatusForbidden, "forbidden", msg)
 }
 
 // manageable reports whether the caller may administer a, which it can
@@ -243,22 +278,39 @@ func (s *Service) manageable(w http.ResponseWriter, r *http.Request, b backend, 
 }
 
 // capabilities fills the caller's rights on a, an artifact it can read
-// (readableArtifact checked it), into resp: CanManage from canAdminister and
-// CanPublish from canWriteErr, the decisions the management and write routes
-// make for the same request. A failed grants read answers 500 and returns
-// false.
+// (readableArtifact checked it), into resp: CanManage from canAdminister,
+// CanPublish and CanReview from canWriteErr (reviewCapability), and
+// CanGrantReview from mayGrantReview (only when CanManage is false), the
+// decisions the management, write and grant routes make for the same
+// request. A failed grants read answers 500 and returns false.
 func (s *Service) capabilities(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, resp *ArtifactResponse) bool {
 	var ok bool
 	if resp.CanManage, ok = s.manageable(w, r, b, a); !ok {
 		return false
 	}
-	canPublish, err := s.canWriteErr(r.Context(), b, a)
+	access, err := s.canWriteErr(r.Context(), b, a)
 	if err != nil {
 		writeGrantsReadFailed(w, r, err)
 		return false
 	}
-	resp.CanPublish = canPublish
+	resp.CanPublish, resp.CanReview = reviewCapability(true, access)
+	resp.CanGrantReview = !resp.CanManage && s.mayGrantReview(r.Context(), a)
 	return true
+}
+
+// reviewCapability maps the write decision to CanPublish and CanReview for
+// a caller whose read check answered readable. CanReview is true only for
+// a reader whose access allows review versions and nothing more: it adds
+// nothing when CanPublish is true, and it is never true without the read.
+// capabilities runs only after readableArtifact, so it always passes true;
+// the parameter states that precondition where the capability is
+// decided, and the kill check for "canReview without the read check"
+// mutates it.
+func reviewCapability(readable bool, access writeAccess) (canPublish, canReview bool) {
+	if !readable {
+		return false, false
+	}
+	return access.canPublish(), access == accessReviewGrant
 }
 
 // writeGrantsReadFailed logs a failed grant read and answers 500.
@@ -269,7 +321,7 @@ func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -359,7 +411,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
 // first.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -388,11 +440,11 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
-	switch err := b.store.RevokeLink(r.Context(), a.ID, linkID); {
+	switch err := b.store.RevokeLink(r.Context(), a.ID, linkID, actor); {
 	case errors.Is(err, ErrNotFound):
 		writeNotFound(w)
 	case err != nil:

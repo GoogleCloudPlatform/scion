@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -68,6 +68,7 @@ func tiaGateServerConfig() ServerConfig {
 		MarkerClass:     config.HubClassTest,
 		MarkerCreatedAt: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
 	}
+	cfg.TestMode = TestModeConfig{Level: TestModeAdmin, HubID: tiaHubID, HubClass: config.HubClassTest, MarkerHubID: tiaHubID, MarkerClass: config.HubClassTest}
 	return cfg
 }
 
@@ -114,7 +115,7 @@ func TestTestAdminGate_NewCapturesImmutableGate(t *testing.T) {
 	// The phase-W status route reads the same gate (unauthenticated).
 	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false}`, strings.TrimSpace(rec.Body.String()))
+	assert.Equal(t, `{"testIdentities":true,"testHubAdmin":true,"testSuperAdmin":false,"testIdentityWebSessions":false,"testIssuerAudience":""}`, strings.TrimSpace(rec.Body.String()))
 }
 
 func TestTestAdminGate_OffByDefault(t *testing.T) {
@@ -306,7 +307,13 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 	// In production code the gate field is assigned exactly once, in New.
 	assignments := 0
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards testAdminGate assignments.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -361,6 +368,8 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	// writer, so no handler can reach it. The hub never reads it either: cmd
 	// reads it once at startup and passes the result in ServerConfig.
 	for _, dir := range []string{".", "../store"} {
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -847,6 +856,7 @@ var tiaKeyMaterialSites = map[string]string{
 	"conduit_grants.go:bootstrap:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey": "conduit_grant",
 	"conduit_grants.go:rotate:github.com/GoogleCloudPlatform/scion/pkg/conduit/grant.NewRingKey":    "conduit_grant",
 	"web.go:NewWebServer:github.com/gorilla/sessions.NewCookieStore":                                "web_session",
+	"handlers_test_identity_web.go:newTestIdentityWebState:github.com/gorilla/securecookie.New":     "exempt: test identity web session marker key, hub-local by construction (generated at test-infra mark, stored with the DB marker, never derived from any shared secret; DEC-8)",
 	"brokerauth.go:computeHMAC:crypto/hmac.New":                                                     "exempt: per-broker HMAC secret, generated per broker; authenticates a broker to this hub, never a user",
 	"access_constraint_preview.go:issueToken:crypto/hmac.New":                                       "exempt: preview token key, random per process and memory-only",
 	"access_constraint_preview.go:ValidateToken:crypto/hmac.New":                                    "exempt: preview token key, random per process and memory-only",
@@ -877,6 +887,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -977,6 +989,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 // definition names it.
 func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

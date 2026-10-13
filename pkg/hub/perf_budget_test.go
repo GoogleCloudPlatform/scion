@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -156,7 +156,10 @@ var perfBudgets = []perfBudget{
 		name: "agent by id",
 		path: func(f *perfBudgetFixture) string { return "/api/v1/agents/" + f.agentIDs[10] },
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14029},
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (e8c1576a7, #3112).
+		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
@@ -165,7 +168,10 @@ var perfBudgets = []perfBudget{
 			return "/api/v1/projects/" + f.project.ID + "/agents/" + f.agentIDs[10]
 		},
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14029},
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (e8c1576a7, #3112).
+		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
 	},
 }
 

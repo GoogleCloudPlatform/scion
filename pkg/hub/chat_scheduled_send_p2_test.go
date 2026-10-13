@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -523,7 +523,7 @@ func TestScheduledSend_SendNowRateLimited(t *testing.T) {
 
 func TestScheduledStore_SQLite_ConversationIndex(t *testing.T) {
 	_, dsn := openScheduledStorePair(t)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	var n int

@@ -12,17 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -345,4 +348,254 @@ func TestWebChatStore_Postgres_ThreadMigrationsRunOnce(t *testing.T) {
 		"a recorded backfill must not run again")
 	assert.Equal(t, 1, pgMigrationRecords(t, db, "thread_id_backfill"))
 	assert.Equal(t, 1, pgMigrationRecords(t, db, "thread_id_index"))
+}
+
+// sqliteThreadMigrationMessagesDDL carries the messages columns the SQLite
+// thread_id backfill reads and writes (the real table is created by the Ent
+// migration).
+const sqliteThreadMigrationMessagesDDL = `CREATE TABLE messages (
+    id TEXT PRIMARY KEY, created TEXT NOT NULL, channel TEXT, thread_id TEXT,
+    sender TEXT, sender_id TEXT, recipient TEXT, recipient_id TEXT)`
+
+// insertSQLiteLegacyAgentThreadMessage inserts a web message in the legacy
+// "agent:<id>" thread format that the thread_id backfill rewrites.
+func insertSQLiteLegacyAgentThreadMessage(t *testing.T, db *sql.DB, id string) {
+	t.Helper()
+	_, err := db.Exec(`INSERT INTO messages
+		(id, created, channel, thread_id, sender, sender_id, recipient, recipient_id)
+		VALUES (?, '2026-01-01T00:00:00Z', 'web', 'agent:agent-a', 'agent:agent-a', 'agent-a', 'user:user-1', 'user-1')`, id)
+	require.NoError(t, err)
+}
+
+func sqliteMessageThreadID(t *testing.T, db *sql.DB, id string) string {
+	t.Helper()
+	var tid string
+	require.NoError(t, db.QueryRow(`SELECT thread_id FROM messages WHERE id = ?`, id).Scan(&tid))
+	return tid
+}
+
+func sqliteMigrationRecords(t *testing.T, db *sql.DB, name string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM webchat_migrations WHERE name = ?`, name).Scan(&n))
+	return n
+}
+
+// TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable checks that
+// when the store starts before the Ent migration has created messages, the
+// thread_id backfill and thread_id index migrations are not recorded as
+// completed, and that they run on the next Init once the table exists.
+func TestSQLiteWebChatStore_ThreadMigrationsWaitForMessagesTable(t *testing.T) {
+	db := openTestMemorySQLite(t, "sqlite")
+	const legacyID = "msg-legacy-1"
+
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_backfill"),
+		"backfill must not be recorded while messages does not exist")
+	assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_index"),
+		"index migration must not be recorded while messages does not exist")
+
+	// The Ent migration creates messages later; it holds a legacy row.
+	_, err := db.Exec(sqliteThreadMigrationMessagesDDL)
+	require.NoError(t, err)
+	insertSQLiteLegacyAgentThreadMessage(t, db, legacyID)
+	require.False(t, sqliteIndexExists(db, "idx_messages_thread_id"))
+
+	// The next store start runs both migrations and records them.
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, legacyID),
+		"backfill must run once messages exists")
+	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"),
+		"thread_id index must be created once messages exists")
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+}
+
+// TestSQLiteWebChatStore_ThreadMigrationsRunOnce checks that with messages
+// present the thread_id migrations run on the first Init and are recorded,
+// and that a later Init does not run them again.
+func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
+	db := openTestMemorySQLite(t, "sqlite")
+	const firstID = "msg-first"
+	const laterID = "msg-later"
+
+	_, err := db.Exec(sqliteThreadMigrationMessagesDDL)
+	require.NoError(t, err)
+	insertSQLiteLegacyAgentThreadMessage(t, db, firstID)
+
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "dm:agent:agent-a:user:user-1", sqliteMessageThreadID(t, db, firstID))
+	assert.True(t, sqliteIndexExists(db, "idx_messages_thread_id"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+
+	// A recorded migration does not run again: a legacy row written after
+	// the first Init is left as it is, and nothing is recorded twice.
+	insertSQLiteLegacyAgentThreadMessage(t, db, laterID)
+	require.NoError(t, NewWebChatStore(db, "sqlite").Init())
+	assert.Equal(t, "agent:agent-a", sqliteMessageThreadID(t, db, laterID),
+		"a recorded backfill must not run again")
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_backfill"))
+	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
+}
+
+// schemaFaultDriverName is a test-only database/sql driver that wraps the
+// production SQLite driver (modernc.org/sqlite, "sqlite") and, while a
+// connection's fault is on, fails every statement that reads sqlite_master
+// or sqlite_schema. It lets a test make the web chat store's
+// table-existence check fail while other statements still work.
+const schemaFaultDriverName = "sqlite-schema-fault"
+
+var registerSchemaFaultDriver sync.Once
+
+// errSchemaReadDenied is what a faulted connection returns for a schema read.
+var errSchemaReadDenied = errors.New("schema read denied by test fault")
+
+type schemaFaultDriver struct{ inner driver.Driver }
+
+func (d schemaFaultDriver) Open(name string) (driver.Conn, error) {
+	c, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &schemaFaultConn{Conn: c}, nil
+}
+
+// schemaFaultConn forwards to the wrapped connection. Only the methods
+// database/sql uses with modernc.org/sqlite are wrapped; each one checks the
+// query text first.
+type schemaFaultConn struct {
+	driver.Conn
+	deny bool
+}
+
+func (c *schemaFaultConn) check(query string) error {
+	if c.deny && (strings.Contains(query, "sqlite_master") || strings.Contains(query, "sqlite_schema")) {
+		return errSchemaReadDenied
+	}
+	return nil
+}
+
+func (c *schemaFaultConn) Prepare(query string) (driver.Stmt, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	return c.Conn.Prepare(query)
+}
+
+func (c *schemaFaultConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if p, ok := c.Conn.(driver.ConnPrepareContext); ok {
+		return p.PrepareContext(ctx, query)
+	}
+	return c.Conn.Prepare(query)
+}
+
+func (c *schemaFaultConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if q, ok := c.Conn.(driver.QueryerContext); ok {
+		return q.QueryContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *schemaFaultConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if e, ok := c.Conn.(driver.ExecerContext); ok {
+		return e.ExecContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *schemaFaultConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
+		return b.BeginTx(ctx, opts)
+	}
+	return c.Conn.Begin() //nolint:staticcheck // fallback for drivers without BeginTx
+}
+
+// openSchemaFaultSQLite opens a private in-memory database through the
+// schema-fault driver (see openTestMemorySQLite for the pool pinning).
+func openSchemaFaultSQLite(t *testing.T) *sql.DB {
+	t.Helper()
+	registerSchemaFaultDriver.Do(func() {
+		// sql.Open does not connect; it only looks up the registered driver.
+		probe, err := sql.Open("sqlite", "")
+		require.NoError(t, err)
+		inner := probe.Driver()
+		_ = probe.Close()
+		sql.Register(schemaFaultDriverName, schemaFaultDriver{inner: inner})
+	})
+	return openTestMemorySQLite(t, schemaFaultDriverName)
+}
+
+// setSQLiteSchemaReadDenied turns the schema-read fault on (deny=true) or off
+// on db's connection, so the table-existence check fails while other
+// statements still work. db must come from openSchemaFaultSQLite, whose pool
+// is pinned to one connection, so the setting applies to every later query.
+func setSQLiteSchemaReadDenied(t *testing.T, db *sql.DB, deny bool) {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	require.NoError(t, conn.Raw(func(dc any) error {
+		fc, ok := dc.(*schemaFaultConn)
+		if !ok {
+			return fmt.Errorf("driver connection is %T, want *schemaFaultConn", dc)
+		}
+		fc.deny = deny
+		return nil
+	}))
+}
+
+// TestSQLiteWebChatStore_TableExistsError_Surfaces checks that a failed
+// table-existence query is returned as an error rather than treated as
+// "table absent". For the two migrations, treating it as absent would also
+// mark the migration completed, so it would never run.
+func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
+	newStore := func(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
+		db := openSchemaFaultSQLite(t)
+		s := &sqliteWebChatStore{db: db}
+		require.NoError(t, s.Init())
+		// Init on a database without messages records nothing; make sure,
+		// so the assertions below see only what the call under test wrote.
+		_, err := db.Exec(`DELETE FROM webchat_migrations WHERE name IN ('thread_id_backfill', 'thread_id_index')`)
+		require.NoError(t, err)
+		setSQLiteSchemaReadDenied(t, db, true)
+		return s, db
+	}
+
+	t.Run("SearchChatMessages", func(t *testing.T) {
+		s, db := newStore(t)
+		res, cursor, err := s.SearchChatMessages(context.Background(), ChatSearchFilter{Query: "x", ProjectID: "p"})
+		require.Error(t, err, "a failed existence check must be returned, not read as no results")
+		assert.Contains(t, err.Error(), "check table messages exists")
+		assert.Nil(t, res)
+		assert.Empty(t, cursor)
+		setSQLiteSchemaReadDenied(t, db, false)
+	})
+
+	for name, run := range map[string]func(*sqliteWebChatStore) error{
+		"migrateThreadIDs": func(s *sqliteWebChatStore) error { return s.migrateThreadIDs(DefaultMigrationBatchSize) },
+		"addThreadIDIndex": func(s *sqliteWebChatStore) error { return s.addThreadIDIndex() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, db := newStore(t)
+			err := run(s)
+			require.Error(t, err, "a failed existence check must be returned")
+			assert.Contains(t, err.Error(), "check table messages exists")
+
+			setSQLiteSchemaReadDenied(t, db, false)
+			assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_backfill"),
+				"a failed existence check must not mark the migration completed")
+			assert.Zero(t, sqliteMigrationRecords(t, db, "thread_id_index"),
+				"a failed existence check must not mark the migration completed")
+		})
+	}
 }

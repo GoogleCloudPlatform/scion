@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -184,7 +184,7 @@ func TestDispatchWithBrokerRetry_ImmediateSuccess(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(1), d.calls.Load())
 }
@@ -194,7 +194,7 @@ func TestDispatchWithBrokerRetry_RetryThenSuccess(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(4), d.calls.Load())
 }
@@ -204,7 +204,7 @@ func TestDispatchWithBrokerRetry_Timeout(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, ErrBrokerTimeout)
 }
 
@@ -214,7 +214,7 @@ func TestDispatchWithBrokerRetry_NonTransientError(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, nonTransient)
 	assert.Equal(t, int32(1), d.calls.Load())
 }
@@ -259,7 +259,7 @@ func TestDispatchWithBrokerRetry_InterruptDowngrade(t *testing.T) {
 			agent := &store.Agent{ID: "a1", Slug: "test", Phase: tt.phase, Activity: tt.activity}
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			require.NoError(t, dispatchWithBrokerRetry(ctx, d, agent, "hello", tt.urgent, nil))
+			require.NoError(t, dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", tt.urgent, nil))
 			require.Len(t, d.urgent, 1, "the message must still be delivered")
 			assert.Equal(t, tt.want, d.urgent[0])
 		})

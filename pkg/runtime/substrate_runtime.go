@@ -541,7 +541,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			// actor and its egress policy so nothing keeps running under
 			// config it never should have received, and fail loudly. See
 			// errBootstrapHijacked's doc comment for the threat model.
-			runtimeLog.Error("substrate: bootstrap hijack detected, deleting actor as a precaution",
+			runtimeLog().Error("substrate: bootstrap hijack detected, deleting actor as a precaution",
 				"atespace", atespace, "actor", actorName)
 			cleanup()
 			return "", fmt.Errorf("substrate: actor %s was bootstrapped by another caller before this broker's request reached it; deleted as a precaution", id)
@@ -561,7 +561,7 @@ func (r *SubstrateRuntime) Run(ctx context.Context, cfg RunConfig) (string, erro
 			// the way it is for bootstrapPathRejectedError.Error()'s plain
 			// fmt.Sprintf (substrate_bootstrap.go), which has no such
 			// built-in quoting.
-			runtimeLog.Error("substrate: bootstrap rejected a file path",
+			runtimeLog().Error("substrate: bootstrap rejected a file path",
 				"atespace", atespace, "actor", actorName, "code", pathErr.code, "path", pathErr.path)
 		}
 		cleanup()
@@ -1415,7 +1415,7 @@ func splitSubstrateID(id string) (atespace, actorName string, err error) {
 // PID 1 does: no TTY, so it polls the tmux session's liveness rather than
 // attaching.
 func buildSubstrateStartCmd(cfg RunConfig) (string, error) {
-	cmdLine, ok := harnessCmdLine(cfg)
+	cmdLine, ok := harnessCmdLine(cfg, harnessCmdLineOptions{})
 	if !ok {
 		return "", fmt.Errorf("substrate: no harness provided")
 	}

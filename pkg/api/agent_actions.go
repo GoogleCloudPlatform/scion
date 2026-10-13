@@ -95,3 +95,12 @@ const ProvisionFailedWarningPrefix = "Failed to provision on runtime broker: "
 // means the hub has no recorded type: the broker searches every registered
 // runtime, as before.
 const RecordedRuntimeQueryParam = "runtime"
+
+// AgentIDQueryParam is the query parameter on a hub-to-broker stop or delete
+// of an existing agent that carries the hub's ID of the agent
+// (ptone/scion#2632). The path names the agent by slug only; the broker
+// compares this ID with the agent ID an in-flight start of that name was
+// registered with, so a late stop or delete for an old agent does not cancel
+// the start of a newer agent recreated under the same name. A broker that
+// does not read it, or a request without it, matches by name.
+const AgentIDQueryParam = "agentId"

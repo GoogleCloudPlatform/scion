@@ -68,14 +68,22 @@ func (s *Server) resolveKubernetesBlockIdentity(in startContextInputs, isKuberne
 		}
 	}
 
-	vs, _, err := config.LoadGlobalSettingsWithOverlay()
-	if err != nil {
-		return kubernetesBlockIdentity{}, &startContextError{
-			Status:  http.StatusInternalServerError,
-			Message: "loading the broker's global settings for the Kubernetes block ServiceAccount: " + err.Error(),
+	var ksaName string
+	var configured bool
+	if s.isFlat() {
+		// A flat instance's block ServiceAccount is its own (the instance
+		// snapshot); omitted means the namespace's default ServiceAccount.
+		ksaName, configured = s.flatK8sIdentity.blockAccount()
+	} else {
+		vs, _, err := config.LoadGlobalSettingsWithOverlay()
+		if err != nil {
+			return kubernetesBlockIdentity{}, &startContextError{
+				Status:  http.StatusInternalServerError,
+				Message: "loading the broker's global settings for the Kubernetes block ServiceAccount: " + err.Error(),
+			}
 		}
+		ksaName, configured = vs.ResolveKubernetesBlockServiceAccountForSelection(sel.ProfileName, sel.RuntimeEntryName)
 	}
-	ksaName, configured := vs.ResolveKubernetesBlockServiceAccountForSelection(sel.ProfileName, sel.RuntimeEntryName)
 	if configured {
 		// settings.yaml can be hand-edited without the schema validator.
 		if err := config.ValidateKubernetesBlockServiceAccount(ksaName); err != nil {
@@ -121,7 +129,6 @@ func (s *Server) resolveKubernetesBlockIdentity(in startContextInputs, isKuberne
 // ServiceAccount, the token-mount setting or the node selector, so it is
 // refused before any side effect. Never falls back to passthrough.
 func rejectKubernetesBlockRuntimeChange(opts api.StartOptions, early *dispatchProfileSelection, resolvedRuntimeType string, lateSelection func() dispatchProfileSelection) *startContextError {
-	const remedy = "recreate the agent, or restore the profile or runtime settings it was resolved with"
 	lateIsKubernetes := isKubernetesRuntimeName(resolvedRuntimeType)
 	var msg string
 	switch {
@@ -131,21 +138,23 @@ func rejectKubernetesBlockRuntimeChange(opts api.StartOptions, early *dispatchPr
 			was = *early
 		}
 		if !lateIsKubernetes {
+			wasText, _, remedy := identityChangeWording(was, dispatchProfileSelection{}, ", ")
 			msg = fmt.Sprintf(
-				"GCP identity mode %q was resolved for the Kubernetes runtime (profile %q, runtime entry %q), but this dispatch now resolves to runtime %q; %s",
-				store.GCPMetadataModeBlock, was.ProfileName, was.RuntimeEntryName, resolvedRuntimeType, remedy)
+				"GCP identity mode %q was resolved for the Kubernetes runtime (%s), but this dispatch now resolves to runtime %q; %s",
+				store.GCPMetadataModeBlock, wasText, resolvedRuntimeType, remedy)
 		} else if early != nil {
 			if late := lateSelection(); late != was {
+				wasText, lateText, remedy := identityChangeWording(was, late, " and ")
 				msg = fmt.Sprintf(
-					"GCP identity mode %q was resolved for profile %q and runtime entry %q, but this dispatch now resolves to profile %q and runtime entry %q; %s",
-					store.GCPMetadataModeBlock, was.ProfileName, was.RuntimeEntryName, late.ProfileName, late.RuntimeEntryName, remedy)
+					"GCP identity mode %q was resolved for %s, but this dispatch now resolves to %s; %s",
+					store.GCPMetadataModeBlock, wasText, lateText, remedy)
 			}
 		}
 	case opts.Env["SCION_METADATA_MODE"] == store.GCPMetadataModeBlock:
 		if lateIsKubernetes {
 			msg = fmt.Sprintf(
 				"GCP identity mode %q was resolved for a non-Kubernetes runtime, but this dispatch now resolves to the Kubernetes runtime %q; %s",
-				store.GCPMetadataModeBlock, resolvedRuntimeType, remedy)
+				store.GCPMetadataModeBlock, resolvedRuntimeType, legacyIdentityChangeRemedy)
 		}
 	}
 	if msg == "" {

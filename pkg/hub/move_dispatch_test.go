@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -19,9 +19,11 @@ package hub
 import (
 	"context"
 	"errors"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,6 +39,9 @@ func TestDispatchAgentDeleteLocalOnly_SendsLocalOnly(t *testing.T) {
 	assert.True(t, client.lastDeleteOpts.deleteFiles)
 	assert.False(t, client.lastDeleteOpts.removeBranch)
 	assert.Equal(t, "run-1", client.lastDeleteOpts.runID)
+	// The hub's agent ID rides along (ptone/scion#2632), so the broker's
+	// launch cancel leaves a different agent's start of the name alone.
+	assert.Equal(t, api.AgentIDQueryParam+"="+url.QueryEscape(agent.ID), client.lastDeleteAgentIDQuery)
 }
 
 // A broker without AgentMove would ignore localOnly and delete the shared

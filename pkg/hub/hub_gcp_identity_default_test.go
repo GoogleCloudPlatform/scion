@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -474,7 +474,7 @@ func TestExpectEmbeddedBroker_StatelessRegistrationReleasesWaiters(t *testing.T)
 
 	select {
 	case state := <-done:
-		assert.Equal(t, embeddedBrokerState{id: "cloudrun-broker"}, state)
+		assert.Equal(t, embeddedBrokerState{id: "cloudrun-broker", ids: map[string]bool{"cloudrun-broker": true}}, state)
 	case <-time.After(5 * time.Second):
 		t.Fatal("SetStatelessEmbeddedBrokerID did not release the pending embedded-broker wait")
 	}
@@ -497,7 +497,7 @@ func TestExpectEmbeddedBroker_Lifecycle(t *testing.T) {
 	srv2.SetEmbeddedBrokerID("b2")
 	srv2.SetEmbeddedBrokerID("b2")
 	state := srv2.waitForEmbeddedBroker(context.Background())
-	assert.Equal(t, embeddedBrokerState{id: "b2"}, state)
+	assert.Equal(t, embeddedBrokerState{id: "b2", ids: map[string]bool{"b2": true}}, state)
 }
 
 // TestHubDefaultGCPIdentity_PassthroughSurvivesSettingsReload covers the

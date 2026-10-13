@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 package hub
 
@@ -422,234 +422,81 @@ func TestPopulateAgentConfig_HarnessConfigFromTemplateDefault(t *testing.T) {
 	}
 }
 
-func TestPopulateAgentConfig_TemplateTelemetryMerged(t *testing.T) {
+// TestPopulateAgentConfig_NoTelemetryWrittenToRecord: create writes no
+// telemetry into the agent record (ptone/scion#4222). Template telemetry is
+// ignored (ptone/scion#4524), and the hub default and the project policy are
+// resolved per dispatch (dispatchTelemetry), so a create without request
+// telemetry leaves InlineConfig.Telemetry nil.
+func TestPopulateAgentConfig_NoTelemetryWrittenToRecord(t *testing.T) {
 	srv, _ := testServer(t)
 
-	project := &store.Project{
-		ID:   "project-telem",
-		Name: "Telemetry Project",
-		Slug: "telemetry-project",
-	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://otel.example.com",
-			Provider: "gcp",
-		},
-	}
-
-	template := &store.Template{
-		ID:   "tmpl-telem",
-		Slug: "telem-template",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-telem",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold template telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be merged from template")
-	assert.Equal(t, &enabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://otel.example.com", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	assert.Equal(t, "gcp", agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Provider)
-}
-
-func TestPopulateAgentConfig_InlineTelemetryNotOverwritten(t *testing.T) {
-	srv, _ := testServer(t)
-
-	project := &store.Project{
-		ID:   "project-telem2",
-		Name: "Telemetry Project 2",
-		Slug: "telemetry-project-2",
-	}
-
-	enabled := true
-	tmplTelemetry := &api.TelemetryConfig{
-		Enabled: &enabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://template-otel.example.com",
-		},
-	}
-
-	inlineTelemetry := &api.TelemetryConfig{
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://inline-otel.example.com",
-		},
-	}
-
-	template := &store.Template{
-		ID:   "tmpl-telem2",
-		Slug: "telem-template-2",
-		Config: &store.TemplateConfig{
-			Telemetry: tmplTelemetry,
-		},
-	}
-
-	agent := &store.Agent{
-		ID: "agent-telem2",
-		AppliedConfig: &store.AgentAppliedConfig{
-			InlineConfig: &api.ScionConfig{
-				Telemetry: inlineTelemetry,
-			},
-		},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
-
-	// Inline telemetry should NOT be overwritten by template telemetry
-	assert.Equal(t, "https://inline-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Explicit inline telemetry should take precedence over template")
-}
-
-func TestPopulateAgentConfig_HubTelemetryDefault(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config
 	hubEnabled := true
 	srv.config.TelemetryConfig = &api.TelemetryConfig{
 		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-			Provider: "gcp",
-		},
+		Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://hub-otel.example.com"},
 	}
-
-	project := &store.Project{
-		ID:   "project-hub-tel",
-		Name: "Hub Telemetry Project",
-		Slug: "hub-telemetry-project",
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-hub-tel",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig,
-		"InlineConfig should be created to hold hub telemetry")
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry,
-		"Telemetry should be populated from hub config")
-	assert.Equal(t, &hubEnabled, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-}
-
-func TestPopulateAgentConfig_HubTelemetryNotOverwrittenByTemplate(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
-	}
-
 	tmplEnabled := true
 	template := &store.Template{
-		ID:   "tmpl-hub-tel",
-		Slug: "hub-tel-template",
+		ID:   "tmpl-no-tel",
+		Slug: "no-tel-template",
 		Config: &store.TemplateConfig{
 			Telemetry: &api.TelemetryConfig{
 				Enabled: &tmplEnabled,
-				Cloud: &api.TelemetryCloudConfig{
-					Endpoint: "https://template-otel.example.com",
+				Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://template-otel.example.com"},
+			},
+		},
+		AgentConfig: &api.ScionConfig{
+			Telemetry: &api.TelemetryConfig{Enabled: &tmplEnabled},
+		},
+	}
+	project := &store.Project{
+		ID:          "project-no-tel",
+		Slug:        "no-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "false"},
+	}
+	agent := &store.Agent{ID: "agent-no-tel", AppliedConfig: &store.AgentAppliedConfig{}}
+
+	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
+
+	if agent.AppliedConfig.InlineConfig != nil {
+		assert.Nil(t, agent.AppliedConfig.InlineConfig.Telemetry,
+			"neither template, hub nor project telemetry may be written into the agent record")
+	}
+}
+
+// TestPopulateAgentConfig_RequesterTelemetryKept: the requester's own inline
+// telemetry is kept as given; nothing (template, hub, project) is merged
+// into it.
+func TestPopulateAgentConfig_RequesterTelemetryKept(t *testing.T) {
+	srv, _ := testServer(t)
+
+	hubEnabled := true
+	srv.config.TelemetryConfig = &api.TelemetryConfig{Enabled: &hubEnabled}
+	project := &store.Project{
+		ID:          "project-req-tel",
+		Slug:        "req-tel-project",
+		Annotations: map[string]string{projectSettingTelemetryEnabled: "true"},
+	}
+	disabled := false
+	agent := &store.Agent{
+		ID: "agent-req-tel",
+		AppliedConfig: &store.AgentAppliedConfig{
+			InlineConfig: &api.ScionConfig{
+				Telemetry: &api.TelemetryConfig{
+					Enabled: &disabled,
+					Cloud:   &api.TelemetryCloudConfig{Endpoint: "https://inline-otel.example.com"},
 				},
 			},
 		},
 	}
 
-	project := &store.Project{ID: "project-hub-tel2", Slug: "hub-tel-project-2"}
-
-	agent := &store.Agent{
-		ID:            "agent-hub-tel2",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, template))
-
-	// Template telemetry should win over hub telemetry
-	assert.Equal(t, "https://template-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint,
-		"Template telemetry should take precedence over hub default")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledOverride(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// Set hub-level telemetry config with enabled=true
-	hubEnabled := true
-	srv.config.TelemetryConfig = &api.TelemetryConfig{
-		Enabled: &hubEnabled,
-		Cloud: &api.TelemetryCloudConfig{
-			Endpoint: "https://hub-otel.example.com",
-		},
-	}
-
-	// Project disables telemetry
-	project := &store.Project{
-		ID:   "project-tel-override",
-		Slug: "tel-override-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "false",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-override",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
 	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
 
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	// Hub cloud config should still be present
-	assert.Equal(t, "https://hub-otel.example.com",
-		agent.AppliedConfig.InlineConfig.Telemetry.Cloud.Endpoint)
-	// But enabled should be overridden by project setting
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.False(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=false should override hub Enabled=true")
-}
-
-func TestPopulateAgentConfig_ProjectTelemetryEnabledWithoutOtherConfig(t *testing.T) {
-	srv, _ := testServer(t)
-
-	// No hub telemetry config, no template — only project sets enabled
-	project := &store.Project{
-		ID:   "project-tel-only",
-		Slug: "tel-only-project",
-		Annotations: map[string]string{
-			projectSettingTelemetryEnabled: "true",
-		},
-	}
-
-	agent := &store.Agent{
-		ID:            "agent-tel-only",
-		AppliedConfig: &store.AgentAppliedConfig{},
-	}
-
-	require.NoError(t, srv.populateAgentConfig(context.Background(), agent, project, nil))
-
-	require.NotNil(t, agent.AppliedConfig.InlineConfig)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry)
-	require.NotNil(t, agent.AppliedConfig.InlineConfig.Telemetry.Enabled)
-	assert.True(t, *agent.AppliedConfig.InlineConfig.Telemetry.Enabled,
-		"Project TelemetryEnabled=true should create telemetry config with Enabled=true")
+	tel := agent.AppliedConfig.InlineConfig.Telemetry
+	require.NotNil(t, tel)
+	require.NotNil(t, tel.Enabled)
+	assert.False(t, *tel.Enabled, "the project policy is not written over the requester's value")
+	assert.Equal(t, "https://inline-otel.example.com", tel.Cloud.Endpoint)
 }
 
 // TestCreateAgent_HubManagedProject_ExplicitBroker_AutoLinks tests that creating an agent

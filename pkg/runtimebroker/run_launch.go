@@ -131,7 +131,9 @@ type launchCtx struct {
 	mgr             agent.Manager
 	key             launchKey
 	sharedWorkspace bool
-	supersededDone  <-chan struct{}
+	// owned is the flat instance's ownership mirror for this run, handed
+	// over when the launch was accepted (nil on a legacy Runtime Broker).
+	owned *ownedStart
 	// downloadWorkspaceFromGCS, when set, replaces Server.downloadWorkspaceFromGCS
 	// for this launch. Always nil in production (beginAsyncLaunch never sets
 	// it); tests use it to control how long the download step takes without
@@ -151,6 +153,17 @@ type launchCtx struct {
 // receivedAt + LaunchTimeoutSeconds - 20s), built by the caller
 // (beginAsyncLaunch) before this goroutine starts.
 func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx) {
+	// A flat instance's ownership mirror, handed over when the launch was
+	// accepted, is released when the launch ends, on every return before
+	// Start (for example claim errors and local cancels, gate and keepalive
+	// aborts, the superseded wait's timeout, and marker and download
+	// failures). Start's own completion consumes the mirror first
+	// (completeOwnedStart), which makes this a no-op, and every path that
+	// started Start waits for it to return before runLaunch does. Only this
+	// launch's own mirror is released, never one a later start installed
+	// under the same run ID. Deferred first so it runs after every other
+	// deferred step.
+	defer s.releaseOwnedMirror(lc.opts.RunID, lc.owned)
 	defer rec.cancel() // ctx' must not outlive runLaunch on any path
 	defer s.launchRegistry.Finish(lc.key, rec)
 	defer removeLaunchMarkerIfMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID)
@@ -179,7 +192,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.handleKeepaliveAbort(sender, rec, lc)
 			return
 		case errors.Is(claimErr, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke the
 			// blocked claim, not a real deadline. The Hub already knows (or
 			// will independently learn) this launch is over, so this is not
 			// "hub unreachable" and gets no terminal.
@@ -214,30 +227,14 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		return
 	}
 	// The claim has been applied: any failure from here on is reported
-	// under the launching step (design §3.9), including a ctx' deadline
-	// reached while still waiting on a superseded launch below.
+	// under the launching step (design §3.9).
 	currentStep = "launching"
 
-	// Step 2, F5: wait for a superseded record's cleanup before writing the
-	// shared marker, then write it (create launches only).
-	WaitSuperseded(ctx, lc.supersededDone)
-	if err := ctx.Err(); err != nil {
-		switch {
-		case errors.Is(err, context.Canceled):
-			// A local stop/delete (launchRegistry.CancelLocal) woke the
-			// wait, not a real ctx' deadline. Same rule as the claim's
-			// local-cancel case: the Hub already knows, or will
-			// independently learn, this launch is over, so no terminal.
-			return
-		default:
-			// context.DeadlineExceeded: ctx' ran out while waiting on the
-			// predecessor. The marker has not been written yet, so fail
-			// directly rather than writing it only to immediately treat
-			// the launch as timed out.
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, "launch_timeout", "launch timed out waiting for a superseded launch to finish")
-			return
-		}
-	}
+	// Step 2: write the shared marker (create launches only). There is no
+	// superseded launch to wait for here: the create already registered
+	// under the name and waited for any earlier start of it before
+	// buildStartContext, and the launch took that registration over
+	// (createAgent, beginAsyncLaunch; ptone/scion#2632).
 	if rec.Kind == store.LaunchKindCreate && lc.opts.ProjectPath != "" {
 		if err := writeLaunchMarker(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID); err != nil {
 			// A marker write failure silently disables file cleanup for this
@@ -286,7 +283,9 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	// Runtime hooks (design §3.8.3, §3.8.4): a Hub-answered checkpoint
 	// immediately before each resource-creating call, and each created
 	// resource recorded for CleanupLaunch.
-	lc.opts.Checkpoint = sender.Checkpoint
+	// A flat instance's ownership mirror checkpoint (installed by
+	// buildStartContext) runs first.
+	lc.opts.Checkpoint = chainCheckpoint(lc.opts.Checkpoint, sender.Checkpoint)
 	lc.opts.OnResourceCreated = rec.AddHandle
 	if sender.IsAborted() {
 		s.handleKeepaliveAbort(sender, rec, lc)
@@ -303,7 +302,13 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 	}
 	startCh := make(chan startResult, 1)
 	go func() {
+		ownedKey := s.ownedRunKeyFor(lc.opts.RunID)
+		rec.ownedRunMu.Lock()
+		rec.ownedRun = ownedKey
+		rec.ownedRunMu.Unlock()
 		info, err := lc.mgr.Start(ctx, lc.opts)
+		// The async failure path cleans up the launch's journaled handles.
+		err = s.completeOwnedStart(ctx, lc.mgr, lc.opts.RunID, err, false)
 		startCh <- startResult{info, err}
 	}()
 
@@ -335,11 +340,11 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 
 	if sr.err != nil {
 		if locallyCancelled(ctx) {
-			// A local stop/delete (launchRegistry.CancelLocal) woke Start
+			// A local stop/delete (launchRegistry.CancelLocalFor) woke Start
 			// via ctx' cancellation, not a real deadline (the
 			// launch_timeout case is context.DeadlineExceeded, handled by
-			// classifyStartError below). Same rule as the claim's and
-			// WaitSuperseded's local-cancel cases: the Hub already knows,
+			// classifyStartError below). Same rule as the claim's
+			// local-cancel case: the Hub already knows,
 			// or will independently learn, this launch is over, so no
 			// terminal. Keyed on ctx' rather than on sr.err: the
 			// exec-based runtimes (docker, podman, apple) return the killed
@@ -424,7 +429,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 // locallyCancelled reports whether ctx' was cancelled rather than having
 // reached its deadline. Once the keepalive-abort paths have returned, the only
 // remaining source of that cancellation is a local stop/delete
-// (launchRegistry.CancelLocal): runLaunch itself cancels ctx' only on the
+// (launchRegistry.CancelLocalFor): runLaunch itself cancels ctx' only on the
 // KeepaliveAborted branch, which returns, and in its deferred cleanup.
 func locallyCancelled(ctx context.Context) bool {
 	return errors.Is(ctx.Err(), context.Canceled)
@@ -481,6 +486,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 	if rec.Kind != store.LaunchKindCreate || lc.opts.ProjectPath == "" {
 		return
 	}
+	// The ownership checks and the removal run under the process-wide
+	// workspace lock on the agent's files.
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancelLock()
+	unlock, err := s.lockAgentFiles(lockCtx, lc.opts.ProjectPath, lc.opts.Name)
+	if err != nil {
+		s.agentLifecycleLog.Warn("runLaunch: skipped agent file cleanup: the agent's workspace lock is unavailable",
+			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
+	}
+	defer unlock()
 	if !launchMarkerMatches(lc.opts.ProjectPath, lc.sharedWorkspace, lc.key.Slug, rec.ID) {
 		// A newer launch's marker write means this one's files are no
 		// longer this launch's to delete (design §3.8.4).
@@ -504,10 +520,17 @@ func (s *Server) cleanupAbortedLaunch(mgr agent.Manager, rec *launchRecord, lc l
 func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := mgr.CleanupLaunch(cleanupCtx, rec.HandlesSnapshot()); err != nil {
+	handles := rec.HandlesSnapshot()
+	if err := mgr.CleanupLaunch(cleanupCtx, handles); err != nil {
 		s.agentLifecycleLog.Warn("runLaunch: failed to clean up launch resources",
 			"agent_id", rec.AgentID, "launch_id", rec.ID, "error", err)
+		return
 	}
+	// A flat instance finishes only this launch's run in its records.
+	rec.ownedRunMu.Lock()
+	key := rec.ownedRun
+	rec.ownedRunMu.Unlock()
+	s.finishCleanedRun(key, handles)
 }
 
 // terminalContext returns a fresh context bounded at deadline + 10 min

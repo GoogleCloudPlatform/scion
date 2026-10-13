@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/google/uuid"
 )
 
 // artifactHost is the hub's implementation of artifacts.Host: it answers the
@@ -129,17 +130,30 @@ func (h *artifactHost) Permits(ctx context.Context, scopeRef, permission string)
 // still work for an agent whose chain allows artifact reads in its own
 // project.
 func (h *artifactHost) agentChainAllows(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) bool {
+	ok, err := h.agentChainAllowsErr(ctx, agent, perm)
+	return err == nil && ok
+}
+
+// agentChainAllowsErr is agentChainAllows with the chain walk's lookup
+// error returned instead of taken for a refusal. It is the one place the
+// artifact chain walk is made: agentChainAllows (a caller's credential)
+// and the send-time recipient check (recipientSubject.Permits, which must
+// stay silent on a failure) both use it.
+func (h *artifactHost) agentChainAllowsErr(ctx context.Context, agent *agentIdentityWrapper, perm permissions.Permission) (bool, error) {
 	if h.server == nil || h.server.authzService == nil {
-		return false
+		return false, nil
 	}
 	project := agent.ProjectID()
 	if project == "" || agent.ID() == "" {
-		return false
+		return false, nil
 	}
 	resource := Resource{Type: permissions.ResourceArtifact, ParentType: permissions.ResourceProject, ParentID: project}
 	allowed, _, err := h.server.authzService.walkDelegationChainWithCause(ctx, resource, Action(perm.Action), perm.ID,
 		agent.ID(), AncestryIsHubAttested(agent), store.RoleScopeProject, project, nil, nil)
-	return err == nil && allowed
+	if err != nil {
+		return false, err
+	}
+	return allowed, nil
 }
 
 // Authorize reports whether the caller may exercise permission on artifacts
@@ -175,7 +189,7 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 // (a write grant) on an artifact owned by agent ownerAgentID and homed in
 // project homeScope. Either is enough:
 //   - the caller holds project.manage on homeScope (project owners and
-//     admins, and hub admins), decided by AuthzService.CheckAccess like any
+//     admins, and super-admins), decided by AuthzService.CheckAccess like any
 //     project administration, so a scoped token's own limits apply;
 //   - the caller is the user at the root of the agent's delegation chain,
 //     resolved now from the recorded, active edges only
@@ -205,11 +219,10 @@ func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeSco
 	if userID == "" {
 		return false
 	}
-	authz := h.server.authzService
-	if authz.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: homeScope}, ActionManage).Allowed {
+	if h.AdministersScope(ctx, homeScope) {
 		return true
 	}
-	root, err := authz.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
+	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
 	if err != nil {
 		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
 			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
@@ -348,26 +361,39 @@ func (h *artifactHost) ScopesExist(ctx context.Context, refs []string) (map[stri
 
 var _ artifacts.ScopeExplainer = (*artifactHost)(nil)
 
-// MissingScope implements artifacts.ScopeExplainer. Only an agent that
-// presented a real token (one with a token id) gets an answer: the scope
-// that Principal requires before serving it, then the token scopes the
-// permission maps to. Users and unauthenticated callers get "".
+// MissingScope implements artifacts.ScopeExplainer: the first scope
+// MissingScopes reports, or "".
 func (h *artifactHost) MissingScope(ctx context.Context, permission string) string {
+	if missing := h.MissingScopes(ctx, permission); len(missing) > 0 {
+		return missing[0]
+	}
+	return ""
+}
+
+var _ artifacts.ScopesExplainer = (*artifactHost)(nil)
+
+// MissingScopes implements artifacts.ScopesExplainer. Only an agent that
+// presented a real token (one with a token id) gets an answer: every scope
+// it lacks among the scope that Principal requires before serving it and
+// the token scopes the permission maps to, in that order (ptone/scion#4571).
+// Users and unauthenticated callers get nil.
+func (h *artifactHost) MissingScopes(ctx context.Context, permission string) []string {
 	perm, ok := artifactPermission(permission)
 	if !ok {
-		return ""
+		return nil
 	}
 	agent, ok := GetIdentityFromContext(ctx).(*agentIdentityWrapper)
 	if !ok || agent == nil || agent.AgentTokenClaims == nil || agent.ID() == "" || agent.TokenID() == "" {
-		return ""
+		return nil
 	}
+	var missing []string
 	if !agentHasAnyScope(agent, []string{string(ScopeProjectArtifactRead)}) {
-		return string(ScopeProjectArtifactRead)
+		missing = append(missing, string(ScopeProjectArtifactRead))
 	}
-	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) {
-		return perm.AgentScopes[0]
+	if len(perm.AgentScopes) > 0 && !agentHasAnyScope(agent, perm.AgentScopes) && !slices.Contains(missing, perm.AgentScopes[0]) {
+		missing = append(missing, perm.AgentScopes[0])
 	}
-	return ""
+	return missing
 }
 
 // artifactPermission returns the registry row for id when it is an artifact
@@ -455,4 +481,95 @@ func isArtifactCapabilityRequest(r *http.Request, route string) bool {
 	}
 	capability, _, _ := strings.Cut(esc[len(route):], "/")
 	return capability != "" && !strings.Contains(capability, "%")
+}
+
+var _ artifacts.PrincipalChecker = (*artifactHost)(nil)
+
+// PrincipalsExist implements artifacts.PrincipalChecker for the owner
+// liveness reconciler. An agent is live while its row exists and is not
+// soft-deleted; a user is live while its row exists with status active.
+// Each call costs at most two store queries whatever the number of refs:
+// one agent list by id (soft-deleted rows excluded) and one user lookup by
+// id. A ref of another kind, or whose id is not a UUID (store ids always
+// are), is left out of the answer, so it counts as live. A store error
+// fails the call, and the reconciler then changes nothing.
+func (h *artifactHost) PrincipalsExist(ctx context.Context, refs []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(refs))
+	if h.server == nil || h.server.store == nil || len(refs) == 0 {
+		return out, nil
+	}
+	var agentIDs, userIDs []string
+	for _, ref := range refs {
+		kind, id, ok := strings.Cut(ref, ":")
+		if _, err := uuid.Parse(id); !ok || err != nil {
+			continue
+		}
+		switch kind {
+		case artifacts.PrincipalKindAgent:
+			agentIDs = append(agentIDs, id)
+		case artifacts.PrincipalKindUser:
+			userIDs = append(userIDs, id)
+		}
+	}
+	if len(agentIDs) > 0 {
+		res, err := h.server.store.ListAgents(ctx, store.AgentFilter{IDs: agentIDs},
+			store.ListOptions{Limit: len(agentIDs), SkipTotalCount: true})
+		if err != nil {
+			return nil, err
+		}
+		live := make(map[string]bool, len(res.Items))
+		for _, a := range res.Items {
+			if a.DeletedAt.IsZero() {
+				live[strings.ToLower(a.ID)] = true
+			}
+		}
+		for _, id := range agentIDs {
+			out[artifacts.PrincipalRef(artifacts.PrincipalKindAgent, id)] = live[strings.ToLower(id)]
+		}
+	}
+	if len(userIDs) > 0 {
+		users, err := h.server.store.GetUsersByIDs(ctx, userIDs)
+		if err != nil {
+			return nil, err
+		}
+		live := make(map[string]bool, len(users))
+		for _, u := range users {
+			if u != nil && u.Status == store.UserStatusActive {
+				live[strings.ToLower(u.ID)] = true
+			}
+		}
+		for _, id := range userIDs {
+			out[artifacts.PrincipalRef(artifacts.PrincipalKindUser, id)] = live[strings.ToLower(id)]
+		}
+	}
+	return out, nil
+}
+
+var _ artifacts.ScopeAdministrator = (*artifactHost)(nil)
+
+// AdministersScope implements artifacts.ScopeAdministrator: the calling
+// user holds project.manage on the project scopeRef (the project owners
+// and admins of the artifact's home project, and super-admins; hub-admins
+// do not hold it), decided by AuthzService.CheckAccess like any
+// project administration, so a scoped token's own limits apply. Only users
+// are answered; every other identity and a missing authz service answer
+// false. It is the first custodian clause of the delete route and the
+// project-admin half of MayGrantReview.
+func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bool {
+	if h.server == nil || h.server.authzService == nil || scopeRef == "" {
+		return false
+	}
+	identity := GetIdentityFromContext(ctx)
+	if isNilIdentity(identity) {
+		return false
+	}
+	switch id := identity.(type) {
+	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
+		if id.ID() == "" {
+			return false
+		}
+	default:
+		return false
+	}
+	return h.server.authzService.CheckAccess(ctx, identity, Resource{Type: permissions.ResourceProject, ID: scopeRef}, ActionManage).Allowed
 }

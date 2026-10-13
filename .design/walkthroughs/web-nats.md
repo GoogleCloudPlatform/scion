@@ -180,7 +180,7 @@ event: connected
 data: {"connectionId":"sse-1","subjects":["grove.test-grove.>"]}
 ```
 
-The stream will then emit `:heartbeat <timestamp>` comments every 30 seconds to keep the connection alive.
+The stream will then emit a named `heartbeat` event every 30 seconds to keep the connection alive. Its data is a millisecond timestamp, and it has no `id:` line.
 
 ### 4.3 Multiple Subject Subscriptions
 
@@ -382,13 +382,14 @@ data: {"subject":"grove.test-grove.agent.log","data":"plain text message"}
 
 ### 6.1 Heartbeat Verification
 
-Hold an SSE connection open for 30+ seconds and observe heartbeat comments:
+Hold an SSE connection open for 30+ seconds and observe heartbeat events:
 
 ```
-:heartbeat 1708264830000
+event: heartbeat
+data: 1708264830000
 ```
 
-These are SSE comments (prefixed with `:`) — ignored by `EventSource` but keep TCP connections alive through proxies.
+These are named events (data is a millisecond timestamp) rather than SSE comments, so page code can observe them with `addEventListener('heartbeat', ...)`. They carry no `id:` line, so `Last-Event-ID` is unaffected, and they keep TCP connections alive through proxies.
 
 ### 6.2 Client Disconnect Cleanup
 

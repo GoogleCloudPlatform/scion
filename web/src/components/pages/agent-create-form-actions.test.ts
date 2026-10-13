@@ -55,11 +55,12 @@ interface StartResponse {
 /**
  * Accepts the create request and records every POST for inspection. `created`
  * is the created agent's phase, or extra fields of the created agent (e.g. an
- * async `launch`).
+ * async `launch`). `createWarnings` are the create response's warnings.
  */
 function stubFetch(
   created?: string | Record<string, unknown>,
-  start: StartResponse = { ok: true, status: 200 }
+  start: StartResponse = { ok: true, status: 200 },
+  createWarnings?: string[]
 ): void {
   const createdAgent =
     typeof created === 'object' ? { id: 'agent-1', ...created } : { id: 'agent-1', phase: created };
@@ -82,7 +83,11 @@ function stubFetch(
           return Promise.resolve({
             ok: true,
             status: 201,
-            json: () => Promise.resolve({ agent: createdAgent }),
+            json: () =>
+              Promise.resolve({
+                agent: createdAgent,
+                ...(createWarnings ? { warnings: createWarnings } : {}),
+              }),
           } as Response);
         }
         if (url.endsWith('/start')) {
@@ -365,5 +370,54 @@ describe('Create Agent form actions', () => {
 
     expect(requests.map((r) => r.url)).toEqual(['/api/v1/agents', '/api/v1/agents/agent-1/start']);
     expect(navigations).toEqual(['/agents/agent-1']);
+  });
+
+  it('shows the create and start warnings as warning toasts (ptone/scion#4569)', async () => {
+    stubFetch(
+      undefined,
+      { ok: true, status: 200, body: { agent: { id: 'agent-1' }, warnings: ['start warning'] } },
+      ['create warning']
+    );
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(showToast).toHaveBeenCalledTimes(2);
+    expect(showToast).toHaveBeenNthCalledWith(1, 'create warning', 'warning', {
+      duration: Infinity,
+    });
+    expect(showToast).toHaveBeenNthCalledWith(2, 'start warning', 'warning', {
+      duration: Infinity,
+    });
+    expect(navigations).toEqual(['/agents/agent-1']);
+  });
+
+  it('toasts a warning repeated by the create and start responses once', async () => {
+    stubFetch(
+      undefined,
+      {
+        ok: true,
+        status: 200,
+        body: { agent: { id: 'agent-1' }, warnings: ['same warning', 'start only'] },
+      },
+      ['same warning']
+    );
+    const el = await mountAgentCreate();
+    const page = el as unknown as AgentCreateInternals;
+    page.name = 'test-agent';
+    page.projectId = 'p1';
+
+    await clickStart(el);
+
+    expect(showToast).toHaveBeenCalledTimes(2);
+    expect(showToast).toHaveBeenNthCalledWith(1, 'same warning', 'warning', {
+      duration: Infinity,
+    });
+    expect(showToast).toHaveBeenNthCalledWith(2, 'start only', 'warning', {
+      duration: Infinity,
+    });
   });
 });

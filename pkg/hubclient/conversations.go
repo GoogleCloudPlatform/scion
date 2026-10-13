@@ -91,13 +91,25 @@ type CreateConversationRequest struct {
 // ConversationDetail wraps a conversation with its participants.
 type ConversationDetail struct {
 	store.Conversation
-	Participants []store.ConversationParticipant `json:"participants,omitempty"`
+	Participants []ConversationParticipantDetail `json:"participants,omitempty"`
 	// DMPeer is the other party of a direct conversation, relative to the
 	// caller. Set by the hub on list responses only.
 	DMPeer *ConversationPeer `json:"dmPeer,omitempty"`
 	// ThreadName is the linked webchat topic name of a native group
 	// conversation without a display name. Set on list responses only.
 	ThreadName string `json:"threadName,omitempty"`
+}
+
+// ConversationParticipantDetail is a conversation participant as the hub
+// returns it on the single-conversation GET.
+type ConversationParticipantDetail struct {
+	store.ConversationParticipant
+	// MessageMode is the participant agent's message mode (none, lineage,
+	// branch, project, hub). The hub sets it only for agents in the
+	// conversation's project (for a conversation without a project, a DM or
+	// legacy group, the calling agent's project); it is
+	// empty for users and for agents outside that project (ptone/scion#4411).
+	MessageMode string `json:"messageMode,omitempty"`
 }
 
 // ConversationPeer identifies the other principal of a direct conversation.

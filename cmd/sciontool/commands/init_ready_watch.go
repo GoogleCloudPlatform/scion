@@ -90,13 +90,9 @@ const (
 //     buffer, which pastes buffered messages at the same deadline.
 //
 // The hub is only told "working" when the local swap from initializing
-// succeeds. Remaining window (settle and deadline only): the swap is a
-// read-modify-write of agent-info.json, not atomic across processes, so a
-// hook whose status write lands between the watcher's read and write at
-// exactly Start+Settle or Start+Deadline would be overwritten with working
-// until the next hook event. This is accepted rather than adding a file lock
-// to the hook path, which must stay non-blocking: in settle mode the harness
-// has no early hooks, and at the deadline no readiness hook has fired.
+// succeeds. The swap is one locked read-modify-write of agent-info.json
+// (StatusHandler.ReplaceActivityIf), so a hook's status write in another
+// process cannot land between the watcher's read and write.
 func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutcome {
 	poll := cfg.PollInterval
 	if poll <= 0 {

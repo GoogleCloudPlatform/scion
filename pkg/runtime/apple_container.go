@@ -242,7 +242,7 @@ func (r *AppleContainerRuntime) appleCheckRun(ctx context.Context, ref RunRef) e
 			continue
 		}
 		if run := c.Configuration.Labels[api.LabelRunID]; run != "" && run != ref.RunID {
-			runtimeLog.Info("Left a container of another run untouched",
+			runtimeLog().Info("Left a container of another run untouched",
 				"container", ref.ID, "run_id", ref.RunID, "container_run_id", run)
 			return fmt.Errorf("container %s belongs to run %q, not %q: %w", ref.ID, run, ref.RunID, ErrRunMismatch)
 		}

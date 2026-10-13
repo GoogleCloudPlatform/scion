@@ -1024,12 +1024,22 @@ func (s *ScheduleStore) ListScheduledEvents(ctx context.Context, filter store.Sc
 	return result, nil
 }
 
-// PurgeOldScheduledEvents removes non-pending events older than cutoff.
+// PurgeOldScheduledEvents removes non-pending events that completed before
+// cutoff. Completion is fired_at (set for fired, expired and failed events);
+// an event with no fired_at (a cancelled one) falls back to created. So an
+// event scheduled far ahead keeps its outcome for the full period after it
+// fires (ptone/scion#4517).
 func (s *ScheduleStore) PurgeOldScheduledEvents(ctx context.Context, cutoff time.Time) (int, error) {
 	n, err := s.client.ScheduledEvent.Delete().
 		Where(
 			scheduledevent.StatusNEQ(store.ScheduledEventPending),
-			scheduledevent.CreatedLT(cutoff),
+			scheduledevent.Or(
+				scheduledevent.FiredAtLT(cutoff),
+				scheduledevent.And(
+					scheduledevent.FiredAtIsNil(),
+					scheduledevent.CreatedLT(cutoff),
+				),
+			),
 		).
 		Exec(ctx)
 	if err != nil {

@@ -4,11 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of September 28 -- October 4, 2026
+## Latest: Week of October 5 -- 11, 2026
 
-Raw keystroke messaging was replaced by a dedicated agent keys API (`scion keys`), and raw message delivery is now removed. A timezone overhaul pinned servers, storage and APIs to UTC and made the Hub the only source of an agent's `TZ`. Agent delete became asynchronous and failure-aware, and asynchronous create arrived as an opt-in. Kubernetes gained per-agent NFS workspaces, Workload Identity and a new Substrate runtime. Security work continued with user access token boundaries, frozen delegation ceilings and project access granted only through role bindings.
+Conduit, still behind its experiment flag, now carries agent terminals, Runtime Broker traffic and user tunnels, including SSH through `scion tunnel`. Agent create, start, stop and delete hold up under races: a create or start that loses to a delete no longer revives the agent, operations are scoped to the run they target, and starts fail closed when credentials or settings cannot be resolved. Access follows membership: removed members' agents are suspended, sharing a Runtime Broker needs its owner's consent, and schedules run under recorded authority. `scion reincarnate` can move agents between Runtime Brokers and change their settings, and the health dashboard was rebuilt around a single attention policy.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-09-28/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
+
+## `scion project list` lists projects across hubs
+
+`scion project list` (and `scion projects list`) now lists the projects on all your registered hubs, each with its hub, merged with the project directories on this machine. Use `--hub <hub>` to show one hub and `--refresh` to fetch each logged-in hub's project list. The earlier output, the project directories on this machine with their type, agent count, status and workspace, moved to `scion project list --local`, which keeps that format byte for byte, JSON included. **Scripts that parse `scion project list` should switch to `scion project list --local`.**
 
 ## Timezone handling changes
 
@@ -29,6 +33,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)
 - [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
 - [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)

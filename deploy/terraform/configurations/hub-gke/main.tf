@@ -195,6 +195,8 @@ module "hub_gke" {
   iap_oauth_client_id = var.iap_oauth_client_id
   admin_emails        = var.admin_emails
 
+  test_identities_enabled = var.test_identities_enabled
+
   image_registry    = local.image_registry
   runtime_namespace = module.agent_runtime_k8s.namespace
   port              = local.hub_port
@@ -206,6 +208,22 @@ module "hub_gke" {
   db_password_rotation = var.db_password_rotation
   sql_connection_name  = module.shared_lookup.shared.sql.connection_name
 
+  # The same NFS share and claim agent_runtime_k8s sets up. The chart mounts
+  # this export in the hub pod at <mount_root>/<hub_name> and renders
+  # server.workspace_storage from the same values; the nfs_workspace output
+  # (outputs.tf) checks they agree with agent_runtime_k8s.
+  nfs = {
+    server  = module.shared_lookup.shared.nfs.server
+    export  = module.agent_runtime_k8s.nfs_export
+    pv_name = module.agent_runtime_k8s.pv_name
+  }
+  nfs_subpath_root = var.nfs_subpath_root
+
+  # The hub runs as the uid/gid agent_runtime_k8s chowns the export to, from
+  # the same two variables, because the hub writes workspaces agents read.
+  hub_run_as_uid = var.nfs_uid
+  hub_run_as_gid = var.nfs_gid
+
   # Real resource attributes only (see hub-gke's variable). The hub pod
   # reaches Secret Manager, Cloud SQL and GCS as the hub GSA through
   # Workload Identity, so the release waits for those grants to exist.
@@ -213,6 +231,23 @@ module "hub_gke" {
     hub_workload_identity = module.hub_identity.hub_workload_identity_member
     hub_iam_grants        = join(",", module.hub_identity.hub_iam_grants)
   }
+}
+
+# Optional test-runner identities, off by default. The backend service name
+# is read here at the root: modules/hub-gke must not consume hub-lb
+# attributes beyond the front-door contract, but this module may.
+#
+# Gated on enabled only. test_runner.impersonators is validated in one
+# place, the module's own variable, which fails the plan on invalid input.
+module "hub_test_runner" {
+  source = "../../modules/hub-test-runner"
+  count  = var.test_runner.enabled ? 1 : 0
+
+  project_id                  = var.project_id
+  hub_name                    = var.hub_name
+  impersonators               = var.test_runner.impersonators
+  backend_service_name        = module.hub_lb.backend_service.name
+  alert_notification_channels = var.test_runner.alert_notification_channels
 }
 
 # Same pattern as hub-cloudrun's check of the same name. Here an unset client

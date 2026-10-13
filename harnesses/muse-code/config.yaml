@@ -30,6 +30,14 @@ provisioner:
 config_dir: .config/muse
 skills_dir: .muse/skills
 interrupt_key: Escape
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: delay
+  settle: 8s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: AGENTS.md
 system_prompt_mode: prepend_to_instructions
 

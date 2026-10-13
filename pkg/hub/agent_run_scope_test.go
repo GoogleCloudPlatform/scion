@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -41,20 +41,19 @@ import (
 
 // --- fakes -------------------------------------------------------------
 
-// fakeAgentRunReader returns agent or err and counts reads.
+// fakeAgentRunReader returns agent's run state or err and counts reads.
 type fakeAgentRunReader struct {
 	agent *store.Agent
 	err   error
 	calls atomic.Int32
 }
 
-func (f *fakeAgentRunReader) GetAgent(context.Context, string) (*store.Agent, error) {
+func (f *fakeAgentRunReader) GetAgentRunState(context.Context, string) (store.AgentRunState, error) {
 	f.calls.Add(1)
 	if f.err != nil {
-		return nil, f.err
+		return store.AgentRunState{}, f.err
 	}
-	a := *f.agent
-	return &a, nil
+	return store.AgentRunState{RunID: f.agent.RunID, DeletedAt: f.agent.DeletedAt}, nil
 }
 
 // fakeRunScopeMetrics records outcomes.
