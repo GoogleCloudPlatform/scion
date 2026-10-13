@@ -297,14 +297,14 @@ through IAP with an access token or an OIDC identity token. For identity tokens,
 the audience **must** be the IAP OAuth client ID (not the resource path).
 
 The deploy script prints this ID in step 6 as `IAP OAuth client ID: ...`. If it
-reports that the ID could not be determined automatically, look it up yourself:
+reports that the ID could not be determined automatically, find it in the console
+under **Security > Identity-Aware Proxy** (the service's OAuth settings), or read
+it from the project's IAP settings:
 
 ```bash
-# Discover the auto-generated IAP OAuth client ID
-export PROJECT_NUMBER=$(gcloud projects describe $PROJECT_ID --format="value(projectNumber)")
-gcloud alpha iap oauth-clients list \
-  "projects/$PROJECT_NUMBER/brands/$PROJECT_NUMBER" \
-  --format="value(name)" | sed 's|.*/||'
+# Read the IAP OAuth client ID from the project's IAP settings
+gcloud iap settings get --project=$PROJECT_ID --resource-type=iap_web \
+  --format="value(accessSettings.oauthSettings.clientId)"
 
 # Use it as the audience
 curl -s "$HUB_URL/health" \
