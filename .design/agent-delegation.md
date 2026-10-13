@@ -372,13 +372,15 @@ the claim transaction.
 - **Never returned:** credential plaintext, `key_hash`, or any credential prefix beyond the fixed
   `scion_adt_` marker. Returned: grant ID, agent, issuer, boundary, canonical permission IDs,
   ceiling version, name, purpose and labels (all labelled as user-supplied), expiry, maximum credential TTL,
-  created, last exchanged, status, revocation fields, and the count and expiry of active
-  credentials.
+  created, last exchanged, status, revocation fields, and the count of active credentials with the
+  ID, issue time and expiry of each, so a caller can name one in credential revoke.
 - **Refused:** a delegated credential on any of these operations, and a UAT on any of them (grant
   management stays session-bound).
 - **Denial codes:** `credential_not_admitted`, `agent_credential_invalid`, `grant_not_found`
-  (missing, or not visible to the caller), `forbidden`, `audit_failed` (§8.4). These routes stay
-  available while the experiment is off (§10).
+  (missing, or not visible to the caller), `forbidden` (the caller may read the grant but lacks the
+  operation's permission), `not_found` (credential revoke: a credential that does not exist or
+  belongs to another grant), `audit_failed` (§8.4). These routes stay available while the
+  experiment is off (§10).
 
 ## 8. Exchange
 
@@ -493,6 +495,7 @@ external code, goes to the decision record (§14.2).
 | 403 | `credential_not_admitted` | a dev session at issuance; anything but a local agent JWT at exchange (including a session super-admin); path agent differs from the JWT subject; a delegated credential on a management route |
 | 403 | `forbidden` with `details.reason = CREDENTIAL_MANAGEMENT`, `details.credential = session_required` | a UAT on a session-only G route (`requireSessionCredentialFor`, `session_only_gate.go:93`) |
 | 403 | `forbidden` (no reason) | a non-user identity (an agent JWT other than the bound agent's own management paths) on a session-only G route |
+| 403 | `forbidden` (no reason) | grant management: the caller may read the grant but lacks the operation's permission (custom roles) |
 | 403 | `reserved_identity` | issuance by a reserved platform identity |
 | 403 | `forbidden` with `details.reason = test_identity_cannot_delegate` | issuance by a hub test identity |
 | 403 | `issuer_not_controller` | issuer is not the agent's owner or recorded ancestor, or lacks `agent.delegation.create` (at issuance this includes an issuer not admitted to the agent's project) |
@@ -506,7 +509,7 @@ external code, goes to the decision record (§14.2).
 | 403 | `grant_agent_changed` | exchange: agent project or generation changed, or a reincarnation is in flight |
 | 404 | `agent_not_found` | issuance: agent missing or deleted |
 | 404 | `grant_not_found` | grant missing, bound to another agent, or not visible to the caller |
-| 404 | `not_found` | issuance or exchange while the experiment is off (`requireExperiment`) |
+| 404 | `not_found` | issuance or exchange while the experiment is off (`requireExperiment`); credential revoke naming a credential that does not exist or belongs to another grant |
 | 409 | `agent_not_eligible` | issuance: agent fails standing, is suspended or lacks attested ancestry |
 | 409 | `agent_reincarnating` | issuance during a reincarnation, or after the agent row changed under the lock |
 | 409 | `grant_limit_reached` | issuance past the per-agent or per-issuer cap |
@@ -945,7 +948,11 @@ renders `verified=true`, because the binding was checked at exchange, not per re
 Mutation audit is persisted and transactional. It is G's durable attribution:
 
 - grant create, each credential exchange (one row per issued credential), grant revoke, credential
-  revoke and every supersede or cascade revocation, each in the same transaction as the change;
+  revoke and every supersede or cascade revocation, each in the same transaction as the change. A
+  grant revoke writes one `agent_delegation_grant_revoke` row that lists the IDs of the credentials
+  it revoked with the grant. Each credential an exchange supersedes gets its own
+  `agent_delegation_credential_revoke` row (reason `superseded`), written in the exchange's
+  transaction together with the new credential and its `agent_delegation_credential_issue` row;
 - every mutation made with a delegated credential, through the normal mutation-audit path, with the
   G block filled in.
 
@@ -1277,7 +1284,9 @@ agent_delegated_credentials
   message model (`store.Message`, `models.go:2396`; `pkg/ent/schema/message.go`) gains two
   nullable columns (§14.5).
 - Purge: expired delegated credentials are purged by a new periodic job. `PurgeExpiredAgentCredentials`
-  has no production caller to extend. Grants are kept for audit.
+  has no production caller to extend. The job runs hourly and deletes every credential row whose
+  expiry is more than 24 hours in the past, revoked or not (a revoked credential still carries an
+  expiry at most 60 minutes after issue). Grants are kept for audit.
 
 ### 18.2 Store
 

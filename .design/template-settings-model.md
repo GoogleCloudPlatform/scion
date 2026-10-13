@@ -30,7 +30,7 @@ A hosted template's agent config currently lives in two places: the template's f
 
 ### Job keys (the template may set them; the project and the requester override)
 
-`harness_config` / `default_harness_config`, `model`, `thinking_level`, `agent_instructions`, `system_prompt`, `skills`, `mcp_servers`, `command_args`, `task_flag`, the limits (`max_turns`, `max_model_calls`, `max_duration`), `services`, `secrets` (declaring which secret names the job needs; values always come from the environment), `message_mode`, and `env` for job-specific variables.
+`harness_config` / `default_harness_config`, `model`, `thinking_level`, `agent_instructions`, `system_prompt`, `skills`, `mcp_servers`, `command_args`, `task_flag`, the limits (`max_turns`, `max_model_calls`, `max_duration`), `services`, `secrets` (declaring which secret names the job needs; values always come from the environment), `message_mode`, and `env`: env for the job's own tools. Template `env` is a lowest-precedence fill, set only when no other source sets the key, and its values are literal (see the template env rule below). It is not on the job-key ladder.
 
 Precedence for job keys, lowest to highest:
 
@@ -47,7 +47,7 @@ built-in defaults
 
 ### Environment keys (settings and policy only; ignored in a template)
 
-`telemetry`, `hub`, `image` (owned by the harness-config and settings/profiles), `resources`, `kubernetes`, `volumes`, and, within a template's `env:` block, reserved keys: `SCION_*`, `OTEL_*`, hub-only keys, and the credential keys the resolved harness-config declares in its auth metadata.
+`telemetry`, `hub`, `image` (owned by the harness-config and settings/profiles), `resources`, `kubernetes`, `volumes`, and, within a template's `env:` block, the reserved `SCION_*` namespace.
 
 For telemetry, lowest to highest:
 
@@ -62,8 +62,15 @@ broker settings
 
 - Defaults fill only what higher tiers leave unset. Policy overrides for its keys only.
 - An environment key found in a template is ignored at load with a warning, and the admin validate report lists the template. Uploads are not rejected.
+- Template env (ptone/scion#4524): a template may set env vars for the tools it ships with, but they never take part in system settings.
+  - It is its own layer: never merged into the agent config or persisted in `scion-agent.json`, and recomputed from the live template chain on every start (for a Hub template, the broker resolves the template's current version on every start; behind an older Hub that sends no template identity, it uses the version the agent was provisioned from, read from its cache when still present). An unresolvable template has no template env, with a start warning.
+  - It is applied by the runtime (every runtime, as `RunConfig.FallbackEnv`) as the final step of its container env assembly, after every other source: config env, request env, telemetry env, hub default env, broker-injected vars, and the env the runtime adds itself (resolved auth env, harness env, env-type secrets). A key is set only when the container env has no entry for it. A source whose value is empty adds no entry (config and request env with an empty value are omitted, with a warning), so the template fills such a key.
+  - The harness-config's auth-candidate keys (every key its auth metadata lists, for any auth type) are never set from template env, even when nothing else sets them, so a template never supplies a credential.
+  - Values are literal: no expansion against the broker host environment and no host passthrough for empty values (an empty value is skipped with a warning; a `${...}` value is used as is, with a warning).
+  - It does not count toward auth credential detection or env-gather required keys, and the hub-only rule (`TZ`) applies to it like any broker-local layer.
+  - Existing agents: a stored `env` key whose value equals the live template env value applies only through the template fill. Nothing on disk is rewritten.
 - Known exceptions, unchanged by this model:
-  - Environment variables and secrets (runtime_broker, hub, project and user scopes, and template and harness-config env): their own orders.
+  - Environment variables and secrets (runtime_broker, hub, project and user scopes, and harness-config env): their own orders. Template env sits below all of them (see the template env rule above).
   - Resources keep their own interleaving with broker profile and harness overrides; templates no longer contribute to it.
   - Skills: merged by scope rather than replaced along the job ladder, using the existing hub and broker merge rules. Hub-injected skills keep travelling in the requester's inline config, labelled by scope. This is an explicit exception to I4.
 
@@ -76,7 +83,8 @@ broker settings
 | Project defaults vs the template (model, harness config, thinking level, limits) | The project wins. | The project owner may use any author's template; the project context is closer to the work. |
 | Hub defaults vs the template for job keys | The template wins; hub defaults fill only what the template leaves unset. | A hub default is a deployment-wide fallback, further from the work than the template author. |
 | Telemetry in templates | Never configured from a template. A template's `telemetry:` block is ignored. | Telemetry is operating environment, not part of the agent's job. |
-| Other environment keys in templates (`hub`, `image`, `resources`, `kubernetes`, `volumes`, reserved `env` keys) | Ignored with a warning and listed by the admin validate report; uploads are not rejected. | Same principle; existing templates and imports keep working. |
+| Other environment keys in templates (`hub`, `image`, `resources`, `kubernetes`, `volumes`, `SCION_*` env keys) | Ignored with a warning and listed by the admin validate report; uploads are not rejected. | Same principle; existing templates and imports keep working. `SCION_*` is the platform's own namespace, and some of its keys carry meaning by their absence. |
+| Other `env` keys in templates | A lowest-precedence fill with literal values, applied last at container env assembly; never in the agent config. | A template's tools may need env vars, but reserved keys cannot be listed in advance, so template env must never take part in system settings. |
 | Requester telemetry | Only the on/off flag, below project policy. | Full telemetry configuration comes from settings. |
 | Template API `config` field on create/update | Removed. The API answers `400` with a pointer to `scion-agent.yaml`. | I1: the files are the only place job config lives. |
 | Existing rows whose `config` holds values not in the files | Reported by `GET /api/v1/admin/validate-resources`, then ignored. No write-back into YAML. | Makes drift visible without rewriting user-owned files. |

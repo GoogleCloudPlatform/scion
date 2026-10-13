@@ -41,7 +41,14 @@ import (
 // access from outside this file is the bug this comment exists to prevent
 // from coming back.
 type mockManager struct {
-	mu                     sync.Mutex
+	mu sync.Mutex
+	// createHandles are launch resources Start reports creating (each after
+	// a checkpoint); beforeCreate, when set, runs before the i-th one.
+	createHandles []api.ResourceHandle
+	beforeCreate  func(i int)
+	// startErrAfterCreate, when set, fails Start after createHandles were
+	// created.
+	startErrAfterCreate    error
 	agents                 []api.AgentInfo
 	startCalls             int
 	stopCalls              int
@@ -99,6 +106,9 @@ func (m *mockManager) Preflight(ctx context.Context, opts api.StartOptions) erro
 	return m.preflightErr
 }
 
+// SetOwner accepts a flat instance's owner scope (the mock filters nothing).
+func (m *mockManager) SetOwner(agent.OwnerScope) {}
+
 func (m *mockManager) CleanupLaunch(ctx context.Context, handles []agent.ResourceHandle) error {
 	m.cleanupLaunchCalls++
 	m.lastCleanupLaunchHandles = handles
@@ -118,6 +128,34 @@ func (m *mockManager) Start(ctx context.Context, opts api.StartOptions) (*api.Ag
 	m.mu.Unlock()
 	if startErr != nil {
 		return nil, startErr
+	}
+	// Simulate a runtime creating launch resources: a checkpoint before
+	// each create, then the creation hooks.
+	m.mu.Lock()
+	handles := append([]api.ResourceHandle(nil), m.createHandles...)
+	beforeCreate := m.beforeCreate
+	m.mu.Unlock()
+	for i, h := range handles {
+		if beforeCreate != nil {
+			beforeCreate(i)
+		}
+		if opts.Checkpoint != nil {
+			if err := opts.Checkpoint(ctx, "launching"); err != nil {
+				return nil, err
+			}
+		}
+		if opts.OnResourceCreated != nil {
+			opts.OnResourceCreated(h)
+		}
+		if opts.ObserveResourceCreated != nil {
+			opts.ObserveResourceCreated(h)
+		}
+	}
+	m.mu.Lock()
+	errAfter := m.startErrAfterCreate
+	m.mu.Unlock()
+	if errAfter != nil {
+		return nil, errAfter
 	}
 	agent := &api.AgentInfo{
 		ID:    "test-container-id",
