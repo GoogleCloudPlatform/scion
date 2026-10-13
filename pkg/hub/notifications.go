@@ -497,7 +497,9 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	}
 
 	// setOutcome also sets dispatched=true; MarkNotificationDispatched is kept
-	// because it is what broadcasts the dispatched event to other replicas.
+	// because it is what broadcasts the dispatched event to other replicas. It
+	// must run before setOutcome: it broadcasts only when its CAS on
+	// dispatched=false wins, and setOutcome would already have set the flag.
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}
