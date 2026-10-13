@@ -1625,6 +1625,20 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+}
+
+// V1ServerHubObservabilityConfig holds the switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset: the hub then keeps the rule that applied before the switch existed
+// (see HubObservabilityConfig).
+type V1ServerHubObservabilityConfig struct {
+	// MetricsEnabled turns the hub metrics exporter on or off.
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
+	// TracingEnabled turns the hub trace exporter on or off.
+	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -3658,6 +3672,8 @@ var knownCompoundFields = []string{
 	"platform_auth_sa",
 	"interval_seconds",
 	"public_key_file",
+	"metrics_enabled",
+	"tracing_enabled",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
@@ -3690,6 +3706,16 @@ var knownCompoundFields = []string{
 	"max_age",
 }
 
+// collapsedCompoundFields maps the canonical env spelling of a compound
+// field, which drops the field's underscores (METRICSENABLED), to the field
+// name. Only fields listed here accept that spelling in this mapper; the
+// underscored spelling (METRICS_ENABLED) is accepted through
+// knownCompoundFields.
+var collapsedCompoundFields = map[string]string{
+	"metricsenabled": "metrics_enabled",
+	"tracingenabled": "tracing_enabled",
+}
+
 // mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
 // known multi-word snake_case fields so they are not incorrectly split.
 // For example: "hub_read_timeout" -> "hub.read_timeout"
@@ -3712,6 +3738,9 @@ func mapEnvKeyRecursive(key string) string {
 		if key == compound {
 			return key
 		}
+	}
+	if field, ok := collapsedCompoundFields[key]; ok {
+		return field
 	}
 
 	// Try to match the longest known compound field at the end,
@@ -4028,6 +4057,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		}
+		if o := v1.Hub.Observability; o != nil {
+			gc.Hub.Observability = HubObservabilityConfig{
+				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+				TracingEnabled: copyBoolPtr(o.TracingEnabled),
+			}
 		}
 	}
 
@@ -4385,6 +4420,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+	}
+	if o := gc.Hub.Observability; !o.IsZero() {
+		v1Hub.Observability = &V1ServerHubObservabilityConfig{
+			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+			TracingEnabled: copyBoolPtr(o.TracingEnabled),
+		}
 	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()

@@ -205,6 +205,10 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -1558,6 +1562,8 @@ var snakeCaseFields = map[string]string{
 	"missingagentgrace":          "missing_agent_grace",
 	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
+	"metricsenabled":             "metrics_enabled",
+	"tracingenabled":             "tracing_enabled",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1676,6 +1682,8 @@ var camelCaseFields = map[string]string{
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"monitoringdashboardurl":        "monitoringDashboardUrl",
+	"metricsenabled":                "metricsEnabled",
+	"tracingenabled":                "tracingEnabled",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
