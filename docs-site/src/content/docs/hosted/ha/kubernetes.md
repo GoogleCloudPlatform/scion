@@ -97,7 +97,7 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
 
-1. The agent's or template's `kubernetes:` block.
+1. The agent's `kubernetes:` block (a template's `kubernetes:` block is ignored with a warning).
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
@@ -200,7 +200,7 @@ A variable is set only when its limit is set, either in `resources.limits` or in
 
 Setting `GOMAXPROCS` turns off the Go 1.25+ default, which reads the cgroup CPU limit and follows changes to it (for example after an in-place pod resize). In return, images with older Go toolchains also get a value that matches the pod.
 
-A value set in the template or agent `env` always wins, and each variable is checked separately. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
+A value set in the agent's `env` (or any env source other than the template) always wins, and each variable is checked separately. A template's `env` is applied only when nothing else sets the variable, so it does not replace the derived value. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
 
 ```yaml
 env:
@@ -343,18 +343,18 @@ profiles:
 ```
 
 ```yaml
-# template or agent scion-agent.yaml — overrides profile and runtime
+# agent scion-agent.yaml — overrides profile and runtime (ignored in a template)
 kubernetes:
   safeToEvict: false
 ```
 
 Scion uses the first value it finds, in this order:
 
-1. The template or agent `kubernetes.safeToEvict`
+1. The agent's `kubernetes.safeToEvict`
 2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
 3. The `safe_to_evict` on that profile's runtime entry
 
-An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on a template turns the annotation off for that template, even when the runtime sets `false`.
+An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on an agent turns the annotation off for that agent, even when the runtime sets `false`.
 
 Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore it. `scion config validate` warns when it is set on a non-Kubernetes runtime, or on a profile that uses one, and Scion logs a warning at agent start when it is ignored.
 
