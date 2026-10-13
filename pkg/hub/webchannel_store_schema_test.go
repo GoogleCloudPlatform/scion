@@ -19,16 +19,18 @@ package hub
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/stdlib"
-	sqlite3 "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -437,41 +439,117 @@ func TestSQLiteWebChatStore_ThreadMigrationsRunOnce(t *testing.T) {
 	assert.Equal(t, 1, sqliteMigrationRecords(t, db, "thread_id_index"))
 }
 
-// SQLite authorizer codes (https://www.sqlite.org/c3ref/c_alter_table.html,
-// https://www.sqlite.org/c3ref/c_deny.html). go-sqlite3 exports these only in
-// cgo builds, so they are spelled out here to keep the file compiling without
-// cgo.
-const (
-	sqliteAuthOK   = 0  // SQLITE_OK
-	sqliteAuthDeny = 1  // SQLITE_DENY
-	sqliteAuthRead = 20 // SQLITE_READ
-)
+// schemaFaultDriverName is a test-only database/sql driver that wraps the
+// production SQLite driver (modernc.org/sqlite, "sqlite") and, while a
+// connection's fault is on, fails every statement that reads sqlite_master
+// or sqlite_schema. It lets a test make the web chat store's
+// table-existence check fail while other statements still work.
+const schemaFaultDriverName = "sqlite-schema-fault"
 
-// setSQLiteSchemaReadDenied installs (deny=true) or removes (deny=false) an
-// authorizer that rejects reads of sqlite_master, so the table-existence
-// check fails while other statements still work. openTestMemorySQLite pins
-// the pool to one connection, so the authorizer applies to every later
-// query on db.
+var registerSchemaFaultDriver sync.Once
+
+// errSchemaReadDenied is what a faulted connection returns for a schema read.
+var errSchemaReadDenied = errors.New("schema read denied by test fault")
+
+type schemaFaultDriver struct{ inner driver.Driver }
+
+func (d schemaFaultDriver) Open(name string) (driver.Conn, error) {
+	c, err := d.inner.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	return &schemaFaultConn{Conn: c}, nil
+}
+
+// schemaFaultConn forwards to the wrapped connection. Only the methods
+// database/sql uses with modernc.org/sqlite are wrapped; each one checks the
+// query text first.
+type schemaFaultConn struct {
+	driver.Conn
+	deny bool
+}
+
+func (c *schemaFaultConn) check(query string) error {
+	if c.deny && (strings.Contains(query, "sqlite_master") || strings.Contains(query, "sqlite_schema")) {
+		return errSchemaReadDenied
+	}
+	return nil
+}
+
+func (c *schemaFaultConn) Prepare(query string) (driver.Stmt, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	return c.Conn.Prepare(query)
+}
+
+func (c *schemaFaultConn) PrepareContext(ctx context.Context, query string) (driver.Stmt, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if p, ok := c.Conn.(driver.ConnPrepareContext); ok {
+		return p.PrepareContext(ctx, query)
+	}
+	return c.Conn.Prepare(query)
+}
+
+func (c *schemaFaultConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if q, ok := c.Conn.(driver.QueryerContext); ok {
+		return q.QueryContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *schemaFaultConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	if err := c.check(query); err != nil {
+		return nil, err
+	}
+	if e, ok := c.Conn.(driver.ExecerContext); ok {
+		return e.ExecContext(ctx, query, args)
+	}
+	return nil, driver.ErrSkip
+}
+
+func (c *schemaFaultConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
+	if b, ok := c.Conn.(driver.ConnBeginTx); ok {
+		return b.BeginTx(ctx, opts)
+	}
+	return c.Conn.Begin() //nolint:staticcheck // fallback for drivers without BeginTx
+}
+
+// openSchemaFaultSQLite opens a private in-memory database through the
+// schema-fault driver (see openTestMemorySQLite for the pool pinning).
+func openSchemaFaultSQLite(t *testing.T) *sql.DB {
+	t.Helper()
+	registerSchemaFaultDriver.Do(func() {
+		// sql.Open does not connect; it only looks up the registered driver.
+		probe, err := sql.Open("sqlite", "")
+		require.NoError(t, err)
+		inner := probe.Driver()
+		_ = probe.Close()
+		sql.Register(schemaFaultDriverName, schemaFaultDriver{inner: inner})
+	})
+	return openTestMemorySQLite(t, schemaFaultDriverName)
+}
+
+// setSQLiteSchemaReadDenied turns the schema-read fault on (deny=true) or off
+// on db's connection, so the table-existence check fails while other
+// statements still work. db must come from openSchemaFaultSQLite, whose pool
+// is pinned to one connection, so the setting applies to every later query.
 func setSQLiteSchemaReadDenied(t *testing.T, db *sql.DB, deny bool) {
 	t.Helper()
 	conn, err := db.Conn(context.Background())
 	require.NoError(t, err)
 	defer conn.Close() //nolint:errcheck
 	require.NoError(t, conn.Raw(func(dc any) error {
-		sc, ok := dc.(*sqlite3.SQLiteConn)
+		fc, ok := dc.(*schemaFaultConn)
 		if !ok {
-			return fmt.Errorf("driver connection is %T, want *sqlite3.SQLiteConn", dc)
+			return fmt.Errorf("driver connection is %T, want *schemaFaultConn", dc)
 		}
-		if !deny {
-			sc.RegisterAuthorizer(nil)
-			return nil
-		}
-		sc.RegisterAuthorizer(func(op int, arg1, _, _ string) int {
-			if op == sqliteAuthRead && (arg1 == "sqlite_master" || arg1 == "sqlite_schema") {
-				return sqliteAuthDeny
-			}
-			return sqliteAuthOK
-		})
+		fc.deny = deny
 		return nil
 	}))
 }
@@ -482,10 +560,7 @@ func setSQLiteSchemaReadDenied(t *testing.T, db *sql.DB, deny bool) {
 // mark the migration completed, so it would never run.
 func TestSQLiteWebChatStore_TableExistsError_Surfaces(t *testing.T) {
 	newStore := func(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
-		// Stays on mattn/go-sqlite3: the fault injection needs an
-		// authorizer hook (setSQLiteSchemaReadDenied), which
-		// modernc.org/sqlite, the production driver, does not expose.
-		db := openTestMemorySQLite(t, "sqlite3")
+		db := openSchemaFaultSQLite(t)
 		s := &sqliteWebChatStore{db: db}
 		require.NoError(t, s.Init())
 		// Init on a database without messages records nothing; make sure,

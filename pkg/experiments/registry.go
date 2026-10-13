@@ -163,7 +163,7 @@ const AgentDelegation = "hub.agent_delegation"
 // before; while it is on, a token whose (issuer, subject) is linked to an
 // active federated account yields that account's visitor identity. It also
 // gates POST /api/v1/auth/federation-token (404 while off), where this
-// hub's own users obtain user tokens for peer hubs.
+// hub's own users obtain user access credentials for peer hubs.
 const FederationProjectVisitors = "federation.project_visitors"
 
 // ChatThreadGroups gates project-scoped chat thread groups

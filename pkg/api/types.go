@@ -1166,9 +1166,13 @@ func TemplateNameFromContext(ctx context.Context) string {
 // AutoExposePorts is the Hub's auto-expose-ports default
 // (SCION_AUTO_EXPOSE_PORTS). It is the lowest env tier: buildAgentEnv applies
 // it only when no higher tier (hub-resolved env, template, harness-config
-// env, scion-agent.json) left the key set. Unlike the four limit fields it is
+// env, scion-agent.json) left the key set. Unlike the three limit fields it is
 // sent on start and restart as well as create, so a change to the Hub default
 // reaches an agent at its next start.
+//
+// Resources are also sent on start and restart: the broker applies them per
+// start and never persists them into scion-agent.json (ptone/scion#4561). A
+// broker on this version that talks to an older Hub gets them only on create.
 type HubAgentDefaults struct {
 	MaxTurns        int           `json:"maxTurns,omitempty"`
 	MaxModelCalls   int           `json:"maxModelCalls,omitempty"`
