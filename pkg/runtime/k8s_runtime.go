@@ -541,6 +541,11 @@ func (r *KubernetesRuntime) Run(ctx context.Context, config RunConfig) (podName 
 	//     pod, since nothing will ever record it as a running agent. Other
 	//     failures after the pod exists keep it, as before, so its status and
 	//     logs stay available until the agent is deleted.
+	//   On the broker's synchronous create path, ctx does not follow the
+	//   hub's request (runtimebroker syncStart.bind): the hub giving up on a
+	//   slow start (its dispatch timeout) does not make it done, so a cold
+	//   start that is still pulling its image is not removed here
+	//   (ptone/scion#4817).
 	// The cleanup runs on a fresh context because ctx may already be done.
 	// cleanupArmed is set just before the first object is created, so early
 	// validation failures make no API calls.

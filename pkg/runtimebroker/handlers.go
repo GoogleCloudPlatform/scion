@@ -1505,12 +1505,15 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		// Tracked as a start in flight until Manager.Start, Run's deferred
 		// cleanup and ss.finish have all returned (the deferred release
 		// above runs finishTracked last).
-		// The start runs under ctx as built up to here (policy hook, skill
-		// resolver, hub agent defaults, worktree signal), cancelled also
-		// when the registration is (bind), never under the registration's
-		// own context, which predates those values.
+		// The start runs with ctx's values as built up to here (policy
+		// hook, skill resolver, hub agent defaults, worktree signal), never
+		// under the registration's own context, which predates those
+		// values. It is cancelled only when the registration is (a stop,
+		// delete or newer start) or at the broker's own bound, not when
+		// the request ends: the hub giving up on a slow start must not
+		// make the runtime tear it down (bind, ptone/scion#4817).
 		var startCtx, trackCtx context.Context
-		startCtx, unbindStart = ss.bind(ctx)
+		startCtx, unbindStart = ss.bind(ctx, s.syncStartMaxDuration)
 		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
 		ctx = trackCtx
