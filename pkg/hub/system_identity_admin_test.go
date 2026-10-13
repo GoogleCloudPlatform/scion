@@ -41,9 +41,8 @@ func seedSystemSettingsHome(t *testing.T) string {
 	return path
 }
 
-// doLoopbackSystemRequest sends a request from a loopback address through the
-// full server handler (authentication middleware, route guard, handler).
-// headers carries the credential; none means an unauthenticated request.
+// doLoopbackSystemRequest sends a request from loopback through the full
+// server handler; no headers means an unauthenticated request.
 func doLoopbackSystemRequest(srv *Server, method, path, body string, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
 	if body != "" {
@@ -58,10 +57,6 @@ func doLoopbackSystemRequest(srv *Server, method, path, body string, headers map
 	return rec
 }
 
-// The mutating workstation routes gate on hub.config.update (super-admin
-// bypass preserved) in addition to workstation mode and loopback origin, so a
-// non-admin or non-user loopback caller cannot rebind the hub's identity or
-// rewrite its settings even though it reaches the loopback hub.
 func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
 	srv, s := testWorkstationServer(t)
 	ctx := context.Background()
@@ -100,8 +95,6 @@ func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
 				rec := doLoopbackSystemRequest(srv, rt.method, rt.path, rt.body, c.headers)
 				require.Equal(t, c.want, rec.Code, "%s %s as %s: %s", rt.method, rt.path, c.who, rec.Body.String())
 
-				// The guard refused before the handler ran: neither the
-				// settings file nor the dev user row changed.
 				data, err := os.ReadFile(settingsPath)
 				require.NoError(t, err)
 				require.Equal(t, "version: \"1\"\n", string(data))
@@ -113,7 +106,6 @@ func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
 		}
 	}
 
-	// The dev user is the workstation's super-admin and passes both routes.
 	dev := map[string]string{"Authorization": "Bearer " + testDevToken}
 	t.Run("/api/v1/system/identity/dev super-admin", func(t *testing.T) {
 		settingsPath := seedSystemSettingsHome(t)
@@ -135,8 +127,6 @@ func TestSystemMutatingRoutesRequireHubAdmin(t *testing.T) {
 	})
 }
 
-// The read-only workstation routes keep workstation-only access: no admin
-// permission is required, so a non-admin loopback caller still reads status.
 func TestSystemReadRoutesStayWorkstationOnly(t *testing.T) {
 	srv, s := testWorkstationServer(t)
 	_, _, member, _ := setupCredentialTestServerOn(t, srv, s)
@@ -149,8 +139,6 @@ func TestSystemReadRoutesStayWorkstationOnly(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// With workstation mode off the routes 404 as before, even for the
-// super-admin.
 func TestSystemIdentityIs404OutsideWorkstation(t *testing.T) {
 	srv, _ := testServer(t)
 	require.False(t, srv.workstation)

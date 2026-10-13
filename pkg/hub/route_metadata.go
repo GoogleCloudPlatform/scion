@@ -1216,10 +1216,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/identity": {
 		Pattern: "/api/v1/system/identity", RouteID: "system.identity",
 		Classification: RouteWorkstation,
-		// Mutating: renames the dev user and writes server.auth.* to the
-		// global settings. Guard it like the admin config writers so a
-		// non-admin loopback caller cannot rebind the hub's identity.
-		Permission: "hub.config.update", Resource: "hub", Action: "update",
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/status": {
 		Pattern: "/api/v1/system/status", RouteID: "system.status",
@@ -1256,9 +1253,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	"/api/v1/system/workstation-settings": {
 		Pattern: "/api/v1/system/workstation-settings", RouteID: "system.workstationSettings",
 		Classification: RouteWorkstation,
-		// Mutating: rewrites the global settings file. Same guard as the
-		// identity writer above.
-		Permission: "hub.config.update", Resource: "hub", Action: "update",
+		Permission:     "hub.config.update", Resource: "hub", Action: "update",
 	},
 	"/api/v1/system/fs/list": {
 		Pattern: "/api/v1/system/fs/list", RouteID: "system.fs.list",
@@ -1363,10 +1358,8 @@ func (s *Server) routePermissionDecision(r *http.Request, meta RouteMetadata) ro
 	return routePermissionDecisionResult{outcome: routePermissionAllowed, identity: identity, target: target}
 }
 
-// enforceRoutePermission runs the permission decision for a route that
-// declares a Permission and writes the matching response on a refusal. It
-// reports whether the request may proceed. Both the RouteHubAdmin guard and a
-// mutating RouteWorkstation route use it, so the two share one refusal shape.
+// enforceRoutePermission reports whether the request may proceed, writing the
+// refusal when it may not.
 func (s *Server) enforceRoutePermission(w http.ResponseWriter, r *http.Request, meta RouteMetadata) bool {
 	d := s.routePermissionDecision(r, meta)
 	switch d.outcome {
@@ -1472,10 +1465,6 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				next(w, r)
 			}
 		case RouteWorkstation:
-			// Agent containers also reach the hub over loopback, so loopback
-			// origin is not a trust boundary: a mutating workstation route
-			// also declares a Permission (the dev user, a super-admin,
-			// still passes).
 			if !s.workstation {
 				http.NotFound(w, r)
 				return
