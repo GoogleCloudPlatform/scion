@@ -254,18 +254,30 @@ const (
 	CheckpointStepPreClean = api.LaunchStepPreClean
 )
 
-// launchStepMessages is the fixed text a runtime sends with each progress
-// step (RunConfig.Progress). It never carries runtime detail such as an
-// image reference, pod name or namespace.
-var launchStepMessages = map[string]string{
-	api.LaunchStepScheduling:       "waiting to be scheduled",
-	api.LaunchStepAwaitingCapacity: "waiting for node capacity",
-	api.LaunchStepInitContainers:   "running init containers",
-	api.LaunchStepContainerCreate:  "preparing the container (image pull, volume mounts)",
-	api.LaunchStepContainerStart:   "starting the container",
-	api.LaunchStepHomeSync:         "syncing the agent home",
-	api.LaunchStepWorkspaceSync:    "syncing the workspace",
-	api.LaunchStepStartupGate:      "starting the agent",
+// launchStepMessage returns the fixed text a runtime sends with each
+// progress step (RunConfig.Progress), or "" for a step without one. It never
+// carries runtime detail such as an image reference, pod name or namespace.
+func launchStepMessage(step string) string {
+	switch step {
+	case api.LaunchStepScheduling:
+		return "waiting to be scheduled"
+	case api.LaunchStepAwaitingCapacity:
+		return "waiting for node capacity"
+	case api.LaunchStepInitContainers:
+		return "running init containers"
+	case api.LaunchStepContainerCreate:
+		return "preparing the container (image pull, volume mounts)"
+	case api.LaunchStepContainerStart:
+		return "starting the container"
+	case api.LaunchStepHomeSync:
+		return "syncing the agent home"
+	case api.LaunchStepWorkspaceSync:
+		return "syncing the workspace"
+	case api.LaunchStepStartupGate:
+		return "starting the agent"
+	default:
+		return ""
+	}
 }
 
 // LaunchFailure is a runtime start failure the runtime could classify
@@ -327,7 +339,7 @@ func (h launchHooks) progress(step string) {
 	if h.progressFn == nil {
 		return
 	}
-	h.progressFn(step, launchStepMessages[step])
+	h.progressFn(step, launchStepMessage(step))
 }
 
 // checkpoint is called immediately before a resource-creating call. A
