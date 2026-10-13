@@ -359,7 +359,7 @@ func (r *Relay) serveStream(w http.ResponseWriter, req *http.Request, peer, sess
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		return
 	}
-	if err := hop.grant(conduit.DefaultStreamWindow); err != nil {
+	if err := hop.grant(conduit.DefaultStreamWindow, TargetStream{SessionID: sessionID, StreamID: st.ID()}); err != nil {
 		_ = st.CloseWithCode(conduit.CloseCancelled, ReasonCancelled)
 		hop.end(errLinkLost, false)
 		return

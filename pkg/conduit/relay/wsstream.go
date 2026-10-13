@@ -73,12 +73,23 @@ type wsStream struct {
 
 	resizes chan conduit.WindowSize
 	done    chan struct{}
+
+	// target is the stream on the target's own session, as the owner
+	// relay reported it in the hop's StreamAccept (caller side only;
+	// zero when the owner did not report it).
+	target TargetStream
 }
 
 var (
 	_ conduit.Stream    = (*wsStream)(nil)
 	_ conduit.Resizable = (*wsStream)(nil)
+	_ targetStreamer    = (*wsStream)(nil)
 )
+
+// TargetStream implements targetStreamer.
+func (s *wsStream) TargetStream() (TargetStream, bool) {
+	return s.target, s.target.valid()
+}
 
 // newWSStream starts the frame reader. sendCredit is the peer's initial
 // window; recvWin is the window we grant (0 until the stream is accepted:
@@ -102,13 +113,20 @@ func newWSStream(conn transport.Conn, sendCredit, recvWin uint32, clk clock.Cloc
 }
 
 // grant opens our receive window (owner side, on accept) and sends
-// StreamAccept carrying it.
-func (s *wsStream) grant(win uint32) error {
+// StreamAccept carrying it, with target: the stream on the target's own
+// session that this hop is spliced to (contracts §3: set only by the owner
+// relay on an internal hop).
+func (s *wsStream) grant(win uint32, target TargetStream) error {
 	s.mu.Lock()
 	s.win = win
 	s.recvAvail += int64(win)
 	s.mu.Unlock()
-	return s.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamAccept{StreamAccept: &conduitv1.StreamAccept{StreamId: hopStreamID, InitialWindow: win}}})
+	return s.send(&conduitv1.Frame{Body: &conduitv1.Frame_StreamAccept{StreamAccept: &conduitv1.StreamAccept{
+		StreamId:        hopStreamID,
+		InitialWindow:   win,
+		TargetSessionId: target.SessionID,
+		TargetStreamId:  target.StreamID,
+	}}})
 }
 
 // Done is closed when the stream has ended (either side closed or the

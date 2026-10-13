@@ -399,7 +399,9 @@ func (s *RemoteSession) OpenStream(ctx context.Context, open *conduitv1.StreamOp
 		}
 		switch body := res.f.GetBody().(type) {
 		case *conduitv1.Frame_StreamAccept:
-			return newWSStream(conn, body.StreamAccept.GetInitialWindow(), win, s.client.hopClock(), s.client.closeWait()), nil
+			hop := newWSStream(conn, body.StreamAccept.GetInitialWindow(), win, s.client.hopClock(), s.client.closeWait())
+			hop.target = hopAcceptTarget(body.StreamAccept, s.rec.SessionID)
+			return hop, nil
 		case *conduitv1.Frame_StreamClose:
 			_ = conn.Close()
 			return nil, &conduit.CloseError{Code: body.StreamClose.GetCode(), Reason: body.StreamClose.GetReason()}
