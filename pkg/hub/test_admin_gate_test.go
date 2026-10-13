@@ -126,7 +126,7 @@ func TestTestAdminGate_NewAdmitsSuperAdminWithCompletePolicy(t *testing.T) {
 	buf := tiaCaptureAudit(t)
 	cfg := tiaGateServerConfig()
 	cfg.TestAdminGate.SuperAdmin = true
-	cfg.TestMode = TestModeConfig{Level: TestModeSuperAdmin}
+	cfg.TestMode.Level = TestModeSuperAdmin
 	srv, _, err := tiaNewServer(t, cfg)
 	require.NoError(t, err)
 	assert.True(t, srv.testAdminTierEnabled(testAdminKindHubAdmin))
