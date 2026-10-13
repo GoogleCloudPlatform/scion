@@ -901,3 +901,94 @@ func TestDeliverImmediate_ZeroValueSpecStillSubmits(t *testing.T) {
 		"tmux send-keys -t scion:0 Enter",
 	})
 }
+
+// TestDeliverImmediate_ExtraSubmitDelayHonoured checks that each extra
+// submit pass waits ExtraSubmitDelay after the previous pass.
+func TestDeliverImmediate_ExtraSubmitDelayHonoured(t *testing.T) {
+	const delay = 60 * time.Millisecond
+	var calls []string
+	mgr := newDeliveryTestManager(api.DeliverySpec{SubmitKeys: []string{"C-m"}, ExtraSubmits: 2, ExtraSubmitDelay: delay}, &calls)
+	var sendTimes []time.Time
+	mgr.Runtime.(*runtime.MockRuntime).ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+		if len(cmd) >= 2 && cmd[1] == "send-keys" {
+			sendTimes = append(sendTimes, time.Now())
+		}
+		return "", nil
+	}
+	if err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false); err != nil {
+		t.Fatalf("deliverImmediate: %v", err)
+	}
+	if len(sendTimes) != 3 {
+		t.Fatalf("expected 3 send-keys calls (closing submit + 2 extras), got %d", len(sendTimes))
+	}
+	for i := 1; i < len(sendTimes); i++ {
+		if gap := sendTimes[i].Sub(sendTimes[i-1]); gap < delay {
+			t.Errorf("gap before extra submit %d = %v, want at least %v", i, gap, delay)
+		}
+	}
+}
+
+// TestDeliverImmediate_ExtraSubmitErrorsNameTheKey pins the error text of the
+// extra-submit loop. With the default spec it is the historical text
+// ("failed to send Enter ..." / "context canceled before sending Enter
+// ..."); with custom keys it names the configured key.
+func TestDeliverImmediate_ExtraSubmitErrorsNameTheKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		spec    *api.DeliverySpec // nil uses the real generic harness
+		key     string
+		wantErr string
+	}{
+		{"default harness", nil, "Enter", "failed to send Enter to agent 'test-agent': exec failed"},
+		{"custom key", &api.DeliverySpec{SubmitKeys: []string{"C-m"}, ExtraSubmits: 1}, "C-m", "failed to send C-m to agent 'test-agent': exec failed"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls []string
+			spec := api.DeliverySpec{}
+			if tc.spec != nil {
+				spec = *tc.spec
+			}
+			mgr := newDeliveryTestManager(spec, &calls)
+			if tc.spec == nil {
+				mgr.newHarness = nil
+			}
+			var submits int
+			mgr.Runtime.(*runtime.MockRuntime).ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+				if len(cmd) >= 2 && cmd[1] == "send-keys" && cmd[len(cmd)-1] == tc.key {
+					submits++
+					if submits == 2 { // the first extra submit
+						return "", fmt.Errorf("exec failed")
+					}
+				}
+				return "", nil
+			}
+			err := mgr.deliverImmediate(context.Background(), "test-agent", "", "hello", false)
+			var partial *PartialDeliveryError
+			if !errors.As(err, &partial) {
+				t.Fatalf("expected a PartialDeliveryError, got %T: %v", err, err)
+			}
+			if err.Error() != tc.wantErr {
+				t.Fatalf("error = %q, want %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+
+	t.Run("default harness cancelled", func(t *testing.T) {
+		var calls []string
+		mgr := newDeliveryTestManager(api.DeliverySpec{}, &calls)
+		mgr.newHarness = nil
+		ctx, cancel := context.WithCancel(context.Background())
+		mgr.Runtime.(*runtime.MockRuntime).ExecFunc = func(ctx context.Context, id string, cmd []string) (string, error) {
+			if len(cmd) >= 2 && cmd[1] == "paste-buffer" {
+				cancel()
+			}
+			return "", nil
+		}
+		err := mgr.deliverImmediate(ctx, "test-agent", "", "hello", false)
+		want := "context canceled before sending Enter to agent 'test-agent': context canceled"
+		if err == nil || err.Error() != want {
+			t.Fatalf("error = %v, want %q", err, want)
+		}
+	})
+}
