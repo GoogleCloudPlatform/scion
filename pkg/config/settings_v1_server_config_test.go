@@ -715,6 +715,8 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 					IssuerType:       "hub",
 					DefaultRole:      "",
 					AllowedEmails:    nil,
+					// AllowVisitorGrants applies to hub and user issuers.
+					AllowVisitorGrants: true,
 				},
 				{
 					IssuerURL:        "https://accounts.google.com",
@@ -759,11 +761,13 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, ti0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, ti0.DefaultScopes)
 	assert.Equal(t, "hub", ti0.IssuerType)
+	assert.True(t, ti0.AllowVisitorGrants)
 
 	ti1 := gc.Federation.TrustedIssuers[1]
 	assert.Equal(t, "https://accounts.google.com", ti1.IssuerURL)
 	assert.Equal(t, "service_account", ti1.IssuerType)
 	assert.Equal(t, []string{"sa@proj.iam.gserviceaccount.com"}, ti1.AllowedEmails)
+	assert.False(t, ti1.AllowVisitorGrants)
 
 	ti2 := gc.Federation.TrustedIssuers[2]
 	assert.Equal(t, "https://accounts.google.com/", ti2.IssuerURL)
@@ -792,6 +796,7 @@ func TestConvertV1FederationConfig_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"user@example.com"}, vi0.AllowedRootUsers)
 	assert.Equal(t, []string{"agent:status:update", "agent:message:send"}, vi0.DefaultScopes)
 	assert.Equal(t, "hub", vi0.IssuerType)
+	assert.True(t, vi0.AllowVisitorGrants)
 
 	vi1 := v1Back.Federation.TrustedIssuers[1]
 	assert.Equal(t, "https://accounts.google.com", vi1.IssuerURL)

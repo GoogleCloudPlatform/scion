@@ -2383,7 +2383,11 @@
         "default_role": { "type": "string" },
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
-        "allowed_domains": { "type": "array", "items": { "type": "string" } }
+        "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "allow_visitor_grants": {
+          "type": "boolean",
+          "description": "Let project owners grant visitor access to users of this issuer (issuer_type user or hub). Default false."
+        }
       },
       "additionalProperties": false
     }

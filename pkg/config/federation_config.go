@@ -77,6 +77,14 @@ type TrustedIssuerConfig struct {
 	// this field is set. Never consulted for a service-account principal:
 	// those are admitted by AllowedGCPProjects instead.
 	AllowedDomains []string `json:"allowed_domains,omitempty" yaml:"allowed_domains,omitempty" koanf:"allowed_domains"`
+
+	// AllowVisitorGrants lets project owners and admins grant visitor
+	// access to users of this issuer (federation.project_visitors). It
+	// applies only to issuer_type "user" and "hub"; Validate rejects it on
+	// any other type. Default false: the hub accepts no visitor grant for
+	// the issuer. A grant's email must still pass AllowedEmails and
+	// AllowedDomains.
+	AllowVisitorGrants bool `json:"allow_visitor_grants,omitempty" yaml:"allow_visitor_grants,omitempty" koanf:"allow_visitor_grants"`
 }
 
 // FederationCacheConfig holds cache tuning parameters for federation JWKS fetching.
@@ -91,6 +99,13 @@ var allowedIssuerTypes = map[string]bool{
 	"hub":             true,
 	"service_account": true,
 	"user":            true,
+}
+
+// IssuerAllowsVisitorGrantsType reports whether issuerType (a
+// TrustedIssuerConfig.IssuerType value; empty means "hub") is one for which
+// allow_visitor_grants may be set: "user" or "hub".
+func IssuerAllowsVisitorGrantsType(issuerType string) bool {
+	return issuerType == "" || issuerType == "hub" || issuerType == "user"
 }
 
 // allowedAlgorithms is the set of algorithms permitted for federation token validation.
@@ -278,6 +293,13 @@ func (c *FederationConfig) Validate() []error {
 			if reason := invalidDomainEntryReason(domain); reason != "" {
 				errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allowed_domains[%d] %q: %s", i, j, domain, reason))
 			}
+		}
+
+		// Rule 12: allow_visitor_grants admits visitor grants for users of
+		// the issuer, so it applies only to the issuer types that present
+		// user tokens: "user", and "hub" (empty means "hub").
+		if issuer.AllowVisitorGrants && !IssuerAllowsVisitorGrantsType(issuer.IssuerType) {
+			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allow_visitor_grants is only applicable to issuer_type \"user\" or \"hub\", not %q", i, issuer.IssuerType))
 		}
 	}
 
