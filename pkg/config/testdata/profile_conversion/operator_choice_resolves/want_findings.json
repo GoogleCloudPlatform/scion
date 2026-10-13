@@ -13,7 +13,9 @@
         "slow"
       ],
       "message_contains": [
-        "instance k8s-agents takes profile slow's clone_depth",
+        "clone_depth stays unset on instance k8s-agents and template batch sets it",
+        "no template is generated",
+        "fast: full from profiles.fast.clone_depth",
         "slow: unset"
       ]
     },
@@ -33,14 +35,29 @@
     {
       "code": "profile_conflict_resolved",
       "severity": "notice",
+      "path": "profiles.*.shared_dir_size",
+      "profiles": [
+        "fast",
+        "slow"
+      ],
+      "message_contains": [
+        "instance k8s-agents takes profile slow's shared_dir_size",
+        "fast: 40Gi from profiles.fast.shared_dir_size",
+        "slow: unset"
+      ]
+    },
+    {
+      "code": "profile_conflict_resolved",
+      "severity": "notice",
       "path": "profiles.*.shared_dir_storage_backend",
       "profiles": [
         "fast",
         "slow"
       ],
       "message_contains": [
-        "stays unset on instance k8s-agents and template batch sets it",
-        "no template is generated"
+        "instance k8s-agents takes profile fast's shared_dir_storage_backend",
+        "fast: nfs from profiles.fast.shared_dir_storage_backend",
+        "slow: local from profiles.slow.shared_dir_storage_backend"
       ]
     }
   ]

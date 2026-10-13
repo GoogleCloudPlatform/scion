@@ -136,7 +136,10 @@ type convValue struct {
 }
 
 type convGroup struct {
-	key      string
+	key string
+	// seed identifies the group's scope (plus its members for a Split
+	// group); a hash of it makes the key unique.
+	seed     string
 	scope    string
 	typ      string
 	ctx      string
@@ -507,7 +510,7 @@ func groupProfiles(profiles []*convProfile) []*convGroup {
 	for _, p := range profiles {
 		g, ok := byScope[p.scope]
 		if !ok {
-			g = &convGroup{scope: p.scope, typ: p.typ, ctx: p.ctx, ns: p.ns}
+			g = &convGroup{seed: p.scope, scope: p.scope, typ: p.typ, ctx: p.ctx, ns: p.ns}
 			if p.typ == RuntimeTargetTypeKubernetes {
 				g.key = conversionKey(p.scope, "k8s", p.ctx, p.ns)
 			} else {
@@ -521,6 +524,7 @@ func groupProfiles(profiles []*convProfile) []*convGroup {
 	for _, g := range byScope {
 		out = append(out, g)
 	}
+	uniqueGroupKeys(out)
 	sortGroups(out)
 	return out
 }
@@ -529,11 +533,37 @@ func sortGroups(groups []*convGroup) {
 	sort.Slice(groups, func(i, j int) bool { return groups[i].key < groups[j].key })
 }
 
+// uniqueGroupKeys gives each group whose key another group shares a key
+// with a short hash of its own seed, so that every group has its own key.
+// Distinct scopes can build the same text (context "prod" and namespace
+// "east" against namespace "prod-east"), and so can a Split group and
+// another scope. A group's new key depends only on its key and seed, so the
+// result is still a function of the input.
+func uniqueGroupKeys(groups []*convGroup) {
+	for round := 0; round < 4; round++ {
+		count := map[string]int{}
+		for _, g := range groups {
+			count[g.key]++
+		}
+		dup := false
+		for _, g := range groups {
+			if count[g.key] > 1 {
+				dup = true
+				g.key = hashedConversionKey(g.key, g.seed+strings.Repeat("\x00", round))
+			}
+		}
+		if !dup {
+			return
+		}
+	}
+}
+
 // conversionKey builds an instance key from prefix and the non-empty parts,
 // each made key-safe (lower-case letters, digits and "-"). When that
 // changes a part, or the key would be too long, a short hash of seed is
-// appended, so distinct scopes never share a key. The result is a function
-// of its arguments only.
+// appended. The result is a function of its arguments only. Two distinct
+// scopes can still build the same key; uniqueGroupKeys resolves that across
+// the groups of one conversion.
 func conversionKey(seed, prefix string, parts ...string) string {
 	key, lossy := prefix, false
 	for _, part := range parts {
@@ -551,6 +581,13 @@ func conversionKey(seed, prefix string, parts ...string) string {
 	if !lossy && len(key) <= 63 {
 		return key
 	}
+	return hashedConversionKey(key, seed)
+}
+
+// hashedConversionKey returns key, cut to fit, with "-" and the first 8 hex
+// digits of the sha256 of seed appended: at most 63 characters, ending in a
+// letter or digit.
+func hashedConversionKey(key, seed string) string {
 	sum := sha256.Sum256([]byte(seed))
 	if len(key) > 54 {
 		key = strings.TrimRight(key[:54], "-")
@@ -616,8 +653,10 @@ func applySplitChoices(st *convState, groups []*convGroup, choices []ConversionC
 		for _, p := range moved {
 			split[p.name] = true
 		}
+		seed := g.scope + "\x00" + strings.Join(members, "\x00")
 		out = append(out, &convGroup{
-			key:      conversionKey(g.scope+"\x00"+strings.Join(members, "\x00"), g.key, strings.Join(members, "-")),
+			key:      conversionKey(seed, g.key, strings.Join(members, "-")),
+			seed:     seed,
 			scope:    g.scope,
 			typ:      g.typ,
 			ctx:      g.ctx,
@@ -637,6 +676,7 @@ func applySplitChoices(st *convState, groups []*convGroup, choices []ConversionC
 			out = append(out, g)
 		}
 	}
+	uniqueGroupKeys(out)
 	sortGroups(out)
 	return out
 }
@@ -702,6 +742,13 @@ func fieldChoicesByGroup(st *convState, groups []*convGroup, choices []Conversio
 				invalidChoice(st, path, "the template choice names no template", g)
 				continue
 			}
+			// Only a workload default has a template setting that
+			// outranks the instance value; an infrastructure field left
+			// unset would silently fall through to the global setting.
+			if !isWorkloadField(field) {
+				invalidChoice(st, path, fmt.Sprintf("field %s is not a workload default, so no template can set it; choose a profile's value, or split the profiles onto separate instances", field), g)
+				continue
+			}
 		} else if groupProfile(g, c.ChosenProfile) == nil {
 			invalidChoice(st, path, fmt.Sprintf("profile %q is not in target group %s", c.ChosenProfile, g.key), g)
 			continue
@@ -750,17 +797,29 @@ func buildGroupInstance(st *convState, g *convGroup, choices map[string]*fieldCh
 	}
 	sort.Strings(fields)
 
+	conflicting := map[string]bool{}
 	for _, field := range fields {
 		first := g.profiles[0].fields[field]
-		agree := true
 		for _, p := range g.profiles[1:] {
 			if !conversionValuesEqual(field, first.v, p.fields[field].v) {
-				agree = false
+				conflicting[field] = true
 				break
 			}
 		}
-		if agree {
+	}
+
+	for _, field := range fields {
+		first := g.profiles[0].fields[field]
+		if !conflicting[field] {
 			setInstanceField(target, defaults, field, first.v)
+			continue
+		}
+		// A harness override that only some profiles have differs in its
+		// presence too. When one of its sub-fields conflicts, that
+		// conflict already names the override, so the presence is not
+		// reported again; the entry exists once a sub-field is agreed or
+		// chosen.
+		if coveredHarnessOverrideMarker(field, conflicting) {
 			continue
 		}
 		profiles := groupProfileNames(g)
@@ -831,13 +890,7 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 		return
 	}
 	if rest, ok := strings.CutPrefix(field, "harness_overrides."); ok {
-		// A harness config name may contain dots, so the sub-field is
-		// the last segment when it names one, else the field is the
-		// override's presence marker.
-		hc, sub := rest, ""
-		if i := strings.LastIndex(rest, "."); i >= 0 && harnessOverrideSubFields[rest[i+1:]] {
-			hc, sub = rest[:i], rest[i+1:]
-		}
+		hc, sub := splitHarnessOverrideField(rest)
 		if d.HarnessOverrides == nil {
 			d.HarnessOverrides = map[string]V1HarnessOverride{}
 		}
@@ -903,15 +956,50 @@ func setInstanceField(t *V1RuntimeTargetConfig, d *V1InstanceAgentDefaults, fiel
 	}
 }
 
+// splitHarnessOverrideField splits a folded field after "harness_overrides."
+// into the harness config name and the sub-field, which is "" for the
+// override's presence marker. A harness config name may contain dots, so
+// the sub-field is the last segment only when it names one.
+func splitHarnessOverrideField(rest string) (hc, sub string) {
+	if i := strings.LastIndex(rest, "."); i >= 0 && harnessOverrideSubFields[rest[i+1:]] {
+		return rest[:i], rest[i+1:]
+	}
+	return rest, ""
+}
+
+// coveredHarnessOverrideMarker reports whether field is a harness override's
+// presence marker and one of the same override's sub-fields conflicts.
+func coveredHarnessOverrideMarker(field string, conflicting map[string]bool) bool {
+	rest, ok := strings.CutPrefix(field, "harness_overrides.")
+	if !ok {
+		return false
+	}
+	hc, sub := splitHarnessOverrideField(rest)
+	if sub != "" {
+		return false
+	}
+	for f := range conflicting {
+		if r, isOverride := strings.CutPrefix(f, "harness_overrides."); isOverride {
+			if fhc, fsub := splitHarnessOverrideField(r); fhc == hc && fsub != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // harnessOverrideSubFields are the folded fields of one harness override.
 var harnessOverrideSubFields = map[string]bool{
 	"image": true, "image_pull_policy": true, "user": true, "auth_selected_type": true,
 	"env": true, "volumes": true, "resources": true,
 }
 
-// templateEquivalents names the template setting that outranks the
-// instance value of an infrastructure field.
-var templateEquivalents = map[string]string{
+// agentKubernetesEquivalents names the agent's own (inline or persisted)
+// kubernetes setting that outranks the instance value of an infrastructure
+// field. A template's kubernetes block is not applied to an agent's job
+// config (ptone/scion#4524, contract-appendix-p3.md FC5 errata), so no
+// template can set these.
+var agentKubernetesEquivalents = map[string]string{
 	"priority_class_name":      "kubernetes.priorityClassName",
 	"shared_dir_storage_class": "kubernetes.shared_dir_storage_class",
 	"shared_dir_size":          "kubernetes.shared_dir_size",
@@ -937,9 +1025,9 @@ func conflictMessage(g *convGroup, field string) string {
 		return head + fmt.Sprintf("Choose one value as the instance's agent_defaults.%s, and express the others through a template "+
 			"(a template's value outranks the instance default, except a harness_overrides image, which ranks above the template image: see ptone/scion#1799), "+
 			"or keep the profiles on separate instances on the same target scope.", field)
-	case templateEquivalents[field] != "":
-		return head + fmt.Sprintf("Choose one value as the instance's runtime_target.%s, and express the others through a template's %s, "+
-			"which outranks the instance default, or keep the profiles on separate instances on the same target scope.", field, templateEquivalents[field])
+	case agentKubernetesEquivalents[field] != "":
+		return head + fmt.Sprintf("Choose one value as the instance's runtime_target.%s, and express the others through the agent's own %s "+
+			"(inline or persisted), which outranks the instance default, or keep the profiles on separate instances on the same target scope.", field, agentKubernetesEquivalents[field])
 	default:
 		return head + fmt.Sprintf("Choose one value for the instance's runtime_target.%s, or declare a second instance with its own key on the same target scope.", field)
 	}
@@ -965,8 +1053,11 @@ func displayConversionValue(field string, v interface{}) string {
 	if env, ok := v.(map[string]string); ok && strings.HasSuffix(field, ".env") {
 		return "env keys " + strings.Join(sortedEnvKeys(env), ",") + " (values not shown)"
 	}
-	if s, ok := v.(string); ok {
+	switch s := v.(type) {
+	case string:
 		return s
+	case api.CloneDepth:
+		return string(s)
 	}
 	b, err := json.Marshal(v)
 	if err != nil {

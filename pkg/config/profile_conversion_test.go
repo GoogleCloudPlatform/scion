@@ -501,40 +501,197 @@ func TestConvert_NeverMaterializesSecretValues(t *testing.T) {
 	}
 }
 
-// Invalid operator choices are blocking findings that keep the group's
-// profiles out of the profile map; nothing is chosen in their place.
+// Invalid operator choices are blocking findings that keep the named
+// group's profiles out of the profile map; nothing is chosen in their
+// place. In each case the group's own conflicts are resolved by valid
+// choices (choices[0] and choices[1]), so the invalid choice is the only
+// thing that can block the profiles.
 func TestConvert_InvalidChoicesBlock(t *testing.T) {
 	vs := &VersionedSettings{
 		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
 		Profiles: map[string]V1ProfileConfig{
-			"a": {Runtime: "cluster", ImageRegistry: "reg/a"},
-			"b": {Runtime: "cluster", ImageRegistry: "reg/b"},
+			"a": {Runtime: "cluster", ImageRegistry: "reg/a", SharedDirStorageBackend: "nfs"},
+			"b": {Runtime: "cluster", ImageRegistry: "reg/b", SharedDirStorageBackend: "local"},
 		},
 	}
-	for name, c := range map[string]ConversionChoice{
-		"unknown group":          {TargetGroup: "nope", Field: "image_registry", ChosenProfile: "a"},
-		"profile not in group":   {TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: "zz"},
-		"field without conflict": {TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: "a"},
-		"split and field":        {TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: "a", Split: []string{"a"}},
-		"split unknown profile":  {TargetGroup: "k8s-agents", Split: []string{"zz"}},
-		"empty template":         {TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: ConversionChoiceTemplatePrefix},
+	valid := []ConversionChoice{
+		{TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: "a"},
+		{TargetGroup: "k8s-agents", Field: "shared_dir_storage_backend", ChosenProfile: "b"},
+	}
+	// Without an invalid choice the group converts cleanly.
+	clean := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: valid})
+	if !reflect.DeepEqual(clean.ProfileMap, map[string]string{"a": "k8s-agents", "b": "k8s-agents"}) {
+		t.Fatalf("valid choices only: profile map %v, findings %+v", clean.ProfileMap, clean.Findings)
+	}
+	for name, tc := range map[string]struct {
+		invalid ConversionChoice
+		blocks  bool // an unknown group names no profiles to block
+	}{
+		"unknown group":          {ConversionChoice{TargetGroup: "nope", Field: "clone_depth", ChosenProfile: "a"}, false},
+		"profile not in group":   {ConversionChoice{TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: "zz"}, true},
+		"field without conflict": {ConversionChoice{TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: "a"}, true},
+		"duplicate field choice": {ConversionChoice{TargetGroup: "k8s-agents", Field: "image_registry", ChosenProfile: "b"}, true},
+		"split and field":        {ConversionChoice{TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: "a", Split: []string{"a"}}, true},
+		"split unknown profile":  {ConversionChoice{TargetGroup: "k8s-agents", Split: []string{"zz"}}, true},
+		"empty template":         {ConversionChoice{TargetGroup: "k8s-agents", Field: "clone_depth", ChosenProfile: ConversionChoiceTemplatePrefix}, true},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: []ConversionChoice{c}})
-			found := false
-			for _, f := range got.Findings {
-				if f.Path == "choices[0]" && f.Code == ConversionUnknownSettingsKey && f.Severity == ConversionSeverityBlocking {
-					found = true
+			choices := append(append([]ConversionChoice(nil), valid...), tc.invalid)
+			got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: choices})
+			var f *ConversionFinding
+			for i := range got.Findings {
+				if got.Findings[i].Path == "choices[2]" {
+					f = &got.Findings[i]
 				}
 			}
-			if !found {
-				t.Fatalf("no blocking finding for the choice: %+v", got.Findings)
+			if f == nil || f.Code != ConversionUnknownSettingsKey || f.Severity != ConversionSeverityBlocking {
+				t.Fatalf("no blocking unknown_settings_key finding at choices[2]: %+v", got.Findings)
 			}
-			if len(got.ProfileMap) != 0 {
+			if tc.blocks && len(got.ProfileMap) != 0 {
 				t.Fatalf("profile map %v, want none", got.ProfileMap)
 			}
-			if d := got.Instances[0].AgentDefaults; d != nil && d.ImageRegistry != "" {
-				t.Fatalf("a value was chosen: %q", d.ImageRegistry)
+			if !tc.blocks && len(got.ProfileMap) != 2 {
+				t.Fatalf("profile map %v, want both profiles", got.ProfileMap)
+			}
+			if d := got.Instances[0].AgentDefaults; d == nil || d.ImageRegistry != "reg/a" || d.CloneDepth != "" {
+				t.Fatalf("agent_defaults %+v, want only the chosen image registry", d)
+			}
+		})
+	}
+}
+
+// A template choice is refused for an infrastructure field, which no
+// template can set: the conflict stays reported and the field stays unset,
+// rather than silently falling through to the global setting.
+func TestConvert_TemplateChoiceRefusedForInfraField(t *testing.T) {
+	vs := &VersionedSettings{
+		Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
+		Profiles: map[string]V1ProfileConfig{
+			"a": {Runtime: "cluster", SharedDirStorageBackend: "nfs", HomeStorageBackend: "nfs", SharedDirSize: "10Gi"},
+			"b": {Runtime: "cluster", SharedDirStorageBackend: "local", HomeStorageBackend: "local", SharedDirSize: "20Gi"},
+		},
+	}
+	for i, field := range []string{"shared_dir_storage_backend", "home_storage_backend", "shared_dir_size"} {
+		choice := ConversionChoice{TargetGroup: "k8s-agents", Field: field, ChosenProfile: ConversionChoiceTemplatePrefix + "batch"}
+		got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs, Choices: []ConversionChoice{choice}})
+		refused, conflict := false, false
+		for _, f := range got.Findings {
+			if f.Path == "choices[0]" && f.Code == ConversionUnknownSettingsKey && f.Severity == ConversionSeverityBlocking &&
+				strings.Contains(f.Message, "no template can set it") {
+				refused = true
+			}
+			if f.Path == "profiles.*."+field {
+				if f.Code != ConversionProfileConflict {
+					t.Errorf("case %d: %s is %s, want an unresolved profile_conflict", i, field, f.Code)
+				}
+				conflict = true
+			}
+		}
+		if !refused || !conflict {
+			t.Fatalf("%s: refused=%v conflict=%v: %+v", field, refused, conflict, got.Findings)
+		}
+		if len(got.ProfileMap) != 0 {
+			t.Fatalf("%s: profile map %v, want none", field, got.ProfileMap)
+		}
+	}
+}
+
+// Distinct target scopes, and a Split group, never share an instance key,
+// and the profile map sends each profile to the instance of its own scope.
+func TestConvert_InstanceKeysUniqueAcrossScopes(t *testing.T) {
+	for name, tc := range map[string]struct {
+		runtimes map[string]V1RuntimeConfig
+		profiles map[string]V1ProfileConfig
+		choices  []ConversionChoice
+	}{
+		"context and namespace vs namespace": {
+			runtimes: map[string]V1RuntimeConfig{
+				"a": {Type: "kubernetes", Context: "prod", Namespace: "east"},
+				"b": {Type: "kubernetes", Namespace: "prod-east"}},
+			profiles: map[string]V1ProfileConfig{"pa": {Runtime: "a"}, "pb": {Runtime: "b"}},
+		},
+		"context vs namespace": {
+			runtimes: map[string]V1RuntimeConfig{
+				"a": {Type: "kubernetes", Context: "x"},
+				"b": {Type: "kubernetes", Namespace: "x"}},
+			profiles: map[string]V1ProfileConfig{"pa": {Runtime: "a"}, "pb": {Runtime: "b"}},
+		},
+		"split key vs another scope": {
+			runtimes: map[string]V1RuntimeConfig{
+				"a": {Type: "kubernetes"},
+				"b": {Type: "kubernetes", Namespace: "agents"}},
+			profiles: map[string]V1ProfileConfig{"agents": {Runtime: "a"}, "rest": {Runtime: "a"}, "pb": {Runtime: "b"}},
+			choices:  []ConversionChoice{{TargetGroup: "k8s", Split: []string{"agents"}}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vs := &VersionedSettings{Runtimes: tc.runtimes, Profiles: tc.profiles}
+			in := ProfileConversionInput{Settings: vs, Choices: tc.choices}
+			got := ConvertProfilesToInstances(in)
+			if len(got.Findings) != 0 {
+				t.Fatalf("findings %+v", got.Findings)
+			}
+			byKey := map[string]V1RuntimeBrokerInstanceConfig{}
+			for _, inst := range got.Instances {
+				if _, dup := byKey[inst.Key]; dup {
+					t.Fatalf("duplicate instance key %q in %+v", inst.Key, got.Instances)
+				}
+				if !runtimeBrokerInstanceKeyRe.MatchString(inst.Key) {
+					t.Errorf("%q is not a valid instance key", inst.Key)
+				}
+				byKey[inst.Key] = inst
+			}
+			if len(got.ProfileMap) != len(tc.profiles) {
+				t.Fatalf("profile map %v", got.ProfileMap)
+			}
+			keys := map[string]string{}
+			for p, key := range got.ProfileMap {
+				inst, ok := byKey[key]
+				if !ok {
+					t.Fatalf("profile %s maps to %q, which is not an instance", p, key)
+				}
+				rt := tc.runtimes[tc.profiles[p].Runtime]
+				if inst.RuntimeTarget.Context != rt.Context || inst.RuntimeTarget.Namespace != rt.Namespace {
+					t.Errorf("profile %s maps to %s with scope %q/%q, want %q/%q", p, key,
+						inst.RuntimeTarget.Context, inst.RuntimeTarget.Namespace, rt.Context, rt.Namespace)
+				}
+				keys[p] = key
+			}
+			if tc.choices != nil && keys["agents"] == keys["rest"] {
+				t.Errorf("the split profile shares its key with the rest of its group: %v", keys)
+			}
+			if again := ConvertProfilesToInstances(in); !reflect.DeepEqual(got, again) {
+				t.Error("the keys are not deterministic")
+			}
+		})
+	}
+}
+
+// A harness override that only one profile has is reported once per
+// conflicting sub-field, not again for its presence; an override that
+// differs only in presence is reported once, for its presence.
+func TestConvert_HarnessOverridePresenceReportedOnce(t *testing.T) {
+	for name, tc := range map[string]struct {
+		override V1HarnessOverride
+		want     string
+	}{
+		"with a sub-field": {V1HarnessOverride{Image: "claude:2"}, "profiles.*.harness_overrides.claude.image"},
+		"empty override":   {V1HarnessOverride{}, "profiles.*.harness_overrides.claude"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			vs := &VersionedSettings{
+				Runtimes: map[string]V1RuntimeConfig{"cluster": {Type: "kubernetes", Namespace: "agents"}},
+				Profiles: map[string]V1ProfileConfig{
+					"a": {Runtime: "cluster", HarnessOverrides: map[string]V1HarnessOverride{"claude": tc.override}},
+					"b": {Runtime: "cluster"},
+				},
+			}
+			got := ConvertProfilesToInstances(ProfileConversionInput{Settings: vs})
+			if len(got.Findings) != 1 || got.Findings[0].Path != tc.want || got.Findings[0].Code != ConversionProfileConflict {
+				t.Fatalf("findings %+v, want one profile_conflict at %s", got.Findings, tc.want)
+			}
+			if d := got.Instances[0].AgentDefaults; d != nil {
+				t.Fatalf("agent_defaults %+v, want none", d)
 			}
 		})
 	}

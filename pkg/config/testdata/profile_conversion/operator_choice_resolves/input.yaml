@@ -14,6 +14,7 @@ profiles:
     runtime: cluster
     image_registry: reg.example/fast
     shared_dir_storage_backend: nfs
+    shared_dir_size: 40Gi
     clone_depth: full
   slow:
     runtime: cluster

@@ -1,10 +1,16 @@
+# Field choices: a profile's value (image_registry, shared_dir_storage_backend),
+# a profile that leaves the field unset (shared_dir_size: the instance leaves
+# it unset too), and a template for a workload default (clone_depth).
 choices:
   - target_group: k8s-agents
     field: image_registry
     chosen_profile: fast
   - target_group: k8s-agents
     field: profiles.*.shared_dir_storage_backend
-    chosen_profile: template:batch
+    chosen_profile: fast
+  - target_group: k8s-agents
+    field: shared_dir_size
+    chosen_profile: slow
   - target_group: k8s-agents
     field: clone_depth
-    chosen_profile: slow
+    chosen_profile: template:batch

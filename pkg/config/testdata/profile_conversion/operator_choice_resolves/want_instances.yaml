@@ -6,5 +6,6 @@ server:
         runtime_target:
           type: kubernetes
           namespace: agents
+          shared_dir_storage_backend: nfs
         agent_defaults:
           image_registry: reg.example/fast
