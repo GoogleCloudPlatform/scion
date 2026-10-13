@@ -128,6 +128,7 @@ func TestEmbeddedHarnessConfigs_ValuesMatchLegacyTable(t *testing.T) {
 func TestEmbeddedHarnessConfigs_AgentPluginsCapability(t *testing.T) {
 	want := map[string]api.SupportLevel{
 		"codex":       api.SupportPartial,
+		"muse-code":   api.SupportPartial,
 		"gemini-cli":  api.SupportNo,
 		"grok-build":  api.SupportNo,
 		"antigravity": api.SupportNo,
