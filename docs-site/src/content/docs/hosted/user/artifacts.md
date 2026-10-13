@@ -129,10 +129,10 @@ The **Artifacts** item in the sidebar (under *Management*) lists the artifacts y
 Opening an artifact shows its page with three tabs:
 
 - **Preview** shows the entry file. Markdown is shown formatted; text and code (including JSON, YAML and CSV) in a read-only editor; PNG, JPEG, GIF and WebP images inline. Other types, such as SVG and PDF, are offered as a download.
-- **Files** lists every file of the version. Plain text, Markdown, CSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. An HTML entry renders in **Preview**.
+- **Files** lists every file of the version. Plain text, Markdown, CSV, TSV, JSON, YAML, TOML and PNG, JPEG, GIF and WebP images open in the browser; other files, such as HTML, CSS and SVG, can only be downloaded there. An HTML entry renders in **Preview**.
 - **History** lists the versions. Use the **Version** menu in the header, or a version's link here, to open an earlier one.
 
-**Copy reference** in the header copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a folder, download files from the **Files** tab.
+**Copy reference** in the header copies the version's `scion://artifact/` reference, ready to paste into a message or a command. For a single-file version, **Download** in the header downloads the file; for a version with more than one file, download them from the **Files** tab.
 
 ### How HTML artifacts render
 
@@ -144,7 +144,7 @@ An artifact whose entry file is HTML, such as a single page or a small site publ
 - **The view expires.** A view lasts 30 minutes. After that the page says so and offers **Reload view**. **Full screen** and **Open in new tab** are on the bar above the frame.
 - **The view URL works without signing in.** Anyone holding the URL behind **Open in new tab** can open that version until the view expires. Treat it like a short-lived share link: do not paste it into chat or tickets; share the `scion://artifact/` reference instead.
 
-Markdown artifacts are different. Their preview runs no scripts: HTML or scripts written in the Markdown are removed or shown inert, and links open in a new tab. When you publish a Markdown artifact, the Hub fetches the remote images it references and serves copies from then on. Images that could not be fetched show a placeholder instead.
+Markdown artifacts are different. Their preview runs no scripts: HTML written in the Markdown is shown as plain text, and links open in a new tab. When you publish a Markdown artifact, the Hub fetches the remote images it references and serves copies from then on. Images that could not be fetched show a placeholder instead.
 
 ### CLI
 
@@ -243,8 +243,8 @@ In a conversation, choose the paperclip and then **Attach artifact…**. The pic
 
 In a message, each artifact shows as a chip with its title, version and owner. Clicking a chip, or a `scion://artifact/` link in the text, opens a preview over the conversation, with **Copy link** and **Open in artifact viewer**. Markdown and HTML render there as on the artifact page. Each reader sees what their own access allows: a reader who cannot open the artifact sees **Artifact unavailable**.
 
-:::note[Conversations without an agent]
-In a conversation between users only, with no agent, artifacts attached with the picker are currently dropped without a chip or a warning. Paste the artifact's `scion://artifact/` reference into the message text instead: it shows as a link that opens the preview.
+:::note[Messages that do not go to an agent]
+Artifacts attached with the picker are kept only on a message that goes to an agent. In a conversation between users, or in a thread with no default agent when you do not @mention an agent, they are currently dropped without a chip or a warning. Paste the artifact's `scion://artifact/` reference into the message text instead: it shows as a link that opens the preview.
 :::
 
 ### CLI
