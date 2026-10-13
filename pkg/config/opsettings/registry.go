@@ -305,10 +305,15 @@ func init() {
 		},
 		{
 			// harness_configs is a map-of-objects section, same pattern as runtimes.
-			Name:            "harness_configs",
-			KoanfPaths:      []string{"harness_configs"},
-			New:             func() any { m := make(HarnessConfigsSettings); return &m },
-			NestedDurations: []string{"harness_configs.*.provisioner.timeout"},
+			Name:       "harness_configs",
+			KoanfPaths: []string{"harness_configs"},
+			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{
+				"harness_configs.*.provisioner.timeout",
+				"harness_configs.*.ready.settle",
+				"harness_configs.*.ready.timeout",
+				"harness_configs.*.delivery.extra_submit_delay",
+			},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml

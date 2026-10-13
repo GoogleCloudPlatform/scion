@@ -70,6 +70,9 @@ func TestSectionNestedDurationsAreSectionKeys(t *testing.T) {
 		{"telemetry", "telemetry.hub.report_interval"},
 		{"runtimes", "runtimes.*.substrate.template_ready_timeout"},
 		{"harness_configs", "harness_configs.*.provisioner.timeout"},
+		{"harness_configs", "harness_configs.*.ready.settle"},
+		{"harness_configs", "harness_configs.*.ready.timeout"},
+		{"harness_configs", "harness_configs.*.delivery.extra_submit_delay"},
 	} {
 		if s := SectionByName(want.section); s == nil || !slices.Contains(s.NestedDurations, want.key) {
 			t.Errorf("%s is not marked as a nested duration key", want.key)
