@@ -809,6 +809,15 @@ type imageBuildLogEvent struct {
 	Line string `json:"line"`
 }
 
+// imageBuildSubject returns the event subject for an image build's output.
+// Build output is delivered on the requesting user's own subject
+// (user.<userID>.images.<jobID>) rather than a shared system.* subject, so
+// only the session that started the build can subscribe to it: SSE
+// authorization admits user.<id>.* subjects only for that same user.
+func imageBuildSubject(userID, jobID string) string {
+	return "user." + userID + ".images." + jobID
+}
+
 func resolveBuildScript() string {
 	var path string
 	if root := os.Getenv("SCION_ROOT"); root != "" {
@@ -833,6 +842,14 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	if err := assertLoopback(r); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	// Build output is scoped to the requesting user's subject, so a build
+	// needs a user identity to address it to.
+	requester := GetUserIdentityFromContext(r.Context())
+	if requester == nil || requester.ID() == "" {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "a user session is required to start an image build", nil)
 		return
 	}
 
@@ -880,50 +897,57 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	buildStarted = true
 	jobID := api.NewUUID()
-	subject := "system.images." + jobID
+	subject := imageBuildSubject(requester.ID(), jobID)
 	requestedHarnesses := req.Harnesses
 
 	go func() {
 		defer s.imageBuildActive.Store(false)
-		cmd := exec.CommandContext(s.ctx, buildScript, "--target", "harnesses")
-		cmd.Dir = filepath.Dir(buildScript)
-
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			slog.Error("build: stdout pipe failed", "error", err)
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
-			return
-		}
-		cmd.Stderr = cmd.Stdout
-
-		if err := cmd.Start(); err != nil {
-			slog.Error("build: start failed", "error", err)
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
-			return
-		}
-
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
-		}
-		if err := scanner.Err(); err != nil {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
-		}
-
-		if err := cmd.Wait(); err != nil {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
-		} else {
-			for _, h := range requestedHarnesses {
-				s.events.PublishRaw(subject, map[string]string{
-					"image":  "scion-" + h + ":latest",
-					"status": "done",
-				})
-			}
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
-		}
+		s.runImageBuild(s.ctx, subject, buildScript, requestedHarnesses)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// runImageBuild runs the build script and publishes its output, line by line,
+// followed by per-image completion events, on subject. It blocks until the
+// script exits.
+func (s *Server) runImageBuild(ctx context.Context, subject, buildScript string, harnesses []string) {
+	cmd := exec.CommandContext(ctx, buildScript, "--target", "harnesses")
+	cmd.Dir = filepath.Dir(buildScript)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		slog.Error("build: stdout pipe failed", "error", err)
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+		return
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		slog.Error("build: start failed", "error", err)
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+		return
+	}
+
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
+	}
+	if err := scanner.Err(); err != nil {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
+	}
+
+	if err := cmd.Wait(); err != nil {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
+	} else {
+		for _, h := range harnesses {
+			s.events.PublishRaw(subject, map[string]string{
+				"image":  "scion-" + h + ":latest",
+				"status": "done",
+			})
+		}
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
+	}
 }
 
 // --- 5.2: Filesystem Endpoints ---
