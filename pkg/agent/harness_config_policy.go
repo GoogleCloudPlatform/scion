@@ -148,10 +148,18 @@ func snapshotControlPlaneInputs(agentDir, agentHome string) error {
 	return copyPluginsTree(agentHome, stagedPlugins, dst, agentplugin.PluginsDirName)
 }
 
-// copyPluginsTree copies the directory srcRel under srcDir to dstRel under
-// dstDir with agentplugin.CopyTree. A missing source, or one that is not a
-// real directory, copies nothing.
+// copyPluginsTree copies the staged Agent Plugins tree srcRel under srcDir
+// (one directory per plugin) to dstRel under dstDir, replacing dstRel. Each
+// plugin directory is copied with its own agentplugin.CopyTree and the
+// per-plugin agentplugin.DefaultLimits, the same bound Stage applied to that
+// bundle. A missing source, or one that is not a real directory, copies
+// nothing; entries that are not real directories with a valid plugin name
+// are skipped.
 func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
+	return copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel, agentplugin.DefaultLimits)
+}
+
+func copyPluginsTreeWithLimits(srcDir, srcRel, dstDir, dstRel string, lim agentplugin.Limits) error {
 	srcRoot, err := os.OpenRoot(srcDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -160,7 +168,8 @@ func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
 		return err
 	}
 	defer func() { _ = srcRoot.Close() }()
-	if ok, err := realDirChain(srcRoot, filepath.Clean(srcRel), true); err != nil || !ok {
+	srcRel = filepath.Clean(srcRel)
+	if ok, err := realDirChain(srcRoot, srcRel, true); err != nil || !ok {
 		return err
 	}
 	dstRoot, err := os.OpenRoot(dstDir)
@@ -171,11 +180,28 @@ func copyPluginsTree(srcDir, srcRel, dstDir, dstRel string) error {
 	if err := dstRoot.RemoveAll(dstRel); err != nil {
 		return err
 	}
-	if err := dstRoot.MkdirAll(filepath.Dir(dstRel), 0o755); err != nil {
+	if err := dstRoot.MkdirAll(dstRel, 0o755); err != nil {
 		return err
 	}
-	if _, err := agentplugin.CopyTree(srcRoot, srcRel, dstRoot, dstRel, agentplugin.DefaultLimits); err != nil {
-		return fmt.Errorf("copy agent plugins: %w", err)
+	entries, err := readRootDir(srcRoot, srcRel)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if agentplugin.ValidateName(name) != nil {
+			continue
+		}
+		fi, err := srcRoot.Lstat(filepath.Join(srcRel, name))
+		if err != nil {
+			return err
+		}
+		if !fi.IsDir() {
+			continue
+		}
+		if _, err := agentplugin.CopyTree(srcRoot, filepath.Join(srcRel, name), dstRoot, filepath.Join(dstRel, name), lim); err != nil {
+			return fmt.Errorf("copy agent plugin %q: %w", name, err)
+		}
 	}
 	return nil
 }

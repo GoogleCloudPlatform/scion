@@ -669,14 +669,21 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         return {"key": key, "installed_path": installed}
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
+        """codex plugin remove. In codex 0.162.1 it is idempotent (exit 0 for
+        an unknown or already-removed plugin) and works after marketplace.json
+        stops listing the plugin. Success is judged by the result, not by
+        output text: the plugin must no longer be enabled in config.toml."""
         key = str(native_ref.get("key") or self.key(name))
         proc = self._run("plugin", "remove", key, "--json")
-        if proc.returncode == 0:
-            return
-        out = f"{proc.stdout}{proc.stderr}".lower()
-        if any(s in out for s in ("unknown plugin", "not installed", "not found")):
-            return
-        raise scion_harness.cli_failure("codex plugin remove", proc)
+        if self.plugin_enabled(name):
+            if proc.returncode != 0:
+                raise scion_harness.cli_failure("codex plugin remove", proc)
+            raise scion_harness.PluginInstallError(
+                f"codex plugin remove exit 0 but {key} is still enabled in config.toml")
+        if proc.returncode != 0:
+            # Not registered any more: the removal took effect (or there was
+            # nothing to remove). Report it, but do not keep retrying.
+            self.ctx.info(f"agent plugin {name}: codex plugin remove exit {proc.returncode}, plugin no longer registered")
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """The install still exists and is still registered. A re-provision

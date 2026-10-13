@@ -16,12 +16,14 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
@@ -196,5 +198,71 @@ func TestSnapshotControlPlaneInputsSkipsSymlinkedPlugins(t *testing.T) {
 	}
 	if _, err := os.Lstat(filepath.Join(agentDir, controlPlaneInputsDirName, "plugins")); !os.IsNotExist(err) {
 		t.Fatalf("symlinked plugins dir was recorded (err %v)", err)
+	}
+}
+
+// Round-2 review: the record copy applies the per-plugin limits to each
+// plugin directory, as Stage did, not to the whole plugins/ tree.
+func TestCopyPluginsTreeLimitsArePerPlugin(t *testing.T) {
+	src, dst := t.TempDir(), t.TempDir()
+	writePluginFiles(t, src, map[string]string{
+		"plugins/a/plugin.json": "{}", "plugins/a/f1": "1", "plugins/a/f2": "2",
+		"plugins/b/plugin.json": "{}", "plugins/b/f1": "1", "plugins/b/f2": "2",
+		// deep: depth 2 below its plugin root, at the depth limit.
+		"plugins/deep/plugin.json": "{}", "plugins/deep/x/y/z": "z",
+		// Not plugins: a leftover staging dir and a stray file.
+		"plugins/.tmp-c/plugin.json": "{}", "plugins/stray": "s",
+	})
+	if err := os.Symlink(filepath.Join(src, "plugins", "a"), filepath.Join(src, "plugins", "linked")); err != nil {
+		t.Fatal(err)
+	}
+	// Each plugin has at most 4 entries and depth 2; the whole tree has 12+
+	// entries and depth 3, so a whole-tree limit would fail.
+	lim := agentplugin.Limits{MaxFiles: 4, MaxBytes: 64, MaxDepth: 2}
+	if err := copyPluginsTreeWithLimits(src, "plugins", dst, "rec/plugins", lim); err != nil {
+		t.Fatalf("per-plugin copy failed: %v", err)
+	}
+	for _, rel := range []string{"a/f2", "b/f2", "deep/x/y/z"} {
+		if _, err := os.Stat(filepath.Join(dst, "rec/plugins", rel)); err != nil {
+			t.Errorf("%s not copied: %v", rel, err)
+		}
+	}
+	for _, rel := range []string{".tmp-c", "stray", "linked"} {
+		if _, err := os.Lstat(filepath.Join(dst, "rec/plugins", rel)); !os.IsNotExist(err) {
+			t.Errorf("%s copied (err %v)", rel, err)
+		}
+	}
+
+	// A single plugin over the limit still fails, naming the plugin.
+	writePluginFiles(t, src, map[string]string{"plugins/big/f1": "1", "plugins/big/f2": "2", "plugins/big/f3": "3", "plugins/big/f4": "4", "plugins/big/f5": "5"})
+	err := copyPluginsTreeWithLimits(src, "plugins", dst, "rec/plugins", lim)
+	if err == nil || !strings.Contains(err.Error(), `copy agent plugin "big"`) || !agentplugin.IsLimitError(err) {
+		t.Fatalf("over-limit plugin: err = %v", err)
+	}
+}
+
+// Two staged plugins whose combined size is over one plugin's limit go
+// through snapshot and restore intact.
+func TestSnapshotRestoreManyPlugins(t *testing.T) {
+	agentDir, agentHome := t.TempDir(), t.TempDir()
+	inputs := stagedInputsDir(agentHome)
+	files := map[string]string{"plugins.json": `{"schema_version":1}`}
+	for _, p := range []string{"one", "two"} {
+		files["plugins/"+p+"/plugin.json"] = "{}"
+		for i := 0; i < 6000; i++ {
+			files[fmt.Sprintf("plugins/%s/d%d/f", p, i/500)+fmt.Sprint(i)] = ""
+		}
+	}
+	writePluginFiles(t, inputs, files)
+	if err := snapshotControlPlaneInputs(agentDir, agentHome); err != nil {
+		t.Fatalf("snapshot of 2 x 6000-file plugins: %v", err)
+	}
+	if err := restoreControlPlaneInputs(agentDir, agentHome, true); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	for _, rel := range []string{"plugins/one/d11/f5999", "plugins/two/d0/f0", "plugins.json"} {
+		if _, err := os.Stat(filepath.Join(inputs, rel)); err != nil {
+			t.Errorf("%s not restored: %v", rel, err)
+		}
 	}
 }

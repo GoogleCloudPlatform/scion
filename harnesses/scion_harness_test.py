@@ -2720,6 +2720,35 @@ class TestAgentPluginsReconcile(unittest.TestCase):
         self.assertEqual(self.kinds(inst), [("version", ""), ("uninstall", "a"), ("install", "a")])
         self.assertEqual(self.env.state()["a"]["digest"], "d2")
 
+    def test_digest_change_uninstall_failure_keeps_ownership(self):
+        self.env.stage({"a": "d1"})
+        inst = _FakeInstaller()
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.env.stage({"a": "d2"})
+        inst.fail_uninstall = {"a"}
+        inst.fail_install = {"a"}
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        # Still owned, with the old digest: pending, not forgotten.
+        self.assertEqual(self.env.state()["a"]["digest"], "d1")
+        # The template drops it: Scion removes the install it owns.
+        self.env.unstage()
+        inst.fail_uninstall = set()
+        inst.calls.clear()
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.assertIn(("uninstall", "a"), inst.calls)
+        self.assertEqual(self.env.state(), {})
+
+    def test_digest_change_uninstall_failure_then_install_success(self):
+        self.env.stage({"a": "d1"})
+        inst = _FakeInstaller()
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.env.stage({"a": "d2"})
+        inst.fail_uninstall = {"a"}
+        with mock.patch.object(self.env.ctx, "warn") as warn:
+            sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.assertIn("removing the previous version failed", warn.call_args_list[0][0][0])
+        self.assertEqual(self.env.state()["a"]["digest"], "d2")
+
     def test_missing_native_install_is_reinstalled(self):
         self.env.stage({"a": "d1"})
         inst = _FakeInstaller()

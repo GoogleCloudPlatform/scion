@@ -1592,6 +1592,8 @@ class _FakeCodexCLI:
         self.codex_homes: list[str] = []
         self.fail_add = False
         self.omit_installed_path = False
+        self.remove_rc = 0
+        self.remove_keeps_entry = False
         self.timeouts: list[float | None] = []
 
     def _append_config(self, codex_home: str, text: str) -> None:
@@ -1625,10 +1627,23 @@ class _FakeCodexCLI:
             self.timeouts.append(timeout)
             return subprocess.CompletedProcess(argv, 0, json.dumps(out, indent=2), "")
         if args[:2] == ["plugin", "remove"]:
-            name = args[2].split("@")[0]
-            import shutil
-            shutil.rmtree(os.path.join(codex_home, "plugins", "cache", "scion-agent-plugins", name), ignore_errors=True)
-            return subprocess.CompletedProcess(argv, 0, "{}", "")
+            # codex 0.162.1: idempotent, exit 0 even for an unknown plugin;
+            # drops the cache dir and the [plugins."<key>"] table.
+            name, market = args[2].split("@")
+            if self.remove_rc != 0 and self.remove_keeps_entry:
+                return subprocess.CompletedProcess(argv, self.remove_rc, "", "error: busy")
+            if not self.remove_keeps_entry:
+                import shutil
+                shutil.rmtree(os.path.join(codex_home, "plugins", "cache", market, name), ignore_errors=True)
+                cfg = os.path.join(codex_home, "config.toml")
+                if os.path.exists(cfg):
+                    with open(cfg, encoding="utf-8") as f:
+                        text = f.read()
+                    text = text.replace(f'\n[plugins."{args[2]}"]\nenabled = true\n', "")
+                    with open(cfg, "w", encoding="utf-8") as f:
+                        f.write(text)
+            out = json.dumps({"pluginId": args[2], "name": name, "marketplaceName": market}, indent=2)
+            return subprocess.CompletedProcess(argv, self.remove_rc, out, "")
         return subprocess.CompletedProcess(argv, 2, "", "unexpected")
 
 
@@ -1745,6 +1760,26 @@ class TestCodexAgentPlugins(unittest.TestCase):
             ["codex", "plugin", "add", "b@scion-agent-plugins", "--json"],
         ])
         self.assertEqual([p["name"] for p in self.marketplace()["plugins"]], ["b"])
+
+    def test_uninstall_judged_by_config_registration(self) -> None:
+        self.stage({"a": "d1"})
+        scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
+        inst = provision.CodexPluginInstaller(self.ctx())
+        # exit 0 but still enabled: not a success.
+        self.cli.remove_keeps_entry = True
+        with self.assertRaises(scion_harness.PluginInstallError):
+            inst.uninstall("a", {})
+        # non-zero and still enabled: the CLI error.
+        self.cli.remove_rc = 1
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "codex plugin remove exit 1"):
+            inst.uninstall("a", {})
+        # non-zero but no longer registered: the removal took effect.
+        self.cli.remove_keeps_entry = False
+        inst.uninstall("a", {})
+        self.assertFalse(inst.plugin_enabled("a"))
+        # Unknown plugin, exit 0 (codex is idempotent): success.
+        self.cli.remove_rc = 0
+        inst.uninstall("never-installed", {})
 
     def test_install_failure_warns_with_stderr(self) -> None:
         self.stage({"a": "d1"})

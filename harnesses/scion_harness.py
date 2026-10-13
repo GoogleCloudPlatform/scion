@@ -2454,10 +2454,14 @@ def _reconcile_agent_plugins(
             ref = old.get("native_ref")
             try:
                 installer.uninstall(p.name, ref if isinstance(ref, dict) else {})
-            except Exception:  # noqa: BLE001 - the install below reports
-                pass
-            state.pop(p.name, None)
-            _save_agent_plugins_state(harness, state)
+            except Exception as exc:  # noqa: BLE001
+                # Keep the old record: Scion still owns that install. If the
+                # install below fails too, the plugin stays pending (its
+                # digest differs) and is removed if the template drops it.
+                ctx.warn(f"agent plugin {p.name}: removing the previous version failed ({exc}); installing over it")
+            else:
+                state.pop(p.name, None)
+                _save_agent_plugins_state(harness, state)
         try:
             ref = installer.install(p, bundle)
         except Exception as exc:  # noqa: BLE001
