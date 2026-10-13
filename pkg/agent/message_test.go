@@ -986,8 +986,12 @@ func TestDeliverImmediate_ExtraSubmitErrorsNameTheKey(t *testing.T) {
 			return "", nil
 		}
 		err := mgr.deliverImmediate(ctx, "test-agent", "", "hello", false)
+		var partial *PartialDeliveryError
+		if !errors.As(err, &partial) {
+			t.Fatalf("expected a PartialDeliveryError, got %T: %v", err, err)
+		}
 		want := "context canceled before sending Enter to agent 'test-agent': context canceled"
-		if err == nil || err.Error() != want {
+		if err.Error() != want {
 			t.Fatalf("error = %v, want %q", err, want)
 		}
 	})
