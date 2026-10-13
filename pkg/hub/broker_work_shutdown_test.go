@@ -317,3 +317,29 @@ func TestBrokerDispatchDrain_StopsClaimingOnceShutdownBegins(t *testing.T) {
 	}
 	requireRecordLive(t, capture, "reconcile: hub is shutting down; leaving the remaining dispatches pending")
 }
+
+// TestStartHTTPStopDrain_IsTrackedWork covers the tracked-spawn half of
+// the HTTP-only broker stop drain (ptone/scion#4869): while only that
+// drain is running, held in its ListPendingDispatch call, it must count as
+// tracked broker work, so shutdown waits for it. A drain started on a
+// plain goroutine would leave the count at 0.
+func TestStartHTTPStopDrain_IsTrackedWork(t *testing.T) {
+	ctx := context.Background()
+	base, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	brokerID := tid("broker-selfheal-httpdrain-tracked")
+	wrapped := newShutdownOrderStore(base, shutdownGateKey{method: "ListPendingDispatch", brokerID: brokerID})
+	srv, _ := testServerOnMigratedStore(t, wrapped)
+	broker, _ := newProviderSelfHealFixture(t, base, "httpdrain-tracked")
+	require.Equal(t, brokerID, broker.ID)
+
+	srv.startHTTPStopDrain(brokerID)
+	<-wrapped.gate("ListPendingDispatch", brokerID).entered
+	assert.Equal(t, 1, srv.brokerWork.runningCount(), "the HTTP stop drain must run as tracked broker work")
+
+	srv.brokerWork.closeAdmission()
+	wrapped.releaseAll()
+	require.Equal(t, 0, srv.brokerWork.wait(ctx, time.Hour), "the drain must be joined")
+	_, marked := srv.httpDrains.Load(brokerID)
+	assert.False(t, marked, "the drain clears its in-flight marker when it ends")
+}
