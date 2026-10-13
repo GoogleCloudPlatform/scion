@@ -60,7 +60,8 @@ Linking project 'my-repo' to the local hub at http://127.0.0.1:8080
 ```
 
 If the hub is not running, `init` still succeeds and prints a note; the project then links on its
-first `scion` command. `init` leaves `.scion/` and a `.gitignore` in your checkout, untracked.
+first `scion` command. `init` adds an untracked `.scion/` and, unless it is already ignored, appends `.scion/agents/` to your
+`.gitignore`.
 
 Agents in this repository get a git worktree of your checkout, so git 2.48 or newer is required
 here; after the first agent, older git can no longer read this checkout.

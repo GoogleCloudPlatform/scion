@@ -162,14 +162,18 @@ workspace; other pages link here.
 
 A repository on your machine becomes a **linked project** when it links to a Hub: on its first
 command against the local workstation Hub (no prompt), or with `scion hub link`. Run `scion init`
-in the repository first. In a git repository without its own `.scion`, `scion hub link` and the
-automatic link refuse with:
+in the repository first. In a git repository without its own `.scion`, where the project would
+otherwise fall back to the global project (no `--global` or `--project` given), `scion hub link`
+and the automatic link refuse with:
 
 ```
 this git repository is not a scion project yet; run 'scion init' here first (or pass --global to link the global project)
 ```
 
-`scion init` leaves `.scion/` and a `.gitignore` in your checkout, untracked; commit or ignore them as you prefer.
+A `.scion`-less repository inside another scion project is not refused: it links that parent
+project, so run `scion init` in the repository itself.
+
+`scion init` adds an untracked `.scion/` to your checkout and, unless it is already ignored, appends `.scion/agents/` to your `.gitignore`.
 
 #### On the local workstation Hub: a worktree of your checkout
 

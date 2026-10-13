@@ -718,7 +718,7 @@ Options:
 - **(B) Auto-link and `hub link` register git repos as `worktree-per-agent`.** No token is needed only if the base clone can use local credentials. Agents still do not see unpushed commits, and branches are not in the user's repo. It is a partial fix.
 - **(C) Accept and document.** Clone plus `GITHUB_TOKEN`; local/workspace.md already describes this. It is a real UX regression for every former local-mode user.
 
-Recommendation: (A), as a new phase before the phase-3 release. Phase 3 can merge if the maintainer accepts shipping (C) temporarily; otherwise phase 3's release waits for (A). Phase 5 documents actual behaviour (C) and marks the gap, until the decision.
+Recommendation (superseded: Amendment 6 replaces option A with phase 3a, variant L, accepted): (A), as a new phase before the phase-3 release. Phase 3 can merge if the maintainer accepts shipping (C) temporarily; otherwise phase 3's release waits for (A). Phase 5 documents actual behaviour (C) and marks the gap, until the decision.
 
 **Finding 2: D4's premise was wrong.** *(Resolved: the macOS order is now podman, docker, then Apple container (#3440), so D4's premise holds again.)* D4 assumed macOS auto-detect prefers podman/docker. The code tries Apple `container` first (pkg/config/runtime_detect.go:34-38: container, podman, docker). Any Mac with Apple `container` installed therefore gets it by default, and with it the root DNS/pf step for container-to-hub reachability, plus the untested Apple broker PTY path (R5). D4's "accept and document" may still stand, but it was approved on an incorrect premise, so it goes back to the maintainer. Options:
 - keep D4 and document the root step prominently;
