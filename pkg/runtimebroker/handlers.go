@@ -3268,9 +3268,7 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 	// MergeScionConfig itself stays non-zero-wins: provisioning and
 	// template layering depend on it. The list is never written to disk.
 	if inlineConfig != nil {
-		if ignored := applyClearedFields(merged, inlineConfig.ClearedFields); len(ignored) > 0 {
-			s.agentLifecycleLog.Warn("applyInlineConfigUpdate: ignored cleared fields this broker does not apply", "agent", agentName, "fields", ignored)
-		}
+		s.applyClearedFields(merged, projectDir, agentName, inlineConfig.ClearedFields)
 	}
 	merged.ClearedFields = nil
 

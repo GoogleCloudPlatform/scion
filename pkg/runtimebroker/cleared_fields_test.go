@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -25,8 +26,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
 )
 
 func readAgentConfig(t *testing.T, cfgPath string) (api.ScionConfig, string) {
@@ -200,12 +203,15 @@ func TestDedupeVolumesByTarget(t *testing.T) {
 		{Source: "c", Target: "/y"},
 		{Source: "d", Target: "/x"},
 		{Type: "gcs", Bucket: "b"},
+		{Source: "ws", Target: "/workspace"},
+		{Source: "ws2", Target: "/workspace/"},
 	}
 	want := []api.VolumeMount{
 		{Source: "d", Target: "/x"},
 		{Type: "gcs", Bucket: "b"},
 		{Source: "c", Target: "/y"},
 		{Type: "gcs", Bucket: "b"},
+		{Source: "ws", Target: "/workspace"},
 	}
 	if got := dedupeVolumesByTarget(in); !reflect.DeepEqual(got, want) {
 		t.Errorf("dedupeVolumesByTarget\n got: %+v\nwant: %+v", got, want)
@@ -216,9 +222,11 @@ func TestDedupeVolumesByTarget(t *testing.T) {
 }
 
 // TestStartAgent_ClearedFieldsAppliedBeforeStart: the start request's
-// inline cleared_fields remove the fields from scion-agent.json before the
-// manager starts the agent, and are not written to disk.
+// inline cleared_fields are removed from scion-agent.json before the
+// manager starts the agent (observed inside Start), and are not written to
+// disk.
 func TestStartAgent_ClearedFieldsAppliedBeforeStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	srv, mgr := newTestServerWithProvisionCapture()
 	projectDir := filepath.Join(t.TempDir(), ".scion")
 	agentName := "cleared-start-agent"
@@ -228,33 +236,211 @@ func TestStartAgent_ClearedFieldsAppliedBeforeStart(t *testing.T) {
 		ThinkingLevel: intPtr(2),
 		Env:           map[string]string{"FOO": "old", "BAR": "kept"},
 	})
+	obs := observeStarts(mgr, projectDir, agentName, cfgPath)
 
-	body := fmt.Sprintf(`{
+	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{
 		"projectPath": %q,
 		"inlineConfig": {
 			"env": {"BAR": "kept"},
 			"cleared_fields": ["max_turns", "thinking_level", "env.FOO"]
 		}
-	}`, projectDir)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/start", strings.NewReader(body))
+	}`, projectDir))
+
+	o := lastObservation(t, obs, 1)
+	if o.file.MaxTurns != 0 || o.file.ThinkingLevel != nil {
+		t.Errorf("cleared limits kept: max_turns=%d thinking_level=%v", o.file.MaxTurns, o.file.ThinkingLevel)
+	}
+	if _, ok := o.file.Env["FOO"]; ok || o.file.Env["BAR"] != "kept" {
+		t.Errorf("env = %v, want only BAR", o.file.Env)
+	}
+	if strings.Contains(o.raw, "cleared_fields") {
+		t.Errorf("cleared_fields written to scion-agent.json: %s", o.raw)
+	}
+}
+
+// clearedStartObservation is what the agent's start read: scion-agent.json
+// as the manager's Start found it, and the config GetAgent derives from it.
+type clearedStartObservation struct {
+	file      api.ScionConfig
+	raw       string
+	effective *api.ScionConfig
+	err       error
+}
+
+// observeStarts makes mgr record, inside each Start, scion-agent.json and
+// the config GetAgent derives for the agent.
+func observeStarts(mgr *provisionCapturingManager, projectDir, agentName, cfgPath string) *[]clearedStartObservation {
+	var obs []clearedStartObservation
+	mgr.onStart = func(ctx context.Context, opts api.StartOptions) {
+		var o clearedStartObservation
+		data, err := os.ReadFile(cfgPath)
+		if err == nil {
+			o.raw = string(data)
+			err = json.Unmarshal(data, &o.file)
+		}
+		if err == nil {
+			_, _, _, o.effective, err = agent.GetAgent(ctx, agentName, "", "", "", projectDir, "", "", "", "")
+		}
+		o.err = err
+		obs = append(obs, o)
+	}
+	return &obs
+}
+
+// writeAgentInfo writes the agent's agent-info.json, which names its
+// template.
+func writeAgentInfo(t *testing.T, projectDir, agentName string, info api.AgentInfo) {
+	t.Helper()
+	home := config.GetAgentHomePath(projectDir, agentName)
+	if err := os.MkdirAll(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "agent-info.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func postClearedAgentAction(t *testing.T, srv *Server, agentName, action, body string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentName+"/"+action, strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(w, req)
+	if w.Code >= 300 {
+		t.Fatalf("%s: status %d: %s", action, w.Code, w.Body.String())
+	}
+}
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, w.Code, w.Body.String())
+// lastObservation returns the latest start's observation, failing on a
+// read error.
+func lastObservation(t *testing.T, obs *[]clearedStartObservation, wantStarts int) clearedStartObservation {
+	t.Helper()
+	if len(*obs) != wantStarts {
+		t.Fatalf("starts observed = %d, want %d", len(*obs), wantStarts)
 	}
-	if !mgr.startCalled {
-		t.Fatal("expected Start to be called")
+	o := (*obs)[wantStarts-1]
+	if o.err != nil {
+		t.Fatalf("start %d: %v", wantStarts, o.err)
 	}
-	got, raw := readAgentConfig(t, cfgPath)
-	if got.MaxTurns != 0 || got.ThinkingLevel != nil {
-		t.Errorf("cleared limits kept: max_turns=%d thinking_level=%v", got.MaxTurns, got.ThinkingLevel)
+	return o
+}
+
+// TestStartAgent_ClearedLimitInheritsTemplateByName: a template resolved by
+// name sets max_turns 5; the owner sets 9, then clears it. The start after
+// the clear reads a scion-agent.json without max_turns, GetAgent derives
+// the template's 5, and a restart, which carries no inline config, still
+// gives 5.
+func TestStartAgent_ClearedLimitInheritsTemplateByName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, mgr := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "by-name-agent"
+	tplDir := filepath.Join(projectDir, "templates", "limited")
+	if err := os.MkdirAll(tplDir, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := got.Env["FOO"]; ok || got.Env["BAR"] != "kept" {
-		t.Errorf("env = %v, want only BAR", got.Env)
+	if err := os.WriteFile(filepath.Join(tplDir, "scion-agent.yaml"), []byte("harness: claude\nmax_turns: 5\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
-	if strings.Contains(raw, "cleared_fields") {
-		t.Errorf("cleared_fields written to scion-agent.json: %s", raw)
+	// As provisioned: the template's values are written into the agent's
+	// config.
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", MaxTurns: 5})
+	writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited"})
+	obs := observeStarts(mgr, projectDir, agentName, cfgPath)
+
+	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"max_turns": 9}}`, projectDir))
+	if o := lastObservation(t, obs, 1); o.file.MaxTurns != 9 || o.effective.MaxTurns != 9 {
+		t.Fatalf("set: file max_turns=%d effective=%d, want 9", o.file.MaxTurns, o.effective.MaxTurns)
+	}
+
+	postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns"]}}`, projectDir))
+	o := lastObservation(t, obs, 2)
+	if o.file.MaxTurns != 0 || strings.Contains(o.raw, "cleared_fields") {
+		t.Fatalf("clear: the start read %s, want no max_turns and no cleared_fields", o.raw)
+	}
+	if o.effective.MaxTurns != 5 {
+		t.Fatalf("clear: effective max_turns = %d, want the template's 5", o.effective.MaxTurns)
+	}
+
+	postClearedAgentAction(t, srv, agentName, "restart", fmt.Sprintf(`{"projectPath": %q}`, projectDir))
+	if o := lastObservation(t, obs, 3); o.effective.MaxTurns != 5 {
+		t.Fatalf("restart: effective max_turns = %d, want the template's 5", o.effective.MaxTurns)
+	}
+}
+
+// TestStartAgent_ClearedLimitHydratedTemplate: for a template hydrated from
+// the content-addressed cache, which GetAgent does not re-merge, a cleared
+// limit is copied from the cached template; when the cached template
+// cannot be loaded, the limit keeps its current value (a clear never
+// removes a limit), while env keys are still removed.
+func TestStartAgent_ClearedLimitHydratedTemplate(t *testing.T) {
+	const hash = "sha256:" + "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	for _, tc := range []struct {
+		name         string
+		cached       bool
+		wantMaxTurns int
+	}{
+		{name: "cached template", cached: true, wantMaxTurns: 5},
+		{name: "cached template missing", cached: false, wantMaxTurns: 9},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, mgr := newTestServerWithProvisionCapture()
+			cache, err := templatecache.New(t.TempDir(), 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.cached {
+				if _, err := cache.Put(hash, map[string][]byte{"scion-agent.yaml": []byte("harness: claude\nmax_turns: 5\n")}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			srv.SetTemplateCache(cache)
+			projectDir := filepath.Join(t.TempDir(), ".scion")
+			agentName := "hydrated-agent"
+			cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{
+				Harness: "claude", MaxTurns: 5, Env: map[string]string{"FOO": "1"},
+			})
+			writeAgentInfo(t, projectDir, agentName, api.AgentInfo{Template: "limited", TemplateHash: hash})
+			obs := observeStarts(mgr, projectDir, agentName, cfgPath)
+
+			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"max_turns": 9, "env": {"FOO": "1"}}}`, projectDir))
+			lastObservation(t, obs, 1)
+			postClearedAgentAction(t, srv, agentName, "start", fmt.Sprintf(`{"projectPath": %q, "inlineConfig": {"cleared_fields": ["max_turns", "env.FOO"]}}`, projectDir))
+			o := lastObservation(t, obs, 2)
+			if o.file.MaxTurns != tc.wantMaxTurns || o.effective.MaxTurns != tc.wantMaxTurns {
+				t.Errorf("max_turns: file %d, effective %d; want %d", o.file.MaxTurns, o.effective.MaxTurns, tc.wantMaxTurns)
+			}
+			if _, ok := o.file.Env["FOO"]; ok {
+				t.Errorf("env FOO kept: %v", o.file.Env)
+			}
+		})
+	}
+}
+
+// TestApplyInlineConfigUpdate_WorkspaceVolumeKeepsFirst: an inline
+// /workspace volume never replaces the provisioned one, which the start
+// takes the agent's workspace from.
+func TestApplyInlineConfigUpdate_WorkspaceVolumeKeepsFirst(t *testing.T) {
+	srv, _ := newTestServerWithProvisionCapture()
+	projectDir := filepath.Join(t.TempDir(), ".scion")
+	agentName := "workspace-agent"
+	provisioned := api.VolumeMount{Source: "/srv/checkout", Target: "/workspace"}
+	cfgPath := writeAgentConfig(t, projectDir, agentName, api.ScionConfig{Harness: "claude", Volumes: []api.VolumeMount{provisioned}})
+	inline := &api.ScionConfig{Volumes: []api.VolumeMount{
+		{Source: "/elsewhere", Target: "/workspace"},
+		{Source: "/data", Target: "/data"},
+	}}
+	for i := 0; i < 3; i++ {
+		srv.applyInlineConfigUpdate(agentName, projectDir, inline, false)
+		got, _ := readAgentConfig(t, cfgPath)
+		want := []api.VolumeMount{provisioned, {Source: "/data", Target: "/data"}}
+		if !reflect.DeepEqual(got.Volumes, want) {
+			t.Fatalf("after start #%d: volumes\n got: %+v\nwant: %+v", i+1, got.Volumes, want)
+		}
 	}
 }
