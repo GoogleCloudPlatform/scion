@@ -473,9 +473,36 @@ func TestHubStatus_ContextProject(t *testing.T) {
 	assert.Contains(t, out, "Project:    foo\n")
 	assert.Contains(t, out, "Type:       hub project (current context)\n")
 	assert.Contains(t, out, "Hub Project:  Foo (ID: "+ctxTestProjectID+")\n")
+	assert.Contains(t, out, "Project ID: "+ctxTestProjectID+" (current context)\n", "the header names the context project")
+	assert.NotContains(t, out, "Project ID: (not configured)")
 	assert.NotContains(t, out, "Linked: no")
 	assert.NotContains(t, out, "hub link")
 	assert.NotContains(t, out, "user global")
+}
+
+// TestHubStatusProjectID: the Project ID line shows the context project
+// only when the project comes from the current context; otherwise it shows
+// the settings' project_id.
+func TestHubStatusProjectID(t *testing.T) {
+	settings := &config.Settings{ProjectID: "dir-id"}
+	none := &config.Settings{}
+	tests := []struct {
+		name     string
+		settings *config.Settings
+		target   useTarget
+		want     string
+	}{
+		{"context project", none, useTarget{ProjectSource: useSourceContext, ProjectID: "ctx-id"}, "ctx-id (current context)"},
+		{"context project, settings id ignored", settings, useTarget{ProjectSource: useSourceContext, ProjectID: "ctx-id"}, "ctx-id (current context)"},
+		{"context source without an id", none, useTarget{ProjectSource: useSourceContext}, "(not configured)"},
+		{"directory project", settings, useTarget{ProjectSource: useSourceDirectory, ProjectID: "ctx-id"}, "dir-id"},
+		{"global project", none, useTarget{ProjectSource: useSourceGlobal}, "(not configured)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hubStatusProjectID(tt.settings, tt.target))
+		})
+	}
 }
 
 // TestHubStatus_ContextProjectNotFound: a context project the hub does not

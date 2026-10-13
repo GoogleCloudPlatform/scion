@@ -30,6 +30,15 @@ provisioner:
 config_dir: .grok
 skills_dir: .grok/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: hook
+  settle: 1.5s
+  timeout: 90s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .grok/AGENTS.md
 system_prompt_file: .grok/system-prompt.md
 system_prompt_mode: native
