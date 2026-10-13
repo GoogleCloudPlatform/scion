@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"html"
 	"image"
 	"image/color"
@@ -66,9 +67,9 @@ func chromiumPath(t *testing.T) string {
 func dumpDOM(t *testing.T, chromium, url, ready string) string {
 	t.Helper()
 	// One overall limit per subtest, covering a retried browser start.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), browserProbeTimeout)
 	defer cancel()
-	dom, err := browserDOM(ctx, t.Logf, func(ctx context.Context) (string, error) {
+	dom, err := browserDOM(ctx, t.Logf, browserAttemptTimeout, func(ctx context.Context) (string, error) {
 		return runBrowser(ctx, chromium, url, ready)
 	})
 	if err != nil {
@@ -77,18 +78,48 @@ func dumpDOM(t *testing.T, chromium, url, ready string) string {
 	return dom
 }
 
-// browserStartTimeout is the error chromedp returns when the browser does
-// not report its DevTools address in time (chromedp does not export it).
-const browserStartTimeout = "websocket url timeout reached"
+// Browser start budget. chromedp starts a browser in two steps, each with a
+// timer of its own: it waits for the browser to print its DevTools address
+// (browserWSURLTimeout, failing with "websocket url timeout reached"), then
+// dials that address (browserDialTimeout, failing with "could not dial ...";
+// chromedp's own default is 10s, too short on a loaded CI runner).
+const (
+	browserWSURLTimeout = 60 * time.Second
+	browserDialTimeout  = 20 * time.Second
+	browserStartTimeout = browserWSURLTimeout + browserDialTimeout
+	// browserAttemptTimeout bounds one attempt: a browser start, then the
+	// page (whose probe reports within probeReportDeadline).
+	browserAttemptTimeout = 100 * time.Second
+	// browserProbeTimeout is the overall limit for one page load. It fits a
+	// failed start plus a full retry attempt.
+	browserProbeTimeout = browserStartTimeout + browserAttemptTimeout
+)
 
-// browserDOM runs run, and runs it once more only if the browser did not
-// start in time, as happens on a loaded CI runner. Any other error, such
-// as a page that never reports its result, is returned as it is.
-func browserDOM(ctx context.Context, logf func(string, ...any), run func(context.Context) (string, error)) (string, error) {
-	dom, err := run(ctx)
-	if err != nil && strings.Contains(err.Error(), browserStartTimeout) {
-		logf("browser did not start in time; starting it once more")
-		dom, err = run(ctx)
+// isBrowserStartError reports whether err is one of the errors chromedp
+// returns when a browser did not start in time (chromedp exports neither).
+func isBrowserStartError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "websocket url timeout reached") ||
+		strings.HasPrefix(msg, "could not dial ")
+}
+
+// browserDOM runs run with a deadline of attempt, and runs it once more,
+// with a deadline of its own, only if the browser did not start in time,
+// as happens on a loaded CI runner, and ctx has not expired. Any other
+// error, such as a page that never reports its result, is returned as it is.
+func browserDOM(ctx context.Context, logf func(string, ...any), attempt time.Duration, run func(context.Context) (string, error)) (string, error) {
+	try := func() (string, error) {
+		actx, cancel := context.WithTimeout(ctx, attempt)
+		defer cancel()
+		return run(actx)
+	}
+	dom, err := try()
+	if isBrowserStartError(err) && ctx.Err() == nil {
+		logf("browser did not start in time (%v); starting it once more", err)
+		dom, err = try()
 	}
 	return dom, err
 }
@@ -105,11 +136,12 @@ func runBrowser(ctx context.Context, chromium, url, ready string) (string, error
 		chromedp.Flag("disable-site-isolation-trials", true),
 		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
 		// CI runners can be slow to start a browser.
-		chromedp.WSURLReadTimeout(60*time.Second),
+		chromedp.WSURLReadTimeout(browserWSURLTimeout),
 	)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
-	bctx, cancel := chromedp.NewContext(allocCtx)
+	bctx, cancel := chromedp.NewContext(allocCtx,
+		chromedp.WithBrowserOption(chromedp.WithDialTimeout(browserDialTimeout)))
 	defer cancel()
 	var dom string
 	err := chromedp.Run(bctx,
@@ -121,24 +153,28 @@ func runBrowser(ctx context.Context, chromium, url, ready string) (string, error
 }
 
 // TestBrowserDOMRetriesStartOnce: a browser that did not start in time is
-// started once more; other errors and a second start timeout are returned.
+// started once more; other errors and a second start failure are returned.
 func TestBrowserDOMRetriesStartOnce(t *testing.T) {
-	startTimeout := errors.New(browserStartTimeout)
+	wsURLTimeout := errors.New("websocket url timeout reached")
+	// The form seen on CI (GoogleCloudPlatform/scion job 115173695746).
+	dialTimeout := fmt.Errorf("could not dial %q: %w",
+		"ws://127.0.0.1:41235/devtools/browser/0b8c", context.DeadlineExceeded)
 	cases := []struct {
 		name    string
 		results []error
 		calls   int
 		wantErr bool
 	}{
-		{"start timeout then success", []error{startTimeout, nil}, 2, false},
-		{"start timeout twice", []error{startTimeout, startTimeout}, 2, true},
+		{"websocket url timeout then success", []error{wsURLTimeout, nil}, 2, false},
+		{"dial timeout then success", []error{dialTimeout, nil}, 2, false},
+		{"start failure twice", []error{wsURLTimeout, dialTimeout}, 2, true},
 		{"other error is not retried", []error{errors.New("context deadline exceeded"), nil}, 1, true},
 		{"success", []error{nil}, 1, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := 0
-			dom, err := browserDOM(context.Background(), t.Logf, func(context.Context) (string, error) {
+			dom, err := browserDOM(context.Background(), t.Logf, time.Minute, func(context.Context) (string, error) {
 				e := tc.results[calls]
 				calls++
 				if e != nil {
@@ -153,6 +189,64 @@ func TestBrowserDOMRetriesStartOnce(t *testing.T) {
 				t.Errorf("got (%q, %v), want error %v", dom, err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestBrowserDOMRetryHasItsOwnDeadline: a first start that uses up its whole
+// attempt deadline (a dial that times out, as on CI) does not leave the
+// retry with an expired or shortened context.
+func TestBrowserDOMRetryHasItsOwnDeadline(t *testing.T) {
+	const attempt = 50 * time.Millisecond
+	var first time.Time
+	calls := 0
+	dom, err := browserDOM(context.Background(), t.Logf, attempt, func(ctx context.Context) (string, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("attempt has no deadline")
+		}
+		if calls == 1 {
+			first = deadline
+			<-ctx.Done()
+			return "", fmt.Errorf("could not dial %q: %w", "ws://127.0.0.1:1/devtools/browser/x", ctx.Err())
+		}
+		if err := ctx.Err(); err != nil {
+			t.Errorf("retry started with a done context: %v", err)
+		}
+		if !deadline.After(first) {
+			t.Errorf("retry deadline %v is not after the first attempt's %v", deadline, first)
+		}
+		return "<html></html>", nil
+	})
+	if err != nil || dom != "<html></html>" || calls != 2 {
+		t.Fatalf("got (%q, %v) after %d calls, want the DOM after 2", dom, err, calls)
+	}
+}
+
+// TestBrowserDOMNoRetryAfterOverallDeadline: once the overall limit is
+// spent, a start failure is returned rather than retried.
+func TestBrowserDOMNoRetryAfterOverallDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, err := browserDOM(ctx, t.Logf, time.Minute, func(context.Context) (string, error) {
+		calls++
+		cancel()
+		return "", errors.New("websocket url timeout reached")
+	})
+	if err == nil || calls != 1 {
+		t.Fatalf("got %v after %d calls, want the start error after 1", err, calls)
+	}
+}
+
+// TestBrowserProbeTimeoutFitsRetry: the overall limit covers a failed start
+// followed by a full retry attempt, and an attempt leaves the page time to
+// report after a slow start.
+func TestBrowserProbeTimeoutFitsRetry(t *testing.T) {
+	if browserProbeTimeout < browserStartTimeout+browserAttemptTimeout {
+		t.Errorf("overall %v < start %v + attempt %v", browserProbeTimeout, browserStartTimeout, browserAttemptTimeout)
+	}
+	if browserAttemptTimeout <= browserStartTimeout {
+		t.Errorf("attempt %v leaves no time after a start of %v", browserAttemptTimeout, browserStartTimeout)
 	}
 }
 
