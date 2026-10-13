@@ -89,24 +89,31 @@ func intPtr(n int) *int { return &n }
 // written before the ready block existed: one for a built-in harness type
 // resolves to that bundle's ready block (hook for claude), one for a harness
 // with no built-in bundle keeps the delay default, and an explicit block
-// always wins.
+// always wins. The metadata-less rows resolve to the plain Generic harness,
+// which carries the entry's ready spec too.
 func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
+	const declarative = "command:\n  base: [tool]\n"
+	hook := api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}
+	delay := api.ReadySpec{Strategy: "delay", Settle: 8 * time.Second}
 	for _, tc := range []struct {
 		name, config string
+		generic      bool
 		want         api.ReadySpec
 	}{
-		{"built-in harness, no block", "harness: claude\n",
-			api.ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}},
-		{"custom harness, no block", "harness: some-custom\n",
-			api.ReadySpec{Strategy: "delay", Settle: 8 * time.Second}},
-		{"built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n",
+		{"built-in harness, no block", "harness: claude\n" + declarative, false, hook},
+		{"custom harness, no block", "harness: some-custom\n" + declarative, false, delay},
+		{"built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n" + declarative, false,
+			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
+		{"metadata-less built-in harness, no block", "harness: claude\n", true, hook},
+		{"metadata-less custom harness, no block", "harness: some-custom\n", true, delay},
+		{"metadata-less built-in harness, explicit block wins", "harness: claude\nready:\n  strategy: delay\n  settle: 3s\n", true,
 			api.ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
 			t.Setenv("HOME", home)
 			hcDir := filepath.Join(home, ".scion", "harness-configs", "hc")
-			writeFile(t, filepath.Join(hcDir, "config.yaml"), tc.config+"image: img:test\ncommand:\n  base: [tool]\n")
+			writeFile(t, filepath.Join(hcDir, "config.yaml"), tc.config+"image: img:test\n")
 
 			resolved, err := Resolve(context.Background(), ResolveOptions{Name: "hc"})
 			if err != nil {
@@ -115,10 +122,45 @@ func TestResolve_ConfigWithoutReadyGetsBundleReady(t *testing.T) {
 			if resolved.ConfigDir == nil || resolved.ConfigDir.Path != hcDir {
 				t.Fatalf("resolved config dir = %+v, want %s", resolved.ConfigDir, hcDir)
 			}
+			if _, isGeneric := resolved.Harness.(*Generic); isGeneric != tc.generic {
+				t.Fatalf("harness is %T, want plain Generic = %v", resolved.Harness, tc.generic)
+			}
 			if got := resolved.Harness.ReadySpec(); got != tc.want {
 				t.Errorf("ReadySpec() = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestResolve_BuiltInNameWithoutDirKeepsBundleReady: a built-in harness name
+// with no installed harness-config dir resolves to the plain Generic harness,
+// which carries the bundle's ready block, the readiness the name had when it
+// was keyed on the harness name.
+func TestResolve_BuiltInNameWithoutDirKeepsBundleReady(t *testing.T) {
+	legacyHook := map[string]bool{"claude": true, "gemini-cli": true, "copilot": true, "grok-build": true}
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range append(AllHarnessNames(), "no-such-harness") {
+		resolved, err := Resolve(context.Background(), ResolveOptions{Name: name})
+		if err != nil {
+			t.Fatalf("%s: Resolve: %v", name, err)
+		}
+		if resolved.ConfigDir != nil {
+			t.Fatalf("%s: unexpected config dir %+v", name, resolved.ConfigDir)
+		}
+		if _, ok := resolved.Harness.(*Generic); !ok {
+			t.Fatalf("%s: harness is %T, want plain Generic", name, resolved.Harness)
+		}
+		want := config.DefaultReadySpec(config.ReadyStrategyDelay)
+		if legacyHook[name] {
+			want = config.DefaultReadySpec(config.ReadyStrategyHook)
+		}
+		if got := resolved.Harness.ReadySpec(); got != want {
+			t.Errorf("%s: ReadySpec() = %+v, want %+v", name, got, want)
+		}
+	}
+	// The zero Generic (harness.New for an unknown name) keeps the default.
+	if got := (&Generic{}).ReadySpec(); got != config.DefaultReadySpec(config.ReadyStrategyDelay) {
+		t.Errorf("zero Generic ReadySpec() = %+v", got)
 	}
 }
 

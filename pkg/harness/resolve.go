@@ -114,8 +114,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
+	// The plain Generic harness still carries the entry's ready spec (which
+	// EffectiveConfig fills from the built-in bundle when the entry has no
+	// block), so a built-in harness type keeps its readiness here too.
+	ready := entry.ResolvedReady()
 	return &ResolvedHarness{
-		Harness:        &Generic{},
+		Harness:        &Generic{ready: &ready},
 		ConfigName:     opts.Name,
 		ConfigDir:      hcDir,
 		Config:         entry,

@@ -25,7 +25,13 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-type Generic struct{}
+// Generic is the harness for a harness-config without a provisioner or
+// declarative metadata, and for names harness.New does not know.
+type Generic struct {
+	// ready, when set, is the resolved ready spec of the harness-config
+	// entry Resolve built this harness from; nil uses the delay default.
+	ready *api.ReadySpec
+}
 
 func (g *Generic) Name() string {
 	return "generic"
@@ -99,8 +105,12 @@ func (g *Generic) DeliverySpec() api.DeliverySpec {
 	return config.DefaultDeliverySpec()
 }
 
-// ReadySpec returns the default (delay) ready spec; Generic has no config.
+// ReadySpec returns the ready spec of the entry Resolve built this harness
+// from, or the default (delay) spec when there is none.
 func (g *Generic) ReadySpec() api.ReadySpec {
+	if g.ready != nil {
+		return *g.ready
+	}
 	return config.DefaultReadySpec(config.ReadyStrategyDelay)
 }
 
