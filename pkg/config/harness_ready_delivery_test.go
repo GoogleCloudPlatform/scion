@@ -273,7 +273,7 @@ func TestValidateHarnessConfig_ReadyDeliveryBlocks(t *testing.T) {
 	}
 	for name, doc := range accepted {
 		t.Run("accepted/"+name, func(t *testing.T) {
-			errs, err := ValidateHarnessConfig([]byte(doc))
+			errs, _, err := ValidateHarnessConfig([]byte(doc))
 			if err != nil {
 				t.Fatalf("ValidateHarnessConfig: %v", err)
 			}
@@ -306,7 +306,7 @@ func TestValidateHarnessConfig_ReadyDeliveryBlocks(t *testing.T) {
 	}
 	for name, doc := range rejected {
 		t.Run("rejected/"+name, func(t *testing.T) {
-			errs, err := ValidateHarnessConfig([]byte(doc))
+			errs, _, err := ValidateHarnessConfig([]byte(doc))
 			if err != nil {
 				t.Fatalf("ValidateHarnessConfig: %v", err)
 			}

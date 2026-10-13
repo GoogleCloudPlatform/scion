@@ -18,9 +18,13 @@ import (
 	"embed"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 	"gopkg.in/yaml.v3"
 )
 
@@ -211,10 +215,22 @@ func ValidateAgentConfig(data []byte, schemaVersion string) ([]ValidationError, 
 
 // ValidateHarnessConfig validates a standalone harness-config config.yaml by
 // wrapping it in the versioned settings schema's harness_configs map.
-func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
+//
+// Unknown top-level keys are tolerated: they are removed from the document
+// before validation and returned, sorted, in unknownKeys, so a binary can
+// load a config.yaml written for a newer Scion version that added a block.
+// Unknown keys inside a known block are still validation errors, as are
+// wrong types, enums and ranges anywhere. The known set is the binary's own
+// embedded schema (see harnessConfigKnownKeys).
+func ValidateHarnessConfig(data []byte) (errs []ValidationError, unknownKeys []string, err error) {
 	var doc interface{}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Errorf("failed to parse harness config: %w", err)
+		return nil, nil, fmt.Errorf("failed to parse harness config: %w", err)
+	}
+
+	doc, unknownKeys, err = stripUnknownHarnessConfigKeys(doc)
+	if err != nil {
+		return nil, nil, err
 	}
 
 	wrapped := map[string]interface{}{
@@ -225,18 +241,96 @@ func ValidateHarnessConfig(data []byte) ([]ValidationError, error) {
 	}
 	wrappedData, err := yaml.Marshal(wrapped)
 	if err != nil {
-		return nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
+		return nil, nil, fmt.Errorf("failed to prepare harness config for validation: %w", err)
 	}
 
-	errors, err := ValidateSettings(wrappedData, "1")
+	errs, err = ValidateSettings(wrappedData, "1")
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	for i := range errors {
-		errors[i].Path = strings.TrimPrefix(errors[i].Path, "harness_configs/_/")
-		errors[i].Path = strings.TrimPrefix(errors[i].Path, "harness_configs/_")
+	for i := range errs {
+		errs[i].Path = strings.TrimPrefix(errs[i].Path, "harness_configs/_/")
+		errs[i].Path = strings.TrimPrefix(errs[i].Path, "harness_configs/_")
 	}
-	return errors, nil
+	return errs, unknownKeys, nil
+}
+
+// stripUnknownHarnessConfigKeys returns a copy of a parsed config.yaml
+// without the top-level keys the embedded schema does not know, and those
+// keys, sorted. Only the root is inspected; nested blocks are returned as
+// they are, so the validator still rejects unknown keys inside them. A
+// document that is not a map is returned unchanged for the validator to
+// reject.
+func stripUnknownHarnessConfigKeys(doc interface{}) (interface{}, []string, error) {
+	root, ok := doc.(map[string]interface{})
+	if !ok {
+		return doc, nil, nil
+	}
+	known, err := harnessConfigKnownKeys()
+	if err != nil {
+		return nil, nil, err
+	}
+	var unknown []string
+	stripped := make(map[string]interface{}, len(root))
+	for k, v := range root {
+		if _, ok := known[k]; !ok {
+			unknown = append(unknown, k)
+			continue
+		}
+		stripped[k] = v
+	}
+	sort.Strings(unknown)
+	return stripped, unknown, nil
+}
+
+// harnessConfigKnownKeysOverride, when non-nil, replaces the schema-derived
+// known key set. Tests set it to simulate a binary built before a key was
+// added to the schema.
+var harnessConfigKnownKeysOverride map[string]struct{}
+
+var (
+	harnessConfigKnownKeysOnce sync.Once
+	harnessConfigKnownKeysSet  map[string]struct{}
+	harnessConfigKnownKeysErr  error
+)
+
+// harnessConfigKnownKeys returns the top-level keys of a harness-config: the
+// property names of $defs.harnessConfig in the embedded settings schema. The
+// schema is the single source of truth, so there is no hand-kept list.
+func harnessConfigKnownKeys() (map[string]struct{}, error) {
+	if harnessConfigKnownKeysOverride != nil {
+		return harnessConfigKnownKeysOverride, nil
+	}
+	harnessConfigKnownKeysOnce.Do(func() {
+		harnessConfigKnownKeysSet, harnessConfigKnownKeysErr = loadHarnessConfigKnownKeys()
+	})
+	return harnessConfigKnownKeysSet, harnessConfigKnownKeysErr
+}
+
+func loadHarnessConfigKnownKeys() (map[string]struct{}, error) {
+	data, err := schemasFS.ReadFile(settingsSchemaFiles["1"])
+	if err != nil {
+		return nil, fmt.Errorf("failed to read embedded schema: %w", err)
+	}
+	var schema struct {
+		Defs struct {
+			HarnessConfig struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+			} `json:"harnessConfig"`
+		} `json:"$defs"`
+	}
+	if err := json.Unmarshal(data, &schema); err != nil {
+		return nil, fmt.Errorf("failed to parse embedded schema: %w", err)
+	}
+	props := schema.Defs.HarnessConfig.Properties
+	if len(props) == 0 {
+		return nil, fmt.Errorf("embedded schema has no $defs.harnessConfig.properties")
+	}
+	known := make(map[string]struct{}, len(props))
+	for k := range props {
+		known[k] = struct{}{}
+	}
+	return known, nil
 }
 
 // validateAgainstSchema performs JSON Schema validation using the specified
@@ -293,35 +387,55 @@ func validateAgainstSchema(data []byte, schemaVersion string, schemaFiles map[st
 	return extractValidationErrors(err), nil
 }
 
-// extractValidationErrors converts jsonschema validation errors into our
-// ValidationError type using the BasicOutput format.
+// validationErrorPrinter renders jsonschema error kinds as English text.
+var validationErrorPrinter = message.NewPrinter(language.English)
+
+// extractValidationErrors converts a jsonschema validation error into the
+// leaf causes as ValidationErrors, sorted by path and then message.
 func extractValidationErrors(err error) []ValidationError {
 	validationErr, ok := err.(*jsonschema.ValidationError)
 	if !ok {
 		return []ValidationError{{Message: err.Error()}}
 	}
 
-	basic := validationErr.BasicOutput()
-	return collectBasicErrors(basic)
+	result := collectLeafErrors(validationErr)
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Path != result[j].Path {
+			return result[i].Path < result[j].Path
+		}
+		return result[i].Message < result[j].Message
+	})
+	return result
 }
 
-// collectBasicErrors extracts leaf validation errors from the BasicOutput tree.
-func collectBasicErrors(unit *jsonschema.OutputUnit) []ValidationError {
+// collectLeafErrors walks the cause tree and returns only its leaves (units
+// with no causes). Intermediate units ($ref, allOf, and so on) only say
+// "validation failed", which hides the real cause; in the flattened
+// BasicOutput every unit carries an error, so leaves cannot be told apart
+// there.
+func collectLeafErrors(e *jsonschema.ValidationError) []ValidationError {
+	if len(e.Causes) == 0 {
+		return []ValidationError{{
+			Path:    instancePath(e.InstanceLocation),
+			Message: e.ErrorKind.LocalizedString(validationErrorPrinter),
+		}}
+	}
 	var result []ValidationError
-
-	if unit.Error != nil {
-		path := strings.TrimPrefix(unit.InstanceLocation, "/")
-		result = append(result, ValidationError{
-			Path:    path,
-			Message: unit.Error.String(),
-		})
+	for _, cause := range e.Causes {
+		result = append(result, collectLeafErrors(cause)...)
 	}
-
-	for i := range unit.Errors {
-		result = append(result, collectBasicErrors(&unit.Errors[i])...)
-	}
-
 	return result
+}
+
+// instancePath renders an instance location as a JSON pointer without the
+// leading slash (e.g. "hub/endpoint").
+func instancePath(location []string) string {
+	parts := make([]string, len(location))
+	for i, tok := range location {
+		tok = strings.ReplaceAll(tok, "~", "~0")
+		parts[i] = strings.ReplaceAll(tok, "/", "~1")
+	}
+	return strings.Join(parts, "/")
 }
 
 // convertYAMLToJSON converts YAML-decoded values to JSON-compatible types.

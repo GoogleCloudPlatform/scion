@@ -196,9 +196,9 @@ func TestValidateSettings_DriftKeysValidate(t *testing.T) {
 func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 	// want is a substring that must appear in one error's path or message,
 	// naming the key under test, so an unrelated error cannot satisfy a case.
-	// For an unknown field it is the closed object's path: the validator
-	// reports additionalProperties failures under a $ref as "<object path>:
-	// validation failed" without the field name.
+	// For an unknown field it is the closed object's path; the leaf message
+	// also names the field ("additional properties 'x' not allowed"), see
+	// TestValidateSettings_LeafErrorNamesProperty.
 	tests := []struct {
 		name string
 		yaml string

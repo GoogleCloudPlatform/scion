@@ -51,7 +51,7 @@ func TestValidateHarnessConfig_ThinkingBlockAccepted(t *testing.T) {
 		"zero max":    "harness: x\nthinking:\n  levels:\n    - {max: 0, value: none}\n    - {max: 100, value: high}\n",
 	} {
 		t.Run(name, func(t *testing.T) {
-			errs, err := ValidateHarnessConfig([]byte(doc))
+			errs, _, err := ValidateHarnessConfig([]byte(doc))
 			if err != nil {
 				t.Fatalf("ValidateHarnessConfig: %v", err)
 			}
@@ -79,7 +79,7 @@ func TestValidateHarnessConfig_ThinkingBlockRejected(t *testing.T) {
 	}
 	for name, doc := range cases {
 		t.Run(name, func(t *testing.T) {
-			errs, err := ValidateHarnessConfig([]byte(doc))
+			errs, _, err := ValidateHarnessConfig([]byte(doc))
 			if err != nil {
 				t.Fatalf("ValidateHarnessConfig: %v", err)
 			}
@@ -91,19 +91,24 @@ func TestValidateHarnessConfig_ThinkingBlockRejected(t *testing.T) {
 }
 
 // The thinking_budget_* keys were never read and were removed in favour of
-// the thinking block; the schema must now reject them like any unknown key.
-func TestValidateHarnessConfig_ThinkingBudgetFieldsRejected(t *testing.T) {
-	for _, doc := range []string{
-		"harness: x\nthinking_budget_map:\n  some-model: 1024\n",
-		"harness: x\nthinking_budget_flag: --thinking-budget\n",
-		"harness: x\nthinking_budget_config_key: thinkingBudget\n",
+// the thinking block. The schema no longer knows them, so at the top level
+// they are reported as unknown keys (a load warning), like any other key
+// this binary does not know (ptone/scion#4975).
+func TestValidateHarnessConfig_ThinkingBudgetFieldsReportedUnknown(t *testing.T) {
+	for key, doc := range map[string]string{
+		"thinking_budget_map":        "harness: x\nthinking_budget_map:\n  some-model: 1024\n",
+		"thinking_budget_flag":       "harness: x\nthinking_budget_flag: --thinking-budget\n",
+		"thinking_budget_config_key": "harness: x\nthinking_budget_config_key: thinkingBudget\n",
 	} {
-		errs, err := ValidateHarnessConfig([]byte(doc))
+		errs, unknown, err := ValidateHarnessConfig([]byte(doc))
 		if err != nil {
 			t.Fatalf("ValidateHarnessConfig: %v", err)
 		}
-		if len(errs) == 0 {
-			t.Fatalf("expected schema to reject removed field in %q", doc)
+		if len(errs) != 0 {
+			t.Fatalf("%s: expected no errors, got %v", key, errs)
+		}
+		if len(unknown) != 1 || unknown[0] != key {
+			t.Fatalf("%s: unknown keys = %v, want [%s]", key, unknown, key)
 		}
 	}
 }

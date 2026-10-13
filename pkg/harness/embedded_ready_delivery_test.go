@@ -16,6 +16,8 @@ package harness
 
 import (
 	"io/fs"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -51,12 +53,15 @@ func TestEmbeddedHarnessConfigs_Validate(t *testing.T) {
 	for _, name := range names {
 		t.Run(name, func(t *testing.T) {
 			data, entry := loadEmbeddedEntry(t, name)
-			verrs, err := config.ValidateHarnessConfig(data)
+			verrs, unknown, err := config.ValidateHarnessConfig(data)
 			if err != nil {
 				t.Fatalf("schema validation error: %v", err)
 			}
 			if len(verrs) > 0 {
 				t.Fatalf("schema violations: %v", verrs)
+			}
+			if len(unknown) > 0 {
+				t.Fatalf("unknown top-level keys %v: add them to the schema in the same change", unknown)
 			}
 			if err := entry.Thinking.Validate(); err != nil {
 				t.Errorf("thinking block: %v", err)
@@ -66,6 +71,37 @@ func TestEmbeddedHarnessConfigs_Validate(t *testing.T) {
 			}
 			if err := entry.Delivery.Validate(); err != nil {
 				t.Errorf("delivery block: %v", err)
+			}
+		})
+	}
+}
+
+// TestEmbeddedHarnessConfigs_LoadWithoutWarnings keeps main strict while
+// binaries in the field tolerate unknown top-level keys (ptone/scion#4975):
+// every bundled config.yaml must load through LoadHarnessConfigDir with zero
+// warnings, so a top-level typo or a key added without its schema entry
+// fails CI instead of becoming a silent warning.
+func TestEmbeddedHarnessConfigs_LoadWithoutWarnings(t *testing.T) {
+	names := AllHarnessNames()
+	if len(names) == 0 {
+		t.Fatal("AllHarnessNames() returned no harnesses")
+	}
+	for _, name := range names {
+		t.Run(name, func(t *testing.T) {
+			data, _ := loadEmbeddedEntry(t, name)
+			dir := filepath.Join(t.TempDir(), name)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "config.yaml"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			hcDir, err := config.LoadHarnessConfigDir(dir)
+			if err != nil {
+				t.Fatalf("LoadHarnessConfigDir: %v", err)
+			}
+			if len(hcDir.Warnings) > 0 {
+				t.Fatalf("load warnings: %v", hcDir.Warnings)
 			}
 		})
 	}

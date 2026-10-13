@@ -88,10 +88,10 @@ func TestEmbeddedHarnessThinkingBlocks(t *testing.T) {
 			continue
 		}
 		got[name] = entry.Thinking
-		if verrs, err := config.ValidateHarnessConfig(data); err != nil {
+		if verrs, unknown, err := config.ValidateHarnessConfig(data); err != nil {
 			t.Errorf("%s/config.yaml: schema validation error: %v", name, err)
-		} else if len(verrs) > 0 {
-			t.Errorf("%s/config.yaml: schema violations: %v", name, verrs)
+		} else if len(verrs) > 0 || len(unknown) > 0 {
+			t.Errorf("%s/config.yaml: schema violations: %v, unknown top-level keys: %v", name, verrs, unknown)
 		}
 		if err := entry.Thinking.Validate(); err != nil {
 			t.Errorf("%s/config.yaml: thinking block: %v", name, err)

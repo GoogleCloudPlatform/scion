@@ -67,6 +67,10 @@ type HarnessConfigDir struct {
 	// HarnessConfigSource). Empty when loaded directly via
 	// LoadHarnessConfigDir outside the resolvers.
 	Source HarnessConfigSource
+	// Warnings lists non-fatal problems found while loading config.yaml,
+	// such as unknown top-level keys (see ValidateHarnessConfig). The
+	// directory is usable; callers decide where to show them.
+	Warnings []string
 }
 
 // HarnessConfigSource names the resolution branch a harness-config came from.
@@ -150,10 +154,20 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to read config.yaml: %w", err)
 	}
 
-	if validationErrors, err := ValidateHarnessConfig(data); err != nil {
+	validationErrors, unknownKeys, err := ValidateHarnessConfig(data)
+	if err != nil {
 		return nil, err
-	} else if len(validationErrors) > 0 {
-		return nil, fmt.Errorf("invalid config.yaml: %s", validationErrors[0].Error())
+	}
+	if len(validationErrors) > 0 {
+		msgs := make([]string, len(validationErrors))
+		for i, ve := range validationErrors {
+			msgs[i] = ve.Error()
+		}
+		return nil, fmt.Errorf("invalid config.yaml: %s", strings.Join(msgs, "; "))
+	}
+	var warnings []string
+	if len(unknownKeys) > 0 {
+		warnings = append(warnings, unknownTopLevelKeysWarning(unknownKeys))
 	}
 
 	var entry HarnessConfigEntry
@@ -182,10 +196,17 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 	}
 
 	return &HarnessConfigDir{
-		Name:   name,
-		Path:   absPath,
-		Config: entry,
+		Name:     name,
+		Path:     absPath,
+		Config:   entry,
+		Warnings: warnings,
 	}, nil
+}
+
+// unknownTopLevelKeysWarning is the warning LoadHarnessConfigDir reports for
+// top-level config.yaml keys this binary's schema does not know.
+func unknownTopLevelKeysWarning(keys []string) string {
+	return fmt.Sprintf("config.yaml: unknown top-level field(s) %s ignored (typo, or written for a newer Scion version)", strings.Join(keys, ", "))
 }
 
 // ParseHarnessConfigYAML unmarshals raw config.yaml bytes into a
