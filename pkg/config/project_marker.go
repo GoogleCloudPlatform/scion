@@ -142,8 +142,18 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	return &marker, nil
 }
 
+// ErrEmptyProjectSlug is returned by WriteProjectMarker for a marker without
+// a project slug. ReadProjectMarker rejects such a marker, and its external
+// project path would be named only by the project ID.
+var ErrEmptyProjectSlug = errors.New("project marker requires a non-empty project-slug")
+
 // WriteProjectMarker writes a ProjectMarker to the given path as a YAML file.
+// A marker with an empty ProjectSlug is refused with ErrEmptyProjectSlug and
+// nothing is written.
 func WriteProjectMarker(path string, marker *ProjectMarker) error {
+	if marker == nil || marker.ProjectSlug == "" {
+		return fmt.Errorf("refusing to write project marker at %s: %w", path, ErrEmptyProjectSlug)
+	}
 	data, err := yaml.Marshal(marker)
 	if err != nil {
 		return fmt.Errorf("failed to marshal project marker: %w", err)

@@ -2089,8 +2089,9 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	if id := globalSettingsProjectID(globalDir); id != "" {
 		return id == projectID
 	}
-	// The global marker may carry an empty slug, which ReadProjectMarker
-	// rejects, so only its project-id is read here.
+	// The global marker may carry an empty slug (see
+	// writeGlobalDirIDRecord), which ReadProjectMarker rejects, so only its
+	// project-id is read here.
 	markerPath := filepath.Join(globalDir, config.DotScion)
 	if !config.IsProjectMarkerFile(markerPath) {
 		return false
@@ -2101,6 +2102,20 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	}
 	var marker config.ProjectMarker
 	return yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID
+}
+
+// writeGlobalDirIDRecord records projectID, the global project's hub id, in
+// the global directory's .scion file at markerPath. The record is
+// deliberately written without a project slug: the global project's dispatch
+// carries none, and config.WriteProjectMarker refuses an empty slug. Such a
+// record is not a readable project marker (config.ReadProjectMarker rejects
+// it); only isGlobalDirProjectID reads it, for its project-id.
+func writeGlobalDirIDRecord(markerPath, projectID string) error {
+	data, err := yaml.Marshal(&config.ProjectMarker{ProjectID: projectID})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the global project id record: %w", err)
+	}
+	return os.WriteFile(markerPath, data, 0644)
 }
 
 // globalSettingsProjectID returns the hub project id recorded in the global
@@ -2315,6 +2330,21 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
 			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
+		} else if in.ProjectSlug == "" && config.IsGlobalProjectDir(in.ProjectPath) {
+			// The global project's dispatch carries no slug (see
+			// splitHubGlobalSlug); globalDirProjectConflict has already
+			// refused any other project at this path. Only the id is
+			// recorded, for isGlobalDirProjectID.
+			if wErr := writeGlobalDirIDRecord(scionPath, in.ProjectID); wErr != nil {
+				s.agentLifecycleLog.Warn("Failed to record the global project id",
+					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+			}
+		} else if in.ProjectSlug == "" {
+			// A marker needs a slug (config.WriteProjectMarker refuses an
+			// empty one), so none is written for a dispatch that names
+			// only the project ID.
+			s.agentLifecycleLog.Warn("Not writing .scion marker for hub-managed project: the dispatch names no project slug",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
 		} else {
 			marker := &config.ProjectMarker{
 				ProjectID:   in.ProjectID,
