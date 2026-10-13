@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -314,7 +315,7 @@ func ResolveHubIDFromEnv() string {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
-		if kService := os.Getenv("K_SERVICE"); kService != "" {
+		if kService := cloudrunenv.ServiceName(); kService != "" {
 			slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
 				"k_service", kService)
 			h := sha256.Sum256([]byte(kService))
@@ -353,7 +354,7 @@ func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
 		return v, true
 	}
-	if kService := os.Getenv("K_SERVICE"); kService != "" {
+	if kService := cloudrunenv.ServiceName(); kService != "" {
 		h := sha256.Sum256([]byte(kService))
 		return hex.EncodeToString(h[:6]), true
 	}
