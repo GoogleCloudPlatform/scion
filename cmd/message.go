@@ -1979,7 +1979,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; when an agent sends the message, attachments the hub cannot read are reported as warnings after it is sent (human sends do not report these yet).")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.
