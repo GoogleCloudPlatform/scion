@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentplugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
@@ -944,6 +945,11 @@ func enumerateLocalSkills(agentHome, skillsDir string) []SkillResolutionEntry {
 	var result []SkillResolutionEntry
 	for _, e := range entries {
 		if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		// An Agent Plugins bundle installed in the skills dir (claude) is
+		// not a skill; the harness loads it as a plugin.
+		if fi, err := os.Lstat(filepath.Join(skillsPath, e.Name(), agentplugin.ManifestFile)); err == nil && fi.Mode().IsRegular() {
 			continue
 		}
 		entry := SkillResolutionEntry{

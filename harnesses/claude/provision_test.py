@@ -22,10 +22,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
+import stat
+import subprocess
 import tempfile
 import unittest
 from contextlib import contextmanager
 from typing import Any
+from unittest import mock
 
 PROVISION_PATH = os.path.join(os.path.dirname(__file__), "provision.py")
 SPEC = importlib.util.spec_from_file_location("claude_provision", PROVISION_PATH)
@@ -678,6 +682,525 @@ class ConfigYamlTest(unittest.TestCase):
 
         self.assertIn("ANTHROPIC_DEFAULT_HAIKU_MODEL", env_keys)
         self.assertNotIn("ANTHROPIC_MODEL", env_keys)
+
+
+# --- Agent Plugins -----------------------------------------------------------
+
+R = "${CLAUDE_PLUGIN_ROOT}"
+WRAP = ["-c", 'cd -- "$1" || exit 127; shift; exec "$@"', "sh"]
+
+# Translation table (design 3.2), row by row: input mcp.json server ->
+# Claude mcpServers entry. D is substituted with the plugin's data dir.
+GOLDEN_SERVERS_IN: dict[str, dict[str, Any]] = {
+    "bare": {"type": "stdio", "command": "npx", "args": ["-y", "srv"]},
+    "relative": {"type": "stdio", "command": "./bin/x"},
+    "cwd-rel": {"type": "stdio", "command": "./bin/x", "cwd": "./d"},
+    "cwd-dot": {"type": "stdio", "command": "./bin/x", "cwd": "./"},
+    "cwd-root": {"type": "stdio", "command": "./bin/x", "cwd": "${PLUGIN_ROOT}/sub"},
+    "cwd-data": {"type": "stdio", "command": "./bin/x", "cwd": "${PLUGIN_DATA}/cache"},
+    "cwd-data-exact": {"type": "stdio", "command": "./bin/x", "cwd": "${PLUGIN_DATA}"},
+    "expand": {
+        "type": "stdio", "command": "./bin/x",
+        "args": ["--root", "${PLUGIN_ROOT}/cfg.json", "--data=${PLUGIN_DATA}/x", "$1", "$HOME", "lit"],
+        "env": {"CFG": "${PLUGIN_ROOT}/c", "DIR": "${PLUGIN_DATA}", "PLAIN": "v"},
+    },
+    "http": {"type": "streamable-http", "url": "https://x.example/mcp", "headers": {"X-Tenant": "t"}},
+    "http-plain": {"type": "streamable-http", "url": "http://127.0.0.1:8765/mcp"},
+    "events": {"type": "sse", "url": "https://x.example/sse"},
+}
+
+
+def golden_servers_out(data: str) -> dict[str, dict[str, Any]]:
+    def stdio(cwd: str, *rest: str, env: dict[str, str] | None = None) -> dict[str, Any]:
+        e = dict(env or {})
+        e["PLUGIN_ROOT"] = R
+        e["PLUGIN_DATA"] = data
+        return {"type": "stdio", "command": "/bin/sh", "args": [*WRAP, cwd, *rest], "env": e}
+
+    return {
+        "bare": stdio(R, "npx", "-y", "srv"),
+        "relative": stdio(R, R + "/bin/x"),
+        "cwd-rel": stdio(R + "/d", R + "/bin/x"),
+        "cwd-dot": stdio(R, R + "/bin/x"),
+        "cwd-root": stdio(R + "/sub", R + "/bin/x"),
+        "cwd-data": stdio(data + "/cache", R + "/bin/x"),
+        "cwd-data-exact": stdio(data, R + "/bin/x"),
+        "expand": stdio(
+            R, R + "/bin/x", "--root", R + "/cfg.json", "--data=" + data + "/x", "$1", "$HOME", "lit",
+            env={"CFG": R + "/c", "DIR": data, "PLAIN": "v"},
+        ),
+        "http": {"type": "http", "url": "https://x.example/mcp", "headers": {"X-Tenant": "t"}},
+        "http-plain": {"type": "http", "url": "http://127.0.0.1:8765/mcp"},
+        "events": {"type": "sse", "url": "https://x.example/sse"},
+    }
+
+
+def _plugin(name: str = "acme.tools", servers: dict[str, Any] | None = None, **raw: Any):
+    entry = {"name": name, "version": "1.2.0", "description": "Acme", **raw}
+    return scion_harness.AgentPlugin(
+        name=name, version="1.2.0", digest="d", staged_dir="/nonexistent", skills=[],
+        skills_dir_conflict=bool(raw.get("skills_dir_conflict")), mcp_servers=servers, raw=entry,
+    )
+
+
+class _Warnings:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def __call__(self, msg: str) -> None:
+        self.messages.append(msg)
+
+
+class ClaudeMcpTranslationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ctx = make_ctx("/home/x")
+        self.warnings = _Warnings()
+        self.ctx.warn = self.warnings  # type: ignore[method-assign]
+        self.data = "/home/x/.scion/agent-plugins/data/acme.tools"
+
+    def test_golden_translation(self) -> None:
+        got = provision.translate_mcp_servers(self.ctx, _plugin(servers=GOLDEN_SERVERS_IN), self.data)
+        self.assertEqual(got, golden_servers_out(self.data))
+        self.assertEqual(self.warnings.messages, [])
+
+    def test_wrapper_argv_layout(self) -> None:
+        out = provision.translate_mcp_server(
+            {"type": "stdio", "command": "./bin/x", "args": ["a", "b c"], "cwd": "./w"}, self.data)
+        self.assertEqual(out["command"], "/bin/sh")
+        # -c SCRIPT $0 $1=cwd $2=command $3..=args: each a separate element,
+        # never joined into the script text.
+        self.assertEqual(out["args"], ["-c", provision.STDIO_CWD_WRAPPER, "sh", R + "/w", R + "/bin/x", "a", "b c"])
+        self.assertNotIn("b c", out["args"][1])
+
+    def test_wrapper_runs_in_cwd_with_positional_args(self) -> None:
+        # Executes the real wrapper with /bin/sh, as Claude would after
+        # expanding ${CLAUDE_PLUGIN_ROOT}: cwd is applied and plugin strings
+        # reach the program unparsed.
+        with tempfile.TemporaryDirectory() as root:
+            out = provision.translate_mcp_server(
+                {"type": "stdio", "command": "printf", "args": ["%s|", "$1", "a b", "`id`", "${PLUGIN_ROOT}"]},
+                self.data)
+            args = [a.replace(R, root) for a in out["args"]]
+            proc = subprocess.run([out["command"], *args], capture_output=True, text=True, cwd="/")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout, f"$1|a b|`id`|{root}|")
+            pwd = subprocess.run([out["command"], *[a.replace(R, root) for a in
+                                  provision.translate_mcp_server({"type": "stdio", "command": "pwd"}, self.data)["args"]]],
+                                 capture_output=True, text=True, cwd="/")
+            self.assertEqual(os.path.realpath(pwd.stdout.strip()), os.path.realpath(root))
+            bad = subprocess.run([out["command"], *[a.replace(R, os.path.join(root, "missing")) for a in out["args"]]],
+                                 capture_output=True, text=True, cwd="/")
+            self.assertEqual(bad.returncode, 127)
+
+    def test_expansion_is_single_pass(self) -> None:
+        # A data dir whose own text contains a placeholder is not expanded
+        # again, and ${PLUGIN_ROOT} becomes Claude's root variable once.
+        data = "/d/${PLUGIN_ROOT}"
+        out = provision.translate_mcp_server(
+            {"type": "stdio", "command": "x", "args": ["${PLUGIN_DATA}/y", "${PLUGIN_ROOT}${PLUGIN_DATA}"],
+             "env": {"A": "${PLUGIN_DATA}"}}, data)
+        self.assertEqual(out["args"][-2:], ["/d/${PLUGIN_ROOT}/y", R + "/d/${PLUGIN_ROOT}"])
+        self.assertEqual(out["env"]["A"], "/d/${PLUGIN_ROOT}")
+        self.assertEqual(provision._expand_plugin_placeholders("${PLUGIN_${PLUGIN_ROOT}}", "${PLUGIN_DATA}", "D"),
+                         "${PLUGIN_${PLUGIN_DATA}}")
+
+    def test_reserved_env_set_last(self) -> None:
+        # Go rejects PLUGIN_ROOT/PLUGIN_DATA in env; even if one slipped
+        # through, the reserved values win (spec 9.1).
+        out = provision.translate_mcp_server(
+            {"type": "stdio", "command": "x", "env": {"PLUGIN_DATA": "/evil", "Z": "1"}}, self.data)
+        self.assertEqual(out["env"]["PLUGIN_DATA"], self.data)
+        self.assertEqual(list(out["env"])[-2:], ["PLUGIN_ROOT", "PLUGIN_DATA"])
+
+    def test_skip_rule(self) -> None:
+        servers = {
+            "home-arg": {"type": "stdio", "command": "x", "args": ["${HOME}/y"]},
+            "claude-root": {"type": "stdio", "command": "x", "args": ["${CLAUDE_PLUGIN_ROOT}"]},
+            "default": {"type": "stdio", "command": "x", "env": {"A": "${A:-1}"}},
+            "partial": {"type": "stdio", "command": "x", "args": ["${PLUGIN_ROOT"]},
+            "nested": {"type": "stdio", "command": "x", "args": ["${${PLUGIN_ROOT}}"]},
+            "cwd": {"type": "stdio", "command": "x", "cwd": "./${HOME}"},
+            "command": {"type": "stdio", "command": "${PLUGIN_ROOT}"},
+            "url": {"type": "streamable-http", "url": "https://x.example/${PLUGIN_ROOT}"},
+            "header": {"type": "sse", "url": "https://x.example/sse", "headers": {"A": "${TOKEN}"}},
+            "ok": {"type": "stdio", "command": "x", "args": ["$HOME", "${PLUGIN_ROOT}", "$", "{x}"]},
+        }
+        got = provision.translate_mcp_servers(self.ctx, _plugin(servers=servers), self.data)
+        self.assertEqual(sorted(got), ["ok"])
+        skipped = sorted(n for n in servers if n != "ok")
+        self.assertEqual(self.warnings.messages, [
+            f"agent plugin acme.tools: mcp server {n} skipped for claude: "
+            "value contains placeholder-like text that Claude would expand"
+            for n in skipped
+        ])
+
+    def test_http_and_sse_mapping(self) -> None:
+        self.assertEqual(provision.translate_mcp_server({"type": "streamable-http", "url": "https://a/m"}, self.data),
+                         {"type": "http", "url": "https://a/m"})
+        self.assertEqual(provision.translate_mcp_server(
+            {"type": "sse", "url": "https://a/s", "headers": {"H": "v"}}, self.data),
+            {"type": "sse", "url": "https://a/s", "headers": {"H": "v"}})
+
+    def test_unknown_type_skipped(self) -> None:
+        got = provision.translate_mcp_servers(self.ctx, _plugin(servers={"w": {"type": "websocket"}}), self.data)
+        self.assertEqual(got, {})
+        self.assertEqual(self.warnings.messages,
+                         ["agent plugin acme.tools: mcp server w skipped for claude: unsupported type 'websocket'"])
+
+    def test_manifest(self) -> None:
+        m = provision.build_claude_manifest(self.ctx, _plugin(servers={"h": {"type": "sse", "url": "https://a/s"}}),
+                                            self.data)
+        self.assertEqual(m, {"name": "acme.tools", "version": "1.2.0", "description": "Acme",
+                             "mcpServers": {"h": {"type": "sse", "url": "https://a/s"}}})
+        bare = scion_harness.AgentPlugin("p", "", "d", "/x", [], False, None, {"name": "p"})
+        self.assertEqual(provision.build_claude_manifest(self.ctx, bare, self.data), {"name": "p"})
+
+
+class _NoCLI:
+    """run_cli stand-in: claude is never run for plugins except --version."""
+
+    def __init__(self, version: str = "2.1.296 (Claude Code)") -> None:
+        self.version = version
+        self.calls: list[list[str]] = []
+
+    def __call__(self, argv, *, timeout=None, env=None):
+        self.calls.append(list(argv))
+        if argv[1:] == ["--version"]:
+            return subprocess.CompletedProcess(argv, 0, self.version + "\n", "")
+        return subprocess.CompletedProcess(argv, 2, "", "unexpected")
+
+
+class ClaudeAgentPluginsTest(unittest.TestCase):
+    def setUp(self) -> None:
+        tmp = tempfile.TemporaryDirectory(prefix="claude-plugins-test-")
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.inputs = os.path.join(self.home, ".scion", "harness", "inputs")
+        os.makedirs(self.inputs)
+        patcher = mock.patch.dict(os.environ, {"HOME": self.home})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.cli = _NoCLI()
+        p = mock.patch.object(scion_harness, "run_cli", self.cli)
+        p.start()
+        self.addCleanup(p.stop)
+        self.skills = os.path.join(self.home, ".claude", "skills")
+        self.root = os.path.join(self.home, ".scion", "agent-plugins")
+
+    def stage(self, plugins: dict[str, dict[str, Any]]) -> None:
+        """plugins: name -> {digest, skill (SKILL.md text), conflict, servers, invalid}."""
+        shutil.rmtree(os.path.join(self.inputs, "plugins"), ignore_errors=True)
+        entries = []
+        for name, spec in plugins.items():
+            d = os.path.join(self.inputs, "plugins", name)
+            os.makedirs(os.path.join(d, "skills", "hello"))
+            os.makedirs(os.path.join(d, "bin"))
+            with open(os.path.join(d, "plugin.json"), "w") as f:
+                json.dump({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": name,
+                           "version": "0.1.0"}, f)
+            with open(os.path.join(d, "skills", "hello", "SKILL.md"), "w") as f:
+                f.write(spec.get("skill", "PLUM-7"))
+            with open(os.path.join(d, "bin", "srv"), "w") as f:
+                f.write("#!/bin/sh\n")
+            os.chmod(os.path.join(d, "bin", "srv"), 0o755)
+            mcp = None
+            if "servers" in spec or "invalid" in spec:
+                mcp = {"servers": spec.get("servers", {}), "invalid": spec.get("invalid", [])}
+            entries.append({"name": name, "version": "0.1.0", "description": "Smoke", "dir": f"plugins/{name}",
+                            "digest": spec.get("digest", "d1"), "skills": ["hello"],
+                            "skills_dir_conflict": bool(spec.get("conflict")), "mcp": mcp})
+        with open(os.path.join(self.inputs, "plugins.json"), "w") as f:
+            json.dump({"schema_version": 1, "spec_version": "1.0.0", "plugins": entries}, f)
+
+    def ctx(self, warnings: list[str] | None = None):
+        ctx = make_ctx(self.home)
+        ctx.harness_config["skills_dir"] = ".claude/skills"
+        if warnings is not None:
+            ctx.warn = warnings.append  # type: ignore[method-assign]
+        return ctx
+
+    def reconcile(self, warnings: list[str] | None = None, claude_version: str | None = None) -> None:
+        """What provision() does last."""
+        ctx = self.ctx(warnings)
+        inst = provision.ClaudePluginInstaller(ctx, claude_version=claude_version)
+        inst.release_stale()
+        scion_harness.reconcile_agent_plugins(ctx, inst)
+
+    def state(self) -> dict[str, Any]:
+        with open(os.path.join(self.root, "state-claude.json")) as f:
+            return json.load(f)["plugins"]
+
+    def status(self) -> dict[str, Any]:
+        with open(os.path.join(self.root, "status-claude.json")) as f:
+            return json.load(f)
+
+    def read(self, *parts: str) -> str:
+        with open(os.path.join(self.skills, *parts)) as f:
+            return f.read()
+
+    def test_install_writes_plugin_dir(self) -> None:
+        self.stage({"scion-smoke": {"servers": {"s": {"type": "stdio", "command": "./bin/srv"}}}})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [["claude", "--version"]])
+        target = os.path.join(self.skills, "scion-smoke")
+        # Bundle files unchanged, generated manifest beside them.
+        self.assertEqual(self.read("scion-smoke", "skills", "hello", "SKILL.md"), "PLUM-7")
+        self.assertTrue(os.path.isfile(os.path.join(target, "plugin.json")))
+        self.assertTrue(os.access(os.path.join(target, "bin", "srv"), os.X_OK))
+        manifest = json.loads(self.read("scion-smoke", ".claude-plugin", "plugin.json"))
+        data = os.path.join(self.root, "data", "scion-smoke")
+        self.assertEqual(manifest, {
+            "name": "scion-smoke", "version": "0.1.0", "description": "Smoke",
+            "mcpServers": {"s": {"type": "stdio", "command": "/bin/sh",
+                                 "args": [*WRAP, R, R + "/bin/srv"],
+                                 "env": {"PLUGIN_ROOT": R, "PLUGIN_DATA": data}}},
+        })
+        self.assertEqual(self.state()["scion-smoke"]["native_ref"], {"path": target})
+        self.assertEqual(self.status()["installed"], ["scion-smoke"])
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [], "no tmp/old left behind")
+
+        # Steady state: no CLI call at all.
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+
+    def test_data_dir_created_0700(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        data = os.path.join(self.root, "data", "p")
+        self.assertEqual(stat.S_IMODE(os.stat(data).st_mode), 0o700)
+        # Kept on removal (spec 9.1 makes deletion optional).
+        with open(os.path.join(data, "keep"), "w") as f:
+            f.write("x")
+        self.stage({})
+        self.reconcile()
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertTrue(os.path.isfile(os.path.join(data, "keep")))
+
+    def test_reuses_provision_claude_version(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile(claude_version="2.1.296")
+        self.assertEqual(self.cli.calls, [])
+        self.assertIn("p", self.state())
+
+    def test_old_claude_skips(self) -> None:
+        self.stage({"p": {}})
+        warnings: list[str] = []
+        self.reconcile(warnings, claude_version="2.1.100")
+        self.assertIn("claude 2.1.100 is older than 2.1.157", warnings[0])
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+
+    def test_conflict_skip(self) -> None:
+        os.makedirs(os.path.join(self.skills, "p"))
+        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
+            f.write("template skill")
+        self.stage({"p": {"conflict": True}})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertIn("plugin p not installed for claude: a skill named p is already installed in the skills dir",
+                      warnings)
+        self.assertEqual(os.listdir(os.path.join(self.skills, "p")), ["SKILL.md"])
+        self.assertNotIn("p", self.state())
+        self.assertEqual(self.status()["installed"], [])
+        self.assertEqual([s["name"] for s in self.status()["skipped"]], ["p"])
+
+    def test_unowned_dir_not_touched(self) -> None:
+        # A same-named dir Scion did not install (not in state), even one
+        # that looks like a plugin, is never replaced.
+        user = os.path.join(self.skills, "p", ".claude-plugin")
+        os.makedirs(user)
+        with open(os.path.join(user, "plugin.json"), "w") as f:
+            f.write('{"name": "p"}')
+        self.stage({"p": {}})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertTrue(any("exists and was not installed by Scion" in w for w in warnings), warnings)
+        self.assertEqual(self.read("p", ".claude-plugin", "plugin.json"), '{"name": "p"}')
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "plugin.json")))
+        self.assertNotIn("p", self.state())
+
+    def test_digest_change_atomic_swap(self) -> None:
+        self.stage({"p": {"digest": "d1", "skill": "PLUM-7"}})
+        self.reconcile()
+        stray = os.path.join(self.skills, "p", "stray")
+        with open(stray, "w") as f:
+            f.write("x")
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        self.reconcile()
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertFalse(os.path.exists(stray), "the whole dir is replaced")
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
+
+    def test_swap_replaces_owned_dir_when_uninstall_fails(self) -> None:
+        # The previous version could not be removed (uninstall raised);
+        # the install still swaps the owned dir atomically.
+        self.stage({"p": {"digest": "d1", "skill": "PLUM-7"}})
+        self.reconcile()
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        warnings: list[str] = []
+        with mock.patch.object(provision.ClaudePluginInstaller, "uninstall",
+                               side_effect=scion_harness.PluginInstallError("busy")):
+            self.reconcile(warnings)
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+
+    def test_failed_swap_keeps_old_dir(self) -> None:
+        self.stage({"p": {"digest": "d1", "skill": "PLUM-7"}})
+        self.reconcile()
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        real_rename = os.rename
+        target = os.path.join(self.skills, "p")
+
+        def rename(src, dst):
+            if dst == target and src.endswith(".p.tmp"):
+                raise OSError("disk full")
+            return real_rename(src, dst)
+
+        warnings: list[str] = []
+        with mock.patch.object(provision.ClaudePluginInstaller, "uninstall", return_value=None), \
+                mock.patch.object(os, "rename", rename):
+            self.reconcile(warnings)
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-7")
+        self.assertTrue(any("install failed" in w and "disk full" in w for w in warnings), warnings)
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
+
+    def test_stale_ownership_removes_only_generated_manifest(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        # A template now ships a skill named p; Go merged it into the dir.
+        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
+            f.write("template skill")
+        self.stage({"p": {"conflict": True}})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        target = os.path.join(self.skills, "p")
+        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
+        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
+        self.assertTrue(os.path.isfile(os.path.join(target, "plugin.json")), "stray bundle files stay (R6)")
+        self.assertNotIn("p", self.state())
+        self.assertTrue(any("now shares its directory" in w for w in warnings), warnings)
+        self.assertIn("plugin p not installed for claude: a skill named p is already installed in the skills dir",
+                      warnings)
+        self.assertEqual(self.status()["installed"], [])
+        # Dropping the plugin later leaves the skill alone.
+        self.stage({})
+        self.reconcile()
+        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
+
+    def test_uninstall_only_owned_generated_dirs(self) -> None:
+        self.stage({"a": {}, "b": {}})
+        self.reconcile()
+        # b's dir lost its generated manifest (now a plain dir): removal
+        # leaves it alone but still drops the record.
+        shutil.rmtree(os.path.join(self.skills, "b", ".claude-plugin"))
+        # A user skill and a user plugin are never touched.
+        os.makedirs(os.path.join(self.skills, "mine", ".claude-plugin"))
+        with open(os.path.join(self.skills, "mine", "plugin.json"), "w") as f:
+            f.write("{}")
+        with open(os.path.join(self.skills, "mine", ".claude-plugin", "plugin.json"), "w") as f:
+            f.write("{}")
+        self.stage({})
+        self.reconcile()
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "a")))
+        self.assertTrue(os.path.isdir(os.path.join(self.skills, "b")))
+        self.assertTrue(os.path.isdir(os.path.join(self.skills, "mine")))
+        self.assertEqual(self.state(), {})
+        self.assertEqual(sorted(self.status()["removed"]), ["a", "b"])
+
+    def test_uninstall_failure_judged_by_result(self) -> None:
+        self.stage({"a": {}})
+        self.reconcile()
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        with mock.patch.object(shutil, "rmtree", lambda *a, **k: None):
+            with self.assertRaisesRegex(scion_harness.PluginInstallError, "still present"):
+                inst.uninstall("a", {})
+        inst.uninstall("a", {})
+        inst.uninstall("never-installed", {})
+
+    def test_manually_removed_is_reinstalled(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [["claude", "--version"]])
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
+
+    def test_reprovision_reset_home_config(self) -> None:
+        # Regression for the codex lesson: a re-provision recopies the
+        # harness-config home/ files. Claude registers a skills-dir plugin
+        # by its directory only, so resetting the shipped ~/.claude.json and
+        # ~/.claude/settings.json keeps it registered (fast path), while a
+        # reset that drops the plugin dir makes the next start reinstall.
+        self.stage({"p": {}})
+        self.reconcile()
+        shipped = os.path.join(os.path.dirname(os.path.abspath(provision.__file__)), "home")
+        for rel in (".claude.json", os.path.join(".claude", "settings.json")):
+            os.makedirs(os.path.dirname(os.path.join(self.home, rel)), exist_ok=True)
+            shutil.copyfile(os.path.join(shipped, rel), os.path.join(self.home, rel))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [])
+        shutil.rmtree(self.skills)
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [["claude", "--version"]])
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
+
+    def test_skills_dir_change_reinstalls(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        self.assertTrue(inst.is_present("p", {"path": os.path.join(self.skills, "p")}))
+        self.assertFalse(inst.is_present("p", {"path": os.path.join(self.home, "other", "p")}))
+
+    def test_invalid_servers_rewarned_and_placeholder_skipped(self) -> None:
+        self.stage({"p": {
+            "servers": {"ok": {"type": "sse", "url": "https://a/s"},
+                        "env": {"type": "stdio", "command": "x", "args": ["${HOME}"]}},
+            "invalid": [{"severity": "warning", "message": 'mcp server "old" skipped: bad url'}],
+        }})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [
+            'agent plugin p: mcp server "old" skipped: bad url',
+            "agent plugin p: mcp server env skipped for claude: value contains placeholder-like text that Claude would expand",
+        ])
+        manifest = json.loads(self.read("p", ".claude-plugin", "plugin.json"))
+        self.assertEqual(sorted(manifest["mcpServers"]), ["ok"])
+
+    def test_bundle_claude_plugin_dir_replaced(self) -> None:
+        self.stage({"p": {}})
+        shipped = os.path.join(self.inputs, "plugins", "p", ".claude-plugin")
+        os.makedirs(shipped)
+        with open(os.path.join(shipped, "plugin.json"), "w") as f:
+            f.write('{"name": "evil", "hooks": {}}')
+        self.reconcile()
+        self.assertEqual(json.loads(self.read("p", ".claude-plugin", "plugin.json"))["name"], "p")
+
+    def test_provision_reconciles_last(self) -> None:
+        with open(os.path.join(self.inputs, "mcp-servers.json"), "w") as f:
+            json.dump({"mcp_servers": {"srv": {"transport": "stdio", "command": "echo"}}}, f)
+        self.stage({"p": {}})
+        ctx = self.ctx()
+        ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")  # type: ignore[method-assign]
+        with mock.patch.object(provision, "_detect_claude_version", return_value="2.1.296"), \
+                env_vars(SCION_MODEL=None, ANTHROPIC_MODEL=None, SCION_THINKING_LEVEL=None):
+            provision.provision(ctx)
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
+        with open(os.path.join(self.home, ".claude.json")) as f:
+            self.assertIn("srv", json.load(f)["mcpServers"])
+        # provision() reuses its own `claude --version`.
+        self.assertEqual(self.cli.calls, [])
+
+    def test_parse_semver_alias(self) -> None:
+        self.assertIs(provision._parse_semver, scion_harness.parse_semver)
+        self.assertEqual(provision._parse_semver("2.1.270"), (2, 1, 270))
+        self.assertEqual(provision._parse_semver("2.1.270-beta.1"), (2, 1, 270))
+        self.assertIsNone(provision._parse_semver(""))
+        self.assertIsNone(provision._parse_semver("2.1"))
 
 
 if __name__ == "__main__":
