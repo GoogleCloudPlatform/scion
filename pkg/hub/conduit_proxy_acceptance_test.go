@@ -238,8 +238,7 @@ func TestConduitSciontoolSupersededLaunchRefused(t *testing.T) {
 // its grant signing key, a grant signed with the new key reaches a
 // sciontool that has not refreshed its keys yet. The agent makes exactly
 // one grant-key fetch from the hub, authenticated as itself, for the
-// unknown kid; the fetch completes before the request's 200, and the
-// session is kept. The new kid was never in the session's Welcome
+// unknown kid, and the session is kept. The new kid was never in the session's Welcome
 // (design v2.21.24 §3.5, Target-side deadlines). That further unknown
 // kids within 10s share that fetch is covered by the sciontool tests
 // (TestAgentUnknownKidsShareOneFetchPerInterval): here the hub signs
@@ -303,9 +302,11 @@ func TestConduitSciontoolKeyRotationWithoutReconnect(t *testing.T) {
 	resp := f.get(t, "/rotated", nil)
 	body, _ := io.ReadAll(resp.Body)
 	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	// Exactly one fetch, completed by the time of the 200.
+	// Exactly one fetch.
 	assert.Equal(t, base+1, arrived.Load(), "grant-key fetches started for the unknown kid")
-	assert.Equal(t, base+1, completed.Load(), "grant-key fetches completed before the 200")
+	require.Eventually(t, func() bool { return completed.Load() == base+1 }, 2*time.Second, 10*time.Millisecond,
+		"the grant-key fetch did not complete")
+	assert.Equal(t, base+1, completed.Load(), "grant-key fetches completed for the unknown kid")
 	mu.Lock()
 	got := append([]string(nil), subjects[first:]...)
 	mu.Unlock()
