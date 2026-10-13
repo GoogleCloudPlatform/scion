@@ -55,8 +55,8 @@ func TestStartClaimSettings_Normalize(t *testing.T) {
 		})
 	}
 
-	assert.Equal(t, store.StartClaimHolds{Default: 17 * time.Minute, Create: 16 * time.Minute}, d.Holds())
-	assert.Equal(t, 16*time.Minute, d.Holds().For(store.StartClaimStop))
+	assert.Equal(t, store.StartClaimHolds{Default: 17 * time.Minute, Create: 16 * time.Minute, Stop: 5 * time.Minute}, d.Holds())
+	assert.Equal(t, 16*time.Minute, d.Holds().For(store.StartClaimCreate))
 	assert.Equal(t, 17*time.Minute, d.Holds().For(store.StartClaimRecovery))
 }
 
@@ -101,4 +101,14 @@ func TestStartClaimSettings_ApplySnapshot(t *testing.T) {
 
 	var nilCfg Server
 	assert.Equal(t, DefaultStartClaimSettings(), nilCfg.startClaimSettings())
+}
+
+// The stop claim hold (a queued stop being applied) keeps its old 5m when
+// the create hold grows to cover the broker's start ceiling, whatever the
+// configured create hold: a stop has no start to wait for.
+func TestStartClaimSettings_StopHoldUnchanged(t *testing.T) {
+	assert.Equal(t, 5*time.Minute, DefaultStartClaimSettings().Holds().For(store.StartClaimStop))
+	c, _ := StartClaimSettings{UnconfirmedHold: 30 * time.Minute, CreateUnconfirmedHold: 25 * time.Minute}.normalized()
+	assert.Equal(t, 25*time.Minute, c.Holds().For(store.StartClaimCreate))
+	assert.Equal(t, 5*time.Minute, c.Holds().For(store.StartClaimStop), "a longer create hold does not lengthen the stop hold")
 }

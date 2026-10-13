@@ -37,8 +37,9 @@ type StartClaimSettings struct {
 	// blocks other starts, sized from the broker's whole start budget
 	// (pod ready 10m, exec ready 90s, 10s, plus a margin).
 	UnconfirmedHold time.Duration
-	// CreateUnconfirmedHold is UnconfirmedHold for create-and-start (and
-	// for a queued-stop drain's stop claim).
+	// CreateUnconfirmedHold is UnconfirmedHold for create-and-start. A
+	// queued-stop drain's stop claim has its own fixed hold
+	// (stopUnconfirmedHold).
 	CreateUnconfirmedHold time.Duration
 }
 
@@ -59,6 +60,10 @@ const (
 	// intervals for the inventory that shows the outcome. Below it, the
 	// reaper would stop a start that is still legitimately coming up.
 	minStartCreateUnconfirmedHold = api.SyncStartCeiling + 2*30*time.Second
+	// stopUnconfirmedHold is the hold of a stop claim (a queued stop being
+	// applied), kept at the create hold's old default when the create hold
+	// grew to cover api.SyncStartCeiling: a stop has no start to wait for.
+	stopUnconfirmedHold = 5 * time.Minute
 )
 
 // DefaultStartClaimSettings returns the defaults.
@@ -73,7 +78,7 @@ func DefaultStartClaimSettings() StartClaimSettings {
 
 // Holds returns the unconfirmed holds by kind.
 func (c StartClaimSettings) Holds() store.StartClaimHolds {
-	return store.StartClaimHolds{Default: c.UnconfirmedHold, Create: c.CreateUnconfirmedHold}
+	return store.StartClaimHolds{Default: c.UnconfirmedHold, Create: c.CreateUnconfirmedHold, Stop: stopUnconfirmedHold}
 }
 
 // normalized returns c with each zero value replaced by its default and
