@@ -69,10 +69,12 @@ func (d *hostStateDir) openFile() (*os.File, error) {
 }
 
 // writeFile writes data to HostStateFile through a temp file with a random
-// name in agentDir, chmod 0600, fsync, then rename. It is not
-// writeAgentInfoFile because that helper does not fsync: after a crash a
-// zero-length host-state.json would be refused as corrupt and block every
-// later update.
+// name in agentDir, chmod 0600, fsync, then rename. writeAgentInfoFile
+// with mode 0600 follows the same temp, fsync and rename steps (its temp
+// name pattern differs). Where it can sync a directory (not Windows) it
+// also fsyncs the parent directory after the rename and can return
+// ErrAgentInfoNotDurable with the new content in place. UpdateHostState
+// does not have that error contract, so this file keeps its own writer.
 func (d *hostStateDir) writeFile(data []byte) error {
 	path := filepath.Join(d.path, HostStateFile)
 	tmp, err := os.CreateTemp(d.path, "."+HostStateFile+".*.tmp")
