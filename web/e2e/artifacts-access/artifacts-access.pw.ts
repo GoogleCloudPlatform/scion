@@ -13,8 +13,8 @@
 // limitations under the License.
 
 /**
- * Artifact access, graded at the UI per role (R1-A: J3 and the access part
- * of J2), end to end on a throwaway hub with no broker.
+ * Artifact access, graded at the UI per role (R1-A), end to end on a
+ * throwaway hub with no broker.
  *
  * Five member test identities, each in its own browser context: owner,
  * member and padmin (members of the artifact's home project, padmin as
@@ -1347,7 +1347,7 @@ test.describe.serial('artifact access per role (R1)', () => {
         });
         await ownerPage.locator(SELECTORS.sharePeopleInput).fill('');
       },
-      { graded: false }
+      { requires: ['R1-01'] }
     );
 
     await row('R1-06b', async (r) => {

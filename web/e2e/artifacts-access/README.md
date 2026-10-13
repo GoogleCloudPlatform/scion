@@ -1,8 +1,8 @@
 # Artifact access journey (R1-A)
 
 Playwright journey for artifact access, graded at the UI per role. It runs
-on a hub with the `hub.artifacts` experiment (J3, plus the access part of
-J2). See the header of `artifacts-access.pw.ts` for the rows.
+on a hub with the `hub.artifacts` experiment. See the header of
+`artifacts-access.pw.ts` for the rows.
 
 ## Run
 
