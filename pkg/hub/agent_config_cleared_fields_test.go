@@ -19,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,3 +103,20 @@ func TestNextClearedFields(t *testing.T) {
 }
 
 func clearedTestIntPtr(v int) *int { return &v }
+
+// TestLegacyCreateInputsDropClearedFields: a reincarnation of an agent that
+// predates CreateInputs rebuilds them from the live inline config; the
+// rebuilt inputs carry no cleared_fields, so the new generation starts with
+// no clears, and the live config is not changed.
+func TestLegacyCreateInputsDropClearedFields(t *testing.T) {
+	old := &store.AgentAppliedConfig{InlineConfig: &api.ScionConfig{
+		MaxTurns:      4,
+		ClearedFields: []string{"env.FOO", "resources"},
+	}}
+	ci, _ := legacyCreateInputsFromAppliedConfig(old, nil)
+	require.NotNil(t, ci)
+	require.NotNil(t, ci.InlineConfig)
+	assert.Nil(t, ci.InlineConfig.ClearedFields)
+	assert.Equal(t, 4, ci.InlineConfig.MaxTurns)
+	assert.Equal(t, []string{"env.FOO", "resources"}, old.InlineConfig.ClearedFields)
+}

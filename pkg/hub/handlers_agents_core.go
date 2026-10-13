@@ -4401,13 +4401,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				warnings = append(warnings, configEnvTZIgnoredWarning)
 			}
 		}
+		// canViewAgentEnv is the same attach-equivalent-access gate the GET
+		// response's Env redaction uses (ResponseView). A caller who fails
+		// it never saw the live Env to begin with, so their request's env
+		// map cannot be trusted to list every key that still exists live --
+		// see recordExplicitEdits' env-removal gate. It also gates the env
+		// removals below (removedConfigEntries, nextClearedFields).
+		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
-			// canViewAgentEnv is the same attach-equivalent-access gate the
-			// GET response's Env redaction uses (ResponseView). A caller who
-			// fails it never saw the live Env to begin with, so their
-			// request's env map cannot be trusted to list every key that
-			// still exists live -- see recordExplicitEdits' env-removal gate.
-			canAttachEnv := canViewAgentEnv(ctx, s, agent)
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
 				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
 		}
@@ -4458,11 +4459,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// as taking effect at the next reincarnation is the key reported
 		// held for it.
 		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
-		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canAttachEnv)
 		// The broker's start-time merge keeps a previous value the inline
 		// config leaves empty; the cleared paths it sends with each start
 		// let the broker remove them (ptone/scion#3906).
-		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canViewAgentEnv(ctx, s, agent))
+		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)

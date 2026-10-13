@@ -452,6 +452,10 @@ func legacyCreateInputsFromAppliedConfig(old *store.AgentAppliedConfig, template
 	var inline *api.ScionConfig
 	if old.InlineConfig != nil {
 		inline = deepCopyScionConfig(old.InlineConfig)
+		// cleared_fields belongs to the live generation: a reincarnation
+		// provisions afresh, so the new generation starts with no clears
+		// (ptone/scion#3906).
+		inline.ClearedFields = nil
 
 		if len(inline.Skills) > 0 {
 			refs := make([]string, 0, len(inline.Skills))
