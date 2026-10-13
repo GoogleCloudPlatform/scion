@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -650,4 +651,367 @@ func TestProjectVisitorRules_AuditFailureLeavesNoChange(t *testing.T) {
 		assert.ErrorIs(t, err, store.ErrNotFound)
 		assert.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 2, "no binding remains")
 	})
+}
+
+// staleVisitorRulesStore answers ListActiveProjectVisitorRules with the
+// rules it holds once they are set: the view of a request that read the
+// rules just before an owner changed or removed one.
+type staleVisitorRulesStore struct {
+	store.Store
+	rules atomic.Pointer[[]*store.ProjectVisitorRule]
+}
+
+func (s *staleVisitorRulesStore) ListActiveProjectVisitorRules(ctx context.Context, issuer, domain string, at time.Time) ([]*store.ProjectVisitorRule, error) {
+	if rules := s.rules.Load(); rules != nil {
+		return *rules, nil
+	}
+	return s.Store.ListActiveProjectVisitorRules(ctx, issuer, domain, at)
+}
+
+// newStaleRulesFixture is newVisitorGrantFixture with its server's store
+// wrapped in a staleVisitorRulesStore.
+func newStaleRulesFixture(t *testing.T) (*visitorGrantFixture, *staleVisitorRulesStore) {
+	t.Helper()
+	var wrapped *staleVisitorRulesStore
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		wrapped, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *staleVisitorRulesStore {
+			return &staleVisitorRulesStore{Store: inner}
+		})
+	})
+	return f, wrapped
+}
+
+// A request that read a rule before the owner changed it binds by the
+// rule as it is when the binding is written: a shortened rule gives the
+// binding its new window, and a removed rule binds no one and leaves no
+// account or binding behind.
+func TestFederatedVisitor_RuleChangedAfterReadBindsCurrentRule(t *testing.T) {
+	t.Run("window shortened", func(t *testing.T) {
+		f, stale := newStaleRulesFixture(t)
+		ctx := context.Background()
+		long := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+		rule := &store.ProjectVisitorRule{ProjectID: f.projectID, Issuer: grantTestOtherIssuer, Domain: "any.example", ExpiresAt: &long, CreatedBy: f.owner.ID}
+		require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
+		read, err := f.st.ListActiveProjectVisitorRules(ctx, grantTestOtherIssuer, "any.example", time.Now())
+		require.NoError(t, err)
+		require.Len(t, read, 1)
+		short := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
+		_, err = f.st.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &short)
+		require.NoError(t, err)
+		stale.rules.Store(&read)
+
+		require.NotNil(t, f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-ari", "ari@any.example", boolPtr(true))))
+		bindings := f.ruleBindings(t, f.projectID, rule.ID)
+		require.Len(t, bindings, 1)
+		require.NotNil(t, bindings[0].ExpiresAt)
+		assert.True(t, bindings[0].ExpiresAt.Equal(short), "the binding ends with the rule as changed (%v), not as read (%v)", short, long)
+	})
+
+	t.Run("rule removed before first contact", func(t *testing.T) {
+		f, stale := newStaleRulesFixture(t)
+		ctx := context.Background()
+		rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+		read, err := f.st.ListActiveProjectVisitorRules(ctx, grantTestOtherIssuer, "any.example", time.Now())
+		require.NoError(t, err)
+		require.Len(t, read, 1)
+		_, err = f.st.DeleteProjectVisitorRule(ctx, rule.ID)
+		require.NoError(t, err)
+		stale.rules.Store(&read)
+
+		assert.Nil(t, f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-bex", "bex@any.example", boolPtr(true))))
+		_, err = f.st.GetFederatedUserBySubject(ctx, grantTestOtherIssuer, "sub-bex")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no account is linked")
+		_, err = f.st.GetFederatedUserByEmail(ctx, grantTestOtherIssuer, "bex@any.example")
+		assert.ErrorIs(t, err, store.ErrNotFound, "no account is created")
+		all, err := f.st.ListVisitorRoleBindings(ctx, f.projectID)
+		require.NoError(t, err)
+		assert.Empty(t, all, "no binding names the removed rule")
+		assert.Empty(t, f.audits(t, mutationTypeVisitorLinked))
+	})
+
+	t.Run("rule removed before a linked visitor's request", func(t *testing.T) {
+		f, stale := newStaleRulesFixture(t)
+		ctx := context.Background()
+		f.grantOK(t, grantTestOtherIssuer, "cy@any.example")
+		token := f.token(t, grantTestOtherIssuer, "sub-cy", "cy@any.example", boolPtr(true))
+		require.NotNil(t, f.visitorThrough(t, token))
+		otherProject := tid(t.Name() + "-other")
+		createRS1Project(t, f.st, otherProject, f.owner.ID)
+		rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
+		require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
+		read, err := f.st.ListActiveProjectVisitorRules(ctx, grantTestOtherIssuer, "any.example", time.Now())
+		require.NoError(t, err)
+		require.Len(t, read, 1)
+		_, err = f.st.DeleteProjectVisitorRule(ctx, rule.ID)
+		require.NoError(t, err)
+		stale.rules.Store(&read)
+
+		require.NotNil(t, f.visitorThrough(t, token), "the visitor keeps its grant by email")
+		there, err := f.st.ListVisitorRoleBindings(ctx, otherProject)
+		require.NoError(t, err)
+		assert.Empty(t, there, "no binding names the removed rule")
+	})
+}
+
+// ruleGoneExclusionStore answers CreateProjectVisitorExclusion with
+// ErrNotFound, inside transactions too, once its switch is armed: the
+// view of a revoke whose binding's rule no longer exists.
+type ruleGoneExclusionStore struct {
+	store.Store
+	fault *storeFaultSwitch
+}
+
+func (s *ruleGoneExclusionStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&ruleGoneExclusionStore{Store: tx, fault: s.fault})
+	})
+}
+
+func (s *ruleGoneExclusionStore) CreateProjectVisitorExclusion(ctx context.Context, ruleID, userID, createdBy string) error {
+	if s.fault.Active() {
+		return store.ErrNotFound
+	}
+	return s.Store.CreateProjectVisitorExclusion(ctx, ruleID, userID, createdBy)
+}
+
+// Revoking a rule visitor whose rule no longer exists still removes the
+// binding, with no exclusion, rather than answering 404.
+func TestProjectVisitorRules_RevokeWhenRuleGone(t *testing.T) {
+	var fault *storeFaultSwitch
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *ruleGoneExclusionStore {
+			return &ruleGoneExclusionStore{Store: inner, fault: sw}
+		})
+	})
+	ctx := context.Background()
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	v := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-dov", "dov@any.example", boolPtr(true)))
+	require.NotNil(t, v)
+	require.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1)
+	fault.Arm()
+
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+v.ID(), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the binding is removed")
+	assert.Len(t, f.audits(t, mutationTypeProjectVisitorRevoke), 1)
+	excluded, err := f.st.IsProjectVisitorExcluded(ctx, rule.ID, v.ID())
+	require.NoError(t, err)
+	assert.False(t, excluded)
+}
+
+// Deleting a project deletes its visitor rules, the bindings they created
+// and their exclusions; a matching visitor's next request creates nothing
+// at the deleted project's ID.
+func TestProjectVisitorRules_ProjectDeletionRemovesRules(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	ctx := context.Background()
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	token := f.token(t, grantTestOtherIssuer, "sub-eda", "eda@any.example", boolPtr(true))
+	eda := f.visitorThrough(t, token)
+	require.NotNil(t, eda)
+	fay := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-fay", "fay@any.example", boolPtr(true)))
+	require.NotNil(t, fay)
+	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+fay.ID(), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	actor := NewAuthenticatedUser(f.owner.ID, f.owner.Email, "Owner", "member", "web")
+	result, decision := f.srv.deletionService.Delete(setTestIdentity(ctx, actor), ProjectDeleteRequest{ProjectID: f.projectID, Actor: actor})
+	require.Nil(t, decision, "the owner may delete the project")
+	require.NotNil(t, result)
+	assert.Equal(t, 1, result.CascadeSummary.ProjectVisitorRules)
+
+	rules, err := f.st.ListProjectVisitorRules(ctx, f.projectID)
+	require.NoError(t, err)
+	assert.Empty(t, rules)
+	_, err = f.st.GetProjectVisitorRule(ctx, rule.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+	excluded, err := f.st.IsProjectVisitorExcluded(ctx, rule.ID, fay.ID())
+	require.NoError(t, err)
+	assert.False(t, excluded, "the rule's exclusions are deleted")
+
+	for i := 0; i < 2; i++ {
+		f.visitorThrough(t, token)
+	}
+	f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-gil", "gil@any.example", boolPtr(true)))
+	left, err := f.st.ListVisitorRoleBindings(ctx, f.projectID)
+	require.NoError(t, err)
+	assert.Empty(t, left, "no binding at the deleted project's ID")
+	_, err = f.st.GetFederatedUserBySubject(ctx, grantTestOtherIssuer, "sub-gil")
+	assert.ErrorIs(t, err, store.ErrNotFound, "no account is created for the deleted project's rule")
+}
+
+// An inactive grant by email (expired, or not started yet) does not keep a
+// person out of an active rule of the same project: the rule binding
+// replaces it in one transaction, and the visitor_linked record names the
+// replaced binding. An active grant by email is kept, and the rule adds
+// nothing on that project.
+func TestFederatedVisitor_RuleReplacesInactiveEmailGrant(t *testing.T) {
+	ruleLinkSummary := func(t *testing.T, f *visitorGrantFixture, ruleID string) map[string]string {
+		t.Helper()
+		for _, rec := range f.audits(t, mutationTypeVisitorLinked) {
+			var after map[string]string
+			require.NoError(t, json.Unmarshal([]byte(rec.AfterSummary), &after))
+			if after["rule_id"] == ruleID {
+				return after
+			}
+		}
+		return nil
+	}
+
+	t.Run("expired grant of a linked visitor", func(t *testing.T) {
+		f := newVisitorGrantFixture(t)
+		ctx := context.Background()
+		granted := f.grantWithExpiry(t, grantTestOtherIssuer, "hal@any.example", time.Now().Add(time.Hour))
+		token := f.token(t, grantTestOtherIssuer, "sub-hal", "hal@any.example", boolPtr(true))
+		require.NotNil(t, f.visitorThrough(t, token))
+		past := time.Now().Add(-time.Minute)
+		_, err := f.st.UpdateVisitorRoleBindingWindow(ctx, granted.BindingID, nil, &past)
+		require.NoError(t, err)
+		require.NotContains(t, f.visitorPermissions(t, token), "agent.message", "the grant has expired")
+
+		rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+		assert.Contains(t, f.visitorPermissions(t, token), "agent.message", "the rule gives access")
+		bindings := f.ruleBindings(t, f.projectID, rule.ID)
+		require.Len(t, bindings, 1)
+		assert.Equal(t, granted.ID, bindings[0].PrincipalID)
+		_, err = f.st.GetRoleBinding(ctx, granted.BindingID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "the expired grant is replaced")
+		listed, ok := f.listedVisitor(t, granted.ID)
+		require.True(t, ok)
+		assert.Equal(t, projectVisitorSourceRule, listed.Source)
+		after := ruleLinkSummary(t, f, rule.ID)
+		require.NotNil(t, after, "a visitor_linked record names the rule")
+		assert.Equal(t, granted.BindingID, after["replaced_binding_id"])
+		assert.Equal(t, bindings[0].ID, after["binding_id"])
+	})
+
+	t.Run("grant not started at first contact", func(t *testing.T) {
+		f := newVisitorGrantFixture(t)
+		ctx := context.Background()
+		rec := f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "ida@any.example",
+			"notBefore": time.Now().Add(24 * time.Hour)})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var granted ProjectVisitor
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &granted))
+		rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+
+		token := f.token(t, grantTestOtherIssuer, "sub-ida", "ida@any.example", boolPtr(true))
+		v := f.visitorThrough(t, token)
+		require.NotNil(t, v)
+		assert.Equal(t, granted.ID, v.ID(), "the granted account is linked")
+		assert.Contains(t, f.visitorPermissions(t, token), "agent.message", "the rule gives access now")
+		require.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1)
+		_, err := f.st.GetRoleBinding(ctx, granted.BindingID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "the grant that had not started is replaced")
+		after := ruleLinkSummary(t, f, rule.ID)
+		require.NotNil(t, after)
+		assert.Equal(t, granted.BindingID, after["replaced_binding_id"])
+	})
+
+	t.Run("active grant is kept", func(t *testing.T) {
+		f := newVisitorGrantFixture(t)
+		ctx := context.Background()
+		expiry := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+		granted := f.grantWithExpiry(t, grantTestOtherIssuer, "jo@any.example", expiry)
+		rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+		token := f.token(t, grantTestOtherIssuer, "sub-jo", "jo@any.example", boolPtr(true))
+		for i := 0; i < 2; i++ {
+			require.NotNil(t, f.visitorThrough(t, token))
+		}
+		assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the rule adds nothing")
+		got, err := f.st.GetRoleBinding(ctx, granted.BindingID)
+		require.NoError(t, err, "the active grant is kept")
+		require.NotNil(t, got.ExpiresAt)
+		assert.WithinDuration(t, expiry, *got.ExpiresAt, time.Second)
+		assert.Nil(t, ruleLinkSummary(t, f, rule.ID))
+	})
+}
+
+// A grant by email to a person who is a visitor through a rule answers 409
+// with a message saying so; once the rule visitor is removed, the grant
+// by email succeeds.
+func TestProjectVisitors_GrantToRuleVisitorConflicts(t *testing.T) {
+	f := newVisitorGrantFixture(t)
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	v := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-kai", "kai@any.example", boolPtr(true)))
+	require.NotNil(t, v)
+
+	rec := f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "kai@any.example"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), visitorGrantedByRuleMessage)
+	assert.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1, "the rule binding is unchanged")
+	assert.Empty(t, f.audits(t, mutationTypeProjectVisitorGrant))
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+v.ID(), nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	granted := f.grantOK(t, grantTestOtherIssuer, "kai@any.example")
+	assert.Equal(t, v.ID(), granted.ID)
+	assert.Equal(t, projectVisitorSourceEmail, granted.Source)
+
+	rec = f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": "kai@any.example"})
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), visitorGrantedByRuleMessage, "a repeat grant by email keeps its own message")
+}
+
+// staleRuleFirstContactStore, once armed, answers the first subject lookup
+// and the first email lookup with not found: the view of a first request
+// through a rule that loses the race to a concurrent first request of the
+// same person, which created and linked the account first.
+type staleRuleFirstContactStore struct {
+	store.Store
+	armed        atomic.Bool
+	subjectCalls atomic.Int32
+	emailCalls   atomic.Int32
+}
+
+func (s *staleRuleFirstContactStore) GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*store.User, error) {
+	if s.armed.Load() && s.subjectCalls.Add(1) == 1 {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetFederatedUserBySubject(ctx, issuer, subject)
+}
+
+func (s *staleRuleFirstContactStore) GetFederatedUserByEmail(ctx context.Context, issuer, email string) (*store.User, error) {
+	if s.armed.Load() && s.emailCalls.Add(1) == 1 {
+		return nil, store.ErrNotFound
+	}
+	return s.Store.GetFederatedUserByEmail(ctx, issuer, email)
+}
+
+// Two first requests at once through a rule: the one that loses the race
+// cannot create the account (ErrAlreadyExists), reads it again by subject
+// and continues as that visitor; one account and one rule binding remain.
+func TestFederatedVisitor_ConcurrentFirstContactThroughRule(t *testing.T) {
+	var wrapped *staleRuleFirstContactStore
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		wrapped, _ = installStoreFault(t, srv, func(inner store.Store, _ *storeFaultSwitch) *staleRuleFirstContactStore {
+			return &staleRuleFirstContactStore{Store: inner}
+		})
+	})
+	ctx := context.Background()
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	token := f.token(t, grantTestOtherIssuer, "sub-lia", "lia@any.example", boolPtr(true))
+
+	// The winning request creates, links and binds first.
+	winner := f.visitorThrough(t, token)
+	require.NotNil(t, winner)
+	require.Len(t, f.audits(t, mutationTypeVisitorLinked), 2)
+
+	wrapped.armed.Store(true)
+	loser := f.visitorThrough(t, token)
+	require.NotNil(t, loser, "the losing request continues as the visitor")
+	assert.Equal(t, winner.ID(), loser.ID())
+	assert.Equal(t, int32(2), wrapped.subjectCalls.Load(), "the losing request read the account again by subject")
+	assert.Equal(t, int32(1), wrapped.emailCalls.Load())
+
+	acct, err := f.st.GetFederatedUserByEmail(ctx, grantTestOtherIssuer, "lia@any.example")
+	require.NoError(t, err)
+	assert.Equal(t, winner.ID(), acct.ID, "one account")
+	identities, err := f.st.GetExternalIdentitiesByUserID(ctx, winner.ID())
+	require.NoError(t, err)
+	assert.Len(t, identities, 1, "one link")
+	bindings := f.ruleBindings(t, f.projectID, rule.ID)
+	require.Len(t, bindings, 1, "one rule binding")
+	assert.Equal(t, winner.ID(), bindings[0].PrincipalID)
+	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), 2, "the losing request wrote no record")
 }

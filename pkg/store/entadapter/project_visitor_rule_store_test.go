@@ -283,3 +283,198 @@ func TestProjectVisitorExclusion_Idempotent(t *testing.T) {
 	assert.ErrorIs(t, env.cs.CreateProjectVisitorExclusion(ctx, uuid.NewString(), alice.ID, "owner-1"), store.ErrNotFound)
 	assert.ErrorIs(t, env.cs.CreateProjectVisitorExclusion(ctx, rule.ID, " ", "owner-1"), store.ErrInvalidInput)
 }
+
+// A rule binding takes the rule's window as stored when the binding is
+// written, whatever window the caller passes, and the store refuses a
+// rule that is not active then: a binding never outlives, or starts
+// before, its rule.
+func TestCreateVisitorRoleBinding_SourceRuleWindow(t *testing.T) {
+	env := newVisitorEnv(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	start := now.Add(-time.Hour)
+	end := now.Add(2 * time.Hour)
+	rule := &store.ProjectVisitorRule{ProjectID: env.projectID, Issuer: testFedIssuer, Domain: "corp.com",
+		NotBefore: &start, ExpiresAt: &end, CreatedBy: "owner-1"}
+	require.NoError(t, env.cs.CreateProjectVisitorRule(ctx, rule))
+
+	alice := createFederatedUser(t, env.cs, testFedIssuer, "alice@corp.com", store.UserStatusActive)
+	stale := env.ruleBinding(alice.ID, rule)
+	longer := now.Add(30 * 24 * time.Hour)
+	stale.NotBefore = nil
+	stale.ExpiresAt = &longer
+	rb, err := env.cs.CreateVisitorRoleBinding(ctx, stale)
+	require.NoError(t, err)
+	require.NotNil(t, rb.NotBefore)
+	require.NotNil(t, rb.ExpiresAt)
+	assert.True(t, rb.NotBefore.Equal(start), "the binding starts with the rule")
+	assert.True(t, rb.ExpiresAt.Equal(end), "the binding ends with the rule, not the caller's expiry")
+	got, err := env.cs.GetRoleBinding(ctx, rb.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.ExpiresAt)
+	assert.True(t, got.ExpiresAt.Equal(end))
+
+	// Inside a transaction too, after a window change in it.
+	shorter := now.Add(time.Hour)
+	bob := createFederatedUser(t, env.cs, testFedIssuer, "bob@corp.com", store.UserStatusActive)
+	require.NoError(t, env.cs.WithTx(ctx, func(tx store.Store) error {
+		if _, err := tx.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &shorter); err != nil {
+			return err
+		}
+		b := env.ruleBinding(bob.ID, rule)
+		b.ExpiresAt = &end
+		rb, err := tx.CreateVisitorRoleBinding(ctx, b)
+		if err != nil {
+			return err
+		}
+		assert.Nil(t, rb.NotBefore)
+		require.NotNil(t, rb.ExpiresAt)
+		assert.True(t, rb.ExpiresAt.Equal(shorter), "the binding takes the window as changed in the transaction")
+		return nil
+	}))
+
+	// A rule that has ended, or has not started, binds no one.
+	carol := createFederatedUser(t, env.cs, testFedIssuer, "carol@corp.com", store.UserStatusActive)
+	past := now.Add(-time.Minute)
+	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &past)
+	require.NoError(t, err)
+	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
+	assert.ErrorIs(t, err, store.ErrVisitorBindingRefused, "the rule has ended")
+	future := now.Add(time.Hour)
+	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, &future, nil)
+	require.NoError(t, err)
+	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
+	assert.ErrorIs(t, err, store.ErrVisitorBindingRefused, "the rule has not started")
+	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, nil)
+	require.NoError(t, err)
+	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
+	assert.NoError(t, err, "an unbounded rule binds")
+}
+
+// Deleting a project's visitor rules deletes the bindings they created
+// and their exclusions, and nothing of another project or a grant by
+// email.
+func TestDeleteProjectVisitorRulesByProject(t *testing.T) {
+	env := newVisitorEnv(t)
+	ctx := context.Background()
+	rule := env.createVisitorRule(t, testFedIssuer, "corp.com")
+	second := env.createVisitorRule(t, testFedIssuer, "corp.example")
+	otherProject := uuid.NewString()
+	elsewhere := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: testFedIssuer, Domain: "corp.com", CreatedBy: "owner-1"}
+	require.NoError(t, env.cs.CreateProjectVisitorRule(ctx, elsewhere))
+
+	alice := createFederatedUser(t, env.cs, testFedIssuer, "alice@corp.com", store.UserStatusActive)
+	dan := createFederatedUser(t, env.cs, testFedIssuer, "dan@corp.example", store.UserStatusActive)
+	carol := createFederatedUser(t, env.cs, testFedIssuer, "carol@corp.com", store.UserStatusActive)
+	_, err := env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(alice.ID, rule))
+	require.NoError(t, err)
+	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(dan.ID, second))
+	require.NoError(t, err)
+	byEmail, err := env.cs.CreateVisitorRoleBinding(ctx, env.visitorBinding(carol.ID))
+	require.NoError(t, err)
+	there := env.ruleBinding(alice.ID, elsewhere)
+	there.ScopeID = otherProject
+	thereRB, err := env.cs.CreateVisitorRoleBinding(ctx, there)
+	require.NoError(t, err)
+	require.NoError(t, env.cs.CreateProjectVisitorExclusion(ctx, rule.ID, carol.ID, "owner-1"))
+	require.NoError(t, env.cs.CreateProjectVisitorExclusion(ctx, elsewhere.ID, carol.ID, "owner-1"))
+
+	n, err := env.cs.DeleteProjectVisitorRulesByProject(ctx, env.projectID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	rules, err := env.cs.ListProjectVisitorRules(ctx, env.projectID)
+	require.NoError(t, err)
+	assert.Empty(t, rules)
+	remaining, err := env.cs.ListVisitorRoleBindings(ctx, env.projectID)
+	require.NoError(t, err)
+	require.Len(t, remaining, 1, "only the grant by email remains")
+	assert.Equal(t, byEmail.ID, remaining[0].ID)
+	excluded, err := env.cs.IsProjectVisitorExcluded(ctx, rule.ID, carol.ID)
+	require.NoError(t, err)
+	assert.False(t, excluded, "the rules' exclusions are deleted with them")
+
+	_, err = env.cs.GetProjectVisitorRule(ctx, elsewhere.ID)
+	assert.NoError(t, err, "another project's rule stays")
+	_, err = env.cs.GetRoleBinding(ctx, thereRB.ID)
+	assert.NoError(t, err, "another project's rule binding stays")
+	excluded, err = env.cs.IsProjectVisitorExcluded(ctx, elsewhere.ID, carol.ID)
+	require.NoError(t, err)
+	assert.True(t, excluded, "another project's exclusion stays")
+
+	n, err = env.cs.DeleteProjectVisitorRulesByProject(ctx, env.projectID)
+	require.NoError(t, err)
+	assert.Zero(t, n, "a project with no rules")
+	require.NoError(t, env.cs.WithTx(ctx, func(tx store.Store) error {
+		_, err := tx.DeleteProjectVisitorRulesByProject(ctx, otherProject)
+		return err
+	}), "inside a transaction too")
+	_, err = env.cs.GetProjectVisitorRule(ctx, elsewhere.ID)
+	assert.ErrorIs(t, err, store.ErrNotFound)
+}
+
+// DeleteInactiveVisitorGrant deletes only a visitor grant by email whose
+// window does not contain the given time.
+func TestDeleteInactiveVisitorGrant(t *testing.T) {
+	env := newVisitorEnv(t)
+	ctx := context.Background()
+	now := time.Now().UTC().Truncate(time.Second)
+	past := now.Add(-time.Hour)
+	future := now.Add(time.Hour)
+	grant := func(email string, notBefore, expiresAt *time.Time) *store.RoleBinding {
+		u := createFederatedUser(t, env.cs, testFedIssuer, email, store.UserStatusActive)
+		b := env.visitorBinding(u.ID)
+		b.NotBefore = notBefore
+		b.ExpiresAt = expiresAt
+		rb, err := env.cs.CreateVisitorRoleBinding(ctx, b)
+		require.NoError(t, err)
+		return rb
+	}
+	expired := grant("expired@corp.com", nil, &past)
+	notStarted := grant("later@corp.com", &future, nil)
+	active := grant("active@corp.com", &past, &future)
+	unbounded := grant("always@corp.com", nil, nil)
+	rule := env.createVisitorRule(t, testFedIssuer, "corp.com")
+	ruleUser := createFederatedUser(t, env.cs, testFedIssuer, "rule@corp.com", store.UserStatusActive)
+	byRule, err := env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(ruleUser.ID, rule))
+	require.NoError(t, err)
+
+	for name, tc := range map[string]struct {
+		id   string
+		want bool
+	}{
+		"expired grant":     {expired.ID, true},
+		"not started grant": {notStarted.ID, true},
+		"active grant":      {active.ID, false},
+		"unbounded grant":   {unbounded.ID, false},
+		"rule binding":      {byRule.ID, false},
+		"missing binding":   {uuid.NewString(), false},
+		"not an id":         {"not-a-uuid", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			removed, err := env.cs.DeleteInactiveVisitorGrant(ctx, tc.id, now)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, removed)
+		})
+	}
+	remaining, err := env.cs.ListVisitorRoleBindings(ctx, env.projectID)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(remaining))
+	for _, rb := range remaining {
+		ids = append(ids, rb.ID)
+	}
+	assert.ElementsMatch(t, []string{active.ID, unbounded.ID, byRule.ID}, ids)
+
+	// A binding of a role other than the project-visitor role is left alone.
+	human := env.humanUser(t)
+	member, err := env.cs.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: env.member.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: human.ID,
+		ScopeType: store.RoleScopeProject, ScopeID: env.projectID, CreatedBy: "test", ExpiresAt: &past,
+	})
+	require.NoError(t, err)
+	removed, err := env.cs.DeleteInactiveVisitorGrant(ctx, member.ID, now)
+	require.NoError(t, err)
+	assert.False(t, removed)
+	_, err = env.cs.GetRoleBinding(ctx, member.ID)
+	assert.NoError(t, err)
+}
