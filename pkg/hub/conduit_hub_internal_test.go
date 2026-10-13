@@ -22,8 +22,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -138,8 +140,9 @@ func TestHubInternal_TransportChecks(t *testing.T) {
 }
 
 // TestHubInternal_ReplayAcrossHubReplicas (criterion 30): a relay-peer
-// request replayed to the same hub, or to a second hub sharing the
-// database, is refused with 401.
+// request replayed to a second hub sharing the database, or to the same
+// hub, is refused with 401 by the shared replay store, while hub B accepts
+// fresh signed requests.
 func TestHubInternal_ReplayAcrossHubReplicas(t *testing.T) {
 	shared := NewNonceCacheStore(enttest.NewClient(t))
 	hubA := newExternalHub(t, shared)
@@ -147,10 +150,59 @@ func TestHubInternal_ReplayAcrossHubReplicas(t *testing.T) {
 	auth := externalRelayAuth(t, "relay-0")
 	body := []byte(`{}`)
 
+	// Hub B authenticates this relay: a fresh request passes every check.
+	fresh := signedHubRequest(t, auth, hubB.URL, hubInternalTestPath, relay.HubPeerTarget, 0, body)
+	require.Equal(t, http.StatusNotFound, resend(t, fresh, hubB.URL, body).StatusCode, "hub B accepts a fresh signed request")
+
 	req := signedHubRequest(t, auth, hubA.URL, hubInternalTestPath, relay.HubPeerTarget, 0, body)
-	assert.Equal(t, http.StatusNotFound, resend(t, req, hubA.URL, body).StatusCode, "first delivery passes the transport checks")
-	assert.Equal(t, http.StatusUnauthorized, resend(t, req, hubB.URL, body).StatusCode, "replayed to another replica")
-	assert.Equal(t, http.StatusUnauthorized, resend(t, req, hubA.URL, body).StatusCode, "replayed to the same replica")
+	require.Equal(t, http.StatusNotFound, resend(t, req, hubA.URL, body).StatusCode, "first delivery passes the transport checks")
+	for name, base := range map[string]string{"another replica": hubB.URL, "the same replica": hubA.URL} {
+		resp := resend(t, req, base, body)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode, name)
+		got, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		if name == "another replica" {
+			// Hub B has not seen this nonce in memory: only the shared
+			// store can refuse it.
+			assert.Contains(t, string(got), "relay-peer request replayed", name)
+		}
+	}
+}
+
+// TestRelayPeerReplayKey: the shared-store key is printable, carries no
+// NUL (a Postgres text column refuses one), has a fixed length, and keeps
+// the peer and nonce apart.
+func TestRelayPeerReplayKey(t *testing.T) {
+	k := relayPeerReplayKey("relay-0", "0123456789abcdef0123456789abcdef")
+	assert.True(t, strings.HasPrefix(k, "relay-peer:"))
+	assert.NotContains(t, k, "\x00")
+	for _, r := range k {
+		assert.True(t, r > ' ' && r <= '~', "non-printable %q in the key", r)
+	}
+	assert.Len(t, k, len("relay-peer:")+64)
+	assert.NotEqual(t, relayPeerReplayKey("relay-0", "ab"), relayPeerReplayKey("relay-0a", "b"), "peer and nonce stay apart")
+	assert.Equal(t, 2*relay.DefaultPeerMaxSkew, relayPeerReplayTTL, "twice the verifier's window")
+}
+
+// TestHubInternal_SettingsReloadKeepsPeerAuth: a settings reload (which
+// re-reads settings.yaml without the peer secret, as after the env holding
+// it was removed) leaves relay-peer authentication as started.
+func TestHubInternal_SettingsReloadKeepsPeerAuth(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	f := &externalFixture{conduitFixture: newConduitFixture(t)}
+	f.regStore = entadapter.NewConduitRegistryStore(enttest.NewClient(t))
+	f.reg = registry.New(f.regStore, registry.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	require.NoError(t, f.srv.StartConduitExternal(ctx, externalOptions(t, f)))
+	hub := httptest.NewServer(f.srv.ConduitInternalHandler())
+	t.Cleanup(hub.Close)
+
+	_ = f.srv.reloadSettings()
+	auth := externalRelayAuth(t, "relay-0")
+	resp := doRaw(t, signedHubRequest(t, auth, hub.URL, hubInternalTestPath, relay.HubPeerTarget, 0, []byte(`{}`)))
+	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "the relay still authenticates after a reload")
 }
 
 // TestHubInternal_ReplayStoreUnavailable (criterion 30): with the shared

@@ -46,8 +46,9 @@ import (
 // hubInternalOps.
 
 // relayPeerReplayTTL is how long a relay-peer nonce stays recorded in the
-// shared store: twice the signature skew window, as the in-memory cache.
-const relayPeerReplayTTL = 2 * time.Minute
+// shared store: twice the verifier's timestamp window, as the in-memory
+// cache keeps it (a request outside the window is refused anyway).
+const relayPeerReplayTTL = 2 * relay.DefaultPeerMaxSkew
 
 // relayPeerReplayStore records a relay-peer nonce once across hub replicas
 // (NonceCacheStore in production).
@@ -66,11 +67,14 @@ var hubInternalOps = map[string]hubInternalOp{}
 // hubInternalSessionOps maps the op of a sessions/{id}/{op} path.
 var hubInternalSessionOps = map[string]func(s *Server, w http.ResponseWriter, r *http.Request, peer, sessionID string, body []byte){}
 
-// relayPeerReplayKey is the shared-store key of a relay-peer nonce. The
-// prefix keeps relay-peer nonces apart from the broker HMAC nonces in the
-// same table.
+// relayPeerReplayKey is the shared-store key of a relay-peer nonce:
+// "relay-peer:" and the hex SHA-256 of the peer id and nonce. It is
+// printable (a text column on every database accepts it), of fixed length,
+// and the prefix keeps relay-peer nonces apart from the broker HMAC nonces
+// in the same table.
 func relayPeerReplayKey(peer, nonce string) string {
-	return "relay-peer\x00" + peer + "\x00" + nonce
+	sum := sha256.Sum256([]byte(peer + "\x00" + nonce))
+	return "relay-peer:" + hex.EncodeToString(sum[:])
 }
 
 // replayStoreFor returns the shared replay store (nil when none can be

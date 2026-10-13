@@ -94,6 +94,10 @@ func deriveHMACPeerKey(secret []byte) ([]byte, error) {
 	return hkdf.Key(sha256.New, secret, nil, hmacPeerKeyInfo, 32)
 }
 
+// DefaultPeerMaxSkew is the default relay-peer timestamp window
+// (HMACPeerAuthConfig.MaxSkew).
+const DefaultPeerMaxSkew = 60 * time.Second
+
 // HMACPeerAuthConfig configures HMACPeerAuth.
 type HMACPeerAuthConfig struct {
 	// Secret is the secret every hub node shares (at least 16 bytes). The
@@ -205,7 +209,7 @@ func newHMACPeerAuthWithKey(cfg HMACPeerAuthConfig, key []byte) (*HMACPeerAuth, 
 		return nil, errors.New("conduit relay: relay-peer HMAC needs SelfID")
 	}
 	if cfg.MaxSkew <= 0 {
-		cfg.MaxSkew = 60 * time.Second
+		cfg.MaxSkew = DefaultPeerMaxSkew
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
