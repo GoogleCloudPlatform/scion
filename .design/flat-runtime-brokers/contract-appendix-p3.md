@@ -157,7 +157,7 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 | Field | Rung of the instance value (chain otherwise unchanged) |
 |---|---|
 | `shared_dir_storage_class`, `shared_dir_size` | below the template/agent `kubernetes.shared_dir_*` (settings fill only empty values, `ApplySharedDirDefaults`); unset → the runtime default (10Gi) |
-| `safe_to_evict` | below the template `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy |
+| `safe_to_evict` | below the agent's own (inline or persisted) `kubernetes.safeToEvict`, which wins whether true or false (`ApplySafeToEvictDefault`); it stays an overridable default, never mandatory policy. Errata (P3.1-b): an earlier text said the template's value wins; a template's `kubernetes` block is not applied to the agent's job config (ptone/scion#4524), so the agent's own config is the outranking tier |
 | `priority_class_name` | below the template/agent `kubernetes.priorityClassName` |
 | `gke` | consumed when the instance runtime is built |
 | `shared_dir_storage_backend(s)` | between the agent's recorded backend (always kept) and `server.shared_dir_storage.backend`; flat order is instance per-dir, instance single, global |
