@@ -1052,7 +1052,10 @@ describe('project thread groups — flag on', () => {
   it('a row drop accepted after a stale mark saves on fresh preferences', async () => {
     hub.secondSpace = true;
     hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
-    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: ['t1'] });
+    hub.prefs['user-a'] = personalPrefs(
+      {},
+      { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: ['t1'] }
+    );
     const el = await mountAs('user-a');
     el._prefsRefreshDelayMs = 60_000;
 
@@ -1062,8 +1065,14 @@ describe('project thread groups — flag on', () => {
     await settle(el);
     // During the round trip the migration writes Q's order and publishes.
     const migratedQ = ['t1', 'srv-q'];
-    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: migratedQ });
-    el.applyThreadGroupEvent(Q, 'created', { ...wire(hubGroup('srv-q', 'Q group', [])), projectId: Q });
+    hub.prefs['user-a'] = personalPrefs(
+      {},
+      { [P]: ['t1', 'srv-1', 't2', 't3', 't4'], [Q]: migratedQ }
+    );
+    el.applyThreadGroupEvent(Q, 'created', {
+      ...wire(hubGroup('srv-q', 'Q group', [])),
+      projectId: Q,
+    });
 
     release();
     await dropping;
