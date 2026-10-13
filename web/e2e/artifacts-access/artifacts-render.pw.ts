@@ -701,7 +701,7 @@ async function frameDiag(
     }
     out.viewFrames = frames;
   } catch (err) {
-    out.diagError = firstLine(err);
+    out.diagError = redactViews(firstLine(err));
   }
   return out;
 }
@@ -2921,6 +2921,19 @@ function errorRedactionSelfTest(): { ok: boolean; cases: Array<{ name: string; o
   cases.push({
     name: 'API call log with cookie headers',
     ok: apiLog.includes(marker) && !keptApi.includes(marker) && !/cookie:/i.test(keptApi),
+  });
+  // A view URL BEFORE the call log (in the first line), so the redactor
+  // itself is exercised, not only the call-log cut.
+  const beforeLog =
+    `page.goto: net::ERR_ABORTED at http://127.0.0.1:1234${VIEW_PREFIX}${cap}/index.html\n` +
+    'Call log:\n  - navigating to the same URL';
+  const keptBefore = j.keptError(beforeLog);
+  cases.push({
+    name: 'view URL before the call log',
+    ok:
+      capabilityLike(beforeLog) > 0 &&
+      capabilityLike(keptBefore) === 0 &&
+      keptBefore.includes(`${VIEW_PREFIX}<redacted>`),
   });
   return { ok: cases.every((c) => c.ok), cases };
 }
