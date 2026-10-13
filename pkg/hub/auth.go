@@ -210,6 +210,10 @@ func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
 // body. Infrastructure failures remain unchanged.
 type constraintAuditAuthFailureWriter struct {
 	http.ResponseWriter
+	// header is the response header map as it was when the writer was
+	// wrapped. A normalized response carries exactly these headers plus
+	// the not-found response's own.
+	header     http.Header
 	normalized bool
 }
 
@@ -220,6 +224,11 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 	switch statusCode {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
 		w.normalized = true
+		h := w.ResponseWriter.Header()
+		clear(h)
+		for k, v := range w.header {
+			h[k] = v
+		}
 		NotFound(w.ResponseWriter, "Access Constraint")
 		return
 	}
@@ -235,7 +244,7 @@ func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
 
 func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
 	if isConstraintAuditAuthFailureRoute(r) {
-		return &constraintAuditAuthFailureWriter{ResponseWriter: w}
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w, header: w.Header().Clone()}
 	}
 	return w
 }
