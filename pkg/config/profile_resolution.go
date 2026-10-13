@@ -64,6 +64,7 @@ func (vs *VersionedSettings) ForProfileResolution(mode ProfileResolutionMode) *V
 	view := *vs
 	view.ActiveProfile = ""
 	view.Profiles = nil
+	view.activeProfileErr = nil
 	return &view
 }
 

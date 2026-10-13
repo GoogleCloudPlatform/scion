@@ -16,7 +16,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"sync"
 )
 
@@ -108,6 +111,7 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	}
 	if o.profiles != nil {
 		vs.Profiles = cloneProfiles(o.profiles)
+		resolveOverlaidActiveProfile(vs)
 	}
 	if o.harnessConfigs != nil {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
@@ -115,6 +119,54 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	if o.imageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
 		vs.ImageRegistry = o.imageRegistry
 	}
+}
+
+// ActiveProfileError reports that the default profile (active_profile)
+// cannot be resolved after the overlay replaced the profiles map: the
+// configured name is not one of the stored profiles. It is returned only
+// when a caller needs the default profile (ResolveRuntime with an empty
+// profile name), never when settings are loaded, so a broker whose agents
+// all carry their own profile still starts and runs.
+type ActiveProfileError struct {
+	// Configured is the active_profile value from the settings file; empty
+	// when none is set.
+	Configured string
+	// Available is the sorted list of profile names in the overlaid map.
+	Available []string
+}
+
+func (e *ActiveProfileError) Error() string {
+	available := "none"
+	if len(e.Available) > 0 {
+		available = strings.Join(e.Available, ", ")
+	}
+	configured := fmt.Sprintf("%q", e.Configured)
+	if e.Configured == "" {
+		configured = `"" (unset)`
+	}
+	return fmt.Sprintf("active_profile %s is not one of the hub's stored profiles (available profiles: %s); set active_profile to one of them, or give the agent an explicit profile",
+		configured, available)
+}
+
+// resolveOverlaidActiveProfile decides the default profile once the overlay
+// has replaced vs.Profiles. The file's active_profile is kept when that
+// profile exists in the overlaid map; otherwise vs records an
+// ActiveProfileError, which ResolveRuntime returns when the default profile
+// is needed. vs.ActiveProfile itself is left unchanged either way.
+//
+// active_profile has no hub (DB) setting today. If one is ever added, its
+// value would take precedence over the file's value here.
+func resolveOverlaidActiveProfile(vs *VersionedSettings) {
+	vs.activeProfileErr = nil
+	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
+		return
+	}
+	available := make([]string, 0, len(vs.Profiles))
+	for name := range vs.Profiles {
+		available = append(available, name)
+	}
+	sort.Strings(available)
+	vs.activeProfileErr = &ActiveProfileError{Configured: vs.ActiveProfile, Available: available}
 }
 
 // Profiles returns a deep copy of the overlay's profiles map. Returns nil if
