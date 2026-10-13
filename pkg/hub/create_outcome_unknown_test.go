@@ -81,6 +81,7 @@ func TestIsUnknownDispatchOutcome(t *testing.T) {
 		{"real dial timeout", realDialTimeout(t), false},
 		{"dial failure", &net.OpError{Op: "dial", Err: timeoutNetErr{}}, false},
 		{"pre-send secret resolution deadline", &secretResolutionError{Verb: "created", Err: context.DeadlineExceeded}, false},
+		{"credential record deadline (never sent)", fmt.Errorf("%w: %w", errAgentTokenRecord, context.DeadlineExceeded), false},
 		{"request never sent", fmt.Errorf("x: %w (%w)", context.DeadlineExceeded, errStartRequestNotSent), false},
 		{"broker not connected", fmt.Errorf("x: %w", errStartBrokerNotConnected), false},
 		{"broker refusal", &brokerStatusError{StatusCode: http.StatusUnprocessableEntity}, false},

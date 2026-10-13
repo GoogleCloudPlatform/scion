@@ -94,7 +94,9 @@ func keepCredentialOnDispatchError(ctx context.Context, err error) bool {
 // A dial failure is checked first: a dial timeout also matches
 // context.DeadlineExceeded (net's timeout errors implement Is), but nothing
 // was sent. A request known not to have been sent, a pre-send hub error
-// (startOutcomeOf releases those), and a cancelled context are never
+// (startOutcomeOf releases most; a credential that could not be recorded,
+// errAgentTokenRecord, is never handed to the broker either), and a
+// cancelled context are never
 // unknown: the dispatch context is detached from the client, so a
 // cancellation comes from the hub itself (a lost start claim, handled
 // before this check).
@@ -107,7 +109,7 @@ func isUnknownDispatchOutcome(err error) bool {
 		return false
 	}
 	if errors.Is(err, errStartRequestNotSent) || errors.Is(err, errStartBrokerNotConnected) ||
-		errors.Is(err, context.Canceled) {
+		errors.Is(err, errAgentTokenRecord) || errors.Is(err, context.Canceled) {
 		return false
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrDispatchFailed) ||
