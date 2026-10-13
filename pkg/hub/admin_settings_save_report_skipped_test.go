@@ -191,8 +191,9 @@ func TestApplySnapshot_RecordsFederationSkipReason(t *testing.T) {
 	assert.Empty(t, srv.layer1ApplySkips().FederationReason)
 
 	// While the test admin tier is on, a federation configuration is
-	// never installed.
+	// never installed, and one already installed is removed.
 	tier := &Server{testAdminGate: testAdminGate{hubAdmin: true}}
+	tier.federationAuth.Store(&FederationAuthenticator{})
 	ApplySnapshot(tier, Layer1Snapshot{FederationConfig: &config.FederationConfig{Enabled: true}})
 	assert.Equal(t, federationSkipTestAdminTier, tier.layer1ApplySkips().FederationReason)
 	assert.Nil(t, tier.federationAuth.Load())
