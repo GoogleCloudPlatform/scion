@@ -84,6 +84,10 @@ type ArtifactListResponse struct {
 	Artifacts []ArtifactListItem `json:"artifacts"`
 	// NextCursor resumes the walk; absent on the last page. It is opaque.
 	NextCursor string `json:"nextCursor,omitempty"`
+	// CanCreate, on a list narrowed to a project with scope=, is true when
+	// the caller may publish artifacts in that project: the decision a
+	// publish there makes (canCreateIn). It is absent without scope=.
+	CanCreate bool `json:"canCreate,omitempty"`
 }
 
 // listParams is a validated list request.
@@ -234,7 +238,7 @@ func (s *Service) handleList(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "could not list artifacts")
 		return
 	}
-	resp := ArtifactListResponse{Artifacts: items}
+	resp := ArtifactListResponse{Artifacts: items, CanCreate: p.scope != "" && canCreateIn(ctx, host, p.scope)}
 	if next != nil {
 		cursor, err := host.SealCursor(ctx, formatPosition(*next), p.binding())
 		if err != nil {

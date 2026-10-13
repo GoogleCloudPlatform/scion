@@ -57,6 +57,15 @@ func BlobPath(hubID, digest string) string {
 	return "hubs/" + hubID + "/artifacts/blobs/sha256/" + digest[0:2] + "/" + digest[2:4] + "/" + digest
 }
 
+// canCreateIn reports whether the caller may publish artifacts in scope:
+// its credential permits artifact.create there and the host authorizes it.
+// It is the decision the create routes make before answering 403
+// (handlePublish, handleCreate), which split it only to explain a missing
+// credential scope; the list reports it as canCreate.
+func canCreateIn(ctx context.Context, host Host, scope string) bool {
+	return host.Permits(ctx, scope, PermissionCreate) && host.Authorize(ctx, scope, PermissionCreate)
+}
+
 // handlePublish implements the single-file fast path: the raw request body
 // becomes the only file of a new artifact's first version, which is ready
 // at once. The artifact is owned by the caller, homed in the requested or

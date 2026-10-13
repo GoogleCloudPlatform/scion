@@ -1084,6 +1084,7 @@ export class ScionPageArtifactDetail extends LitElement {
         ? html`<scion-artifact-move-dialog
             .artifact=${this.data.artifact}
             ?open=${this.moveOpen}
+            ?homeDeleted=${this.data.scopeDeleted === true}
             @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e.detail)}
             @artifact-move-closed=${(): void => {
               this.moveOpen = false;
@@ -1150,11 +1151,14 @@ export class ScionPageArtifactDetail extends LitElement {
       !this.editing &&
       !this.reviewing &&
       (!!v || this.canEdit || this.canReview || !!this.data?.canManage || this.canGrantReview);
+    // A deleted home project has no page: go back to the artifacts list
+    // instead (ptone/scion#4588).
+    const back = this.data?.scopeDeleted
+      ? { href: '/artifacts', label: 'Artifacts' }
+      : { href: `/projects/${encodeURIComponent(this.homeProject)}`, label: 'Project' };
     return html`
       <scion-detail-header heading=${a.title}>
-        <scion-back-link slot="back" href=${`/projects/${encodeURIComponent(this.homeProject)}`}
-          >Project</scion-back-link
-        >
+        <scion-back-link slot="back" href=${back.href}>${back.label}</scion-back-link>
         <sl-icon slot="icon" name="file-earmark-richtext"></sl-icon>
         ${this.currentIsReview
           ? html`<sl-badge variant="warning" pill>

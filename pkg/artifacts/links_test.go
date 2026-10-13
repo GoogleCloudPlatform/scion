@@ -1265,3 +1265,47 @@ func TestRateLimiterZeroRates(t *testing.T) {
 		t.Errorf("wait with a zero rate")
 	}
 }
+
+// TestLinkListLifetimes: GET /links reports, in hours, the default and
+// maximum lifetimes POST /links applies, so the Share dialog can offer
+// what the hub accepts (ptone/scion#4585).
+func TestLinkListLifetimes(t *testing.T) {
+	f, id := newLinkFixture(t)
+	get := func() (LinkListResponse, string) {
+		t.Helper()
+		rec := f.do(&userU, http.MethodGet, linksPath(id), nil, nil)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("list links: %d %s", rec.Code, rec.Body.String())
+		}
+		return decodeInto[LinkListResponse](t, rec), rec.Body.String()
+	}
+	for _, c := range []struct {
+		name          string
+		limits        func(context.Context) Limits
+		def, maxHours int64
+	}{
+		{"from the limits", func(context.Context) Limits { return Limits{LinkDefaultTTL: 2 * time.Hour, LinkMaxTTL: 5 * time.Hour} }, 2, 5},
+		{"default above the maximum", func(context.Context) Limits { return Limits{LinkDefaultTTL: 9 * time.Hour, LinkMaxTTL: 3 * time.Hour} }, 3, 3},
+		{"no limits", nil, int64(DefaultLinkTTL / time.Hour), int64(DefaultLinkMaxTTL / time.Hour)},
+	} {
+		f.svc.SetLimits(c.limits)
+		got, _ := get()
+		if got.DefaultTTLHours != c.def || got.MaxTTLHours != c.maxHours {
+			t.Errorf("%s: default %d max %d, want %d and %d", c.name, got.DefaultTTLHours, got.MaxTTLHours, c.def, c.maxHours)
+		}
+		// The reported maximum is what minting accepts, and no more.
+		if rec, _ := f.mintLink(userU, id, `{"ttlHours": `+strconv.FormatInt(got.MaxTTLHours, 10)+`}`); rec.Code != http.StatusCreated {
+			t.Errorf("%s: minting at the reported maximum: %d", c.name, rec.Code)
+		}
+		if rec, _ := f.mintLink(userU, id, `{"ttlHours": `+strconv.FormatInt(got.MaxTTLHours+1, 10)+`}`); rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: minting past the reported maximum: %d", c.name, rec.Code)
+		}
+	}
+	// Both fields are present even with no links.
+	f.svc.SetLimits(nil)
+	f.exec(t, `DELETE FROM artifact_grant WHERE subject_kind = 'link'`)
+	got, body := get()
+	if len(got.Links) != 0 || !strings.Contains(body, `"defaultTtlHours":168`) || !strings.Contains(body, `"maxTtlHours":720`) {
+		t.Errorf("no links: %s", body)
+	}
+}

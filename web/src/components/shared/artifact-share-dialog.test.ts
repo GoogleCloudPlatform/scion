@@ -94,6 +94,8 @@ interface Server {
   refuseGrant?: boolean;
   /** When set, POST /grants answers the 409 of an artifact at its grant limit. */
   grantsFull?: boolean;
+  /** The hub's link lifetimes GET /links reports; absent like an older hub. */
+  lifetimes?: { defaultTtlHours: number; maxTtlHours: number };
   /** When set, link creation waits until the test calls release(). */
   holdCreate?: boolean;
   release?: () => void;
@@ -124,7 +126,8 @@ function mockServer(init: Partial<Server> = {}): Server {
       const method = opts?.method ?? 'GET';
       const body = typeof opts?.body === 'string' ? JSON.parse(opts.body) : undefined;
       s.calls.push({ method, url, body });
-      if (url === `${BASE}/links` && method === 'GET') return json({ links: s.links });
+      if (url === `${BASE}/links` && method === 'GET')
+        return json({ links: s.links, ...s.lifetimes });
       if (url === `${BASE}/links` && method === 'POST') {
         const l = link('l-new', (body as { ttlHours: number }).ttlHours / 24);
         const answer = (): Promise<Response> =>
@@ -201,6 +204,11 @@ function mockServer(init: Partial<Server> = {}): Server {
     })
   );
   return s;
+}
+
+/** The values of a select's options, in order. */
+function optionValues(select: Element): Array<string | null> {
+  return Array.from(select.querySelectorAll('sl-option')).map((o) => o.getAttribute('value'));
 }
 
 async function settle(el: ScionArtifactShareDialog): Promise<void> {
@@ -349,6 +357,26 @@ describe('share dialog', () => {
     const el = await mount();
     expect($(el, 'table')).toBeNull();
     expect(el.shadowRoot!.textContent).toContain('No active links.');
+  });
+
+  it('offers the hub link lifetimes up to its maximum and preselects its default (ptone/scion#4585)', async () => {
+    const s = mockServer({ lifetimes: { defaultTtlHours: 48, maxTtlHours: 240 } });
+    const el = await mount();
+    const ttl = $(el, '#ttl') as HTMLElement & { value: string };
+    expect(optionValues(ttl)).toEqual(['24', '48', '168', '240']);
+    expect(ttl.value).toBe('48');
+    button(el, 'Create link').click();
+    await settle(el);
+    const post = s.calls.find((c) => c.method === 'POST' && c.url === `${BASE}/links`)!;
+    expect(post.body).toEqual({ ttlHours: 48 });
+  });
+
+  it('keeps the preset link lifetimes when the hub does not report its own', async () => {
+    mockServer();
+    const el = await mount();
+    const ttl = $(el, '#ttl') as HTMLElement & { value: string };
+    expect(optionValues(ttl)).toEqual(['24', '168', '720']);
+    expect(ttl.value).toBe('168');
   });
 
   it('creates a link with the chosen lifetime and shows it only once', async () => {

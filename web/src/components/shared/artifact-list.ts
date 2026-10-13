@@ -54,6 +54,8 @@ export class ScionArtifactList extends LitElement {
   /** Only artifacts homed elsewhere and shared with this project. */
   @state() private sharedOnly = false;
   @state() private publishOpen = false;
+  /** The caller may publish here: canCreate on the list (ptone/scion#4584). */
+  @state() private canCreate = false;
   /** Owner display names by "kind:id"; missing while unknown. */
   @state() private names = new Map<string, string>();
 
@@ -229,6 +231,7 @@ export class ScionArtifactList extends LitElement {
         if (abort.signal.aborted) return;
         items = [...items, ...page.artifacts];
         cursor = page.nextCursor ?? '';
+        this.canCreate = page.canCreate === true;
         if (page.artifacts.length > 0 || !cursor) break;
       }
       this.items = items;
@@ -301,7 +304,9 @@ export class ScionArtifactList extends LitElement {
     return principalLabel(item.ownerKind, item.ownerRef, name, this.currentUserId);
   }
 
-  private newButton(): TemplateResult {
+  /** New artifact, only for a caller the list says may publish here. */
+  private newButton(): TemplateResult | typeof nothing {
+    if (!this.canCreate) return nothing;
     return html`<sl-button
       size="small"
       variant="primary"

@@ -1003,7 +1003,7 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}

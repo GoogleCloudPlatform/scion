@@ -106,6 +106,12 @@ type CreateLinkResponse struct {
 // LinkListResponse answers GET /{id}/links.
 type LinkListResponse struct {
 	Links []LinkInfo `json:"links"`
+	// DefaultTTLHours is the lifetime, in hours, of a link created without
+	// ttlHours.
+	DefaultTTLHours int64 `json:"defaultTtlHours"`
+	// MaxTTLHours is the longest lifetime, in hours, a link can be created
+	// with; a longer ttlHours is refused with ttl_too_long.
+	MaxTTLHours int64 `json:"maxTtlHours"`
 }
 
 // newLinkToken returns a fresh link token: linkTokenBytes from
@@ -395,7 +401,7 @@ func decodeLinkRequest(w http.ResponseWriter, r *http.Request) (*CreateLinkReque
 }
 
 // handleListLinks implements GET /{id}/links: the unexpired links, oldest
-// first.
+// first, and the link lifetimes POST /{id}/links applies.
 func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, _, ok := s.adminArtifact(w, r, id)
 	if !ok {
@@ -408,7 +414,12 @@ func (s *Service) handleListLinks(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	now := time.Now()
-	out := LinkListResponse{Links: []LinkInfo{}}
+	def, maxTTL := b.currentLimits(r.Context()).linkLifetimes()
+	out := LinkListResponse{
+		Links:           []LinkInfo{},
+		DefaultTTLHours: int64(def / time.Hour),
+		MaxTTLHours:     int64(maxTTL / time.Hour),
+	}
 	for i := range grants {
 		g := &grants[i]
 		if g.SubjectKind != SubjectLink || g.ExpiresAt == nil || !now.Before(*g.ExpiresAt) {

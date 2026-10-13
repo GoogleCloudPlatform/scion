@@ -891,3 +891,72 @@ func TestListDeletedProjectGrantsReadOnce(t *testing.T) {
 		t.Errorf("failed grants read: %d, want 500", rec.Code)
 	}
 }
+
+// permitsOffHost is a fakeHost whose credential check (Permits) refuses
+// artifact.create everywhere while Authorize still allows it, so a test can
+// tell the two halves of the create decision apart.
+type permitsOffHost struct{ *fakeHost }
+
+func (h permitsOffHost) Permits(ctx context.Context, scope, perm string) bool {
+	return perm != PermissionCreate && h.fakeHost.Permits(ctx, scope, perm)
+}
+
+// TestListCanCreate: a list narrowed to a project says whether the caller
+// may publish there, with the answer a publish there gives; without scope=
+// or a principal it says nothing (ptone/scion#4584).
+func TestListCanCreate(t *testing.T) {
+	f := newFixture(t, false)
+	f.publish(agentA, "a.md", []byte("a"), "")
+	canPublish := func(p principal, scope string) bool {
+		t.Helper()
+		target := "/api/v1/artifacts?name=probe.md&scope=" + scope
+		rec := f.do(&p, http.MethodPost, target, []byte("p"), map[string]string{"Content-Type": "application/octet-stream"})
+		if rec.Code != http.StatusCreated && rec.Code != http.StatusForbidden {
+			t.Fatalf("publish %s as %s: %d %s", scope, p.ref, rec.Code, rec.Body.String())
+		}
+		return rec.Code == http.StatusCreated
+	}
+	for _, c := range []struct {
+		name  string
+		p     principal
+		scope string
+		want  bool
+	}{
+		{"member", agentA, "project-1", true},
+		{"user member", userU, "project-1", true},
+		{"not authorized there", agentA, "project-2", false},
+	} {
+		got := f.list(&c.p, listPath+"&scope="+c.scope).CanCreate
+		if got != c.want {
+			t.Errorf("%s: canCreate %v, want %v", c.name, got, c.want)
+		}
+		if pub := canPublish(c.p, c.scope); pub != got {
+			t.Errorf("%s: canCreate %v but publish allowed %v", c.name, got, pub)
+		}
+	}
+
+	// The credential half: Authorize allows but Permits refuses.
+	f.svc.host = permitsOffHost{f.host}
+	if f.list(&agentA, listPath+"&scope=project-1").CanCreate {
+		t.Error("canCreate true while the credential does not permit artifact.create")
+	}
+	if canPublish(agentA, "project-1") {
+		t.Error("publish allowed while the credential does not permit artifact.create")
+	}
+	f.svc.host = f.host
+
+	// Without scope= or without a principal the field is absent.
+	for _, c := range []struct {
+		name   string
+		p      *principal
+		target string
+	}{
+		{"no scope", &agentA, listPath},
+		{"no principal", nil, listPath + "&scope=project-1"},
+	} {
+		rec := f.do(c.p, http.MethodGet, c.target, nil, nil)
+		if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), `"canCreate"`) {
+			t.Errorf("%s: %d %s, want 200 without canCreate", c.name, rec.Code, rec.Body.String())
+		}
+	}
+}

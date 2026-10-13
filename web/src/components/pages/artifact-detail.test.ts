@@ -407,6 +407,24 @@ describe('artifact page', () => {
     expect(backHref(el2)).toBe('/projects/home-project');
   });
 
+  it('links back to the artifacts list when the home project was deleted (ptone/scion#4588)', async () => {
+    mockFetch(
+      { ...artifact('design.md', 'text/markdown'), canManage: true, scopeDeleted: true },
+      '# Hello',
+      { crossProjectSharing: true }
+    );
+    const el = await mount(true);
+    const link = el.shadowRoot!.querySelector(
+      'scion-detail-header > scion-back-link[slot="back"]'
+    )!;
+    expect(link.textContent!.trim()).toBe('Artifacts');
+    expect(link.getAttribute('href')).toBe('/artifacts');
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      homeDeleted: boolean;
+    };
+    expect(dialog.homeDeleted).toBe(true);
+  });
+
   it('renders markdown in a sandboxed frame that loads images from the version only', async () => {
     const meta = artifact('docs/design.md', 'text/markdown');
     meta.version!.files.push(

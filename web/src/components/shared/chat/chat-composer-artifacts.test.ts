@@ -392,8 +392,15 @@ describe('scion-artifact-picker', () => {
   });
 
   it('offers New artifact in the empty state, opening the publish dialog for the project', async () => {
-    apiFetch.mockImplementation(() => Promise.resolve(listResponse([])));
+    apiFetch.mockImplementation((url: string) =>
+      Promise.resolve(
+        url.includes('scope=proj-1')
+          ? new Response(JSON.stringify({ artifacts: [], canCreate: true }), { status: 200 })
+          : listResponse([])
+      )
+    );
     const el = await openPicker();
+    await settle(el);
     const dialog = el.shadowRoot.querySelector('scion-artifact-publish-dialog') as any;
     expect(dialog.projectId).toBe('proj-1');
     expect(dialog.open).toBe(false);
@@ -437,5 +444,40 @@ describe('scion-artifact-picker', () => {
     expect(noProject.shadowRoot.querySelector('.placeholder.empty')).toBeTruthy();
     expect(noProject.shadowRoot.querySelector('.new-artifact')).toBeNull();
     expect(noProject.shadowRoot.querySelector('scion-artifact-publish-dialog')).toBeNull();
+  });
+
+  it('asks the hub once per project whether the caller may publish, hiding New artifact unless it says yes (ptone/scion#4584)', async () => {
+    const scoped = (): string[] =>
+      apiFetch.mock.calls.map((c) => c[0] as string).filter((u) => u.includes('scope='));
+    let answer: () => Promise<Response> = () =>
+      Promise.resolve(new Response(JSON.stringify({ artifacts: [] }), { status: 200 }));
+    apiFetch.mockImplementation((url: string) =>
+      url.includes('scope=') ? answer() : Promise.resolve(listResponse([]))
+    );
+    const el = await openPicker();
+    await settle(el);
+    expect(scoped()).toEqual(['/api/v1/artifacts?mine=1&scope=proj-1&limit=1']);
+    const empty = el.shadowRoot.querySelector('.placeholder.empty');
+    expect(empty.textContent.replace(/\s+/g, ' ')).toContain('Agents publish them as they work.');
+    expect(el.shadowRoot.querySelector('.new-artifact')).toBeNull();
+
+    // Reopening the picker for the same project does not ask again.
+    el.open = false;
+    await settle(el);
+    el.open = true;
+    await settle(el);
+    await settle(el);
+    expect(scoped()).toHaveLength(1);
+
+    // A failed read leaves New artifact hidden.
+    answer = () => Promise.reject(new Error('offline'));
+    el.projectId = 'proj-2';
+    await settle(el);
+    await settle(el);
+    expect(scoped()).toEqual([
+      '/api/v1/artifacts?mine=1&scope=proj-1&limit=1',
+      '/api/v1/artifacts?mine=1&scope=proj-2&limit=1',
+    ]);
+    expect(el.shadowRoot.querySelector('.new-artifact')).toBeNull();
   });
 });
