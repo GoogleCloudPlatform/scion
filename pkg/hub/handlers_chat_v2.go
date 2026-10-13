@@ -4865,21 +4865,6 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&body)
 	}
 
-	// Presence fans out on each named project's subject, so every caller
-	// needs project:read on every project it names. A project that does
-	// not exist is refused the same way.
-	for _, projectID := range body.ProjectIDs {
-		project, err := s.store.GetProject(r.Context(), projectID)
-		if err != nil {
-			logAuthzDenial(r, GetIdentityFromContext(r.Context()), Resource{Type: "project", ID: projectID}, ActionRead, "presence names a project the caller cannot read")
-			writeForbiddenStructured(w, "", "project", ActionRead)
-			return
-		}
-		if !s.authorize(w, r, projectResource(project), ActionRead) {
-			return
-		}
-	}
-
 	s.mu.RLock()
 	pm := s.presenceManager
 	s.mu.RUnlock()
@@ -4894,9 +4879,38 @@ func (s *Server) handleChatPresence(w http.ResponseWriter, r *http.Request) {
 		displayName = user.Email()
 	}
 
-	pm.Heartbeat(r.Context(), user.ID(), displayName, body.ProjectIDs)
+	pm.Heartbeat(r.Context(), user.ID(), displayName, s.chatPresenceProjects(r.Context(), GetIdentityFromContext(r.Context()), body.ProjectIDs))
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// chatPresenceProjects returns the projects a presence heartbeat fans out
+// on: the named projects the caller can read (project:read), each once, in
+// the order named. A project the caller cannot read, or one that does not
+// exist, is left out, and the heartbeat still counts for the rest. At most
+// chatVisibleSpacesMaxProjects distinct IDs are considered, the most spaces
+// the chat rail lists.
+func (s *Server) chatPresenceProjects(ctx context.Context, identity Identity, ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" || seen[id] {
+			continue
+		}
+		if len(seen) >= chatVisibleSpacesMaxProjects {
+			break
+		}
+		seen[id] = true
+		project, err := s.store.GetProject(ctx, id)
+		if err != nil {
+			continue
+		}
+		if !s.authzService.CheckAccess(ctx, identity, projectResource(project), ActionRead).Allowed {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
 }
 
 // handleChatSearch handles GET /api/v1/chat/search.

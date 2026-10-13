@@ -119,6 +119,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the unscoped search covers only the projects the token can read instead of refusing the request, so a token without project:read gets 200 with no rows",
 		Pin:    "TestChatSearchToken_DMRowsNeedInboxRead",
 	},
+	{OperationID: "chat.presence.update", Method: "POST", Pattern: "/api/v1/chat/presence"}: {
+		Reason: "presence leaves the named projects the caller cannot read out of its fan-out instead of refusing the request, so a project token for another project gets 200 and fans out on nothing",
+		Pin:    "TestChatPresence_EveryProjectRequiresProjectRead",
+	},
 	{OperationID: "chat.conversation.send.dmuser", Method: "POST", Pattern: "/api/v1/chat/conversations/{id}/messages"}: {
 		Reason: "a send to a user needs read access to the peer user record for every caller, and that record has no hub target for a token, so the admitting token is refused by the peer read check",
 		Pin:    "TestChatHumanDirectMessage_RequiresHubBoundary",

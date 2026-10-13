@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -427,22 +428,61 @@ func TestChatUserPrefsToken_RequiresHubBoundary(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "inbox:write"), http.MethodPut, path, body).Code)
 }
 
-// TestChatPresence_EveryProjectRequiresProjectRead requires every caller
-// to pass project:read on every project its presence names (a missing
-// project is refused the same way), and a token to carry inbox:write.
+// TestChatPresence_EveryProjectRequiresProjectRead requires a presence
+// heartbeat to fan out only on the named projects the caller can read
+// (project:read), each once: a project the caller cannot read, or one that
+// does not exist, is left out and the heartbeat still counts. A token also
+// needs inbox:write.
 func TestChatPresence_EveryProjectRequiresProjectRead(t *testing.T) {
 	f := newChatFixture(t)
+	f.srv.InitPresenceManager()
+	t.Cleanup(f.srv.presenceManager.Stop)
 	const path = "/api/v1/chat/presence"
 	body := func(ids ...string) map[string][]string { return map[string][]string{"projectIds": ids} }
+	fanOut := func(userID string) []string {
+		pm := f.srv.presenceManager
+		pm.mu.RLock()
+		defer pm.mu.RUnlock()
+		entry := pm.users[userID]
+		require.NotNil(t, entry, "the heartbeat of %s is recorded", userID)
+		return append([]string(nil), entry.projectIDs...)
+	}
 
-	assert.Equal(t, http.StatusOK, f.session(t, f.owner, http.MethodPost, path, body(f.projA)).Code)
-	assert.Equal(t, http.StatusForbidden, f.session(t, f.owner, http.MethodPost, path, body(f.projA, f.projB)).Code)
-	assert.Equal(t, http.StatusForbidden, f.session(t, f.owner, http.MethodPost, path, body(uuid.NewString())).Code)
+	rec := f.session(t, f.owner, http.MethodPost, path, body(f.projA, f.projB, uuid.NewString(), f.projA, ""))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{f.projA}, fanOut(f.owner), "only the readable project, once")
 
-	assert.Equal(t, http.StatusOK, f.call(t, f.mint(t, f.admin, hubBoundary(), "inbox:write", "project:read"), http.MethodPost, path, body(f.projA, f.projB)).Code)
-	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "inbox:write", "project:read"), http.MethodPost, path, body(f.projB)).Code)
-	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, hubBoundary(), "project:read"), http.MethodPost, path, body(f.projA)).Code)
-	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, hubBoundary(), "inbox:write"), http.MethodPost, path, body(f.projA)).Code)
+	rec = f.session(t, f.owner, http.MethodPost, path, body(f.projB))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, fanOut(f.owner), "no project the caller cannot read")
+
+	rec = f.call(t, f.mint(t, f.admin, hubBoundary(), "inbox:write", "project:read"), http.MethodPost, path, body(f.projA, f.projB))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{f.projA, f.projB}, fanOut(f.admin))
+
+	rec = f.call(t, f.mint(t, f.admin, projectBoundary(f.projA), "inbox:write", "project:read"), http.MethodPost, path, body(f.projA, f.projB))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, []string{f.projA}, fanOut(f.admin), "a project token fans out only inside its boundary")
+
+	rec = f.call(t, f.mint(t, f.admin, hubBoundary(), "inbox:write"), http.MethodPost, path, body(f.projA))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, fanOut(f.admin), "a token without project:read fans out on no project")
+
+	assert.Equal(t, http.StatusForbidden, f.call(t, f.mint(t, f.admin, hubBoundary(), "project:read"), http.MethodPost, path, body(f.projA)).Code, "a token needs inbox:write")
+}
+
+// TestChatPresenceProjects_DistinctIDsCapped requires the presence fan-out
+// list to consider at most chatVisibleSpacesMaxProjects distinct IDs.
+func TestChatPresenceProjects_DistinctIDsCapped(t *testing.T) {
+	f := newChatFixture(t)
+	user := NewAuthenticatedUser(f.admin, f.admin+"@test.com", "Admin", "admin", string(ClientTypeWeb))
+	ids := make([]string, 0, chatVisibleSpacesMaxProjects+1)
+	for i := 0; i < chatVisibleSpacesMaxProjects; i++ {
+		ids = append(ids, uuid.NewString())
+	}
+	ids = append(ids, f.projA)
+	assert.Empty(t, f.srv.chatPresenceProjects(context.Background(), user, ids), "an ID past the cap is not considered")
+	assert.Equal(t, []string{f.projA}, f.srv.chatPresenceProjects(context.Background(), user, append([]string{f.projA}, ids...)))
 }
 
 func chatSearchKeys(t *testing.T, rec *httptest.ResponseRecorder) []string {
@@ -489,6 +529,9 @@ func TestChatSearchToken_DMRowsNeedInboxRead(t *testing.T) {
 
 	hub := f.mint(t, f.admin, hubBoundary(), "project:read", "agent:read", "inbox:read")
 	assert.Equal(t, chatSortedKeys(f.topicA, f.topicB, dmA, dmB), chatSearchKeys(t, f.call(t, hub, http.MethodGet, unscoped, nil)))
+
+	hubNoProjectRead := f.mint(t, f.admin, hubBoundary(), "inbox:read")
+	assert.Empty(t, chatSearchKeys(t, f.call(t, hubNoProjectRead, http.MethodGet, unscoped, nil)), "no project:read: no thread rows, and no agent DM rows without agent:read")
 
 	hubNoAgentRead := f.mint(t, f.admin, hubBoundary(), "project:read", "inbox:read")
 	assert.Equal(t, chatSortedKeys(f.topicA, f.topicB), chatSearchKeys(t, f.call(t, hubNoAgentRead, http.MethodGet, unscoped, nil)))
@@ -646,5 +689,46 @@ func TestChatToken_ProjectMembershipRecheckedOnEveryRequest(t *testing.T) {
 	for _, r := range reqs {
 		rec := f.call(t, tok, r.method, r.path, r.body)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "after removal: %s %s: %s", r.method, r.path, rec.Body.String())
+		// The refusal is the inbox selector check, which carries the
+		// membership check, not a later target check.
+		var resp ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+		assert.Equal(t, "inbox", resp.Error.Details["resource_type"], "after removal: %s %s: %s", r.method, r.path, rec.Body.String())
 	}
+}
+
+// TestChatRoutes_EveryRegistrationRefusesUnlistedCredentials requires every
+// registered /api/v1/chat route to refuse a credential the chat routes do
+// not accept (a broker acting for a user) with 403, while the same user on
+// a session is not refused.
+func TestChatRoutes_EveryRegistrationRefusesUnlistedCredentials(t *testing.T) {
+	f := newChatFixture(t)
+	admin, err := f.s.GetUser(context.Background(), f.admin)
+	require.NoError(t, err)
+	user := NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, string(ClientTypeWeb))
+	run := func(path string, kind CredentialKind) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		ctx := contextWithIdentity(req.Context(), user)
+		ctx = contextWithCredentialContext(ctx, CredentialContext{Kind: kind})
+		rec := httptest.NewRecorder()
+		f.srv.mux.ServeHTTP(rec, req.WithContext(ctx))
+		return rec
+	}
+	checked := 0
+	for key := range routeMetadataTable {
+		_, pattern := splitRouteKey(key)
+		if !strings.HasPrefix(pattern, "/api/v1/chat/") {
+			continue
+		}
+		path := pattern
+		if strings.HasSuffix(path, "/") {
+			path += uuid.NewString() + "/read"
+		}
+		rec := run(path, CredentialKindBroker)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "GET %s with a broker credential: %s", path, rec.Body.String())
+		rec = run(path, CredentialKindInteractive)
+		assert.NotEqual(t, http.StatusForbidden, rec.Code, "GET %s with a session: %s", path, rec.Body.String())
+		checked++
+	}
+	assert.GreaterOrEqual(t, checked, 12, "every chat route pattern is checked")
 }

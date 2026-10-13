@@ -111,7 +111,7 @@
 - [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
 - [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
 - [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
-- [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. A token needs inbox:write on a hub boundary
+- [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
 - [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
 - [chat.message.delete](#chatmessagedelete) — Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
 - [chat.conversation.readstate.topic](#chatconversationreadstatetopic) — Read the caller's read state on a chat thread. Needs project:read on the thread's project
@@ -130,7 +130,7 @@
 - [chat.dm.list](#chatdmlist) — List the caller's DMs. A token needs inbox:read and lists only the DMs the DM rule lets it read
 - [chat.userprefs.read](#chatuserprefsread) — Read the caller's chat rail preferences, a project-less record. A token needs inbox:read on a hub boundary
 - [chat.userprefs.update](#chatuserprefsupdate) — Write the caller's chat rail preferences, a project-less record. A federated caller is refused. A token needs inbox:write on a hub boundary
-- [chat.presence.update](#chatpresenceupdate) — Publish the caller's presence on the projects it names. Every caller needs project:read on every named project; a federated caller is refused. A token also needs inbox:write
+- [chat.presence.update](#chatpresenceupdate) — Publish the caller's presence. It fans out only on the named projects the caller can read (project:read), each once, at most 1000; the others are left out. A federated caller is refused. A token also needs inbox:write
 - [chat.search.topic](#chatsearchtopic) — Search the messages of one chat thread. Needs project:read on the thread's project
 - [chat.search.project](#chatsearchproject) — Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
 - [chat.search.unscoped](#chatsearchunscoped) — Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
@@ -4080,7 +4080,7 @@
 
 **Domain:** chat
 
-**Description:** Post a message to one of the caller's DMs with another user. A token needs inbox:write on a hub boundary
+**Description:** Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
 
 ### Entry Points
 
@@ -4689,7 +4689,7 @@
 
 **Domain:** chat
 
-**Description:** Publish the caller's presence on the projects it names. Every caller needs project:read on every named project; a federated caller is refused. A token also needs inbox:write
+**Description:** Publish the caller's presence. It fans out only on the named projects the caller can read (project:read), each once, at most 1000; the others are left out. A federated caller is refused. A token also needs inbox:write
 
 ### Entry Points
 

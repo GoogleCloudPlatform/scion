@@ -380,7 +380,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.conversation.send.dmuser",
 		Domain:      "chat",
-		Description: "Post a message to one of the caller's DMs with another user. A token needs inbox:write on a hub boundary",
+		Description: "Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "POST", Variant: "dm_user"},
 		},
@@ -761,7 +761,7 @@ var chatOperations = []OperationSpec{
 	{
 		ID:          "chat.presence.update",
 		Domain:      "chat",
-		Description: "Publish the caller's presence on the projects it names. Every caller needs project:read on every named project; a federated caller is refused. A token also needs inbox:write",
+		Description: "Publish the caller's presence. It fans out only on the named projects the caller can read (project:read), each once, at most 1000; the others are left out. A federated caller is refused. A token also needs inbox:write",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/presence", Method: "POST"},
 		},
