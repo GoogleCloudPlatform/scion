@@ -146,6 +146,21 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			wantHub: ctxTestHub,
 		},
 		{
+			name: "--global gives no project: neither the global hub.projectId nor the context",
+			setup: func(t *testing.T) {
+				writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+				globalMode = true
+			},
+			want:    hubOnlyProject{},
+			wantHub: ctxTestHub,
+		},
+		{
+			name:    "--project global names a hub project",
+			setup:   func(t *testing.T) { projectPath = "global" },
+			want:    hubOnlyProject{ref: "global", label: "global", source: hubOnlySourceFlag},
+			wantHub: ctxTestHub,
+		},
+		{
 			name:      "no directory project and no context give no project",
 			noContext: true,
 			want:      hubOnlyProject{},
@@ -280,6 +295,23 @@ func TestTunnelCLI_UnlinkedDirectoryIgnoresGlobalHubProjectID(t *testing.T) {
 	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
 	assert.Contains(t, stderr, unlinkedMessage)
 	assert.NotContains(t, stderr, "global-hub-id")
+}
+
+// Through the whole command, a context project the hub does not know ends
+// tunnel with exit 4, naming the project by slug and source, never by the
+// id sent.
+func TestTunnelCLI_UnknownContextProjectNamesSource(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		t.Setenv("SCION_AGENT_ID", "") // a hub-managed agent ignores the context
+		t.Setenv("SCION_HUB_TOKEN", "tok")
+		saveTestContext(t, hub.srv.URL, ctxTestProjectID)
+	}, "tunnel", "--stdio", "--port", "22", "a1")
+	t.Cleanup(resetContextTargets)
+	assert.Equal(t, tunnelclient.ExitAgentNotFound, code, "stderr %q", stderr)
+	assert.Contains(t, stderr, "agent a1 not found in project foo (from the scion use context)")
+	assert.NotContains(t, stderr, ctxTestProjectID)
+	tunnelAssertOneLine(t, stderr)
 }
 
 // tunnel takes its project from the current context: the request passes

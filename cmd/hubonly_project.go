@@ -55,10 +55,16 @@ type hubOnlyProject struct {
 // project that is not linked to a hub.
 func resolveHubOnlyProject() hubOnlyProject {
 	switch {
+	case globalMode:
+		// --global names the global settings, which never give these
+		// commands a project; resolveInvocationTarget applies no context
+		// project either.
+		return hubOnlyProject{}
 	case projectSource == targetSourceContext:
 		return hubOnlyProject{ref: projectPath, label: contextProjectSlug, source: hubOnlySourceContext}
-	case projectPath != "" && !globalMode && projectPath != "global" && projectPath != "home":
-		// For these commands --project names a hub project.
+	case projectPath != "":
+		// For these commands --project always names a hub project, also
+		// when its value is global or home.
 		return hubOnlyProject{ref: projectPath, label: projectPath, source: hubOnlySourceFlag}
 	}
 	dir, ok := filesystemProject()
@@ -79,15 +85,11 @@ func resolveHubOnlyProject() hubOnlyProject {
 // It returns "" for a project that is not linked. Only the project's own
 // settings files are read, never the global ones.
 func linkedHubProjectID(dir string) string {
-	isGlobal := false
-	if g, err := config.GetGlobalDir(); err == nil && g == dir {
-		isGlobal = true
-	}
-	hubID, localID := ownProjectIDs(dir, isGlobal)
+	hubID, localID := ownProjectIDs(dir)
 	if hubID != "" {
 		return hubID
 	}
-	if linked := hubsync.ProjectLinkedSetting(dir, isGlobal); linked != nil && *linked {
+	if linked := hubsync.ProjectLinkedSetting(dir, false); linked != nil && *linked {
 		return localID
 	}
 	return ""
@@ -98,12 +100,10 @@ func linkedHubProjectID(dir string) string {
 // directory, which wins), as hubsync.ProjectLinkedSetting reads hub.linked.
 // A versioned settings file keeps its id at hub.project_id; that counts as
 // the project's own id.
-func ownProjectIDs(dir string, isGlobal bool) (hubID, localID string) {
+func ownProjectIDs(dir string) (hubID, localID string) {
 	dirs := []string{dir}
-	if !isGlobal {
-		if ext := config.GetProjectConfigDir(dir); ext != "" && ext != dir {
-			dirs = append(dirs, ext)
-		}
+	if ext := config.GetProjectConfigDir(dir); ext != "" && ext != dir {
+		dirs = append(dirs, ext)
 	}
 	for _, d := range dirs {
 		if s, err := config.LoadSettingsFromDir(d); err == nil && s != nil {
