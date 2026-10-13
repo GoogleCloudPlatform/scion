@@ -880,9 +880,11 @@ func applyProjectDefaults(ac *store.AgentAppliedConfig, project *store.Project) 
 	// empty profile as "use vs.ActiveProfile". A project value now pre-empts
 	// both, so this affects harness-config resolution and env/secret extraction
 	// as well as runtime selection. Intended — hub configuration should outrank
-	// broker-local defaults for a hub-created agent — and it degrades
-	// gracefully: resolveManagerForOpts returns the default manager when
-	// ResolveRuntime errors, so a stale annotation cannot fail dispatch.
+	// broker-local defaults for a hub-created agent. A stale annotation is
+	// handled per broker: on a co-located broker the hub's stored profiles
+	// are authoritative, so a profile they lack is refused at dispatch with
+	// a clear, retryable runtime_unavailable error naming the available
+	// profiles; a standalone broker still falls back to its default runtime.
 	if ac.Profile == "" && settings.ActiveProfile != nil && *settings.ActiveProfile != "" {
 		ac.Profile = *settings.ActiveProfile
 	}
