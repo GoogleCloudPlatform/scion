@@ -173,9 +173,12 @@ same image/resources/sandbox share one template.
   from `snapshot_storage`); `sandboxConfig` (the configured sandbox class and
   `SandboxConfig` name); `workerSelector` from config; a `wakeupProbe` on
   `GET /scion/v1/healthz` port 80 (timeout 120s), so every wakeup, including
-  the golden actor's first boot, waits for `substrate-serve` to answer, and
-  an image whose entrypoint exits fails at template time instead of being
-  snapshotted.
+  the golden actor's first boot, waits for `substrate-serve` to answer. A
+  miss crashes the actor, so an image whose entrypoint exits fails at
+  template time instead of producing a golden that cannot be restored.
+  (Substrate's API guide also states that a template whose containers all
+  declare a probe has its golden snapshot taken once the probe answers,
+  rather than after a fixed warm-up delay.)
 - **Creating a template boots a golden actor and snapshots it.**
   `ensureActorTemplate` calls `GetActorTemplate`, and `CreateActorTemplate`
   if missing, then polls `GetActorTemplate` until the golden snapshot is

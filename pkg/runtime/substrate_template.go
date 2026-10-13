@@ -76,9 +76,14 @@ const substrateWakeupProbeTimeoutSeconds = 120
 // it reports (pkg/sciontool/substrate's HealthzResponse), so the probe
 // passes on both a fresh golden boot ("awaiting-bootstrap") and a resumed,
 // bootstrapped actor ("running" or "init-failed"). It gates each wakeup on
-// substrate-serve actually serving; in particular Substrate only takes the
-// golden snapshot after the probe has answered, so an image whose
-// entrypoint exits fails at template time instead of being checkpointed.
+// substrate-serve actually serving: the probe is polled on every wakeup,
+// including a cold boot, and a miss within the timeout crashes the actor
+// (ateapi.proto, ContainerWakeupProbe). The golden actor's cold boot is
+// gated the same way, so an image whose entrypoint exits fails template
+// creation rather than producing a golden that cannot be restored.
+// Substrate's API guide further states that when every container declares
+// a probe, the golden snapshot is taken once the probe has answered,
+// instead of after a fixed warm-up delay.
 //
 // A fresh value on every call, so no caller can mutate a shared probe and
 // change what substrateTemplateName hashes without changing its input.

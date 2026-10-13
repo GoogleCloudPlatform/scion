@@ -34,13 +34,14 @@ import (
 
 // TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden pins
 // buildActorTemplate's output with EgressTrustBundle unset (the default)
-// against the exact template shape the function produced before
-// egress_trust_bundle existed: no system-info volume, no /run/ate mount,
-// Env nil. This is the "off means exact current behaviour" golden test —
-// want is hand-built to mirror the pre-change source, before
-// egress_trust_bundle existed, not derived from the function under test, so
-// a regression that silently changes the unset-case shape is caught here
-// rather than compared against itself.
+// against the template shape the function produced before
+// egress_trust_bundle existed (no system-info volume, no /run/ate mount,
+// Env nil), plus the container's wakeup probe on the serve healthz, which
+// every template carries since it was added. This is the "off means exact
+// current behaviour" golden test — want is hand-built, with literal values,
+// not derived from the function under test, so a regression that silently
+// changes the unset-case shape is caught here rather than compared against
+// itself.
 func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *testing.T) {
 	image := "repo/image@sha256:" + strings.Repeat("c", 64)
 	sc := config.V1SubstrateConfig{
@@ -71,6 +72,10 @@ func TestBuildActorTemplate_EgressTrustBundleUnset_MatchesPreChangeGolden(t *tes
 					{Name: "cpu", Quantity: "2"},
 					{Name: "memory", Quantity: "4Gi"},
 				}},
+				WakeupProbe: &ateapipb.ContainerWakeupProbe{
+					HttpGet:        &ateapipb.HTTPGetAction{Path: "/scion/v1/healthz", Port: 80},
+					TimeoutSeconds: 120,
+				},
 			},
 		},
 		Volumes: []*ateapipb.Volume{
@@ -211,7 +216,7 @@ func substrateTemplateNameFixtures() []substrateTemplateNameFixture {
 			// image/sandbox/config-name/snapshot-storage/resources shape
 			// substrateTemplateName has always hashed. A
 			// regression that starts hashing EgressTrustBundle
-			// unconditionally (e.g. always as a 10th "%s" field, "" when
+			// unconditionally (e.g. always as an extra "%s" field, "" when
 			// unset) would change this literal even though the setting is
 			// off — exactly the silent golden-template reuse break this
 			// pin exists to catch.
