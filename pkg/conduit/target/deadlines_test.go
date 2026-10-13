@@ -26,7 +26,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 )
 
-// Stream authorization deadlines at the target (design v2.21.16 §3.5,
+// Stream authorization deadlines at the target (design v2.21.17 §3.5,
 // "Target-side deadlines"; criterion 29).
 
 const testInterval = time.Hour

@@ -25,7 +25,7 @@ import (
 )
 
 // Renewal grants and the optional deadline claims of stream grants
-// (design v2.21.16 §3.5, "Target-side deadlines").
+// (design v2.21.17 §3.5, "Target-side deadlines").
 
 const testOpenJTI = "open-jti-1"
 
@@ -314,4 +314,51 @@ func TestGrantEncodingWithoutDeadlineUnchanged(t *testing.T) {
 	if string(payload) != wantPayload {
 		t.Fatalf("payload\n got %s\nwant %s", payload, wantPayload)
 	}
+}
+
+// TestVerify_RequireDeadlineFor: with RequireDeadlineFor set, a grant whose
+// sub has that prefix and no authz_until is refused with ErrAuthzUntil
+// without consuming its jti (the same token verifies once the requirement
+// is dropped); a grant with another subject is not affected; and an empty
+// RequireDeadlineFor leaves verification unchanged.
+func TestVerify_RequireDeadlineFor(t *testing.T) {
+	f := newFixture(t)
+	now := t0.Add(time.Second)
+	required := baseExpect()
+	required.RequireDeadlineFor = SubjectUserPrefix
+
+	t.Run("user grant refused, jti kept", func(t *testing.T) {
+		cache := newCache()
+		c := baseClaims()
+		c.Subject = SubjectUserPrefix + "u1"
+		tok := f.mint(t, c)
+		if _, err := Verify(context.Background(), tok, f.keys, required, cache, now); !errors.Is(err, ErrAuthzUntil) {
+			t.Fatalf("err = %v, want ErrAuthzUntil", err)
+		}
+		if _, err := Verify(context.Background(), tok, f.keys, baseExpect(), cache, now); err != nil {
+			t.Fatalf("the same grant without the requirement: %v", err)
+		}
+	})
+	t.Run("user grant with authz_until accepted", func(t *testing.T) {
+		c := baseClaims()
+		c.Subject = SubjectUserPrefix + "u1"
+		c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, newCache(), now); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("other subject not affected", func(t *testing.T) {
+		c := baseClaims()
+		c.Subject = "agent:a1"
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, newCache(), now); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("empty requirement unchanged", func(t *testing.T) {
+		c := baseClaims()
+		c.Subject = SubjectUserPrefix + "u1"
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, baseExpect(), newCache(), now); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

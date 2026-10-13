@@ -130,10 +130,12 @@ var (
 	ErrReplay         = errors.New("grant: jti already used")
 	ErrExpectation    = errors.New("grant: incomplete verification expectation")
 	ErrInvalidClaims  = errors.New("grant: invalid claims")
-	// Renewal grants only (renewal.go).
+	// ErrSubject and ErrStreamBinding refuse renewal grants (renewal.go).
+	// ErrAuthzUntil refuses a renewal whose authz_until is out of range, or
+	// a stream grant without one when the expectation requires it.
 	ErrSubject       = errors.New("grant: wrong subject")
 	ErrStreamBinding = errors.New("grant: renewal is for another stream")
-	ErrAuthzUntil    = errors.New("grant: authz_until out of range")
+	ErrAuthzUntil    = errors.New("grant: authz_until missing or out of range")
 )
 
 // StreamHeader is the authority-bearing part of a StreamOpen: its kind and
@@ -340,6 +342,10 @@ type Expectation struct {
 	// ClockSkew tolerates that much clock difference on nbf and exp. It is
 	// capped at MaxClockSkew; zero means none.
 	ClockSkew time.Duration
+	// RequireDeadlineFor, when non-empty, is a subject prefix: a grant
+	// whose sub starts with it must carry authz_until, or it is refused
+	// with ErrAuthzUntil (before its jti is consumed).
+	RequireDeadlineFor string
 }
 
 // Verify checks token against keys and expect, and on success consumes its
@@ -401,6 +407,9 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	}
 	if !c.Stream.Equal(expect.Header) {
 		return nil, ErrStream
+	}
+	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) && c.AuthzUntil.IsZero() {
+		return nil, ErrAuthzUntil
 	}
 
 	// Final step: consume the jti. Exactly one concurrent caller wins.

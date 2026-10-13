@@ -32,7 +32,7 @@ type renewalRecord struct {
 // Config.OnStreamRenewal with the stream id, the credential bytes and the
 // session context (which carries the Welcome). A stream's Renew
 // (StreamRenewer) sends exactly that frame. The sessions and the stream
-// stay up (design v2.21.16 §3.5, "Target-side deadlines").
+// stay up (design v2.21.17 §3.5, "Target-side deadlines").
 func TestOnStreamRenewalReceivesRenewals(t *testing.T) {
 	in := make(chan Stream, 1)
 	var mu sync.Mutex

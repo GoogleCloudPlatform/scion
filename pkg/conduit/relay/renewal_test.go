@@ -37,7 +37,7 @@ type renewalAt struct {
 // relay B to the owner relay A reaches the target as
 // AuthRefresh{stream_id, credential}, with the target's own stream id and
 // the credential bytes unchanged, and the stream keeps working (design
-// v2.21.16 §3.5, "Target-side deadlines").
+// v2.21.17 §3.5, "Target-side deadlines").
 func TestRemoteRenewalForwarded(t *testing.T) {
 	accepted := make(chan uint32, 1)
 	renewals := make(chan renewalAt, 4)

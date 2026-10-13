@@ -50,7 +50,7 @@ var ErrUntracked = errors.New("conduit target: renewal for a stream without a de
 // grant's, its stream_id is the stream's id on the session the renewal
 // arrived on, and its open_jti is the open grant's jti. It may only move
 // the deadline later, to at most now + the open grant's authz_interval +
-// Grace. A refused renewal changes nothing (design v2.21.16 §3.5
+// Grace. A refused renewal changes nothing (design v2.21.17 §3.5
 // "Target-side deadlines").
 type Deadlines struct {
 	// Keys verifies renewal grants. Required.

@@ -18,7 +18,7 @@
 // identity and incarnation, the session id and epoch from its current
 // Welcome, its project, and the StreamOpen kind and params, and only then
 // performs the side effect. Verification keys come only from the target's
-// own authenticated requests to the hub (KeyHolder; design v2.21.16 §3.5
+// own authenticated requests to the hub (KeyHolder; design v2.21.17 §3.5
 // "Target-side deadlines"); keys listed in a Welcome are never used to
 // verify anything.
 //
@@ -134,6 +134,9 @@ type Verifier struct {
 	Issuer    string        // optional: required iss
 	ClockSkew time.Duration // capped by grant.MaxClockSkew
 	Now       func() time.Time
+	// RequireDeadlineFor, when non-empty, is a subject prefix whose grants
+	// must carry authz_until (grant.Expectation.RequireDeadlineFor).
+	RequireDeadlineFor string
 }
 
 // VerifyStreamOpen verifies open.grant for a stream about to be accepted on
@@ -190,6 +193,8 @@ func (v *Verifier) VerifyStreamOpen(ctx context.Context, b Binding, open *condui
 		ProjectID: projectID,
 		Issuer:    v.Issuer,
 		ClockSkew: v.ClockSkew,
+
+		RequireDeadlineFor: v.RequireDeadlineFor,
 	}
 	return grant.Verify(ctx, open.GetGrant(), v.Keys, expect, v.Replay, now())
 }
