@@ -218,7 +218,7 @@ echo after-long-lines
 		switch {
 		case l == strings.Repeat("a", 100000):
 			sawLong = true
-		case strings.HasPrefix(l, strings.Repeat("b", imageBuildLogMaxLine)+" ... [line truncated"):
+		case l == truncatedBuildLogLine("b"):
 			sawTruncated = true
 		case l == "after-long-lines":
 			sawAfter = true
