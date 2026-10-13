@@ -91,6 +91,11 @@ import {
   writeFolder,
 } from './render-fixtures.js';
 import {
+  classifierSelfTest,
+  classifyFrameRequest,
+  type FrameRequestClass,
+} from './render-classify.js';
+import {
   RENDER_SELECTORS,
   fileIconButton,
   fileRow,
@@ -210,6 +215,42 @@ interface FrameRequest {
    * session".
    */
   cookieHeader: { read: boolean; present: boolean | null; names: string[] };
+  /** Fetch metadata read from the same full headers (null: missing or unread). */
+  secFetchSite: string | null;
+  secFetchDest: string | null;
+  secFetchMode: string | null;
+  /** The URL is exactly a frame src the app set for a mint (compared in memory). */
+  srcMatch?: boolean;
+  /** The one excluded class, or frame-initiated (graded); see render-classify.ts. */
+  classification?: FrameRequestClass;
+}
+
+/** Each record's full URL, in memory only (it can hold a view capability). */
+const requestUrls = new WeakMap<FrameRequest, string>();
+
+/**
+ * Classifies a recorded request (render-classify.ts): the app page's own
+ * src load of the frame is excluded; everything else is frame-initiated.
+ * The class and the src match are recorded on the request.
+ */
+function classify(q: FrameRequest): FrameRequestClass {
+  const base = j.state.target?.baseURL;
+  const frameSrcs = base
+    ? r2.mints.flatMap((m) => (m.who === q.who && m.url ? [new URL(m.url, base).href] : []))
+    : [];
+  const { classification, srcMatch } = classifyFrameRequest(
+    {
+      headersRead: q.cookieHeader.read,
+      secFetchSite: q.secFetchSite,
+      secFetchDest: q.secFetchDest,
+      secFetchMode: q.secFetchMode,
+      url: requestUrls.get(q) ?? null,
+    },
+    frameSrcs
+  );
+  q.srcMatch = srcMatch;
+  q.classification = classification;
+  return classification;
 }
 
 /** A view mint seen by the browser: status, seq and the URL (in memory only). */
@@ -242,6 +283,8 @@ const r2 = {
   remoteHost: {
     requests: 0,
     cspBlocked: 0,
+    /** Remote requests not (yet) refused by CSP: empty means every one was refused. */
+    open: new Set<Request>(),
     /** Any answer from the remote host (a response means it reached the network). */
     responses: 0,
     /** errorText of each failed remote request. */
@@ -351,6 +394,9 @@ function readCookieHeader(req: Request, rec: FrameRequest): void {
   const p = req
     .allHeaders()
     .then((h) => {
+      rec.secFetchSite = h['sec-fetch-site'] ?? null;
+      rec.secFetchDest = h['sec-fetch-dest'] ?? null;
+      rec.secFetchMode = h['sec-fetch-mode'] ?? null;
       rec.cookieHeader = { read: true, present: !!h.cookie, names: cookieNames(h.cookie) };
     })
     .catch(() => undefined);
@@ -367,7 +413,10 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
   const records = new Map<Request, FrameRequest>();
   context.on('request', (req) => {
     if (!/^https?:/.test(req.url())) return;
-    if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHost.requests++;
+    if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) {
+      r2.remoteHost.requests++;
+      r2.remoteHost.open.add(req);
+    }
     if (!isBundleRequest(req)) return;
     let topLevelDocument: boolean;
     let frameUnavailable = false;
@@ -388,7 +437,11 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
       topLevelDocument,
       ...(frameUnavailable ? { frameUnavailable } : {}),
       cookieHeader: { read: false, present: null, names: [] },
+      secFetchSite: null,
+      secFetchDest: null,
+      secFetchMode: null,
     };
+    requestUrls.set(rec, req.url());
     records.set(req, rec);
     r2.frameRequests.push(rec);
     readCookieHeader(req, rec);
@@ -442,7 +495,8 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     if (/^https?:/.test(req.url()) && new URL(req.url()).hostname === REMOTE_IMAGE_HOST) {
       const errorText = req.failure()?.errorText ?? 'unknown';
       r2.remoteHost.failures.push(errorText);
-      if (errorText === 'csp') r2.remoteHost.cspBlocked++;
+      // One-to-one: only a counted request that failed by CSP leaves the open set.
+      if (errorText === 'csp' && r2.remoteHost.open.delete(req)) r2.remoteHost.cspBlocked++;
     }
   });
 }
@@ -457,6 +511,8 @@ async function frameSessionFacts(records: FrameRequest[]): Promise<{
   unread: number;
   bearing: number;
   unverified: number;
+  excludedParentLoads: number;
+  excludedParentLoadsWithCookie: number;
 }> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
@@ -466,8 +522,14 @@ async function frameSessionFacts(records: FrameRequest[]): Promise<{
     }),
   ]);
   if (timer) clearTimeout(timer);
-  const frameOnly = records.filter((q) => !q.topLevelDocument);
+  const notTopLevel = records.filter((q) => !q.topLevelDocument);
+  // Rule 7a: only the app page's own src load of the frame is excluded; its
+  // cookie presence is still recorded.
+  const excluded = notTopLevel.filter((q) => classify(q) === 'excluded-parent-load');
+  const frameOnly = notTopLevel.filter((q) => q.classification === 'frame-initiated');
   return {
+    excludedParentLoads: excluded.length,
+    excludedParentLoadsWithCookie: excluded.filter((q) => q.cookieHeader.present === true).length,
     total: frameOnly.length,
     unread: frameOnly.filter((q) => !q.cookieHeader.read).length,
     bearing: frameOnly.filter((q) => q.cookieHeader.present === true).length,
@@ -1055,6 +1117,13 @@ test.describe.serial('artifact page view and render (R2)', () => {
       j.state.setupError = `beforeAll: ${refusal}`;
       throw new Error(refusal);
     }
+    // The frame-request classifier's self-test: a wrong class refuses the run.
+    const selfTest = classifierSelfTest();
+    j.state.evidence.classifierSelfTest = selfTest;
+    if (!selfTest.ok) {
+      j.state.setupError = 'beforeAll: frame-request classifier self-test failed';
+      throw new Error('frame-request classifier self-test failed');
+    }
     try {
       const t = j.resolveTarget();
       j.state.target = t;
@@ -1349,9 +1418,11 @@ async function runMain(browser: Browser): Promise<void> {
       // A remote request counts only if the browser did not refuse it by CSP
       // (errorText 'csp', before any network use); any answer from the host
       // also counts, so the check can still fail.
-      const remoteNotBlocked = r2.remoteHost.requests - r2.remoteHost.cspBlocked;
+      const remoteNotBlocked = r2.remoteHost.open.size;
       r.ui.remoteHost = {
-        ...r2.remoteHost,
+        requests: r2.remoteHost.requests,
+        cspBlocked: r2.remoteHost.cspBlocked,
+        responses: r2.remoteHost.responses,
         failures: [...r2.remoteHost.failures],
         notBlocked: remoteNotBlocked,
       };
@@ -1411,6 +1482,12 @@ async function runMain(browser: Browser): Promise<void> {
         code: null,
       });
       expect.soft(p2?.status, 'page2 200').toBe(200);
+      // Rule 7a: an in-frame link navigation is frame-initiated (graded).
+      if (p2) await frameSessionFacts([p2]);
+      r.ui.page2Classification = p2?.classification ?? null;
+      expect
+        .soft(p2?.classification, 'in-frame link navigation classified frame-initiated')
+        .toBe('frame-initiated');
     },
     { pre: preBundle }
   );
@@ -1499,6 +1576,11 @@ async function runMain(browser: Browser): Promise<void> {
         checks.headersAllRead = session.unread === 0;
         checks.noSessionBearing = session.bearing === 0;
         checks.apiNavUnauthenticated = apiNavStatus === 401;
+        // Rule 7a: the frame's own navigation to the API path is frame-initiated.
+        const apiNavRec = requestsIn('owner', ['R2-05']).find(
+          (q) => q.resourceType === 'document' && q.path === API_PROBE_PATH
+        );
+        checks.apiNavClassifiedFrameInitiated = apiNavRec?.classification === 'frame-initiated';
         // (c)
         checks.popupBlocked = String(result.popup).startsWith('blocked:');
         checks.pageUrlUnchanged = nav.pageUrlUnchanged;
@@ -2112,7 +2194,11 @@ async function runMain(browser: Browser): Promise<void> {
         checks.headersAllRead = session.unread === 0;
         checks.noSessionBearing = session.bearing === 0;
         // A reader's GET omits canPublish when it is false.
-        checks.readOnly = caps.status === 200 && rec.canPublish !== true;
+        checks.readOnly =
+          caps.status === 200 &&
+          typeof caps.body === 'object' &&
+          caps.body !== null &&
+          rec.canPublish !== true;
         checks.minted = mint.status === 200;
       }),
     { pre: preV3 }

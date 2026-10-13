@@ -55,6 +55,11 @@ anchor.
   CI).
 - A frame request whose Cookie header could not be read counts as unknown, which fails the session check. It never
   counts as "no session".
+- The session checks count requests started by the frame's content. They exclude exactly one class: the iframe
+  element's own document load started by the app page, recognised only when Sec-Fetch-Site is same-origin,
+  Sec-Fetch-Dest iframe, Sec-Fetch-Mode navigate and the URL is exactly a frame src the app set for a mint. Its cookie
+  presence is still recorded. Any missing or different header, or a URL mismatch, counts as frame-started (graded).
+  R2-04 and R2-05 check that in-frame link navigations are classified as frame-started.
 - Rows depend on facts, not on other rows passing: the bundle exists, the markdown was published, v3 exists, the
   owner's view URL was minted. A failed R2-01 smoke stops every later row; a refused markdown publish makes the
   markdown rows `not run` with the cause.
