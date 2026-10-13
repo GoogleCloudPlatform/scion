@@ -136,15 +136,15 @@ func TestPutServerConfigDB_FederationRebuildErrorReportedSkipped(t *testing.T) {
 	previous := &FederationAuthenticator{}
 	srv.federationAuth.Store(previous)
 
-	// Valid as saved, but a hosted hub refuses an http issuer when it
-	// builds the authenticator.
+	// Valid as saved, but a hosted hub refuses an http issuer when it builds
+	// the authenticator. Federation only: another section's self-apply sees no
+	// federation row and clears the authenticator stored by hand above.
 	rr := putHubNameServerConfigDB(t, srv, ops, `{
-		"server":{"hub":{"hub_name":"fed-skip-hub"}},
 		"federation":{"enabled":true,"trusted_issuers":[{"issuer_url":"http://issuer-4466.example.com"}]}}`)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	rep := skippedReport(t, rr.Body.Bytes())
-	assert.Equal(t, []string{"server.hub.hub_name"}, rep.AppliedKeys, "no federation key is reported as applied")
+	assert.Empty(t, rep.AppliedKeys, "no federation key is reported as applied")
 	assert.Equal(t, []skippedKey{
 		{Key: "server.federation.enabled", Reason: federationSkipBuildFailed},
 		{Key: "server.federation.trusted_issuers", Reason: federationSkipBuildFailed},
