@@ -76,7 +76,9 @@ if (argv[0] === 'server' && argv[1] === 'start') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ status: 'healthy' }));
     })
-    .listen(port, '127.0.0.1', () => console.log("export SCION_DEV_TOKEN=$(cat '" + tokenFile + "')"));
+    .listen(port, '127.0.0.1', () => {
+      console.log("export SCION_DEV_TOKEN=$(cat '" + tokenFile + "')");
+    });
   process.on('SIGTERM', () => process.exit(0));
 } else {
   process.exit(2);

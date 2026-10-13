@@ -36,9 +36,10 @@
  *   "none", a harness config, and the declared image (A2d; the running
  *   container's image is recorded next to it, not checked).
  * - Failure panel, no container runtime (only where agents cannot start):
- *   the broker fails the launch; the failed-create panel shows a known
- *   code and a message, Delete and Create again, and none of the header
- *   Start, Resume or Resume (best effort) controls.
+ *   the broker fails the launch; the failed-create panel shows a
+ *   non-empty code (whether it is a known code is recorded) and a message,
+ *   Delete and Create again, and none of the header Start, Resume or
+ *   Resume (best effort) controls.
  *   This is not A4: it does not exercise a bad image.
  * - A4 (needs a real launch): an image tag that does not exist, typed into
  *   the form's Container image field (request config.image), gives the
@@ -517,6 +518,9 @@ async function expectFailedCreatePanel(
   if (evidence) evidence.messageLength = message.length;
   // Recorded, not checked: A3b asks for a non-empty code only.
   panel.codeKnown = (KNOWN_LAUNCH_ERROR_CODES as readonly string[]).includes(code);
+  // What the agent was created with, as the panel shows it (recorded only).
+  panel.template = await textOf(SELECTORS.incompleteTemplate);
+  panel.task = await textOf(SELECTORS.incompleteTask);
   expect(message, 'launch-error-message').not.toBe('');
   // A3c: Delete and Create again offered; header-start, header-resume and
   // header-force-resume all absent (not rendered, or not visible).
@@ -1191,7 +1195,6 @@ test.describe.serial('async agent create from the web form', () => {
     expect(['succeeded', 'running_observed']).toContain(last.endReason);
     expectForwardOnly(phaseSequence(sse.map((r) => r.phase ?? '')), 'SSE phases');
 
-
     // The running path is the credential-free no-auth fallback: the agent
     // must have started without credentials. The hub records the image the
     // broker resolved on the succeeded async launch report, as on a sync
@@ -1314,9 +1317,9 @@ test.describe.serial('async agent create from the web form', () => {
 
     // 1. Graded UX rows (A3b, A3c): the failed-create panel with
     //    launch-code and launch-error-message, Delete and Create again, no
-    //    visible header-start/-resume/-force-resume (each merged into the evidence as it is read or checked); then the
-    //    reload/state evidence is recorded before no /start and no reload
-    //    are asserted.
+    //    visible header-start/-resume/-force-resume (each merged into the
+    //    evidence as it is read or checked); then the reload/state evidence
+    //    is recorded before no /start and no reload are asserted.
     const panel = await expectFailedCreatePanel(tracked.page, a4Evidence);
     const sse = await sseRecords(tracked.page, submit.agentId);
     const lastLaunch = sse.filter((r) => r.launch).at(-1)?.launch ?? null;

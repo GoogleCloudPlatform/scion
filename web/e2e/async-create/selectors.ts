@@ -123,7 +123,7 @@ export const LAUNCH_STEPS = [
   'launching',
 ] as const;
 
-/** Phases of an in-flight create, in order.
+/** Phases of an in-flight create, in order. */
 export const LAUNCH_PHASES = ['created', 'provisioning', 'cloning', 'starting', 'running'] as const;
 
 export const LAUNCH_END_REASONS = [
@@ -138,8 +138,8 @@ export const LAUNCH_END_REASONS = [
 
 /**
  * Launch failure codes the hub may send: today's, plus those of the
- * per-step progress work (pkg/api/launch_codes.go). A code outside the
- * list fails the check, so a new code is a one-line change here.
+ * per-step progress work (pkg/api/launch_codes.go). Whether the panel's
+ * code is in the list is recorded (panel.codeKnown), not checked.
  */
 export const KNOWN_LAUNCH_ERROR_CODES = [
   'launch_timeout',
