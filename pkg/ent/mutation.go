@@ -43649,6 +43649,7 @@ type HarnessConfigMutation struct {
 	status                  *harnessconfig.Status
 	image_status            *harnessconfig.ImageStatus
 	image_status_checked_at *time.Time
+	built_image             *string
 	owner_id                *string
 	created_by              *string
 	updated_by              *string
@@ -44471,6 +44472,55 @@ func (m *HarnessConfigMutation) ResetImageStatusCheckedAt() {
 	delete(m.clearedFields, harnessconfig.FieldImageStatusCheckedAt)
 }
 
+// SetBuiltImage sets the "built_image" field.
+func (m *HarnessConfigMutation) SetBuiltImage(s string) {
+	m.built_image = &s
+}
+
+// BuiltImage returns the value of the "built_image" field in the mutation.
+func (m *HarnessConfigMutation) BuiltImage() (r string, exists bool) {
+	v := m.built_image
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldBuiltImage returns the old "built_image" field's value of the HarnessConfig entity.
+// If the HarnessConfig object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *HarnessConfigMutation) OldBuiltImage(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldBuiltImage is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldBuiltImage requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldBuiltImage: %w", err)
+	}
+	return oldValue.BuiltImage, nil
+}
+
+// ClearBuiltImage clears the value of the "built_image" field.
+func (m *HarnessConfigMutation) ClearBuiltImage() {
+	m.built_image = nil
+	m.clearedFields[harnessconfig.FieldBuiltImage] = struct{}{}
+}
+
+// BuiltImageCleared returns if the "built_image" field was cleared in this mutation.
+func (m *HarnessConfigMutation) BuiltImageCleared() bool {
+	_, ok := m.clearedFields[harnessconfig.FieldBuiltImage]
+	return ok
+}
+
+// ResetBuiltImage resets all changes to the "built_image" field.
+func (m *HarnessConfigMutation) ResetBuiltImage() {
+	m.built_image = nil
+	delete(m.clearedFields, harnessconfig.FieldBuiltImage)
+}
+
 // SetOwnerID sets the "owner_id" field.
 func (m *HarnessConfigMutation) SetOwnerID(s string) {
 	m.owner_id = &s
@@ -44773,7 +44823,7 @@ func (m *HarnessConfigMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *HarnessConfigMutation) Fields() []string {
-	fields := make([]string, 0, 22)
+	fields := make([]string, 0, 23)
 	if m.name != nil {
 		fields = append(fields, harnessconfig.FieldName)
 	}
@@ -44821,6 +44871,9 @@ func (m *HarnessConfigMutation) Fields() []string {
 	}
 	if m.image_status_checked_at != nil {
 		fields = append(fields, harnessconfig.FieldImageStatusCheckedAt)
+	}
+	if m.built_image != nil {
+		fields = append(fields, harnessconfig.FieldBuiltImage)
 	}
 	if m.owner_id != nil {
 		fields = append(fields, harnessconfig.FieldOwnerID)
@@ -44880,6 +44933,8 @@ func (m *HarnessConfigMutation) Field(name string) (ent.Value, bool) {
 		return m.ImageStatus()
 	case harnessconfig.FieldImageStatusCheckedAt:
 		return m.ImageStatusCheckedAt()
+	case harnessconfig.FieldBuiltImage:
+		return m.BuiltImage()
 	case harnessconfig.FieldOwnerID:
 		return m.OwnerID()
 	case harnessconfig.FieldCreatedBy:
@@ -44933,6 +44988,8 @@ func (m *HarnessConfigMutation) OldField(ctx context.Context, name string) (ent.
 		return m.OldImageStatus(ctx)
 	case harnessconfig.FieldImageStatusCheckedAt:
 		return m.OldImageStatusCheckedAt(ctx)
+	case harnessconfig.FieldBuiltImage:
+		return m.OldBuiltImage(ctx)
 	case harnessconfig.FieldOwnerID:
 		return m.OldOwnerID(ctx)
 	case harnessconfig.FieldCreatedBy:
@@ -45066,6 +45123,13 @@ func (m *HarnessConfigMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetImageStatusCheckedAt(v)
 		return nil
+	case harnessconfig.FieldBuiltImage:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetBuiltImage(v)
+		return nil
 	case harnessconfig.FieldOwnerID:
 		v, ok := value.(string)
 		if !ok {
@@ -45168,6 +45232,9 @@ func (m *HarnessConfigMutation) ClearedFields() []string {
 	if m.FieldCleared(harnessconfig.FieldImageStatusCheckedAt) {
 		fields = append(fields, harnessconfig.FieldImageStatusCheckedAt)
 	}
+	if m.FieldCleared(harnessconfig.FieldBuiltImage) {
+		fields = append(fields, harnessconfig.FieldBuiltImage)
+	}
 	if m.FieldCleared(harnessconfig.FieldOwnerID) {
 		fields = append(fields, harnessconfig.FieldOwnerID)
 	}
@@ -45223,6 +45290,9 @@ func (m *HarnessConfigMutation) ClearField(name string) error {
 		return nil
 	case harnessconfig.FieldImageStatusCheckedAt:
 		m.ClearImageStatusCheckedAt()
+		return nil
+	case harnessconfig.FieldBuiltImage:
+		m.ClearBuiltImage()
 		return nil
 	case harnessconfig.FieldOwnerID:
 		m.ClearOwnerID()
@@ -45291,6 +45361,9 @@ func (m *HarnessConfigMutation) ResetField(name string) error {
 		return nil
 	case harnessconfig.FieldImageStatusCheckedAt:
 		m.ResetImageStatusCheckedAt()
+		return nil
+	case harnessconfig.FieldBuiltImage:
+		m.ResetBuiltImage()
 		return nil
 	case harnessconfig.FieldOwnerID:
 		m.ResetOwnerID()
