@@ -83,12 +83,17 @@ func TestHubObservabilityPut_OmittedKeepsNullClears(t *testing.T) {
 	assert.Nil(t, ops.Snapshot().HubTracingEnabled)
 }
 
-// A non-boolean switch is rejected and nothing is written.
+// A non-boolean switch is a JSON type mismatch: the typed decode rejects it
+// with 400 invalid_request, as for the other boolean sections (quotas,
+// agent_secrets), and nothing is written. 422 is for well-typed values
+// that fail validation.
 func TestHubObservabilityPut_RejectsNonBoolean(t *testing.T) {
 	srv, fakeStore, ops := newTestDBServer(t)
 	rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"observability":{"metrics_enabled":"yes"}}}}`)
-	assert.GreaterOrEqual(t, rr.Code, 400, rr.Body.String())
-	assert.Less(t, rr.Code, 500, rr.Body.String())
+	require.Equal(t, http.StatusBadRequest, rr.Code, rr.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &errResp), rr.Body.String())
+	assert.Equal(t, ErrCodeInvalidRequest, errResp.Error.Code)
 	_, err := fakeStore.GetHubSetting(context.Background(), hubObservabilitySection)
 	assert.Error(t, err, "no row is written")
 }
@@ -167,10 +172,16 @@ func TestHubObservability_FileSnapshotAndNoLiveApply(t *testing.T) {
 	assert.Equal(t, &on, snap.HubMetricsEnabled)
 	assert.Equal(t, &off, snap.HubTracingEnabled)
 
-	srv, _, _ := newTestDBServer(t)
+	srv, _, ops := newTestDBServer(t)
 	st := hubexport.Status{Metrics: hubexport.DecideMetrics(nil, hubexport.Project{})}
 	srv.SetObservabilityExportStatus(st)
-	applied := ApplySnapshot(srv, Layer1Snapshot{HubMetricsEnabled: &on, HubTracingEnabled: &on, FromOperationalSettings: true})
+	_, err := ops.Update(context.Background(), hubObservabilitySection,
+		json.RawMessage(`{"metrics_enabled":true,"tracing_enabled":true}`), "admin", -1, "managed")
+	require.NoError(t, err)
+	live := ops.Snapshot()
+	require.Equal(t, &on, live.HubMetricsEnabled)
+	require.Equal(t, &on, live.HubTracingEnabled)
+	applied := ApplySnapshot(srv, live)
 	for k := range applied {
 		assert.NotContains(t, k, "observability", "the switches are not applied live")
 	}
