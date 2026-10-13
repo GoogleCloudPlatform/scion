@@ -816,8 +816,11 @@ describe('space rail — a new selection re-decides the override (N6, intended b
 describe('space rail — collapse with project thread groups', () => {
   const FLAG_KEY = 'scion:feature:hub.chat_thread_groups';
 
-  /** Two spaces; p-a has project group g-proj, personal group g-personal is hidden. */
-  function serveProjectGroups(threadGroupsFor: Record<string, unknown[]>): void {
+  /**
+   * Two spaces; p-a has project group g-proj, personal group g-personal is
+   * hidden. A space mapped to null answers its groups request with a 500.
+   */
+  function serveProjectGroups(threadGroupsFor: Record<string, unknown[] | null>): void {
     apiFetchMock.mockImplementation((path: string) => {
       if (path === '/api/v1/chat/spaces') {
         return Promise.resolve(
@@ -859,6 +862,9 @@ describe('space rail — collapse with project thread groups', () => {
       }
       if (path.startsWith('/api/v1/thread-groups?projectId=')) {
         const projectId = path.slice('/api/v1/thread-groups?projectId='.length);
+        if (threadGroupsFor[projectId] === null) {
+          return Promise.resolve(new Response('{}', { status: 500 }));
+        }
         return Promise.resolve(
           new Response(JSON.stringify({ threadGroups: threadGroupsFor[projectId] ?? [] }), {
             status: 200,
@@ -889,13 +895,17 @@ describe('space rail — collapse with project thread groups', () => {
 
   it("does not prune while a space's project groups have not loaded", async () => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-proj', 'g-other-space']));
-    serveProjectGroups({ 'p-a': [projectGroup] });
+    // p-b's groups never load (activity sort loads every space's threads,
+    // and groups with them, in the background, so a failure is what keeps a
+    // space's groups unloaded).
+    serveProjectGroups({ 'p-a': [projectGroup], 'p-b': null });
 
     const el = mount();
     await el.reload();
     await flush(el);
+    expect(el.projectGroups.has('p-b')).toBe(false);
 
-    // Spaces start collapsed, so no space's groups have loaded.
+    // Not every space has its groups, so nothing is pruned.
     expect(el.collapsedGroups.has('g-proj')).toBe(true);
     expect(el.collapsedGroups.has('g-other-space')).toBe(true);
     const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
