@@ -637,3 +637,75 @@ func TestServerConfigDB_SeedUnderFilePublicURL(t *testing.T) {
 		})
 	}
 }
+
+// publicURLSupersededKey returns the superseded endpoints entry for the
+// public URL, if listed.
+func publicURLSupersededKey(resp ServerConfigDBResponse) (SupersededKey, bool) {
+	for _, sk := range resp.SupersededKeys["endpoints"] {
+		if sk.Key == config.PublicURLKey {
+			return sk, true
+		}
+	}
+	return SupersededKey{}, false
+}
+
+// TestGetServerConfigDB_SavedPublicURLNotSupersededBySeed checks that a
+// saved public URL that differs from a seed value is not listed as
+// superseded: startup never applies the seed value for the hub endpoint
+// (ptone/scion#4865).
+func TestGetServerConfigDB_SavedPublicURLNotSupersededBySeed(t *testing.T) {
+	const seedURL, savedURL = "https://seed.example.com", "https://saved.example.com"
+	for _, seeded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("seeded=%v", seeded), func(t *testing.T) {
+			srv, _, ops, _ := newSeededPublicURLServer(t, seedURL, "", "http://localhost:8080", seeded)
+			rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+savedURL+`"}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			_, err := ops.Refresh(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, savedURL, getPublicURL(t, srv, ops), "the saved value shows")
+
+			sk, listed := publicURLSupersededKey(getServerConfigDB(t, srv, ops))
+			assert.False(t, listed, "the saved public URL is not superseded by the seed value: %+v", sk)
+		})
+	}
+}
+
+// TestGetServerConfigDB_SavedPublicURLSupersedesFileUnderSeed checks that
+// with a seed value and a settings.yaml value, a saved public URL that
+// differs from the settings.yaml value is still listed as superseded, with
+// source yaml rather than the seed layer, and that a pin still drops it
+// from the list (ptone/scion#3905, ptone/scion#4865).
+func TestGetServerConfigDB_SavedPublicURLSupersedesFileUnderSeed(t *testing.T) {
+	const seedURL, fileURL, savedURL = "https://seed.example.com", "https://file.example.com", "https://saved.example.com"
+	for _, seeded := range []bool{true, false} {
+		t.Run(fmt.Sprintf("seeded=%v", seeded), func(t *testing.T) {
+			srv, _, ops, _ := newSeededPublicURLServer(t, seedURL, fileURL, "", seeded)
+			rr := putServerConfigDB(t, srv, ops, `{"server":{"hub":{"public_url":"`+savedURL+`"}}}`)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			_, err := ops.Refresh(context.Background())
+			require.NoError(t, err)
+
+			sk, listed := publicURLSupersededKey(getServerConfigDB(t, srv, ops))
+			require.True(t, listed, "the saved value supersedes the settings.yaml value")
+			assert.Equal(t, SupersededKey{Key: config.PublicURLKey, Source: "yaml"}, sk)
+
+			srv.config.HubEndpoints.Pin = "SCION_SERVER_HUB_ENDPOINT"
+			_, listed = publicURLSupersededKey(getServerConfigDB(t, srv, ops))
+			assert.False(t, listed, "a pinned public URL is not superseded")
+		})
+	}
+}
+
+// TestGetServerConfigDB_SavedPublicURLMatchingFileUnderSeed checks that a
+// saved public URL equal to the settings.yaml value is not listed as
+// superseded although it differs from the seed value (ptone/scion#4865).
+func TestGetServerConfigDB_SavedPublicURLMatchingFileUnderSeed(t *testing.T) {
+	const seedURL, fileURL = "https://seed.example.com", "https://file.example.com"
+	srv, fake, ops, _ := newSeededPublicURLServer(t, seedURL, fileURL, "", false)
+	fake.seedWithOrigin("endpoints", json.RawMessage(`{"public_url":"`+fileURL+`"}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	sk, listed := publicURLSupersededKey(getServerConfigDB(t, srv, ops))
+	assert.False(t, listed, "the saved value matches the value startup reads: %+v", sk)
+}
