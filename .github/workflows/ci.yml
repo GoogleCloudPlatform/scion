@@ -786,14 +786,18 @@ jobs:
           persist-credentials: false
 
       # One Go cache for every shard (and the shard integration Postgres
-      # jobs): the shards build the same dependencies, with the same tags
-      # apart from the hubshard ones, which select only pkg/hub test files.
-      # Only the first shard saves it (the Save step's if:), so the shards
-      # do not race to save one key. Its trim drops the other shards' own
-      # pkg/hub test builds (about 30 s each to recompile), which a PR
-      # rebuilds anyway whenever it changes pkg/hub or anything pkg/hub
-      # imports; one cache instead of six saves about 3.4 GB of the repo's
-      # 10 GB cache budget (ptone/scion#4251).
+      # jobs). The shards share pkg/hub's non-test dependencies (the
+      # hubshard tags select only pkg/hub test files), but a test-only
+      # import that only one shard's test files use (for example chromedp,
+      # imported only by suspended_page_browser_test.go) is downloaded and
+      # built only by that shard, and so is not in the shared cache unless
+      # that shard is the first. Only the first shard saves it (the Save
+      # step's if:), so the shards do not race to save one key. Its trim
+      # drops the other shards' own pkg/hub test builds (about 30 s each to
+      # recompile), which a PR rebuilds anyway whenever it changes pkg/hub
+      # or anything pkg/hub imports, and their test-only imports; one cache
+      # instead of six saves about 3.4 GB of the repo's 10 GB cache budget
+      # (ptone/scion#4251).
       - name: Setup Go
         id: go
         uses: ./.github/actions/setup-go-cache
@@ -1196,7 +1200,7 @@ jobs:
       # (~/.cache/golangci-lint), not GOCACHE, which golangci-lint's
       # package loading (go list) fills: 4.2 GB on a cold run.
       # With this cache restored, golangci-lint took 584-776 s on main
-      # (7 runs) against 818-1062 s without it (4 runs), so it stays.
+      # (7 runs) against 818-1063 s without it (5 runs), so it stays.
       - name: Setup Go
         id: go
         uses: ./.github/actions/setup-go-cache
