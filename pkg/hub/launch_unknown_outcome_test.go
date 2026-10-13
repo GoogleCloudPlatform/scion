@@ -158,6 +158,19 @@ func TestDispatchAgentCreate_DefiniteSendErrorEndsLaunch(t *testing.T) {
 	}
 }
 
+// The async launch path keeps the credential because it returns no error,
+// not through the keep-credential context flag (copied from
+// ptone/scion#4936, which uses it on the synchronous path): that flag keeps
+// a credential only for an unknown outcome under a marked context.
+func TestUnknownSendOutcome_KeepCredentialFlagNeedsMarkedContext(t *testing.T) {
+	marked := withKeepCredentialOnUnknownOutcome(context.Background())
+	for name, sendErr := range launchUnknownSendErrors() {
+		assert.True(t, keepCredentialOnDispatchError(marked, sendErr), "%s under a marked context keeps", name)
+		assert.False(t, keepCredentialOnDispatchError(context.Background(), sendErr), "%s under an unmarked context revokes", name)
+	}
+	assert.False(t, keepCredentialOnDispatchError(marked, launchDialTimeoutErr(t)), "a definite failure revokes even when marked")
+}
+
 // The broker did get the request: its first claim takes the kept launch
 // over and records the owner, as for an acknowledged launch.
 func TestUnknownSendOutcome_BrokerClaimTakesLaunchOver(t *testing.T) {
