@@ -1215,7 +1215,8 @@ type workstationSettingsRequest struct {
 }
 
 // handleWorkstationSettings handles PATCH /api/v1/system/workstation-settings.
-// It allows toggling workstation-level settings without requiring admin role.
+// The route guard requires hub.config.update (route_metadata.go), since these
+// settings are hub-wide.
 func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		MethodNotAllowed(w, http.MethodPatch)
