@@ -1298,21 +1298,42 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 			return roles[roleName]
 		}
 
+		// Project membership grants. Only a caller that already manages the
+		// project's membership (project.manage) reaches the grant check: the
+		// test super-admin does; the built-in hub-admin role holds no
+		// project.manage, so a test hub-admin is refused before it, exactly
+		// like a human hub-admin (the control below), and not by the
+		// test-admin policy.
+		expectGrant := func(rec *httptest.ResponseRecorder, what string) {
+			t.Helper()
+			if who == "test_super_admin" {
+				assert.Less(t, rec.Code, 300, "%s %s: %s", who, what, rec.Body.String())
+				return
+			}
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s %s: %s", who, what, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), `"denied_action":"manage"`, "%s %s: the project.manage check refuses", who, what)
+			assert.NotContains(t, rec.Body.String(), "test-admin policy", "%s %s: not the test-admin policy", who, what)
+			assert.NotContains(t, rec.Body.String(), "test_admin_policy", "%s %s: not the test-admin policy", who, what)
+		}
+		wantRole := func(userID, roleName string) {
+			t.Helper()
+			assert.Equal(t, who == "test_super_admin", hasRole(userID, roleName), "%s: %s binding for the grantee", who, roleName)
+		}
 		// Members POST with project-admin and with project-owner.
 		for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
 			u := taUser(t, s, "tsa-pr-post-"+tc.role+"-"+who, store.SystemRoleHubMember)
 			rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/projects/"+projectID+"/members",
 				addProjectMemberRequest{RoleDefinitionID: tc.rd, PrincipalType: "user", PrincipalID: u.ID})
-			assert.Less(t, rec.Code, 300, "%s members POST %s: %s", who, tc.role, rec.Body.String())
-			assert.True(t, hasRole(u.ID, tc.role), "%s granted %s by POST", who, tc.role)
+			expectGrant(rec, "members POST "+tc.role)
+			wantRole(u.ID, tc.role)
 		}
 		// Members PUT with project-admin and with project-owner.
 		for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
 			u := taUser(t, s, "tsa-pr-put-"+tc.role+"-"+who, store.SystemRoleHubMember)
 			rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/projects/"+projectID+"/members/principals/user/"+u.ID,
 				setMemberRolesRequestBody{RoleDefinitionIDs: []string{tc.rd}})
-			assert.Less(t, rec.Code, 300, "%s members PUT %s: %s", who, tc.role, rec.Body.String())
-			assert.True(t, hasRole(u.ID, tc.role), "%s granted %s by PUT", who, tc.role)
+			expectGrant(rec, "members PUT "+tc.role)
+			wantRole(u.ID, tc.role)
 		}
 		// Member role change from project-member to project-admin.
 		changed := taUser(t, s, "tsa-pr-change-"+who, store.SystemRoleHubMember)
@@ -1321,8 +1342,16 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 		require.NoError(t, err)
 		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPatch, "/api/v1/projects/"+projectID+"/members/"+b.ID,
 			updateProjectMemberRequest{RoleDefinitionID: adminRD})
-		assert.Less(t, rec.Code, 300, "%s member role change to project-admin: %s", who, rec.Body.String())
-		assert.True(t, hasRole(changed.ID, store.ProjectRoleAdmin), "%s changed the member to project-admin", who)
+		expectGrant(rec, "member role change to project-admin")
+		wantRole(changed.ID, store.ProjectRoleAdmin)
+		// The refusal for a hub-admin is the project.manage decision, not
+		// the test-admin policy.
+		d := srv.authzService.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(tsaIdentity(t, s, k.Identity.ID)), Credential: credentialContextForIdentity(tsaIdentity(t, s, k.Identity.ID)),
+			Resource: Resource{Type: "project", ID: projectID}, Action: Action(permissions.ActionManage), Permission: "project.manage",
+		})
+		assert.Equal(t, who == "test_super_admin", d.Allowed, "%s project.manage on the project: %s", who, d.Reason)
+		assert.NotEqual(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s project.manage: not the test-admin policy", who)
 
 		// A project-scope custom role holding the four is grantable; one
 		// holding another deny-classified permission is not.
@@ -1381,6 +1410,23 @@ func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
 				assert.Equal(t, DeniedByTestAdminPolicy, refusal.DeniedBy, "%s %s", who, tc.name)
 			}
 		}
+	}
+
+	// Human hub-admin control: the same project membership grants are
+	// refused by the same project.manage check.
+	humanHubAdmin := taUser(t, s, "tsa-pr-human-hub-admin", store.SystemRoleHubAdmin)
+	humanTok := taTokenFor(t, srv, humanHubAdmin)
+	controlProject := tid("tsa-pr-project-human")
+	taProject(t, s, controlProject, owner.ID)
+	for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
+		u := taUser(t, s, "tsa-pr-human-"+tc.role, store.SystemRoleHubMember)
+		rec := doRequestWithToken(t, srv, humanTok, http.MethodPost, "/api/v1/projects/"+controlProject+"/members",
+			addProjectMemberRequest{RoleDefinitionID: tc.rd, PrincipalType: "user", PrincipalID: u.ID})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "human hub-admin members POST %s: %s", tc.role, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), `"denied_action":"manage"`, "human hub-admin members POST %s", tc.role)
+		rec = doRequestWithToken(t, srv, humanTok, http.MethodPut, "/api/v1/projects/"+controlProject+"/members/principals/user/"+u.ID,
+			setMemberRolesRequestBody{RoleDefinitionIDs: []string{tc.rd}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "human hub-admin members PUT %s: %s", tc.role, rec.Body.String())
 	}
 }
 
