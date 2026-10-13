@@ -296,8 +296,8 @@ func (c *FederationConfig) Validate() []error {
 		}
 
 		// Rule 12: allow_visitor_grants admits visitor grants for users of
-		// the issuer, so it applies only to the issuer types that present
-		// user access credentials: "user", and "hub" (empty means "hub").
+		// the issuer, so it applies only to the issuer types whose issuer
+		// tokens identify users: "user", and "hub" (empty means "hub").
 		if issuer.AllowVisitorGrants && !IssuerAllowsVisitorGrantsType(issuer.IssuerType) {
 			errs = append(errs, fmt.Errorf("trusted_issuers[%d]: allow_visitor_grants is only applicable to issuer_type \"user\" or \"hub\", not %q", i, issuer.IssuerType))
 		}
