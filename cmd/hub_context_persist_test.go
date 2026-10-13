@@ -166,7 +166,8 @@ func TestRequireHub_ContextHubDoesNotRelink(t *testing.T) {
 	_, err := requireHub(projectPath)
 	require.Error(t, err)
 	assert.Equal(t, "project must be linked to Hub to perform this operation\n\n"+
-		"Link this project: scion hub link", err.Error())
+		"Link this project: scion hub link\n"+
+		"If it is linked to another hub, pass --hub <name>, or run 'scion hub link --hub <name>' once so this directory stays on that hub.", err.Error())
 	assert.Zero(t, writes.Load(), "no register or create request")
 	assert.Equal(t, before, readFileT(t, settingsFile), "project settings unchanged")
 }

@@ -90,8 +90,11 @@ func setupLinkedGlobalProject(t *testing.T, home string, linked bool) string {
 	return path
 }
 
+// wantMustBeLinked is the context-hub guard's refusal: the not-linked error
+// plus the hint to reach the project's own hub.
 const wantMustBeLinked = "project must be linked to Hub to perform this operation\n\n" +
-	"Link this project: scion hub link"
+	"Link this project: scion hub link\n" +
+	"If it is linked to another hub, pass --hub <name>, or run 'scion hub link --hub <name>' once so this directory stays on that hub."
 
 // TestEnsureHubReady_HubFromContextDoesNotRelink: a project already linked
 // to a hub (hub.projectId) that the hub selected with 'scion use' does not

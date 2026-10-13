@@ -327,6 +327,15 @@ func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
 	return linked != nil && !*linked
 }
 
+// errProjectLinkedElsewhere is errProjectMustBeLinked for a project that was
+// linked to a hub other than the one selected with 'scion use', with a hint
+// to reach its own hub. A repository linked before link entries existed has
+// no link entry naming its hub, so the hub from the context applies to it.
+func errProjectLinkedElsewhere() error {
+	return errors.New(errProjectMustBeLinked().Error() + "\n" +
+		"If it is linked to another hub, pass --hub <name>, or run 'scion hub link --hub <name>' once so this directory stays on that hub.")
+}
+
 // projectWasLinked reports whether the project was linked to a hub: its own
 // settings record hub.linked=true, or it carries an explicit hub project ID
 // that differs from its local project ID (a link made before the link state
@@ -554,7 +563,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 		// that was never linked is not refused: it goes on to the local
 		// auto-link like any other.
 		if opts.HubFromContext && projectWasLinked(resolvedPath, isGlobal, settings) {
-			return nil, errProjectMustBeLinked()
+			return nil, errProjectLinkedElsewhere()
 		}
 
 		// Do not auto-link the global project from a git repository that
