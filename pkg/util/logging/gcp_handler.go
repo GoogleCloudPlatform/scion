@@ -119,9 +119,7 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	labels := map[string]string{
 		"component": h.component,
 	}
-	if h.hubName != "" {
-		labels["hub"] = h.hubName
-	}
+	addHubLabel(labels, h.hubName)
 	if h.hostname != "" {
 		labels["node"] = h.hostname
 	}

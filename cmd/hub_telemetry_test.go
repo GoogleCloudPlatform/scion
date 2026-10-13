@@ -27,15 +27,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 )
 
-type fakeTelemetrySource struct{ hubID, instanceID string }
+type fakeTelemetrySource struct{ hubID, hubName, instanceID string }
 
 func (f fakeTelemetrySource) HubID() string      { return f.hubID }
+func (f fakeTelemetrySource) HubName() string    { return f.hubName }
 func (f fakeTelemetrySource) InstanceID() string { return f.instanceID }
 
 // TestHubTelemetryIdentity checks metrics and traces are wired from the hub's
 // instance ID, not its hub ID (ptone/scion#3644).
 func TestHubTelemetryIdentity(t *testing.T) {
-	id := newHubTelemetryIdentity(fakeTelemetrySource{hubID: "hub-a", instanceID: "pod-0-1234"}, "Hub A")
+	id := newHubTelemetryIdentity(fakeTelemetrySource{hubID: "hub-a", hubName: "Hub A", instanceID: "pod-0-1234"})
 	if id.hubID != "hub-a" || id.hubName != "Hub A" || id.instanceID != "pod-0-1234" {
 		t.Fatalf("identity = %+v, want hub-a / Hub A / pod-0-1234", id)
 	}
@@ -69,7 +70,7 @@ func resourceAttr(res *resource.Resource, key attribute.Key) string {
 // TestHubTelemetryIdentityFallback checks an empty instance ID is replaced
 // once, by a UUID both signals share.
 func TestHubTelemetryIdentityFallback(t *testing.T) {
-	id := newHubTelemetryIdentity(fakeTelemetrySource{hubID: "hub-a"}, "")
+	id := newHubTelemetryIdentity(fakeTelemetrySource{hubID: "hub-a"})
 	if _, err := uuid.Parse(id.instanceID); err != nil {
 		t.Fatalf("fallback instance ID %q is not a UUID: %v", id.instanceID, err)
 	}

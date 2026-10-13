@@ -25,6 +25,7 @@ import (
 // exported telemetry.
 type hubTelemetrySource interface {
 	HubID() string
+	HubName() string
 	InstanceID() string
 }
 
@@ -37,12 +38,14 @@ type hubTelemetryIdentity struct {
 	instanceID string
 }
 
-// newHubTelemetryIdentity reads the hub and instance IDs from src. The hub
-// always assigns an instance ID; if it ever comes back empty, one UUID is
-// generated here and shared by both signals, rather than letting metrics and
-// tracing each fall back to a different one.
-func newHubTelemetryIdentity(src hubTelemetrySource, hubName string) hubTelemetryIdentity {
-	id := hubTelemetryIdentity{hubID: src.HubID(), hubName: hubName, instanceID: src.InstanceID()}
+// newHubTelemetryIdentity reads the hub ID, hub name and instance ID from
+// src. Build it after the operational settings are applied, so the hub name
+// is the applied one rather than the startup configuration's
+// (ptone/scion#4903). The hub always assigns an instance ID; if it ever comes
+// back empty, one UUID is generated here and shared by both signals, rather
+// than letting metrics and tracing each fall back to a different one.
+func newHubTelemetryIdentity(src hubTelemetrySource) hubTelemetryIdentity {
+	id := hubTelemetryIdentity{hubID: src.HubID(), hubName: src.HubName(), instanceID: src.InstanceID()}
 	if id.instanceID == "" {
 		id.instanceID = uuid.NewString()
 	}

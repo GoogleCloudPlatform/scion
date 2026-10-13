@@ -444,8 +444,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			hubSrv.ExpectEmbeddedBroker()
 		}
 
-		// Metrics and traces share one resolved identity.
-		telemetryID := newHubTelemetryIdentity(hubSrv, cfg.Hub.ResolveHubName())
+		// Metrics and traces share one resolved identity. initHubServerFn
+		// has applied the operational settings, so the hub name is the
+		// applied one (ptone/scion#4903).
+		telemetryID := newHubTelemetryIdentity(hubSrv)
 
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
@@ -2988,6 +2990,10 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	snap := ops.Snapshot()
 	hub.ApplySnapshot(hubSrv, snap)
 	hub.ApplyMaintenanceFromSnapshot(hubSrv, snap)
+	// Log handlers were built in initServerLogging, before the stored
+	// settings were loaded; label their records with the applied hub name
+	// (ptone/scion#4903).
+	logging.SetHubName(hubSrv.HubName())
 
 	hubSrv.SetOperationalSettings(ops)
 
