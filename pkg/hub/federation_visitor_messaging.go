@@ -198,8 +198,8 @@ func writeVisitorRefusal(w http.ResponseWriter) {
 }
 
 // errVisitorTargetRefused is visitorTargetAgent's answer for a target the
-// visitor may not act on: an unknown project or agent, or a DM key that is
-// not the visitor's own DM with an agent.
+// visitor may not act on: an unknown project or agent, a deleted agent, or
+// a DM key that is not the visitor's own DM with an agent.
 var errVisitorTargetRefused = errors.New("visitor target refused")
 
 // admitVisitorSubRoute is routeGuard's second visitor check; it runs after
@@ -214,11 +214,12 @@ var errVisitorTargetRefused = errors.New("visitor target refused")
 //   - the entry's Access check passes (below).
 //
 // The Access checks:
-//   - visitorAccessMessage: the entry names an agent that exists (in the
-//     named project, on the project form), on a DM route the key is the
-//     visitor's own DM with that agent, and the visitor may message the
-//     agent now (authorizeAgentMessage: a current project-visitor grant,
-//     through agent.message, and the agent's message mode);
+//   - visitorAccessMessage: the entry names an agent that exists and is
+//     not deleted (in the named project, on the project form), on a DM
+//     route the key is the visitor's own DM with that agent, and the
+//     visitor may message the agent now (authorizeAgentMessage: a current
+//     project-visitor grant, through agent.message, and the agent's
+//     message mode);
 //   - visitorAccessAgentList: the named project exists, the visitor holds
 //     a current grant on it and agent.list there
 //     (visitorMayListProjectAgents);
@@ -264,7 +265,7 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 	}
 	agent, err := s.visitorTargetAgent(r.Context(), visitor, ref)
 	if errors.Is(err, errVisitorTargetRefused) {
-		return refuse("unknown target or not the visitor's own DM")
+		return refuse("unknown or deleted target, or not the visitor's own DM")
 	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
@@ -289,7 +290,8 @@ func (s *Server) admitVisitorSubRoute(w http.ResponseWriter, r *http.Request, me
 
 // visitorTargetAgent resolves the agent ref names. A DM key must be the
 // visitor's own DM with an agent (visitorDMAgentID). An unknown project or
-// agent, or a key that is not the visitor's DM, returns
+// agent, a deleted agent (on every form, so a visitor can neither message
+// it nor read its DM), or a key that is not the visitor's DM, returns
 // errVisitorTargetRefused; any other store error is returned as is.
 func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentity, ref visitorAgentRef) (*store.Agent, error) {
 	if s.store == nil {
@@ -323,7 +325,7 @@ func (s *Server) visitorTargetAgent(ctx context.Context, visitor *VisitorIdentit
 	if err != nil {
 		return nil, err
 	}
-	if agent == nil {
+	if agent == nil || !agent.DeletedAt.IsZero() {
 		return nil, errVisitorTargetRefused
 	}
 	return agent, nil

@@ -522,7 +522,7 @@ func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
 func TestVisitorAgents_DeletedAgentRefused(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	ctx := context.Background()
-	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
+	aliceID, alice := f.visitor(t, "sub-alice", "alice@corp.example")
 	list := f.projectAgentsPath(f.projectID)
 
 	gone := &store.Agent{
@@ -560,14 +560,91 @@ func TestVisitorAgents_DeletedAgentRefused(t *testing.T) {
 	deleted, err := f.st.GetAgent(ctx, gone.ID)
 	require.NoError(t, err)
 	require.False(t, deleted.DeletedAt.IsZero())
-	visitor := NewVisitorIdentity(tid("deleted-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
-	allowed, err := f.srv.visitorMayReadAgent(ctx, visitor, deleted)
+	// The identity holds alice's grant, so only the deletion refuses.
+	visitor := NewVisitorIdentity(aliceID, grantTestIssuer, "sub-alice", "alice@corp.example", "Alice")
+	allowed, err := f.srv.visitorMayReadAgent(ctx, visitor, f.agent)
+	require.NoError(t, err)
+	require.True(t, allowed, "control: the granted visitor may read a live agent")
+	allowed, err = f.srv.visitorMayReadAgent(ctx, visitor, deleted)
 	require.NoError(t, err)
 	assert.False(t, allowed, "admission refuses a deleted agent")
 
 	direct := httptest.NewRecorder()
 	f.srv.getProjectAgentForVisitor(direct, httptest.NewRequest(http.MethodGet, list+"/"+gone.ID, nil), f.projectID, gone.ID)
 	assertVisitorRefusal(t, direct, "handler: deleted agent by ID")
+}
+
+// A deleted agent is refused to a visitor like an unknown agent on every
+// messaging path: the send (project form by ID and by slug, and the by-ID
+// form), the DM history read and the read marker (GET and POST); the
+// visitor's own DM list leaves the DM out. A member's send to the same
+// agent is unchanged.
+func TestVisitorMessaging_DeletedAgentRefused(t *testing.T) {
+	f := newVisitorMessagingFixture(t)
+	ctx := context.Background()
+	_, alice := f.visitor(t, "sub-alice", "alice@corp.example")
+
+	gone := &store.Agent{
+		ID: tid(t.Name() + "-gone"), Name: "gone", Slug: "gone", ProjectID: f.projectID,
+		RuntimeBrokerID: f.agent.RuntimeBrokerID, Phase: "running", MessageMode: store.MessageModeProject,
+	}
+	require.NoError(t, f.st.CreateAgent(ctx, gone))
+
+	// Before deletion: alice has a DM with gone and one with helper, and
+	// both are listed.
+	rec := f.do(t, alice, http.MethodPost, f.projectMessagePath(gone.Slug), visitorTextBody("alice to gone"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var sent MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
+	goneDM := sent.ConversationKey
+	require.NotEmpty(t, goneDM)
+	rec = f.do(t, alice, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("alice to helper"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	dmsOfAlice := func() []VisitorOwnDM {
+		t.Helper()
+		rec := f.do(t, alice, http.MethodGet, "/api/v1/users/me/visitor-dms", nil)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp ListVisitorOwnDMsResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		return resp.DMs
+	}
+	require.Len(t, dmsOfAlice(), 2, "control: both DMs listed before deletion")
+	rec = f.do(t, alice, http.MethodGet, chatDMPath(goneDM, "messages"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, "control: DM readable before deletion: %s", rec.Body.String())
+
+	row, err := f.st.GetAgent(ctx, gone.ID)
+	require.NoError(t, err)
+	row.DeletedAt = time.Now()
+	require.NoError(t, f.st.UpdateAgent(ctx, row))
+
+	reference := f.do(t, alice, http.MethodPost, f.projectMessagePath("no-such-agent"), visitorTextBody("x"))
+	assertVisitorRefusal(t, reference, "5A refusal")
+
+	for _, c := range []struct {
+		label, method, path string
+		body                interface{}
+	}{
+		{"send, project form by ID", http.MethodPost, f.projectMessagePath(gone.ID), visitorTextBody("x")},
+		{"send, project form by slug", http.MethodPost, f.projectMessagePath(gone.Slug), visitorTextBody("x")},
+		{"send, by-ID form", http.MethodPost, agentMessagePath(gone.ID), visitorTextBody("x")},
+		{"DM history", http.MethodGet, chatDMPath(goneDM, "messages"), nil},
+		{"read marker, GET", http.MethodGet, chatDMPath(goneDM, "read"), nil},
+		{"read marker, POST", http.MethodPost, chatDMPath(goneDM, "read"), map[string]string{"messageId": sent.MessageID}},
+	} {
+		rec := f.do(t, alice, c.method, c.path, c.body)
+		assertVisitorRefusal(t, rec, c.label)
+		assertSameResponse(t, reference, rec, c.label)
+	}
+
+	dms := dmsOfAlice()
+	require.Len(t, dms, 1, "the DM with the deleted agent is not listed")
+	assert.Equal(t, f.agent.Slug, dms[0].AgentSlug)
+	assert.NotEqual(t, goneDM, dms[0].ConversationKey)
+
+	// A member's send to the deleted agent is unchanged.
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.projectMessagePath(gone.ID), visitorTextBody("owner to gone"))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
 // With ?messageable=true a visitor's list holds only the agents the

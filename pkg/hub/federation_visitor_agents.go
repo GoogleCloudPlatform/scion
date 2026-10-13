@@ -356,7 +356,7 @@ type ListVisitorOwnDMsResponse struct {
 //   - it is a native conversation whose key is the canonical DM key of an
 //     agent and this visitor (visitorDMAgentID), so another principal's DM
 //     is never listed;
-//   - the agent exists and the visitor may message it now
+//   - the agent exists, is not deleted, and the visitor may message it now
 //     (authorizeAgentMessage), the same check that admits the DM read
 //     routes, so every listed DM is one the visitor can read.
 //
@@ -398,6 +398,9 @@ func (s *Server) handleUserMeVisitorDMs(w http.ResponseWriter, r *http.Request) 
 		if err != nil {
 			writeErrorFromErr(w, err, "")
 			return
+		}
+		if !agent.DeletedAt.IsZero() {
+			continue
 		}
 		if allowed, _, _ := s.authorizeAgentMessage(ctx, visitor, agent, false); !allowed {
 			continue
