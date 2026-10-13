@@ -149,7 +149,8 @@ same image/resources/sandbox share one template.
 - **Template name** = `scion-` + the first 12 hex characters of
   `sha256(image reference (digest-pinned), sandbox class, sandbox config name, worker_selector,
   snapshot storage, effective resources, snapshot scope, the container's
-  added capabilities, substrate-serve entrypoint version)`, plus
+  added capabilities, substrate-serve entrypoint version, the container's
+  wakeup probe)`, plus
   `egress_trust_bundle` appended only when it is non-empty. Same inputs
   always produce the same name, so concurrent `Run`s for the same effective
   template converge on one `CreateActorTemplate` instead of racing to create
@@ -170,7 +171,11 @@ same image/resources/sandbox share one template.
   `cfg.Resources` or runtime defaults; one `durableDir` volume at
   `/workspace`; `snapshotsConfig` (`onPause`/`onCommit` = `DATA`, storage
   from `snapshot_storage`); `sandboxConfig` (the configured sandbox class and
-  `SandboxConfig` name); `workerSelector` from config.
+  `SandboxConfig` name); `workerSelector` from config; a `wakeupProbe` on
+  `GET /scion/v1/healthz` port 80 (timeout 120s), so every wakeup, including
+  the golden actor's first boot, waits for `substrate-serve` to answer, and
+  an image whose entrypoint exits fails at template time instead of being
+  snapshotted.
 - **Creating a template boots a golden actor and snapshots it.**
   `ensureActorTemplate` calls `GetActorTemplate`, and `CreateActorTemplate`
   if missing, then polls `GetActorTemplate` until the golden snapshot is
