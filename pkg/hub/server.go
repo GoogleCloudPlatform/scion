@@ -369,11 +369,12 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
-	// EnableTestIdentities turns on hub-issued test identities
-	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
-	// /api/v1/test-identities/{id}/token. Off by default. While it is off
-	// those routes return 404 and every test-fixture user is refused at
-	// authentication. It is a startup-only switch, never a runtime setting.
+	// EnableTestIdentities turns on hub-issued test identities: POST/GET
+	// /api/v1/test-identities and POST /api/v1/test-identities/{id}/token.
+	// cmd sets it from the resolved --test-mode level (true for member and
+	// above; see TestMode). Off by default. While it is off those routes
+	// return 404 and every test-fixture user is refused at authentication.
+	// It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
 	// TestIdentityWebSessionKey is the hub-local test identity web session
 	// key cmd read from the test infrastructure marker at startup (WS1,
@@ -392,12 +393,17 @@ type ServerConfig struct {
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
 	TestIdentityWorkloadValidator GoogleCredentialValidator
-	// TestAdminGate is the validated test admin tier gate
-	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
-	// validateTestAdminIdentities builds it; New re-checks it, verifies
-	// every signing-key class is hub-local, and captures it into an
-	// immutable value. The zero value leaves the tier off.
+	// TestAdminGate is the validated test admin tier gate (--test-mode=admin,
+	// ptone/scion#4240 phase A0). cmd's resolveTestMode builds it; New
+	// re-checks it, verifies every signing-key class is hub-local, and
+	// captures it into an immutable value. The zero value leaves the tier
+	// off.
 	TestAdminGate TestAdminGateConfig
+	// TestMode is the resolved --test-mode level and the preconditions
+	// that admitted it (test_mode.go). New refuses a configuration whose
+	// EnableTestIdentities and TestAdminGate differ from what the level
+	// grants. The zero value is off.
+	TestMode TestModeConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -721,6 +727,10 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// TelemetryPolicy is the project's enforced telemetry on/off, set only
+	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
+	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
 	// registry-rewritten; empty when the user chose none. The broker applies
 	// it as the top-tier image (opts.Image), the same as create's
@@ -796,6 +806,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.TelemetryPolicy != nil {
+		payload["telemetryPolicy"] = *extras.TelemetryPolicy
 	}
 	if extras.Image != "" {
 		payload["image"] = extras.Image
@@ -960,6 +973,7 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 		query += "&projectId=" + url.QueryEscape(projectID)
 	}
 	query += deleteProjectPathQuery(ctx)
+	query += dispatchAgentIDQuery(ctx, "&")
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
 	}
@@ -992,7 +1006,40 @@ func stopAgentQuery(ctx context.Context, projectID, runID string) string {
 		}
 		query += "runId=" + url.QueryEscape(runID)
 	}
+	if p := dispatchAgentIDQuery(ctx, ""); p != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += p
+	}
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// dispatchAgentIDKey carries the hub's agent ID for a broker stop or delete;
+// see withDispatchAgentID.
+type dispatchAgentIDKey struct{}
+
+// withDispatchAgentID attaches the hub's ID of the agent a broker stop or
+// delete is for (ptone/scion#2632). Both transports send it as the
+// api.AgentIDQueryParam query parameter; the broker uses it only to keep
+// the stop or delete from cancelling the in-flight start of a different
+// agent recreated under the same name. Like withRecordedRuntime it rides on
+// the context to keep the RuntimeBrokerClient interface unchanged; an empty
+// ID leaves ctx unchanged and the broker matches by name.
+func withDispatchAgentID(ctx context.Context, agentID string) context.Context {
+	if agentID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchAgentIDKey{}, agentID)
+}
+
+// dispatchAgentIDQuery returns sep + "agentId=<escaped>" when an agent ID
+// was attached with withDispatchAgentID, otherwise "".
+func dispatchAgentIDQuery(ctx context.Context, sep string) string {
+	if id, _ := ctx.Value(dispatchAgentIDKey{}).(string); id != "" {
+		return sep + api.AgentIDQueryParam + "=" + url.QueryEscape(id)
+	}
+	return ""
 }
 
 // withRunIDURL appends the runId query parameter to a start or restart
@@ -1402,6 +1449,13 @@ type RemoteAgentConfig struct {
 	// application at the broker's LOW-precedence defaults tier — deliberately
 	// not folded into InlineConfig, which is a top-of-chain slot.
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// TelemetryPolicy is the project's enforced telemetry on/off
+	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// TemplateTiers. The broker applies it last, above the agent's config
+	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
+	// Nil = no policy.
+	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
@@ -1428,6 +1482,12 @@ type RemoteHubAgentDefaults struct {
 	Resources       *api.ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
+	// Telemetry is the hub's telemetry default (settings telemetry), sent
+	// only to a broker that reports TemplateTiers. The broker applies it per
+	// start below the agent's own config telemetry and never persists it
+	// (ptone/scion#4218). A legacy broker gets it inline instead
+	// (dispatchTelemetry, ptone/scion#4222).
+	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1672,6 +1732,11 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// brokerWork admits and joins broker connection work (connect,
+	// disconnect, reconcile and notification drains), so shutdown stops
+	// it before the store closes (broker_work.go, ptone/scion#4869).
+	brokerWork brokerWorkTracker
+
 	// autoSuspend is the auto-suspend worker the stalled-detection tick
 	// hands stalled agents to (auto_suspend_worker.go).
 	autoSuspend autoSuspendWorker
@@ -1809,6 +1874,10 @@ type Server struct {
 	// (test_admin_gate.go). It has no setter: testAdminTierEnabled reads
 	// only this value.
 	testAdminGate testAdminGate
+
+	// testMode is the immutable resolved --test-mode level captured by New
+	// (test_mode.go).
+	testMode testModeState
 
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
@@ -1976,8 +2045,15 @@ type Server struct {
 	projectsLog       *slog.Logger
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
-	workspaceLog      *slog.Logger
-	agentMetricsLog   *slog.Logger
+	// templateAgentConfigMisses records template rows, keyed by ID and
+	// content hash, whose agent config file does not parse or is missing
+	// from storage when deriving a missing snapshot
+	// (ensureTemplateAgentConfig), so a broken file is read once per
+	// content, not on every create and dispatch. Transient read failures
+	// are not recorded. A new commit changes the content hash and retries.
+	templateAgentConfigMisses sync.Map
+	workspaceLog              *slog.Logger
+	agentMetricsLog           *slog.Logger
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
@@ -2065,6 +2141,10 @@ type Server struct {
 	// scheduledSend is the scheduled chat message sweeper's state
 	// (chat_scheduled_send.go); created on first use.
 	scheduledSend *scheduledSendRuntime
+
+	// threadGroupMigration tracks the personal thread group migration
+	// sweeper (ptone/scion#4424) so CleanupResources can join it.
+	threadGroupMigration threadGroupMigrationRuntime
 
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
@@ -2156,11 +2236,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
-		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
+		return nil, err
+	}
+	// The switches must be exactly what the resolved --test-mode grants,
+	// and the member preconditions it carries must hold.
+	if err := ValidateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Workload issuer allowlist and issuer audience (X2): refuse a
@@ -2530,8 +2615,22 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
-	if srv.testAdminGate.on() {
+	testModeCfg := cfg.TestMode
+	if cfg.TestAdminGate.requested() {
+		// verifyTestAdminSigningKeys passed above.
+		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
+	}
+	srv.testMode = newTestModeState(testModeCfg)
+	// One startup line through the test admin audit sink for any level but
+	// off: the gate-start banner for the admin levels (it carries the level
+	// and preconditions too), the test-mode line for member.
+	switch {
+	case srv.testAdminGate.on():
 		if err := srv.emitTestAdminGateStart(); err != nil {
+			return nil, err
+		}
+	case srv.testMode.level != TestModeOff:
+		if err := srv.emitTestModeStart(); err != nil {
 			return nil, err
 		}
 	}
@@ -2550,8 +2649,15 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}, logging.Subsystem("hub.control-channel"))
 	// Set disconnect callback to mark broker offline when WebSocket drops.
 	// See handleBrokerDisconnect for the CAS/race rationale (issue #131).
+	// The callback is tracked work, so shutdown joins it before the store
+	// closes; once shutdown has started it is skipped (ptone/scion#4869).
 	srv.controlChannel.SetOnDisconnect(func(brokerID, sessionID string) {
-		srv.handleBrokerDisconnect(context.Background(), brokerID, sessionID)
+		ctx, done, ok := srv.brokerWork.begin()
+		if !ok {
+			return
+		}
+		defer done()
+		srv.handleBrokerDisconnect(ctx, brokerID, sessionID)
 	})
 	slog.Info("Control channel manager initialized")
 
@@ -4571,6 +4677,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
+	// Hub telemetry default and template job config (ptone/scion#4222).
+	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
+	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
+
 	// Wire the async agent launch settings. They are static after startup;
 	// the accessor reads them under s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
@@ -4848,8 +4958,14 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	return true
 }
 
+// scheduledEventRetention is how long non-pending scheduled events are kept
+// after they complete (fired_at, or created when never fired) before the
+// soft-delete-purge job deletes them.
+const scheduledEventRetention = 7 * 24 * time.Hour
+
 // purgeHandler returns a recurring handler function that permanently removes
-// soft-deleted agents that have exceeded the retention period.
+// soft-deleted agents that have exceeded the retention period, and
+// non-pending scheduled events older than scheduledEventRetention.
 func (s *Server) purgeHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Purge soft-deleted agents. The retention is read per tick, so a
@@ -4870,18 +4986,16 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 			}
 		}
 
-		// Purge old scheduled events (non-pending, older than 7 days). This
-		// keeps its startup gate: it runs only on a hub started with a
-		// soft-delete retention, as when the whole job was registered
-		// only then.
-		if s.startupLayer1.SoftDeleteRetention > 0 {
-			eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
-			purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
-			if err != nil {
-				slog.Error("Scheduler: scheduled event purge failed", "error", err)
-			} else if purgedEvents > 0 {
-				slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
-			}
+		// Purge scheduled events that are no longer pending (failed
+		// included) and completed more than scheduledEventRetention ago, on
+		// every tick, whatever the soft-delete retention (ptone/scion#4517).
+		// Completion is fired_at, or created for an event never fired.
+		eventCutoff := time.Now().Add(-scheduledEventRetention)
+		purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
+		if err != nil {
+			slog.Error("Scheduler: scheduled event purge failed", "error", err)
+		} else if purgedEvents > 0 {
+			slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
 		}
 	}
 }
@@ -5969,14 +6083,14 @@ func (s *Server) registerSchedulerHandlers() {
 	s.registerMembershipStandingReconciler()
 
 	// Test identity expiry reaper (ptone/scion#4240): only with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	// Registered whatever the startup retention: soft_delete_retention is
 	// applied live, and the handler skips the agent purge while it is 0.
-	// The scheduled-event purge inside it keeps its startup gate.
+	// The scheduled-event purge inside it always runs.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
@@ -6177,6 +6291,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Start the migration of personal chat thread groups into project
+	// thread groups (ptone/scion#4424). It idles while
+	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	s.startThreadGroupMigrationSweeper(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
@@ -6356,13 +6475,30 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
 
+		// Wait for a thread group migration pass in progress; the cancelled
+		// ctx above makes its store calls return.
+		s.stopThreadGroupMigrationSweeper()
+
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.
 		s.stopAutoSuspendWorker(ctx)
 
+		// Stop broker connection work (connect, disconnect, reconcile and
+		// notification drains) before the control channel closes: new
+		// work is refused, and running drains claim no more rows, so rows
+		// they have not claimed stay pending for the next connect instead
+		// of failing on a closed tunnel. The work is joined below, after
+		// the control channel closes, while the store is still open
+		// (ptone/scion#4869).
+		s.brokerWork.closeAdmission()
+
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
+		}
+		if n := s.brokerWork.wait(ctx, brokerWorkStopGrace); n > 0 {
+			slog.Warn("Broker connection work still running after the shutdown grace; cancelled it",
+				"running", n, "grace", brokerWorkStopGrace)
 		}
 		if s.brokerAuthService != nil {
 			s.brokerAuthService.Close()
@@ -6781,6 +6917,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
+	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
+	// hub.chat_thread_groups experiment is off (threadGroupsGate).
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.threadGroupsGate(s.handleThreadGroups)))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.threadGroupsGate(s.handleThreadGroupRoutes)))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))
@@ -6844,7 +6984,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
-	// handler returns 404 unless --enable-test-identities is set.
+	// handler returns 404 unless --test-mode is member or above.
 	// The gate runs before the route guard, so a hub without the flag
 	// answers 404 to every caller, whatever its permissions.
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
@@ -7230,6 +7370,12 @@ func (s *Server) handleRuntimeBrokerConnect(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID, err := s.controlChannel.HandleUpgrade(w, r, brokerID)
+	if errors.Is(err, errControlChannelClosed) {
+		// The hub is shutting down; the broker reconnects to a live
+		// instance (ptone/scion#4869).
+		slog.Info("Refused broker control channel: hub is shutting down", "brokerID", brokerID)
+		return
+	}
 	if err != nil {
 		slog.Error("Upgrade failed for broker", "brokerID", brokerID, "error", err)
 		// Error already written by upgrader
@@ -7265,8 +7411,18 @@ func (s *Server) stampProvidersOnline(ctx context.Context, brokerID string) ([]s
 // markBrokerOnline updates broker and provider statuses to online after a successful WebSocket connection.
 // It claims broker affinity for this hub instance + the connection's sessionID,
 // which also bumps status->online and refreshes the heartbeat in one CAS write.
+//
+// It runs as tracked broker work (brokerWorkTracker): shutdown waits for it
+// before the store closes, and once shutdown has started it does nothing,
+// because the control channel it would mark online is being torn down
+// (ptone/scion#4869).
 func (s *Server) markBrokerOnline(brokerID, sessionID string) {
-	ctx := context.Background()
+	ctx, done, ok := s.brokerWork.begin()
+	if !ok {
+		slog.Info("Hub is shutting down; not marking broker online", "brokerID", brokerID, "sessionID", sessionID)
+		return
+	}
+	defer done()
 	slog.Info("Broker connected, marking online", "brokerID", brokerID, "sessionID", sessionID, "instanceID", s.instanceID)
 
 	if err := s.store.ClaimRuntimeBrokerConnection(ctx, brokerID, s.instanceID, sessionID); err != nil {
@@ -7295,13 +7451,19 @@ func (s *Server) markBrokerOnline(brokerID, sessionID string) {
 	// drain any durable dispatch intent that accumulated while the broker was
 	// offline or owned elsewhere. Async so it never blocks the connect path;
 	// idempotent + CAS-gated so concurrent drains execute each item once.
-	go s.reconcileBroker(context.Background(), brokerID)
+	// Tracked, so shutdown joins it; skipped once shutdown has started (the
+	// rows are durable and drain on the next connect).
+	s.brokerWork.goTracked(func(ctx context.Context) {
+		s.reconcileBroker(ctx, brokerID)
+	})
 
 	// Notification redeliver (ptone/scion#495): drain undispatched agent
 	// notifications for agents on this broker. Async + CAS-gated, same
 	// pattern as reconcileBroker above.
 	if s.notificationDispatcher != nil {
-		go s.drainUndispatchedNotifications(context.Background(), brokerID)
+		s.brokerWork.goTracked(func(ctx context.Context) {
+			s.drainUndispatchedNotifications(ctx, brokerID)
+		})
 	}
 }
 

@@ -249,6 +249,33 @@ func TestArtifactErrorHints(t *testing.T) {
 	require.NoError(t, err)
 	err = publishArtifact(context.Background(), c403.Artifacts(), &stdout, &stdout, "", file, "", "")
 	assert.ErrorContains(t, err, "does not carry the project:artifact:read scope")
-	assert.ErrorContains(t, err, "Recreate the agent")
+	assert.ErrorContains(t, err, "scion reset-auth")
+	assert.NotContains(t, err.Error(), "Recreate the agent", "recreating from the same parent gives the same scopes")
 	assert.NotContains(t, err.Error(), "may not publish artifacts in this project", "missing_scope has its own hint")
+}
+
+// TestMissingScopeHint: the missing_scope hint names every scope the hub
+// reported, falls back to the single scope an older hub sends, points to a
+// scope re-issue by a hub super-admin rather than recreating the agent, and
+// names the agent when it runs in one (ptone/scion#4571).
+func TestMissingScopeHint(t *testing.T) {
+	t.Setenv("SCION_AGENT_SLUG", "worker-1")
+	both := missingScopeHint(map[string]any{
+		"scope":  "project:artifact:read",
+		"scopes": []any{"project:artifact:read", "project:artifact:write"},
+	})
+	assert.Contains(t, both, "the project:artifact:read and project:artifact:write scopes")
+	assert.Contains(t, both, "scope ceiling of the agent's creator")
+	assert.Contains(t, both, "same parent gives it the same scopes")
+	assert.Contains(t, both, "hub super-admin")
+	assert.Contains(t, both, "scion reset-auth worker-1 --reissue-scopes")
+	assert.NotContains(t, both, "experiment", "the feature-off case has its own 404 hint")
+
+	older := missingScopeHint(map[string]any{"scope": "project:artifact:write"})
+	assert.Contains(t, older, "the project:artifact:write scope.")
+
+	assert.Contains(t, missingScopeHint(nil), "a required scope")
+
+	t.Setenv("SCION_AGENT_SLUG", "")
+	assert.Contains(t, missingScopeHint(nil), "scion reset-auth <agent> --reissue-scopes")
 }

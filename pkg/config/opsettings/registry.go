@@ -182,6 +182,7 @@ func init() {
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
+				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
 				"telemetry.hub", "telemetry.hub.enabled", "telemetry.hub.report_interval",
 				"telemetry.local", "telemetry.local.enabled", "telemetry.local.file", "telemetry.local.console",
@@ -305,10 +306,15 @@ func init() {
 		},
 		{
 			// harness_configs is a map-of-objects section, same pattern as runtimes.
-			Name:            "harness_configs",
-			KoanfPaths:      []string{"harness_configs"},
-			New:             func() any { m := make(HarnessConfigsSettings); return &m },
-			NestedDurations: []string{"harness_configs.*.provisioner.timeout"},
+			Name:       "harness_configs",
+			KoanfPaths: []string{"harness_configs"},
+			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{
+				"harness_configs.*.provisioner.timeout",
+				"harness_configs.*.ready.settle",
+				"harness_configs.*.ready.timeout",
+				"harness_configs.*.delivery.extra_submit_delay",
+			},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml

@@ -1071,7 +1071,8 @@ func TestWorkloadDelegation_StartupValidation(t *testing.T) {
 	member := []config.TestIdentityWorkloadIssuer{{Sub: x2Sub, MaxTier: "member"}}
 	aud := testIssuerAudience(x2HubID)
 	base := func() ServerConfig {
-		return ServerConfig{HubID: x2HubID, EnableTestIdentities: true, TestIdentityWorkloadIssuers: member}
+		return ServerConfig{HubID: x2HubID, EnableTestIdentities: true, TestIdentityWorkloadIssuers: member,
+			TestMode: TestModeConfig{Level: TestModeMember, HubID: x2HubID, HubClass: config.HubClassTest, MarkerHubID: x2HubID, MarkerClass: config.HubClassTest}}
 	}
 	require.NoError(t, validateTestIdentityWorkloadIssuers(base()))
 	require.NoError(t, validateTestIdentityWorkloadIssuers(ServerConfig{}), "no workload issuer: nothing to check")

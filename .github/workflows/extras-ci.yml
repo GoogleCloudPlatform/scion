@@ -138,6 +138,10 @@ jobs:
         with:
           go-version-file: '${{ matrix.module }}/go.mod'
           cache: true
+          # Key the cache on the module's own go.sum. Without this, setup-go
+          # hashes the root go.sum, so a change to this module's go.sum never
+          # changed its key (ptone/scion#4251).
+          cache-dependency-path: '${{ matrix.module }}/go.sum'
 
       - name: Build
         working-directory: ${{ matrix.module }}
@@ -246,6 +250,8 @@ jobs:
         with:
           go-version-file: 'extras/scion-a2a-bridge/go.mod'
           cache: true
+          # The module's own go.sum (see build-and-test above).
+          cache-dependency-path: 'extras/scion-a2a-bridge/go.sum'
 
       - name: Run Integration Tests
         working-directory: extras/scion-a2a-bridge

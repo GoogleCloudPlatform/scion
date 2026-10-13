@@ -30,6 +30,7 @@ import (
 
 	gouuid "github.com/google/uuid"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -434,14 +435,25 @@ func (s *Server) handleAdminPermissions(w http.ResponseWriter, r *http.Request) 
 // CRUD: Role Definitions
 // ---------------------------------------------------------------------------
 
+// roleDefinitionHidden reports whether def is left out of the role
+// definition API: a role that does not confer membership (project-visitor)
+// is shown only while the federation.project_visitors experiment is on.
+func (s *Server) roleDefinitionHidden(def *store.RoleDefinition) bool {
+	return def != nil && !def.ConfersProjectMembership() &&
+		!s.experimentEnabled(experiments.FederationProjectVisitors)
+}
+
 func (s *Server) listRoleDefinitions(w http.ResponseWriter, r *http.Request) {
-	defs, err := s.store.ListRoleDefinitions(r.Context())
+	all, err := s.store.ListRoleDefinitions(r.Context())
 	if err != nil {
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	if defs == nil {
-		defs = []*store.RoleDefinition{}
+	defs := make([]*store.RoleDefinition, 0, len(all))
+	for _, d := range all {
+		if !s.roleDefinitionHidden(d) {
+			defs = append(defs, d)
+		}
 	}
 	writeJSON(w, http.StatusOK, listRoleDefinitionsResponse{
 		Items:      defs,
@@ -457,6 +469,10 @@ func (s *Server) getRoleDefinition(w http.ResponseWriter, r *http.Request, id st
 			return
 		}
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if s.roleDefinitionHidden(def) {
+		NotFound(w, "Role Definition")
 		return
 	}
 	writeJSON(w, http.StatusOK, def)

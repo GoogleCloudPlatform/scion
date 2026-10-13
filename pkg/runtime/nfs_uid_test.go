@@ -238,6 +238,7 @@ func (h *nfsTestHarness) Provision(ctx context.Context, agentName, agentDir, age
 }
 func (h *nfsTestHarness) GetInterruptKey() string                { return "C-c" }
 func (h *nfsTestHarness) GetInterruptSequence() []string         { return nil }
+func (h *nfsTestHarness) DeliverySpec() api.DeliverySpec         { return api.DeliverySpec{} }
 func (h *nfsTestHarness) GetHarnessEmbedsFS() (embed.FS, string) { return embed.FS{}, "" }
 func (h *nfsTestHarness) InjectAgentInstructions(agentHome string, content []byte) error {
 	return nil

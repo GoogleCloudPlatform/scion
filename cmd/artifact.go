@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -549,12 +550,7 @@ func artifactErrorHint(err error, publishing bool) string {
 	}
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == artifacts.CodeMissingScope:
-		scope := "a required"
-		if v, ok := apiErr.Details["scope"].(string); ok && v != "" {
-			scope = "the " + v
-		}
-		return "\nThis agent's credential does not carry " + scope + " scope, usually because the agent was created " +
-			"before artifacts were available to it. Recreate the agent so it is issued a current credential."
+		return missingScopeHint(apiErr.Details)
 	case apiErr.StatusCode == http.StatusUnauthorized:
 		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
@@ -566,6 +562,44 @@ func artifactErrorHint(err error, publishing bool) string {
 		return "\nYou may not publish artifacts in this project, or may not add versions to this artifact."
 	}
 	return ""
+}
+
+// missingScopeHint is the hint for a 403 missing_scope (ptone/scion#4571).
+// It names every scope the hub reported: details.scopes, or the single
+// details.scope an older hub sends. The usual cause is the scope ceiling of
+// the agent's creator, so recreating the agent from the same parent does
+// not help; a scope re-issue does, once the creator holds the scopes, and
+// only a hub super-admin can run it.
+func missingScopeHint(details map[string]any) string {
+	var scopes []string
+	if list, ok := details["scopes"].([]any); ok {
+		for _, v := range list {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		if v, ok := details["scope"].(string); ok && v != "" {
+			scopes = []string{v}
+		}
+	}
+	what := "a required scope"
+	switch len(scopes) {
+	case 0:
+	case 1:
+		what = "the " + scopes[0] + " scope"
+	default:
+		what = "the " + strings.Join(scopes, " and ") + " scopes"
+	}
+	agent := os.Getenv("SCION_AGENT_SLUG")
+	if agent == "" {
+		agent = "<agent>"
+	}
+	return "\nThis agent's credential does not carry " + what + ". The usual cause is the scope ceiling of the " +
+		"agent's creator; recreating the agent from the same parent gives it the same scopes. Ask the agent's user " +
+		"to have a hub super-admin re-issue its scopes once its creator holds them: scion reset-auth " + agent +
+		" --reissue-scopes (parents before children)."
 }
 
 // copyVerified copies src to dst and fails unless the bytes are exactly
