@@ -114,6 +114,22 @@
   independently of it (revoke, then grant).
 - **Allowed-email patterns** are lower-cased only, as the per-email check
   does, when deciding whether an issuer admits a rule's domain.
+- **Lock order with project deletion.** Project deletion (and the fixture
+  purge) locks the project row, deletes all project-scope bindings, then
+  locks and deletes the project's rules. Removing a rule or changing its
+  window locked the rule and then its bindings, the opposite order, so on
+  Postgres the two could wait on each other until one aborted with a
+  deadlock error (40P01, marked transient; nothing left behind). Removing
+  and changing a rule now take the project row lock
+  (`LockProjectForMembership`) before the rule lock, so they run before or
+  after a deletion of the same project. The cascade order is unchanged:
+  reordering it instead would have reversed its order against a rule
+  binding that replaces an inactive grant by email (grant row, then rule).
+  A rule whose project row is missing is still removed or changed. Tested
+  by the order of queries (SQLite has one connection, so the wait itself
+  is not reproducible there).
+- **Activation check.** Replacing an inactive grant by email uses the
+  shared `isBindingActive` check rather than a copy of it.
 
 ## Verification
 
