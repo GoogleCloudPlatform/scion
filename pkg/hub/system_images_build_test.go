@@ -17,6 +17,7 @@ package hub
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
 func collectBuildLog(t *testing.T, r io.Reader) ([]string, error) {
@@ -34,6 +37,12 @@ func collectBuildLog(t *testing.T, r io.Reader) ([]string, error) {
 	var lines []string
 	err := streamBuildLog(r, func(line string) { lines = append(lines, line) })
 	return lines, err
+}
+
+// truncatedBuildLogLine is the line streamBuildLog emits for an over-long
+// line made of the byte c repeated.
+func truncatedBuildLogLine(c string) string {
+	return strings.Repeat(c, imageBuildLogMaxLine) + fmt.Sprintf(imageBuildLogTruncatedFmt, imageBuildLogMaxLine)
 }
 
 func TestStreamBuildLog_LongLines(t *testing.T) {
@@ -57,9 +66,8 @@ func TestStreamBuildLog_LongLines(t *testing.T) {
 	if lines[2] != "" {
 		t.Errorf("line 2 = %q, want empty line", lines[2])
 	}
-	wantPrefix := strings.Repeat("b", imageBuildLogMaxLine) + " ... [line truncated at "
-	if !strings.HasPrefix(lines[3], wantPrefix) || strings.Count(lines[3], "b") != imageBuildLogMaxLine {
-		t.Errorf("line 3 not truncated at %d bytes with marker (length %d)", imageBuildLogMaxLine, len(lines[3]))
+	if want := truncatedBuildLogLine("b"); lines[3] != want {
+		t.Errorf("line 3 has length %d, want %d (cut at %d bytes plus marker)", len(lines[3]), len(want), imageBuildLogMaxLine)
 	}
 	if lines[4] != "last-no-newline" {
 		t.Errorf("line 4 = %q, want %q", lines[4], "last-no-newline")
@@ -89,6 +97,30 @@ func TestStreamBuildLog_ReadErrorReturnsPendingLineAndError(t *testing.T) {
 	}
 	if len(lines) != 2 || lines[0] != "one" || lines[1] != "partial" {
 		t.Fatalf("lines = %q, want [one partial]", lines)
+	}
+}
+
+// A final line with no newline that exactly fills the read buffer comes back
+// from ReadLine with isPrefix set, followed by EOF or an error with no data.
+// It must still be emitted.
+func TestStreamBuildLog_UnterminatedLineOnBufferBoundary(t *testing.T) {
+	last := strings.Repeat("c", imageBuildLogReadBuf)
+
+	lines, err := collectBuildLog(t, strings.NewReader("first\n"+last))
+	if err != nil {
+		t.Fatalf("streamBuildLog error at EOF: %v", err)
+	}
+	if len(lines) != 2 || lines[0] != "first" || lines[1] != last {
+		t.Fatalf("at EOF: got %d lines, want [first, %d x c]", len(lines), len(last))
+	}
+
+	readErr := errors.New("boom")
+	lines, err = collectBuildLog(t, &failingReader{data: []byte("first\n" + last), err: readErr})
+	if !errors.Is(err, readErr) {
+		t.Fatalf("err = %v, want %v", err, readErr)
+	}
+	if len(lines) != 2 || lines[0] != "first" || lines[1] != last {
+		t.Fatalf("on read error: got %d lines, want [first, %d x c]", len(lines), len(last))
 	}
 }
 
@@ -128,10 +160,9 @@ func writeExecutable(t *testing.T, path, content string) {
 // second build must then be accepted.
 func TestHandleSystemImagesBuild_LongLogLinesDoNotHang(t *testing.T) {
 	root := t.TempDir()
-	binDir := filepath.Join(root, "bin")
-	fakeRuntime := filepath.Join(binDir, "podman")
-	writeExecutable(t, fakeRuntime, "#!/bin/sh\nexit 0\n")
-	if err := exec.Command(fakeRuntime).Run(); err != nil {
+	probe := filepath.Join(root, "probe.sh")
+	writeExecutable(t, probe, "#!/bin/sh\nexit 0\n")
+	if err := exec.Command(probe).Run(); err != nil {
 		t.Skipf("cannot execute scripts in temp dir %s (noexec?): %v", root, err)
 	}
 	writeExecutable(t, filepath.Join(root, "image-build", "scripts", "build-images.sh"), `#!/bin/sh
@@ -143,7 +174,12 @@ echo
 echo after-long-lines
 `)
 	t.Setenv("SCION_ROOT", root)
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	restore := config.OverrideRuntimeDetection(
+		func(string) (string, error) { return "/usr/bin/podman", nil },
+		func(string, []string) error { return nil },
+	)
+	t.Cleanup(restore)
+	builder := NewAuthenticatedUser("u-build", "builder@example.com", "Builder", "admin", "cli")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -153,6 +189,7 @@ echo after-long-lines
 	startBuild := func() int {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/system/images/build", strings.NewReader(`{"harnesses":["claude"]}`))
 		req.RemoteAddr = "127.0.0.1:12345"
+		req = req.WithContext(contextWithIdentity(req.Context(), builder))
 		w := httptest.NewRecorder()
 		srv.handleSystemImagesBuild(w, req)
 		return w.Code

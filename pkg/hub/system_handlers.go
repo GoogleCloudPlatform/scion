@@ -815,19 +815,30 @@ type imageBuildLogEvent struct {
 // read and discarded so the build keeps running.
 const imageBuildLogMaxLine = 1 << 20
 
+// imageBuildLogTruncatedFmt is appended (with imageBuildLogMaxLine) to a
+// build-log line that was cut at imageBuildLogMaxLine bytes.
+const imageBuildLogTruncatedFmt = " ... [line truncated at %d bytes]"
+
+// imageBuildLogReadBuf is the bufio.Reader size streamBuildLog reads with;
+// lines longer than this arrive from ReadLine in several fragments.
+const imageBuildLogReadBuf = 4096
+
 // streamBuildLog reads r line by line and calls emit for each line, without
-// the line terminator. A line longer than imageBuildLogMaxLine is cut at
-// that length and marked as truncated. streamBuildLog always reads r to EOF
-// so that a child process writing to r never blocks on a full pipe; on a
-// read error it discards whatever is left and returns the error.
+// the "\n" or "\r\n" terminator (a lone trailing "\r" on a final line with
+// no "\n" is kept). A line longer than imageBuildLogMaxLine is cut at that
+// length and marked as truncated. streamBuildLog reads r until EOF so that a
+// child process writing to r never blocks on a full pipe. On any other read
+// error it emits the pending partial line, makes a best-effort attempt to
+// discard what is left (a reader that keeps failing ends this at once; for a
+// pipe the realistic case is os.ErrClosed) and returns the error.
 func streamBuildLog(r io.Reader, emit func(string)) error {
-	br := bufio.NewReader(r)
+	br := bufio.NewReaderSize(r, imageBuildLogReadBuf)
 	var line []byte
 	truncated := false
 	flush := func() {
 		text := string(line)
 		if truncated {
-			text += fmt.Sprintf(" ... [line truncated at %d bytes]", imageBuildLogMaxLine)
+			text += fmt.Sprintf(imageBuildLogTruncatedFmt, imageBuildLogMaxLine)
 		}
 		emit(text)
 		line = line[:0]
