@@ -135,7 +135,7 @@ Only these commands run with a profile:
 - `artifact publish`, `get`, `versions` and `delete`; `publish` needs `--project <name or id>`
   on the target
 - the agent commands `create`, `start`, `list`, `stop`, `delete`, `look` and `logs`, with
-  `--project <name or id>` on the target (see [Agents on the target](#agents-on-the-target))
+  `--project <name or id>` on the target (see [Agents on the target](#6-agents-on-the-target))
 
 They read no local project settings. Every other command, such as `message`, `whoami`,
 `resume` and anything that touches local state, is refused while a profile is selected.
