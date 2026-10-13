@@ -613,6 +613,9 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         return isinstance(markets, dict) and CODEX_PLUGIN_MARKETPLACE in markets
 
     def prepare(self, desired: list[scion_harness.AgentPlugin]) -> None:
+        # codex refuses to run when CODEX_HOME does not exist ("failed to
+        # resolve CODEX_HOME"); images ship ~/.codex, but never rely on it.
+        os.makedirs(self.codex_home, exist_ok=True)
         self.write_marketplace([p.name for p in desired])
         if not desired or self.marketplace_registered():
             return

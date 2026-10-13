@@ -1708,6 +1708,14 @@ class TestCodexAgentPlugins(unittest.TestCase):
         scion_harness.reconcile_agent_plugins(self.ctx(), provision.CodexPluginInstaller(self.ctx()))
         self.assertEqual(self.cli.calls, [])
 
+    def test_prepare_creates_codex_home(self) -> None:
+        # Real codex 0.162.1 exits 1 ("failed to resolve CODEX_HOME") when
+        # CODEX_HOME does not exist yet.
+        self.assertFalse(os.path.exists(os.path.join(self.home, ".codex")))
+        provision.CodexPluginInstaller(self.ctx()).prepare([])
+        self.assertTrue(os.path.isdir(os.path.join(self.home, ".codex")))
+        self.assertEqual(self.cli.calls, [])
+
     def test_marketplace_add_only_when_not_registered(self) -> None:
         os.makedirs(os.path.join(self.home, ".codex"))
         with open(os.path.join(self.home, ".codex", "config.toml"), "w") as f:
