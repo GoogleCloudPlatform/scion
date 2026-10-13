@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -103,7 +104,9 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 			}
 			b := true
 			f.Set(reflect.ValueOf(&b))
-		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func:
+		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func,
+			reflect.Struct, reflect.Array, reflect.UnsafePointer:
+			// A struct or array can hold a map or pointer of its own.
 			t.Fatalf("field %s: unsupported kind %s; extend this test", name, f.Kind())
 		default:
 			continue
@@ -129,6 +132,12 @@ func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
 	}
 	if len(refFields) == 0 {
 		t.Fatal("V1RuntimeTargetConfig has no reference field; the test checks nothing")
+	}
+	// Not vacuous for the known reference fields.
+	for _, want := range []string{"KubernetesServiceAccountMappings", "SafeToEvict", "SharedDirStorageBackends"} {
+		if !slices.Contains(refFields, want) {
+			t.Fatalf("reference field %s was not checked (checked: %v)", want, refFields)
+		}
 	}
 }
 
@@ -352,6 +361,10 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 	// Not vacuous: every wired flat branch is found.
 	for _, want := range []string{
 		"VersionedSettings.ResolveSharedDirDefaultsWithSource",
+		"VersionedSettings.ResolveSafeToEvictWithSource",
+		"VersionedSettings.ResolveSharedDirStorage",
+		"VersionedSettings.ResolveSharedDirStorageBackend",
+		"VersionedSettings.ResolveHomeStorage",
 		// agent_defaults
 		"VersionedSettings.ResolveHarnessConfig",
 		"VersionedSettings.ResolveCloneDepthWithSource",

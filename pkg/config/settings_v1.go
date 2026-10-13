@@ -322,6 +322,10 @@ const SharedDirStorageGlobalSource = "server.shared_dir_storage.backend"
 //
 // A dispatch-time NFS mount check should choose the backend through this
 // method too, so it agrees with the start path.
+//
+// On a flat instance view (ForFlatInstance) the instance's
+// runtime_target.shared_dir_storage_backend takes the place of the profile
+// and runtime entry, and no profile is consulted.
 func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V1SharedDirStorageConfig, source string) {
 	if vs == nil {
 		return nil, ""
@@ -330,9 +334,18 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	if vs.Server != nil {
 		global = vs.Server.SharedDirStorage
 	}
-	backend, source := vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
-		func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
-		func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	var backend string
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; unset falls through to the global block.
+		if b := vs.flat.Target.SharedDirStorageBackend; b != "" {
+			backend, source = b, vs.flat.path("runtime_target.shared_dir_storage_backend")
+		}
+	} else {
+		backend, source = vs.ResolveProfileSetting(profileName, "shared_dir_storage_backend",
+			func(p V1ProfileConfig) string { return p.SharedDirStorageBackend },
+			func(r V1RuntimeConfig) string { return r.SharedDirStorageBackend })
+	}
 	if backend == "" {
 		if global == nil {
 			return nil, ""
@@ -362,10 +375,24 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 //
 // For a dir no per-dir entry names, the result matches the backend of
 // ResolveSharedDirStorage. Call this only on global settings, as for
-// ResolveSharedDirStorage.
+// ResolveSharedDirStorage. On a flat instance view the order is the
+// instance's runtime_target.shared_dir_storage_backends entry, its
+// shared_dir_storage_backend, then server.shared_dir_storage.backend.
 func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName string) (backend, source string, perDir bool) {
 	if vs == nil {
 		return "", "", false
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's per-dir entry, else its single
+		// value, else the global backend. No profile is consulted.
+		t := vs.flat.Target
+		if v := t.SharedDirStorageBackends[dirName]; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backends." + dirName), true
+		}
+		if v := t.SharedDirStorageBackend; v != "" {
+			return v, vs.flat.path("runtime_target.shared_dir_storage_backend"), false
+		}
+		return vs.globalSharedDirStorageBackend()
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -386,6 +413,12 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 			}
 		}
 	}
+	return vs.globalSharedDirStorageBackend()
+}
+
+// globalSharedDirStorageBackend is the server.shared_dir_storage.backend
+// rung of ResolveSharedDirStorageBackend.
+func (vs *VersionedSettings) globalSharedDirStorageBackend() (backend, source string, perDir bool) {
 	if vs.Server != nil && vs.Server.SharedDirStorage != nil {
 		return vs.Server.SharedDirStorage.Backend, SharedDirStorageGlobalSource, false
 	}
@@ -393,7 +426,8 @@ func (vs *VersionedSettings) ResolveSharedDirStorageBackend(profileName, dirName
 }
 
 // SharedDirStorageNFSAnywhere reports whether the global backend or any
-// runtime or profile override selects nfs, and returns the nfs-backed
+// runtime, profile or flat Runtime Broker instance override selects nfs
+// (server.broker.instances[].runtime_target), and returns the nfs-backed
 // config to use for project-wide operations such as cleanup. It is nil
 // when no setting selects nfs. Like ResolveSharedDirStorage, call it only
 // on global settings.
@@ -417,6 +451,13 @@ func (vs *VersionedSettings) SharedDirStorageNFSAnywhere() (cfg *V1SharedDirStor
 	for _, p := range vs.Profiles {
 		if p.SharedDirStorageBackend == "nfs" || mapSelectsNFS(p.SharedDirStorageBackends) {
 			found = true
+		}
+	}
+	if vs.Server != nil && vs.Server.Broker != nil {
+		for _, inst := range vs.Server.Broker.Instances {
+			if t := inst.RuntimeTarget; t != nil && (t.SharedDirStorageBackend == "nfs" || mapSelectsNFS(t.SharedDirStorageBackends)) {
+				found = true
+			}
 		}
 	}
 	if !found {
@@ -987,9 +1028,20 @@ func (vs *VersionedSettings) ResolveSafeToEvict(profileName string) *bool {
 // ResolveSafeToEvictWithSource is ResolveSafeToEvict that also returns the
 // settings key the value came from ("profiles.NAME.safe_to_evict" or
 // "runtimes.NAME.safe_to_evict"). source is empty when the value is nil.
-// The returned pointer is a fresh copy, never one held by vs.
+// The returned pointer is a fresh copy, never one held by vs. On a flat
+// instance view the value is the instance's runtime_target.safe_to_evict,
+// with source "server.broker.instances[KEY].runtime_target.safe_to_evict".
 func (vs *VersionedSettings) ResolveSafeToEvictWithSource(profileName string) (value *bool, source string) {
 	if vs == nil {
+		return nil, ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung, false and true as written. There is no
+		// lower settings rung, so nil stays nil.
+		if v := vs.flat.Target.SafeToEvict; v != nil {
+			return copyBoolPtr(v), vs.flat.path("runtime_target.safe_to_evict")
+		}
 		return nil, ""
 	}
 	if profileName == "" {
@@ -2007,11 +2059,42 @@ type V1RuntimeTargetConfig struct {
 	// SharedDirStorageClass and SharedDirSize are this Kubernetes
 	// instance's defaults for the ReadWriteMany PVCs backing project shared
 	// dirs: the flat counterparts of the runtime entry and profile settings
-	// of the same name, at the same rung (a template's or agent's
-	// kubernetes block wins over them). Local operator policy: never part
+	// of the same name, at the same rung (the agent's own kubernetes
+	// block wins over them). Local operator policy: never part
 	// of the persisted target identity. Kubernetes only.
 	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
 	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
+	// GKE forces GKE mode on this Kubernetes instance's runtime; false
+	// means auto-detect, as for the runtime entry's gke. PriorityClassName
+	// is the instance's default pod spec.priorityClassName, below the
+	// agent's own (inline or persisted) kubernetes.priorityClassName.
+	// Kubernetes only.
+	GKE               bool   `json:"gke,omitempty" yaml:"gke,omitempty" koanf:"gke"`
+	PriorityClassName string `json:"priority_class_name,omitempty" yaml:"priority_class_name,omitempty" koanf:"priority_class_name"`
+	// SafeToEvict is the instance's safe_to_evict default: nil is unset,
+	// and an explicit false or true is kept as written. The agent's own
+	// kubernetes.safeToEvict wins over it. Kubernetes only.
+	SafeToEvict *bool `json:"safe_to_evict,omitempty" yaml:"safe_to_evict,omitempty" koanf:"safe_to_evict"`
+	// SharedDirStorageBackend and SharedDirStorageBackends ("local" or
+	// "nfs", the second per shared dir name) choose the shared-dir storage
+	// backend of the instance's new agents, between the agent's recorded
+	// backend and server.shared_dir_storage.backend. Docker and Kubernetes.
+	SharedDirStorageBackend  string            `json:"shared_dir_storage_backend,omitempty" yaml:"shared_dir_storage_backend,omitempty" koanf:"shared_dir_storage_backend"`
+	SharedDirStorageBackends map[string]string `json:"shared_dir_storage_backends,omitempty" yaml:"shared_dir_storage_backends,omitempty" koanf:"shared_dir_storage_backends"`
+	// HomeStorageBackend ("local" or "nfs") and HomeStorageLeaf ("pod" or
+	// "broker") choose the home storage of the instance's new agents, above
+	// server.home_storage. Kubernetes only.
+	HomeStorageBackend string `json:"home_storage_backend,omitempty" yaml:"home_storage_backend,omitempty" koanf:"home_storage_backend"`
+	HomeStorageLeaf    string `json:"home_storage_leaf,omitempty" yaml:"home_storage_leaf,omitempty" koanf:"home_storage_leaf"`
+}
+
+// KubernetesRuntimeConfig returns the runtime entry form of a Kubernetes
+// target, which a flat instance's runtime is built from: its context,
+// namespace, GKE mode and default priority class. ListAllNamespaces stays
+// false, because an instance is one cluster and namespace.
+func (t *V1RuntimeTargetConfig) KubernetesRuntimeConfig() V1RuntimeConfig {
+	return V1RuntimeConfig{Type: RuntimeTargetTypeKubernetes, Context: t.Context, Namespace: t.Namespace,
+		GKE: t.GKE, PriorityClassName: t.PriorityClassName}
 }
 
 // V1DatabaseConfig holds database settings.

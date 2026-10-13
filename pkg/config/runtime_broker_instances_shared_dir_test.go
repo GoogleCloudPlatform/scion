@@ -72,15 +72,8 @@ func TestRuntimeBrokerInstances_SharedDirFieldsRoundTrip(t *testing.T) {
 // Every frozen key that this release does not apply yet is refused with an
 // explicit error naming its settings path, never dropped.
 func TestRuntimeBrokerInstances_StrictLoaderRefusesReservedKeys(t *testing.T) {
-	cases := map[string]string{
-		"runtime_target.gke":                         "gke: true",
-		"runtime_target.priority_class_name":         "priority_class_name: high",
-		"runtime_target.safe_to_evict":               "safe_to_evict: false",
-		"runtime_target.shared_dir_storage_backend":  "shared_dir_storage_backend: nfs",
-		"runtime_target.shared_dir_storage_backends": "shared_dir_storage_backends: {scratch: nfs}",
-		"runtime_target.home_storage_backend":        "home_storage_backend: nfs",
-		"runtime_target.home_storage_leaf":           "home_storage_leaf: x",
-	}
+	// Every frozen runtime_target key is wired, so none is reserved.
+	cases := map[string]string{}
 	if len(cases) != len(reservedRuntimeTargetKeys) {
 		t.Fatalf("the test covers %d runtime_target keys, the reserved list has %d", len(cases), len(reservedRuntimeTargetKeys))
 	}

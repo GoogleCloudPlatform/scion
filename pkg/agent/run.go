@@ -1943,7 +1943,7 @@ authDone:
 			if startGlobalSettings != nil {
 				return checkHomeStorageLoaded(startGlobalSettings)
 			}
-			return loadHomeStorageSettings()
+			return loadHomeStorageSettings(ctx)
 		},
 	})
 	if err != nil {

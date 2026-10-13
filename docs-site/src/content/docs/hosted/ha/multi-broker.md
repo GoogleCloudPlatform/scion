@@ -72,7 +72,7 @@ When an agent runs `scion start` or `scion create` inside its container, the CLI
 
 With the `hub.flat_runtime_brokers` [experiment](/scion/reference/experiments/) on (default off), the Hub accepts Runtime Brokers that each serve exactly one runtime target with a stable identity. A new agent placed on such a Runtime Broker is pinned to its runtime target and stays on it across restarts, and the Hub refuses a dispatch for a different target. The agent's record shows the pin as a read-only `pinnedRuntimeTarget`, and the Runtime Broker's record shows its `runtimeTarget` (see the [Agents API](/scion/reference/api/#agents-apiv1agents)). A pinned agent cannot be [moved to another Runtime Broker](#moving-an-agent-to-another-runtime-broker), and an agent cannot be moved onto a flat Runtime Broker (`409 runtime_target_move_unsupported`). Existing profile-based Runtime Brokers are unchanged.
 
-To run a flat Runtime Broker, start the Hub and the Runtime Broker in the same process and add one entry under `server.broker.instances` in `settings.yaml`:
+To run flat Runtime Brokers, add one entry per instance under `server.broker.instances` in the global `settings.yaml`. Each entry has an immutable local `key`, a `name` that it registers under, and exactly one `runtime_target`: the local Docker daemon, or a Kubernetes cluster and namespace.
 
 ```yaml
 server:
@@ -82,9 +82,31 @@ server:
         name: local-docker
         runtime_target:
           type: docker
+      - key: k8s-batch
+        name: k8s-batch
+        runtime_target:
+          type: kubernetes
+          context: batch-cluster
+          namespace: agents
+          shared_dir_size: 40Gi
+          safe_to_evict: false
 ```
 
-Only `docker` targets and a single entry are accepted in this release. A process with `server.broker.instances` hosts only the flat instance, not a regular Runtime Broker. Startup is refused if the Hub is not in the same process or if the entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
+One process starts every configured instance. A process with `server.broker.instances` hosts only flat instances, not a regular Runtime Broker. Startup is refused if an entry does not validate.
+
+- **With the Hub in the same process**, each instance registers with it when the process starts.
+- **With a remote Hub**, register each instance once with `scion runtime-broker register --instance <key>`, which saves credentials for that instance only. At each start, an instance activates only after the Hub has confirmed its identity and runtime target.
+- **An instance that cannot serve** is refused and reported, and the other instances keep running. If the Hub refuses a registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated.
+
+A flat instance never uses Runtime Broker Profiles: not the active profile, and not a profile named in a request. Defaults that a profile or its runtime entry supplied to a regular Runtime Broker are set on the instance's `runtime_target` instead. These are:
+
+- the shared directory PVC class and size;
+- `safe_to_evict`;
+- the pod priority class;
+- GKE mode;
+- the shared directory and home storage backends.
+
+Each default keeps its usual precedence. An agent's own Kubernetes setting still wins over it, and an unset field falls back to the same global setting as before. An agent keeps the storage backends it recorded at its first start. See [the runtime target fields](/scion/reference/server-config/#flat-instance-runtime-target-serverbrokerinstancesruntime_target) for every field.
 
 A flat Runtime Broker does not use Runtime Broker profiles. Instead, an entry may set `agent_defaults`: the image registry, default harness config, volumes, resources, harness overrides, required secrets and clone depth of the agents it runs. Each default sits where the matching profile setting sat, so templates, the agent's own configuration and the request keep winning where they won over a profile. See [flat instance agent defaults](/scion/reference/server-config/#flat-instance-agent-defaults-serverbrokerinstancesagent_defaults).
 

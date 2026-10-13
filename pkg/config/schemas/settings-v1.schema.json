@@ -1672,11 +1672,46 @@
             },
             "shared_dir_storage_class": {
               "type": "string",
-              "description": "Kubernetes only. This instance's default storage class for shared-dir PVCs (must support ReadWriteMany). Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_storage_class wins over it. Local operator policy: never sent to the Hub."
+              "description": "Kubernetes only. This instance's default storage class for shared-dir PVCs (must support ReadWriteMany). Takes the place of the profile and runtime entry value; an agent's own kubernetes.shared_dir_storage_class wins over it. Local operator policy: never sent to the Hub."
             },
             "shared_dir_size": {
               "type": "string",
-              "description": "Kubernetes only. This instance's default size per shared-dir PVC, a positive Kubernetes quantity (e.g. 40Gi); unset means 10Gi. Takes the place of the profile and runtime entry value; a template or agent kubernetes.shared_dir_size wins over it. Local operator policy: never sent to the Hub."
+              "description": "Kubernetes only. This instance's default size per shared-dir PVC, a positive Kubernetes quantity (e.g. 40Gi); unset means 10Gi. Takes the place of the profile and runtime entry value; an agent's own kubernetes.shared_dir_size wins over it. Local operator policy: never sent to the Hub."
+            },
+            "gke": {
+              "type": "boolean",
+              "description": "Kubernetes only. true forces GKE mode for this instance's runtime; false or unset auto-detects a GKE cluster, as for a runtime entry's gke."
+            },
+            "priority_class_name": {
+              "type": "string",
+              "maxLength": 253,
+              "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$",
+              "description": "Kubernetes only. This instance's default PriorityClass name (DNS-1123 subdomain) for agent pods. The PriorityClass must already exist on the cluster. An agent's kubernetes.priorityClassName wins over it."
+            },
+            "safe_to_evict": {
+              "type": ["boolean", "null"],
+              "description": "Kubernetes only. This instance's safe_to_evict default: false adds the cluster-autoscaler.kubernetes.io/safe-to-evict: \"false\" annotation to agent pods; true is accepted and adds nothing; unset or null adds nothing. An agent's kubernetes.safeToEvict wins over it."
+            },
+            "shared_dir_storage_backend": {
+              "type": "string",
+              "enum": ["", "local", "nfs"],
+              "description": "Shared-dir storage backend for this instance's new agents. Takes the place of the profile and runtime entry value and overrides server.shared_dir_storage.backend; an agent's recorded backend is always kept. nfs uses the server.shared_dir_storage.nfs block, which must then be complete."
+            },
+            "shared_dir_storage_backends": {
+              "type": "object",
+              "propertyNames": { "pattern": "^[a-z0-9]([a-z0-9-]*[a-z0-9])?$" },
+              "additionalProperties": { "type": "string", "enum": ["local", "nfs"] },
+              "description": "Shared-dir storage backend per shared dir name, for this instance's new agents. A dir not named here uses shared_dir_storage_backend, then server.shared_dir_storage.backend."
+            },
+            "home_storage_backend": {
+              "type": "string",
+              "enum": ["", "local", "nfs"],
+              "description": "Kubernetes only. Agent home storage backend for this instance's new agents. Overrides server.home_storage.backend; an agent's recorded home storage is always kept. nfs keeps the home on the export of the instance's resolved shared_dir_storage and needs the server.shared_dir_storage.nfs block to be complete."
+            },
+            "home_storage_leaf": {
+              "type": "string",
+              "enum": ["", "pod", "broker"],
+              "description": "Kubernetes only. How the agent home directory is created on the export for this instance's new agents: pod (an init container) or broker (through the broker's mount of the export). Overrides server.home_storage.leaf."
             }
           },
           "if": { "properties": { "type": { "const": "docker" } } },
@@ -1689,7 +1724,12 @@
                 { "required": ["kubernetes_block_service_account"], "properties": { "kubernetes_block_service_account": { "minLength": 1 } } },
                 { "required": ["kubernetes_service_account_mappings"], "properties": { "kubernetes_service_account_mappings": { "minProperties": 1 } } },
                 { "required": ["shared_dir_storage_class"], "properties": { "shared_dir_storage_class": { "minLength": 1 } } },
-                { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } }
+                { "required": ["shared_dir_size"], "properties": { "shared_dir_size": { "minLength": 1 } } },
+                { "required": ["gke"], "properties": { "gke": { "const": true } } },
+                { "required": ["priority_class_name"], "properties": { "priority_class_name": { "minLength": 1 } } },
+                { "required": ["safe_to_evict"], "properties": { "safe_to_evict": { "type": "boolean" } } },
+                { "required": ["home_storage_backend"], "properties": { "home_storage_backend": { "minLength": 1 } } },
+                { "required": ["home_storage_leaf"], "properties": { "home_storage_leaf": { "minLength": 1 } } }
               ]
             }
           }
