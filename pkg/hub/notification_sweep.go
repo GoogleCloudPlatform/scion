@@ -115,6 +115,11 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 		if ctx.Err() != nil {
 			break
 		}
+		// Once hub shutdown has begun, claim nothing more; undispatched
+		// notifications drain on the next connect (ptone/scion#4869).
+		if s.brokerWork.closing() {
+			break
+		}
 		s.notificationDispatcher.RetryDispatch(ctx, &notifs[i])
 	}
 }

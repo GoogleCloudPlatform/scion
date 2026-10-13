@@ -6372,14 +6372,20 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// already stops new ones from starting.
 		s.stopAutoSuspendWorker(ctx)
 
+		// Stop broker connection work (connect, disconnect, reconcile and
+		// notification drains) before the control channel closes: new
+		// work is refused, and running drains claim no more rows, so rows
+		// they have not claimed stay pending for the next connect instead
+		// of failing on a closed tunnel. The work is joined below, after
+		// the control channel closes, while the store is still open
+		// (ptone/scion#4869).
+		s.brokerWork.closeAdmission()
+
 		// Wait for in-flight audit goroutines.
 		if cc != nil {
 			cc.Shutdown()
 		}
-		// With the control channel closed, stop broker connection work
-		// (connect, disconnect, reconcile and notification drains) and
-		// wait for it while the store is still open (ptone/scion#4869).
-		if n := s.brokerWork.stop(ctx, brokerWorkStopGrace); n > 0 {
+		if n := s.brokerWork.wait(ctx, brokerWorkStopGrace); n > 0 {
 			slog.Warn("Broker connection work still running after the shutdown grace; cancelled it",
 				"running", n, "grace", brokerWorkStopGrace)
 		}

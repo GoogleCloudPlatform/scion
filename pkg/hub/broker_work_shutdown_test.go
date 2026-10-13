@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -163,13 +164,15 @@ func (s *shutdownOrderStore) GetUndispatchedAgentNotifications(ctx context.Conte
 }
 
 // TestHubShutdown_JoinsBrokerWorkBeforeStoreClose covers ptone/scion#4869.
-// It shuts a hub down while three kinds of broker work are in flight, each
+// It shuts a hub down while four kinds of broker work are in flight, each
 // held inside a store call:
 //
 //   - the connect path (markBrokerOnline), in GetBrokerProjects
 //   - the dispatch reconcile markBrokerOnline starts, in ListPendingDispatch
 //   - the disconnect callback (handleBrokerDisconnect), in
 //     ReleaseAndMarkBrokerOffline
+//   - the heartbeat-triggered stop drain of an HTTP-only broker
+//     (startHTTPStopDrain), in ListPendingDispatch
 //
 // Background teardown must not return until all of them have exited, so
 // that nothing runs when the store closes right after it (as cmd does),
@@ -186,16 +189,18 @@ func TestHubShutdown_JoinsBrokerWorkBeforeStoreClose(t *testing.T) {
 	connectID := tid("broker-selfheal-shutdown-connect")
 	reconcileID := tid("broker-selfheal-shutdown-reconcile")
 	disconnectID := tid("broker-selfheal-shutdown-disconnect")
+	httpDrainID := tid("broker-selfheal-shutdown-httpdrain")
 	wrapped := newShutdownOrderStore(base,
 		shutdownGateKey{method: "GetBrokerProjects", brokerID: connectID},
 		shutdownGateKey{method: "ListPendingDispatch", brokerID: reconcileID},
 		shutdownGateKey{method: "ReleaseAndMarkBrokerOffline", brokerID: disconnectID},
+		shutdownGateKey{method: "ListPendingDispatch", brokerID: httpDrainID},
 	)
 	srv, _ := testServerOnMigratedStore(t, wrapped)
 
-	for _, suffix := range []string{"shutdown-connect", "shutdown-reconcile", "shutdown-disconnect"} {
+	for _, suffix := range []string{"shutdown-connect", "shutdown-reconcile", "shutdown-disconnect", "shutdown-httpdrain"} {
 		broker, _ := newProviderSelfHealFixture(t, base, suffix)
-		require.Contains(t, []string{connectID, reconcileID, disconnectID}, broker.ID)
+		require.Contains(t, []string{connectID, reconcileID, disconnectID, httpDrainID}, broker.ID)
 	}
 
 	start := len(capture.all())
@@ -221,6 +226,10 @@ func TestHubShutdown_JoinsBrokerWorkBeforeStoreClose(t *testing.T) {
 	srv.controlChannel.removeConnection(disconnectID, "sess-shutdown-disconnect")
 	<-wrapped.gate("ReleaseAndMarkBrokerOffline", disconnectID).entered
 
+	// Heartbeat-triggered stop drain of an HTTP-only broker in flight.
+	srv.startHTTPStopDrain(httpDrainID)
+	<-wrapped.gate("ListPendingDispatch", httpDrainID).entered
+
 	runningAtClose := -1
 	cleanupDone := make(chan struct{})
 	go func() {
@@ -231,7 +240,9 @@ func TestHubShutdown_JoinsBrokerWorkBeforeStoreClose(t *testing.T) {
 		wrapped.markClosed()
 	}()
 
-	<-srv.brokerWork.stoppingCh()
+	// If teardown never closes admission, this fails by assertion when
+	// teardown returns rather than hanging.
+	waitStopping(t, &srv.brokerWork, cleanupDone, "background teardown")
 	select {
 	case <-cleanupDone:
 		t.Fatal("background teardown returned while broker work was still running")
@@ -250,7 +261,58 @@ func TestHubShutdown_JoinsBrokerWorkBeforeStoreClose(t *testing.T) {
 	assert.Empty(t, wrapped.lateCalls(), "a connect after shutdown must not touch the store")
 	requireRecordLive(t, capture, "Hub is shutting down; not marking broker online")
 
+	// A heartbeat after shutdown has started does not start a stop drain,
+	// and leaves no in-flight marker behind.
+	srv.startHTTPStopDrain(httpDrainID)
+	assert.Empty(t, wrapped.lateCalls(), "a heartbeat drain after shutdown must not touch the store")
+	_, marked := srv.httpDrains.Load(httpDrainID)
+	assert.False(t, marked, "a refused heartbeat drain must clear its in-flight marker")
+
 	for _, r := range capture.all()[start:] {
 		assert.Less(t, r.Level, slog.LevelError, "shutdown logged an ERROR: %q", r.Message)
 	}
+}
+
+// TestBrokerDispatchDrain_StopsClaimingOnceShutdownBegins covers the
+// in-flight half of ptone/scion#4869. A drain that is already running when
+// shutdown begins must claim no more rows: the broker's tunnel is about to
+// close, so a claimed row would only be failed. The rows it has not
+// claimed must stay pending, so they drain on the next connect.
+func TestBrokerDispatchDrain_StopsClaimingOnceShutdownBegins(t *testing.T) {
+	capture := captureDefaultCapturingHandler(t)
+	ctx := context.Background()
+
+	base, err := newTestStore(t, ":memory:")
+	require.NoError(t, err)
+	brokerID := tid("broker-selfheal-drain-shutdown")
+	wrapped := newShutdownOrderStore(base, shutdownGateKey{method: "ListPendingDispatch", brokerID: brokerID})
+	srv, _ := testServerOnMigratedStore(t, wrapped)
+
+	broker, project := newProviderSelfHealFixture(t, base, "drain-shutdown")
+	require.Equal(t, brokerID, broker.ID)
+	ids := []string{tid("dispatch-drain-shutdown-1"), tid("dispatch-drain-shutdown-2")}
+	for _, id := range ids {
+		require.NoError(t, base.InsertBrokerDispatch(ctx, &store.BrokerDispatch{
+			ID: id, BrokerID: brokerID, ProjectID: project.ID, Op: "stop",
+		}))
+	}
+
+	// The drain reads its pending rows, then waits on the gate.
+	require.True(t, srv.brokerWork.goTracked(func(workCtx context.Context) {
+		srv.reconcileBroker(workCtx, brokerID)
+	}))
+	<-wrapped.gate("ListPendingDispatch", brokerID).entered
+
+	// Shutdown begins while the drain holds its row list.
+	srv.brokerWork.closeAdmission()
+	wrapped.releaseAll()
+	require.Equal(t, 0, srv.brokerWork.wait(ctx, time.Hour), "the drain must finish")
+
+	for _, id := range ids {
+		d, err := base.GetBrokerDispatch(ctx, id)
+		require.NoError(t, err)
+		assert.Equal(t, store.DispatchStatePending, d.State, "dispatch %s must stay pending for the next connect", id)
+		assert.Empty(t, d.ClaimedBy, "dispatch %s must not be claimed", id)
+	}
+	requireRecordLive(t, capture, "reconcile: hub is shutting down; leaving the remaining dispatches pending")
 }

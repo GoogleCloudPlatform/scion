@@ -19,12 +19,36 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// stoppingCh returns a channel that is closed once closeAdmission has run.
+// Test plumbing for the tracker's stopping hook: it lets a test wait for
+// admission to close without polling.
+func (t *brokerWorkTracker) stoppingCh() <-chan struct{} {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.initLocked()
+	return t.stopping
+}
+
+// waitStopping waits until tr's admission is closed. If done is closed
+// first, the code under test returned without closing admission, and the
+// test fails by assertion instead of hanging.
+func waitStopping(t *testing.T, tr *brokerWorkTracker, done <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-tr.stoppingCh():
+	case <-done:
+		t.Fatalf("%s returned without closing broker work admission", what)
+	}
+}
 
 // stop must not return while admitted work is still running, and returns 0
 // once that work ends (ptone/scion#4869).
@@ -34,9 +58,13 @@ func TestBrokerWorkTracker_StopWaitsForAdmittedWork(t *testing.T) {
 	require.True(t, ok, "work is admitted before stop")
 
 	res := make(chan int, 1)
-	go func() { res <- tr.stop(context.Background(), time.Hour) }()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		res <- tr.stop(context.Background(), time.Hour)
+	}()
 
-	<-tr.stoppingCh()
+	waitStopping(t, &tr, returned, "stop")
 	select {
 	case n := <-res:
 		t.Fatalf("stop returned %d while admitted work was still running", n)
@@ -58,8 +86,12 @@ func TestBrokerWorkTracker_StopJoinsGoTracked(t *testing.T) {
 	}))
 
 	res := make(chan int, 1)
-	go func() { res <- tr.stop(context.Background(), time.Hour) }()
-	<-tr.stoppingCh()
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		res <- tr.stop(context.Background(), time.Hour)
+	}()
+	waitStopping(t, &tr, returned, "stop")
 	select {
 	case n := <-res:
 		t.Fatalf("stop returned %d while a goTracked function was still running", n)
@@ -85,7 +117,26 @@ func TestBrokerWorkTracker_StopRefusesNewWork(t *testing.T) {
 	assert.False(t, tr.goTracked(func(context.Context) {
 		t.Error("goTracked after stop must not run its function")
 	}))
-	assert.Equal(t, 0, tr.stop(context.Background(), time.Hour), "a second stop returns without waiting")
+	assert.Equal(t, 0, tr.stop(context.Background(), time.Hour), "a second stop with nothing running returns 0")
+}
+
+// closeAdmission refuses new work and sets closing, but leaves admitted
+// work running until wait joins it.
+func TestBrokerWorkTracker_CloseAdmissionThenWait(t *testing.T) {
+	var tr brokerWorkTracker
+	assert.False(t, tr.closing())
+	workCtx, done, ok := tr.begin()
+	require.True(t, ok)
+
+	tr.closeAdmission()
+	assert.True(t, tr.closing(), "running work sees that shutdown has begun")
+	_, _, ok = tr.begin()
+	assert.False(t, ok, "begin after closeAdmission must refuse the work")
+	assert.NoError(t, workCtx.Err(), "closeAdmission does not cancel admitted work")
+	assert.Equal(t, 1, tr.runningCount())
+
+	done()
+	assert.Equal(t, 0, tr.wait(context.Background(), time.Hour))
 }
 
 // The wait is bounded by the caller's context: stop returns the count still
@@ -128,4 +179,38 @@ func TestControlChannelHandleUpgrade_RefusedAfterShutdown(t *testing.T) {
 	assert.Empty(t, sessionID)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 	assert.False(t, m.IsConnected("broker-after-shutdown"))
+}
+
+// Shutdown can run while HandleUpgrade is between its first closed check
+// and registering the connection. The re-check under the lock must then
+// refuse the connection and close it, so Shutdown, which no longer sees
+// it, does not leave it open (ptone/scion#4869). The upgrader's
+// CheckOrigin runs at exactly that point, so the test shuts down there.
+func TestControlChannelHandleUpgrade_ShutdownDuringUpgradeClosesConnection(t *testing.T) {
+	m := NewControlChannelManager(DefaultControlChannelConfig(), slog.Default())
+	m.upgrader.CheckOrigin = func(*http.Request) bool {
+		m.Shutdown()
+		return true
+	}
+
+	errCh := make(chan error, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, err := m.HandleUpgrade(w, r, "broker-mid-upgrade")
+		errCh <- err
+	}))
+	defer ts.Close()
+
+	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http"), nil)
+	require.NoError(t, err, "the websocket handshake itself completes")
+	defer func() { _ = c.Close() }()
+
+	require.ErrorIs(t, <-errCh, errControlChannelClosed)
+	assert.False(t, m.IsConnected("broker-mid-upgrade"), "the refused connection must not be registered")
+
+	// The hub closed the socket instead of sending the connected message.
+	// The deadline only keeps a broken build from hanging; the assertion
+	// does not depend on it.
+	require.NoError(t, c.SetReadDeadline(time.Now().Add(time.Minute)))
+	_, msg, err := c.ReadMessage()
+	assert.Error(t, err, "the hub must close the connection, got message %q", msg)
 }

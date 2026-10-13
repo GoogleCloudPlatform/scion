@@ -38,17 +38,22 @@ var brokerWorkStopGrace = 5 * time.Second
 // the store could close under it, and every store call it made after that
 // logged an ERROR on every deploy.
 //
-// stop closes admission and then waits, so work that has not started yet
-// is skipped instead of racing the store close. Skipping is safe: the
-// dispatch and notification rows are durable and drain on the next
-// connect. The zero value is ready to use.
+// Shutdown first calls closeAdmission, so work that has not started yet is
+// skipped instead of racing the store close, and work already running
+// stops claiming dispatch and notification rows (closing). Then it calls
+// wait. Skipping is safe: rows that were never claimed stay pending and
+// drain on the next connect. The zero value is ready to use.
 type brokerWorkTracker struct {
-	mu       sync.Mutex
-	closed   bool
-	running  int
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
+	mu      sync.Mutex
+	closed  bool
+	running int
+	wg      sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
+
+	// stopping is closed by closeAdmission. Only tests wait on it (test
+	// hook, see stoppingCh in broker_work_test.go): it tells them that
+	// admission is closed without polling.
 	stopping chan struct{}
 }
 
@@ -101,33 +106,43 @@ func (t *brokerWorkTracker) goTracked(fn func(ctx context.Context)) bool {
 	return true
 }
 
-// stoppingCh returns a channel that is closed once stop has closed
-// admission.
-func (t *brokerWorkTracker) stoppingCh() <-chan struct{} {
+// closeAdmission refuses all new work from now on. Work already admitted
+// keeps running; wait joins it. Safe to call more than once.
+func (t *brokerWorkTracker) closeAdmission() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.initLocked()
-	return t.stopping
-}
-
-// stop closes admission and waits for the admitted work to end, until ctx
-// is done or grace elapses, whichever comes first. If the wait ends early
-// it cancels the work context so the remaining work stops as soon as it
-// can. It returns how many units were still running when it returned; 0
-// means every unit was joined. Only the first call waits; later calls
-// return the count still running without waiting.
-func (t *brokerWorkTracker) stop(ctx context.Context, grace time.Duration) int {
-	t.mu.Lock()
-	t.initLocked()
-	first := !t.closed
-	if first {
+	if !t.closed {
 		t.closed = true
 		close(t.stopping)
 	}
+}
+
+// closing reports whether closeAdmission has run. Running work checks it
+// between rows, so that once shutdown has begun it claims no more rows
+// and leaves them pending for the next connect.
+func (t *brokerWorkTracker) closing() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.closed
+}
+
+// stop is closeAdmission followed by wait.
+func (t *brokerWorkTracker) stop(ctx context.Context, grace time.Duration) int {
+	t.closeAdmission()
+	return t.wait(ctx, grace)
+}
+
+// wait waits for the admitted work to end, until ctx is done or grace
+// elapses, whichever comes first. Call it after closeAdmission; until then
+// new work can still be admitted. If the wait ends early it cancels the
+// work context so the remaining work stops as soon as it can. It returns
+// how many units were still running when it returned; 0 means every unit
+// was joined.
+func (t *brokerWorkTracker) wait(ctx context.Context, grace time.Duration) int {
+	t.mu.Lock()
+	t.initLocked()
 	t.mu.Unlock()
-	if !first {
-		return t.runningCount()
-	}
 
 	joined := make(chan struct{})
 	go func() {
