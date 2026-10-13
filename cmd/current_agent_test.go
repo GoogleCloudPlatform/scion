@@ -23,10 +23,11 @@ import (
 
 // currentAgentEnvKeys are the environment variables that identify the agent
 // a command runs inside, set the project ID the Hub context resolves (and so
-// the project the guard compares against), or choose and configure the Hub. An agent container sets them
-// ambiently, so tests set every one explicitly. SCION_CLI_MODE and
-// SCION_HOST_UID are cleared too, so the command resolves its Hub and
-// project as it would on a workstation or in CI.
+// the project the guard compares against), or choose and configure the Hub.
+// An agent container sets them ambiently, so tests set every one
+// explicitly. SCION_CLI_MODE and SCION_HOST_UID are cleared too, so the
+// command resolves its Hub and project as it would on a workstation or in
+// CI.
 var currentAgentEnvKeys = []string{
 	"SCION_AGENT_ID",
 	"SCION_AGENT_NAME",

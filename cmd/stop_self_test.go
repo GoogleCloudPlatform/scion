@@ -145,11 +145,20 @@ var stopSelfAllAgents = []stopSelfHubAgent{
 	{ID: "id-third", Name: "third-agent"},
 }
 
-// runStopAllViaHub runs stop --all (--rm if rm, --self if self) against a
-// mock Hub for project selfProjectID listing agents, inside the agent given
-// by name and id (empty values: not inside an agent). It returns stderr,
-// the recorded requests and the error.
-func runStopAllViaHub(t *testing.T, name, id string, agents []stopSelfHubAgent, rm, self bool) (string, []string, error) {
+// stopAllRun is the outcome of runStopAllViaHub.
+type stopAllRun struct {
+	stdout string
+	stderr string
+	events []string
+	err    error
+}
+
+// runStopAllViaHub runs stop --all (--rm if rm, --self if self, JSON output
+// if asJSON) against a mock Hub for project selfProjectID listing agents,
+// inside the agent given by name and id (empty values: not inside an
+// agent). autoConfirm is on; the confirm list still goes to stdout in text
+// mode.
+func runStopAllViaHub(t *testing.T, name, id string, agents []stopSelfHubAgent, rm, self, asJSON bool) stopAllRun {
 	t.Helper()
 	setupStopSelf(t, name, id, selfProjectID)
 	server, events := newStopSelfHub(t, selfProjectID, agents)
@@ -157,12 +166,24 @@ func runStopAllViaHub(t *testing.T, name, id string, agents []stopSelfHubAgent, 
 	require.NoError(t, err)
 	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: selfProjectID}
 	stopAll, stopRm, stopSelf = true, rm, self
+	if asJSON {
+		outputFormat = "json"
+	}
 
-	var runErr error
-	stderr := captureStderr(t, func() {
-		_ = captureStdout(t, func() { runErr = stopAllAgentsViaHub(hubCtx) })
+	var run stopAllRun
+	run.stderr = captureStderr(t, func() {
+		run.stdout = captureStdout(t, func() { run.err = stopAllAgentsViaHub(hubCtx) })
 	})
-	return stderr, events.list(), runErr
+	run.events = events.list()
+	return run
+}
+
+// stopAllJSON decodes the JSON result document stop --all printed.
+func stopAllJSON(t *testing.T, stdout string) map[string]interface{} {
+	t.Helper()
+	var doc map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &doc), "stdout must hold one JSON document: %q", stdout)
+	return doc
 }
 
 // stop --rm naming the current agent without --self is refused before the
@@ -233,8 +254,9 @@ func TestStopCmd_LocalRmCurrentAgentWithoutSelfRefused(t *testing.T) {
 // stop --all --rm skips the current agent, notes it, and stops and removes
 // the others.
 func TestStopAllViaHub_RmSkipsCurrentAgent(t *testing.T) {
-	stderr, events, err := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, false)
-	require.NoError(t, err)
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, false, false)
+	stderr, events := run.stderr, run.events
+	require.NoError(t, run.err)
 	assert.NotContains(t, events, "stop:"+selfAgentName, "stop --all --rm must not stop the current agent")
 	assert.NotContains(t, events, "delete:"+selfAgentName, "stop --all --rm must not remove the current agent")
 	assert.ElementsMatch(t, []string{"stop:other-agent", "delete:other-agent", "stop:third-agent", "delete:third-agent"}, events)
@@ -245,16 +267,18 @@ func TestStopAllViaHub_RmSkipsCurrentAgent(t *testing.T) {
 // The current agent is skipped when it matches by agent ID only.
 func TestStopAllViaHub_RmSkipsCurrentAgentByID(t *testing.T) {
 	agents := []stopSelfHubAgent{{ID: "id-other", Name: "other-agent"}, {ID: selfAgentID, Name: "renamed-agent"}}
-	_, events, err := runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false)
-	require.NoError(t, err)
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false, false)
+	events := run.events
+	require.NoError(t, run.err)
 	assert.NotContains(t, events, "stop:renamed-agent", "the agent with the current agent's ID must be skipped")
 	assert.ElementsMatch(t, []string{"stop:other-agent", "delete:other-agent"}, events)
 }
 
 // stop --all --rm --self includes the current agent.
 func TestStopAllViaHub_RmWithSelfIncludesCurrentAgent(t *testing.T) {
-	stderr, events, err := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, true)
-	require.NoError(t, err)
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, true, false)
+	stderr, events := run.stderr, run.events
+	require.NoError(t, run.err)
 	assert.Contains(t, events, "stop:"+selfAgentName, "--self must include the current agent")
 	assert.Contains(t, events, "delete:"+selfAgentName, "--self must include the current agent")
 	assert.Len(t, events, 6)
@@ -263,16 +287,18 @@ func TestStopAllViaHub_RmWithSelfIncludesCurrentAgent(t *testing.T) {
 
 // A plain stop --all (no --rm) still stops the current agent.
 func TestStopAllViaHub_PlainStopIncludesCurrentAgent(t *testing.T) {
-	_, events, err := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, false, false)
-	require.NoError(t, err)
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, false, false, false)
+	events := run.events
+	require.NoError(t, run.err)
 	assert.ElementsMatch(t, []string{"stop:other-agent", "stop:" + selfAgentName, "stop:third-agent"}, events,
 		"stop --all without --rm is unchanged")
 }
 
 // Outside an agent, stop --all --rm stops and removes every agent.
 func TestStopAllViaHub_RmOutsideAgentIncludesAll(t *testing.T) {
-	stderr, events, err := runStopAllViaHub(t, "", "", stopSelfAllAgents, true, false)
-	require.NoError(t, err)
+	run := runStopAllViaHub(t, "", "", stopSelfAllAgents, true, false, false)
+	stderr, events := run.stderr, run.events
+	require.NoError(t, run.err)
 	assert.Len(t, events, 6, "outside an agent no agent is skipped")
 	assert.Contains(t, events, "delete:"+selfAgentName)
 	assert.NotContains(t, stderr, "Skipping agent")
@@ -286,14 +312,70 @@ func TestSkipCurrentAgentForStopAllRm(t *testing.T) {
 	identity := func(n string) []string { return []string{n} }
 
 	stopRm = true
-	var got []string
-	stderr := captureStderr(t, func() { got = skipCurrentAgentForStopAllRm(names, "", identity) })
+	var got, skipped []string
+	stderr := captureStderr(t, func() { got, skipped = skipCurrentAgentForStopAllRm(names, "", identity) })
 	assert.Equal(t, []string{"other-agent"}, got, "with --rm and an unknown project the current agent is skipped by name")
+	assert.Equal(t, []string{selfAgentName}, skipped)
 	assert.Contains(t, stderr, "Skipping agent 'self-agent'")
 
 	stopSelf = true
-	assert.Equal(t, names, skipCurrentAgentForStopAllRm(names, "", identity), "--self keeps the current agent")
+	got, skipped = skipCurrentAgentForStopAllRm(names, "", identity)
+	assert.Equal(t, names, got, "--self keeps the current agent")
+	assert.Empty(t, skipped)
 
 	stopRm, stopSelf = false, false
-	assert.Equal(t, names, skipCurrentAgentForStopAllRm(names, "", identity), "without --rm nothing is skipped")
+	got, skipped = skipCurrentAgentForStopAllRm(names, "", identity)
+	assert.Equal(t, names, got, "without --rm nothing is skipped")
+	assert.Empty(t, skipped)
+}
+
+// The skip runs before the confirm list, so the list names the other
+// agents and not the current agent.
+func TestStopAllViaHub_RmConfirmListOmitsCurrentAgent(t *testing.T) {
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, false, false)
+	require.NoError(t, run.err)
+	assert.Contains(t, run.stdout, "will be stopped and removed")
+	assert.Contains(t, run.stdout, "  - other-agent\n")
+	assert.Contains(t, run.stdout, "  - third-agent\n")
+	assert.NotContains(t, run.stdout, "  - self-agent", "the confirm list must not name the skipped current agent")
+}
+
+// When the current agent is the only running agent, stop --all --rm says
+// it was skipped instead of "No running agents found.".
+func TestStopAllViaHub_RmOnlyCurrentAgentText(t *testing.T) {
+	agents := []stopSelfHubAgent{{ID: selfAgentID, Name: selfAgentName}}
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false, false)
+	require.NoError(t, run.err)
+	assert.Empty(t, run.events, "nothing is stopped or removed")
+	assert.Contains(t, run.stderr, noOtherRunningAgentsMessage)
+	assert.NotContains(t, run.stderr, "No running agents found.", "the current agent is running; it was skipped")
+}
+
+// The JSON variant reports the message and lists the skipped agent.
+func TestStopAllViaHub_RmOnlyCurrentAgentJSON(t *testing.T) {
+	agents := []stopSelfHubAgent{{ID: selfAgentID, Name: selfAgentName}}
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, agents, true, false, true)
+	require.NoError(t, run.err)
+	assert.Empty(t, run.events)
+	doc := stopAllJSON(t, run.stdout)
+	assert.Equal(t, noOtherRunningAgentsMessage, doc["message"])
+	assert.Equal(t, []interface{}{selfAgentName}, doc["skipped"], "the JSON result must list the skipped current agent")
+	assert.Equal(t, []interface{}{}, doc["results"])
+}
+
+// The normal JSON summary of stop --all --rm lists the skipped agent too;
+// with --self nothing is skipped and the field is absent.
+func TestStopAllViaHub_RmJSONSummaryListsSkipped(t *testing.T) {
+	run := runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, false, true)
+	require.NoError(t, run.err)
+	doc := stopAllJSON(t, run.stdout)
+	assert.Equal(t, []interface{}{selfAgentName}, doc["skipped"], "the JSON summary must list the skipped current agent")
+	results, ok := doc["results"].([]interface{})
+	require.True(t, ok, "results must be a list")
+	assert.Len(t, results, 2, "the two other agents are stopped and removed")
+
+	run = runStopAllViaHub(t, selfAgentName, selfAgentID, stopSelfAllAgents, true, true, true)
+	require.NoError(t, run.err)
+	doc = stopAllJSON(t, run.stdout)
+	assert.NotContains(t, doc, "skipped", "with --self nothing is skipped")
 }
