@@ -320,7 +320,7 @@ func TestFetchRemoteForImport_RepoKeyOnTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchRemoteForImport: %v", err)
 	}
-	defer os.RemoveAll(cachePath)
+	t.Cleanup(func() { _ = os.RemoveAll(cachePath) })
 	if capturedAuth != "Bearer fake-repo-cred" {
 		t.Errorf("Authorization header = %q, want the repo-specific credential", capturedAuth)
 	}
