@@ -1472,13 +1472,10 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 				next(w, r)
 			}
 		case RouteWorkstation:
-			// Workstation mode gates the whole family (404 otherwise). A
-			// mutating workstation route additionally declares a Permission:
-			// it rewrites hub-wide configuration, and the hub binds loopback,
-			// which on a multi-tenant host (lever's jail) every agent reaches.
-			// Loopback origin is therefore not a trust boundary, so the write
-			// must also pass a permission check (super-admin, so the local
-			// desktop's dev user, still passes).
+			// Agent containers also reach the hub over loopback, so loopback
+			// origin is not a trust boundary: a mutating workstation route
+			// also declares a Permission (the dev user, a super-admin,
+			// still passes).
 			if !s.workstation {
 				http.NotFound(w, r)
 				return
