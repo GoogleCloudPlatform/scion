@@ -50,8 +50,9 @@ func (a *Agent) trackDeadline(ctx context.Context, st core.Stream, claims *grant
 	id := st.ID()
 	return a.deadlines.Track(target.BindingFromWelcome(w), id, claims, func(code uint32, reason string) {
 		log.Info("Conduit: stream %d reached its authorization deadline; closing", id)
-		// CloseWithCode waits for the peer's close; the deadline timer
-		// does not wait with it.
+		// The close runs off the timer callback, which a fake clock runs
+		// synchronously inside Advance, so the callback never takes the
+		// stream's or the session's locks itself.
 		go func() { _ = st.CloseWithCode(code, reason) }()
 	})
 }
