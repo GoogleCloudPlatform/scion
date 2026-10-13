@@ -196,11 +196,18 @@ scion server start
 ```
 
 It runs in the background, adds itself to your list of hubs as `local` (`http://127.0.0.1:8080`),
-and on the first run opens the [Onboarding Wizard](/scion/getting-started/onboarding/). Without a
-running hub, agent commands fail with:
+and on the first run opens the [Onboarding Wizard](/scion/getting-started/onboarding/). Before any
+hub is set up, agent commands fail with:
 
 ```
 No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.
+```
+
+Once the local hub is set up, commands run while it is stopped (for example after
+`scion server stop`) fail with:
+
+```
+Local scion server is not running. Start it with 'scion server start'.
 ```
 
 To use a shared hub instead, see [Connecting to a Hub](/scion/hosted/user/hosted-user/).

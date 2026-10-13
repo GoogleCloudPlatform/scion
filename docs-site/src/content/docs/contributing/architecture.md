@@ -70,7 +70,7 @@ An **Agent** is an isolated container running an LLM harness. Each agent has:
 | Component | Description |
 | :--- | :--- |
 | **Home directory** | Mounted at `/home/<user>` inside the container. Contains harness config, credentials, and a per-agent `agent-info.json`. |
-| **Workspace** | Mounted at `/workspace`. A per-agent clone, a git worktree, or a shared or empty directory, depending on the project's workspace sharing mode; see [About Workspaces](/scion/local/workspace/). |
+| **Workspace** | Mounted at `/workspace` (for a repository linked to the local workstation Hub, the agent works in its worktree at `/repo-root/.scion/agents/<name>/workspace`). A per-agent clone, a git worktree, or a shared or empty directory, depending on the project's workspace sharing mode; see [About Workspaces](/scion/local/workspace/). |
 | **Template** | The blueprint that seeded the agent's home directory and configuration. |
 | **Harness** | The LLM-specific adapter (Claude, Gemini, OpenCode, Codex, or Generic). |
 

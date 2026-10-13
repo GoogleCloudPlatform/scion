@@ -115,7 +115,7 @@ Furthermore, agent identities are **strictly scoped by their project** (e.g., `p
 
 ### Workspace Sharing Modes
 
-A **Workspace** is the working directory mounted into a single agent's container at `/workspace`. How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
+A **Workspace** is the working directory mounted into a single agent's container, at `/workspace` (for a repository linked to the local workstation Hub, at the agent's worktree path under `/repo-root/.scion/agents/<name>/workspace`). How it is provisioned across a project's agents is set by the project's **workspace sharing mode**, chosen when the project is created. There are four modes:
 
 - **Shared-plain** — One workspace directory is mounted into every agent with no per-agent isolation. This is the model used for plain (non-git) projects.
 - **Worktree-per-agent** — Each agent gets its own [git worktree](https://git-scm.com/docs/git-worktree) over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see [Linked git projects](/scion/local/workspace/#linked-git-projects)); requires git 2.48 or later on the broker (on Kubernetes, only with NFS workspace storage).
@@ -123,7 +123,7 @@ A **Workspace** is the working directory mounted into a single agent's container
 - **Empty-per-agent** — For Hub-managed projects without git: each agent gets its own private directory that starts empty. Use [shared directories](/scion/local/workspaces-and-sharing/#2-the-shared-directories-invariant) to share or keep files.
 
 **Worktree-per-agent (a repository linked to the local workstation Hub):**
-- A new worktree of your checkout is created at `.scion/agents/<agent>/workspace` with a branch named after the agent, and mounted into the agent's container as `/workspace`.
+- A new worktree of your checkout is created at `.scion/agents/<agent>/workspace` with a branch named after the agent. Your repository is mounted in the container at `/repo-root`, and the agent works in `/repo-root/.scion/agents/<agent>/workspace` (not `/workspace`).
 - Agents operate on the same repository history as your checkout but have independent working directories.
 - Work is merged back manually (e.g., `git merge <agent-branch>`). See [Linked git projects](/scion/local/workspace/#linked-git-projects) for the checks and cautions.
 

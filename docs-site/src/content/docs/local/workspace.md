@@ -2,7 +2,7 @@
 title: About Workspaces
 ---
 
-Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. This is where the agent reads code, makes changes, and runs commands.
+Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container (except for a repository linked to the local workstation Hub, where the agent works in its worktree path; see [Linked git projects](#linked-git-projects)). This is where the agent reads code, makes changes, and runs commands.
 
 Scion provides flexible options for how this workspace is backed on your host machine, ranging from isolated git worktrees to direct directory mounts.
 
@@ -192,6 +192,10 @@ Using hub, git worktree per agent for repo <remote>
   have not pushed are visible to the agent; uncommitted changes are not.
 - **Branches land in your repository.** The agent's branch shows up in `git branch`; merge it
   directly.
+- **The working directory is the worktree, not `/workspace`.** Your repository is mounted in the
+  container at `/repo-root`, and the agent starts in `/repo-root/.scion/agents/<name>/workspace`.
+  `/workspace` is not mounted for these agents. Scripts and instructions should use `$PWD` or
+  `git rev-parse --show-toplevel` instead of a hard-coded `/workspace`.
 - **Deleting an agent deletes its branch**, including commits you have not merged, unless you pass
   `--preserve-branch` to `scion delete`.
 - **Git 2.48 or newer.** The first agent worktree sets `repositoryformatversion=1` and
