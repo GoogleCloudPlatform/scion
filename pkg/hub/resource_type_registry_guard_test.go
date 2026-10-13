@@ -232,7 +232,7 @@ func enclosingFuncBody(f *ast.File, n ast.Node) *ast.BlockStmt {
 // function literal, by a compound, defining or multi-value assignment, or
 // as a range variable. A parenthesised operand, as in (x) = v or &(x),
 // is the same variable.
-func varWrites(body *ast.BlockStmt, obj *ast.Object) (rhs []ast.Expr, ok bool) {
+func varWrites(body *ast.BlockStmt, obj *ast.Object) (rhs []ast.Expr, ok bool) { //nolint:staticcheck // SA1019: syntax-only resolution via ast.Object; no type info is loaded.
 	ok = true
 	is := func(e ast.Expr) bool {
 		id, isIdent := ast.Unparen(e).(*ast.Ident)
