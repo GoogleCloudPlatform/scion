@@ -42,42 +42,53 @@ func requestCredentialKind(ctx context.Context, identity Identity) CredentialKin
 	return kind
 }
 
-// selfReadCredentialKinds are the credential kinds a self read accepts.
-// An empty or unknown kind is refused.
-var selfReadCredentialKinds = map[CredentialKind]bool{
-	CredentialKindInteractive:        true,
-	CredentialKindUAT:                true,
-	CredentialKindAgentJWT:           true,
-	CredentialKindFederation:         true,
-	CredentialKindBroker:             true,
-	CredentialKindDev:                true,
-	CredentialKindDelegatedAgent:     true,
-	CredentialKindWorkloadDelegation: true,
-	CredentialKindHubDelivery:        true,
+// catalogCredentialRequestKinds maps a catalog credential kind to the
+// request credential kinds it names: a session JWT is an interactive
+// session or a dev credential.
+var catalogCredentialRequestKinds = map[authzop.CredentialKind][]CredentialKind{
+	authzop.CredentialSessionJWT: {CredentialKindInteractive, CredentialKindDev},
+	authzop.CredentialScopedUAT:  {CredentialKindUAT},
+	authzop.CredentialAgentJWT:   {CredentialKindAgentJWT},
 }
 
-// selfReadCredential classifies the credential of a self read. ok is false
-// when the read is refused: an empty or unknown credential kind, a user
-// access token kind without a token identity, or a token identity with any
-// other kind. token is the caller's token identity when the request
-// carries a user access token, and nil otherwise; a token reads its
-// holder's records limited to its ceiling and boundary.
-func selfReadCredential(ctx context.Context, identity Identity) (token *ScopedUserIdentity, ok bool) {
+// operationAdmitsRequestKind reports whether the catalog operation op
+// declares a credential that names the request credential kind. An
+// unknown operation admits nothing.
+func operationAdmitsRequestKind(op authzop.OperationID, kind CredentialKind) bool {
+	spec, ok := catalogOperationByID(op)
+	if !ok {
+		return false
+	}
+	for _, declared := range spec.Credentials {
+		for _, k := range catalogCredentialRequestKinds[declared] {
+			if k == kind {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// selfReadCredential classifies the credential of a self read against the
+// credentials the catalog operation op declares. ok is false for a kind
+// the operation does not declare (an empty or unknown kind included), for
+// a user access token kind without a token identity, and for a token
+// identity with any other kind. token is the caller's token identity when
+// the request carries a user access token, and nil otherwise; a token
+// reads its holder's records limited to its ceiling and boundary.
+func selfReadCredential(ctx context.Context, identity Identity, op authzop.OperationID) (token *ScopedUserIdentity, ok bool) {
 	if isNilIdentity(identity) {
 		return nil, false
 	}
 	kind := requestCredentialKind(ctx, identity)
 	scoped, isToken := identity.(*ScopedUserIdentity)
 	if isToken || kind == CredentialKindUAT {
-		if !isToken || kind != CredentialKindUAT {
+		if !isToken || kind != CredentialKindUAT || !operationAdmitsRequestKind(op, kind) {
 			return nil, false
 		}
 		return scoped, true
 	}
-	if !selfReadCredentialKinds[kind] {
-		return nil, false
-	}
-	return nil, true
+	return nil, operationAdmitsRequestKind(op, kind)
 }
 
 // refuseSelfReadCredential logs and writes the 403 for a self read whose

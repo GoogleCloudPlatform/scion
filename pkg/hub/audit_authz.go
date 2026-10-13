@@ -335,9 +335,10 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A user access token explains through its own ceiling and boundary;
-	// an empty or unknown credential kind is refused.
-	token, credentialOK := selfReadCredential(ctx, identity)
+	// Only the credentials the user.self.explain catalog operation
+	// declares are admitted, for self and cross-principal explains alike.
+	// A user access token explains through its own ceiling and boundary.
+	token, credentialOK := selfReadCredential(ctx, identity, "user.self.explain")
 	if !credentialOK {
 		refuseSelfReadCredential(w, r, identity, "hub")
 		return

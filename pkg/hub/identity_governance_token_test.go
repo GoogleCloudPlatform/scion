@@ -369,8 +369,9 @@ func TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain(t *testing.T) {
 
 // TestAdminStatusToken_ReportsCeilingIntersection pins that admin-status
 // for a token lists only the holder's system-scope permissions that the
-// token's ceiling allows and that are eligible for its boundary kind, while
-// a session sees every permission.
+// token's ceiling allows and that are eligible for its boundary kind, and
+// reports isAdmin and isSuperAdmin false, while a session sees every
+// permission and its admin status.
 func TestAdminStatusToken_ReportsCeilingIntersection(t *testing.T) {
 	srv, s := testServer(t)
 	admin := hubConfigTokenUser(t, s, "ig-status-super", store.SystemRoleSuperAdmin)
@@ -389,6 +390,7 @@ func TestAdminStatusToken_ReportsCeilingIntersection(t *testing.T) {
 	got := status(doRequestWithToken(t, srv, hubToken, http.MethodGet, "/api/v1/auth/admin-status", nil))
 	assert.Equal(t, []string{"agent.read", "hub.audit.read", "role.read"}, got.Permissions)
 	assert.False(t, got.IsSuperAdmin)
+	assert.False(t, got.IsAdmin, "a token reports no admin status")
 
 	projectToken := mintHubConfigToken(t, srv, admin, projectBoundary(project), "agent:read", "project:read")
 	got = status(doRequestWithToken(t, srv, projectToken, http.MethodGet, "/api/v1/auth/admin-status", nil))
@@ -398,6 +400,7 @@ func TestAdminStatusToken_ReportsCeilingIntersection(t *testing.T) {
 	got = status(doRequestAsIdentity(t, srv, adminSession, http.MethodGet, "/api/v1/auth/admin-status", nil))
 	assert.Contains(t, got.Permissions, "role.create")
 	assert.Contains(t, got.Permissions, "hub.audit.read")
+	assert.True(t, got.IsAdmin, "a super-admin session reports admin status")
 	assert.True(t, sort.StringsAreSorted(got.Permissions))
 }
 
@@ -634,32 +637,105 @@ func TestSelfIdentityReadsToken_AnyTokenReads(t *testing.T) {
 }
 
 // TestSelfReads_UnknownCredentialKindRefused pins the credential rule of
-// admin-status, the caller's groups and explain: an unknown credential kind
-// is refused, a user access token kind without a token identity is refused,
-// and an interactive session is admitted.
+// admin-status, the caller's groups and explain: an interactive session is
+// admitted; an unknown kind, a user access token kind without a token
+// identity, a broker acting for the user, a hub delivery credential, a
+// workload delegation and a federation credential are refused; an agent
+// JWT is refused on admin-status and the caller's groups.
 func TestSelfReads_UnknownCredentialKindRefused(t *testing.T) {
 	srv, s := testServer(t)
 	user := seedRoleUser(t, s, tid("ig-kind-user"), "", true)
 	explainBody := `{"resource":{"type":"user","id":"` + user.ID() + `"},"action":"read"}`
 	routes := []struct {
-		name    string
-		handler http.HandlerFunc
-		method  string
-		path    string
-		body    string
+		name     string
+		handler  http.HandlerFunc
+		method   string
+		path     string
+		body     string
+		agentJWT bool // whether the row admits an agent JWT
 	}{
-		{"admin-status", srv.handleAuthAdminStatus, http.MethodGet, "/api/v1/auth/admin-status", ""},
-		{"my groups", srv.handleMyGroups, http.MethodGet, "/api/v1/users/me/groups", ""},
-		{"explain", srv.handleAuthzExplain, http.MethodPost, "/api/v1/authz/explain", explainBody},
+		{"admin-status", srv.handleAuthAdminStatus, http.MethodGet, "/api/v1/auth/admin-status", "", false},
+		{"my groups", srv.handleMyGroups, http.MethodGet, "/api/v1/users/me/groups", "", false},
+		{"explain", srv.handleAuthzExplain, http.MethodPost, "/api/v1/authz/explain", explainBody, true},
+	}
+	refused := []CredentialKind{
+		CredentialKind("unknown-kind"),
+		CredentialKindUAT,
+		CredentialKindBroker,
+		CredentialKindHubDelivery,
+		CredentialKindWorkloadDelegation,
+		CredentialKindFederation,
 	}
 	for _, r := range routes {
 		t.Run(r.name, func(t *testing.T) {
-			rec := igRequestWithCredential(r.handler, user, CredentialKind("unknown-kind"), r.method, r.path, r.body)
-			assert.Equal(t, http.StatusForbidden, rec.Code, "unknown kind: %s", rec.Body.String())
-			rec = igRequestWithCredential(r.handler, user, CredentialKindUAT, r.method, r.path, r.body)
-			assert.Equal(t, http.StatusForbidden, rec.Code, "token kind without a token identity: %s", rec.Body.String())
-			rec = igRequestWithCredential(r.handler, user, CredentialKindInteractive, r.method, r.path, r.body)
+			for _, kind := range refused {
+				rec := igRequestWithCredential(r.handler, user, kind, r.method, r.path, r.body)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "kind %q: %s", kind, rec.Body.String())
+			}
+			if !r.agentJWT {
+				rec := igRequestWithCredential(r.handler, user, CredentialKindAgentJWT, r.method, r.path, r.body)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "agent JWT: %s", rec.Body.String())
+			}
+			rec := igRequestWithCredential(r.handler, user, CredentialKindInteractive, r.method, r.path, r.body)
 			assert.Equal(t, http.StatusOK, rec.Code, "session: %s", rec.Body.String())
 		})
+	}
+}
+
+// TestSelfReadCredential_FollowsCatalogCredentials pins that the self-read
+// credential rule admits exactly the request credential kinds the catalog
+// operation declares: a session JWT names an interactive session and a
+// dev credential, a scoped token names a user access token, and an agent
+// JWT is declared only on the caller's own explain.
+func TestSelfReadCredential_FollowsCatalogCredentials(t *testing.T) {
+	kinds := []CredentialKind{
+		CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT,
+		CredentialKindBroker, CredentialKindFederation, CredentialKindHubDelivery,
+		CredentialKindWorkloadDelegation, CredentialKindDelegatedAgent, CredentialKind(""),
+	}
+	want := map[authzop.OperationID][]CredentialKind{
+		"user.self.adminstatus": {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
+		"user.self.groups":      {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT},
+		"user.self.explain":     {CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindAgentJWT},
+	}
+	for op, admitted := range want {
+		for _, kind := range kinds {
+			expected := false
+			for _, a := range admitted {
+				if a == kind {
+					expected = true
+				}
+			}
+			assert.Equal(t, expected, operationAdmitsRequestKind(op, kind), "%s admits %q", op, kind)
+		}
+	}
+	assert.False(t, operationAdmitsRequestKind("no.such.operation", CredentialKindInteractive))
+}
+
+// TestGovernanceReadsToken_ProjectBoundaryRefused pins at request level
+// that a project-boundary credential carrying role:read,
+// role_binding:read and access_constraint:read is refused on every role,
+// permission registry, role binding and access constraint read: their
+// targets are hub-level records.
+func TestGovernanceReadsToken_ProjectBoundaryRefused(t *testing.T) {
+	m := newBearerMatrixFixture(t)
+	adminUser := NewAuthenticatedUser(m.adminID, m.adminID+"@test.com", m.adminID, "admin", "api")
+	selectors := []string{"role:read", "role_binding:read", "access_constraint:read"}
+	credential := NewScopedUserIdentityWithBoundaryAndDecoration(adminUser, projectBoundary(m.ids.project),
+		selectors, tid("ig-gov-project-cred"), bearerCeiling(t, selectors...), nil)
+	for _, path := range []string{
+		"/api/v1/admin/roles",
+		"/api/v1/admin/roles/" + m.ids.roleDefinition,
+		"/api/v1/admin/roles/export",
+		"/api/v1/admin/roles/" + m.ids.roleDefinition + "/export",
+		"/api/v1/admin/permissions",
+		"/api/v1/admin/role-bindings",
+		"/api/v1/admin/role-bindings/user/" + m.ids.userDel,
+		"/api/v1/admin/access-constraints",
+		"/api/v1/admin/access-constraints/" + m.ids.accessConstraint,
+		"/api/v1/admin/access-constraints/" + m.ids.accessConstraint + "/affected-principals",
+	} {
+		rec := doRequestAsIdentity(t, m.srv, credential, http.MethodGet, path, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "GET %s: %s", path, rec.Body.String())
 	}
 }

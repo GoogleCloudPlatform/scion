@@ -780,7 +780,9 @@ type AdminStatusResponse struct {
 //
 // For a user access token the permissions list holds only the permissions
 // the token may use: those its ceiling allows that are eligible for its
-// boundary kind. An empty or unknown credential kind is refused.
+// boundary kind, and isAdmin and isSuperAdmin are false. Only the
+// credentials the user.self.adminstatus catalog operation declares are
+// admitted.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -792,7 +794,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 		Unauthorized(w)
 		return
 	}
-	token, ok := selfReadCredential(r.Context(), user)
+	token, ok := selfReadCredential(r.Context(), user, "user.self.adminstatus")
 	if !ok {
 		refuseSelfReadCredential(w, r, user, "user")
 		return
@@ -828,6 +830,9 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 
 	if token != nil {
 		perms = filterPermissionsForToken(token, perms)
+		// A token reports no admin status: isAdmin and isSuperAdmin
+		// describe an unscoped caller.
+		isAdmin = false
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.

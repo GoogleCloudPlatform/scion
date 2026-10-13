@@ -117,6 +117,10 @@ var recordedProvenanceRequired = toPermissionSet(recordedProvenanceRequiredIDs)
 // while it is reserved: when you un-reserve a row, decide whether
 // unrecorded chains may hold it, and if not, cover it with a
 // ceiling-optional scope or add it to this set explicitly.
+//
+// user.list is not Reserved (the user list checks it) and is not in the
+// set: it maps to no agent scope, so no agent role, and no unrecorded
+// chain, can hold it.
 var legacyChainExcludedPermissions = toPermissionSet(append(agentScopeCoverage(sortedOptionalRoleScopes()), permissions.ReservedIDs()...))
 
 // sortedOptionalRoleScopes returns the keys of ceilingOptionalRoleScopes in

@@ -50,8 +50,8 @@ type GroupsResponse struct {
 // handleMyGroups handles GET /api/v1/users/me/groups. A project-boundary
 // user access token lists the caller's groups that belong to no project and
 // the groups of its boundary project, the latter only while the caller is a
-// current member of that project. An empty or unknown credential kind is
-// refused.
+// current member of that project. Only the credentials the
+// user.self.groups catalog operation declares are admitted.
 func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -65,7 +65,7 @@ func (s *Server) handleMyGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	token, ok := selfReadCredential(ctx, user)
+	token, ok := selfReadCredential(ctx, user, "user.self.groups")
 	if !ok {
 		refuseSelfReadCredential(w, r, user, "group")
 		return
