@@ -40,12 +40,23 @@ func alwaysAlive() bool { return true }
 // /healthz body. withHub adds the nested hub health of the combined web port.
 func delayedHealthServer(t *testing.T, delay time.Duration, withHub bool) *httptest.Server {
 	t.Helper()
+	srv, _ := delayedHealthServerAnswered(t, delay, withHub)
+	return srv
+}
+
+// delayedHealthServerAnswered is delayedHealthServer that also reports
+// whether it has sent a healthy answer. The flag is set before the healthy
+// response is written, so a client that received one sees it set.
+func delayedHealthServerAnswered(t *testing.T, delay time.Duration, withHub bool) (*httptest.Server, *atomic.Bool) {
+	t.Helper()
+	answered := &atomic.Bool{}
 	readyAt := time.Now().Add(delay)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/healthz" || time.Now().Before(readyAt) {
 			w.WriteHeader(http.StatusServiceUnavailable)
 			return
 		}
+		answered.Store(true)
 		w.Header().Set("Content-Type", "application/json")
 		if withHub {
 			_, _ = w.Write([]byte(`{"status":"healthy","hub":{"status":"healthy"}}`))
@@ -54,7 +65,7 @@ func delayedHealthServer(t *testing.T, delay time.Duration, withHub bool) *httpt
 		_, _ = w.Write([]byte(`{"status":"healthy"}`))
 	}))
 	t.Cleanup(srv.Close)
-	return srv
+	return srv, answered
 }
 
 // closedURL returns a /healthz URL on a port nothing listens on.
@@ -68,20 +79,26 @@ func closedURL(t *testing.T) string {
 
 func TestWaitForServerListening_ReturnsOnceServerAnswers(t *testing.T) {
 	const delay = 150 * time.Millisecond
-	hubSrv := delayedHealthServer(t, delay, true)
-	brokerSrv := delayedHealthServer(t, delay/2, false)
+	hubSrv, hubAnswered := delayedHealthServerAnswered(t, delay, true)
+	brokerSrv, brokerAnswered := delayedHealthServerAnswered(t, delay/2, false)
 	targets := []serverReadyTarget{
 		{Name: "hub API and web", URL: hubSrv.URL + "/healthz", NeedsHub: true},
 		{Name: "runtime broker", URL: brokerSrv.URL + "/healthz"},
 	}
 
-	start := time.Now()
 	err := waitForServerListening(&http.Client{Timeout: time.Second}, targets, 5*time.Second, readyTestInterval, 0, alwaysAlive)
 	if err != nil {
 		t.Fatalf("waitForServerListening: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed < delay {
-		t.Fatalf("returned after %s, before the server answered (%s)", elapsed, delay)
+	// Assert on ordering, not elapsed time: each server's ready time is
+	// anchored when the server is built, which is earlier than any start
+	// time the test could take, so an elapsed-time check can come out just
+	// under the delay even when the wait was correct (ptone/scion#4840).
+	if !hubAnswered.Load() {
+		t.Fatal("returned before the hub API and web listener answered healthy")
+	}
+	if !brokerAnswered.Load() {
+		t.Fatal("returned before the runtime broker answered healthy")
 	}
 	// A request made right after the wait succeeds.
 	resp, err := http.Get(hubSrv.URL + "/healthz")

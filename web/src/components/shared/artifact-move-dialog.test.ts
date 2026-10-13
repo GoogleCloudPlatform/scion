@@ -173,6 +173,27 @@ describe('artifact move dialog', () => {
     expect(hint).not.toContain('Links and grants are kept.');
   });
 
+  it('says the home project was deleted only when it was (ptone/scion#4583)', async () => {
+    mockFetch([{ id: 'proj-2', name: 'docs' }], json({}));
+    let el = await mount();
+    const what = (): string =>
+      el.shadowRoot!.querySelector('p.what')!.textContent!.replace(/\s+/g, ' ').trim();
+    expect(what()).toBe(
+      'Onboarding guide draft Choose a new home project; its members will be able to view the artifact.'
+    );
+    document.body.innerHTML = '';
+    el = document.createElement('scion-artifact-move-dialog') as ScionArtifactMoveDialog;
+    el.artifact = ARTIFACT;
+    el.homeDeleted = true;
+    document.body.appendChild(el);
+    el.open = true;
+    await settle(el);
+    expect(what()).toBe(
+      'Onboarding guide draft The home project of this artifact was deleted. Choose a new home ' +
+        'project; its members will be able to view the artifact.'
+    );
+  });
+
   it('says so when the user has no other project', async () => {
     mockFetch([{ id: 'gone-1', name: 'old' }], json({}));
     const el = await mount();

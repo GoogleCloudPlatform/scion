@@ -767,18 +767,29 @@ func TestTLSSkipVerifyIsDistinctFromPlaintext(t *testing.T) {
 }
 
 func TestCloudDestinationRejectsContradictoryOrIgnoredTLSOptions(t *testing.T) {
+	// Each row asserts the conflict message so it cannot pass on an
+	// unrelated error (for example missing GCP default credentials).
+	const plaintextConflict = "plaintext OTLP transport conflicts"
+	const gcpConflict = "does not support generic OTLP TLS overrides"
 	for _, tc := range []struct {
-		name   string
-		config Config
+		name    string
+		config  Config
+		wantErr string
 	}{
-		{"plaintext plus skip", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, SkipTLSVerify: true}},
-		{"plaintext plus CA", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CAFile: "ca.pem"}},
-		{"GCP plaintext override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", Insecure: true}},
-		{"GCP skip verify override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", SkipTLSVerify: true}},
+		{"plaintext plus skip", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, SkipTLSVerify: true}, plaintextConflict},
+		{"plaintext plus CA", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CAFile: "ca.pem"}, plaintextConflict},
+		{"plaintext plus client certificate", Config{CloudEnabled: true, Endpoint: "127.0.0.1:1234", Protocol: "grpc", Insecure: true, CertFile: "client.pem", KeyFile: "client-key.pem"}, plaintextConflict},
+		{"GCP client certificate override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", CertFile: "client.pem", KeyFile: "client-key.pem"}, gcpConflict},
+		{"GCP plaintext override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", Insecure: true}, gcpConflict},
+		{"GCP skip verify override", Config{CloudEnabled: true, CloudProvider: "gcp", ProjectID: "test", SkipTLSVerify: true}, gcpConflict},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := NewCloudExporter(context.Background(), &tc.config); err == nil {
+			_, err := NewCloudExporter(context.Background(), &tc.config)
+			if err == nil {
 				t.Fatal("invalid TLS configuration was accepted")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want it to contain %q", err, tc.wantErr)
 			}
 		})
 	}

@@ -216,19 +216,27 @@ func TestKeyRetryBackoff(t *testing.T) {
 			go func() { a.refreshKeysLoop(ctx); close(done) }()
 			t.Cleanup(func() { cancel(); <-done })
 
-			waitPending(t, clk, 1)
+			// Each timer is armed only once the previous fetch has
+			// finished, so waiting on its exact deadline pins the delay.
+			now := clk.Now()
+			if !clk.WaitForTimer(waitTimeout, now.Add(tt.interval)) {
+				t.Fatalf("no timer armed for the scheduled fetch at %v", tt.interval)
+			}
 			clk.Advance(tt.interval) // first scheduled fetch fails
+			now = now.Add(tt.interval)
 			for i, d := range tt.want {
-				waitPending(t, clk, 1)
-				clk.Advance(d - time.Millisecond)
+				if !clk.WaitForTimer(waitTimeout, now.Add(d)) {
+					t.Fatalf("retry %d: no timer armed for %v (%d fetches)", i+1, d, h.keyHits.Load())
+				}
 				if n := h.keyHits.Load(); n != int64(i+1) {
-					t.Fatalf("retry %d: fetched before %v (%d fetches)", i+1, d, n)
+					t.Fatalf("retry %d: %d fetches before it, want %d", i+1, n, i+1)
 				}
-				clk.Advance(time.Millisecond)
-				waitPending(t, clk, 1)
-				if n := h.keyHits.Load(); n != int64(i+2) {
-					t.Fatalf("retry %d: no fetch after %v (%d fetches)", i+1, d, n)
-				}
+				clk.Advance(d)
+				now = now.Add(d)
+			}
+			waitPending(t, clk, 1) // the last retry ran and the next one is armed
+			if n := h.keyHits.Load(); n != int64(len(tt.want)+1) {
+				t.Fatalf("%d fetches after the last retry, want %d", n, len(tt.want)+1)
 			}
 		})
 	}

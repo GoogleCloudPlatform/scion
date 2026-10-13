@@ -95,6 +95,21 @@ func ThreadGroupNameKey(name string) string {
 	return strings.ToLower(strings.TrimSpace(stripControlChars(name)))
 }
 
+// SanitizeThreadGroupName turns a free-form name (such as a personal thread
+// group name, which was never validated) into one that
+// ValidateThreadGroupName accepts: control characters are removed, the name
+// is trimmed, and a name longer than MaxThreadGroupNameRunes runes is
+// truncated to that length and trimmed again. It returns "" when nothing is
+// left; such a name is skipped, not stored. The automatic migration of
+// personal groups uses it (design section 5a, rule 2).
+func SanitizeThreadGroupName(name string) string {
+	s := strings.TrimSpace(stripControlChars(name))
+	if utf8.RuneCountInString(s) > MaxThreadGroupNameRunes {
+		s = strings.TrimSpace(string([]rune(s)[:MaxThreadGroupNameRunes]))
+	}
+	return s
+}
+
 // ValidateThreadGroupName checks a thread group name and returns it trimmed.
 // A valid name has no control characters and is 1 to
 // MaxThreadGroupNameRunes runes long after trimming. Any other name returns
