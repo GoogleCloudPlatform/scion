@@ -232,7 +232,7 @@ Because an agent cannot share its own artifacts, it cannot choose who reviews it
 
 They see **Grant review access** on the artifact page instead of **Share**. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
-Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. The owner and *Can manage* users can also give *Can review*, from the Share dialog.
+Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It cannot be given to someone who already holds a grant of their own on the artifact (*Can view*, *Can edit* or *Can manage*); the request is refused. Ask the owner or a *Can manage* user to change that grant to *Can edit* instead, which includes review.
 
 ## Attach artifacts in chat
 
@@ -254,7 +254,7 @@ Keep in mind:
 
 - The Hub keeps only references that you can read, and drops the others with a warning.
 - When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; share the artifact with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
-- Group (`group[...]`) and broadcast messages do not carry artifact references.
+- Some messages do not carry artifact references, among them group (`group[...]`) and broadcast messages, @-mention copies, and messages that arrive through chat plugins. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
 
 ## Expiry, moving and deleting
 
@@ -264,7 +264,7 @@ These actions are for **users** who manage the artifact. Agents cannot do any of
 - **Moving.** **Move…** gives an artifact a new home project, for example after its project was deleted. It appears on the artifact page, and in the Artifacts list on rows whose home project was deleted, for the owner and users with *Can manage*, while the Hub's cross-project sharing setting is on. You must be allowed to publish in the new project. The old home project loses its access unless you add a grant for it.
 - **Deleting.** Run `scion artifact delete <ref>` (users only; add `--yes` when not at a terminal). The owner, a user with *Can manage*, and the project owners and admins of the artifact's home project (and super-admins) can delete it. Deleting ends its grants and share links, and chat references to it show as unavailable. **There is no undelete.**
 
-Deleting a project does not delete its artifacts, and it does not revoke their share links. Revoke the links or move the artifact if you need to end that access.
+Deleting a project does not delete its artifacts, and it does not revoke their share links. Moving the artifact does not end them either. To end that access, revoke the links, set the artifact to expire under **Retention**, or delete it.
 
 ## What agents cannot do
 
@@ -294,16 +294,18 @@ A `404` means that the artifact does not exist **or** that you cannot read it. T
 
 ### The artifacts experiment is off
 
-While `hub.artifacts` is off (or the Hub's artifact settings are disabled):
+While `hub.artifacts` is off:
 
 - **Web:** there is no *Artifacts* item in the sidebar, artifact pages show "not found", the project Files area has no *Artifacts* view, and the chat paperclip offers only file upload.
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
+If the experiment is on but artifacts are disabled in the Hub's settings, the web pages still appear, but every artifact request behind them, and every artifact command in the CLI, answers `404`. Ask a Hub admin to check the Hub's `artifacts` settings.
+
 ### A review is refused
 
 - **Text outside the marks changed** (`unmarked_changes`). The page, or the CLI, names the lines that changed outside marks. Undo those changes, or mark them, and save again. Use **Edit** or `--version-of` for a plain edit.
-- **A newer version was published** (`stale_review`). Review the current version again.
+- **A newer version was published, or is being published** (`stale_review`). Review the current version again, once any version being published has finished.
 
 ### An HTML artifact looks broken
 
