@@ -345,7 +345,7 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 		return false, ""
 	}
 	state := s.waitForEmbeddedBroker(ctx)
-	if state.id != "" && state.id == runtimeBrokerID {
+	if state.has(runtimeBrokerID) {
 		return s.hubDefaultRuntimeAllowed(ctx, runtimeBrokerID, profileName, agentName, projectID)
 	}
 	switch {
@@ -357,14 +357,14 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 		slog.Warn("hub-default GCP passthrough denied: co-located broker registration still pending",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID, "waited", embeddedBrokerWaitTimeout)
-	case state.id == "":
+	case len(state.ids) == 0:
 		slog.Info("hub-default GCP passthrough denied: hub has no embedded broker registered",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID)
 	default:
 		slog.Info("hub-default GCP passthrough denied: broker is not the hub's embedded broker",
 			"surface", SurfaceHubDefault, "project_id", projectID,
-			"broker", runtimeBrokerID, "embedded_broker", state.id)
+			"broker", runtimeBrokerID, "embedded_brokers", state.sortedIDs())
 	}
 	return false, ""
 }

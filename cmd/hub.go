@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -569,6 +570,11 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 }
 
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
+	// With a hub profile selected, the client comes only from the profile:
+	// none of the credentials below is read, and there is no fallback.
+	if hubProfileSelected() {
+		return openHubProfileClient()
+	}
 	endpoint := GetHubEndpoint(settings)
 	if endpoint == "" {
 		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
@@ -760,6 +766,11 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
+	// With a hub profile, report the profile session and gate on it.
+	if hubProfileSelected() {
+		return runHubProfileStatus(cmd)
+	}
+
 	// Resolve project path to find project settings
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
@@ -805,6 +816,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		// Add auth info to JSON output
 		status["authMethod"] = authInfo.MethodType
 		status["authSource"] = authInfo.Source
+		status["bearerSource"] = bearerSourceLabel(authInfo)
 		status["isDevAuth"] = authInfo.IsDevAuth
 
 		// Try to connect and get health, then verify auth
@@ -919,10 +931,12 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		if meErr != nil {
 			fmt.Println("Status:     Not authenticated")
 			fmt.Printf("Method:     %s (configured but not accepted by server)\n", authInfo.Method)
+			fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 			fmt.Println("            Run 'scion hub auth login' to authenticate.")
 		} else {
 			authVerified = true
 			fmt.Printf("Method:     %s\n", authInfo.Method)
+			fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 			if authInfo.IsDevAuth {
 				fmt.Println("            (development mode - not for production use)")
 			}
@@ -948,6 +962,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	} else {
 		// Can't reach server to verify - show local auth info only
 		fmt.Printf("Method:     %s (not verified - server unreachable)\n", authInfo.Method)
+		fmt.Printf("Source:     %s\n", bearerSourceLabel(authInfo))
 		if authInfo.IsDevAuth {
 			fmt.Println("            (development mode - not for production use)")
 		}
@@ -1316,41 +1331,7 @@ func runHubProjectsInfo(cmd *cobra.Command, args []string) error {
 		outputFormat = "json"
 	}
 
-	// Resolve project path to find project settings
-	gp := projectPath
-	if gp == "" && globalMode {
-		gp = "global"
-	}
-
-	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
-	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
-	}
-
-	settings, err := config.LoadSettings(resolvedPath)
-	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
-	}
-
-	// Determine project name from args or current project
-	var projectName string
-	if len(args) > 0 {
-		projectName = args[0]
-	} else {
-		// Use current project name
-		if isGlobal {
-			projectName = "global"
-		} else {
-			gitRemote := util.GetGitRemote()
-			if gitRemote != "" {
-				projectName = util.ExtractRepoName(gitRemote)
-			} else {
-				projectName = config.GetProjectName(resolvedPath)
-			}
-		}
-	}
-
-	client, err := getHubClient(settings)
+	projectName, client, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}
@@ -1490,7 +1471,22 @@ func providerCapacityIndicator(p hubclient.ProjectProvider) string {
 	return fmt.Sprintf(" (agents: %s)", formatProviderCapacity(p))
 }
 
-func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
+// hubProjectsTarget resolves the project named by args (or the current
+// project) and a hub client for 'hub projects info' and 'delete'. With a
+// hub profile the project must be named: no local project is resolved and
+// no local settings are read.
+func hubProjectsTarget(args []string) (string, hubclient.Client, error) {
+	if hubProfileSelected() {
+		if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+			return "", nil, errors.New("with a hub profile, name the project on the target hub (its name or id): the current directory's project is not used")
+		}
+		client, err := openHubProfileClient()
+		if err != nil {
+			return "", nil, err
+		}
+		return args[0], client, nil
+	}
+
 	// Resolve project path to find project settings
 	gp := projectPath
 	if gp == "" && globalMode {
@@ -1499,12 +1495,12 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(gp)
 	if err != nil {
-		return fmt.Errorf("failed to resolve project path: %w", err)
+		return "", nil, fmt.Errorf("failed to resolve project path: %w", err)
 	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return fmt.Errorf("failed to load settings: %w", err)
+		return "", nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 
 	// Determine project name from args or current project
@@ -1526,6 +1522,14 @@ func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
 	}
 
 	client, err := getHubClient(settings)
+	if err != nil {
+		return "", nil, err
+	}
+	return projectName, client, nil
+}
+
+func runHubProjectsDelete(cmd *cobra.Command, args []string) error {
+	projectName, client, err := hubProjectsTarget(args)
 	if err != nil {
 		return err
 	}

@@ -227,12 +227,6 @@ func serveStandalone() {
 		return broker.Configure(newCfg)
 	})
 
-	// Webhook URL and secret for RegisterWebhook. The runtime has already
-	// merged TELEGRAM_WEBHOOK_URL and TELEGRAM_WEBHOOK_SECRET into cfg, and
-	// Configure rejected the config if either is empty.
-	webhookURL := cfg["webhook_url"]
-	webhookSecret := cfg["webhook_secret"]
-
 	// F1+F5: Use the shared lock loop. Only the lock holder calls setWebhook;
 	// all instances serve webhook HTTP traffic.
 	lockStore, ok := telegramStore.(lockloop.AdvisoryLocker)
@@ -243,7 +237,10 @@ func serveStandalone() {
 
 	lockLoop := lockloop.New(lockStore, int64(store.LockTelegramWebhook), log)
 	lockLoop.OnAcquired = func() error {
-		if err := broker.RegisterWebhook(webhookURL, webhookSecret); err != nil {
+		// RegisterWebhook registers the webhook URL and credential of the
+		// broker's current configuration, and a reconfigure while this
+		// instance holds the registration registers the new ones.
+		if err := broker.RegisterWebhook(); err != nil {
 			return err
 		}
 		healthServer.SetServingStatus("", healthpb.HealthCheckResponse_SERVING)

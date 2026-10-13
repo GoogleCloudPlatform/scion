@@ -748,6 +748,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
 	}
 
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above emitted, never a suppressed key. Docker
+	// keeps the last -e for a key, so nothing may be added after this.
+	for _, e := range FallbackEnvEntries(config.FallbackEnv, config.SuppressedFallbackKeys, envKeysOfArgs(args)) {
+		addArg("-e", e)
+	}
+
 	args = append(args, config.Image)
 
 	if len(fuseMounts) > 0 {

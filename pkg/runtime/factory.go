@@ -190,15 +190,10 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 		}
 		return pr
 	case "kubernetes", "k8s":
-		k8sClient, err := k8s.NewClientWithContext(os.Getenv("KUBECONFIG"), rtConfig.Context)
+		rt, err := NewKubernetesRuntimeFromConfig(os.Getenv("KUBECONFIG"), rtConfig)
 		if err != nil {
 			return &ErrorRuntime{Err: err}
 		}
-		if err := k8sClient.Verify(); err != nil {
-			return &ErrorRuntime{Err: err}
-		}
-		rt := NewKubernetesRuntime(k8sClient)
-		applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
 		return rt
 	case "cloudrun":
 		cfg := rtConfig.CloudRun
@@ -275,6 +270,36 @@ func GetRuntime(projectPath string, profileName string) Runtime {
 // connection.
 func kubernetesIsGKE(rtConfig config.V1RuntimeConfig, client *k8s.Client) bool {
 	return !rtConfig.GKE && client.IsGKE()
+}
+
+// NewKubernetesRuntimeFromConfig builds a Kubernetes runtime from an
+// explicit kubeconfig path (empty: the default loading rules, then in-cluster
+// config) and a runtime config entry: it creates the client for
+// rtConfig.Context, verifies the connection, then applies the namespace,
+// GKE (explicit or auto-detected), listing and priority class settings. It
+// is the body of GetRuntime's kubernetes case, which wraps its error in an
+// ErrorRuntime; it has no side effects beyond building the client, so it is
+// safe to call more than once per process (a flat Runtime Broker host builds
+// one runtime per configured Kubernetes instance).
+func NewKubernetesRuntimeFromConfig(kubeconfigPath string, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	k8sClient, err := k8s.NewClientWithContext(kubeconfigPath, rtConfig.Context)
+	if err != nil {
+		return nil, err
+	}
+	return NewKubernetesRuntimeFromClient(k8sClient, rtConfig)
+}
+
+// NewKubernetesRuntimeFromClient builds a Kubernetes runtime on an already
+// constructed client: it verifies the connection, then applies rtConfig's
+// namespace, GKE (explicit or auto-detected), listing and priority class
+// settings. Its only error is the connection check's.
+func NewKubernetesRuntimeFromClient(k8sClient *k8s.Client, rtConfig config.V1RuntimeConfig) (*KubernetesRuntime, error) {
+	if err := k8sClient.Verify(); err != nil {
+		return nil, err
+	}
+	rt := NewKubernetesRuntime(k8sClient)
+	applyKubernetesRuntimeConfig(rt, rtConfig, kubernetesIsGKE(rtConfig, k8sClient))
+	return rt, nil
 }
 
 // applyKubernetesRuntimeConfig applies rtConfig's Kubernetes-specific fields

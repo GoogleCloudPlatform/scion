@@ -52,6 +52,7 @@ import {
   artifactFileUrl,
   artifactPagePath,
   baseName,
+  discardReasonText,
   formatBytes,
   isInlineType,
   isRemoteFile,
@@ -69,6 +70,7 @@ import type {
   ArtifactResponse,
   ArtifactRenderer,
   ArtifactVersion,
+  DiscardedVersion,
   PendingPublish,
   PublishFile,
   ViewResponse,
@@ -138,6 +140,12 @@ export const REVIEW_PREVIEW_DELAY_MS = 250;
 /** Longest delay setTimeout honours. */
 const MAX_TIMER_MS = 2 ** 31 - 1;
 
+/**
+ * The most extra version pages loadVersions reads in one go while the
+ * pages hold only discarded versions.
+ */
+const MAX_EXTRA_VERSION_PAGES = 5;
+
 @customElement('scion-page-artifact-detail')
 export class ScionPageArtifactDetail extends LitElement {
   @property({ type: Object })
@@ -158,7 +166,15 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private copied = false;
   @state() private tab: Tab = 'preview';
   @state() private versions: ArtifactVersion[] = [];
+  /** Discarded versions listed beside versions (ptone/scion#4577). */
+  @state() private discarded: DiscardedVersion[] = [];
+  /** Discarded-version groups shown expanded, by their newest seq. */
+  @state() private expandedGaps = new Set<number>();
   @state() private versionsNext = 0;
+  /** A loadVersions call is reading pages; Load more waits for it. */
+  @state() private versionsLoading = false;
+  /** The load generation of the loadVersions call in flight. */
+  private versionsLoadingGen = -1;
   @state() private versionsError: string | null = null;
   @state() private view: ViewResponse | null = null;
   @state() private viewError: string | null = null;
@@ -602,16 +618,40 @@ export class ScionPageArtifactDetail extends LitElement {
   }
 
   private async loadVersions(before = 0, gen = this.loadGen): Promise<void> {
+    // One call at a time per load: a Load more while pages are still being
+    // read would fetch and append the same pages twice.
+    if (this.versionsLoading && this.versionsLoadingGen === gen) return;
+    this.versionsLoading = true;
+    this.versionsLoadingGen = gen;
     try {
-      const page = await listVersions(this.artifactId, before);
-      if (gen !== this.loadGen) return;
-      this.versions = before > 0 ? [...this.versions, ...page.versions] : page.versions;
-      this.versionsNext = page.nextBefore ?? 0;
+      // A page walks ready and discarded versions together, so after a long
+      // run of discarded versions it can hold no ready one. Keep reading
+      // (a few pages at most) until one arrives, so the version picker and
+      // the review state see a ready version.
+      let next = before;
+      for (let extra = 0; ; extra++) {
+        const page = await listVersions(this.artifactId, next);
+        if (gen !== this.loadGen) return;
+        this.versions = next > 0 ? [...this.versions, ...page.versions] : page.versions;
+        const discarded = page.discarded ?? [];
+        this.discarded = next > 0 ? [...this.discarded, ...discarded] : discarded;
+        this.versionsNext = page.nextBefore ?? 0;
+        if (
+          page.versions.length > 0 ||
+          this.versionsNext <= 0 ||
+          extra >= MAX_EXTRA_VERSION_PAGES
+        ) {
+          break;
+        }
+        next = this.versionsNext;
+      }
       this.resolveNames();
       this.versionsError = null;
     } catch (err) {
       if (gen !== this.loadGen) return;
       this.versionsError = err instanceof Error ? err.message : 'Could not load versions';
+    } finally {
+      if (this.versionsLoadingGen === gen) this.versionsLoading = false;
     }
   }
 
@@ -834,6 +874,8 @@ export class ScionPageArtifactDetail extends LitElement {
   private async reloadForReview(discarded: string): Promise<void> {
     this.seq = 0;
     this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     this.clearPreviewTimer();
     await this.load();
@@ -973,6 +1015,8 @@ export class ScionPageArtifactDetail extends LitElement {
     this.seq = 0;
     this.tab = 'preview';
     this.versions = [];
+    this.discarded = [];
+    this.expandedGaps = new Set();
     this.versionsNext = 0;
     void this.load();
   }
@@ -1390,6 +1434,108 @@ export class ScionPageArtifactDetail extends LitElement {
     return this.label(v.createdByKind, v.createdByRef ?? '');
   }
 
+  /**
+   * The History rows: the ready versions and, between them by number, the
+   * discarded ones (ptone/scion#4577). Consecutive discarded versions
+   * collapse into one muted row that expands to each one's reason and
+   * time; they have no actions.
+   */
+  private historyRows(shown: number | undefined): TemplateResult[] {
+    const rows: TemplateResult[] = [];
+    let d = 0;
+    const gapsAbove = (seq: number): void => {
+      const group: DiscardedVersion[] = [];
+      for (; d < this.discarded.length && this.discarded[d].seq > seq; d++) {
+        group.push(this.discarded[d]);
+      }
+      if (group.length > 0) rows.push(...this.renderDiscardedGroup(group));
+    };
+    for (const x of this.versions) {
+      gapsAbove(x.seq);
+      rows.push(this.renderVersionRow(x, shown));
+    }
+    gapsAbove(0);
+    return rows;
+  }
+
+  private renderDiscardedGroup(group: DiscardedVersion[]): TemplateResult[] {
+    const newest = group[0].seq;
+    const oldest = group[group.length - 1].seq;
+    const range = group.length === 1 ? `v${newest}` : `v${oldest}–v${newest}`;
+    const reasons = new Set(group.map((g) => g.reason));
+    const summary =
+      reasons.size === 1
+        ? `discarded: ${discardReasonText(group[0].reason)}`
+        : `${group.length} discarded`;
+    const open = this.expandedGaps.has(newest);
+    const toggle = (): void => {
+      const next = new Set(this.expandedGaps);
+      if (open) next.delete(newest);
+      else next.add(newest);
+      this.expandedGaps = next;
+    };
+    const rows = [
+      html`<tr class="discarded-group muted">
+        <td colspan="7">
+          <span class="discarded-range">${range}</span> · ${summary}
+          <sl-button size="small" variant="text" @click=${toggle}
+            >${open ? 'Hide' : 'Details'}</sl-button
+          >
+        </td>
+      </tr>`,
+    ];
+    if (open) {
+      for (const g of group) {
+        rows.push(
+          html`<tr class="discarded-version muted">
+            <td>v${g.seq}</td>
+            <td colspan="6">
+              discarded: ${discardReasonText(g.reason)} · ${formatInstant(g.createdAt)}
+            </td>
+          </tr>`
+        );
+      }
+    }
+    return rows;
+  }
+
+  private renderVersionRow(x: ArtifactVersion, shown: number | undefined): TemplateResult {
+    return html`
+      <tr>
+        <td>
+          <strong>v${x.seq}</strong>
+          ${x.seq === this.data!.artifact.currentSeq
+            ? html`<sl-badge pill variant="success">current</sl-badge>`
+            : nothing}
+        </td>
+        <td>
+          <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
+        </td>
+        <td>${this.createdBy(x)}</td>
+        <td class="muted">${formatInstant(x.createdAt)}</td>
+        <td>${x.note ?? ''}</td>
+        <td class="muted">${x.fileCount}</td>
+        <td class="actions-cell">
+          ${x.seq === shown
+            ? nothing
+            : html`<sl-icon-button
+                name="eye"
+                label=${`View v${x.seq}`}
+                @click=${(): void => this.goToVersion(x.seq)}
+              ></sl-icon-button>`}
+          ${x.fileCount === 1 && x.entryPath
+            ? html`<sl-icon-button
+                name="download"
+                label=${`Download v${x.seq}`}
+                href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
+                download=${baseName(x.entryPath)}
+              ></sl-icon-button>`
+            : nothing}
+        </td>
+      </tr>
+    `;
+  }
+
   private renderHistory(): TemplateResult {
     if (this.versionsError) {
       return html`<div class="error-state">
@@ -1413,42 +1559,7 @@ export class ScionPageArtifactDetail extends LitElement {
           </tr>
         </thead>
         <tbody>
-          ${this.versions.map(
-            (x) => html`
-              <tr>
-                <td>
-                  <strong>v${x.seq}</strong>
-                  ${x.seq === this.data!.artifact.currentSeq
-                    ? html`<sl-badge pill variant="success">current</sl-badge>`
-                    : nothing}
-                </td>
-                <td>
-                  <sl-badge pill class=${`kind-${x.kind}`} variant="primary">${x.kind}</sl-badge>
-                </td>
-                <td>${this.createdBy(x)}</td>
-                <td class="muted">${formatInstant(x.createdAt)}</td>
-                <td>${x.note ?? ''}</td>
-                <td class="muted">${x.fileCount}</td>
-                <td class="actions-cell">
-                  ${x.seq === shown
-                    ? nothing
-                    : html`<sl-icon-button
-                        name="eye"
-                        label=${`View v${x.seq}`}
-                        @click=${(): void => this.goToVersion(x.seq)}
-                      ></sl-icon-button>`}
-                  ${x.fileCount === 1 && x.entryPath
-                    ? html`<sl-icon-button
-                        name="download"
-                        label=${`Download v${x.seq}`}
-                        href=${artifactFileUrl(this.artifactId, x.seq, x.entryPath)}
-                        download=${baseName(x.entryPath)}
-                      ></sl-icon-button>`
-                    : nothing}
-                </td>
-              </tr>
-            `
-          )}
+          ${this.historyRows(shown)}
         </tbody>
       </table>
       ${this.versions.some((x) => x.kind === 'review')
@@ -1459,7 +1570,10 @@ export class ScionPageArtifactDetail extends LitElement {
         : nothing}
       ${this.versionsNext > 0
         ? html`<div class="more">
-            <sl-button size="small" @click=${(): void => void this.loadVersions(this.versionsNext)}
+            <sl-button
+              size="small"
+              ?disabled=${this.versionsLoading}
+              @click=${(): void => void this.loadVersions(this.versionsNext)}
               >Load more</sl-button
             >
           </div>`

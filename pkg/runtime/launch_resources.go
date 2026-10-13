@@ -48,7 +48,9 @@ var containerIDPattern = regexp.MustCompile(`^[0-9a-f]{12,64}$`)
 // ID) and a warning is logged. Run itself still returns the whole trimmed
 // output; only the handle is restricted.
 func reportContainerCreated(hooks launchHooks, name, out string) {
-	if !hooks.active() {
+	// Report to an observer too (the synchronous path), not only to an
+	// async launch's OnResourceCreated.
+	if hooks.createdFn == nil && hooks.observedFn == nil {
 		return
 	}
 	lines := strings.Split(out, "\n")

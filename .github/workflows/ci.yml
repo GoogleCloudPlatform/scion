@@ -689,6 +689,10 @@ jobs:
     outputs:
       shards: ${{ steps.plan.outputs.shards }}
       count: ${{ steps.plan.outputs.count }}
+      integration_shards: ${{ steps.integration.outputs.integration_shards }}
+      # The single place to change the runner label for every pkg/hub shard
+      # job (hub-shard and hub-shard-postgres-integration).
+      runner: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -709,17 +713,34 @@ jobs:
           echo "count=$(echo "$shards" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards: $(echo "$shards" | tr '\n' ' ')"
 
+      # The shards that hold a -tags integration pkg/hub Postgres test
+      # (HUB_INTEGRATION_POSTGRES_TESTS in the Makefile); fails if a listed
+      # test no longer exists.
+      - name: List the pkg/hub shards with integration Postgres tests
+        id: integration
+        run: |
+          set -o pipefail
+          shards=$(make -s hub-postgres-integration-shards)
+          json=$(printf '%s\n' "$shards" | jq -cR 'select(length > 0) | tonumber' | jq -cs .)
+          # hubshard -locate fails on a name in no test file, so at least
+          # one shard must come back; [] means the listing itself broke.
+          if [ -z "$json" ] || [ "$json" = '[]' ]; then
+            echo "::error title=pkg/hub shard plan::no pkg/hub shard holds a HUB_INTEGRATION_POSTGRES_TESTS test (got '$json' from '$shards')"
+            exit 1
+          fi
+          echo "integration_shards=$json" >> "$GITHUB_OUTPUT"
+          echo "pkg/hub shards with integration Postgres tests: $json"
+
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
     needs: hub-shard-plan
-    # runner is the single place to change the runner label for every
-    # shard job.
-    runs-on: ${{ matrix.runner }}
+    # The runner label comes from hub-shard-plan (outputs.runner), the
+    # single place to change it for every pkg/hub shard job.
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-latest]
         shard: ${{ fromJSON(needs.hub-shard-plan.outputs.shards) }}
     services:
       postgres:
@@ -773,27 +794,79 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: make vet-hub-shard SHARD="$SHARD"
 
-      # The pkg/hub Postgres tests that live in this shard: the web chat
-      # store tests (own SQL, read SCION_TEST_POSTGRES_DSN), the conduit
-      # stream re-check tests, and the -tags integration tests (project
-      # delete lock order, two-replica scheduled send, membership loss and
-      # test identity concurrency). Every listed test must pass and none
-      # may skip. See the Makefile target's comment.
+      # The default-tag pkg/hub Postgres tests that live in this shard: the
+      # web chat store tests (own SQL, read SCION_TEST_POSTGRES_DSN) and the
+      # conduit stream re-check tests. Every listed test must pass and none
+      # may skip. See the Makefile target's comment. The -tags integration
+      # ones run in the hub-shard-postgres-integration jobs below.
       - name: Run pkg/hub shard Postgres tests
         if: ${{ !cancelled() }}
         env:
           SHARD: ${{ matrix.shard }}
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-        run: make test-hub-postgres SHARD="$SHARD"
+        run: make test-hub-postgres-default SHARD="$SHARD"
+
+  # The -tags integration pkg/hub Postgres tests (project delete lock
+  # order, two-replica scheduled send, membership loss and test identity
+  # concurrency) of each shard that holds one. Their binary is a separate
+  # pkg/hub compile (-tags integration has its own TestMain and test
+  # files, so the shard job's binary cannot run them), about 1.5-2.5 min;
+  # in its own job, in parallel with the shard jobs, it is off their
+  # critical path. Every listed test must pass and none may skip
+  # (hack/hubshard/shard.sh postgres). The plan fails if no shard holds
+  # one, so this job always has at least one shard.
+  hub-shard-postgres-integration:
+    name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }} Postgres (integration)
+    needs: hub-shard-plan
+    runs-on: ${{ needs.hub-shard-plan.outputs.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.hub-shard-plan.outputs.integration_shards) }}
+    services:
+      postgres:
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run pkg/hub shard integration Postgres tests
+        env:
+          SHARD: ${{ matrix.shard }}
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+          SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+        run: make test-hub-postgres-integration SHARD="$SHARD"
 
   # The single, stable check name for the pkg/hub tests (the name the old
   # single pkg/hub job had, so a required check keeps working). A matrix
   # job's names include the matrix values, so they are not usable as
-  # required checks. It fails unless every shard succeeded.
+  # required checks. It fails unless every shard job and every shard
+  # integration Postgres job succeeded.
   hub-sqlite-tests:
     name: pkg/hub SQLite Tests
-    needs: [hub-shard-plan, hub-shard]
+    needs: [hub-shard-plan, hub-shard, hub-shard-postgres-integration]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -802,24 +875,104 @@ jobs:
         env:
           PLAN: ${{ needs.hub-shard-plan.result }}
           RESULT: ${{ needs.hub-shard.result }}
+          INTEGRATION: ${{ needs.hub-shard-postgres-integration.result }}
         run: |
           if [ "$PLAN" != success ] || [ "$RESULT" != success ]; then
             echo "::error title=pkg/hub shards::the pkg/hub shard plan (result: $PLAN) or one or more pkg/hub shard jobs (result: $RESULT) did not succeed; see the pkg/hub shard jobs."
             exit 1
           fi
+          if [ "$INTEGRATION" != success ]; then
+            echo "::error title=pkg/hub shards::one or more pkg/hub shard integration Postgres jobs did not succeed (result: $INTEGRATION); see the pkg/hub shard Postgres (integration) jobs."
+            exit 1
+          fi
 
-  launch-store-postgres-tests:
-    name: T1 Launch Store PostgreSQL Tests
+  # T1 Launch Store PostgreSQL Tests runs as several parallel jobs; the
+  # job below with the old name only rolls them up. About 70% of the old
+  # single job was pkg/store/entadapter on Postgres (~13 of ~20 min), so
+  # that package's tests are split by name into strategy.job-total parts
+  # (hack/testpart.sh: round-robin over the sorted top-level test names),
+  # one job each, and the other Postgres packages run in one more job.
+  # Every entadapter job checks that the parts together hold every test of
+  # the package exactly once (testpart.sh parity) and that every test of
+  # its part printed a PASS or SKIP line.
+  #
+  # The entadapter jobs. The number of parts is the number of matrix jobs
+  # (strategy.job-total); to change it, change the part list, which must
+  # be 1..N in order (the run step checks part == job-index + 1).
+  launch-store-postgres-entadapter:
+    name: T1 Launch Store PostgreSQL Tests (entadapter ${{ matrix.part }}/${{ strategy.job-total }})
     runs-on: ubuntu-latest
-    # 90m: the job took ~29-39m on main, but ~57m on a runner 2-3x slower
-    # than usual (GoogleCloudPlatform/scion#2855), where pkg/store/entadapter
-    # hit its old 40m go test timeout. make test-store-postgres now gives
-    # entadapter 60m. The rest of that slow job took ~15m (plus the
-    # storetest and pkg/hub runs the timeout skipped), so 90m keeps the job
-    # limit above the go test limit and a real hang still produces go's
-    # goroutine dump instead of a bare job kill (ptone/scion#3945). The
-    # pkg/hub Postgres tests run in the pkg/hub shard jobs.
+    # 90m: the whole entadapter suite took ~29-39m of the old single job on
+    # main, but ~57m on a runner 2-3x slower than usual
+    # (GoogleCloudPlatform/scion#2855), where it hit its old 40m go test
+    # timeout. make test-store-postgres-entadapter gives each part 60m, and
+    # 90m keeps the job limit above the go test limit so a real hang still
+    # produces go's goroutine dump instead of a bare job kill
+    # (ptone/scion#3945).
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [1, 2]
+    services:
+      postgres:
+        # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
+        image: mirror.gcr.io/library/postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      # The splitter's own tests (bash only, a second).
+      - name: Test the test splitter (hack/testpart.sh)
+        run: make testpart-selftest
+
+      # The full pkg/store/entadapter suite (ptone/scion#2207; see the
+      # Makefile's test-store-postgres comment), which runs unchanged
+      # against SQLite (the default `go test` build) and Postgres (here, via
+      # -tags integration) to prove dialect parity. This job runs part
+      # matrix.part of strategy.job-total of its top-level tests, with the
+      # same skip checks as the unsplit run. The part must be the job's
+      # own position in the matrix, so a part list that is not 1..N (a
+      # gap would leave a part unrun) fails here.
+      - name: Run entadapter tests (Postgres-enabled, part ${{ matrix.part }}/${{ strategy.job-total }})
+        env:
+          SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+          PART: ${{ matrix.part }}
+          PARTS: ${{ strategy.job-total }}
+          JOB_INDEX: ${{ strategy.job-index }}
+        run: |
+          if [ "$PART" != "$((JOB_INDEX + 1))" ]; then
+            echo "::error title=T1 entadapter matrix::matrix.part is $PART but this is matrix job $((JOB_INDEX + 1)) of $PARTS; the part list must be 1..N in order"
+            exit 1
+          fi
+          make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
+
+  # The T1 Postgres packages other than pkg/store/entadapter.
+  launch-store-postgres-others:
+    name: T1 Launch Store PostgreSQL Tests (other packages)
+    runs-on: ubuntu-latest
+    # The old single job took ~20m, of which ~7m was this job's part; 45m
+    # leaves room for a runner 2-3x slower than usual.
+    timeout-minutes: 45
     services:
       postgres:
         # Pulled through the Google Docker Hub mirror to avoid the Docker Hub unauthenticated pull limit (ptone/scion#4147).
@@ -848,18 +1001,17 @@ jobs:
           cache: true
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
-      # pkg/store/integrationtest (the existing Postgres-only harness) plus
-      # the full pkg/store/entadapter suite (ptone/scion#2207; see that
-      # Makefile target's comment), which runs unchanged against SQLite (the
-      # default `go test` build) and Postgres (here, via -tags integration)
-      # to prove dialect parity. This job owns every Postgres-specific assertion in
-      # P1a: the transaction-scoped advisory lock, SKIP LOCKED,
+      # pkg/store/integrationtest (the existing Postgres-only harness), the
+      # storetest group/MembershipCleanup conformance, the pkg/ent/entc and
+      # cmd Postgres tests (see the Makefile's test-store-postgres comment).
+      # With the entadapter jobs above, T1 owns every Postgres-specific
+      # assertion in P1a: the transaction-scoped advisory lock, SKIP LOCKED,
       # lock_timeout/idle-in-transaction SET LOCAL, and the per-row
       # savepoints. The job also runs the timestamp contract test (last step).
-      - name: Run launch store tests (Postgres-enabled)
+      - name: Run launch store tests (Postgres-enabled, without entadapter)
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
-        run: make test-store-postgres
+        run: make test-store-postgres-others
 
       # The pkg/artifacts store is likewise not an Ent store (it creates its
       # own artifact_* tables at Init), so it has its own Postgres SQL. Its
@@ -879,6 +1031,27 @@ jobs:
         env:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
+
+  # The single, stable check name for T1 (the name the old single job had,
+  # so a required check keeps working; matrix job names include the matrix
+  # values). It fails unless every entadapter part and the other-packages
+  # job succeeded: a failed, cancelled or skipped part fails it.
+  launch-store-postgres-tests:
+    name: T1 Launch Store PostgreSQL Tests
+    needs: [launch-store-postgres-entadapter, launch-store-postgres-others]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check T1 part results
+        env:
+          ENTADAPTER: ${{ needs.launch-store-postgres-entadapter.result }}
+          OTHERS: ${{ needs.launch-store-postgres-others.result }}
+        run: |
+          if [ "$ENTADAPTER" != success ] || [ "$OTHERS" != success ]; then
+            echo "::error title=T1 Launch Store PostgreSQL Tests::one or more T1 entadapter jobs (result: $ENTADAPTER) or the T1 other-packages job (result: $OTHERS) did not succeed; see the T1 Launch Store PostgreSQL Tests jobs."
+            exit 1
+          fi
 
   workstation-smoke:
     name: Workstation smoke test
