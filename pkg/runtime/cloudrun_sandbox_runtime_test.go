@@ -1038,6 +1038,7 @@ func (h *mockHarness) HasSystemPrompt(agentHome string) bool                    
 func (h *mockHarness) Provision(ctx context.Context, name, dir, home, ws string) error { return nil }
 func (h *mockHarness) GetInterruptKey() string                                         { return "C-c" }
 func (h *mockHarness) GetInterruptSequence() []string                                  { return nil }
+func (h *mockHarness) DeliverySpec() api.DeliverySpec                                  { return api.DeliverySpec{} }
 func (h *mockHarness) GetHarnessEmbedsFS() (embed.FS, string)                          { return embed.FS{}, "" }
 func (h *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error  { return nil }
 func (h *mockHarness) InjectSystemPrompt(agentHome string, content []byte) error       { return nil }

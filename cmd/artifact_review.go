@@ -24,6 +24,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -152,7 +153,9 @@ func publishToArtifact(ctx context.Context, svc hubclient.ArtifactService, out, 
 
 // unmarkedChangesReport renders the hub's unmarked_changes rejection, or
 // returns "" for any other error. The hub bounds the number of files and
-// hunks and the length of each excerpt.
+// hunks and the length of each excerpt. A hunk the hub marks whitespace-only
+// shows its whitespace (writeHunkSide), and a change to the final newline is
+// named, since neither is visible as plain text (ptone/scion#4578).
 func unmarkedChangesReport(err error) string {
 	var apiErr *apiclient.APIError
 	if !errors.As(err, &apiErr) || apiErr.Code != artifacts.CodeUnmarkedChanges {
@@ -170,9 +173,20 @@ func unmarkedChangesReport(err error) string {
 		for _, rh := range hunks {
 			h, _ := rh.(map[string]any)
 			line, _ := h["line"].(float64)
-			fmt.Fprintf(&b, "    line %d:\n", int(line))
-			writeHunkSide(&b, "-", h["parent"])
-			writeHunkSide(&b, "+", h["clean"])
+			ws, _ := h["whitespace_only"].(bool)
+			if ws {
+				fmt.Fprintf(&b, "    line %d (whitespace only):\n", int(line))
+			} else {
+				fmt.Fprintf(&b, "    line %d:\n", int(line))
+			}
+			writeHunkSide(&b, "-", h["parent"], ws)
+			writeHunkSide(&b, "+", h["clean"], ws)
+			switch fn, _ := h["final_newline"].(string); fn {
+			case critic.FinalNewlineAdded:
+				b.WriteString("      (adds the final newline)\n")
+			case critic.FinalNewlineRemoved:
+				b.WriteString("      (removes the final newline)\n")
+			}
 			if t, _ := h["truncated"].(bool); t {
 				b.WriteString("      …\n")
 			}
@@ -184,13 +198,38 @@ func unmarkedChangesReport(err error) string {
 	return b.String()
 }
 
-// writeHunkSide writes one side of a hunk, one prefixed line per line.
-func writeHunkSide(b *strings.Builder, prefix string, v any) {
+// writeHunkSide writes one side of a hunk, one prefixed line per line, or
+// "(no lines)" for an empty side. With visible set, each line shows its
+// whitespace (showWhitespace).
+func writeHunkSide(b *strings.Builder, prefix string, v any, visible bool) {
 	s, _ := v.(string)
 	if s == "" {
+		fmt.Fprintf(b, "      %s (no lines)\n", prefix)
 		return
 	}
-	for _, l := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
-		fmt.Fprintf(b, "      %s %s\n", prefix, l)
+	if !visible {
+		for _, l := range strings.Split(strings.TrimSuffix(s, "\n"), "\n") {
+			fmt.Fprintf(b, "      %s %s\n", prefix, l)
+		}
+		return
 	}
+	for _, l := range strings.SplitAfter(s, "\n") {
+		if l != "" {
+			fmt.Fprintf(b, "      %s %s\n", prefix, showWhitespace(l))
+		}
+	}
+}
+
+// showWhitespace makes the whitespace of one line visible: every tab as
+// "→", each trailing space as "·", and the line's newline, if it has one,
+// as "⏎". A blank line therefore shows as "⏎".
+func showWhitespace(line string) string {
+	body, nl := strings.CutSuffix(line, "\n")
+	text := strings.TrimRight(body, " \t")
+	tail := strings.ReplaceAll(body[len(text):], " ", "·")
+	out := strings.ReplaceAll(text+tail, "\t", "→")
+	if nl {
+		out += "⏎"
+	}
+	return out
 }

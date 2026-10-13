@@ -152,9 +152,13 @@ var effectCallSiteClassifications = []effectCallSiteEntry{
 	{file: "workspace_handlers.go", function: "handleWorkspaceSyncToFinalize", symbol: "DispatchAgentCreate",
 		class: "guarded", reason: "workspace agent creation with project authorization"},
 
-	// notification_sweep.go: RetryDispatch — guarded retry of previously
-	// authorized notification dispatch.
-	{file: "notification_sweep.go", function: "RetryDispatch", symbol: "dispatchWithBrokerRetry",
+	// notification_sweep.go: retryDispatch — guarded retry of previously
+	// authorized notification dispatch. The periodic sweep and the
+	// broker-connect drain (both via retryBatch) and the exported
+	// RetryDispatch wrapper reach the call only through retryDispatch,
+	// after its claim CAS and its re-lookup of the subscription,
+	// subscriber and watched agent.
+	{file: "notification_sweep.go", function: "retryDispatch", symbol: "dispatchWithBrokerRetry",
 		class: "guarded", reason: "retry of previously authorized notification dispatch"},
 }
 

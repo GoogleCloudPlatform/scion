@@ -190,7 +190,7 @@ A project whose workspace is a pre-existing path on a broker machine, linked to 
 _Avoid_: local project, imported project, registered project
 
 **Shadowed project**:
-A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine.
+A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine. Created by the removed `scion hub shadow`; existing ones still resolve and print a cleanup notice. Use `scion use <project>` instead.
 _Avoid_: linked, mounted, cloned
 _See also_: Hub-managed project
 

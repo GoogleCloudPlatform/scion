@@ -210,6 +210,14 @@ func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.H
 	if len(overlay.Secrets) > 0 {
 		base.Secrets = overlay.Secrets
 	}
+	// Ready and delivery are replaced as whole blocks, never merged field
+	// by field: a half-merged readiness or delivery rule is confusing.
+	if overlay.Ready != nil {
+		base.Ready = overlay.Ready
+	}
+	if overlay.Delivery != nil {
+		base.Delivery = overlay.Delivery
+	}
 	return base
 }
 

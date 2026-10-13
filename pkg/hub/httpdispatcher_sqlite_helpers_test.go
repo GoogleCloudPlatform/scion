@@ -137,6 +137,8 @@ type mockRuntimeBrokerClient struct {
 	startCalled                bool
 	stopCalled                 bool
 	lastStopRunID              string
+	lastStopAgentIDQuery       string
+	lastDeleteAgentIDQuery     string
 	restartCalled              bool
 	deleteCalled               bool
 	messageCalled              bool
@@ -368,6 +370,7 @@ func (m *mockRuntimeBrokerClient) StartAgent(ctx context.Context, brokerID, brok
 func (m *mockRuntimeBrokerClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
 	m.stopCalled = true
 	m.lastStopRunID = runID
+	m.lastStopAgentIDQuery = dispatchAgentIDQuery(ctx, "")
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID
@@ -397,6 +400,7 @@ func (m *mockRuntimeBrokerClient) ResetAuthAgent(_ context.Context, _, _, _, _, 
 func (m *mockRuntimeBrokerClient) DeleteAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID string, opts DeleteAgentOptions) error {
 	m.deleteCalled = true
 	m.lastDeleteProjectPathQuery = deleteProjectPathQuery(ctx)
+	m.lastDeleteAgentIDQuery = dispatchAgentIDQuery(ctx, "")
 	m.lastBrokerID = brokerID
 	m.lastEndpoint = brokerEndpoint
 	m.lastAgentID = agentID

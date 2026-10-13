@@ -111,6 +111,20 @@ func (_u *RoleDefinitionUpdate) SetNillableSystem(v *bool) *RoleDefinitionUpdate
 	return _u
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (_u *RoleDefinitionUpdate) SetConfersMembership(v bool) *RoleDefinitionUpdate {
+	_u.mutation.SetConfersMembership(v)
+	return _u
+}
+
+// SetNillableConfersMembership sets the "confers_membership" field if the given value is not nil.
+func (_u *RoleDefinitionUpdate) SetNillableConfersMembership(v *bool) *RoleDefinitionUpdate {
+	if v != nil {
+		_u.SetConfersMembership(*v)
+	}
+	return _u
+}
+
 // SetUpdated sets the "updated" field.
 func (_u *RoleDefinitionUpdate) SetUpdated(v time.Time) *RoleDefinitionUpdate {
 	_u.mutation.SetUpdated(v)
@@ -246,6 +260,9 @@ func (_u *RoleDefinitionUpdate) sqlSave(ctx context.Context) (_node int, err err
 	}
 	if value, ok := _u.mutation.System(); ok {
 		_spec.SetField(roledefinition.FieldSystem, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ConfersMembership(); ok {
+		_spec.SetField(roledefinition.FieldConfersMembership, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(roledefinition.FieldUpdated, field.TypeTime, value)
@@ -391,6 +408,20 @@ func (_u *RoleDefinitionUpdateOne) SetSystem(v bool) *RoleDefinitionUpdateOne {
 func (_u *RoleDefinitionUpdateOne) SetNillableSystem(v *bool) *RoleDefinitionUpdateOne {
 	if v != nil {
 		_u.SetSystem(*v)
+	}
+	return _u
+}
+
+// SetConfersMembership sets the "confers_membership" field.
+func (_u *RoleDefinitionUpdateOne) SetConfersMembership(v bool) *RoleDefinitionUpdateOne {
+	_u.mutation.SetConfersMembership(v)
+	return _u
+}
+
+// SetNillableConfersMembership sets the "confers_membership" field if the given value is not nil.
+func (_u *RoleDefinitionUpdateOne) SetNillableConfersMembership(v *bool) *RoleDefinitionUpdateOne {
+	if v != nil {
+		_u.SetConfersMembership(*v)
 	}
 	return _u
 }
@@ -560,6 +591,9 @@ func (_u *RoleDefinitionUpdateOne) sqlSave(ctx context.Context) (_node *RoleDefi
 	}
 	if value, ok := _u.mutation.System(); ok {
 		_spec.SetField(roledefinition.FieldSystem, field.TypeBool, value)
+	}
+	if value, ok := _u.mutation.ConfersMembership(); ok {
+		_spec.SetField(roledefinition.FieldConfersMembership, field.TypeBool, value)
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(roledefinition.FieldUpdated, field.TypeTime, value)
