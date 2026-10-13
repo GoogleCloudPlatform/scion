@@ -520,6 +520,39 @@ func isString(e ast.Expr, want string) bool {
 	return err == nil && v == want
 }
 
+// relayForbiddenCalls are registry operations only the hub performs: a
+// relay never deletes a principal's epoch row.
+var relayForbiddenCalls = map[string]bool{"ForgetPrincipalEpoch": true, "DeletePrincipalEpoch": true}
+
+// forbiddenCalls returns every selector naming a relayForbiddenCalls
+// operation in the non-test files of the packages in dirs.
+func (s *importScan) forbiddenCalls(t *testing.T, dirs ...string) []string {
+	t.Helper()
+	var bad []string
+	for _, dir := range dirs {
+		entries, err := os.ReadDir(filepath.Join(s.root, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+				continue
+			}
+			f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(s.root, dir, e.Name()), nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				if sel, ok := n.(*ast.SelectorExpr); ok && relayForbiddenCalls[sel.Sel.Name] {
+					bad = append(bad, fmt.Sprintf("%s/%s uses %s", dir, e.Name(), sel.Sel.Name))
+				}
+				return true
+			})
+		}
+	}
+	return bad
+}
+
 // moduleRoot finds the module root above the test's directory.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
@@ -556,6 +589,9 @@ func TestRelayCodeUsesOnlyRegistryStore(t *testing.T) {
 	}
 	for _, v := range s.relayDBViolations(t) {
 		t.Errorf("relay database access: %s", v)
+	}
+	for _, v := range s.forbiddenCalls(t, relayRoots...) {
+		t.Errorf("a relay package deletes epoch rows: %s", v)
 	}
 }
 
@@ -610,6 +646,9 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		if got := s.relayDBViolations(t); len(got) != 0 {
 			t.Fatalf("relaydb violations in a clean module: %v", got)
 		}
+		if got := s.forbiddenCalls(t, relayRoots...); len(got) != 0 {
+			t.Fatalf("forbidden calls in a clean module: %v", got)
+		}
 	})
 	for name, tc := range map[string]struct {
 		files map[string]string
@@ -641,6 +680,10 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		"relayserver imports pkg/ent": {
 			files: map[string]string{"pkg/conduit/relayrole/relayserver/e.go": "package relayserver\nimport _ \"example.com/m/pkg/ent\"\n"},
 			check: func(s *importScan) []string { return s.forbiddenReach(t, relayRoots...) },
+		},
+		"relay forgets a principal epoch": {
+			files: map[string]string{"pkg/conduit/relay/g.go": "package relay\nfunc g(r *x) { _ = r.registry.ForgetPrincipalEpoch(nil, \"agent\", \"a1\") }\n"},
+			check: func(s *importScan) []string { return s.forbiddenCalls(t, relayRoots...) },
 		},
 		"cmd imports pkg/hub": {
 			files: map[string]string{"cmd/server_relay.go": "package cmd\nimport _ \"example.com/m/pkg/hub\"\n"},
