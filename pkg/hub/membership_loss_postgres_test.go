@@ -97,7 +97,9 @@ func TestMembershipLossProcessor_vs_ProjectDelete_Postgres(t *testing.T) {
 	runConcurrently(t,
 		func() { f.srv.drainMembershipLossChecks(ctx) },
 		func() {
-			_, decision = svc.Delete(setTestIdentity(ctx, owner), ProjectDeleteRequest{ProjectID: f.projectID, Actor: owner})
+			// Forced: the fixture's agents are live, and the race needs the
+			// cascade (ptone/scion#4811).
+			_, decision = svc.Delete(setTestIdentity(ctx, owner), ProjectDeleteRequest{ProjectID: f.projectID, Actor: owner, Force: true})
 		})
 	// The owner's delete is not refused: it ran and took its locks.
 	require.Nil(t, decision, "the project delete must succeed (a 40P01 or refusal here means it did not race)")

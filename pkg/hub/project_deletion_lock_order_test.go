@@ -96,7 +96,10 @@ func TestProjectDeletionService_LockOrderNoDeadlock(t *testing.T) {
 	}
 	done := make(chan outcome, 1)
 	go func() {
-		r, d := svc.Delete(svcCtx, ProjectDeleteRequest{ProjectID: projectID, Actor: actor})
+		// Forced: the fixture's agents are live, and only the forced delete
+		// reaches the cascade whose lock order this test checks
+		// (ptone/scion#4811).
+		r, d := svc.Delete(svcCtx, ProjectDeleteRequest{ProjectID: projectID, Actor: actor, Force: true})
 		done <- outcome{r, d}
 	}()
 

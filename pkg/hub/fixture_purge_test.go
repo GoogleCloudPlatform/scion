@@ -921,8 +921,10 @@ func TestTestIdentityReaper_Registration(t *testing.T) {
 
 // DEC-2 a, by construction: the purge removes projects through an
 // unexported method that takes no request, actor or credential. The
-// general request type has exactly its two fields, and the purge-only
-// selectors (purgeFixtureProject, the purge basis, the hard delete flag,
+// general request type has exactly its three fields. Force
+// (ptone/scion#4811) only chooses, on the authorized request path, between
+// refusing while agents remain and the cascade; it cannot reach
+// purgeFixtureProject. The purge-only selectors (purgeFixtureProject, the purge basis, the hard delete flag,
 // purgeTestIdentity) are reached only from the purge's own files.
 func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 	var fields []string
@@ -930,7 +932,7 @@ func TestFixturePurge_ProjectPathUnreachableFromRequests(t *testing.T) {
 	for i := 0; i < rt.NumField(); i++ {
 		fields = append(fields, rt.Field(i).Name)
 	}
-	assert.Equal(t, []string{"ProjectID", "Actor"}, fields, "ProjectDeleteRequest gains no field that selects another path")
+	assert.Equal(t, []string{"ProjectID", "Actor", "Force"}, fields, "ProjectDeleteRequest gains no field that selects another path")
 
 	allowed := map[string][]string{
 		"purgeFixtureProject(":   {"fixture_purge.go", "project_fixture_purge.go"},
