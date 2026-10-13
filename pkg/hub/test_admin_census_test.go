@@ -327,7 +327,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
 	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
 	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
-	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test identity's stored role is never admin and the JWT row block refuses a mismatched role claim",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test_super_admin passes it, so each caller is classified as its own gate in testAdminRoleGatePolicy",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.
