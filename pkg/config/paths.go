@@ -50,8 +50,11 @@ func FindProjectRoot() (string, bool) {
 		if err == nil {
 			if info.IsDir() {
 				if abs, err := filepath.EvalSymlinks(p); err == nil {
-					return abs, true
+					p = abs
 				}
+				// Backfill the workspace record of a git project
+				// initialized before init wrote it.
+				healGitWorkspaceOnce(p)
 				return p, true
 			}
 			// .scion is a file (project marker) — resolve to external path

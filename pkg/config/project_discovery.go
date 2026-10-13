@@ -38,7 +38,16 @@ type ProjectStatus string
 const (
 	ProjectStatusOK       ProjectStatus = "ok"
 	ProjectStatusOrphaned ProjectStatus = "orphaned"
+	// ProjectStatusUnverified marks a git project config with no agents and
+	// no recorded workspace path: nothing shows that it is still in use, and
+	// nothing shows that it is not. It is never pruned.
+	ProjectStatusUnverified ProjectStatus = "unverified"
 )
+
+// statusWithoutEvidence is the status shown for a git project config that
+// has no agents and no recorded workspace path. Such a config is never
+// pruned, whatever this status is (see ProjectInfo.unverified).
+const statusWithoutEvidence = ProjectStatusUnverified
 
 // ProjectInfo describes a discovered project.
 type ProjectInfo struct {
@@ -59,6 +68,10 @@ type ProjectInfo struct {
 	// agentsPath overrides the default agents directory derivation.
 	// Used for legacy git projects where agents are a sibling of .scion/.
 	agentsPath string
+	// unverified is set when there is no evidence either way about whether
+	// the project config is still in use. FindOrphanedProjectConfigs never
+	// returns such a project.
+	unverified bool
 }
 
 // AgentsDir returns the path to the agents directory for this project.
@@ -169,7 +182,7 @@ func scanConfigDir(projects []ProjectInfo, configDir string, seenSlugs map[strin
 			if vs, vsErr := LoadVersionedSettings(configPath); vsErr == nil && vs != nil && vs.ProjectType == string(ProjectTypeShadow) {
 				agentsDir := filepath.Join(configPath, "agents")
 				pi = projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug)
-			} else if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" {
+			} else if settings, err := LoadSettings(configPath); err == nil && settings.WorkspacePath != "" && !isGitProjectConfig(configPath, settings.WorkspacePath) {
 				pi = projectInfoFromExternal(configPath, dirName, slug)
 			} else {
 				agentsDir := filepath.Join(configPath, "agents")
@@ -257,21 +270,82 @@ func projectInfoFromGitExternalWithConfig(configPath, agentsDir, dirName, slug s
 		}
 	}
 
+	recorded := ""
 	if settings, err := LoadSettings(configPath); err == nil {
 		pi.ProjectID = settings.ProjectID
 		pi.setHubLink(settings)
+		recorded = settings.WorkspacePath
 	}
 	pi.AgentCount = countAgents(agentsDir)
-	if pi.ProjectID == "" {
+	pi.WorkspacePath = recorded
+	if recorded == "" && pi.ProjectID == "" {
 		if marker, workspacePath, err := readWorkspaceMarkerForSlug(slug); err == nil {
 			pi.ProjectID = marker.ProjectID
 			pi.WorkspacePath = workspacePath
 		}
 	}
-	if pi.AgentCount == 0 {
-		pi.Status = ProjectStatusOrphaned
+
+	// A git project config is orphaned only on positive evidence: a
+	// recorded workspace that is gone or no longer resolves to this config.
+	// A config with agents is never orphaned (its repo may have moved). A
+	// workspace found by slug alone (readWorkspaceMarkerForSlug) can show
+	// that the config is in use, but never that it is not: another repo
+	// with the same slug may own that workspace.
+	switch {
+	case pi.AgentCount > 0:
+	case recorded != "":
+		if !gitWorkspaceResolvesTo(recorded, configPath) {
+			pi.Status = ProjectStatusOrphaned
+		}
+	case pi.WorkspacePath != "" && gitWorkspaceResolvesTo(pi.WorkspacePath, configPath):
+	default:
+		pi.Status = statusWithoutEvidence
+		pi.unverified = true
 	}
 	return pi
+}
+
+// isGitProjectConfig reports whether the project config at configPath, whose
+// settings record workspacePath, belongs to a git project. Settings written
+// by init, hub link or the lazy heal say so with project_type: git. A config
+// with a workspace path but no project_type (written before project_type
+// was recorded) is a git one when the workspace holds a .scion directory,
+// and is healed by recording project_type: git; when the workspace is gone
+// it is treated as an external project, as before.
+func isGitProjectConfig(configPath, workspacePath string) bool {
+	if vs, err := LoadVersionedSettings(configPath); err == nil && vs != nil && vs.ProjectType != "" {
+		return vs.ProjectType == string(ProjectTypeGit)
+	}
+	info, err := os.Stat(filepath.Join(workspacePath, DotScion))
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	if gitWorkspaceResolvesTo(workspacePath, configPath) {
+		_ = setProjectTypeGit(configPath)
+	}
+	return true
+}
+
+// gitWorkspaceResolvesTo reports whether the git workspace at workspacePath
+// still exists and its .scion resolves to the project config at configPath:
+// a .scion directory through its project-id file and the workspace's slug
+// (GetGitProjectExternalConfigDir), a .scion marker file as in
+// isValidWorkspace. The settings project_id is not compared: hub link can
+// record one that differs from the repo's project-id file.
+func gitWorkspaceResolvesTo(workspacePath, configPath string) bool {
+	markerPath := filepath.Join(workspacePath, DotScion)
+	info, err := os.Stat(markerPath)
+	if err != nil {
+		return false
+	}
+	if !info.IsDir() {
+		return isValidWorkspace(workspacePath, "", configPath)
+	}
+	extDir, err := GetGitProjectExternalConfigDir(markerPath)
+	if err != nil || extDir == "" {
+		return false
+	}
+	return resolvePathForComparison(extDir) == resolvePathForComparison(configPath)
 }
 
 func readWorkspaceMarkerForSlug(slug string) (*ProjectMarker, string, error) {
@@ -380,7 +454,9 @@ func ListAgentNames(agentsDir string) []string {
 }
 
 // FindOrphanedProjectConfigs returns project configs that are orphaned
-// (their workspace no longer exists or no longer points back to them).
+// (their workspace no longer exists or no longer points back to them). A
+// config with no evidence either way (ProjectInfo.unverified) is never
+// returned.
 func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 	projects, err := DiscoverProjects()
 	if err != nil {
@@ -389,7 +465,7 @@ func FindOrphanedProjectConfigs() ([]ProjectInfo, error) {
 
 	var orphaned []ProjectInfo
 	for _, g := range projects {
-		if g.Status == ProjectStatusOrphaned {
+		if g.Status == ProjectStatusOrphaned && !g.unverified {
 			orphaned = append(orphaned, g)
 		}
 	}

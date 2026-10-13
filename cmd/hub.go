@@ -2706,6 +2706,13 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to save linked state: %w", err)
 	}
+	if !isGlobal {
+		// A git project records its repo root, so that project discovery
+		// can tell its config from an orphaned one.
+		if err := config.RecordGitWorkspace(resolvedPath); err != nil {
+			util.Debugf("Failed to record the workspace path: %v", err)
+		}
+	}
 
 	// Record the link in the hub list: the project resolves to this hub
 	// from now on, whatever hub is current. No hub.endpoint is written to

@@ -489,6 +489,11 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	if err := ensureProjectSettingsFile(externalConfigDir, opt); err != nil {
 		return err
 	}
+	// Record the repo root and project type, so that project discovery can
+	// tell this config from an orphaned one.
+	if err := RecordGitWorkspace(projectDir); err != nil {
+		return fmt.Errorf("failed to record workspace path: %w", err)
+	}
 
 	// Create external agents directory for agent homes
 	externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir)
