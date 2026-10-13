@@ -6358,9 +6358,11 @@ var errSavedProfileUnresolved = errors.New("saved runtime profile cannot be reso
 
 // errDefaultProfileUnresolved marks a dispatch that needs the broker's
 // default profile (active_profile) when the Hub's stored profiles, applied
-// through the settings overlay, do not define it. Handlers return it as a
-// retryable 503, like errSavedProfileUnresolved; it is never a startup
-// error, so a broker whose agents all carry their own profile still runs.
+// through the settings overlay, do not define it and do not hold exactly
+// one profile to use instead (config.ActiveProfileError). Handlers return
+// it as a retryable 503, like errSavedProfileUnresolved; it is never a
+// startup error, so a broker whose agents all carry their own profile still
+// runs.
 var errDefaultProfileUnresolved = errors.New("default runtime profile cannot be resolved")
 
 // errProfileUnresolved marks a dispatch that names a profile (not an
@@ -6392,7 +6394,8 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // errSavedProfileUnresolved. With
 // profileLenient those cases fall back to the default, as for a fresh start.
 // In every mode, a dispatch with no profile whose default profile cannot be
-// resolved against the Hub's stored profiles (*config.ActiveProfileError)
+// resolved against the Hub's stored profiles (*config.ActiveProfileError:
+// active_profile is not one of them and they do not hold exactly one)
 // returns errDefaultProfileUnresolved together with the default manager.
 // With profileLenient, a named profile the stored profiles lack
 // (*config.StoredProfileNotFoundError) likewise returns errProfileUnresolved
@@ -6468,7 +6471,8 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
 		// The dispatch needs the default profile (opts.Profile is empty)
-		// and the Hub's stored profiles do not define active_profile: fail
+		// and the Hub's stored profiles neither define active_profile nor
+		// hold exactly one profile to use instead: fail
 		// this dispatch with an error naming both, rather than running it
 		// on the broker's default runtime. The default manager is still
 		// returned for resolveManagerForOpts, which ignores the error, so

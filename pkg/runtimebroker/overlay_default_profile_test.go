@@ -33,19 +33,41 @@ import (
 // profile the stored profiles lack fails start, restart and resume with no
 // fallback to the default; a dispatch that needs the default profile, when
 // the stored profiles do not define active_profile, fails with an error
-// naming both; a create naming a profile the stored profiles lack fails the
+// naming both, unless the stored profiles hold exactly one profile, which is
+// then used; a create naming a profile the stored profiles lack fails the
 // same way; and none of this is a startup error.
 
+// storedK8sAltProfile is the second stored profile installStoredProfilesOverlay
+// defines, so that the stored profiles do not hold exactly one profile and an
+// unresolvable active_profile is refused rather than replaced by it.
+const storedK8sAltProfile = "k8s-alt"
+
+// storedProfilesList is how errors list installStoredProfilesOverlay's stored
+// profiles (sorted, comma-separated).
+const storedProfilesList = lifecycleK8sProfile + ", " + storedK8sAltProfile
+
 // installStoredProfilesOverlay installs a global settings overlay whose
-// stored profiles define only the kubernetes profile, so the fixture's
-// file active_profile ("local") is not one of them.
+// stored profiles define two kubernetes profiles, so the fixture's file
+// active_profile ("local") is not one of them and there is no single stored
+// profile to use instead.
 func installStoredProfilesOverlay(t *testing.T) {
+	t.Helper()
+	installOverlayProfiles(t, map[string]config.V1ProfileConfig{
+		lifecycleK8sProfile: {Runtime: "kubernetes"},
+		storedK8sAltProfile: {Runtime: "kubernetes"},
+	})
+}
+
+// installOverlayProfiles installs a global settings overlay with a
+// kubernetes runtime and the given stored profiles, restoring the previous
+// overlay when the test ends.
+func installOverlayProfiles(t *testing.T, profiles map[string]config.V1ProfileConfig) {
 	t.Helper()
 	prev := config.GetGlobalSettingsOverlay()
 	o := config.NewSettingsOverlay()
 	o.Update(
 		map[string]config.V1RuntimeConfig{"kubernetes": {Type: "kubernetes"}},
-		map[string]config.V1ProfileConfig{lifecycleK8sProfile: {Runtime: "kubernetes"}},
+		profiles,
 		nil, "")
 	config.SetGlobalSettingsOverlay(o)
 	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
@@ -148,7 +170,7 @@ func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 
 				w := op.run(t, f, name)
 				assertDispatchRefused(t, w, "saved runtime profile cannot be resolved", `profile "vanished" not found`,
-					"available profiles: "+lifecycleK8sProfile, "retry once its profile is configured")
+					"available profiles: "+storedProfilesList, "retry once its profile is configured")
 				if f.defaultMgr.StartCalls() != 0 || f.defaultMgr.stopCalls != 0 {
 					t.Errorf("default runtime used: start=%d stop=%d", f.defaultMgr.StartCalls(), f.defaultMgr.stopCalls)
 				}
@@ -195,7 +217,7 @@ func TestOverlayProfiles_DispatchNeedingDefaultFailsClearly(t *testing.T) {
 		w := lifecyclePost(t, f.srv, "/api/v1/agents/fresh-agent/start", map[string]any{
 			"projectPath": f.projectPath,
 		})
-		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+lifecycleK8sProfile,
+		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+storedProfilesList,
 			"retry once active_profile names one of the hub's stored profiles")
 		if strings.Contains(w.Body.String(), "retry once its profile is configured") {
 			t.Errorf("default-profile error uses the saved-profile wording: %s", w.Body.String())
@@ -215,7 +237,7 @@ func TestOverlayProfiles_DispatchNeedingDefaultFailsClearly(t *testing.T) {
 			"provisionOnly": true,
 			"config":        map[string]any{"template": "claude"},
 		})
-		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+lifecycleK8sProfile)
+		assertDispatchRefused(t, w, `active_profile "local"`, "available profiles: "+storedProfilesList)
 	})
 	t.Run("create with explicit profile missing from stored profiles", func(t *testing.T) {
 		f := newLifecycleFixture(t)
@@ -228,7 +250,7 @@ func TestOverlayProfiles_DispatchNeedingDefaultFailsClearly(t *testing.T) {
 			"config":      map[string]any{"template": "claude", "profile": "local"},
 		})
 		assertDispatchRefused(t, w, "requested runtime profile cannot be resolved", `profile "local" not found`,
-			"available profiles: "+lifecycleK8sProfile, "retry once the profile is one of the hub's stored profiles")
+			"available profiles: "+storedProfilesList, "retry once the profile is one of the hub's stored profiles")
 		if f.defaultMgr.StartCalls() != 0 {
 			t.Errorf("default runtime Start calls = %d, want 0", f.defaultMgr.StartCalls())
 		}
@@ -334,8 +356,36 @@ func TestOverlayProfiles_KubernetesOnlyBrokerWithoutActiveProfileStarts(t *testi
 	})
 	// The embedded defaults supply active_profile "local" when no settings
 	// file sets one; either way it is not a stored profile.
-	assertDispatchRefused(t, w, "active_profile ", "is not one of the hub's stored profiles", "available profiles: "+lifecycleK8sProfile)
+	assertDispatchRefused(t, w, "active_profile ", "is not one of the hub's stored profiles", "available profiles: "+storedProfilesList)
 	if mgr.StartCalls() != 1 {
 		t.Errorf("Start calls after refused dispatch = %d, want 1", mgr.StartCalls())
+	}
+}
+
+// When active_profile is not one of the stored profiles and the stored
+// profiles hold exactly one profile, a dispatch that needs the default
+// profile uses that profile instead of being refused.
+func TestOverlayProfiles_SingleStoredProfileUsedAsDefault(t *testing.T) {
+	f := newLifecycleFixture(t)
+	installOverlayProfiles(t, map[string]config.V1ProfileConfig{lifecycleK8sProfile: {Runtime: "kubernetes"}})
+	w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+		"name":          "prov-agent",
+		"slug":          "prov-agent",
+		"id":            "agent-uuid-prov",
+		"projectPath":   f.projectPath,
+		"provisionOnly": true,
+		"config":        map[string]any{"template": "claude"},
+	})
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	var raw struct {
+		Agent map[string]any `json:"agent"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if got := raw.Agent["runtime"]; got != "kubernetes" {
+		t.Errorf("response agent.runtime = %v, want kubernetes (the only stored profile's runtime)", got)
 	}
 }

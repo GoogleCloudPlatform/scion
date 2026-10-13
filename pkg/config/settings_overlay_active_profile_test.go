@@ -15,7 +15,9 @@
 package config
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 )
@@ -181,5 +183,99 @@ func TestSettingsOverlay_RequestedProfileMissingUnchangedWithoutOverlaidProfiles
 	view := vs.ForProfileResolution(ProfileResolutionFlatInstance)
 	if _, _, err := view.ResolveRuntime("vanished"); errors.As(err, &spe) {
 		t.Errorf("flat view returned *StoredProfileNotFoundError: %v", err)
+	}
+}
+
+// captureSlog routes the default slog logger into a buffer for the test.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// When active_profile is not one of the overlaid profiles and they hold
+// exactly one profile, that profile is the default; the choice is logged
+// once, naming the profile and why, however often settings are loaded.
+func TestSettingsOverlay_ActiveProfile_SingleStoredProfileUsed(t *testing.T) {
+	for _, active := range []string{"gone", ""} {
+		t.Run("active="+active, func(t *testing.T) {
+			logs := captureSlog(t)
+			o := NewSettingsOverlay()
+			o.Update(
+				map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}},
+				map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}},
+				nil, "")
+
+			for i := 0; i < 3; i++ {
+				vs := overlayActiveProfileFixture(active)
+				o.Apply(vs)
+				if vs.ActiveProfile != "cluster" {
+					t.Fatalf("ActiveProfile = %q, want cluster", vs.ActiveProfile)
+				}
+				_, rtType, err := vs.ResolveRuntime("")
+				if err != nil {
+					t.Fatalf("ResolveRuntime(\"\"): %v", err)
+				}
+				if rtType != "kubernetes" {
+					t.Errorf("runtime type = %q, want kubernetes", rtType)
+				}
+			}
+
+			out := logs.String()
+			if n := strings.Count(out, "Default profile set to the only stored profile"); n != 1 {
+				t.Fatalf("fallback logged %d times, want 1:\n%s", n, out)
+			}
+			wantActive := "active_profile=" + active
+			if active == "" {
+				wantActive = "active_profile=(unset)"
+			}
+			for _, want := range []string{"profile=cluster", wantActive, "does not name one of the hub's stored profiles"} {
+				if !strings.Contains(out, want) {
+					t.Errorf("log %q does not contain %q", out, want)
+				}
+			}
+		})
+	}
+}
+
+// With zero or several overlaid profiles, an active_profile that is not one
+// of them is refused with an error naming every stored profile, and nothing
+// is chosen in its place.
+func TestSettingsOverlay_ActiveProfile_ZeroOrSeveralStoredProfilesRefused(t *testing.T) {
+	for name, tc := range map[string]struct {
+		profiles map[string]V1ProfileConfig
+		want     string
+	}{
+		"zero": {profiles: map[string]V1ProfileConfig{}, want: "available profiles: none"},
+		"two": {
+			profiles: map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}, "batch": {Runtime: "k8s"}},
+			want:     "available profiles: batch, cluster",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			logs := captureSlog(t)
+			o := NewSettingsOverlay()
+			o.Update(map[string]V1RuntimeConfig{"k8s": {Type: "kubernetes"}}, tc.profiles, nil, "")
+			vs := overlayActiveProfileFixture("gone")
+			o.Apply(vs)
+
+			if vs.ActiveProfile != "gone" {
+				t.Errorf("ActiveProfile = %q, want the file value kept", vs.ActiveProfile)
+			}
+			_, _, err := vs.ResolveRuntime("")
+			var ape *ActiveProfileError
+			if !errors.As(err, &ape) {
+				t.Fatalf("ResolveRuntime(\"\") error = %v, want *ActiveProfileError", err)
+			}
+			if !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), `"gone"`) {
+				t.Errorf("error %q should name \"gone\" and contain %q", err, tc.want)
+			}
+			if strings.Contains(logs.String(), "only stored profile") {
+				t.Errorf("fallback logged with %s stored profiles: %s", name, logs.String())
+			}
+		})
 	}
 }

@@ -138,7 +138,10 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 // Returns the runtime config, the effective runtime type, and any error.
 // If profileName is empty, ActiveProfile is used; when the hub settings
 // overlay replaced the profiles map and ActiveProfile is not one of them,
-// the error is an *ActiveProfileError naming both. A named profile missing
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
 // from an overlaid map gives a *StoredProfileNotFoundError naming it and
 // the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
@@ -1207,8 +1210,9 @@ type VersionedSettings struct {
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
 	// activeProfileErr is set by the hub settings overlay when it replaced
-	// Profiles and ActiveProfile is not one of them (see
-	// resolveOverlaidActiveProfile). It is not serialized.
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
 	activeProfileErr *ActiveProfileError
 	// storedProfileNames is the sorted list of profile names when the hub
 	// settings overlay replaced Profiles (non-nil exactly then); nil

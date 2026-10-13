@@ -32,7 +32,7 @@ Files without `schema_version` are treated as legacy format. Run `scion config m
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `schema_version` | string | **Required**. Must be `"1"`. |
-| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). |
+| `active_profile` | string | The name of the profile to use by default (e.g., `local`, `remote`). On a Runtime Broker co-located with a database-backed Hub, profiles come from the Hub's stored profiles. The default profile is then `active_profile` if it is one of them. Otherwise, if the Hub stores exactly one profile, that profile is used (the broker logs which one and why). With no stored profiles, or several, a dispatch that needs the default profile is refused with an error that names the available profiles. |
 | `default_template` | string | The default template to use when creating agents (e.g., `gemini`, `antigravity`). |
 | `default_harness_config` | string | Default harness config to use. |
 | `default_harness_auth` | string | Default authentication type for new agents (e.g., `api-key`, `vertex-ai`, `none`). |

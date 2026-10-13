@@ -17,6 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -42,6 +43,12 @@ type SettingsOverlay struct {
 	harnessConfigs map[string]HarnessConfigEntry
 	imageRegistry  string
 	active         bool // true when any field has been set
+
+	// fallbackLogMu guards fallbackLogged, the last (active_profile,
+	// chosen profile) pair logged by logSingleProfileFallback. It is
+	// separate from mu because Apply holds mu only for reading.
+	fallbackLogMu  sync.Mutex
+	fallbackLogged string
 }
 
 // globalOverlay is the process-wide settings overlay. It is nil by default;
@@ -111,7 +118,9 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	}
 	if o.profiles != nil {
 		vs.Profiles = cloneProfiles(o.profiles)
-		resolveOverlaidActiveProfile(vs)
+		if configured, chosen := resolveOverlaidActiveProfile(vs); chosen != "" {
+			o.logSingleProfileFallback(configured, chosen)
+		}
 	}
 	if o.harnessConfigs != nil {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
@@ -123,7 +132,9 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 
 // ActiveProfileError reports that the default profile (active_profile)
 // cannot be resolved after the overlay replaced the profiles map: the
-// configured name is not one of the stored profiles. It is returned only
+// configured name is not one of the stored profiles, and there is not
+// exactly one stored profile to use instead (see
+// resolveOverlaidActiveProfile). It is returned only
 // when a caller needs the default profile (ResolveRuntime with an empty
 // profile name), never when settings are loaded, so a broker whose agents
 // all carry their own profile still starts and runs.
@@ -171,14 +182,21 @@ func joinAvailableProfiles(names []string) string {
 // resolveOverlaidActiveProfile decides the default profile once the overlay
 // has replaced vs.Profiles, and records the stored profile names so that
 // ResolveRuntime can name them when a requested profile is missing. The
-// file's active_profile is kept when that profile exists in the overlaid
-// map; otherwise vs records an ActiveProfileError, which ResolveRuntime
-// returns when the default profile is needed. vs.ActiveProfile itself is
-// left unchanged either way.
+// order is:
+//
+//  1. the file's active_profile, when that profile exists in the overlaid
+//     map;
+//  2. otherwise, when the overlaid map holds exactly one profile, that
+//     profile: vs.ActiveProfile is set to it, and its name is returned as
+//     chosen (with the file value as configured) so the caller can log the
+//     choice;
+//  3. otherwise (zero or several stored profiles), vs records an
+//     ActiveProfileError, which ResolveRuntime returns when the default
+//     profile is needed; vs.ActiveProfile is left unchanged.
 //
 // active_profile has no hub (DB) setting today. If one is ever added, its
 // value would take precedence over the file's value here.
-func resolveOverlaidActiveProfile(vs *VersionedSettings) {
+func resolveOverlaidActiveProfile(vs *VersionedSettings) (configured, chosen string) {
 	available := make([]string, 0, len(vs.Profiles))
 	for name := range vs.Profiles {
 		available = append(available, name)
@@ -187,9 +205,34 @@ func resolveOverlaidActiveProfile(vs *VersionedSettings) {
 	vs.storedProfileNames = available
 	vs.activeProfileErr = nil
 	if _, ok := vs.Profiles[vs.ActiveProfile]; ok {
-		return
+		return "", ""
+	}
+	if len(available) == 1 {
+		configured = vs.ActiveProfile
+		vs.ActiveProfile = available[0]
+		return configured, available[0]
 	}
 	vs.activeProfileErr = &ActiveProfileError{Configured: vs.ActiveProfile, Available: available}
+	return "", ""
+}
+
+// logSingleProfileFallback logs that the only stored profile is used as the
+// default profile because active_profile does not name a stored profile.
+// Apply runs on every settings load, so the line is written only when the
+// (configured, chosen) pair differs from the one last logged.
+func (o *SettingsOverlay) logSingleProfileFallback(configured, chosen string) {
+	key := configured + "\x00" + chosen
+	o.fallbackLogMu.Lock()
+	defer o.fallbackLogMu.Unlock()
+	if o.fallbackLogged == key {
+		return
+	}
+	o.fallbackLogged = key
+	if configured == "" {
+		configured = "(unset)"
+	}
+	slog.Info("Default profile set to the only stored profile: active_profile does not name one of the hub's stored profiles",
+		"profile", chosen, "active_profile", configured)
 }
 
 // Profiles returns a deep copy of the overlay's profiles map. Returns nil if
