@@ -59,7 +59,7 @@ func (s *Server) notificationDispatchSweepHandler() func(ctx context.Context) {
 		// broker-connect hook handles the latency-sensitive path. If
 		// sequential processing becomes a bottleneck under sustained load,
 		// consider bounded concurrency.
-		s.notificationDispatcher.retryBatch(ctx, notifs)
+		s.notificationDispatcher.retryBatch(ctx, notifs, nil)
 	}
 }
 
@@ -109,7 +109,7 @@ func (s *Server) drainUndispatchedNotifications(ctx context.Context, brokerID st
 	s.agentLifecycleLog.Info("broker-connect notification drain: delivering",
 		"brokerID", brokerID, "count", len(notifs))
 
-	s.notificationDispatcher.retryBatch(ctx, notifs)
+	s.notificationDispatcher.retryBatch(ctx, notifs, s.brokerWork.closing)
 }
 
 // notificationRetryPassTimeout is the budget of one sweep or broker-connect
@@ -167,10 +167,20 @@ const (
 // on that broker are skipped (without being claimed) for the rest of the
 // pass, so a dead broker costs at most one attempt per pass instead of
 // blocking newer, deliverable notifications behind it.
-func (nd *NotificationDispatcher) retryBatch(ctx context.Context, notifs []store.Notification) {
+//
+// stop, if non-nil, is checked before each notification; once it returns
+// true no further notification is claimed. The broker-connect drain passes
+// the broker work tracker's closing check so it stops claiming once hub
+// shutdown begins (ptone/scion#4869).
+func (nd *NotificationDispatcher) retryBatch(ctx context.Context, notifs []store.Notification, stop func() bool) {
 	skipBrokers := map[string]bool{}
 	for i := range notifs {
 		if ctx.Err() != nil {
+			return
+		}
+		// Once hub shutdown has begun, claim nothing more; undispatched
+		// notifications drain on the next connect (ptone/scion#4869).
+		if stop != nil && stop() {
 			return
 		}
 		if deadline, ok := ctx.Deadline(); ok && time.Until(deadline) < retryDispatchAttemptTimeout {
