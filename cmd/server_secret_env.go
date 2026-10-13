@@ -27,13 +27,10 @@ const (
 // serverSecretEnvNames are the server secret env names that
 // scrubServerSecretEnv removes from the process env once their values are in
 // memory, so that no child process (git, container CLIs, plugins, agents)
-// inherits them. Both conduit peer secret spellings are listed so that no
-// child inherits them either.
+// inherits them.
 var serverSecretEnvNames = []string{
 	sessionSecretEnv,
 	legacySessionSecretEnv,
-	"SCION_SERVER_HUB_CONDUIT_PEERSECRET",
-	"SCION_SERVER_HUB_CONDUIT_PEER_SECRET",
 }
 
 // capturedSessionSecret holds the session secret read from the env by

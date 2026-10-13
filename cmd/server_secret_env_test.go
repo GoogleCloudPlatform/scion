@@ -57,6 +57,9 @@ func captureSecretEnvSlog(t *testing.T) *bytes.Buffer {
 
 func TestScrubServerSecretEnv_UnsetsNamesAndKeepsSecret(t *testing.T) {
 	isolateServerSecretEnv(t)
+	if strings.Join(serverSecretEnvNames, ",") != "SCION_SERVER_SESSION_SECRET,SESSION_SECRET" {
+		t.Fatalf("serverSecretEnvNames = %v, want both session secret spellings", serverSecretEnvNames)
+	}
 	for _, name := range serverSecretEnvNames {
 		t.Setenv(name, "value-of-"+name)
 	}
