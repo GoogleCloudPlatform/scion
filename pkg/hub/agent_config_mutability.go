@@ -227,7 +227,7 @@ func editDisposition(f agentEditField, phase string, deleted bool) (EditDisposit
 	}
 	var noContainer, liveOrTransitional bool
 	switch p {
-	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		noContainer = true
 	case state.PhaseProvisioning, state.PhaseCloning, state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
 		liveOrTransitional = true

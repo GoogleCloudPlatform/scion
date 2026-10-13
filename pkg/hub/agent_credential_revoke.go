@@ -155,7 +155,8 @@ func isConfirmedNonRunningPhase(phase string) bool {
 		string(state.PhaseProvisioning),
 		string(state.PhaseStopped),
 		string(state.PhaseSuspended),
-		string(state.PhaseError):
+		string(state.PhaseError),
+		string(state.PhaseHalted):
 		return true
 	default:
 		return false

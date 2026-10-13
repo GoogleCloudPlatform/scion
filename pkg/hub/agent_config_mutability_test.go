@@ -98,27 +98,27 @@ var wantSessionSensitive = map[string]bool{
 // before the per-key exceptions in wantDispositionException.
 var wantTierDisposition = map[EditTier]map[state.Phase]EditDisposition{
 	EditTierMetadata: {
-		state.PhaseCreated: EditImmediate, state.PhaseStopped: EditImmediate, state.PhaseError: EditImmediate,
+		state.PhaseCreated: EditImmediate, state.PhaseStopped: EditImmediate, state.PhaseError: EditImmediate, state.PhaseHalted: EditImmediate,
 		state.PhaseSuspended: EditImmediate, state.PhaseRunning: EditImmediate, state.PhaseProvisioning: EditImmediate,
 		state.PhaseCloning: EditImmediate, state.PhaseStarting: EditImmediate, state.PhaseStopping: EditImmediate,
 	},
 	EditTierContainer: {
-		state.PhaseCreated: EditNow, state.PhaseStopped: EditNow, state.PhaseError: EditNow,
+		state.PhaseCreated: EditNow, state.PhaseStopped: EditNow, state.PhaseError: EditNow, state.PhaseHalted: EditNow,
 		state.PhaseSuspended: EditNow, state.PhaseRunning: EditHeld, state.PhaseProvisioning: EditHeld,
 		state.PhaseCloning: EditHeld, state.PhaseStarting: EditHeld, state.PhaseStopping: EditHeld,
 	},
 	EditTierProvision: {
-		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate, state.PhaseHalted: EditReincarnate,
 		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
 		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
 	},
 	EditTierPrincipal: {
-		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate,
+		state.PhaseCreated: EditReincarnate, state.PhaseStopped: EditReincarnate, state.PhaseError: EditReincarnate, state.PhaseHalted: EditReincarnate,
 		state.PhaseSuspended: EditReincarnate, state.PhaseRunning: EditReincarnate, state.PhaseProvisioning: EditReincarnate,
 		state.PhaseCloning: EditReincarnate, state.PhaseStarting: EditReincarnate, state.PhaseStopping: EditReincarnate,
 	},
 	EditTierImmutable: {
-		state.PhaseCreated: EditLocked, state.PhaseStopped: EditLocked, state.PhaseError: EditLocked,
+		state.PhaseCreated: EditLocked, state.PhaseStopped: EditLocked, state.PhaseError: EditLocked, state.PhaseHalted: EditLocked,
 		state.PhaseSuspended: EditLocked, state.PhaseRunning: EditLocked, state.PhaseProvisioning: EditLocked,
 		state.PhaseCloning: EditLocked, state.PhaseStarting: EditLocked, state.PhaseStopping: EditLocked,
 	},
@@ -185,7 +185,7 @@ func TestScionConfigJSONKey(t *testing.T) {
 func TestAgentEditTable_EveryKeyEveryPhase(t *testing.T) {
 	require.Len(t, agentEditFields, len(wantEditTier), "every table row must have an expected tier, and the reverse")
 	require.Len(t, agentEditFieldByKey, len(agentEditFields), "table keys must be unique")
-	require.Len(t, state.Phases(), 9, "a new phase needs a column in wantTierDisposition")
+	require.Len(t, state.Phases(), 10, "a new phase needs a column in wantTierDisposition")
 
 	for _, f := range agentEditFields {
 		want, ok := wantEditTier[f.Key]

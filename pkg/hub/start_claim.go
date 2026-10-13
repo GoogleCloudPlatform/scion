@@ -614,7 +614,7 @@ func (s *Server) settleFailedProvisionedStart(ctx context.Context, agentID strin
 func (s *Server) writeStartedStatus(ctx context.Context, agent *store.Agent, clearRemnants bool) error {
 	phase := agent.Phase
 	switch state.Phase(phase) {
-	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseStarting:
+	case "", state.PhaseCreated, state.PhaseProvisioning, state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseHalted, state.PhaseStarting:
 		phase = string(state.PhaseRunning)
 	}
 	// StartWrite: a finalizing delete holds the row even with its lease

@@ -66,6 +66,7 @@ func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Age
 	case err != nil:
 		s.agentLifecycleLog.Warn("failed to re-read agent before created publish",
 			"agent_id", agent.ID, "error", err)
+		s.enrichAgentRuntime(ctx, agent)
 		s.events.PublishAgentCreated(ctx, agent)
 		return true
 	}
@@ -75,6 +76,7 @@ func (s *Server) publishAgentCreatedIfLive(ctx context.Context, agent *store.Age
 			"deletion_state", fresh.DeletionState, "deletion_claim", fresh.DeletionClaim)
 		return false
 	}
+	s.enrichAgentRuntime(ctx, fresh)
 	s.events.PublishAgentCreated(ctx, fresh)
 	return true
 }

@@ -4238,10 +4238,15 @@ func injectThinkingLevelEnv(env map[string]string, cfg *store.AgentAppliedConfig
 // =============================================================================
 
 // isStartTerminal returns true for terminal phases of a start/restart op.
-func isStartTerminal(phase string) bool { return phase == "running" || phase == "error" }
+// error and halted end it as a failure.
+func isStartTerminal(phase string) bool {
+	return phase == "running" || phase == "error" || phase == "halted"
+}
 
 // isStopTerminal returns true for terminal phases of a stop op.
-func isStopTerminal(phase string) bool { return phase == "stopped" || phase == "error" }
+func isStopTerminal(phase string) bool {
+	return phase == "stopped" || phase == "error" || phase == "halted"
+}
 
 // deferredStart handles a cross-node agent start: subscribe → write intent →
 // signal → wait for the terminal phase. Called when client.StartAgent returns

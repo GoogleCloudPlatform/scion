@@ -217,9 +217,9 @@ type HealthBrokerStorage struct {
 type HealthSummaryAgents struct {
 	// Total is the number of non-deleted agents.
 	Total int `json:"total"`
-	// Active is Total minus agents in phase stopped or error.
+	// Active is Total minus agents in phase stopped, error or halted.
 	Active int `json:"active"`
-	// Errored is the number of agents in phase error or with activity
+	// Errored is the number of agents in phase error or halted, or with activity
 	// crashed, each agent once, stopped agents excluded.
 	Errored int `json:"errored"`
 	// Considered is the number of non-deleted agents not in phase stopped.
@@ -420,7 +420,7 @@ func (s *Server) healthSummaryDispatch(ctx context.Context, now time.Time) (*Hea
 func (s *Server) healthSummaryAgents(ctx context.Context, agg *store.AgentHealthAggregate) HealthSummaryAgents {
 	out := HealthSummaryAgents{
 		Total:      agg.Total,
-		Active:     agg.Total - agg.ByPhase[string(state.PhaseStopped)] - agg.ByPhase[string(state.PhaseError)],
+		Active:     agg.Total - agg.ByPhase[string(state.PhaseStopped)] - agg.ByPhase[string(state.PhaseError)] - agg.ByPhase[string(state.PhaseHalted)],
 		Errored:    agg.Errored,
 		Considered: agg.Considered,
 		ByPhase:    orderedPhaseCounts(agg.ByPhase),

@@ -315,7 +315,10 @@ func TestStatusUpdateIsEmpty_EveryFieldCounts(t *testing.T) {
 
 	// statusUpdatePreconditionFields are AgentStatusUpdate fields that only
 	// condition the write and so do not make an update non-empty.
-	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true, "GuardReincarnation": true}
+	// ReportRunID, Restore and Result (ptone/scion#4853) likewise only
+	// condition or report on the write.
+	statusUpdatePreconditionFields := map[string]bool{"IfPhase": true, "IfRunID": true, "StartWrite": true, "GuardReincarnation": true,
+		"ReportRunID": true, "Restore": true, "Result": true}
 
 	typ := reflect.TypeOf(store.AgentStatusUpdate{})
 	for i := 0; i < typ.NumField(); i++ {

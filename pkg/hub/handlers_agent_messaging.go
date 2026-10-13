@@ -1807,6 +1807,7 @@ func (s *Server) restoreAgent(w http.ResponseWriter, r *http.Request, id string)
 	// Marked as a restore so web clients that tombstoned the ID on deleted
 	// bring it back (ptone/scion#2951). restoreAgentTx stamps the restored
 	// row's Updated with the restore time, so that is the marker.
+	s.enrichAgentRuntime(ctx, agent)
 	s.events.PublishAgentRestored(ctx, agent, agent.Updated)
 
 	// Answer with the same enriched shape as GET /agents/{id}, so the
@@ -2238,6 +2239,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		case state.PhaseStopped:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
 				fmt.Sprintf("Agent %q is stopped. Use 'scion resume' to restart it with its previous state.", agent.Slug), nil)
+			return
+		case state.PhaseHalted:
+			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,
+				fmt.Sprintf("Agent %q is halted. Use 'scion start' to restart it.", agent.Slug), nil)
 			return
 		case state.PhaseError:
 			writeError(w, http.StatusConflict, ErrCodeAgentNotRunning,

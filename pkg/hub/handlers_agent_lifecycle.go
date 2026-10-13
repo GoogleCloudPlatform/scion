@@ -182,6 +182,12 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	// A reincarnation that starts after the read above must still win: the
 	// store re-checks Guard 0b on the row it locks (ptone/scion#2887).
 	status.GuardReincarnation = true
+	// The run of the token that sent this report: the store drops a report
+	// of another run, and tells this handler whether the write halted the
+	// agent (ptone/scion#4853).
+	status.ReportRunID = presentedAgentTokenRunID(ctx)
+	var statusResult store.AgentStatusResult
+	status.Result = &statusResult
 	if err := s.store.UpdateAgentStatus(ctx, id, status); err != nil {
 		writeErrorFromErr(w, err, "")
 		return
@@ -193,6 +199,9 @@ func (s *Server) updateAgentStatus(w http.ResponseWriter, r *http.Request, id st
 	if agent, err := s.store.GetAgent(ctx, id); err == nil {
 		if agent.DeletedAt.IsZero() {
 			s.events.PublishAgentStatus(ctx, agent)
+			if statusResult.Halted {
+				s.onAgentHalted(ctx, agent, statusResult.HaltedFrom)
+			}
 		}
 	} else {
 		s.agentLifecycleLog.Warn("Failed to fetch agent for status event", "agent_id", id, "error", err)
@@ -252,9 +261,11 @@ func statusUpdateTouchesGuardedFields(su store.AgentStatusUpdate) bool {
 // Every field counts, including the internal json:"-" ones a decoded status
 // POST never sets (ClearExit, ClearMessageIf, ClearTerminalRemnants):
 // erring towards "not empty" only means the store write runs.
-// The exceptions are the preconditions IfPhase, IfRunID, StartWrite and
-// GuardReincarnation: they only condition the write (StartWrite selects the
-// delete guard; GuardReincarnation turns on the store's reincarnation guard)
+// The exceptions are the preconditions IfPhase, IfRunID, StartWrite,
+// GuardReincarnation, ReportRunID and Restore, and the output Result: they
+// only condition the write (StartWrite selects the delete guard;
+// GuardReincarnation turns on the store's reincarnation guard; ReportRunID
+// selects the run check; Restore only qualifies a Phase) or report on it,
 // and persist nothing themselves, so they deliberately do not count.
 // TestStatusUpdateIsEmpty_EveryFieldCounts catches a field missing here.
 func statusUpdateIsEmpty(su store.AgentStatusUpdate) bool {
@@ -329,6 +340,23 @@ func guardAgentPhaseTransition(agent *store.Agent, status *store.AgentStatusUpda
 	// Only explicit start/stop lifecycle actions may leave the suspended phase,
 	// and those write phase directly without going through this guard.
 	if currentPhase == state.PhaseSuspended {
+		status.Phase = ""
+		status.Activity = ""
+		return
+	}
+
+	// Guard 0e: halted is sticky against the agent's own reports
+	// (ptone/scion#4853). The platform ended the run; only a start or a stop
+	// leaves halted. The one exception is a starting/running report (with
+	// its activity) while a start claim is held: that is the new run of a
+	// start whose outcome was in doubt, restored to halted by its rollback.
+	// The store applies the same rule on the locked row. Exit reason and
+	// message refinements still apply.
+	if currentPhase == state.PhaseHalted {
+		p := state.Phase(status.Phase)
+		if agent.StartClaimID != "" && (p == state.PhaseStarting || p == state.PhaseRunning) {
+			return
+		}
 		status.Phase = ""
 		status.Activity = ""
 		return
@@ -677,8 +705,8 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 			// (mirrors resumeInPlaceDecision's forcedRecovery case for the
 			// create-agent resume path). This never applies to any other
 			// phase: a running agent must not be recreated out from under
-			// itself, and a stopped agent restarts fresh even if asked to
-			// resume, matching the create-agent path's behavior.
+			// itself, and a stopped or halted agent restarts fresh even if
+			// asked to resume, matching the create-agent path's behavior.
 			var startReq AgentLifecycleStartRequest
 			if r.ContentLength > 0 {
 				if err := readJSON(r, &startReq); err != nil {

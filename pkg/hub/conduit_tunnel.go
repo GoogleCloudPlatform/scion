@@ -385,7 +385,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		return nil, tunnelRefusal(tunnelForbidden, "not permitted")
 	}
 	switch state.Phase(agent.Phase) {
-	case state.PhaseStopped, state.PhaseStopping, state.PhaseSuspended:
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseStopping, state.PhaseSuspended:
 		return nil, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
 	}
 	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)

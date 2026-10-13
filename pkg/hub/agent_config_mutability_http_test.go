@@ -179,7 +179,7 @@ func TestAgentConfigPatch_ErrorAgentFreshStartDispatchesEdit(t *testing.T) {
 // removed.
 func TestAgentConfigPatch_PhaseGate(t *testing.T) {
 	accepted := map[state.Phase]bool{
-		state.PhaseCreated: true, state.PhaseStopped: true, state.PhaseError: true, state.PhaseSuspended: true,
+		state.PhaseCreated: true, state.PhaseStopped: true, state.PhaseError: true, state.PhaseHalted: true, state.PhaseSuspended: true,
 	}
 	for _, phase := range state.Phases() {
 		t.Run(string(phase), func(t *testing.T) {

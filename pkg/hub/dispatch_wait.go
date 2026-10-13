@@ -222,8 +222,13 @@ func waitForLifecycleOutcome(
 				timer.Reset(lifecycleRollingTimeout)
 				continue
 			}
-			if status.Phase != "error" {
+			// error and halted are failures; any other terminal phase is
+			// the op's success.
+			if status.Phase != "error" && status.Phase != "halted" {
 				return nil
+			}
+			if status.Phase == "halted" {
+				errorPhaseErr = fmt.Errorf("agent entered halted phase during %s", op)
 			}
 			rowState, err := readRow()
 			if err != nil {

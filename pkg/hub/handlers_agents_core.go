@@ -3087,7 +3087,7 @@ func (s *Server) preserveTerminalPhase(ctx context.Context, agent *store.Agent) 
 		return true
 	}
 	p := state.Phase(current.Phase)
-	if p == state.PhaseError || p == state.PhaseStopped {
+	if p == state.PhaseError || p == state.PhaseStopped || p == state.PhaseHalted {
 		agent.Phase = current.Phase
 		agent.Activity = current.Activity
 		agent.Message = current.Message
@@ -3310,7 +3310,7 @@ func copyHubWorkspaceStorage(dst, src *store.Agent) {
 
 func isTerminalAgentPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseError:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		return true
 	case state.PhaseCreated,
 		state.PhaseProvisioning,
@@ -3774,6 +3774,26 @@ func (s *Server) enrichAgents(ctx context.Context, agents []store.Agent) {
 				agents[i].Template = slug
 			}
 		}
+	}
+}
+
+// enrichAgentRuntime fills agent.Runtime, when none is recorded, with the
+// runtime resolveAgentRuntime derives from the agent's broker, as
+// enrichAgent does. It is for the raw (otherwise unenriched) reads that are
+// published as events: the derived runtime is display-only and is never
+// persisted, because the halt rule trusts only a broker-reported runtime
+// (ptone/scion#2262, ptone/scion#4853).
+func (s *Server) enrichAgentRuntime(ctx context.Context, agent *store.Agent) {
+	if agent == nil || agent.Runtime != "" || agent.RuntimeBrokerID == "" {
+		return
+	}
+	b, err := s.store.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
+	if err != nil {
+		s.agentLifecycleLog.Debug("failed to get runtime broker for runtime enrichment", "agent_id", agent.ID, "brokerID", agent.RuntimeBrokerID, "error", err)
+		return
+	}
+	if rt := resolveAgentRuntime(agent, b); rt != "" {
+		agent.Runtime = rt
 	}
 }
 
@@ -4805,7 +4825,7 @@ func removedEntriesWarnings(removed map[string][]string) []string {
 // AppliedConfig.
 func configPatchPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseSuspended:
+	case state.PhaseCreated, state.PhaseStopped, state.PhaseError, state.PhaseHalted, state.PhaseSuspended:
 		return true
 	}
 	return false

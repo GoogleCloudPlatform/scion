@@ -212,9 +212,12 @@ func (d *startDispatch) rollback(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), startDispatchRollbackTimeout)
 	defer cancel()
 	if d.marked {
+		// Restore lets the prior phase be halted, which no other write
+		// may store directly (ptone/scion#4853).
 		err := d.s.store.UpdateAgentStatus(ctx, d.agent.ID, store.AgentStatusUpdate{
 			Phase:   d.priorPhase,
 			IfPhase: string(state.PhaseStarting),
+			Restore: true,
 		})
 		if err != nil && !errors.Is(err, store.ErrPhaseMismatch) {
 			d.s.agentLifecycleLog.Warn("start dispatch: failed to restore prior phase after failed dispatch",

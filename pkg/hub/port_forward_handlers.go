@@ -744,10 +744,11 @@ func (s *Server) exposedPortsSweepHandler() func(ctx context.Context) {
 			}
 
 			// An agent's ports are stale if the agent is soft-deleted or in a
-			// terminal phase (stopped, error). We are generous: running,
-			// suspended, provisioning, starting, etc. are left alone.
+			// terminal phase (stopped, error, halted). We are generous:
+			// running, suspended, provisioning, starting, etc. are left alone.
 			isDeleted := !agent.DeletedAt.IsZero()
-			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError)
+			isTerminal := agent.Phase == string(state.PhaseStopped) || agent.Phase == string(state.PhaseError) ||
+				agent.Phase == string(state.PhaseHalted)
 
 			if !isDeleted && !isTerminal {
 				continue
