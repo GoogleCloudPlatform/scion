@@ -535,8 +535,12 @@ type Capabilities struct {
 	EndpointIncarnation string                 `protobuf:"bytes,3,opt,name=endpoint_incarnation,json=endpointIncarnation,proto3" json:"endpoint_incarnation,omitempty"`
 	ExecScope           string                 `protobuf:"bytes,4,opt,name=exec_scope,json=execScope,proto3" json:"exec_scope,omitempty"`
 	TransportLimits     *TransportLimits       `protobuf:"bytes,5,opt,name=transport_limits,json=transportLimits,proto3" json:"transport_limits,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// Optional protocol features the endpoint supports, as canonical
+	// lowercase names (for example "stream_renewal": the target enforces
+	// stream authorization deadlines and accepts renewal grants).
+	Features      []string `protobuf:"bytes,6,rep,name=features,proto3" json:"features,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Capabilities) Reset() {
@@ -600,6 +604,13 @@ func (x *Capabilities) GetExecScope() string {
 func (x *Capabilities) GetTransportLimits() *TransportLimits {
 	if x != nil {
 		return x.TransportLimits
+	}
+	return nil
+}
+
+func (x *Capabilities) GetFeatures() []string {
+	if x != nil {
+		return x.Features
 	}
 	return nil
 }
@@ -1340,8 +1351,15 @@ type StreamAccept struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	StreamId      uint32                 `protobuf:"varint,1,opt,name=stream_id,json=streamId,proto3" json:"stream_id,omitempty"`
 	InitialWindow uint32                 `protobuf:"varint,2,opt,name=initial_window,json=initialWindow,proto3" json:"initial_window,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	// target_session_id and target_stream_id are set only by the owning
+	// relay on an internal relay-to-relay hop: the session id and stream id
+	// of the stream on the target's own session, as the target sees it. The
+	// opening relay uses them to request and deliver stream renewals. They
+	// are empty ("" and 0) on every other StreamAccept.
+	TargetSessionId string `protobuf:"bytes,3,opt,name=target_session_id,json=targetSessionId,proto3" json:"target_session_id,omitempty"`
+	TargetStreamId  uint32 `protobuf:"varint,4,opt,name=target_stream_id,json=targetStreamId,proto3" json:"target_stream_id,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *StreamAccept) Reset() {
@@ -1384,6 +1402,20 @@ func (x *StreamAccept) GetStreamId() uint32 {
 func (x *StreamAccept) GetInitialWindow() uint32 {
 	if x != nil {
 		return x.InitialWindow
+	}
+	return 0
+}
+
+func (x *StreamAccept) GetTargetSessionId() string {
+	if x != nil {
+		return x.TargetSessionId
+	}
+	return ""
+}
+
+func (x *StreamAccept) GetTargetStreamId() uint32 {
+	if x != nil {
+		return x.TargetStreamId
 	}
 	return 0
 }
@@ -1658,14 +1690,15 @@ const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\fprincipal_id\x18\x02 \x01(\tR\vprincipalId\x12%\n" +
 	"\x0eclient_version\x18\x03 \x01(\tR\rclientVersion\x12B\n" +
 	"\fcapabilities\x18\x04 \x01(\v2\x1e.scion.conduit.v1.CapabilitiesR\fcapabilities\x12\x12\n" +
-	"\x04role\x18\x05 \x01(\tR\x04role\"\xe3\x01\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role\"\xff\x01\n" +
 	"\fCapabilities\x12!\n" +
 	"\fstream_kinds\x18\x01 \x03(\tR\vstreamKinds\x12\x10\n" +
 	"\x03rpc\x18\x02 \x03(\tR\x03rpc\x121\n" +
 	"\x14endpoint_incarnation\x18\x03 \x01(\tR\x13endpointIncarnation\x12\x1d\n" +
 	"\n" +
 	"exec_scope\x18\x04 \x01(\tR\texecScope\x12L\n" +
-	"\x10transport_limits\x18\x05 \x01(\v2!.scion.conduit.v1.TransportLimitsR\x0ftransportLimits\"T\n" +
+	"\x10transport_limits\x18\x05 \x01(\v2!.scion.conduit.v1.TransportLimitsR\x0ftransportLimits\x12\x1a\n" +
+	"\bfeatures\x18\x06 \x03(\tR\bfeatures\"T\n" +
 	"\x0fTransportLimits\x12\x1b\n" +
 	"\tmax_frame\x18\x01 \x01(\rR\bmaxFrame\x12$\n" +
 	"\x0eidle_timeout_s\x18\x02 \x01(\rR\fidleTimeoutS\"\xdc\x02\n" +
@@ -1734,10 +1767,12 @@ const file_conduit_v1_conduit_proto_rawDesc = "" +
 	"\x0fopen_timeout_ms\x18\x06 \x01(\rR\ropenTimeoutMs\x1a9\n" +
 	"\vParamsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"R\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xa8\x01\n" +
 	"\fStreamAccept\x12\x1b\n" +
 	"\tstream_id\x18\x01 \x01(\rR\bstreamId\x12%\n" +
-	"\x0einitial_window\x18\x02 \x01(\rR\rinitialWindow\"O\n" +
+	"\x0einitial_window\x18\x02 \x01(\rR\rinitialWindow\x12*\n" +
+	"\x11target_session_id\x18\x03 \x01(\tR\x0ftargetSessionId\x12(\n" +
+	"\x10target_stream_id\x18\x04 \x01(\rR\x0etargetStreamId\"O\n" +
 	"\n" +
 	"StreamData\x12\x1b\n" +
 	"\tstream_id\x18\x01 \x01(\rR\bstreamId\x12\x12\n" +
