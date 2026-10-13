@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -47,11 +48,17 @@ const (
 	maxStartClaimLeaseTTL = 5 * time.Minute
 	// minStartMaxDuration is the broker's pod-ready bound plus a minute.
 	minStartMaxDuration = 10*time.Minute + time.Minute
-	// minStartUnconfirmedHold is pod ready plus exec ready plus a minute.
-	minStartUnconfirmedHold = 10*time.Minute + 100*time.Second + time.Minute
-	// minStartCreateUnconfirmedHold is the hub's synchronous dispatch
-	// bound (120s) plus two heartbeat intervals.
-	minStartCreateUnconfirmedHold = 120*time.Second + 2*30*time.Second
+	// minStartUnconfirmedHold covers the broker's bound on a synchronous
+	// start that runs on after the hub gave up on it (api.SyncStartCeiling,
+	// which itself covers pod ready plus exec ready), plus a minute, so the
+	// create hold below fits under it.
+	minStartUnconfirmedHold = api.SyncStartCeiling + time.Minute
+	// minStartCreateUnconfirmedHold covers a create whose dispatch outcome
+	// was unknown: the broker may go on starting it for up to
+	// api.SyncStartCeiling (ptone/scion#4817), plus two heartbeat
+	// intervals for the inventory that shows the outcome. Below it, the
+	// reaper would stop a start that is still legitimately coming up.
+	minStartCreateUnconfirmedHold = api.SyncStartCeiling + 2*30*time.Second
 )
 
 // DefaultStartClaimSettings returns the defaults.
@@ -59,8 +66,8 @@ func DefaultStartClaimSettings() StartClaimSettings {
 	return StartClaimSettings{
 		LeaseTTL:              90 * time.Second,
 		MaxDuration:           12 * time.Minute,
-		UnconfirmedHold:       13 * time.Minute,
-		CreateUnconfirmedHold: 5 * time.Minute,
+		UnconfirmedHold:       minStartUnconfirmedHold + time.Minute,
+		CreateUnconfirmedHold: minStartCreateUnconfirmedHold,
 	}
 }
 
@@ -90,10 +97,10 @@ func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
 	check("start_max_duration", &c.MaxDuration, d.MaxDuration,
 		c.MaxDuration >= minStartMaxDuration, "at least 11m")
 	check("start_unconfirmed_hold", &c.UnconfirmedHold, d.UnconfirmedHold,
-		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least 12m40s")
+		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least "+minStartUnconfirmedHold.String())
 	check("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, d.CreateUnconfirmedHold,
 		c.CreateUnconfirmedHold >= minStartCreateUnconfirmedHold && c.CreateUnconfirmedHold <= c.UnconfirmedHold,
-		"3m up to start_unconfirmed_hold")
+		minStartCreateUnconfirmedHold.String()+" up to start_unconfirmed_hold")
 	// The default create hold must itself fit under a configured hold.
 	if c.CreateUnconfirmedHold > c.UnconfirmedHold {
 		c.CreateUnconfirmedHold = c.UnconfirmedHold

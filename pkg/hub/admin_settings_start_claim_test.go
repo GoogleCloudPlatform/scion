@@ -68,6 +68,7 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 		`{"server": {"hub": {"start_max_duration": "5m"}}}`,
 		`{"server": {"hub": {"start_unconfirmed_hold": "10m"}}}`,
 		`{"server": {"hub": {"start_create_unconfirmed_hold": "20m"}}}`,
+		`{"server": {"hub": {"start_create_unconfirmed_hold": "5m"}}}`,
 	} {
 		if rr := putStartClaimConfigDB(t, srv, ops, body); rr.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%s: status %d, want 422: %s", body, rr.Code, rr.Body.String())
@@ -83,11 +84,11 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 func TestPutServerConfigDB_StartClaimValidatedAgainstStartupValues(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
 	srv.config.StartClaim = StartClaimSettings{UnconfirmedHold: 20 * time.Minute}
-	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusOK {
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "18m"}}}`); rr.Code != http.StatusOK {
 		t.Errorf("a create hold under the startup hold rejected: %d %s", rr.Code, rr.Body.String())
 	}
 	srv.config.StartClaim = StartClaimSettings{}
-	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusUnprocessableEntity {
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "18m"}}}`); rr.Code != http.StatusUnprocessableEntity {
 		t.Errorf("a create hold over the default hold accepted: %d %s", rr.Code, rr.Body.String())
 	}
 }

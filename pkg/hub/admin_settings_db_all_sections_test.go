@@ -57,8 +57,8 @@ var layer1RoundTripSamples = map[string]string{
 	"server.hub.soft_delete_retain_files":      `true`,
 	"server.hub.start_claim_lease_ttl":         `"60s"`,
 	"server.hub.start_max_duration":            `"15m"`,
-	"server.hub.start_unconfirmed_hold":        `"14m"`,
-	"server.hub.start_create_unconfirmed_hold": `"4m"`,
+	"server.hub.start_unconfirmed_hold":        `"18m"`,
+	"server.hub.start_create_unconfirmed_hold": `"16m30s"`,
 	// telemetry (deep-merged)
 	"telemetry.enabled":                        `true`,
 	"telemetry.cloud":                          `{"endpoint":"otel.example.com:4317"}`,

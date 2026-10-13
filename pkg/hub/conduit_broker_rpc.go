@@ -152,7 +152,7 @@ func (t *conduitBrokerTunnel) tunnel(ctx context.Context, brokerID string, req *
 		return nil, ctx.Err()
 	case callCtx.Err() != nil:
 		// Past our own request timeout; Call sent RpcCancel.
-		return nil, fmt.Errorf("request timeout after %v", t.timeout)
+		return nil, fmt.Errorf("request timeout after %v (%w)", t.timeout, errBrokerResponseTimeout)
 	default:
 		return nil, fmt.Errorf("conduit request failed: %w", err)
 	}

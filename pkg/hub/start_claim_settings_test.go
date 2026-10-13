@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 )
@@ -37,10 +38,10 @@ func TestStartClaimSettings_Normalize(t *testing.T) {
 		{"lease too long", StartClaimSettings{LeaseTTL: 10 * time.Minute}, d},
 		{"lease ok", StartClaimSettings{LeaseTTL: 30 * time.Second}, StartClaimSettings{LeaseTTL: 30 * time.Second, MaxDuration: d.MaxDuration, UnconfirmedHold: d.UnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}},
 		{"max below pod-ready bound", StartClaimSettings{MaxDuration: 10 * time.Minute}, d},
-		{"hold below start budget", StartClaimSettings{UnconfirmedHold: 12*time.Minute + 39*time.Second}, d},
-		{"hold at start budget", StartClaimSettings{UnconfirmedHold: 12*time.Minute + 40*time.Second}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: 12*time.Minute + 40*time.Second, CreateUnconfirmedHold: d.CreateUnconfirmedHold}},
-		{"create hold too short", StartClaimSettings{CreateUnconfirmedHold: 2 * time.Minute}, d},
-		{"create hold above hold", StartClaimSettings{CreateUnconfirmedHold: 14 * time.Minute}, d},
+		{"hold below start budget", StartClaimSettings{UnconfirmedHold: minStartUnconfirmedHold - time.Second}, d},
+		{"hold at start budget", StartClaimSettings{UnconfirmedHold: minStartUnconfirmedHold}, StartClaimSettings{LeaseTTL: d.LeaseTTL, MaxDuration: d.MaxDuration, UnconfirmedHold: minStartUnconfirmedHold, CreateUnconfirmedHold: d.CreateUnconfirmedHold}},
+		{"create hold too short", StartClaimSettings{CreateUnconfirmedHold: minStartCreateUnconfirmedHold - time.Second}, d},
+		{"create hold above hold", StartClaimSettings{CreateUnconfirmedHold: d.UnconfirmedHold + time.Minute}, d},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -54,9 +55,27 @@ func TestStartClaimSettings_Normalize(t *testing.T) {
 		})
 	}
 
-	assert.Equal(t, store.StartClaimHolds{Default: 13 * time.Minute, Create: 5 * time.Minute}, d.Holds())
-	assert.Equal(t, 5*time.Minute, d.Holds().For(store.StartClaimStop))
-	assert.Equal(t, 13*time.Minute, d.Holds().For(store.StartClaimRecovery))
+	assert.Equal(t, store.StartClaimHolds{Default: 17 * time.Minute, Create: 16 * time.Minute}, d.Holds())
+	assert.Equal(t, 16*time.Minute, d.Holds().For(store.StartClaimStop))
+	assert.Equal(t, 17*time.Minute, d.Holds().For(store.StartClaimRecovery))
+}
+
+// The unconfirmed-start bounds cover the broker's bound on a synchronous
+// start that runs on after the hub gave up on it (api.SyncStartCeiling,
+// ptone/scion#4817): below it, the reaper would stop a start that is still
+// legitimately coming up, and run adoption could overtake it.
+func TestStartClaimSettings_HoldsCoverSyncStartCeiling(t *testing.T) {
+	d := DefaultStartClaimSettings()
+	assert.GreaterOrEqual(t, minStartCreateUnconfirmedHold, api.SyncStartCeiling+time.Minute, "create hold minimum")
+	assert.GreaterOrEqual(t, minStartUnconfirmedHold, minStartCreateUnconfirmedHold, "the create hold minimum fits under the hold minimum")
+	assert.GreaterOrEqual(t, d.CreateUnconfirmedHold, minStartCreateUnconfirmedHold)
+	assert.GreaterOrEqual(t, d.UnconfirmedHold, d.CreateUnconfirmedHold)
+	assert.GreaterOrEqual(t, runAdoptionQuietPeriod(), api.SyncStartCeiling+syncDispatchTimeout, "run adoption quiet period")
+
+	// The old 5m create hold is out of range: replaced by the default.
+	got, warns := StartClaimSettings{CreateUnconfirmedHold: 5 * time.Minute}.normalized()
+	assert.Equal(t, d.CreateUnconfirmedHold, got.CreateUnconfirmedHold)
+	assert.Len(t, warns, 1)
 }
 
 func TestStartClaimSettings_ApplySnapshot(t *testing.T) {

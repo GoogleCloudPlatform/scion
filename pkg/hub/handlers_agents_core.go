@@ -2836,6 +2836,13 @@ func (s *Server) createAgentInProject(
 					// claimed the row during the dispatch is a dispatch
 					// failure, cleaned up below.
 					return
+				} else if isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+					// The broker may still be starting the agent (the
+					// dispatch deadline, or no answer to a sent request):
+					// keep it for the start-claim reaper instead of
+					// rolling it back (ptone/scion#4817).
+					s.keepUnknownOutcomeStart(ctx, w, agent, string(createStageDispatchEnvGather), err, createAudit.ID, true, dispatchWarns.Warnings())
+					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
 					// and delete the agent record so orphaned local files don't
@@ -2917,6 +2924,13 @@ func (s *Server) createAgentInProject(
 					// not cleaned up as a failed create. A delete that
 					// claimed the row during the dispatch is a dispatch
 					// failure, cleaned up below.
+					return
+				} else if isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+					// The broker may still be starting the agent (the
+					// dispatch deadline, or no answer to a sent request):
+					// keep it for the start-claim reaper instead of
+					// rolling it back (ptone/scion#4817).
+					s.keepUnknownOutcomeStart(ctx, w, agent, string(createStageDispatch), err, createAudit.ID, true, dispatchWarns.Warnings())
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -3561,6 +3575,14 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	if s.writeStartClaimError(ctx, w, err, agent.ID) {
+		return
+	}
+	if err != nil && isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+		// The broker may still be starting the agent: keep it for the
+		// start-claim reaper (the finalize never deletes the row) and say
+		// the outcome is unknown, not that the finalize failed
+		// (ptone/scion#4817).
+		s.keepUnknownOutcomeStart(ctx, w, agent, "env_finalize", err, "", false, dispatchWarns.Warnings())
 		return
 	}
 	if err != nil {

@@ -187,6 +187,13 @@ func (s *Server) reapUnconfirmedStartClaim(ctx context.Context, a *store.Agent, 
 		if a.Phase == string(state.PhaseCreated) && a.RunIntent == store.RunIntentRunning && a.RunIntentAt != nil {
 			s.settleFailedProvisionedStart(ctx, a.ID, *a.RunIntentAt, provisionedStartNotCompletedMessage)
 		}
+		if a.StartClaimKind == store.StartClaimCreate {
+			// A create whose dispatch outcome was unknown keeps its
+			// credential for a start that may still come up
+			// (isUnknownDispatchOutcome). Nothing came up: revoke it, as a
+			// failed create or a delete would (ptone/scion#4817).
+			revokeAgentCredentialsBestEffort(ctx, s.store, a.ID, agentCredentialRevokeReasonCreateFailed)
+		}
 		return
 	}
 	if exp, ok := holds.HoldExpiry(a); ok && !now.Before(exp) && (obs.State == store.ObservedPresentRunning || inFlight) {
