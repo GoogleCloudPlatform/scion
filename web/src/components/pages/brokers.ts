@@ -407,7 +407,7 @@ export class ScionPageBrokers extends LitElement {
   private renderCapabilities(capabilities: import('../../shared/types.js').BrokerCapabilities) {
     return html`
       <div class="broker-details">
-        <span class="capability-tag ${capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
+        <span class="capability-tag ${capabilities.webPty ? 'enabled' : ''}">WebPTY</span>
         <span class="capability-tag ${capabilities.sync ? 'enabled' : ''}">Sync</span>
         <span class="capability-tag ${capabilities.attach ? 'enabled' : ''}">Attach</span>
       </div>
@@ -465,7 +465,7 @@ export class ScionPageBrokers extends LitElement {
           ${broker.capabilities
             ? html`
                 <span class="capability-tags-inline">
-                  <span class="capability-tag ${broker.capabilities.webPTY ? 'enabled' : ''}"
+                  <span class="capability-tag ${broker.capabilities.webPty ? 'enabled' : ''}"
                     >WebPTY</span
                   >
                   <span class="capability-tag ${broker.capabilities.sync ? 'enabled' : ''}"

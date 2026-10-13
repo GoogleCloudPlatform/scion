@@ -1102,7 +1102,7 @@ export type BrokerStatus = 'online' | 'offline' | 'degraded';
  * Capabilities advertised by a Runtime Broker
  */
 export interface BrokerCapabilities {
-  webPTY: boolean;
+  webPty: boolean;
   sync: boolean;
   attach: boolean;
 }
