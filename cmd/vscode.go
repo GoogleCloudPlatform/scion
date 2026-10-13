@@ -57,7 +57,12 @@ const (
 	// Application-scoped settings "apply to all instances of VS Code and can
 	// only be configured in user settings"
 	// (https://code.visualstudio.com/api/references/contribution-points,
-	// configuration scope), so a VS Code profile cannot carry the setting on
+	// configuration scope). The user settings of the default profile are
+	// the application settings: "When you're using a non-default profile,
+	// you can access the settings.json file that is associated with the
+	// default profile by using the Preferences: Open Application Settings
+	// (JSON) command" (https://code.visualstudio.com/docs/configure/settings,
+	// Profile settings). So a VS Code profile cannot carry the setting on
 	// its own. A scion-owned user data directory can: its settings.json sets
 	// it, and the user's default user data is never touched. Extensions stay
 	// in the default, shared extensions directory. The mechanism is fixed
@@ -138,14 +143,20 @@ var vscodePreflight = func(ctx context.Context, endpoint, project, agent string,
 	cfg.State = nil
 	ctx, cancel := context.WithTimeout(ctx, vscodePreflightTimeout)
 	defer cancel()
-	err = tunnelclient.Run(ctx, cfg, tunnelclient.Request{
+	return vscodePreflightError(tunnelclient.Run(ctx, cfg, tunnelclient.Request{
 		Agent:   agent,
 		Project: project,
 		SSH:     true,
 		Stdio:   true,
 		Stdin:   strings.NewReader(""),
 		Stdout:  io.Discard,
-	})
+	}), project, agent)
+}
+
+// vscodePreflightError maps the preflight tunnel's result to the command's
+// error: a tunnel client error as it is, the preflight timeout as exit 6,
+// anything else as exit 1.
+func vscodePreflightError(err error, project, agent string) error {
 	if err == nil {
 		return nil
 	}
@@ -178,6 +189,10 @@ func vscodeMain(ctx context.Context, env *sshCommandEnv, ref, folder string, pru
 	}
 	hub, err := resolveSSHHub(env)
 	if err != nil {
+		return err
+	}
+	p := vscodePaths{home: env.home}
+	if hub.label, err = vscodeHubLabel(p, hub); err != nil {
 		return err
 	}
 	rctx, cancel := context.WithTimeout(ctx, sshHubRequestTimeout)
@@ -222,8 +237,7 @@ func vscodeMain(ctx context.Context, env *sshCommandEnv, ref, folder string, pru
 		return err
 	}
 
-	p := vscodePaths{home: env.home}
-	changed, err := updateVSCodeFiles(p, vscodeUpdate{host: host, block: block, key: norm, pruneLabel: hub.label, keep: keep})
+	changed, err := updateVSCodeFiles(p, vscodeUpdate{host: host, block: block, key: norm, endpoint: hub.endpoint, keep: keep})
 	if err != nil {
 		return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
 	}
@@ -237,11 +251,12 @@ func vscodeMain(ctx context.Context, env *sshCommandEnv, ref, folder string, pru
 }
 
 // vscodeUpdate is one change to the scion vscode files: set host's block
-// and pin, and, when keep is not nil, drop the blocks and pins of the hosts
-// of pruneLabel's hub that keep does not list.
+// and pin for the hub at endpoint (normalized), and, when keep is not nil,
+// drop the blocks and pins of that hub's other hosts that keep does not
+// list. A block belongs to the hub its ProxyCommand pins with --hub.
 type vscodeUpdate struct {
 	host, block, key string
-	pruneLabel       string
+	endpoint         string
 	keep             map[string]bool
 }
 
@@ -268,19 +283,18 @@ func updateVSCodeFiles(p vscodePaths, u vscodeUpdate) (changed bool, err error) 
 	if err != nil {
 		return false, fmt.Errorf("reading %s: %w", p.knownHosts(), err)
 	}
+	if existing, ok := blocks[u.host]; ok {
+		if ep := vscodeBlockHub(existing); ep != "" && ep != u.endpoint {
+			return false, fmt.Errorf("host %s in %s belongs to hub %s; run scion vscode again", u.host, p.sshConfig(), ep)
+		}
+	}
 	old, hadPin := keys[u.host]
 	blocks[u.host] = u.block
 	keys[u.host] = u.key
 	if u.keep != nil {
-		prefix := "scion." + u.pruneLabel + "."
-		for h := range blocks {
-			if strings.HasPrefix(h, prefix) && h != u.host && !u.keep[h] {
+		for h, b := range blocks {
+			if h != u.host && !u.keep[h] && vscodeBlockHub(b) == u.endpoint {
 				delete(blocks, h)
-				delete(keys, h)
-			}
-		}
-		for h := range keys {
-			if strings.HasPrefix(h, prefix) && h != u.host && !u.keep[h] {
 				delete(keys, h)
 			}
 		}
@@ -309,6 +323,73 @@ func lockVSCodeDir(path string) (func(), error) {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 		_ = f.Close()
 	}, nil
+}
+
+// vscodeBlockHub returns the hub endpoint, normalized, that a Host block's
+// ProxyCommand pins with --hub, or "" when it has none.
+func vscodeBlockHub(block string) string {
+	for _, line := range strings.Split(block, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.EqualFold(fields[0], "ProxyCommand") {
+			continue
+		}
+		for i := 1; i+1 < len(fields); i++ {
+			if fields[i] == "--hub" {
+				return tunnelclient.NormalizeEndpoint(sshShellUnquote(fields[i+1]))
+			}
+		}
+	}
+	return ""
+}
+
+// sshShellUnquote reverses sshShellQuote for one word.
+func sshShellUnquote(w string) string {
+	if len(w) >= 2 && strings.HasPrefix(w, "'") && strings.HasSuffix(w, "'") {
+		w = strings.ReplaceAll(w[1:len(w)-1], `'\''`, "'")
+	}
+	return strings.ReplaceAll(w, "%%", "%")
+}
+
+// vscodeHubLabel returns the hub label for the vscode files: the label an
+// ssh-config include file or an existing vscode block records for this
+// endpoint, else the first candidate no other endpoint holds in either.
+func vscodeHubLabel(p vscodePaths, hub *sshHubTarget) (string, error) {
+	files := append([]sshIncludeFileInfo{}, hub.files...)
+	if data, err := os.ReadFile(p.sshConfig()); err == nil {
+		files = append(files, vscodeLabelRecords(parseSSHHostBlocks(string(data)))...)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return "", tunnelclient.Errorf(tunnelclient.ExitError, "reading %s: %v", p.sshConfig(), err)
+	}
+	u, err := sshEndpointURL(hub.endpoint)
+	if err != nil {
+		return "", tunnelclient.Errorf(tunnelclient.ExitUsage, "%v", err)
+	}
+	label, err := resolveSSHHubLabel(hub.endpoint, u, files)
+	if err != nil {
+		return "", tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+	}
+	return label, nil
+}
+
+// vscodeLabelRecords turns the vscode file's blocks into label records: the
+// label of each Host name with the hub its ProxyCommand pins.
+func vscodeLabelRecords(blocks map[string]string) []sshIncludeFileInfo {
+	hosts := make([]string, 0, len(blocks))
+	for h := range blocks {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts)
+	var out []sshIncludeFileInfo
+	for _, h := range hosts {
+		rest, ok := strings.CutPrefix(h, "scion.")
+		label, _, _ := strings.Cut(rest, ".")
+		ep := vscodeBlockHub(blocks[h])
+		if !ok || label == "" || ep == "" {
+			continue
+		}
+		out = append(out, sshIncludeFileInfo{label: label, endpoint: ep})
+	}
+	return out
 }
 
 // renderVSCodeSSHConfig writes the header and the blocks, sorted by host
@@ -345,6 +426,9 @@ func ensureVSCodeSettings(p vscodePaths) error {
 	}
 	if err != nil {
 		return fmt.Errorf("reading %s: %w", path, err)
+	}
+	if t := strings.TrimSpace(string(data)); t == "" || t == "null" {
+		return writeVSCodeSettings(path, map[string]any{vscodeConfigFileSetting: want})
 	}
 	var m map[string]any
 	if json.Unmarshal(data, &m) == nil && m != nil {

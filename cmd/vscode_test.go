@@ -173,8 +173,10 @@ func TestVSCode_ReusesIncludeFileLabel(t *testing.T) {
 }
 
 // Concurrent updates under the directory lock keep every entry. All
-// writers start together at a barrier; the outcome does not depend on
-// timing.
+// writers start together at a barrier and no step sleeps or times out.
+// With the lock, no entry can be lost; without it, eight writers released
+// at once lose entries with high probability, so this test catches a
+// missing lock with high probability, not certainty.
 func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 	p := vscodePaths{home: t.TempDir()}
 	const n = 8
@@ -192,7 +194,7 @@ func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 		go func(host string) {
 			defer wg.Done()
 			<-start
-			_, err := updateVSCodeFiles(p, vscodeUpdate{host: host, block: block, key: key})
+			_, err := updateVSCodeFiles(p, vscodeUpdate{host: host, block: block, key: key, endpoint: tunnelclient.NormalizeEndpoint("https://h.example")})
 			errs <- err
 		}(hosts[i])
 	}
@@ -216,14 +218,19 @@ func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 // has; a truncated listing changes nothing and runs neither the preflight
 // nor code.
 func TestVSCode_Prune(t *testing.T) {
-	seed := func(t *testing.T, env *sshCommandEnv, label string) (gone, kept, other string) {
+	seed := func(t *testing.T, env *sshCommandEnv, hub *fakeSSHHub) (gone, kept, other string) {
 		p := vscodePaths{home: env.home}
+		label := hub.label(t)
 		gone, kept, other = "scion."+label+".a.gone", "scion."+label+".a-b.c", "scion.elsewhere.p.q"
 		blocks := map[string]string{}
 		keys := map[string]string{}
 		for _, h := range []string{gone, kept, other} {
 			parts := strings.Split(h, ".")
-			b, err := renderSSHHostBlockKnown(sshTestExe, "https://x.example", parts[1], parts[2], parts[3], vscodeKnownHostsRef)
+			endpoint := hub.endpoint(t)
+			if h == other {
+				endpoint = "https://elsewhere.example"
+			}
+			b, err := renderSSHHostBlockKnown(sshTestExe, endpoint, parts[1], parts[2], parts[3], vscodeKnownHostsRef)
 			require.NoError(t, err)
 			blocks[h] = b
 			keys[h] = mustNormKey(t, testSSHPublicKey(t))
@@ -236,7 +243,7 @@ func TestVSCode_Prune(t *testing.T) {
 
 	t.Run("complete listing", func(t *testing.T) {
 		hub, env, _ := newVSCodeTest(t)
-		gone, kept, other := seed(t, env, hub.label(t))
+		gone, kept, other := seed(t, env, hub)
 		require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, true))
 		p := vscodePaths{home: env.home}
 		blocks := parseSSHHostBlocks(readTestFile(t, p.sshConfig()))
@@ -250,14 +257,14 @@ func TestVSCode_Prune(t *testing.T) {
 	})
 	t.Run("without --prune nothing is removed", func(t *testing.T) {
 		hub, env, _ := newVSCodeTest(t)
-		gone, _, _ := seed(t, env, hub.label(t))
+		gone, _, _ := seed(t, env, hub)
 		require.NoError(t, vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, false))
 		assert.Contains(t, parseSSHHostBlocks(readTestFile(t, vscodePaths{home: env.home}.sshConfig())), gone)
 	})
 	t.Run("truncated listing", func(t *testing.T) {
 		hub, env, fake := newVSCodeTest(t)
 		hub.truncateAgents = true
-		seed(t, env, hub.label(t))
+		seed(t, env, hub)
 		before := sshFilesSnapshot(t, vscodePaths{home: env.home}.dir())
 		err := vscodeMain(context.Background(), env, "a/b-c", vscodeDefaultFolder, true)
 		assert.Equal(t, tunnelclient.ExitError, tunnelclient.CodeOf(err), "%v", err)
@@ -351,6 +358,15 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		require.NoError(t, ensureVSCodeSettings(p))
 		assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
 	})
+	for name, content := range map[string]string{"empty": "", "whitespace": " \n\t\n", "null": "null\n"} {
+		t.Run(name+" counts as an empty object", func(t *testing.T) {
+			p := vscodePaths{home: t.TempDir()}
+			require.NoError(t, ensureSSHDir(p.home, filepath.Dir(p.settings())))
+			require.NoError(t, os.WriteFile(p.settings(), []byte(content), 0o600))
+			require.NoError(t, ensureVSCodeSettings(p))
+			assert.JSONEq(t, `{"remote.SSH.configFile": "`+p.sshConfig()+`"}`, readTestFile(t, p.settings()))
+		})
+	}
 	t.Run("plain JSON is merged", func(t *testing.T) {
 		p := setup(t, `{"editor.fontSize": 14, "remote.SSH.configFile": "/old"}`)
 		require.NoError(t, ensureVSCodeSettings(p))
@@ -376,6 +392,121 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 }
 
 func TestStripJSONComments(t *testing.T) {
-	in := "{\"a\": \"// not a comment\", // c\n \"b\": [1, 2,], /* x */ \"c\": \"/* s */\",\n}"
-	assert.JSONEq(t, `{"a": "// not a comment", "b": [1, 2], "c": "/* s */"}`, string(stripJSONComments([]byte(in))))
+	for _, tc := range []struct{ name, in, want string }{
+		{
+			"comments, trailing commas and comment text in strings",
+			"{\"a\": \"// not a comment\", // c\n \"b\": [1, 2,], /* x */ \"c\": \"/* s */\",\n}",
+			`{"a": "// not a comment", "b": [1, 2], "c": "/* s */"}`,
+		},
+		{
+			"a backslash-quote followed by comment text stays in the string",
+			`{"a": "x\"// y", "b": "z\"/* w */"}`,
+			`{"a": "x\"// y", "b": "z\"/* w */"}`,
+		},
+		{
+			"a value ending in a doubled backslash closes the string",
+			`{"c": "d\\" // tail` + "\n" + `, "e": "f\\" /* x */}`,
+			`{"c": "d\\", "e": "f\\"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.JSONEq(t, tc.want, string(stripJSONComments([]byte(tc.in))))
+		})
+	}
+}
+
+// Two hubs whose hosts share a first DNS label get distinct labels, so
+// their Host names never collide: a label an existing vscode block holds
+// for another hub falls back.
+func TestVSCodeHubLabel_SharedFirstDNSLabel(t *testing.T) {
+	p := vscodePaths{home: t.TempDir()}
+	a := tunnelclient.NormalizeEndpoint("https://hub.a.example")
+	b := tunnelclient.NormalizeEndpoint("https://hub.b.example")
+
+	labelA, err := vscodeHubLabel(p, &sshHubTarget{endpoint: a})
+	require.NoError(t, err)
+	assert.Equal(t, "hub", labelA)
+	blockA, err := renderSSHHostBlockKnown(sshTestExe, a, labelA, "p", "x", vscodeKnownHostsRef)
+	require.NoError(t, err)
+	_, err = updateVSCodeFiles(p, vscodeUpdate{host: sshHostName(labelA, "p", "x"), block: blockA, key: mustNormKey(t, testSSHPublicKey(t)), endpoint: a})
+	require.NoError(t, err)
+
+	labelB, err := vscodeHubLabel(p, &sshHubTarget{endpoint: b})
+	require.NoError(t, err)
+	assert.Equal(t, "hub-b-example", labelB)
+	assert.NotEqual(t, sshHostName(labelA, "p", "x"), sshHostName(labelB, "p", "x"))
+
+	again, err := vscodeHubLabel(p, &sshHubTarget{endpoint: a})
+	require.NoError(t, err)
+	assert.Equal(t, labelA, again, "the label a block records for its own hub is reused")
+}
+
+// Pruning selects blocks by the hub their ProxyCommand pins, so another
+// hub's blocks and pins survive even under the same label; a host held by
+// another hub is never overwritten.
+func TestUpdateVSCodeFiles_PruneAndOwnershipByPinnedHub(t *testing.T) {
+	p := vscodePaths{home: t.TempDir()}
+	a := tunnelclient.NormalizeEndpoint("https://hub.a.example")
+	b := tunnelclient.NormalizeEndpoint("https://hub.b.example")
+	put := func(endpoint, agent string, keep map[string]bool) error {
+		block, err := renderSSHHostBlockKnown(sshTestExe, endpoint, "x", "p", agent, vscodeKnownHostsRef)
+		require.NoError(t, err)
+		_, err = updateVSCodeFiles(p, vscodeUpdate{host: sshHostName("x", "p", agent), block: block, key: mustNormKey(t, testSSHPublicKey(t)), endpoint: endpoint, keep: keep})
+		return err
+	}
+	require.NoError(t, put(a, "a1", nil))
+	require.NoError(t, put(b, "b1", nil))
+
+	require.NoError(t, put(a, "a2", map[string]bool{}))
+	blocks := parseSSHHostBlocks(readTestFile(t, p.sshConfig()))
+	keys := parseKnownHosts(readTestFile(t, p.knownHosts()))
+	assert.NotContains(t, blocks, "scion.x.p.a1", "hub a's unlisted host is pruned")
+	assert.NotContains(t, keys, "scion.x.p.a1")
+	assert.Contains(t, blocks, "scion.x.p.a2")
+	assert.Contains(t, blocks, "scion.x.p.b1", "hub b's block survives hub a's prune")
+	assert.Contains(t, keys, "scion.x.p.b1")
+
+	before := sshFilesSnapshot(t, p.dir())
+	err := put(a, "b1", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "belongs to hub "+b)
+	assert.Equal(t, before, sshFilesSnapshot(t, p.dir()), "nothing is written")
+}
+
+func TestVSCodeBlockHub(t *testing.T) {
+	rendered, err := renderSSHHostBlockKnown(sshTestExe, "https://hub.example", "h", "p", "a", vscodeKnownHostsRef)
+	require.NoError(t, err)
+	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(rendered))
+	quoted := "Host scion.h.p.a\n  ProxyCommand /s tunnel --stdio --ssh --hub 'https://Hub.Example:443/' --project p a\n"
+	assert.Equal(t, tunnelclient.NormalizeEndpoint("https://hub.example"), vscodeBlockHub(quoted))
+	assert.Equal(t, "https://h.example/a b'c%d", sshShellUnquote(sshShellQuote("https://h.example/a b'c%d")))
+	assert.Empty(t, vscodeBlockHub("Host scion.h.p.a\n  HostKeyAlias scion.h.p.a\n"))
+}
+
+// The preflight result maps to the command's error: tunnel client errors
+// pass through unchanged, the timeout is exit 6, anything else exit 1.
+func TestVSCodePreflightError(t *testing.T) {
+	te := tunnelclient.Errorf(tunnelclient.ExitAgentNotRunning, "agent is not running")
+	for _, tc := range []struct {
+		name string
+		in   error
+		code int
+		line string
+	}{
+		{"nil", nil, tunnelclient.ExitOK, ""},
+		{"tunnel client error", fmt.Errorf("wrapped: %w", te), tunnelclient.ExitAgentNotRunning, "agent is not running"},
+		{"timeout", fmt.Errorf("dial: %w", context.DeadlineExceeded), tunnelclient.ExitHubUnavailable, "checking the SSH tunnel to p/a timed out after 1m0s"},
+		{"other", errors.New("boom"), tunnelclient.ExitError, "boom"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := vscodePreflightError(tc.in, "p", "a")
+			assert.Equal(t, tc.code, tunnelclient.CodeOf(got))
+			if tc.in == nil {
+				assert.NoError(t, got)
+				return
+			}
+			assert.Equal(t, tc.line, got.Error())
+		})
+	}
+	assert.Same(t, te, vscodePreflightError(te, "p", "a"), "a tunnel client error is returned as it is")
 }
