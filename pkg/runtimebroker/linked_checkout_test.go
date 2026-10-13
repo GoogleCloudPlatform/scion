@@ -184,7 +184,7 @@ func TestResolveLinkedCheckout(t *testing.T) {
 		// after it, where the remotes are shown.
 		const pathLead = linkedCheckoutErrPrefix + "the project's checkout at "
 		cut := strings.Index(got.Refusal, " has origin ")
-		if !strings.HasPrefix(got.Refusal, pathLead) || cut < len(pathLead) {
+		if !strings.HasPrefix(got.Refusal, pathLead) || cut <= len(pathLead) {
 			t.Fatalf("Refusal %q does not have the expected checkout-path layout", got.Refusal)
 		}
 		remotes := got.Refusal[cut:]
