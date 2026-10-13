@@ -97,10 +97,17 @@ func linkedHubProjectID(dir string) string {
 }
 
 // ownProjectIDs returns hub.projectId and the project's own id from the
-// settings files of the project dir itself (and of its external config
-// directory, which wins), as hubsync.ProjectLinkedSetting reads hub.linked.
-// A versioned settings file keeps its id at hub.project_id; that counts as
-// the project's own id.
+// settings files of the project dir itself and of its external config
+// directory, read in that order with the later file winning, as
+// hubsync.ProjectLinkedSetting reads hub.linked. Global settings are never
+// read.
+//
+// A versioned settings file keeps the project's own id at hub.project_id
+// only: when a dir's file is versioned, the own id is taken from there even
+// when it is empty, and a legacy top-level project_id does not count. So
+// when the external config directory's file is versioned without
+// hub.project_id, a legacy project_id in the in-repo dir does not count
+// either, and the directory is treated as not linked (it fails safe).
 func ownProjectIDs(dir string) (hubID, localID string) {
 	dirs := []string{dir}
 	if ext := config.GetProjectConfigDir(dir); ext != "" && ext != dir {
@@ -129,7 +136,9 @@ func ownProjectIDs(dir string) (hubID, localID string) {
 }
 
 // isVersionedSettingsDir reports whether dir's settings file is in the
-// versioned format.
+// versioned format. A missing, unreadable or unparseable file reports
+// false. It mirrors config.detectDirSettingsFormat, which is not exported:
+// the file GetSettingsPath finds, classified by DetectSettingsFormat.
 func isVersionedSettingsDir(dir string) bool {
 	path := config.GetSettingsPath(dir)
 	if path == "" {

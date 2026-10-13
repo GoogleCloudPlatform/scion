@@ -23,6 +23,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
@@ -141,6 +143,22 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			name: "a linked versioned directory project without hub.project_id ignores a top-level project_id",
 			setup: func(t *testing.T) {
 				makeHubOnlyDirProject(t, "schema_version: \"1\"\nproject_id: "+hubOnlyLocalID+"\nhub:\n  linked: true\n")
+			},
+			want:    hubOnlyProject{unlinkedDir: "myrepo"},
+			wantHub: ctxTestHub,
+		},
+		{
+			name: "a versioned external config file without hub.project_id overrides a legacy in-repo project_id",
+			setup: func(t *testing.T) {
+				makeHubOnlyDirProject(t, "project_id: "+hubOnlyLocalID+"\nhub:\n  linked: true\n")
+				wd, err := os.Getwd()
+				require.NoError(t, err)
+				dotScion := filepath.Join(wd, ".scion")
+				require.NoError(t, os.WriteFile(filepath.Join(dotScion, projectkeys.ProjectIDFile), []byte("8c3c4e2a-0000-4000-8000-00000000000b\n"), 0o644))
+				ext := config.GetProjectConfigDir(dotScion)
+				require.NotEqual(t, dotScion, ext, "the project must have an external config directory")
+				require.NoError(t, os.MkdirAll(ext, 0o755))
+				require.NoError(t, os.WriteFile(filepath.Join(ext, "settings.yaml"), []byte("schema_version: \"1\"\nhub:\n  linked: true\n"), 0o644))
 			},
 			want:    hubOnlyProject{unlinkedDir: "myrepo"},
 			wantHub: ctxTestHub,
