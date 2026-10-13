@@ -144,6 +144,18 @@ var agentAllowed = map[string]bool{
 	"artifact.versions":             true,
 	// artifact share and artifact delete are human-only and deliberately
 	// absent (ptone/scion#4529): agents may not share or delete artifacts.
+
+	// Project thread groups (ptone/scion#4424, design section 4 and
+	// decision Q3): agents may list, read, create, rename and re-file
+	// threads. conversation.group.delete is deliberately absent: only
+	// users may delete a thread group, and the hub refuses an agent.
+	"conversation.group":        true,
+	"conversation.group.list":   true,
+	"conversation.group.get":    true,
+	"conversation.group.create": true,
+	"conversation.group.rename": true,
+	"conversation.group.add":    true,
+	"conversation.group.remove": true,
 }
 
 // resolveMode determines the active CLI mode from environment and settings.

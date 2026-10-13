@@ -123,6 +123,7 @@ func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService 
 func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
+func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                                 { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                                   { return nil }
