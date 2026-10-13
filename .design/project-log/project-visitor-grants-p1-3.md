@@ -35,8 +35,11 @@
   passes, as in `CanDelegate`). Shortening and revoking never do. The
   `PATCH` reads the actor's permissions before the transaction and
   compares the new window with the binding read inside it
-  (`visitorWindowExtends`), so a concurrent change cannot turn a
-  shortening into an extension.
+  (`visitorWindowExtends`). That read takes no row lock and the window
+  update is unconditional, so on databases at READ COMMITTED (Postgres) a
+  window change committed concurrently can be overwritten by a shortening
+  request, but never beyond a window that request read; SQLite refuses
+  the stale write with a transient error.
 - **Grant.** Issuer must be trusted with `allow_visitor_grants` and a user
   or hub type; the email (lower-cased) must pass `allowed_emails` and
   `allowed_domains`; otherwise 400 with `details.field` and a neutral
@@ -110,3 +113,6 @@ binding gets an exclusion row instead).
 - A pending account whose last grant is revoked stays (pending); first
   contact still links it, with no grant.
 - Admin tooling to suspend a federated account does not exist yet.
+- `PATCH` window update: lock the binding row on the in-transaction read,
+  or make the update conditional on the window that was read (answering
+  409 when it changed), so a concurrent window change is not overwritten.
