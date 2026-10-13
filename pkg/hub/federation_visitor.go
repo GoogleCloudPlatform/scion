@@ -354,7 +354,7 @@ func missingVisitorRules(ctx context.Context, st store.Store, userID string, rul
 		}
 		var replaces *store.RoleBinding
 		if b, ok := existing[rule.ProjectID]; ok {
-			if b.SourceRuleID != nil || visitorGrantActiveAt(b, now) {
+			if b.SourceRuleID != nil || isBindingActive(b, now) {
 				continue
 			}
 			replaces = b
@@ -370,20 +370,6 @@ func missingVisitorRules(ctx context.Context, st store.Store, userID string, rul
 		out = append(out, visitorRuleBinding{rule: rule, replaces: replaces})
 	}
 	return out, nil
-}
-
-// visitorGrantActiveAt reports whether the window of the binding rb
-// contains now, by the authorization kernel's rule (evaluateActivation):
-// an unset bound is unbounded, NotBefore is inclusive and ExpiresAt is
-// exclusive.
-func visitorGrantActiveAt(rb *store.RoleBinding, now time.Time) bool {
-	if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-		return false
-	}
-	if rb.ExpiresAt != nil && !now.Before(*rb.ExpiresAt) {
-		return false
-	}
-	return true
 }
 
 // bindVisitorRules creates, in tx, a project-visitor binding of the
