@@ -76,7 +76,44 @@
   account's stored email (fixed at first contact) is not re-read for it.
 - One project-visitor binding per account and project (the existing
   unique index): an email grant and a rule on the same project never
-  coexist; whichever came first stands.
+  coexist. An active grant by email stands and the rule adds nothing
+  there; an inactive one (expired, or not started yet) is replaced by the
+  rule binding (see "Review changes" below).
+- After first contact the subject is the account's key (design §4.3): a
+  later email change at the issuer does not remove a binding a rule
+  created. The binding stays while the rule stands and the person is not
+  revoked; removing the rule, or revoking the person, ends it. A rule of
+  the new domain can still bind the account on another project.
+
+## Review changes
+
+- **Rule changes and a concurrent rule binding.** The request path reads
+  the rules before its transaction. The store now re-reads the rule in
+  the binding's transaction (`FOR SHARE` on Postgres), refuses one that is
+  missing or not active, and gives the binding the rule's window as read
+  there, whatever the caller passed. Removing a rule and changing its
+  window take the rule row `FOR UPDATE` before touching bindings, so a
+  concurrent rule binding either commits first and is then removed or
+  changed with the others, or waits and then sees the change. A first
+  contact that created an account only for rules that no longer bind it
+  rolls back. Revoking a rule visitor whose rule no longer exists removes
+  the binding without an exclusion instead of answering 404.
+- **Project deletion.** `cascadeSecurityState` now deletes the project's
+  visitor rules with their bindings and exclusions
+  (`DeleteProjectVisitorRulesByProject`, step 1b, counted in the cascade
+  summary as `project_visitor_rules_deleted`); the rule rows have no
+  foreign key to the project.
+- **Inactive grant by email and a rule.** When the account's only visitor
+  binding on a rule's project is a grant by email whose window does not
+  contain now, the rule binding replaces it in one transaction
+  (`DeleteInactiveVisitorGrant` re-reads and re-checks the grant, `FOR
+  UPDATE` on Postgres); the `visitor_linked` record carries
+  `replaced_binding_id`. A grant that became active meanwhile is kept.
+- **Grant by email to a rule visitor** answers 409 with a message saying
+  the person has access through a visitor rule and how to keep access
+  independently of it (revoke, then grant).
+- **Allowed-email patterns** are lower-cased only, as the per-email check
+  does, when deciding whether an issuer admits a rule's domain.
 
 ## Verification
 
