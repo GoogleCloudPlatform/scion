@@ -148,3 +148,35 @@ func TestArtifactViewNonHTMLEntry(t *testing.T) {
 	assert.Contains(t, err.Error(), "Only a version whose entry file is HTML has a view.")
 	assert.Empty(t, out.String())
 }
+
+// TestArtifactViewAgentModeHidesLink: with the link hidden (agent mode
+// without --show-link), view prints the version and the link's expiry and
+// no part of the link.
+func TestArtifactViewAgentModeHidesLink(t *testing.T) {
+	svc := realArtifactHubWithViews(t)
+	ref := publishSite(t, svc, map[string]string{"index.html": "<p>hi</p>"})
+	var out bytes.Buffer
+	require.NoError(t, viewArtifact(context.Background(), svc, &out, "https://hub.example/", ref, viewOptions{HideLink: true}))
+	got := out.String()
+	assert.Contains(t, got, "View of "+ref+"@1, valid until ")
+	assert.Contains(t, got, "run with --show-link to print it")
+	assert.NotContains(t, got, "/api/v1/artifacts/view/")
+	assert.NotContains(t, got, "https://hub.example")
+}
+
+// TestArtifactViewAgentModeJSONOmitsLink: the JSON output in agent mode
+// without --show-link has no url, says the link is hidden, and keeps the
+// expiry.
+func TestArtifactViewAgentModeJSONOmitsLink(t *testing.T) {
+	svc := realArtifactHubWithViews(t)
+	ref := publishSite(t, svc, map[string]string{"index.html": "<p>hi</p>"})
+	var out bytes.Buffer
+	require.NoError(t, viewArtifact(context.Background(), svc, &out, "https://hub.example", ref, viewOptions{JSON: true, HideLink: true}))
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(out.Bytes(), &raw))
+	_, hasURL := raw["url"]
+	assert.False(t, hasURL, out.String())
+	assert.Equal(t, true, raw["linkHidden"], out.String())
+	assert.NotEmpty(t, raw["expiresAt"], out.String())
+	assert.NotContains(t, out.String(), "/api/v1/artifacts/view/")
+}

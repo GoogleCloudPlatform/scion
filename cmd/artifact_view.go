@@ -36,7 +36,10 @@ import (
 	"golang.org/x/net/html"
 )
 
-var artifactViewCheck bool
+var (
+	artifactViewCheck    bool
+	artifactViewShowLink bool
+)
 
 var artifactViewCmd = &cobra.Command{
 	Use:   "view <ref>",
@@ -59,9 +62,14 @@ a fragment of the same page are not checked, and a link that cannot be
 parsed is reported. A <base href> in a page is not taken into account:
 links are resolved against the page's own folder.
 
+In agent mode the command prints the version and the link's expiry but
+not the link itself; --show-link prints the link too. In human mode the
+link is always printed.
+
 Examples:
   scion artifact view scion://artifact/5f1c2d3e-...
-  scion artifact view scion://artifact/5f1c2d3e-...@3 --check`,
+  scion artifact view scion://artifact/5f1c2d3e-...@3 --check
+  scion artifact view scion://artifact/5f1c2d3e-... --show-link`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		settings, client, err := requireArtifactHubClient()
@@ -71,12 +79,17 @@ Examples:
 		ctx, cancel := context.WithTimeout(cmd.Context(), 5*time.Minute)
 		defer cancel()
 		return viewArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), GetHubEndpoint(settings), args[0],
-			viewOptions{Check: artifactViewCheck, JSON: isJSONOutput()})
+			viewOptions{
+				Check:    artifactViewCheck,
+				JSON:     isJSONOutput(),
+				HideLink: viewHidesLink(resolveMode(), artifactViewShowLink),
+			})
 	},
 }
 
 func init() {
 	artifactViewCmd.Flags().BoolVar(&artifactViewCheck, "check", false, "Also report href and src links that name no file of the version")
+	artifactViewCmd.Flags().BoolVar(&artifactViewShowLink, "show-link", false, "Print the view link in agent mode too (human mode always prints it)")
 	artifactCmd.AddCommand(artifactViewCmd)
 }
 
@@ -84,6 +97,15 @@ func init() {
 type viewOptions struct {
 	Check bool
 	JSON  bool
+	// HideLink leaves the view link out of the output, text and JSON
+	// alike; the version and the link's expiry are still printed.
+	HideLink bool
+}
+
+// viewHidesLink reports whether artifact view leaves the link out: in
+// agent mode unless --show-link is given, and never in human mode.
+func viewHidesLink(mode CLIMode, showLink bool) bool {
+	return mode == ModeAgent && !showLink
 }
 
 // brokenLink is a relative link of an HTML file that names no file of the
@@ -97,7 +119,8 @@ type brokenLink struct {
 // viewResult is the JSON output of artifact view.
 type viewResult struct {
 	Ref          string       `json:"ref"`
-	URL          string       `json:"url"`
+	URL          string       `json:"url,omitempty"`
+	LinkHidden   bool         `json:"linkHidden,omitempty"`
 	ExpiresAt    time.Time    `json:"expiresAt"`
 	RemoteImages bool         `json:"remoteImages,omitempty"`
 	Checked      bool         `json:"checked"`
@@ -134,6 +157,10 @@ func viewArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Wri
 		Checked:      opts.Check,
 		Broken:       []brokenLink{},
 	}
+	if opts.HideLink {
+		res.URL = ""
+		res.LinkHidden = true
+	}
 	if opts.Check {
 		files, broken, err := checkBundleLinks(ctx, svc, id, v)
 		if err != nil {
@@ -158,8 +185,13 @@ func viewArtifact(ctx context.Context, svc hubclient.ArtifactService, out io.Wri
 }
 
 func printViewResult(out io.Writer, res viewResult) {
-	_, _ = fmt.Fprintf(out, "%s\n", safeText(res.URL))
+	if !res.LinkHidden {
+		_, _ = fmt.Fprintf(out, "%s\n", safeText(res.URL))
+	}
 	_, _ = fmt.Fprintf(out, "View of %s, valid until %s\n", res.Ref, clitime.Format(res.ExpiresAt, clitime.Minute))
+	if res.LinkHidden {
+		_, _ = fmt.Fprintln(out, "The link is not printed in agent mode; run with --show-link to print it.")
+	}
 	if res.RemoteImages {
 		_, _ = fmt.Fprintln(out, "Note: the entry references remote images, which the view does not load.")
 	}
