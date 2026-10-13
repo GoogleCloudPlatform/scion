@@ -592,9 +592,11 @@ var agentOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "DELETE"},
 		},
 		// authorizePortRegistration: the agent itself with the port-forward
-		// scope, or a user with agent.port_access on the agent record. The
-		// loopback-host rule, the reserved-port list and the per-agent port
-		// limit apply to every caller.
+		// scope, or a user with agent.port_access on the agent record and
+		// agent.port_access at hub level (for a token, the record check
+		// needs the selector and boundary, and the hub-level check applies
+		// to the holder). The loopback-host rule, the reserved-port list and
+		// the per-agent port limit apply to every caller.
 		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "agent-from-url",
@@ -603,8 +605,11 @@ var agentOperations = []OperationSpec{
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
 		DenialCodes:      []DenialCode{DenialForbidden, DenialConflict},
-		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestPortRegistration_UsesAgentRecordTarget"}},
-		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
+		TestRefs: []TestRef{
+			{Package: "pkg/hub", Function: "TestPortRegistration_UsesAgentRecordTarget"},
+			{Package: "pkg/hub", Function: "TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder"},
+		},
+		Bearer: AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
 		ID:          "agent.port.tunnel",

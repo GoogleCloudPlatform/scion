@@ -265,7 +265,8 @@ Access to the proxy and port registration APIs requires authentication, verified
 
 * **Managing Ports (Register/Delete/Clear)**:
   * The agent container itself (authenticating with its token containing `ScopeAgentPortForward`) may register or delete its own exposed ports.
-  * A user may register, delete or clear an agent's exposed ports when they hold `agent.port_access` on that agent (the same check as accessing its proxied ports). A [user access token](/scion/hosted/user/personal-access-tokens/) needs the `agent:port_access` scope and a boundary that contains the agent's project.
+  * A user may register, delete or clear an agent's exposed ports when they hold `agent.port_access` on that agent (the same check as accessing its proxied ports) and `agent.port_access` at hub level (the super-admin role, or a custom system-scope role that grants it). The `agent.port_access` that the project owner and admin roles carry within a project opens ports but does not manage them.
+  * A [user access token](/scion/hosted/user/personal-access-tokens/) needs the `agent:port_access` scope and a boundary that contains the agent's project, and its holder needs `agent.port_access` at hub level. All three are required.
   * Only the agent itself opens its port tunnel (`/api/v1/agents/{id}/ports/tunnel`); every user is refused.
 * **Accessing Proxied Ports**:
   * An agent can only access its own port registrations.

@@ -72,12 +72,12 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Empty(t, got.ExposedPorts)
 }
 
-// TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent pins
-// the agent-record rule for a federated user: without agent.port_access on
-// the agent (no role in its project, not its owner) the caller is refused,
-// and with the project-owner role, which carries agent.port_access, it may
-// manage the agent's ports.
-func TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent(t *testing.T) {
+// TestAuthorizePortRegistration_FederatedUserNeedsHubLevelPortAccess pins
+// that a federated user without agent.port_access at hub level is refused
+// port management: with no grant on the agent, and also as the agent's
+// owner with the project-owner role, which carry agent.port_access on the
+// agent record only.
+func TestAuthorizePortRegistration_FederatedUserNeedsHubLevelPortAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	caller := newBindableFederatedAdmin(tid("federated-port-admin"))
@@ -90,7 +90,7 @@ func TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent(t *tes
 	require.NoError(t, s.CreateProject(ctx, project))
 	agent := &store.Agent{
 		ID: tid("federated-port-agent"), Slug: "federated-port-agent", Name: "Federated Port Agent",
-		ProjectID: project.ID, OwnerID: tid("federated-port-other-owner"), Phase: string(state.PhaseRunning),
+		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
 
@@ -103,12 +103,14 @@ func TestAuthorizePortRegistration_FederatedUserNeedsPortAccessOnTheAgent(t *tes
 	}
 
 	w, ok := register()
-	assert.False(t, ok, "a federated admin with no grant on the agent is refused")
+	assert.False(t, ok, "a federated user with no hub-level grant is refused")
 	assert.Equal(t, http.StatusForbidden, w.Code)
 
 	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 	w, ok = register()
-	assert.True(t, ok, "agent.port_access on the agent admits the caller: %s", w.Body.String())
+	assert.False(t, ok, "agent.port_access on the agent record alone does not admit port management")
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "requires agent.port_access at hub level")
 }
 
 func TestAuthorizePortRegistrationAllowsUnscopedLocalAdmin(t *testing.T) {

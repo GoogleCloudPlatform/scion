@@ -563,10 +563,13 @@ func (s *Server) authorizePortAccess(w http.ResponseWriter, r *http.Request, age
 // authorizePortRegistration authorizes registering, deleting and clearing an
 // agent's exposed ports. The agent itself needs the port-forward scope on its
 // own record. A user needs agent.port_access on the agent record (the same
-// check as authorizePortAccess); a user access token needs the
-// agent:port_access selector, a boundary that contains the agent's project
-// and current access to that project. Loopback, reserved-port and per-agent
-// limits are checked by the callers.
+// check as authorizePortAccess) and agent.port_access at hub level; a role
+// that grants agent.port_access only within a project opens an agent's
+// exposed ports but does not manage them. For a user access token the
+// record check needs the agent:port_access selector, a boundary that
+// contains the agent's project and current access to that project, and the
+// hub-level check applies to the token's holder. Loopback, reserved-port and
+// per-agent limits are checked by the callers.
 func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Request, agentID string) (*store.Agent, bool) {
 	agent, ok := s.authorizePortAccess(w, r, agentID, ActionPortAccess)
 	if !ok {
@@ -577,8 +580,25 @@ func (s *Server) authorizePortRegistration(w http.ResponseWriter, r *http.Reques
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
 			return nil, false
 		}
+		return agent, true
 	}
-	return agent, true
+	if userIdent := GetUserIdentityFromContext(r.Context()); userIdent != nil {
+		holder := UserIdentity(userIdent)
+		if scoped, isToken := userIdent.(*ScopedUserIdentity); isToken && scoped != nil {
+			holder = scoped.UserIdentity
+		}
+		if s.authzService.Decide(r.Context(), AuthzRequest{
+			Principal:  principalContextForIdentity(holder),
+			Credential: credentialContextForIdentity(holder),
+			Resource:   Resource{Type: "agent", ID: "hub"},
+			Action:     ActionPortAccess,
+			Permission: "agent.port_access",
+		}).Allowed {
+			return agent, true
+		}
+	}
+	writeError(w, http.StatusForbidden, ErrCodeForbidden, "Managing an agent's exposed ports requires agent.port_access at hub level", nil)
+	return nil, false
 }
 
 // authorizePortTunnel authorizes opening an agent's port tunnel. Only the

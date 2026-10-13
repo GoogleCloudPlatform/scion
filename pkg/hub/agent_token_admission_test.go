@@ -239,12 +239,13 @@ func TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary(t *testing.T) {
 }
 
 // TestPortRegistration_UsesAgentRecordTarget pins that registering,
-// deleting and clearing an agent's exposed ports is authorized by
-// agent.port_access on the agent record: a token needs agent:port_access and
-// a boundary that contains the agent's project, and a session user needs
-// agent.port_access on the agent. The loopback-host rule, the reserved ports
-// and the per-agent exposed-port limit apply to a token too, and a port a
-// token registers is recorded as exposed by a user.
+// deleting and clearing an agent's exposed ports needs agent.port_access on
+// the agent record and agent.port_access at hub level. A token needs
+// agent:port_access, a boundary that contains the agent's project, and a
+// holder with the hub-level grant; a project owner without it is refused,
+// whether it uses a session or a token. The loopback-host rule, the reserved
+// ports and the per-agent exposed-port limit apply to a token too, and a
+// port a token registers is recorded as exposed by a user.
 func TestPortRegistration_UsesAgentRecordTarget(t *testing.T) {
 	f := newAgentTokenFixture(t, "atk-port")
 	ctx := context.Background()
@@ -267,9 +268,38 @@ func TestPortRegistration_UsesAgentRecordTarget(t *testing.T) {
 	rec = doRequestAsUser(t, f.srv, stranger, http.MethodPost, ports, map[string]any{"port": 3000})
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
+	// A project owner holds agent.port_access on the agent record but not at
+	// hub level: its session and its agent:port_access token are refused.
+	owner, err := f.store.GetUser(ctx, f.ownerID)
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, f.srv, owner, http.MethodPost, ports, map[string]any{"port": 3000})
+	assert.Equal(t, http.StatusForbidden, rec.Code, "project owner session: %s", rec.Body.String())
+	for _, boundary := range []TokenBoundary{projectBoundary(f.project), hubBoundary()} {
+		key := f.mint(t, f.ownerID, boundary, "agent:port_access")
+		for _, tc := range []struct {
+			method, path string
+			body         map[string]any
+		}{
+			{http.MethodPost, ports, map[string]any{"port": 3000}},
+			{http.MethodDelete, ports + "/3000", nil},
+			{http.MethodDelete, ports, nil},
+		} {
+			rec = doRequestWithUAT(t, f.srv, key, tc.method, tc.path, tc.body)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s token without a hub-level holder, %s %s: %s",
+				boundary.Kind, tc.method, tc.path, rec.Body.String())
+		}
+	}
+
 	got, err := f.store.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.ExposedPorts, "no refused request registers a port")
+
+	// With agent.port_access at hub level the session is admitted.
+	grantHubPortAccess(t, f.store, f.ownerID)
+	rec = doRequestAsUser(t, f.srv, owner, http.MethodPost, ports, map[string]any{"port": 3000})
+	assert.Equal(t, http.StatusCreated, rec.Code, "hub-level holder session: %s", rec.Body.String())
+	rec = doRequestAsUser(t, f.srv, owner, http.MethodDelete, ports, nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "hub-level holder session: %s", rec.Body.String())
 
 	for _, boundary := range []TokenBoundary{projectBoundary(f.project), hubBoundary()} {
 		key := f.mint(t, f.ownerID, boundary, "agent:port_access")
@@ -312,6 +342,75 @@ func TestPortRegistration_UsesAgentRecordTarget(t *testing.T) {
 	got, err = f.store.GetAgent(ctx, f.agent.ID)
 	require.NoError(t, err)
 	assert.Empty(t, got.ExposedPorts)
+}
+
+// TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder pins, for
+// each port-management route, that a token is admitted only when all of
+// these hold: the agent:port_access selector, a boundary that contains the
+// agent's project, and a holder with agent.port_access at hub level (on top
+// of the holder's agent.port_access on the agent record). A token missing
+// any one of them is refused and changes no stored port.
+func TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder(t *testing.T) {
+	f := newAgentTokenFixture(t, "atk-pmt")
+	ctx := context.Background()
+	ports := f.agentPath(f.agent, "/ports")
+
+	// hubHolder owns both projects and holds agent.port_access at hub
+	// level. f.ownerID owns both projects (agent.port_access on the agent
+	// record) without the hub-level grant.
+	hubHolder := tid("atk-pmt-hub-holder")
+	createTestUserWithProjectRole(t, f.store, hubHolder, hubHolder+"@test.com", f.project, store.ProjectRoleOwner)
+	createTestUserWithProjectRole(t, f.store, hubHolder, hubHolder+"@test.com", f.other, store.ProjectRoleOwner)
+	ensureHubMembership(ctx, f.store, hubHolder)
+	grantHubPortAccess(t, f.store, hubHolder)
+
+	seeded := []store.ExposedPort{{Port: 3000, Host: "127.0.0.1", Mode: "rw", ExposedAt: time.Now().UTC(), ExposedBy: "agent"}}
+	storedPorts := func() []int {
+		got, err := f.store.GetAgent(ctx, f.agent.ID)
+		require.NoError(t, err)
+		out := make([]int, 0, len(got.ExposedPorts))
+		for _, p := range got.ExposedPorts {
+			out = append(out, p.Port)
+		}
+		return out
+	}
+
+	for _, route := range []struct {
+		name, method, path string
+		body               map[string]any
+		admitted           int
+		after              []int
+	}{
+		{"register", http.MethodPost, ports, map[string]any{"port": 3001}, http.StatusCreated, []int{3000, 3001}},
+		{"delete", http.MethodDelete, ports + "/3000", nil, http.StatusNoContent, []int{}},
+		{"clear", http.MethodDelete, ports, nil, http.StatusNoContent, []int{}},
+	} {
+		t.Run(route.name, func(t *testing.T) {
+			require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, f.agent.ID, seeded))
+
+			for _, refused := range []struct {
+				name string
+				key  string
+			}{
+				{"no agent:port_access selector", f.mint(t, hubHolder, projectBoundary(f.project), "agent:read", "agent:update")},
+				{"boundary of another project", f.mint(t, hubHolder, projectBoundary(f.other), "agent:port_access", "agent:read")},
+				{"holder without the hub-level grant, project boundary", f.mint(t, f.ownerID, projectBoundary(f.project), "agent:port_access")},
+				{"holder without the hub-level grant, hub boundary", f.mint(t, f.ownerID, hubBoundary(), "agent:port_access")},
+			} {
+				rec := doRequestWithUAT(t, f.srv, refused.key, route.method, route.path, route.body)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", refused.name, rec.Body.String())
+				assert.Equal(t, []int{3000}, storedPorts(), "%s: a refused request changes no stored port", refused.name)
+			}
+
+			for _, boundary := range []TokenBoundary{projectBoundary(f.project), hubBoundary()} {
+				require.NoError(t, f.store.UpdateAgentExposedPorts(ctx, f.agent.ID, seeded))
+				key := f.mint(t, hubHolder, boundary, "agent:port_access")
+				rec := doRequestWithUAT(t, f.srv, key, route.method, route.path, route.body)
+				assert.Equal(t, route.admitted, rec.Code, "%s token of a hub-level holder: %s", boundary.Kind, rec.Body.String())
+				assert.Equal(t, route.after, storedPorts(), "%s token of a hub-level holder", boundary.Kind)
+			}
+		})
+	}
 }
 
 // TestPortTunnel_OnlyTheAgentItself pins that only the agent itself, with
@@ -468,4 +567,26 @@ func TestAgentCreateToken_ProjectBoundaryTokensCannotGrantHubMode(t *testing.T) 
 	created, err := s.GetAgentBySlug(context.Background(), project.ID, "atk-create-hub")
 	require.NoError(t, err, "the hub token creates the agent")
 	assert.Equal(t, store.MessageModeHub, created.MessageMode)
+}
+
+// grantHubPortAccess binds userID to a system-scope role that carries only
+// agent.port_access, so the user holds that permission at hub level.
+func grantHubPortAccess(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	ctx := context.Background()
+	role, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
+		Name:        "hub-port-access-" + userID,
+		Description: "Manages exposed ports on every agent",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"agent.port_access"},
+	})
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: role.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 }

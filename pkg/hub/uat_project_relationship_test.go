@@ -239,12 +239,12 @@ func TestProjectUAT_AttachDeniedForOtherMembersAgents(t *testing.T) {
 
 // TestProjectUAT_OwnerAdminPortAccessOnMembersAgent pins use-time behaviour
 // of owner and admin user access tokens on another member's agent. The
-// project-owner and project-admin roles carry agent.port_access, so an
-// agent:port_access token opens the member's already-exposed ports and,
-// with agent.port_access on the agent record, registers and deletes its
-// exposed ports. The same token cannot attach, open the tunnel, exec or read
-// env; an
-// agent:attach token stays denied on the member's agent; a token without
+// project-owner and project-admin roles carry agent.port_access within the
+// project, so an agent:port_access token opens the member's already-exposed
+// ports. Managing ports needs agent.port_access at hub level, so the same
+// token cannot register, delete or clear the member's agent's ports, and it
+// cannot attach, open the tunnel, exec or read env; an agent:attach token
+// stays denied on the member's agent; a token without
 // agent:port_access (agent:manage excludes it) cannot open ports; and
 // another member's port_access token is refused.
 func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
@@ -279,22 +279,24 @@ func TestProjectUAT_OwnerAdminPortAccessOnMembersAgent(t *testing.T) {
 			rec = doRequestWithUAT(t, srv, portKey, http.MethodGet, base+"/pty", nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s port_access token must not attach: %s", tc.name, rec.Body.String())
 
-			// Port registration is authorized on the agent record, so the
-			// same token registers, deletes and clears ports of the member's
-			// agent.
-			rec = doRequestWithUAT(t, srv, portKey, http.MethodPost, base+"/ports", map[string]any{"port": 9090})
-			assert.Equal(t, http.StatusCreated, rec.Code,
-				"%s port_access token registers a port on a member's agent: %s", tc.name, rec.Body.String())
-			rec = doRequestWithUAT(t, srv, portKey, http.MethodDelete, base+"/ports/9090", nil)
-			assert.Equal(t, http.StatusNoContent, rec.Code,
-				"%s port_access token deletes a port on a member's agent: %s", tc.name, rec.Body.String())
-			// Clearing removes 8080 as well, so it is re-exposed for the
-			// other subtest's proxy check.
-			rec = doRequestWithUAT(t, srv, portKey, http.MethodDelete, base+"/ports", nil)
-			assert.Equal(t, http.StatusNoContent, rec.Code,
-				"%s port_access token clears a member's agent's ports: %s", tc.name, rec.Body.String())
-			agent.ExposedPorts = nil
-			uatpExposePort(t, s, agent, 8080)
+			// Managing ports needs agent.port_access at hub level, which the
+			// project roles do not carry.
+			for _, mc := range []struct {
+				method, path string
+				body         map[string]any
+			}{
+				{http.MethodPost, base + "/ports", map[string]any{"port": 9090}},
+				{http.MethodDelete, base + "/ports/8080", nil},
+				{http.MethodDelete, base + "/ports", nil},
+			} {
+				rec = doRequestWithUAT(t, srv, portKey, mc.method, mc.path, mc.body)
+				assert.Equal(t, http.StatusForbidden, rec.Code,
+					"%s port_access token must not manage a member's agent's ports (%s %s): %s", tc.name, mc.method, mc.path, rec.Body.String())
+			}
+			stored, err := s.GetAgent(context.Background(), agent.ID)
+			require.NoError(t, err)
+			require.Len(t, stored.ExposedPorts, 1, "%s: refused requests change no stored port", tc.name)
+			assert.Equal(t, 8080, stored.ExposedPorts[0].Port)
 
 			req := httptest.NewRequest(http.MethodGet, base+"/ports/tunnel", nil)
 			req.Header.Set("Authorization", "Bearer "+portKey)

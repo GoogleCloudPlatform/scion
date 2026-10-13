@@ -304,10 +304,10 @@ func projectOwnerPermissionIDs() []string {
 		// members' agents.
 		//
 		// agent.port_access is included (R5) so owners and admins can open
-		// members' already-exposed ports for oversight, and register,
-		// delete or clear an agent's exposed ports. It does not grant
-		// terminal, exec or env access (agent.attach). project-member still
-		// does not carry it; grant it to members through a custom role.
+		// members' already-exposed ports for oversight. It does not grant
+		// terminal, exec or env access (agent.attach), or port registration
+		// (hub-level). project-member still does not carry it; grant it to
+		// members through a custom role.
 		"agent.create",
 		"agent.delete",
 		"agent.lifecycle",

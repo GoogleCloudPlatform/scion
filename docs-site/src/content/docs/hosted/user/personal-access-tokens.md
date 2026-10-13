@@ -44,7 +44,7 @@ permissions). Available scopes:
 | `agent:delete` | Delete agents |
 | `agent:message` | Send messages to agents |
 | `agent:attach` | Attach to agent sessions (terminal, exec, env, reset-auth) — your own agents and their descendants |
-| `agent:port_access` | Access agent forwarded ports and register, delete or clear an agent's exposed ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins) |
+| `agent:port_access` | Access agent forwarded ports — your own agents and their descendants, plus agents in projects where your role grants `agent.port_access` (project owners and admins). Registering, deleting or clearing an agent's exposed ports also needs `agent.port_access` at hub level for the token's holder |
 | `agent:update` | Update an agent's metadata and configuration, report its status, and sync its workspace |
 | `agent:stop_all` | Stop all agents of a project (any boundary that contains it), or of the whole hub (hub-bound tokens only) |
 | `agent:set_message_mode` | Change an agent's message mode, under the same owner rules as a signed-in session. Granting `hub` mode (by setting it, by a cascade, or when creating an agent) needs a hub-bound token |

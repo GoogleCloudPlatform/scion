@@ -1080,6 +1080,7 @@
 ### Tests
 
 - `pkg/hub:TestPortRegistration_UsesAgentRecordTarget`
+- `pkg/hub:TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder`
 
 ---
 
