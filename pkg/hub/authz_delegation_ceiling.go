@@ -225,7 +225,7 @@ func descendantReadPassesHop(edge *store.DelegationEdge, permissionID string, de
 	if !descendantRead || permissionID != permissionAgentRead || edge == nil || edge.Kind != store.EffectCeilingBounded {
 		return false
 	}
-	frozen, ok := edge.EffectCeiling.Frozen()
+	frozen, ok := edge.Frozen()
 	if !ok {
 		return false
 	}
