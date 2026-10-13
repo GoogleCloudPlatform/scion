@@ -187,13 +187,14 @@ func TestArtifactViewAgentModeJSONOmitsLink(t *testing.T) {
 func TestArtifactViewCommandModes(t *testing.T) {
 	svc := realArtifactHubWithViews(t)
 	ref := publishSite(t, svc, map[string]string{"index.html": "<p>hi</p>"})
-	prevClient, prevFormat := artifactViewClient, outputFormat
+	prevClient, prevFormat, prevCtx := artifactViewClient, outputFormat, artifactViewCmd.Context()
 	artifactViewClient = func() (string, hubclient.ArtifactService, error) { return "https://hub.example", svc, nil }
 	outputFormat = ""
 	t.Cleanup(func() {
 		artifactViewClient, outputFormat = prevClient, prevFormat
 		_ = artifactViewCmd.Flags().Set("show-link", "false")
 		artifactViewCmd.SetOut(nil)
+		artifactViewCmd.SetContext(prevCtx)
 	})
 	for _, tc := range []struct {
 		mode     string

@@ -74,7 +74,7 @@ Commands:
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
   scion artifact list [--mine] [--all]         List the artifacts you can read
-  scion artifact view <ref> [--check] [--show-link] Print a view link for an HTML artifact
+  scion artifact view <ref> [--check] [--show-link]
   scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
   scion artifact grants <ref> [--add|--remove] List or change grants (users only)
   scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
