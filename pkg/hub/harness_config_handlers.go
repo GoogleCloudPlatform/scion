@@ -992,15 +992,13 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 
 	// A registry-qualified image can be present in a local image store
 	// without being in the registry (built locally, never pushed), so the
-	// local store is consulted before the registry.
+	// local store is consulted before the registry. A local find is
+	// reported but not persisted: the stored image status reflects registry
+	// validity only (see store.HarnessConfigImageStatusValid).
 	if s.localImagePresent(ctx, "", resolvedImage) {
-		now := time.Now()
-		if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, store.HarnessConfigImageStatusValid, now); err != nil {
-			slog.Warn("failed to persist image status", "id", hc.ID, "error", err)
-		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"image_status":            store.HarnessConfigImageStatusValid,
-			"image_status_checked_at": now,
+			"image_status_checked_at": time.Now(),
 			"source":                  "local",
 			"resolved_image":          resolvedImage,
 		})
@@ -1026,10 +1024,11 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// localImagePresent reports whether an image exists in a local runtime image
-// store. It asks the same sources as the image-status endpoint: every
-// dispatchable node-bound broker, through its image-status API, or, when there
-// is no such broker, the hub's co-located runtime. shortImage is checked as a
+// localImagePresent reports whether an image exists in at least one local
+// runtime image store. It asks the same sources as the image-status endpoint:
+// every dispatchable node-bound broker, through its image-status API, or, when
+// there is no such broker, the hub's co-located runtime. An error from one
+// broker does not mask a find on another. shortImage is checked as a
 // bare local name and longImage as a registry-qualified name; either may be
 // empty. It returns false when no source can be asked.
 func (s *Server) localImagePresent(ctx context.Context, shortImage, longImage string) bool {
