@@ -405,8 +405,8 @@ func TestHubTestIdentityPurge(t *testing.T) {
 	assert.Empty(t, stdout.String())
 }
 
-// CLI mode (ptone/scion#4240): scion hub test-identity's issue, token, list, delete
-// and teardown, hub status and hub profile stay in agent mode (they refuse
+// CLI mode (ptone/scion#4240): scion hub test-identity's issue, token, list, delete,
+// teardown and web-code, hub status and hub profile stay in agent mode (they refuse
 // at run time without a target-hub profile; see hub_profile_test.go), while
 // delegate, the human consent step, and every other hub child are removed.
 func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
@@ -423,9 +423,9 @@ func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
 		"hub.test-identity.list",
 		"hub.test-identity.delete",
 		"hub.test-identity.teardown",
+		"hub.test-identity.web-code",
 	}
 	humanOnly := []string{
-		"hub.test-identity.web-code",
 		"hub.test-identity.delegate",
 		"hub.test-identity.delegate.create",
 		"hub.test-identity.delegate.list",

@@ -123,6 +123,7 @@ export default defineConfig([
   project(
     [
       'e2e/agent-store-count/*.ts',
+      'e2e/artifacts-access/*.ts',
       'e2e/chat/*.ts',
       'e2e/chat-file-preview/*.ts',
       'e2e/chat-mobile/*.ts',

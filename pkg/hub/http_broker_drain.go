@@ -53,15 +53,29 @@ func (s *Server) drainQueuedStopsFromHeartbeat(ctx context.Context, brokerID str
 	if stops, err := report.pendingStops(ctx, s, brokerID); err != nil || len(stops) == 0 {
 		return
 	}
+	s.startHTTPStopDrain(brokerID)
+}
+
+// startHTTPStopDrain starts the stop-only drain for an HTTP-only broker,
+// unless one is already running for it on this node. The drain is tracked
+// broker work (brokerWorkTracker): shutdown joins it before the store
+// closes, and once shutdown has begun it is not started, leaving the rows
+// pending for a later heartbeat (ptone/scion#4869).
+func (s *Server) startHTTPStopDrain(brokerID string) {
 	if _, running := s.httpDrains.LoadOrStore(brokerID, struct{}{}); running {
 		return
 	}
-	go func() {
+	started := s.brokerWork.goTracked(func(workCtx context.Context) {
 		dctx, cancel := context.WithTimeout(context.Background(), httpDrainTimeout)
 		defer cancel()
+		stop := context.AfterFunc(workCtx, cancel)
+		defer stop()
 		defer s.httpDrains.Delete(brokerID)
 		s.drainBrokerDispatch(dctx, brokerID, func(op string) bool { return op == "stop" })
-	}()
+	})
+	if !started {
+		s.httpDrains.Delete(brokerID)
+	}
 }
 
 // settleQueuedStops confirms queued stops whose container is gone: an agent

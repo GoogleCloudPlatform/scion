@@ -468,7 +468,7 @@ func TestAgentAllowedList(t *testing.T) {
 		"hub.enable", "hub.disable", "hub.link", "hub.unlink",
 		"hub.auth", "hub.token", "hub.token.scopes", "hub.brokers",
 		"hub.env", "hub.secret", "hub.notifications", "hub.projects",
-		"hub.test-identity.delegate", "hub.test-identity.web-code", "hub.users", "hub.allow-list",
+		"hub.test-identity.delegate", "hub.users", "hub.allow-list",
 		"messages.read",
 		"shared-dir.create", "shared-dir.remove",
 	}

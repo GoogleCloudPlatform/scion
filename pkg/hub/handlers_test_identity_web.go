@@ -16,6 +16,7 @@ package hub
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -225,6 +226,24 @@ func testIdentityWebKindAdmitted(u *store.User) bool {
 	return u != nil && u.IsTestFixture()
 }
 
+// workloadWebCodeAdmitted reports whether the request may mint a web-login
+// code for u as far as a workload delegation is concerned. A request that
+// is not a workload delegation request is not restricted here. A workload
+// delegation is admitted only with the member scope, and only for a
+// member-tier identity (kind test_fixture, never an admin kind; admin tiers
+// come with X4). The caller answers 404 otherwise, as for an identity the
+// delegation did not issue.
+func workloadWebCodeAdmitted(ctx context.Context, u *store.User) bool {
+	st := workloadDelegationCaller(ctx)
+	if st == nil {
+		return GetCredentialContextFromContext(ctx).Kind != CredentialKindWorkloadDelegation
+	}
+	if st.delegation == nil || st.delegation.Scope != testIdentityDelegationScope {
+		return false
+	}
+	return u.IsTestFixture() && !u.IsTestAdmin()
+}
+
 // writeTestIdentityWebUnavailable answers 404 with the unavailable reason.
 func writeTestIdentityWebUnavailable(w http.ResponseWriter, cause string) {
 	writeError(w, http.StatusNotFound, ErrCodeNotFound, "test identity web sessions are not available on this hub",
@@ -288,8 +307,11 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	u, err := s.store.GetUser(ctx, id)
 	// One answer for a missing user, a user of a kind that cannot hold a
 	// web session, and an identity the caller did not issue, as for
-	// re-issue: the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !canManageTestIdentity(ctx, caller, u))) {
+	// re-issue: the route is no user-existence oracle. A workload
+	// delegation (ptone/scion#4240, X3b) reaches only the member-tier
+	// identities it issued itself (canManageTestIdentity,
+	// workloadWebCodeAdmitted).
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u))) {
 		NotFound(w, "test identity")
 		return
 	}
@@ -321,6 +343,7 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		expiresAt = *u.ExpiresAt
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)
+	workload := workloadDelegationCaller(ctx)
 	row := &store.TestIdentityLoginCode{
 		UserID:             u.ID,
 		CodeHash:           hash,
@@ -330,16 +353,24 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 		Created:            now,
 	}
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
+		// A workload delegation must still be live at the mint itself
+		// (DEC-3 C3), as for token re-issue.
+		if workload != nil {
+			if err := s.recheckWorkloadDelegation(ctx, tx, workload, now); err != nil {
+				return err
+			}
+		}
 		if err := tx.ReplaceTestIdentityLoginCode(ctx, row); err != nil {
 			return fmt.Errorf("store web-login code: %w", err)
 		}
 		summary, _ := json.Marshal(struct {
-			UserID         string `json:"user_id"`
-			CodeID         string `json:"code_id"`
-			CodeExpiresAt  string `json:"code_expires_at"`
-			IssuedBy       string `json:"issued_by"`
-			CredentialKind string `json:"credential_kind"`
-		}{u.ID, row.ID, expiresAt.UTC().Format(time.RFC3339), caller.ID(), auditActor.CredentialKind})
+			UserID         string                     `json:"user_id"`
+			CodeID         string                     `json:"code_id"`
+			CodeExpiresAt  string                     `json:"code_expires_at"`
+			IssuedBy       string                     `json:"issued_by"`
+			CredentialKind string                     `json:"credential_kind"`
+			Workload       *testIdentityWorkloadAudit `json:"workload_delegation,omitempty"`
+		}{u.ID, row.ID, expiresAt.UTC().Format(time.RFC3339), caller.ID(), auditActor.CredentialKind, testIdentityWorkloadAuditOf(ctx)})
 		record := &store.MutationAuditRecord{
 			MutationType: testIdentityWebCodeIssueMutation,
 			TargetType:   testIdentityAuditTargetType,
@@ -352,6 +383,8 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	})
 	if err != nil {
 		switch {
+		case errors.Is(err, errTestIdentityDelegationNotLive):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "workload delegation does not grant this request", nil)
 		case errors.Is(err, store.ErrAlreadyExists), isTransientIssuanceConflict(err):
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "web-login code issuance is busy; retry shortly",

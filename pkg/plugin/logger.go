@@ -28,14 +28,59 @@ type hclogAdapter struct {
 	logger *slog.Logger
 	name   string
 	args   []interface{}
+
+	// exitExpected reports whether the plugin's owner is shutting down,
+	// so a plugin process exit is expected. May be nil.
+	exitExpected func() bool
 }
 
-func newHclogAdapter(logger *slog.Logger) hclog.Logger {
-	return &hclogAdapter{logger: logger}
+// newHclogAdapter returns an hclog.Logger that writes to logger.
+// exitExpected (may be nil) reports whether a plugin process exit is
+// expected; see processExitLevel.
+func newHclogAdapter(logger *slog.Logger, exitExpected func() bool) hclog.Logger {
+	return &hclogAdapter{logger: logger, exitExpected: exitExpected}
+}
+
+// goPluginProcessExitedMsg is the message go-plugin logs when a plugin
+// process ends: at ERROR when the process exited with an error (including
+// a signal), at INFO otherwise.
+const goPluginProcessExitedMsg = "plugin process exited"
+
+// processExitLevel is the level for go-plugin's ERROR "plugin process
+// exited" record (ptone/scion#4869). An exit while the owner shuts down is
+// expected and logs at INFO: the process was stopped by Manager.Shutdown,
+// or by the same SIGTERM that stopped the hub, which service managers
+// such as systemd send to every process of the service. An exit caused by
+// SIGTERM or SIGINT at any other time is a stop requested from outside
+// the hub, not a plugin crash, and logs at WARN. Every other exit stays at
+// ERROR.
+func (h *hclogAdapter) processExitLevel(args []interface{}) hclog.Level {
+	if h.exitExpected != nil && h.exitExpected() {
+		return hclog.Info
+	}
+	for i := 0; i+1 < len(args); i += 2 {
+		if k, _ := args[i].(string); k != "error" {
+			continue
+		}
+		var text string
+		switch v := args[i+1].(type) {
+		case string:
+			text = v
+		case error:
+			text = v.Error()
+		}
+		if text == "signal: terminated" || text == "signal: interrupt" {
+			return hclog.Warn
+		}
+	}
+	return hclog.Error
 }
 
 func (h *hclogAdapter) Log(level hclog.Level, msg string, args ...interface{}) {
 	allArgs := append(h.args, args...)
+	if level == hclog.Error && msg == goPluginProcessExitedMsg {
+		level = h.processExitLevel(allArgs)
+	}
 	switch level {
 	case hclog.Trace, hclog.Debug:
 		h.logger.Debug(msg, allArgs...)
@@ -80,9 +125,10 @@ func (h *hclogAdapter) ImpliedArgs() []interface{} {
 
 func (h *hclogAdapter) With(args ...interface{}) hclog.Logger {
 	return &hclogAdapter{
-		logger: h.logger,
-		name:   h.name,
-		args:   append(h.args, args...),
+		logger:       h.logger,
+		name:         h.name,
+		args:         append(h.args, args...),
+		exitExpected: h.exitExpected,
 	}
 }
 
@@ -96,17 +142,19 @@ func (h *hclogAdapter) Named(name string) hclog.Logger {
 		newName = h.name + "." + name
 	}
 	return &hclogAdapter{
-		logger: h.logger.With("subsystem", newName),
-		name:   newName,
-		args:   h.args,
+		logger:       h.logger.With("subsystem", newName),
+		name:         newName,
+		args:         h.args,
+		exitExpected: h.exitExpected,
 	}
 }
 
 func (h *hclogAdapter) ResetNamed(name string) hclog.Logger {
 	return &hclogAdapter{
-		logger: h.logger.With("subsystem", name),
-		name:   name,
-		args:   h.args,
+		logger:       h.logger.With("subsystem", name),
+		name:         name,
+		args:         h.args,
+		exitExpected: h.exitExpected,
 	}
 }
 
