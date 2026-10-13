@@ -38,8 +38,9 @@
   (`visitorWindowExtends`). That read takes no row lock and the window
   update is unconditional, so on databases at READ COMMITTED (Postgres) a
   window change committed concurrently can be overwritten by a shortening
-  request, but never beyond a window that request read; SQLite refuses
-  the stale write with a transient error.
+  request, but never beyond a window that request read. On SQLite the
+  hub uses a single connection, so these transactions run one at a time
+  and the read cannot be stale.
 - **Grant.** Issuer must be trusted with `allow_visitor_grants` and a user
   or hub type; the email (lower-cased) must pass `allowed_emails` and
   `allowed_domains`; otherwise 400 with `details.field` and a neutral
