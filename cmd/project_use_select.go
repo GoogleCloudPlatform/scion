@@ -29,6 +29,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/spf13/cobra"
 )
@@ -65,7 +66,7 @@ var useLoginToHub = func(cmd *cobra.Command, endpoint string) error {
 	if err != nil {
 		return err
 	}
-	return storeTokenAndPrintResult(endpoint, tokenResp)
+	return storeTokenAndPrintResult(cmd.OutOrStdout(), endpoint, tokenResp)
 }
 
 // useLoginClientOptions returns the client options of the login offer's
@@ -148,8 +149,12 @@ type useLookup struct {
 	found map[string][]config.KnownProject
 	// dropped are known entries (hub, ID) that their hub reported gone.
 	dropped [][2]string
-	// notLoggedIn are hubs skipped for want of a usable credential.
+	// notLoggedIn are hubs skipped for want of a usable credential, and
+	// hubs that refused the credential sent.
 	notLoggedIn []useHub
+	// refused are the endpoints of the hubs in notLoggedIn that refused
+	// the credential sent (rather than having none to send).
+	refused map[string]bool
 	// failed are hubs whose lookup failed.
 	failed []useHubFailure
 	// searched are hubs that answered the lookup.
@@ -212,6 +217,27 @@ func (l *useLookup) remember(hub useHub, projects ...hubclient.Project) {
 	}
 }
 
+// isHubGlobalProject reports whether p is a hub's built-in global project.
+// Every hub has one, so it is left out of the projects across hubs: of the
+// known-project list, of 'scion project list' and of the projects 'scion
+// use' can select. The global project on this machine is a directory and
+// is not affected.
+func isHubGlobalProject(p hubclient.Project) bool {
+	return p.Labels[store.LabelGlobalProject] == "true"
+}
+
+// withoutHubGlobalProjects returns projects without the hub's global
+// project.
+func withoutHubGlobalProjects(projects []hubclient.Project) []hubclient.Project {
+	var kept []hubclient.Project
+	for _, p := range projects {
+		if !isHubGlobalProject(p) {
+			kept = append(kept, p)
+		}
+	}
+	return kept
+}
+
 // useVerdict is the outcome of checking a known project on its hub.
 type useVerdict int
 
@@ -243,6 +269,11 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	defer cancel()
 	p, err := client.Projects().Get(ctx, m.ID)
 	switch {
+	case err == nil && isHubGlobalProject(*p):
+		// An entry recorded before the hub's global project was left out
+		// of the known list.
+		l.dropped = append(l.dropped, [2]string{m.Hub.Name, m.ID})
+		return useGone, ""
 	case err == nil:
 		m.Slug, m.Name = p.Slug, p.Name
 		l.remember(m.Hub, *p)
@@ -258,9 +289,16 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 }
 
 // lookupOn looks the reference up on one hub. A reference that matches
-// nothing is no error; several projects with the name are all returned. In
-// a fan-out the hub gets only a credential bound to it (see hubClientFor).
+// nothing is no error; several projects with the name are all returned.
+// The hub's global project is never returned. In a fan-out the hub gets
+// only a credential bound to it (see hubClientFor).
 func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
+	projects, err := l.lookupAllOn(hub, fanOut)
+	return withoutHubGlobalProjects(projects), err
+}
+
+// lookupAllOn is lookupOn with the hub's global project included.
+func (l *useLookup) lookupAllOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
 	client, err := hubClientFor(l.settings, hub.Endpoint, fanOut)
 	if err != nil {
 		return nil, err
@@ -319,8 +357,14 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 	for i, h := range hubs {
 		r := results[i]
 		switch {
-		case r.skipped || apiclient.IsUnauthorizedError(r.err):
+		case r.skipped:
 			l.notLoggedIn = append(l.notLoggedIn, h)
+		case apiclient.IsUnauthorizedError(r.err):
+			l.notLoggedIn = append(l.notLoggedIn, h)
+			if l.refused == nil {
+				l.refused = map[string]bool{}
+			}
+			l.refused[h.Endpoint] = true
 		case r.err != nil:
 			l.failed = append(l.failed, useHubFailure{Hub: h, Reason: fmt.Sprintf("unreachable: %v", hubclient.HintProxyError(r.err))})
 		default:
@@ -335,11 +379,16 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 }
 
 // skipped describes the hubs that could not be searched, for example
-// "staging: not logged in; dev: unreachable: ...", or "".
+// "staging: not logged in; prod: login refused; dev: unreachable: ...", or
+// "".
 func (l *useLookup) skipped() string {
 	var parts []string
 	for _, h := range l.notLoggedIn {
-		parts = append(parts, h.label()+": not logged in")
+		reason := "not logged in"
+		if l.refused[h.Endpoint] {
+			reason = "login refused"
+		}
+		parts = append(parts, h.label()+": "+reason)
 	}
 	for _, f := range l.failed {
 		parts = append(parts, f.Hub.label()+": "+f.Reason)
@@ -348,20 +397,21 @@ func (l *useLookup) skipped() string {
 }
 
 // notFoundError is the error when no searched hub has the project. It
-// names the hubs that were searched and those that were skipped, and the
-// login command for each hub that was skipped for want of a login.
+// names the hubs that were searched and those that could not be: the
+// project may be on one of those. It ends with the login command for each
+// hub that was skipped for want of a login or refused it.
 func (l *useLookup) notFoundError() error {
 	var names []string
 	for _, h := range l.searched {
 		names = append(names, h.label())
 	}
 	var b strings.Builder
-	switch {
+	switch skipped := l.skipped(); {
+	case len(names) > 0 && skipped != "":
+		fmt.Fprintf(&b, "project '%s' not found on the hubs searched (%s); it may be on the hubs that could not be searched (%s)",
+			l.ref, strings.Join(names, ", "), skipped)
 	case len(names) > 0:
 		fmt.Fprintf(&b, "project '%s' not found on hubs: %s", l.ref, strings.Join(names, ", "))
-		if s := l.skipped(); s != "" {
-			fmt.Fprintf(&b, " (%s)", s)
-		}
 	default:
 		fmt.Fprintf(&b, "project '%s' could not be looked up (%s)", l.ref, l.skipped())
 	}
@@ -469,7 +519,7 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 				if err := useLoginToHub(cmd, h.Endpoint); err != nil {
 					return err
 				}
-				l.notLoggedIn = nil
+				l.notLoggedIn, l.refused = nil, nil
 				candidates = l.search([]useHub{h})
 			}
 		}
@@ -500,9 +550,24 @@ func runUseSelect(cmd *cobra.Command, ref string) error {
 	return saveUseSelection(out, stderr, l, *chosen, checkNote)
 }
 
+// sortUseCandidates puts candidates in the order every listing of them
+// uses (the picker, the error and its JSON), whether they came from the
+// known-project list or from a lookup: by hub, then by project ID.
+func sortUseCandidates(candidates []useMatch) {
+	sort.SliceStable(candidates, func(i, j int) bool {
+		a, b := candidates[i], candidates[j]
+		if a.Hub.label() != b.Hub.label() {
+			return a.Hub.label() < b.Hub.label()
+		}
+		return a.ID < b.ID
+	})
+}
+
 // useChoose picks one of several candidates: with the picker when the user
 // can be asked, else it fails with the candidates and how to choose one.
+// It lists them in the order of sortUseCandidates.
 func useChoose(ref string, candidates []useMatch) (*useMatch, error) {
+	sortUseCandidates(candidates)
 	if useInteractive() && !isJSONOutput() {
 		options := make([]string, len(candidates))
 		for i, m := range candidates {
