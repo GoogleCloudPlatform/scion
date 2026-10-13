@@ -56,6 +56,7 @@ import {
   formatBytes,
   isInlineType,
   isRemoteFile,
+  listGrants,
   listVersions,
   mintView,
   parseArtifactPagePath,
@@ -90,6 +91,7 @@ import type { CriticCounts, CriticTool } from '../../utils/critic.js';
 import '../shared/artifact-markdown-frame.js';
 import '../shared/detail-header.js';
 import '../shared/artifact-publish-dialog.js';
+import '../shared/artifact-move-dialog.js';
 import '../shared/artifact-share-dialog.js';
 import '../shared/code-editor.js';
 import './not-found.js';
@@ -194,6 +196,14 @@ export class ScionPageArtifactDetail extends LitElement {
   @state() private editError: string | null = null;
   @state() private publishOpen = false;
   @state() private shareOpen = false;
+  /** The Move dialog is open (ptone/scion#4583). */
+  @state() private moveOpen = false;
+  /**
+   * The hub's cross-project sharing setting, from the grants response (read
+   * only for a caller who manages the artifact). The hub refuses every move
+   * while it is off, so Move… is offered only while it is on.
+   */
+  @state() private crossProjectSharing = false;
   /** The version a failed Edit publish left pending; the next attempt resumes it. */
   private editPending: PendingPublish | null = null;
   @state() private reviewing = false;
@@ -528,6 +538,7 @@ export class ScionPageArtifactDetail extends LitElement {
     this.view = null;
     this.viewError = null;
     this.viewExpired = false;
+    this.crossProjectSharing = false;
     if (this.viewTimer) clearTimeout(this.viewTimer);
     this.viewTimer = null;
     try {
@@ -548,6 +559,7 @@ export class ScionPageArtifactDetail extends LitElement {
       this.entry = version?.files.find((f) => f.path === version.entryPath) ?? null;
       this.resolveNames();
       void this.loadVersions(0, gen);
+      if (data.canManage) void this.loadCrossProjectSharing(gen);
       const kind = this.entry ? rendererFor(this.entry.mediaType) : 'download';
       if ((kind === 'markdown' || kind === 'text') && this.entry) {
         if (this.entry.size <= MAX_INLINE_TEXT_BYTES) {
@@ -1068,7 +1080,33 @@ export class ScionPageArtifactDetail extends LitElement {
             }}
           ></scion-artifact-share-dialog>`
         : nothing}
+      ${this.data?.canManage
+        ? html`<scion-artifact-move-dialog
+            .artifact=${this.data.artifact}
+            ?open=${this.moveOpen}
+            @artifact-moved=${(e: CustomEvent<Artifact>): void => this.onMoved(e.detail)}
+            @artifact-move-closed=${(): void => {
+              this.moveOpen = false;
+            }}
+          ></scion-artifact-move-dialog>`
+        : nothing}
     `;
+  }
+
+  /** Reads whether cross-project sharing is on; any failure leaves it off. */
+  private async loadCrossProjectSharing(gen: number): Promise<void> {
+    try {
+      const { crossProjectSharing } = await listGrants(this.artifactId);
+      if (gen === this.loadGen) this.crossProjectSharing = crossProjectSharing;
+    } catch {
+      // Move… stays hidden; the Share dialog reports its own load errors.
+    }
+  }
+
+  /** After a move the artifact lives under its new home project: open it there. */
+  private onMoved(moved: Artifact): void {
+    this.moveOpen = false;
+    navigateTo(artifactPagePath(moved));
   }
 
   private versionLabel(v: ArtifactVersion | undefined): string {
@@ -1175,6 +1213,17 @@ export class ScionPageArtifactDetail extends LitElement {
                         Grant review access
                       </sl-button>`
                     : nothing}
+                ${this.data!.canManage && this.crossProjectSharing
+                  ? html`<sl-button
+                      size="small"
+                      @click=${(): void => {
+                        this.moveOpen = true;
+                      }}
+                    >
+                      <sl-icon slot="prefix" name="folder-symlink"></sl-icon>
+                      Move…
+                    </sl-button>`
+                  : nothing}
                 ${v && f && ownFiles.length === 1
                   ? html`<sl-button
                       size="small"
