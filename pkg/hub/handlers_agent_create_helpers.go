@@ -1087,7 +1087,7 @@ func newNotifySubscription(projectID, notifySubscriberType, notifySubscriberID, 
 		SubscriberType:    notifySubscriberType,
 		SubscriberID:      notifySubscriberID,
 		ProjectID:         projectID,
-		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR"},
+		TriggerActivities: []string{"COMPLETED", "WAITING_FOR_INPUT", "LIMITS_EXCEEDED", "STALLED", "ERROR", NotificationStatusHalted},
 		CreatedAt:         time.Now(),
 		CreatedBy:         createdBy,
 	}

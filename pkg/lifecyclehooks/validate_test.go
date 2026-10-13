@@ -156,6 +156,7 @@ func TestValidateHook_Triggers(t *testing.T) {
 		{"valid: suspended", "suspended", false},
 		{"valid: stopped", "stopped", false},
 		{"valid: error", "error", false},
+		{"valid: halted", "halted", false},
 		{"invalid: stopping", "stopping", true},
 		{"invalid: created", "created", true},
 		{"invalid: empty", "", true},

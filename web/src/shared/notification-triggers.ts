@@ -25,6 +25,7 @@ export const DEFAULT_TRIGGERS: readonly string[] = [
   'COMPLETED',
   'WAITING_FOR_INPUT',
   'LIMITS_EXCEEDED',
+  'HALTED',
 ];
 
 /** Every trigger a subscription can select. */
@@ -34,6 +35,7 @@ export const ALL_TRIGGERS: readonly string[] = [
   'LIMITS_EXCEEDED',
   'STALLED',
   'ERROR',
+  'HALTED',
   'DELETED',
 ];
 
@@ -45,6 +47,8 @@ const TRIGGER_LABELS: Record<string, string> = {
   LIMITS_EXCEEDED: 'Limits Exceeded',
   STALLED: 'Stalled',
   ERROR: 'Error',
+  // The platform ended a run that should still be running (ptone/scion#4853).
+  HALTED: 'Halted',
   DELETED: 'Deleted',
 };
 

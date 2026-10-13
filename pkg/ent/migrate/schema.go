@@ -1679,7 +1679,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"hub", "project"}, Default: "hub"},
 		{Name: "scope_id", Type: field.TypeString, Nullable: true},
 		{Name: "selector", Type: field.TypeJSON, Nullable: true},
-		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error"}},
+		{Name: "trigger", Type: field.TypeEnum, Enums: []string{"running", "suspended", "stopped", "error", "halted"}},
 		{Name: "action", Type: field.TypeJSON, Nullable: true},
 		{Name: "execution_identity", Type: field.TypeString, Nullable: true},
 		{Name: "enabled", Type: field.TypeBool, Default: true},

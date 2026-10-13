@@ -2904,7 +2904,7 @@ type LifecycleHookStore interface {
 type LifecycleHookFilter struct {
 	ScopeType string // Filter by scope type (hub, project)
 	ScopeID   string // Filter by scope ID
-	Trigger   string // Filter by trigger (running, suspended, stopped, error)
+	Trigger   string // Filter by trigger (running, suspended, stopped, error, halted)
 	Enabled   *bool  // Filter by enabled status (nil = no filter)
 }
 

@@ -233,6 +233,22 @@ func (nd *NotificationDispatcher) RetryDispatch(ctx context.Context, notif *stor
 	nd.retryDispatch(ctx, notif)
 }
 
+// retrySubscription returns the subscription a retry delivers notif for:
+// the stored subscription, or, for a notification sent to an agent's
+// creator without one (store.CreatorFallbackSubscriptionID), one rebuilt
+// from the notification's own subscriber and project.
+func retrySubscription(ctx context.Context, s store.Store, notif *store.Notification) (*store.NotificationSubscription, error) {
+	if notif.SubscriptionID == store.CreatorFallbackSubscriptionID {
+		return &store.NotificationSubscription{
+			ID:             notif.SubscriptionID,
+			SubscriberType: notif.SubscriberType,
+			SubscriberID:   notif.SubscriberID,
+			ProjectID:      notif.ProjectID,
+		}, nil
+	}
+	return s.GetNotificationSubscription(ctx, notif.SubscriptionID)
+}
+
 // retryDispatch implements RetryDispatch and reports its outcome. brokerID is
 // the subscriber's RuntimeBrokerID when a delivery was attempted, else "".
 func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *store.Notification) (outcome retryOutcome, brokerID string) {
@@ -246,8 +262,10 @@ func (nd *NotificationDispatcher) retryDispatch(ctx context.Context, notif *stor
 		return retryNotAttempted, "" // another caller (sweep or hook) already claimed this one
 	}
 
-	// 2. Look up subscription context.
-	sub, err := nd.store.GetNotificationSubscription(ctx, notif.SubscriptionID)
+	// 2. Look up subscription context. A creator notification sent with no
+	// subscription (store.CreatorFallbackSubscriptionID) carries its
+	// subscriber itself.
+	sub, err := retrySubscription(ctx, nd.store, notif)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			// Subscription permanently deleted — leave claimed so the sweep

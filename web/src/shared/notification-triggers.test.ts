@@ -35,6 +35,7 @@ describe('triggerLabel', () => {
       'Limits Exceeded',
       'Stalled',
       'Error',
+      'Halted',
       'Deleted',
     ]);
   });
@@ -49,14 +50,14 @@ describe('triggerLabel', () => {
   });
 
   it('keeps the API trigger values unchanged', () => {
-    expect(DEFAULT_TRIGGERS).toEqual(['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED']);
+    expect(DEFAULT_TRIGGERS).toEqual(['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED', 'HALTED']);
   });
 });
 
 describe('defaultTriggersHint', () => {
   it('lists the default triggers by display label', () => {
     expect(defaultTriggersHint()).toBe(
-      'You will be notified when this agent reaches: Completed, Waiting on Parent, or Limits Exceeded.'
+      'You will be notified when this agent reaches: Completed, Waiting on Parent, Limits Exceeded, or Halted.'
     );
   });
 
