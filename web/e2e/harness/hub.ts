@@ -86,16 +86,34 @@ const TEST_INFRA_MARK_ACK = '--i-understand-this-hub-can-mint-super-admins';
 
 /**
  * The hub prints the dev token file path, not the token value:
- * `export SCION_DEV_TOKEN="$(cat '<path>')"`, with the path single-quoted
+ * `export SCION_DEV_TOKEN=$(cat '<path>')`, with the path single-quoted
  * for a POSIX shell. Group 1 is the quoted body; see unquoteShellSingle.
  */
-const DEV_TOKEN_FILE_PATTERN = /SCION_DEV_TOKEN="\$\(cat '((?:[^']|'\\'')*)'\)"/;
+const DEV_TOKEN_FILE_PATTERN = /SCION_DEV_TOKEN=\$\(cat '((?:[^']|'\\'')*)'\)/;
 /** Any dev token value, for redaction in logs. */
 const DEV_TOKEN_ANY = /scion_dev_[0-9a-f]+/g;
 
 /** Hub log lines are echoed with any dev token redacted. */
 function redact(line: string): string {
   return line.replace(DEV_TOKEN_ANY, 'scion_dev_<redacted>');
+}
+
+/**
+ * Returns the message of a hub log line. The hub logs JSON records (the
+ * message is "msg", or "message" with GCP logging); other lines are used as
+ * they are.
+ */
+function hubLogMessage(line: string): string {
+  if (line.startsWith('{')) {
+    try {
+      const rec = JSON.parse(line) as { msg?: unknown; message?: unknown };
+      const msg = rec.msg ?? rec.message;
+      if (typeof msg === 'string') return msg;
+    } catch {
+      // Not JSON after all: fall through to the raw line.
+    }
+  }
+  return line;
 }
 
 /** Undoes the hub's single quoting: each '\'' in the body is one quote. */
@@ -295,7 +313,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubState>
   // read from that file once the hub is healthy.
   let devTokenFile = '';
   const captureDevTokenFile = (line: string) => {
-    const match = line.match(DEV_TOKEN_FILE_PATTERN);
+    const match = hubLogMessage(line).match(DEV_TOKEN_FILE_PATTERN);
     if (match) {
       devTokenFile = unquoteShellSingle(match[1]);
     }

@@ -16,13 +16,16 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +36,7 @@ const fixtureDevToken = "scion_dev_fixture0123456789abcdef"
 // wantDevTokenExport is the line startup output must show for the dev token
 // file at path (path must not contain a single quote).
 func wantDevTokenExport(path string) string {
-	return `export SCION_DEV_TOKEN="$(cat '` + path + `')"`
+	return "export SCION_DEV_TOKEN=$(cat '" + path + "')"
 }
 
 // captureDevTokenLog redirects the standard logger to a buffer for the test.
@@ -171,4 +174,69 @@ func TestDevTokenExportHint_ShellSafe(t *testing.T) {
 	got, err := exec.Command("sh", "-c", hint+` && printf '%s' "$SCION_DEV_TOKEN"`).Output()
 	require.NoError(t, err)
 	assert.Equal(t, fixtureDevToken, string(got))
+}
+
+// TestInitDevAuth_JSONLogLine checks the dev token line as the server really
+// writes it. Startup calls logging.SetupWithOTel (see initServerLogging),
+// which installs a JSON handler on stdout as the slog default; that routes
+// the standard log through slog. The line must hold the path form unescaped
+// (so it can be copied from the log, and the e2e harness can match it after
+// decoding the record) and no token value.
+func TestInitDevAuth_JSONLogLine(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		useGCP bool
+		msgKey string
+	}{
+		{name: "json", useGCP: false, msgKey: "msg"},
+		{name: "gcp", useGCP: true, msgKey: "message"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_DEV_TOKEN", "")
+			t.Setenv("SCION_AUTH_TOKEN", "")
+			t.Setenv("K_SERVICE", "")
+			globalDir := t.TempDir()
+			tokenPath := filepath.Join(globalDir, "dev-token")
+			require.NoError(t, os.WriteFile(tokenPath, []byte(fixtureDevToken+"\n"), 0o600))
+			cfg := &config.GlobalConfig{}
+			cfg.Auth.Enabled = true
+
+			// The base handler writes to os.Stdout as it is when the handler
+			// is built, so point it at a file first. Setting a non-default
+			// slog handler also redirects the standard log; restore it all.
+			stdoutFile, err := os.Create(filepath.Join(t.TempDir(), "stdout"))
+			require.NoError(t, err)
+			prevStdout := os.Stdout
+			prevSlog, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
+			t.Cleanup(func() {
+				os.Stdout = prevStdout
+				slog.SetDefault(prevSlog)
+				log.SetOutput(prevOut)
+				log.SetFlags(prevFlags)
+				_ = stdoutFile.Close()
+			})
+			os.Stdout = stdoutFile
+			logging.SetupWithOTel("scion-hub", "", false, tc.useGCP, nil)
+
+			_, err = initDevAuth(cfg, globalDir)
+			os.Stdout = prevStdout
+			require.NoError(t, err)
+
+			out, err := os.ReadFile(stdoutFile.Name())
+			require.NoError(t, err)
+			want := wantDevTokenExport(tokenPath)
+			var exportLine string
+			for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
+				var rec map[string]any
+				require.NoError(t, json.Unmarshal(line, &rec), "log line is not JSON: %s", line)
+				if msg, _ := rec[tc.msgKey].(string); msg == "  "+want {
+					exportLine = string(line)
+				}
+			}
+			require.NotEmpty(t, exportLine, "no log record with %s %q; stdout:\n%s", tc.msgKey, "  "+want, out)
+			t.Logf("server stdout line: %s", exportLine)
+			assert.Contains(t, exportLine, want, "the raw log line should hold the command unescaped")
+			assert.NotContains(t, string(out), "scion_dev_")
+		})
+	}
 }

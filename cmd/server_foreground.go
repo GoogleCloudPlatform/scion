@@ -1843,9 +1843,12 @@ func devTokenFilePath(configured, globalDir string) string {
 
 // devTokenExportHint returns the shell command that exports the dev token
 // stored at path. The path is single-quoted, so it may contain spaces or
-// shell metacharacters.
+// shell metacharacters. The command substitution needs no outer double
+// quotes (an assignment is not field-split), and leaving them out keeps the
+// line free of characters the server's JSON log encoding would escape, so
+// it can be copied from the log as is.
 func devTokenExportHint(path string) string {
-	return `export SCION_DEV_TOKEN="$(cat ` + shellSingleQuote(path) + `)"`
+	return "export SCION_DEV_TOKEN=$(cat " + shellSingleQuote(path) + ")"
 }
 
 // shellSingleQuote quotes s for a POSIX shell: it is wrapped in single

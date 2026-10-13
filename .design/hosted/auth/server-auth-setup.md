@@ -116,7 +116,7 @@ When the server starts with development authentication enabled:
 **Startup Log Output:**
 ```
 To authenticate CLI commands, run:
-  export SCION_DEV_TOKEN="$(cat '/home/user/.scion/dev-token')"
+  export SCION_DEV_TOKEN=$(cat '/home/user/.scion/dev-token')
 ```
 
 The path is the configured `server.auth.dev_token_file`, or `~/.scion/dev-token` by default. If the token is set directly with `server.auth.dev_token`, the output names that setting instead.

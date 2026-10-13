@@ -339,7 +339,7 @@ When using the Chrome DevTools MCP tools (`take_screenshot`, `take_snapshot`, `c
 
 3. **Load the dev token from its file.** Startup output shows the dev token file path instead of its value, as a command you can run:
    ```bash
-   export SCION_DEV_TOKEN="$(cat '/home/user/.scion/dev-token')"
+   export SCION_DEV_TOKEN=$(cat '/home/user/.scion/dev-token')
    ```
 
 4. **Build assets before starting the server**: Run `npm install && npm run build` in `web/` first. The server serves from `web/dist/client`.
