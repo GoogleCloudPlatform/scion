@@ -727,6 +727,10 @@ type StartExtras struct {
 	// HubAgentDefaults carries the hub defaults a start applies at the
 	// broker's lowest tier (see startHubAgentDefaults). Nil = none.
 	HubAgentDefaults *RemoteHubAgentDefaults
+	// TelemetryPolicy is the project's enforced telemetry on/off, set only
+	// for a broker that reports TemplateTiers (wire key telemetryPolicy;
+	// see RemoteAgentConfig.TelemetryPolicy). Nil = none.
+	TelemetryPolicy *bool
 	// Image is the user's explicit image (explicitDispatchImage), already
 	// registry-rewritten; empty when the user chose none. The broker applies
 	// it as the top-tier image (opts.Image), the same as create's
@@ -802,6 +806,9 @@ func applyStartExtras(payload map[string]interface{}, extras StartExtras) {
 	}
 	if extras.HubAgentDefaults != nil {
 		payload["hubAgentDefaults"] = extras.HubAgentDefaults
+	}
+	if extras.TelemetryPolicy != nil {
+		payload["telemetryPolicy"] = *extras.TelemetryPolicy
 	}
 	if extras.Image != "" {
 		payload["image"] = extras.Image
@@ -966,6 +973,7 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 		query += "&projectId=" + url.QueryEscape(projectID)
 	}
 	query += deleteProjectPathQuery(ctx)
+	query += dispatchAgentIDQuery(ctx, "&")
 	if opts.RunID != "" {
 		query += "&runId=" + url.QueryEscape(opts.RunID)
 	}
@@ -998,7 +1006,40 @@ func stopAgentQuery(ctx context.Context, projectID, runID string) string {
 		}
 		query += "runId=" + url.QueryEscape(runID)
 	}
+	if p := dispatchAgentIDQuery(ctx, ""); p != "" {
+		if query != "" {
+			query += "&"
+		}
+		query += p
+	}
 	return withRecordedRuntimeQuery(ctx, query)
+}
+
+// dispatchAgentIDKey carries the hub's agent ID for a broker stop or delete;
+// see withDispatchAgentID.
+type dispatchAgentIDKey struct{}
+
+// withDispatchAgentID attaches the hub's ID of the agent a broker stop or
+// delete is for (ptone/scion#2632). Both transports send it as the
+// api.AgentIDQueryParam query parameter; the broker uses it only to keep
+// the stop or delete from cancelling the in-flight start of a different
+// agent recreated under the same name. Like withRecordedRuntime it rides on
+// the context to keep the RuntimeBrokerClient interface unchanged; an empty
+// ID leaves ctx unchanged and the broker matches by name.
+func withDispatchAgentID(ctx context.Context, agentID string) context.Context {
+	if agentID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, dispatchAgentIDKey{}, agentID)
+}
+
+// dispatchAgentIDQuery returns sep + "agentId=<escaped>" when an agent ID
+// was attached with withDispatchAgentID, otherwise "".
+func dispatchAgentIDQuery(ctx context.Context, sep string) string {
+	if id, _ := ctx.Value(dispatchAgentIDKey{}).(string); id != "" {
+		return sep + api.AgentIDQueryParam + "=" + url.QueryEscape(id)
+	}
+	return ""
 }
 
 // withRunIDURL appends the runId query parameter to a start or restart
@@ -1408,6 +1449,13 @@ type RemoteAgentConfig struct {
 	// application at the broker's LOW-precedence defaults tier — deliberately
 	// not folded into InlineConfig, which is a top-of-chain slot.
 	HubAgentDefaults *RemoteHubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// TelemetryPolicy is the project's enforced telemetry on/off
+	// (scion.io/telemetry-enabled), sent only to a broker that reports
+	// TemplateTiers. The broker applies it last, above the agent's config
+	// and the requester's SCION_TELEMETRY_ENABLED flag (ptone/scion#4218).
+	// Nil = no policy.
+	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 }
 
 // RemoteHubAgentDefaults carries the four limit/resource operational
@@ -1434,6 +1482,12 @@ type RemoteHubAgentDefaults struct {
 	Resources       *api.ResourceSpec `json:"resources,omitempty"`
 	AutoExposePorts *bool             `json:"autoExposePorts,omitempty"`
 	Experiments     []string          `json:"experiments,omitempty"`
+	// Telemetry is the hub's telemetry default (settings telemetry), sent
+	// only to a broker that reports TemplateTiers. The broker applies it per
+	// start below the agent's own config telemetry and never persists it
+	// (ptone/scion#4218). A legacy broker gets it inline instead
+	// (dispatchTelemetry, ptone/scion#4222).
+	Telemetry *api.TelemetryConfig `json:"telemetry,omitempty"`
 }
 
 // RemoteGCPIdentityConfig holds GCP identity configuration sent from Hub to Broker.
@@ -1986,8 +2040,15 @@ type Server struct {
 	projectsLog       *slog.Logger
 	resourceLog       *slog.Logger
 	templateLog       *slog.Logger
-	workspaceLog      *slog.Logger
-	agentMetricsLog   *slog.Logger
+	// templateAgentConfigMisses records template rows, keyed by ID and
+	// content hash, whose agent config file does not parse or is missing
+	// from storage when deriving a missing snapshot
+	// (ensureTemplateAgentConfig), so a broken file is read once per
+	// content, not on every create and dispatch. Transient read failures
+	// are not recorded. A new commit changes the content hash and retries.
+	templateAgentConfigMisses sync.Map
+	workspaceLog              *slog.Logger
+	agentMetricsLog           *slog.Logger
 	// perfTraceLog receives the per-request perf_trace lines. Set only when
 	// server.hub.perf_trace is on; nil otherwise.
 	perfTraceLog *slog.Logger
@@ -2075,6 +2136,10 @@ type Server struct {
 	// scheduledSend is the scheduled chat message sweeper's state
 	// (chat_scheduled_send.go); created on first use.
 	scheduledSend *scheduledSendRuntime
+
+	// threadGroupMigration tracks the personal thread group migration
+	// sweeper (ptone/scion#4424) so CleanupResources can join it.
+	threadGroupMigration threadGroupMigrationRuntime
 
 	// chatLinkStore is the DB-backed chat link code store (nil when entClient is nil).
 	// When non-nil, Telegram/Discord/Teams link services delegate to it.
@@ -4600,6 +4665,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// is then omitted and broker behaviour is unchanged.
 	dispatcher.SetHubAgentDefaultsProvider(s.hubAgentDefaults)
 
+	// Hub telemetry default and template job config (ptone/scion#4222).
+	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
+	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
+
 	// Wire the async agent launch settings. They are static after startup;
 	// the accessor reads them under s.mu.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
@@ -6210,6 +6279,11 @@ func (s *Server) StartBackgroundServices(ctx context.Context) {
 	// Start the scheduled chat message sweeper (exits when ctx is cancelled).
 	s.startScheduledSendSweeper(ctx)
 
+	// Start the migration of personal chat thread groups into project
+	// thread groups (ptone/scion#4424). It idles while
+	// hub.chat_thread_groups is off and exits when ctx is cancelled.
+	s.startThreadGroupMigrationSweeper(ctx)
+
 	// Start notification dispatcher (uses the current event publisher).
 	// The dispatcher is resolved lazily so it works even if SetDispatcher
 	// is called after Start().
@@ -6388,6 +6462,10 @@ func (s *Server) CleanupBackgroundResources(ctx context.Context) error {
 		// Let a scheduled chat message being delivered finish (bounded)
 		// while the stores and event publisher are still open.
 		s.stopScheduledSendSweeper(ctx)
+
+		// Wait for a thread group migration pass in progress; the cancelled
+		// ctx above makes its store calls return.
+		s.stopThreadGroupMigrationSweeper()
 
 		// Likewise for an auto-suspend in flight; the cancelled ctx above
 		// already stops new ones from starting.

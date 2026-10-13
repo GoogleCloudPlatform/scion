@@ -188,6 +188,9 @@ var agentEditFields = []agentEditField{
 	// cleared_fields is derived by the hub from a PATCH's clears
 	// (nextClearedFields); a request never sets it.
 	{Key: "config.cleared_fields", Tier: EditTierImmutable, LockedReason: editReasonInternal},
+	// A template key: the hub reads it from the template's snapshot at
+	// create (ptone/scion#4222). An agent's mode is the top-level messageMode.
+	{Key: "config.message_mode", Tier: EditTierImmutable, LockedReason: "Set the agent's message mode with messageMode."},
 }
 
 // agentEditFieldByKey indexes agentEditFields by wire key.

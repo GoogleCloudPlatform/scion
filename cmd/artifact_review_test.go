@@ -19,10 +19,13 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,6 +109,48 @@ func TestArtifactReviewUnmarkedChanges(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	require.NoError(t, getArtifactWith(ctx, svc, &stdout, &stderr, ref, "", false, getOptions{}))
 	assert.Equal(t, cliReviewParent, stdout.String())
+}
+
+// TestUnmarkedChangesReportShowsWhitespace: a whitespace-only hunk shows
+// its tabs, trailing spaces and newlines, a final-newline change is named,
+// an empty side says so, and other hunks print as plain text
+// (ptone/scion#4578). The details are the hub's JSON for real hunks.
+func TestUnmarkedChangesReportShowsWhitespace(t *testing.T) {
+	files := []artifacts.UnmarkedFile{
+		{Path: "plan.md", Change: artifacts.ChangeModified,
+			Hunks: critic.Diff([]byte("a\nfoo\nb\n\tx\nend\n"), []byte("a\nfoo  \nb\n  x\nend"))},
+		{Path: "notes.md", Change: artifacts.ChangeModified,
+			Hunks: critic.Diff([]byte("a\nb\nc\n"), []byte("a\nnew\nb\n\nc\n"))},
+	}
+	raw, err := json.Marshal(map[string]any{"files": files})
+	require.NoError(t, err)
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(raw, &details))
+	got := unmarkedChangesReport(&apiclient.APIError{Code: artifacts.CodeUnmarkedChanges, Details: details})
+	want := "The review changes text outside CriticMarkup marks (compared with every mark rejected):\n" +
+		"  plan.md (modified)\n" +
+		"    line 2 (whitespace only):\n" +
+		"      - foo⏎\n" +
+		"      + foo··⏎\n" +
+		"    line 4 (whitespace only):\n" +
+		"      - →x⏎\n" +
+		"      - end⏎\n" +
+		"      +   x⏎\n" +
+		"      + end\n" +
+		"      (removes the final newline)\n" +
+		"  notes.md (modified)\n" +
+		"    line 2:\n" +
+		"      - b\n" +
+		"      + new\n" +
+		"      + b\n" +
+		"      + \n"
+	assert.Equal(t, want, got)
+	added := critic.Diff([]byte("a\nb\n"), []byte("a\n\nb\n"))
+	raw, err = json.Marshal(map[string]any{"files": []artifacts.UnmarkedFile{{Path: "x.md", Change: artifacts.ChangeModified, Hunks: added}}})
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(raw, &details))
+	got = unmarkedChangesReport(&apiclient.APIError{Code: artifacts.CodeUnmarkedChanges, Details: details})
+	assert.Contains(t, got, "    line 2 (whitespace only):\n      - (no lines)\n      + ⏎\n")
 }
 
 func TestArtifactGetOptions(t *testing.T) {

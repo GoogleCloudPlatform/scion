@@ -26,6 +26,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
@@ -792,7 +793,7 @@ const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 // identifies the single-node hosted tier, which needs a cloudrun-sandbox
 // profile instead of the workstation defaults.
 func isCloudRunSandboxEnvironment() bool {
-	return os.Getenv("CLOUD_RUN_INSTANCE") != "" && sandboxBinExists(defaultSandboxBin)
+	return cloudrunenv.IsInstance() && sandboxBinExists(defaultSandboxBin)
 }
 
 // sandboxBinExists is a test seam for isCloudRunSandboxEnvironment.

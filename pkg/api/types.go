@@ -320,6 +320,25 @@ func (v VolumeMount) Validate() error {
 	return nil
 }
 
+// validMessageModes are the agent message modes a scion-agent config may name
+// in message_mode. They match the hub's store.MessageMode* constants
+// (TestValidateMessageMode_MatchesStore pins that).
+var validMessageModes = map[string]struct{}{
+	"none": {}, "lineage": {}, "branch": {}, "project": {}, "hub": {},
+}
+
+// ValidateMessageMode returns an error when mode is set and is not one of the
+// five agent message modes. An empty mode is valid (unset).
+func ValidateMessageMode(mode string) error {
+	if mode == "" {
+		return nil
+	}
+	if _, ok := validMessageModes[mode]; !ok {
+		return fmt.Errorf("invalid message_mode %q: must be one of none, lineage, branch, project, hub", mode)
+	}
+	return nil
+}
+
 // ValidateVolumes validates a slice of VolumeMount entries.
 func ValidateVolumes(volumes []VolumeMount) error {
 	for i, v := range volumes {
@@ -479,16 +498,22 @@ type TelemetrySamplingConfig struct {
 }
 
 type ScionConfig struct {
-	Harness          string            `json:"harness,omitempty" yaml:"harness,omitempty"`
-	HarnessConfig    string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
-	ConfigDir        string            `json:"config_dir,omitempty" yaml:"config_dir,omitempty"`
-	Env              map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	Volumes          []VolumeMount     `json:"volumes,omitempty" yaml:"volumes,omitempty"`
-	Detached         *bool             `json:"detached" yaml:"detached"`
-	CommandArgs      []string          `json:"command_args,omitempty" yaml:"command_args,omitempty"`
-	TaskFlag         string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty"`
-	Model            string            `json:"model,omitempty" yaml:"model,omitempty"`
-	ThinkingLevel    *int              `json:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
+	Harness       string            `json:"harness,omitempty" yaml:"harness,omitempty"`
+	HarnessConfig string            `json:"harness_config,omitempty" yaml:"harness_config,omitempty"`
+	ConfigDir     string            `json:"config_dir,omitempty" yaml:"config_dir,omitempty"`
+	Env           map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
+	Volumes       []VolumeMount     `json:"volumes,omitempty" yaml:"volumes,omitempty"`
+	Detached      *bool             `json:"detached" yaml:"detached"`
+	CommandArgs   []string          `json:"command_args,omitempty" yaml:"command_args,omitempty"`
+	TaskFlag      string            `json:"task_flag,omitempty" yaml:"task_flag,omitempty"`
+	Model         string            `json:"model,omitempty" yaml:"model,omitempty"`
+	ThinkingLevel *int              `json:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
+	// MessageMode is the template's initial message mode for agents created
+	// from it (none, lineage, branch, project, hub; see ValidateMessageMode).
+	// A job key: only the hub reads it, from the template's AgentConfig
+	// snapshot, when an agent is created without an explicit mode
+	// (ptone/scion#4222).
+	MessageMode      string            `json:"message_mode,omitempty" yaml:"message_mode,omitempty"`
 	Kubernetes       *KubernetesConfig `json:"kubernetes,omitempty" yaml:"kubernetes,omitempty"`
 	AuthSelectedType string            `json:"auth_selectedType,omitempty" yaml:"auth_selectedType,omitempty"`
 	Resources        *ResourceSpec     `json:"resources,omitempty" yaml:"resources,omitempty"`
