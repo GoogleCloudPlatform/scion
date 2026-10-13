@@ -1115,6 +1115,19 @@ func (s *Server) runScopeReissue(ctx context.Context, agent *store.Agent, operat
 		return resp, nil
 	}
 
+	// Flat placement pre-check (requirePinnedPlacement) before the commit:
+	// the commit revokes the agent's credentials and the new token is then
+	// delivered through reset-auth, which the placement backstop refuses
+	// for an agent whose saved placement is inconsistent. Refusing first
+	// leaves the scopes and credentials unchanged. A pinned agent whose
+	// check cannot read its Runtime Broker row is refused too; an unpinned
+	// agent's read failure keeps today's path.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		if _, refused := placementRefusalOf(err); refused || agent.IsPinned() {
+			return nil, err
+		}
+	}
+
 	newEdge, revoked, err := s.commitScopeReissue(ctx, plan, operator, opID, batchOpID)
 	if err != nil {
 		return nil, err
@@ -1207,6 +1220,9 @@ func (s *Server) handleAgentScopeReissue(w http.ResponseWriter, r *http.Request,
 // writeScopeReissueError answers a failed re-issue.
 func writeScopeReissueError(w http.ResponseWriter, err error) {
 	switch {
+	case writeRuntimeTargetRefusal(w, err):
+		// The agent's saved placement is inconsistent: its own 409 and
+		// code, and nothing was committed.
 	case errors.Is(err, errReissueConflict), errors.Is(err, store.ErrVersionConflict), errors.Is(err, store.ErrAlreadyExists):
 		writeError(w, http.StatusConflict, ErrCodeConflict,
 			"The agent or its delegation record changed during the re-issue; retry", nil)

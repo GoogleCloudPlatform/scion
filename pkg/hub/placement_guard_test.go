@@ -630,6 +630,34 @@ func TestPlacementGuard_ResetAuthExecLogsAnswer409(t *testing.T) {
 	}
 }
 
+// A scope re-issue of an agent whose saved placement is inconsistent is
+// refused before the commit: 409 with the placement code, the delegation
+// edge and the agent's credentials unchanged, nothing dispatched.
+func TestPlacementGuard_ScopeReissueRefusedBeforeCommit(t *testing.T) {
+	ctx := context.Background()
+	f := newReissueFixture(t, "rs-placement", store.ProjectRoleOwner)
+	f.run(t, f.parent, false) // the child now has scopes to gain
+	child := f.reload(t, f.child)
+	// Pin the child to its own, non-flat Runtime Broker: an inconsistent
+	// placement (runtime_target_pin_stale).
+	_, err := f.store.SetAgentPinnedRuntimeTarget(ctx, child.ID,
+		store.PinnedPlacement{RuntimeBrokerID: child.RuntimeBrokerID},
+		store.PinnedPlacement{RuntimeBrokerID: child.RuntimeBrokerID, RuntimeTargetID: "target-of-a-non-flat-row", RuntimeTargetType: "docker"})
+	require.NoError(t, err)
+	insertTestAgentCredential(t, f.store, f.child.ID, f.projectID, "rs-placement-jti")
+	edgesBefore := f.allEdges(t, f.child)
+	f.client.resetAuthCalled = false
+
+	rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/agents/"+f.child.ID+"/reset-auth", ScopeReissueRequest{ReissueScopes: true})
+	requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+
+	assert.Equal(t, edgesBefore, f.allEdges(t, f.child), "the delegation edge is unchanged: nothing was committed")
+	cred := getTestAgentCredential(t, f.store, "rs-placement-jti")
+	assert.Nil(t, cred.RevokedAt, "the agent's credentials are not revoked")
+	assert.False(t, f.client.resetAuthCalled, "nothing is dispatched")
+	assert.Empty(t, reissueAudits(t, f.store, f.child.ID, mutationTypeAgentScopesReissueDispatch), "no dispatch record")
+}
+
 // --- non-dispatcher routes -------------------------------------------------
 
 func TestPlacementGuard_PTYRefusedBeforeUpgrade(t *testing.T) {
