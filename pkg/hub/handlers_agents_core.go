@@ -5477,8 +5477,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 				"unable to verify credential status", nil)
 			return
 		case credErr == nil && cred.RevokedAt != nil:
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, slog.Default(), agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",
@@ -5493,8 +5492,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		cred, legacy, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
 		switch {
 		case errors.Is(credErr, errAgentCredentialRevoked):
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, slog.Default(), agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",

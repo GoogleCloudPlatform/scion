@@ -85,5 +85,5 @@ func TestAgentAuthRevokedBeforeHoldFault(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, ErrCodeUnauthorized, decodeAPIError(t, rec.Body.Bytes()).Error.Code)
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }

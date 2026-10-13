@@ -543,7 +543,7 @@ func TestAgentDelegationExchange_Refusals(t *testing.T) {
 		require.NoError(t, f.store.RevokeAgentCredential(context.Background(), ac.ID, "test", "test"))
 		rec := f.exchange(t, token, f.agentA.ID, grant.ID, map[string]interface{}{"audience": aud})
 		// The middleware already refuses a revoked agent credential.
-		adtAssertAPIError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, agentTokenRefusedCode)
 	})
 	t.Run("revoked grant", func(t *testing.T) {
 		other := f.hubGrant(t)
@@ -756,11 +756,13 @@ func TestAgentDelegation_HeaderRules(t *testing.T) {
 		"X-Scion-Agent-Token": "not-a-token", "Authorization": "Bearer " + cred.Token,
 	})
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 
 	// A delegated credential in the agent token header is an invalid agent
 	// token.
 	rec = f.do(t, http.MethodGet, "/api/v1/agents/"+f.agentB.ID, nil, map[string]string{"X-Scion-Agent-Token": cred.Token})
 	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 
 	// An unknown or malformed delegated credential: 401.
 	assert.Equal(t, http.StatusUnauthorized, f.getAgent(t, delegatedCredentialPrefix+strings.Repeat("A", 43), f.agentB.ID).Code)

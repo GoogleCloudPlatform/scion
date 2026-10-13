@@ -675,7 +675,7 @@ func TestAgentDelegationExchange_AgentCredentialRowChecks(t *testing.T) {
 		require.NoError(t, f.store.CreateAgentCredential(ctx, ac))
 		require.NoError(t, f.store.RevokeAgentCredential(ctx, ac.ID, "test", "test"))
 		rec := f.exchange(t, token, stored.ID, grant.ID, aud)
-		adtAssertAPIError(t, rec, http.StatusUnauthorized, ErrCodeUnauthorized)
+		adtAssertAPIError(t, rec, http.StatusUnauthorized, agentTokenRefusedCode)
 	})
 	assert.Empty(t, adtAudits(t, f.store, mutationAgentDelegationCredentialIssue), "no credential was issued")
 }
@@ -718,7 +718,7 @@ func TestAgentDelegation_AgentAndIssuerStateAtExchangeAndUse(t *testing.T) {
 		}})
 		require.NoError(t, err)
 		// The agent middleware refuses a held agent's token before exchange.
-		adtAssertAPIError(t, f.exchange(t, token, d.ID, grant.ID, aud), http.StatusUnauthorized, ErrCodeUnauthorized)
+		adtAssertAPIError(t, f.exchange(t, token, d.ID, grant.ID, aud), http.StatusUnauthorized, agentTokenRefusedCode)
 		decisions.reset()
 		adtAssertAPIError(t, f.getAgent(t, cred.Token, f.agentB.ID), http.StatusForbidden, ErrCodeForbidden)
 		decisions.assertDelegatedDeny(t, agentDelegationCodeGrantAgentChanged)

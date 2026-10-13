@@ -31,8 +31,10 @@ type agentTokenRefusal int
 const (
 	// agentTokenAccepted: the token may authenticate the request.
 	agentTokenAccepted agentTokenRefusal = iota
-	// agentTokenRevoked: the credential is revoked or the agent is held.
+	// agentTokenRevoked: the credential is revoked.
 	agentTokenRevoked
+	// agentTokenHeld: the agent is held.
+	agentTokenHeld
 	// agentTokenInvalidSubject: the subject names no agent.
 	agentTokenInvalidSubject
 	// agentTokenRunRefused: the token's run check refused it.
@@ -105,7 +107,7 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 			return ctx, agentTokenUnevaluated
 		}
 		if held {
-			return ctx, agentTokenRevoked
+			return ctx, agentTokenHeld
 		}
 	}
 
@@ -122,17 +124,45 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 	return ctx, agentTokenAccepted
 }
 
+// Agent-token refusal causes. A cause is logged only: the client gets
+// writeAgentTokenRefused whatever the cause.
+const (
+	agentTokenCauseRevoked            = "revoked"              // credential revoked
+	agentTokenCauseHeld               = "held"                 // agent held
+	agentTokenCauseInvalidSubject     = "invalid_subject"      // subject names no agent
+	agentTokenCauseInvalidToken       = "invalid_token"        // X-Scion-Agent-Token failed validation
+	agentTokenCauseHeaderNotValidated = "header_not_validated" // X-Scion-Agent-Token reached dev auth unvalidated
+	agentTokenCauseRefreshRevoked     = "refresh_revoked"      // token refresh found the credential revoked
+)
+
+// agentTokenRefusedLogMessage is the message of the log line for a
+// refused agent token.
+const agentTokenRefusedLogMessage = "agent token refused"
+
+// refuseAgentToken logs cause and attrs at info level on log (nil:
+// slog.Default) and writes the shared agent-token refusal.
+func refuseAgentToken(ctx context.Context, w http.ResponseWriter, log *slog.Logger, cause string, attrs ...any) {
+	if log == nil {
+		log = slog.Default()
+	}
+	log.InfoContext(ctx, agentTokenRefusedLogMessage, append([]any{"cause", cause}, attrs...)...)
+	writeAgentTokenRefused(w)
+}
+
 // writeAgentTokenRefusal writes UnifiedAuthMiddleware's response to a
-// refusal from verifyAgentTokenCredential.
-func writeAgentTokenRefusal(w http.ResponseWriter, refusal agentTokenRefusal) {
+// refusal from verifyAgentTokenCredential for the token of agentID: the
+// shared refusal for every cause, or 503 when the token could not be
+// evaluated.
+func writeAgentTokenRefusal(ctx context.Context, w http.ResponseWriter, log *slog.Logger, refusal agentTokenRefusal, agentID string) {
 	switch refusal {
 	case agentTokenRevoked:
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-			"token has been revoked", nil)
+		refuseAgentToken(ctx, w, log, agentTokenCauseRevoked, "agent_id", agentID)
+	case agentTokenHeld:
+		refuseAgentToken(ctx, w, log, agentTokenCauseHeld, "agent_id", agentID)
 	case agentTokenInvalidSubject:
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-			"invalid agent token", nil)
+		refuseAgentToken(ctx, w, log, agentTokenCauseInvalidSubject, "agent_id", agentID)
 	case agentTokenRunRefused:
+		// The run-scope checker has logged the outcome.
 		writeAgentTokenRefused(w)
 	default:
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,

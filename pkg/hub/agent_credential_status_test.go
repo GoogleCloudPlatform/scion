@@ -228,8 +228,8 @@ func TestAgentRefresh_MarkerPresent_RevokedDenied(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
-	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "revoked")
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 // --- Refresh handler: credential-ID marker absent -------------------------
@@ -282,8 +282,8 @@ func TestAgentRefresh_MarkerAbsent_RevokedDenied(t *testing.T) {
 	rec := httptest.NewRecorder()
 	srv.handleAgentTokenRefresh(rec, req, agentID)
 
-	require.Equal(t, http.StatusForbidden, rec.Code, "body: %s", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "revoked")
+	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }
 
 func TestAgentRefresh_MarkerAbsent_ActiveRefreshesAndRevokesOldCredential(t *testing.T) {

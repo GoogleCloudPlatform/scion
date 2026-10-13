@@ -18,6 +18,7 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -27,6 +28,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// agentTokenRefusedCode is the error code in agentTokenRefusedBody.
+const agentTokenRefusedCode = "invalid_token"
 
 // agentTokenRefusalCase is one agent-token refusal: the token sent as
 // X-Scion-Agent-Token, the run header, the agent id for a path, and the
@@ -163,4 +167,72 @@ func TestUniformRefusalResponsesOnAuditRoute(t *testing.T) {
 		assert.Equal(t, want, got)
 		assert.Empty(t, got.Header.Values("WWW-Authenticate"))
 	})
+}
+
+// revokedRefreshRequest stores an agent and a revoked token for it and
+// returns a token refresh request for the handler, with the credential
+// marker set when marker is true.
+func revokedRefreshRequest(t *testing.T, srv *Server, s store.Store, project *store.Project, name string, marker bool) (*http.Request, string) {
+	t.Helper()
+	ctx := context.Background()
+	agent := runScopeAgent(t, s, project.ID, name, "")
+	tok := signRunToken(t, srv, s, agent, "", recordRun(""))
+	claims, err := srv.agentTokenService.ValidateAgentToken(tok)
+	require.NoError(t, err)
+	cred, err := s.GetAgentCredentialByJTIHash(ctx, hashJTI(claims.ID))
+	require.NoError(t, err)
+	require.NoError(t, s.RevokeAgentCredential(ctx, cred.ID, "test", "explicit"))
+	credID := ""
+	if marker {
+		credID = cred.ID
+	}
+	return buildAgentRefreshRequest(agent.ID, claims, credID, false), agent.ID
+}
+
+// TestAgentTokenRefusalCauseIsLogged: each refusal cause is logged once
+// with its cause, while the response stays the shared refusal.
+func TestAgentTokenRefusalCauseIsLogged(t *testing.T) {
+	srv, s, _, project := setupCredentialTestServer(t)
+	logs := &captureHandler{}
+	srv.authConfig.Logger = slog.New(logs)
+	cases := agentTokenRefusalCases(t, srv, s, project)
+	h := srv.Handler()
+
+	for _, c := range cases {
+		if c.cause == "" {
+			continue
+		}
+		t.Run(c.name, func(t *testing.T) {
+			before := len(logs.records(agentTokenRefusedLogMessage))
+			rec := agentRequest(t, h, http.MethodGet, "/api/v1/agents/"+c.agentID, c.token, c.runHeader)
+			require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+			recs := logs.records(agentTokenRefusedLogMessage)
+			require.Len(t, recs, before+1)
+			assert.Equal(t, c.cause, recs[before].attrs["cause"])
+		})
+	}
+
+	t.Run("development middleware", func(t *testing.T) {
+		buf := captureSlogDefault(t)
+		dh := DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(http.NotFoundHandler())
+		rec := agentRequest(t, dh, http.MethodGet, "/api/v1/agents/any", "not-a-token", "")
+		assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+		assert.Contains(t, buf.String(), "msg=\""+agentTokenRefusedLogMessage+"\" cause=header_not_validated")
+	})
+
+	for _, marker := range []bool{true, false} {
+		name := "refresh without credential marker"
+		if marker {
+			name = "refresh with credential marker"
+		}
+		t.Run(name, func(t *testing.T) {
+			req, agentID := revokedRefreshRequest(t, srv, s, project, "cause-log-"+name, marker)
+			buf := captureSlogDefault(t)
+			rec := httptest.NewRecorder()
+			srv.handleAgentTokenRefresh(rec, req, agentID)
+			assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
+			assert.Contains(t, buf.String(), "msg=\""+agentTokenRefusedLogMessage+"\" cause=refresh_revoked")
+		})
+	}
 }

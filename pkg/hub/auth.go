@@ -335,7 +335,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						var refusal agentTokenRefusal
 						ctx, refusal = verifyAgentTokenCredential(ctx, cfg, log, claims, runScopeRequestFrom(r), runScopeSourceHTTP)
 						if refusal != agentTokenAccepted {
-							writeAgentTokenRefusal(w, refusal)
+							writeAgentTokenRefusal(ctx, w, log, refusal, claims.Subject)
 							return
 						}
 
@@ -352,8 +352,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
 						// Agent token header was present but invalid
-						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-							"invalid agent token: "+err.Error(), nil)
+						refuseAgentToken(ctx, w, log, agentTokenCauseInvalidToken, "error", err)
 						return
 					}
 				}

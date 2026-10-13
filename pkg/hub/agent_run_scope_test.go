@@ -348,6 +348,9 @@ func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 	goneTok := signRunToken(t, srv, s, gone, "run-gone", recordRun("run-gone"))
 	require.NoError(t, s.DeleteAgent(ctx, gone.ID))
 	causes = append(causes, cause{name: "agent-gone", agent: gone, token: goneTok})
+	for _, c := range agentTokenRefusalCases(t, srv, s, project) {
+		causes = append(causes, cause{name: c.name, agent: &store.Agent{ID: c.agentID}, token: c.token, header: c.runHeader})
+	}
 
 	want := httptest.NewRecorder()
 	writeAgentTokenRefused(want)
@@ -366,6 +369,25 @@ func TestAgentTokenRefusedIsByteIdentical(t *testing.T) {
 				assert.NotContains(t, got.Body, "run-")
 			})
 		}
+	}
+
+	t.Run("development middleware", func(t *testing.T) {
+		dh := DevAuthMiddleware(testDevToken, srv.config.DevUserConfig)(http.NotFoundHandler())
+		got := rawOf(agentRequest(t, dh, http.MethodGet, "/api/v1/agents/any", "not-a-token", ""))
+		assert.Equal(t, wantRaw, got)
+	})
+
+	for _, marker := range []bool{true, false} {
+		name := "refresh handler without credential marker"
+		if marker {
+			name = "refresh handler with credential marker"
+		}
+		t.Run(name, func(t *testing.T) {
+			req, agentID := revokedRefreshRequest(t, srv, s, project, "refused-"+name, marker)
+			rec := httptest.NewRecorder()
+			srv.handleAgentTokenRefresh(rec, req, agentID)
+			assert.Equal(t, wantRaw, rawOf(rec))
+		})
 	}
 
 	t.Run("bound token is served", func(t *testing.T) {

@@ -388,7 +388,7 @@ func TestStandingGates_HeldAgent(t *testing.T) {
 	t.Run("agentTokenAuth", func(t *testing.T) {
 		rec := doRequestWithAgentToken(t, f.srv, http.MethodGet, "/api/v1/agents/"+f.agentA.ID, nil, tokA)
 		require.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
-		assert.Contains(t, rec.Body.String(), "token has been revoked")
+		assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 	})
 	t.Run("legacyToken", func(t *testing.T) {
 		legacyService, err := NewAgentTokenService(AgentTokenConfig{

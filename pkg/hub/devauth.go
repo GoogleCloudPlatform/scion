@@ -222,11 +222,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 			// (the agent token middleware will have validated it or rejected it)
 			if r.Header.Get("X-Scion-Agent-Token") != "" {
 				// Agent token was present but not validated - reject
-				if debug {
-					slog.Debug("Auth failed: X-Scion-Agent-Token present but not validated")
-				}
-				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-					"invalid agent token", nil)
+				refuseAgentToken(r.Context(), w, slog.Default(), agentTokenCauseHeaderNotValidated)
 				return
 			}
 
