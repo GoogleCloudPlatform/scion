@@ -2934,11 +2934,14 @@ func (d *HarnessDeliveryConfig) submitKeys() ([]string, error) {
 }
 
 // validateSubmitKey checks one tmux key name: 1 to 32 bytes with no
-// whitespace or control characters, so it is passed to send-keys as exactly
-// one key.
+// whitespace or control characters and no leading "-", so it is passed to
+// send-keys as exactly one key rather than parsed as a send-keys option.
 func validateSubmitKey(key string) error {
 	if key == "" || len(key) > maxDeliverySubmitKeyBytes {
 		return fmt.Errorf("key must be 1 to %d bytes, got %d", maxDeliverySubmitKeyBytes, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		return fmt.Errorf("key %q must not start with \"-\"", key)
 	}
 	for _, r := range key {
 		if unicode.IsSpace(r) || unicode.IsControl(r) {
@@ -2970,7 +2973,9 @@ func (d *HarnessDeliveryConfig) extraSubmitDelay() (time.Duration, error) {
 }
 
 // Validate checks the rules the JSON schema cannot express: key contents and
-// duration ranges. A nil block is valid.
+// duration ranges. A nil block is valid. On load paths the schema runs first
+// and is the stricter gate for an empty submit_keys list and for a bare "0"
+// duration, both of which Validate treats as acceptable.
 func (d *HarnessDeliveryConfig) Validate() error {
 	if d == nil {
 		return nil

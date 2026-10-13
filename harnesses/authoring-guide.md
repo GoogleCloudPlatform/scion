@@ -299,7 +299,8 @@ bracketed paste. Then each key in `submit_keys` is sent with its own
 empty message (a bare confirmation) sends `submit_keys` once, with no extra
 passes. The defaults give paste, Enter, then two more Enters 300ms apart.
 
-Each key must be 1 to 32 bytes, with no whitespace or control characters.
+Each key must be 1 to 32 bytes, with no whitespace or control characters,
+and must not start with `-` (tmux would read it as a `send-keys` option).
 Message delivery reads the embedded bundle's `delivery` block, the same as
 the interrupt keys. Project, template and hub harness-config overrides do not
 change it yet.
