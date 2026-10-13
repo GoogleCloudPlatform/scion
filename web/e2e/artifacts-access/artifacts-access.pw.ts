@@ -402,7 +402,10 @@ const ROWS: Record<string, RowSpec> = {
     title: 'grantee after the grant: Edit, Review, Upload new version; no Share',
   },
   'R1-07a': { role: 'grantee', title: 'grantee: Edit, then Publish new version lands on v2' },
-  'R1-07b': { role: 'owner', title: 'owner after v2: still the owner; v2 published by the grantee' },
+  'R1-07b': {
+    role: 'owner',
+    title: 'owner after v2: still the owner; v2 published by the grantee',
+  },
   'R1-07c': { role: 'member', title: 'member after the grant and v2: still read-only' },
   'R1-08': {
     role: 'owner, member, padmin, grantee',
@@ -418,7 +421,11 @@ const ROWS: Record<string, RowSpec> = {
     title: 'agent-owned: Grant review access visible; Share hidden',
     where: 'b',
   },
-  'R1-B3': { role: 'member', title: 'agent-owned: Grant review access and Share hidden', where: 'b' },
+  'R1-B3': {
+    role: 'member',
+    title: 'agent-owned: Grant review access and Share hidden',
+    where: 'b',
+  },
   'R1-B4': {
     role: 'owner -> member',
     title: 'Grant review access dialog gives Can review',
@@ -1000,83 +1007,79 @@ test.describe.serial('artifact access per role (R1)', () => {
     // ---- R1-01: smoke, the owner publishes through the web -------------
     const smoke: Record<string, unknown> = {};
     journey.evidence.smoke = smoke;
-    const smokePassed = await row(
-      'R1-01',
-      async (r) => {
-        const page = await pageOf('owner');
-        await page.goto(`/projects/${journey.projects.home}`, { waitUntil: 'domcontentloaded' });
-        await revealFiles(page);
-        await expect(page.locator(SELECTORS.filesSegmentArtifacts)).toBeVisible();
-        await page.locator(SELECTORS.filesSegmentArtifacts).click();
-        await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
-        const newButton = newArtifactButton(page);
-        await expect(newButton, 'New artifact visible to the owner').toBeVisible();
-        r.ui.newArtifactVisible = true;
-        await newButton.click();
-        await expect(page.locator(SELECTORS.publishDialog)).toBeVisible();
-        await page.locator(SELECTORS.publishFileInput).setInputFiles({
-          name: ENTRY,
-          mimeType: 'text/markdown',
-          buffer: Buffer.from(ENTRY_TEXT),
-        });
-        const title = `R1 access ${suffix()}`;
-        await page.locator(SELECTORS.publishTitleInput).fill(title);
+    const smokePassed = await row('R1-01', async (r) => {
+      const page = await pageOf('owner');
+      await page.goto(`/projects/${journey.projects.home}`, { waitUntil: 'domcontentloaded' });
+      await revealFiles(page);
+      await expect(page.locator(SELECTORS.filesSegmentArtifacts)).toBeVisible();
+      await page.locator(SELECTORS.filesSegmentArtifacts).click();
+      await expect(page.locator(SELECTORS.artifactList)).toBeAttached();
+      const newButton = newArtifactButton(page);
+      await expect(newButton, 'New artifact visible to the owner').toBeVisible();
+      r.ui.newArtifactVisible = true;
+      await newButton.click();
+      await expect(page.locator(SELECTORS.publishDialog)).toBeVisible();
+      await page.locator(SELECTORS.publishFileInput).setInputFiles({
+        name: ENTRY,
+        mimeType: 'text/markdown',
+        buffer: Buffer.from(ENTRY_TEXT),
+      });
+      const title = `R1 access ${suffix()}`;
+      await page.locator(SELECTORS.publishTitleInput).fill(title);
 
-        const createResponse = page.waitForResponse(
-          (res) =>
-            res.request().method() === 'POST' && new URL(res.url()).pathname === '/api/v1/artifacts'
-        );
-        await publishSubmit(page).click();
-        const created = await createResponse;
-        const createBody = (await created.json().catch(() => null)) as unknown;
-        smoke.createStatus = created.status();
-        smoke.code = errorCode(createBody);
-        r.api.push({
-          as: 'owner',
-          method: 'POST',
-          path: '/api/v1/artifacts',
-          status: created.status(),
-          code: errorCode(createBody),
-        });
-        if (created.status() === 401 || created.status() === 403) {
-          smoke.stopped = true;
-          const text =
-            `member session cannot publish (${created.status()} ${String(errorCode(createBody))}); ` +
-            'no scope or role workaround';
-          finding('R1-01', text);
-          journey.stopped = `not run: smoke precondition failed (${text})`;
-          throw new Error(`STOP: ${text}`);
-        }
-        expect(created.status(), 'publish create').toBe(201);
-        smoke.stopped = false;
-
-        // The dialog finalizes and the list opens the artifact page.
-        await expect(page).toHaveURL(
-          new RegExp(`/projects/${journey.projects.home}/artifacts/[0-9a-f-]+$`)
-        );
-        const id = new URL(page.url()).pathname.split('/').pop()!;
-        journey.artifact = { id, title };
-        const finalize = who('owner').requests.find(
-          (q) => q.method === 'POST' && q.path === `/api/v1/artifacts/${id}/versions/1/finalize`
-        );
-        smoke.finalizeStatus = finalize?.status ?? null;
-        expect.soft(finalize?.status, 'finalize status').toBeGreaterThanOrEqual(200);
-        expect.soft(finalize?.status, 'finalize status').toBeLessThan(300);
-        await expect(headerTitle(page)).toHaveText(title);
-        r.ui.landed = redactPath(new URL(page.url()).pathname);
-
-        const read = await capabilities('owner', r);
-        smoke.readStatus = read.status;
-        expect.soft(read.status, 'owner reads the artifact').toBe(200);
-        const art = (read.body as { artifact?: { ownerKind?: string; ownerRef?: string } })
-          .artifact;
-        journey.artifact.ownerRefAtPublish = art?.ownerRef;
-        r.ui.ownerAtPublish = {
-          ownerKind: art?.ownerKind ?? null,
-          ownerRef: art?.ownerRef ?? null,
-        };
+      const createResponse = page.waitForResponse(
+        (res) =>
+          res.request().method() === 'POST' && new URL(res.url()).pathname === '/api/v1/artifacts'
+      );
+      await publishSubmit(page).click();
+      const created = await createResponse;
+      const createBody = (await created.json().catch(() => null)) as unknown;
+      smoke.createStatus = created.status();
+      smoke.code = errorCode(createBody);
+      r.api.push({
+        as: 'owner',
+        method: 'POST',
+        path: '/api/v1/artifacts',
+        status: created.status(),
+        code: errorCode(createBody),
+      });
+      if (created.status() === 401 || created.status() === 403) {
+        smoke.stopped = true;
+        const text =
+          `member session cannot publish (${created.status()} ${String(errorCode(createBody))}); ` +
+          'no scope or role workaround';
+        finding('R1-01', text);
+        journey.stopped = `not run: smoke precondition failed (${text})`;
+        throw new Error(`STOP: ${text}`);
       }
-    );
+      expect(created.status(), 'publish create').toBe(201);
+      smoke.stopped = false;
+
+      // The dialog finalizes and the list opens the artifact page.
+      await expect(page).toHaveURL(
+        new RegExp(`/projects/${journey.projects.home}/artifacts/[0-9a-f-]+$`)
+      );
+      const id = new URL(page.url()).pathname.split('/').pop()!;
+      journey.artifact = { id, title };
+      const finalize = who('owner').requests.find(
+        (q) => q.method === 'POST' && q.path === `/api/v1/artifacts/${id}/versions/1/finalize`
+      );
+      smoke.finalizeStatus = finalize?.status ?? null;
+      expect.soft(finalize?.status, 'finalize status').toBeGreaterThanOrEqual(200);
+      expect.soft(finalize?.status, 'finalize status').toBeLessThan(300);
+      await expect(headerTitle(page)).toHaveText(title);
+      r.ui.landed = redactPath(new URL(page.url()).pathname);
+
+      const read = await capabilities('owner', r);
+      smoke.readStatus = read.status;
+      expect.soft(read.status, 'owner reads the artifact').toBe(200);
+      const art = (read.body as { artifact?: { ownerKind?: string; ownerRef?: string } }).artifact;
+      journey.artifact.ownerRefAtPublish = art?.ownerRef;
+      r.ui.ownerAtPublish = {
+        ownerKind: art?.ownerKind ?? null,
+        ownerRef: art?.ownerRef ?? null,
+      };
+    });
     // Oracle rule 3: a failed smoke stops every later graded row, whatever
     // failed in it (cleanup still deletes a published artifact).
     if (!smokePassed) {
@@ -1085,31 +1088,28 @@ test.describe.serial('artifact access per role (R1)', () => {
     }
 
     // ---- R1-02: the owner's view (control baseline) -------------------
-    await row(
-      'R1-02',
-      async (r) => {
-        const snap = await snapshotArtifactPage('owner', 'R1-02', { history: true });
-        r.ui.snapshot = snap;
-        // Positive anchors for the hidden checks of later rows: the owner
-        // sees History's Upload new version and Edit on the same v1 page.
-        expectControls(snap, {
-          visible: ['Edit', 'Review', 'Share', 'Download'],
-          hidden: ['Grant review access'],
-          uploadVersion: true,
-          historyEdit: true,
-        });
-        expect.soft(snap.owner, 'owner label').toBe('Owner: You');
-        expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
-        const caps = await capabilities('owner', r);
-        expect.soft(caps.status).toBe(200);
-        expect.soft(caps.flags, 'owner flags').toEqual({
-          canManage: true,
-          canPublish: true,
-          canReview: false,
-          canGrantReview: false,
-        });
-      }
-    );
+    await row('R1-02', async (r) => {
+      const snap = await snapshotArtifactPage('owner', 'R1-02', { history: true });
+      r.ui.snapshot = snap;
+      // Positive anchors for the hidden checks of later rows: the owner
+      // sees History's Upload new version and Edit on the same v1 page.
+      expectControls(snap, {
+        visible: ['Edit', 'Review', 'Share', 'Download'],
+        hidden: ['Grant review access'],
+        uploadVersion: true,
+        historyEdit: true,
+      });
+      expect.soft(snap.owner, 'owner label').toBe('Owner: You');
+      expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
+      const caps = await capabilities('owner', r);
+      expect.soft(caps.status).toBe(200);
+      expect.soft(caps.flags, 'owner flags').toEqual({
+        canManage: true,
+        canPublish: true,
+        canReview: false,
+        canGrantReview: false,
+      });
+    });
 
     // ---- R1-03: outsider, non-disclosure ------------------------------
     await row('R1-03a', async (r) => {
@@ -1144,48 +1144,45 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect.soft(res.status, 'list status').toBe(200);
       expect.soft(r.ui.listContainsId, 'list has no row for the artifact').toBe(false);
     });
-    await row(
-      'R1-03c',
-      async (r) => {
-        const missing = crypto.randomUUID();
-        // UI half: the page of a missing artifact looks like R1-03a's.
-        const snap = await snapshotArtifactPage('outsider', 'R1-03c', {
-          path: `/projects/${journey.projects.home}/artifacts/${missing}`,
-        });
-        r.ui.missingSnapshot = snap;
-        r.ui.realSnapshot =
-          journey.snapshots.find((x) => x.as === 'outsider' && x.step === 'R1-03a') ?? null;
-        const page = await pageOf('outsider');
-        expect.soft(snap.rendered404, 'missing artifact: 404 page').toBe(true);
-        expect.soft(snap.headerRendered, 'missing artifact: no artifact header').toBe(false);
-        expect.soft(snap.visible, 'missing artifact: no header controls').toEqual([]);
-        expect.soft(await page.locator(SELECTORS.header).count(), 'no header element').toBe(0);
-        expect.soft(await tab(page, 'preview').count(), 'no tabs').toBe(0);
-        // API half: the same status and error code for each read.
-        const pairs: Array<Record<string, unknown>> = [];
-        for (const sub of ['', '/versions', `/versions/1/files/${ENTRY}`]) {
-          const real = await api(
-            'outsider',
-            'GET',
-            `/api/v1/artifacts/${artifactId()}${sub}`,
-            undefined,
-            r
-          );
-          const none = await api(
-            'outsider',
-            'GET',
-            `/api/v1/artifacts/${missing}${sub}`,
-            undefined,
-            r
-          );
-          pairs.push({ sub, real: [real.status, real.code], missing: [none.status, none.code] });
-          expect
-            .soft([real.status, real.code], `same answer for ${sub || 'the artifact'}`)
-            .toEqual([none.status, none.code]);
-        }
-        r.ui.compared = pairs;
+    await row('R1-03c', async (r) => {
+      const missing = crypto.randomUUID();
+      // UI half: the page of a missing artifact looks like R1-03a's.
+      const snap = await snapshotArtifactPage('outsider', 'R1-03c', {
+        path: `/projects/${journey.projects.home}/artifacts/${missing}`,
+      });
+      r.ui.missingSnapshot = snap;
+      r.ui.realSnapshot =
+        journey.snapshots.find((x) => x.as === 'outsider' && x.step === 'R1-03a') ?? null;
+      const page = await pageOf('outsider');
+      expect.soft(snap.rendered404, 'missing artifact: 404 page').toBe(true);
+      expect.soft(snap.headerRendered, 'missing artifact: no artifact header').toBe(false);
+      expect.soft(snap.visible, 'missing artifact: no header controls').toEqual([]);
+      expect.soft(await page.locator(SELECTORS.header).count(), 'no header element').toBe(0);
+      expect.soft(await tab(page, 'preview').count(), 'no tabs').toBe(0);
+      // API half: the same status and error code for each read.
+      const pairs: Array<Record<string, unknown>> = [];
+      for (const sub of ['', '/versions', `/versions/1/files/${ENTRY}`]) {
+        const real = await api(
+          'outsider',
+          'GET',
+          `/api/v1/artifacts/${artifactId()}${sub}`,
+          undefined,
+          r
+        );
+        const none = await api(
+          'outsider',
+          'GET',
+          `/api/v1/artifacts/${missing}${sub}`,
+          undefined,
+          r
+        );
+        pairs.push({ sub, real: [real.status, real.code], missing: [none.status, none.code] });
+        expect
+          .soft([real.status, real.code], `same answer for ${sub || 'the artifact'}`)
+          .toEqual([none.status, none.code]);
       }
-    );
+      r.ui.compared = pairs;
+    });
 
     // ---- R1-04: member (home-project reader) --------------------------
     await row('R1-04a', async (r) => {
@@ -1203,47 +1200,44 @@ test.describe.serial('artifact access per role (R1)', () => {
       const caps = await capabilities('member', r);
       expect.soft(caps.status, 'member GET').toBe(200);
     });
-    await row(
-      'R1-04b',
-      async (r) => {
-        const snap = journey.snapshots.find((s) => s.as === 'member' && s.step === 'R1-04');
-        if (!snap) throw new Error('no member snapshot (R1-04a did not reach the page)');
-        r.ui.snapshot = snap;
-        expectControls(snap, {
-          visible: [],
-          hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
-          uploadVersion: false,
-          historyEdit: false,
-        });
-        const caps = await capabilities('member', r);
-        expect.soft(caps.flags, 'member flags').toEqual({
-          canManage: false,
-          canPublish: false,
-          canReview: false,
-          canGrantReview: false,
-        });
-        const publish = await api(
-          'member',
-          'POST',
-          `/api/v1/artifacts/${artifactId()}/versions`,
-          probePublishBody(),
-          r
-        );
-        expect.soft(publish.status, 'member publish probe').toBe(403);
-        const grant = await api(
-          'member',
-          'POST',
-          `/api/v1/artifacts/${artifactId()}/grants`,
-          {
-            subjectKind: 'principal',
-            subjectRef: `user:${who('outsider').id}`,
-            permission: 'read',
-          },
-          r
-        );
-        expect.soft(grant.status, 'member grant probe').toBe(403);
-      }
-    );
+    await row('R1-04b', async (r) => {
+      const snap = journey.snapshots.find((s) => s.as === 'member' && s.step === 'R1-04');
+      if (!snap) throw new Error('no member snapshot (R1-04a did not reach the page)');
+      r.ui.snapshot = snap;
+      expectControls(snap, {
+        visible: [],
+        hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
+        uploadVersion: false,
+        historyEdit: false,
+      });
+      const caps = await capabilities('member', r);
+      expect.soft(caps.flags, 'member flags').toEqual({
+        canManage: false,
+        canPublish: false,
+        canReview: false,
+        canGrantReview: false,
+      });
+      const publish = await api(
+        'member',
+        'POST',
+        `/api/v1/artifacts/${artifactId()}/versions`,
+        probePublishBody(),
+        r
+      );
+      expect.soft(publish.status, 'member publish probe').toBe(403);
+      const grant = await api(
+        'member',
+        'POST',
+        `/api/v1/artifacts/${artifactId()}/grants`,
+        {
+          subjectKind: 'principal',
+          subjectRef: `user:${who('outsider').id}`,
+          permission: 'read',
+        },
+        r
+      );
+      expect.soft(grant.status, 'member grant probe').toBe(403);
+    });
     await row('R1-04c', async (r) => {
       const access = await artifactsListAccess('member');
       r.ui.listRow = access;
@@ -1257,35 +1251,32 @@ test.describe.serial('artifact access per role (R1)', () => {
     });
 
     // ---- R1-05: project admin, no grant --------------------------------
-    await row(
-      'R1-05',
-      async (r) => {
-        const snap = await snapshotArtifactPage('padmin', 'R1-05', { history: true });
-        r.ui.snapshot = snap;
-        expectControls(snap, {
-          visible: ['Download'],
-          hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
-          uploadVersion: false,
-          historyEdit: false,
-        });
-        // The same reads as R1-04a.
-        expect.soft(snap.title, 'title').toBe(journey.artifact!.title);
-        expect.soft(snap.previewRendered, 'preview rendered').toBe(true);
-        expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
-        await expect
-          .soft(ownerMeta(await pageOf('padmin')), 'owner label names the owner')
-          .toHaveText(new RegExp(`^\\s*Owner: (${ownerLabels().map(escapeRegExp).join('|')})\\s*$`));
-        r.ui.ownerLabel = ((await ownerMeta(await pageOf('padmin')).textContent()) ?? '').trim();
-        const caps = await capabilities('padmin', r);
-        expect.soft(caps.status).toBe(200);
-        expect.soft(caps.flags, 'padmin flags').toEqual({
-          canManage: false,
-          canPublish: false,
-          canReview: false,
-          canGrantReview: false,
-        });
-      }
-    );
+    await row('R1-05', async (r) => {
+      const snap = await snapshotArtifactPage('padmin', 'R1-05', { history: true });
+      r.ui.snapshot = snap;
+      expectControls(snap, {
+        visible: ['Download'],
+        hidden: ['Edit', 'Review', 'Share', 'Grant review access'],
+        uploadVersion: false,
+        historyEdit: false,
+      });
+      // The same reads as R1-04a.
+      expect.soft(snap.title, 'title').toBe(journey.artifact!.title);
+      expect.soft(snap.previewRendered, 'preview rendered').toBe(true);
+      expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
+      await expect
+        .soft(ownerMeta(await pageOf('padmin')), 'owner label names the owner')
+        .toHaveText(new RegExp(`^\\s*Owner: (${ownerLabels().map(escapeRegExp).join('|')})\\s*$`));
+      r.ui.ownerLabel = ((await ownerMeta(await pageOf('padmin')).textContent()) ?? '').trim();
+      const caps = await capabilities('padmin', r);
+      expect.soft(caps.status).toBe(200);
+      expect.soft(caps.flags, 'padmin flags').toEqual({
+        canManage: false,
+        canPublish: false,
+        canReview: false,
+        canGrantReview: false,
+      });
+    });
 
     // ---- R1-06: people search, then the write grant through the UI -----
     await row('R1-06a', async (r) => {
@@ -1558,48 +1549,45 @@ test.describe.serial('artifact access per role (R1)', () => {
     );
 
     // ---- R1-08: Grant review access hidden on a user-owned artifact ----
-    await row(
-      'R1-08',
-      async (r) => {
-        const seen: Record<string, unknown> = {};
-        const keys: IdentityKey[] =
-          journey.rows['R1-06b']?.status === 'passed'
-            ? ['owner', 'member', 'padmin', 'grantee']
-            : ['owner', 'member', 'padmin'];
-        // Without the grant the grantee leg cannot run: the row records the
-        // other legs and ends "not run" (never passed) unless a leg failed.
-        if (keys.length < 4) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
-        for (const key of keys) {
-          const snap = await snapshotArtifactPage(key, 'R1-08');
-          const caps = await capabilities(key, r);
-          seen[key] = { visible: snap.visible, canGrantReview: caps.flags.canGrantReview };
-          expect.soft(snap.headerRendered, `${key}: header rendered`).toBe(true);
-          expect
-            .soft(snap.hidden, `${key}: Grant review access hidden`)
-            .toContain('Grant review access');
-          expect.soft(caps.flags.canGrantReview, `${key}: canGrantReview`).toBe(false);
-        }
+    await row('R1-08', async (r) => {
+      const seen: Record<string, unknown> = {};
+      const keys: IdentityKey[] =
+        journey.rows['R1-06b']?.status === 'passed'
+          ? ['owner', 'member', 'padmin', 'grantee']
+          : ['owner', 'member', 'padmin'];
+      // Without the grant the grantee leg cannot run: the row records the
+      // other legs and ends "not run" (never passed) unless a leg failed.
+      if (keys.length < 4) r.legNotRun = 'grantee leg not run: needs R1-06b to pass';
+      for (const key of keys) {
+        const snap = await snapshotArtifactPage(key, 'R1-08');
+        const caps = await capabilities(key, r);
+        seen[key] = { visible: snap.visible, canGrantReview: caps.flags.canGrantReview };
+        expect.soft(snap.headerRendered, `${key}: header rendered`).toBe(true);
         expect
-          .soft(
-            journey.snapshots.filter((s) => s.as === 'owner' && s.step === 'R1-08').at(-1)?.visible,
-            'owner has Share instead'
-          )
-          .toContain('Share');
-        r.ui.seen = seen;
-        const probe = await api(
-          'padmin',
-          'POST',
-          `/api/v1/artifacts/${artifactId()}/grants`,
-          {
-            subjectKind: 'principal',
-            subjectRef: `user:${who('member').id}`,
-            permission: 'review',
-          },
-          r
-        );
-        expect.soft(probe.status, 'padmin review-grant probe on a user-owned artifact').toBe(403);
+          .soft(snap.hidden, `${key}: Grant review access hidden`)
+          .toContain('Grant review access');
+        expect.soft(caps.flags.canGrantReview, `${key}: canGrantReview`).toBe(false);
       }
-    );
+      expect
+        .soft(
+          journey.snapshots.filter((s) => s.as === 'owner' && s.step === 'R1-08').at(-1)?.visible,
+          'owner has Share instead'
+        )
+        .toContain('Share');
+      r.ui.seen = seen;
+      const probe = await api(
+        'padmin',
+        'POST',
+        `/api/v1/artifacts/${artifactId()}/grants`,
+        {
+          subjectKind: 'principal',
+          subjectRef: `user:${who('member').id}`,
+          permission: 'review',
+        },
+        r
+      );
+      expect.soft(probe.status, 'padmin review-grant probe on a user-owned artifact').toBe(403);
+    });
 
     // Every identity still holds its own test identity session after the rows.
     const identityChecks: Record<string, string> = {};
@@ -1674,7 +1662,9 @@ test.describe.serial('artifact access per role (R1)', () => {
           ((res.body ?? {}) as { items?: Array<{ id: string; principalId?: string }> }).items ?? [];
         for (const b of mine) {
           const userId = journey.ids[b.key]?.id;
-          const present = items.some((i) => i.id === b.id || (!!userId && i.principalId === userId));
+          const present = items.some(
+            (i) => i.id === b.id || (!!userId && i.principalId === userId)
+          );
           states[`binding ${b.key}@${name}`] =
             res.status === 200 ? (present ? 'present' : 'absent') : 'unknown';
         }
