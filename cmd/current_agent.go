@@ -62,9 +62,10 @@ func currentAgentTarget(targets []string, targetProjectID string) string {
 // refuseCurrentAgentTarget returns an error if one of targets is the
 // current agent and allowSelf (the command's --self flag) is false
 // (ptone/scion#4843). Removing the current agent ends its own session, so
-// it has to be asked for explicitly. The error does not print a command to
-// run: a rebuilt command could drop other targets or flags (such as
-// --project) and so remove something other than what was asked for.
+// it has to be asked for explicitly. By design the error names the flag
+// but does not print a command to run: a rebuilt command could drop other
+// targets or flags (such as --project) and so remove something other than
+// what was asked for.
 func refuseCurrentAgentTarget(targets []string, targetProjectID string, allowSelf bool) error {
 	if allowSelf {
 		return nil

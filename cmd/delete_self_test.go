@@ -200,3 +200,18 @@ func setupSelfDeleteLocal(t *testing.T) string {
 	projectPath = projectDir
 	return projectDir
 }
+
+// Without a Hub, --cleanup-only --force removes local files without any Hub
+// check. The guard runs first, so the current agent's files are kept unless
+// --self is given.
+func TestDeleteCmd_LocalCleanupOnlyForceCurrentAgentRefused(t *testing.T) {
+	projectDir := setupSelfDeleteLocal(t)
+	agentDir := createAgentDir(t, projectDir, selfAgentName)
+	deleteCleanupOnly = true
+	deleteForce = true
+
+	_, err := runDelete(t, selfAgentName)
+	require.Error(t, err, "--cleanup-only --force of the current agent without a Hub must be refused without --self")
+	assert.Contains(t, err.Error(), "--self is required")
+	assert.DirExists(t, agentDir, "the current agent's files are kept")
+}
