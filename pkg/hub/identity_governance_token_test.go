@@ -769,3 +769,18 @@ func TestCrossPrincipalExplain_AgentJWTRefusedAtCredentialCheck(t *testing.T) {
 	rec = igRequestWithCredential(srv.handleAuthzExplain, user, CredentialKindAgentJWT, http.MethodPost, "/api/v1/authz/explain", self)
 	assert.NotEqual(t, http.StatusForbidden, rec.Code, "the caller's own explain admits an agent JWT: %s", rec.Body.String())
 }
+
+// TestCompareExplain_AgentJWTRefusedAtCredentialCheck pins that comparing
+// the caller's effective permissions with another principal's admits only
+// the credentials the hub.audit.explain catalog operation declares: an
+// agent JWT is refused at the credential check, before the comparison's
+// hub.audit.read decision.
+func TestCompareExplain_AgentJWTRefusedAtCredentialCheck(t *testing.T) {
+	srv, s := testServer(t)
+	user := seedRoleUser(t, s, tid("ig-cmpexplain-user"), "", true)
+	other := seedRoleUser(t, s, tid("ig-cmpexplain-other"), "", true)
+	body := `{"resource":{"type":"user","id":"` + user.ID() + `"},"action":"read","mode":"effective_permissions","comparePrincipalId":"` + other.ID() + `"}`
+	rec := igRequestWithCredential(srv.handleAuthzExplain, user, CredentialKindAgentJWT, http.MethodPost, "/api/v1/authz/explain", body)
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "comparison requires hub.audit.read", "refused at the credential check, not the comparison decision")
+}

@@ -376,9 +376,10 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 		isSuperAdmin = decision.Allowed
 	}
 
-	// An explain for another principal admits only the credentials the
-	// hub.audit.explain catalog operation declares.
-	if isCrossPrincipal {
+	// An explain for another principal, or a comparison with another
+	// principal, admits only the credentials the hub.audit.explain catalog
+	// operation declares.
+	if isCrossPrincipal || req.ComparePrincipalID != "" {
 		if _, ok := selfReadCredential(ctx, identity, "hub.audit.explain"); !ok {
 			refuseSelfReadCredential(w, r, identity, "hub")
 			return
