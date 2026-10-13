@@ -7,7 +7,7 @@
 # (often a tiny one) saved the cache every job then restored, and no job
 # ever saved a useful one. Here:
 # - every workload (a fixed string per job, e.g. build-test or
-#   hub-shard-3) has its own key, so it restores what its own builds made;
+#   hub-shards) has its own key, so it restores what its own builds made;
 # - the key ends in the UTC date, so the first main run of each day saves a
 #   fresh cache, and later runs that day hit it;
 # - restore-keys fall back to the same workload's newest cache (same go.sum
@@ -82,7 +82,15 @@ runs:
         WORKLOAD: ${{ inputs.workload }}
       run: |
         set -euo pipefail
-        names=$( { echo "$WORKLOAD"; grep -hE '^[[:space:]]+workload:[[:space:]]*[^[:space:]$]+[[:space:]]*$' "$GITHUB_WORKSPACE"/.github/workflows/*.yml | sed -E 's/^[[:space:]]+workload:[[:space:]]*//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//'; } | sort -u)
+        # grep exits 1 when no workflow names a literal workload (fine: only
+        # this job's name is checked) and 2 when it cannot read them.
+        rc=0
+        literal=$(grep -hE '^[[:space:]]+workload:[[:space:]]*[^[:space:]$]+[[:space:]]*$' "$GITHUB_WORKSPACE"/.github/workflows/*.yml) || rc=$?
+        if [ "$rc" -gt 1 ]; then
+          echo "::error title=setup-go-cache::could not read the workflows in $GITHUB_WORKSPACE/.github/workflows to check the Go cache workload names (grep exit $rc)"
+          exit 1
+        fi
+        names=$( { echo "$WORKLOAD"; printf '%s\n' "$literal" | sed -E 's/^[[:space:]]+workload:[[:space:]]*//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//'; } | sed '/^$/d' | sort -u)
         bad=0
         while IFS= read -r a; do
           while IFS= read -r b; do

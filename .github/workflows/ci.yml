@@ -791,13 +791,12 @@ jobs:
       # import that only one shard's test files use (for example chromedp,
       # imported only by suspended_page_browser_test.go) is downloaded and
       # built only by that shard, and so is not in the shared cache unless
-      # that shard is the first. Only the first shard saves it (the Save
-      # step's if:), so the shards do not race to save one key. Its trim
-      # drops the other shards' own pkg/hub test builds (about 30 s each to
-      # recompile), which a PR rebuilds anyway whenever it changes pkg/hub
-      # or anything pkg/hub imports, and their test-only imports; one cache
-      # instead of six saves about 3.4 GB of the repo's 10 GB cache budget
-      # (ptone/scion#4251).
+      # that shard is the first. Only the first shard saves the cache (the
+      # Save step's if:), so the shards do not race to save one key. Its
+      # trim drops the other shards' own pkg/hub test builds (about 30 s
+      # each to recompile), which a PR rebuilds anyway whenever it changes
+      # pkg/hub or anything pkg/hub imports; one cache instead of six saves
+      # about 3.4 GB of the repo's 10 GB cache budget (ptone/scion#4251).
       - name: Setup Go
         id: go
         uses: ./.github/actions/setup-go-cache
