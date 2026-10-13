@@ -670,9 +670,9 @@ func conduitTunnelOpenError(err error) error {
 // on): the session may only ask the hub for tunnels by RPC. The
 // credential's expiry is captured here and bounds new tunnels on the
 // session.
-func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity) (conduitAdmission, bool) {
+func (s *Server) decideConduitUser(w http.ResponseWriter, r *http.Request, user UserIdentity, forRelay bool) (conduitAdmission, bool) {
 	rt := s.conduit.Load()
-	if rt == nil {
+	if rt == nil && !forRelay {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
 		return conduitAdmission{}, false
 	}

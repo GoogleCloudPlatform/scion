@@ -160,3 +160,149 @@ func (c *HubClient) post(ctx context.Context, path string, body []byte) ([]byte,
 		return nil, fmt.Errorf("%w: HTTP %d", ErrHubUnavailable, resp.StatusCode)
 	}
 }
+
+// HubAdmitRequest asks the hub to admit a dialer the relay received
+// (design §3.9 "Admission"). Headers are the dialer's credential headers
+// (ForwardCredentialHeaders), passed unchanged, and Host and RawQuery are
+// the ones the relay received, so a signed request (broker HMAC) verifies
+// as sent. SessionID is the id the relay will admit the session under.
+type HubAdmitRequest struct {
+	RelayInstanceID string              `json:"relay_instance_id"`
+	RelayGeneration int64               `json:"relay_generation"`
+	SessionID       string              `json:"session_id"`
+	Host            string              `json:"host"`
+	RawQuery        string              `json:"raw_query,omitempty"`
+	Headers         map[string][]string `json:"headers"`
+}
+
+// HubAdmitResponse is an admitted dialer: the principal to serve the
+// session as, and the admission token to present, unchanged and unparsed,
+// on every later hub call for the session. The principal fields are for
+// serving the session and logging only: the hub never reads them back.
+type HubAdmitResponse struct {
+	AdmissionToken   string    `json:"admission_token"`
+	PrincipalKind    string    `json:"principal_kind"`
+	PrincipalID      string    `json:"principal_id"`
+	ProjectID        string    `json:"project_id,omitempty"`
+	ExecScope        string    `json:"exec_scope,omitempty"`
+	AgentLaunchID    string    `json:"agent_launch_id,omitempty"`
+	AgentGeneration  int64     `json:"agent_generation,omitempty"`
+	TokenRunID       string    `json:"token_run_id,omitempty"`
+	TokenRunEnforce  bool      `json:"token_run_enforce,omitempty"`
+	CredentialExpiry time.Time `json:"credential_expiry,omitzero"`
+}
+
+// forwardedCredentialHeaders are the dialer headers a relay passes to Admit
+// (and the hub accepts from it): the credentials the hub's verifiers read,
+// and the run id an agent presents. Trusted-proxy identity headers are
+// never forwarded: they are trusted only from a proxy in front of the hub.
+var forwardedCredentialHeaders = []string{
+	"Authorization",
+	"X-Scion-Agent-Token",
+	"X-Scion-Run-Id",
+	"X-Goog-IAP-JWT-Assertion",
+	"X-Api-Key",
+	"X-Scion-Broker-Id",
+	"X-Scion-Timestamp",
+	"X-Scion-Nonce",
+	"X-Scion-Signature",
+	"X-Scion-Signed-Headers",
+	"X-Scion-On-Behalf-Of",
+}
+
+// hopByHopHeaders are never forwarded (RFC 9110 §7.6.1), nor is Host,
+// which travels as HubAdmitRequest.Host.
+var hopByHopHeaders = map[string]bool{
+	"Connection": true, "Keep-Alive": true, "Proxy-Authenticate": true, "Proxy-Authorization": true,
+	"Proxy-Connection": true, "Te": true, "Trailer": true, "Transfer-Encoding": true, "Upgrade": true, "Host": true,
+}
+
+// ForwardCredentialHeaders returns the headers of h a relay forwards to
+// Admit: the credential headers, plus any header a broker signature lists
+// in X-Scion-Signed-Headers, so the signature verifies as sent. Hop-by-hop
+// headers are dropped.
+func ForwardCredentialHeaders(h http.Header) map[string][]string {
+	out := map[string][]string{}
+	add := func(name string) {
+		k := http.CanonicalHeaderKey(strings.TrimSpace(name))
+		if k == "" || hopByHopHeaders[k] {
+			return
+		}
+		if v, ok := h[k]; ok && len(v) > 0 {
+			out[k] = append([]string(nil), v...)
+		}
+	}
+	for _, name := range forwardedCredentialHeaders {
+		add(name)
+	}
+	for _, list := range h.Values("X-Scion-Signed-Headers") {
+		for _, name := range strings.FieldsFunc(list, func(r rune) bool { return r == ',' || r == ';' || r == ' ' }) {
+			add(name)
+		}
+	}
+	return out
+}
+
+// The requests below identify the session only by its admission token
+// (and the session id in the path): the hub takes the principal from the
+// token, never from the relay. The relay stores each token unchanged and
+// replaces it when the hub returns a new one.
+
+// HubRPCRequest forwards one RPC the principal of a relay-held session
+// sent (POST sessions/{id}/rpc). RPC is the encoded RpcRequest.
+type HubRPCRequest struct {
+	AdmissionToken string `json:"admission_token"`
+	RPC            []byte `json:"rpc"`
+}
+
+// HubRPCResponse is the RPC's answer (the encoded RpcResponse).
+type HubRPCResponse struct {
+	RPC []byte `json:"rpc"`
+}
+
+// HubRefreshRequest carries an in-band AuthRefresh credential of a
+// relay-held session (POST sessions/{id}/refresh).
+type HubRefreshRequest struct {
+	AdmissionToken string `json:"admission_token"`
+	Credential     []byte `json:"credential"`
+}
+
+// HubRefreshResponse accepts the refreshed credential: the session's new
+// admission token and credential expiry.
+type HubRefreshResponse struct {
+	AdmissionToken   string    `json:"admission_token"`
+	CredentialExpiry time.Time `json:"credential_expiry,omitzero"`
+}
+
+// HubSessionRecheckRequest asks the hub to re-check relay-held sessions
+// (POST sessions/recheck).
+type HubSessionRecheckRequest struct {
+	Items []HubSessionRecheckItem `json:"items"`
+}
+
+// HubSessionRecheckItem is one session to re-check.
+type HubSessionRecheckItem struct {
+	SessionID      string `json:"session_id"`
+	AdmissionToken string `json:"admission_token"`
+}
+
+// HubSessionRecheckResponse has one result per item, in item order.
+type HubSessionRecheckResponse struct {
+	Results []HubSessionRecheckResult `json:"results"`
+}
+
+// HubSessionRecheckResult is one session's re-check: OK (keep it, and
+// replace its token when AdmissionToken is set), Close (close it with
+// CloseCode), or neither (the hub could not evaluate it: keep it, the next
+// sweep tries again).
+type HubSessionRecheckResult struct {
+	SessionID      string `json:"session_id"`
+	OK             bool   `json:"ok,omitempty"`
+	AdmissionToken string `json:"admission_token,omitempty"`
+	Close          bool   `json:"close,omitempty"`
+	CloseCode      uint32 `json:"close_code,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+}
+
+// MaxHubRecheckBatch bounds the items of one re-check call.
+const MaxHubRecheckBatch = 64

@@ -106,6 +106,11 @@ type Principal struct {
 	// RPCHandler, when set, serves the session's inbound RPCs in place of
 	// Config.Session.RPCHandler (the hub sets it for user sessions only).
 	RPCHandler conduit.RPCHandler
+	// SessionID, when set, is the id the session is admitted under in place
+	// of a new one (Config.NewSessionID). A separate relay chooses it before
+	// asking the hub to admit the dialer, so the hub binds its admission to
+	// exactly this session.
+	SessionID string
 }
 
 // TokenRunBinding compares the run an agent's credential was issued for

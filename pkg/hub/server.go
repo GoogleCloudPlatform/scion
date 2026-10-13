@@ -1650,6 +1650,10 @@ type Server struct {
 	// conduitEligibleRelays is the number of eligible separate relays at
 	// the last check (-1: not checked yet), read by the readiness gauge.
 	conduitEligibleRelays atomic.Int64
+	// conduitAdmissionKeyBytes is the admission token key
+	// (conduit_admission.go), derived once.
+	conduitAdmissionKeyOnce  sync.Once
+	conduitAdmissionKeyBytes []byte
 	// conduitAuthz re-checks the user streams this node owns (nil while
 	// no relay runs); conduitAuthzMetrics is its counter.
 	conduitAuthz        atomic.Pointer[conduitStreamAuthz]

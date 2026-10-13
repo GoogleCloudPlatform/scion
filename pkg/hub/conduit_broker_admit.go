@@ -84,13 +84,13 @@ func brokerExecScope(b *store.RuntimeBroker) string {
 // incarnation is the process id its Hello presents (the hub keeps no
 // authoritative value for it), and its exec_scope comes from the broker
 // row.
-func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request) (conduitAdmission, bool) {
+func (s *Server) decideConduitBroker(w http.ResponseWriter, r *http.Request, forRelay bool) (conduitAdmission, bool) {
 	brokerID, ok := s.authenticateBrokerUpgrade(w, r)
 	if !ok {
 		return conduitAdmission{}, false
 	}
 	rt := s.conduit.Load()
-	if rt == nil {
+	if rt == nil && !forRelay {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
 		return conduitAdmission{}, false
 	}

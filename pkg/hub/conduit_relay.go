@@ -511,6 +511,13 @@ func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
 // returns the admission. On a refusal it writes the response and returns
 // false.
 func (s *Server) decideConduit(w http.ResponseWriter, r *http.Request) (conduitAdmission, bool) {
+	return s.decideConduitFor(w, r, false)
+}
+
+// decideConduitFor is decideConduit; forRelay decides for a separate relay
+// (Admit), which holds the session itself, so no in-process relay is
+// required and the admission carries no runtime.
+func (s *Server) decideConduitFor(w http.ResponseWriter, r *http.Request, forRelay bool) (conduitAdmission, bool) {
 	if !s.experimentEnabled(conduitExperiment) {
 		NotFound(w, "route")
 		return conduitAdmission{}, false
@@ -528,11 +535,11 @@ func (s *Server) decideConduit(w http.ResponseWriter, r *http.Request) (conduitA
 	userIdent, isUser := identity.(UserIdentity)
 	switch {
 	case r.Header.Get(HeaderBrokerID) != "":
-		return s.decideConduitBroker(w, r)
+		return s.decideConduitBroker(w, r, forRelay)
 	case isAgent:
-		return s.decideConduitAgent(w, r, agentIdent)
+		return s.decideConduitAgent(w, r, agentIdent, forRelay)
 	case isUser:
-		return s.decideConduitUser(w, r, userIdent)
+		return s.decideConduitUser(w, r, userIdent, forRelay)
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Conduit sessions are open to agent, broker and user principals only", nil)
 		return conduitAdmission{}, false
@@ -540,13 +547,13 @@ func (s *Server) decideConduit(w http.ResponseWriter, r *http.Request) (conduitA
 }
 
 // decideConduitAgent is decideConduit for an agent principal.
-func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, ident AgentIdentity) (conduitAdmission, bool) {
+func (s *Server) decideConduitAgent(w http.ResponseWriter, r *http.Request, ident AgentIdentity, forRelay bool) (conduitAdmission, bool) {
 	if err := conduitAgentScopeCheck(ident); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Missing required scope: agent:port:forward", nil)
 		return conduitAdmission{}, false
 	}
 	rt := s.conduit.Load()
-	if rt == nil {
+	if rt == nil && !forRelay {
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, "Conduit relay is not running on this hub node (hub.conduit was enabled after startup; restart required)", nil)
 		return conduitAdmission{}, false
 	}

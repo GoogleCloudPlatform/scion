@@ -102,8 +102,12 @@ func (a *admitter) Admit(ctx context.Context, hello *conduitv1.Hello) (*conduitv
 		return nil, reject(conduit.CloseRelayTimeout, ReasonGrantKeysUnavailable, "")
 	}
 
+	sessionID := p.SessionID
+	if sessionID == "" {
+		sessionID = r.cfg.NewSessionID()
+	}
 	rec := registry.SessionRecord{
-		SessionID:           r.cfg.NewSessionID(),
+		SessionID:           sessionID,
 		PrincipalKind:       p.Kind,
 		PrincipalID:         p.ID,
 		ProjectID:           p.ProjectID,
