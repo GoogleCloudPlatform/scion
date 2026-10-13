@@ -503,7 +503,7 @@ func ensureVSCodeSettings(p vscodePaths) error {
 		mergeVSCodeSettings(m, p.sshConfig())
 		return writeVSCodeSettings(path, m)
 	}
-	if m, err := decodeJSONObject(data); err == nil {
+	if m, err := decodeVSCodeSettingsJSON(data); err == nil {
 		before, err := encodeVSCodeSettings(m)
 		if err != nil {
 			return err
@@ -518,7 +518,7 @@ func ensureVSCodeSettings(p vscodePaths) error {
 		}
 		return writeVSCodeSettingsData(path, after)
 	}
-	if m, err := decodeJSONObject(stripJSONComments(data)); err == nil {
+	if m, err := decodeVSCodeSettingsJSON(stripJSONComments(data)); err == nil {
 		before, berr := encodeVSCodeSettings(m)
 		mergeVSCodeSettings(m, p.sshConfig())
 		after, aerr := encodeVSCodeSettings(m)
@@ -530,9 +530,9 @@ func ensureVSCodeSettings(p vscodePaths) error {
 		path, vscodeConfigFileSetting, p.sshConfig(), vscodeProfilesKey, vscodeDefaultProfileKey, vscodeSendKeysKey)
 }
 
-// decodeJSONObject decodes data as one JSON object, keeping numbers as
+// decodeVSCodeSettingsJSON decodes data as one JSON object, keeping numbers as
 // written.
-func decodeJSONObject(data []byte) (map[string]any, error) {
+func decodeVSCodeSettingsJSON(data []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var m map[string]any

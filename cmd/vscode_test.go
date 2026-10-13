@@ -219,7 +219,7 @@ func TestUpdateVSCodeFiles_ConcurrentWritersKeepAllEntries(t *testing.T) {
 
 	// settings.json, updated by every run under the same lock, is valid
 	// JSON with the managed values and the user's own key and profile.
-	settings, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+	settings, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
 	require.NoError(t, err, "settings.json must stay valid JSON")
 	assert.Equal(t, json.Number("13"), settings["editor.fontSize"], "the user key is kept")
 	assert.Equal(t, p.sshConfig(), settings["remote.SSH.configFile"])
@@ -477,7 +477,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
   }
 }`)
 		require.NoError(t, ensureVSCodeSettings(p))
-		got, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		got, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
 		require.NoError(t, err)
 		assert.Equal(t, json.Number("14"), got["editor.fontSize"])
 		assert.Equal(t, p.sshConfig(), got["remote.SSH.configFile"])
@@ -494,7 +494,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 	t.Run("user default profile and keybinding choice kept on re-run", func(t *testing.T) {
 		p := setup(t, "")
 		require.NoError(t, ensureVSCodeSettings(p))
-		m, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		m, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
 		require.NoError(t, err)
 		m["terminal.integrated.defaultProfile.linux"] = "Container shell"
 		m["terminal.integrated.sendKeybindingsToShell"] = false
@@ -502,7 +502,7 @@ func TestEnsureVSCodeSettings(t *testing.T) {
 		require.NoError(t, writeVSCodeSettings(p.settings(), m))
 
 		require.NoError(t, ensureVSCodeSettings(p))
-		got, err := decodeJSONObject([]byte(readTestFile(t, p.settings())))
+		got, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p.settings())))
 		require.NoError(t, err)
 		assert.Equal(t, "Container shell", got["terminal.integrated.defaultProfile.linux"])
 		assert.Equal(t, false, got["terminal.integrated.sendKeybindingsToShell"])
@@ -558,7 +558,7 @@ func TestVSCodeTerminalProfileCommands(t *testing.T) {
 	}
 	p0 := vscodePaths{home: t.TempDir()}
 	require.NoError(t, ensureVSCodeSettings(p0))
-	written, err := decodeJSONObject([]byte(readTestFile(t, p0.settings())))
+	written, err := decodeVSCodeSettingsJSON([]byte(readTestFile(t, p0.settings())))
 	require.NoError(t, err)
 	profiles := written["terminal.integrated.profiles.linux"].(map[string]any)
 	commands := map[string]string{
