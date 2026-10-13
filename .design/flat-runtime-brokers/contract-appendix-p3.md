@@ -175,7 +175,7 @@ Normative: **each field keeps its own existing precedence chain, and the instanc
 
 **Shadowing fold for the backend pair.** Today's order is profile per-dir, profile single, runtime per-dir, runtime single. A profile's single value therefore shadows the runtime entry's per-dir map. Conversion reproduces that (FC6 rule 2a); an independent per-key merge is wrong.
 
-**Mechanism (frozen).** A request served by a flat instance carries a `config.FlatInstancePolicy` on its context (`config.WithFlatInstancePolicy`, read by `config.FlatInstancePolicyFrom`; nil means legacy). The policy is an immutable deep copy built once per instance server from its strictly loaded entry. `ProfileResolutionFrom(ctx)` returns `ProfileResolutionFlatInstance` exactly when a policy is present. `LoadEffectiveSettingsFor`, `LoadGlobalSettingsWithOverlayFor` and the Runtime Broker's `settingsView` return `vs.ForFlatInstance(policy)`: a view with no profiles and no active profile that carries the policy in an unexported field. Each resolver has a flat branch that reads only the typed policy field and never calls `ResolveProfileValue` or reads `Profiles` / `Runtimes`; a source-scan guard test in `pkg/config` enforces this. Source labels name the instance path, for example `server.broker.instances[k8s-nfs-1].runtime_target.shared_dir_size`. `ForProfileResolution(ProfileResolutionFlatInstance)` remains the policy-less view for the Hub's reincarnation planning, which never sees node-local policy.
+**Mechanism.** Frozen: the exported API named here (`FlatInstancePolicy`, `WithFlatInstancePolicy`, `FlatInstancePolicyFrom`, `ForFlatInstance`, the derived `ProfileResolutionFrom`, `ForProfileResolution` for the Hub) and the guard-test rule. Not frozen: unexported internals such as the view's policy field and the per-resolver branch layout, which a later refactor may change without amending this appendix as long as the frozen API and rules hold. A request served by a flat instance carries a `config.FlatInstancePolicy` on its context (`config.WithFlatInstancePolicy`, read by `config.FlatInstancePolicyFrom`; nil means legacy). The policy is an immutable deep copy built once per instance server from its strictly loaded entry. `ProfileResolutionFrom(ctx)` returns `ProfileResolutionFlatInstance` exactly when a policy is present. `LoadEffectiveSettingsFor`, `LoadGlobalSettingsWithOverlayFor` and the Runtime Broker's `settingsView` return `vs.ForFlatInstance(policy)`: a view with no profiles and no active profile that carries the policy in an unexported field. Each resolver has a flat branch that reads only the typed policy field and never calls `ResolveProfileValue` or reads `Profiles` / `Runtimes`; a source-scan guard test in `pkg/config` enforces this. Source labels name the instance path, for example `server.broker.instances[k8s-nfs-1].runtime_target.shared_dir_size`. `ForProfileResolution(ProfileResolutionFlatInstance)` remains the policy-less view for the Hub's reincarnation planning, which never sees node-local policy.
 
 ## FC6. Conversion API and finding codes
 
@@ -189,10 +189,10 @@ type ProfileConversionInput struct {
     Choices     []ConversionChoice  // explicit operator choices from a reviewed manifest
 }
 type ConversionChoice struct {
-    TargetGroup   string
-    Field         string   // a legacy settings path
-    ChosenProfile string   // or "template:<name>"
-    Split         []string // keep these profiles on separate same-scope instances
+    TargetGroup   string   // the proposed instance Key of the group (see below)
+    Field         string   // a legacy settings path; empty for a Split choice
+    ChosenProfile string   // or "template:<name>"; empty for a Split choice
+    Split         []string // keep these profiles on separate same-scope instances; empty for a field choice
 }
 type ProfileConversionResult struct {
     Instances  []V1RuntimeBrokerInstanceConfig // one per target group; Key/Name proposed, operator-editable
@@ -208,6 +208,8 @@ type ConversionFinding struct {
 }
 func ConvertProfilesToInstances(in ProfileConversionInput) ProfileConversionResult
 ```
+
+`ConversionChoice.TargetGroup` is the proposed instance `Key` of that group in `ProfileConversionResult.Instances`, derived deterministically from the resolved target scope, so the same input always yields the same key. A choice is one of two kinds: a **Split** choice sets `TargetGroup` and `Split` only (`Field` and `ChosenProfile` empty); a **field** choice sets `TargetGroup`, `Field` and `ChosenProfile` and leaves `Split` empty.
 
 Rules:
 1. **Group by resolved target scope** (type plus normalized context/namespace/kubeconfig for Kubernetes; the local daemon for Docker), not by entry name. Grouping is a proposal: `ConversionChoice.Split` keeps profiles on separate same-scope instances.
@@ -241,7 +243,7 @@ Rules:
 
 ## FC8. Project-level overrides on flat instances
 
-Project settings never set instance values. The strict loader reads only global settings, so project `settings.yaml`, project Hub settings maps (`profiles`, `runtimes`, `activeProfile`; `hubclient.ProjectSettings`) and the `scion.io/active-profile` annotation cannot change an instance's `runtime_target` or `agent_defaults`, and they are not applied to pinned agents (P1 appendix section 10; P3.2 stops the scheduled profile pinning from writing a profile onto a pinned agent). Non-profile project-merged settings (for example top-level `default_harness_config`, `image_registry`, `harness_configs`) keep their existing lower rungs. **Deferred:** whether a project may carry new flat workload overrides. No such feature exists or is proposed in P3; it would be a new rung.
+Project settings never set instance values. The strict loader reads only global settings, so project `settings.yaml`, project Hub settings maps (`profiles`, `runtimes`, `activeProfile`; `hubclient.ProjectSettings`) and the `scion.io/active-profile` annotation cannot change an instance's `runtime_target` or `agent_defaults`, and they are not applied to pinned agents (P1 appendix section 10; P3.2 stops both create paths, the interactive create and the scheduled one, from writing a profile onto a pinned agent). Non-profile project-merged settings (for example top-level `default_harness_config`, `image_registry`, `harness_configs`) keep their existing lower rungs. **Deferred:** whether a project may carry new flat workload overrides. No such feature exists or is proposed in P3; it would be a new rung.
 
 ## FC9. Saved storage records and applied config
 
@@ -257,6 +259,8 @@ The API stays as it is, plus one new error code:
 - `max_agents_per_broker` is scoped per Runtime Broker ID, so each flat instance has its own limit; two instances on one host have two independent caps.
 - `BrokerSettings.MaxAgents` (`pkg/store/models.go`): `nil` inherits, `0` is unlimited, `> 0` is a cap.
 - The providers view reports `agentLimit`, `agentCount` and `agentLimitSource` (`pkg/hub/handlers_env_secrets.go`).
+- **New:** the admin usage row gains a `scopeConflict` flag for a pinned agent whose active reservation's scope differs from its Runtime Broker. Such a reservation is reported (log, metric, flag) and never moved, released or backfilled (P3.3).
+- Reservations on a confirmed-deleted Runtime Broker scope are released with an audit event, so usage shows no rows on deleted Runtime Brokers (P3.3).
 - **New:** a typed 409 with code `broker_reservation_scope_conflict` when an agent that already holds capacity on one Runtime Broker is admitted on another ("agent <id> already holds capacity on Runtime Broker <A>; it cannot be admitted on <B>"). The existing reservation is kept and no new one is made. Store failures stay 500 (P3.3).
 - There are no profile rows and no host-wide or profile capacity scopes.
 
