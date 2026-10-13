@@ -366,10 +366,11 @@ func TestSetTemplateAgentConfigLosesToRacingMetadataEdit(t *testing.T) {
 }
 
 // TestSetTemplateAgentConfigNonCanonicalUpdatedText: on SQLite, a row whose
-// stored updated text is not the canonical form ent writes, but names the
-// same instant, still matches the Updated precondition: the snapshot is
-// written and updated still names that instant (ptone/scion#4674). This is
-// what the raw-text compare is for; see rawStoredText.
+// stored updated text is in any of the forms below, including non-canonical
+// ones, and names the same instant still matches the Updated precondition:
+// the snapshot is written and updated still names that instant
+// (ptone/scion#4674). The non-canonical forms are what the raw-text compare
+// is for; see rawStoredText.
 func TestSetTemplateAgentConfigNonCanonicalUpdatedText(t *testing.T) {
 	enttest.SkipOnPostgres(t, "writes non-canonical SQLite TEXT timestamps; Postgres stores timestamptz")
 	for name, form := range nonCanonicalUpdatedForms {
