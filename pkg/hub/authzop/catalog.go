@@ -73,6 +73,9 @@ var SecurityMutationSymbols = map[string]string{
 	"DeleteRoleBinding":              "revoke-authority",
 	"DeleteRoleBindingsForPrincipal": "revoke-authority",
 	"DeleteRoleBindingsForScope":     "revoke-authority",
+	// CreateVisitorRoleBinding is the only path that binds the
+	// project-visitor role, to a federated account (ptone/scion#4603).
+	"CreateVisitorRoleBinding": "grant-authority",
 
 	// Role definition mutations
 	"CreateRoleDefinition":                  "create-resource",

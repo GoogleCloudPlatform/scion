@@ -273,6 +273,7 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+		"project.manage_visitors":      "Held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
 
 		// Admin test identities: the super-admin kind's capability is
 		// checked by testAdminIssuer, whose issuance answers 404 until the
@@ -288,12 +289,11 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service: read and create are cataloged (P1). update and
-		// delete are Reserved registry rows (nothing checks them yet);
-		// manage is checked inline by the artifact service.
+		// Artifact service: read, create and manage are cataloged. update
+		// and delete are Reserved registry rows (nothing checks them yet;
+		// PATCH and DELETE are gated by artifact.manage).
 		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
 		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
-		"artifact.manage": "Inline check in pkg/artifacts canAdminister (grants, share links, PATCH), no catalog operation",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)

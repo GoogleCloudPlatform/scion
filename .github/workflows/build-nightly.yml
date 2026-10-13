@@ -35,6 +35,10 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
+          # Blobless partial clone: the tag step needs only tags and commits
+          # (git tag -l, git rev-list --count, git rev-parse, git tag/push),
+          # never file contents of older commits.
+          filter: blob:none
 
       - name: Check for new commits and tag
         id: tag

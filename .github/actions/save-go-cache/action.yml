@@ -1,7 +1,14 @@
-# Saves the Go module and build cache restored by
+# Saves the Go module download cache and build cache restored by
 # ./.github/actions/setup-go-cache (see that file). It saves only on a push
 # to main, and only when the primary key (today's) was not restored
 # exactly; on any other event, or on a hit, it does nothing.
+#
+# Jobs that share one workload (and so one key) must save from one job
+# only: give the others' save step an `if:` that is false for them (a
+# condition without a status function keeps the implicit success()), as
+# the pkg/hub shards do. Otherwise they race to save the key: whichever
+# finishes first wins, with only the entries its own builds used, and the
+# others just warn that the key is taken.
 #
 # Before saving it:
 # - runs `go clean -testcache`, so that no cached test result is ever
@@ -15,7 +22,7 @@
 # never save); a failed run saves nothing, and the next green main push of
 # the day saves the full cache.
 name: Save the per-workload Go cache
-description: Save the Go module and build cache restored by setup-go-cache, on pushes to main only.
+description: Save the Go module download cache and build cache restored by setup-go-cache, on pushes to main only.
 inputs:
   key:
     description: setup-go-cache's cache-key output.
@@ -34,7 +41,7 @@ runs:
       run: |
         set -euo pipefail
         gocache=$(go env GOCACHE)
-        gomodcache=$(go env GOMODCACHE)
+        gomoddownload="$(go env GOMODCACHE)/cache/download"
         go clean -testcache
         stamp="$RUNNER_TEMP/go-cache-restored.stamp"
         mkdir -p "$gocache"
@@ -46,10 +53,11 @@ runs:
         else
           echo "::warning title=save-go-cache::no restore stamp ($stamp); saving GOCACHE untrimmed"
         fi
-        echo "GOCACHE to save: $(du -sh "$gocache" | cut -f1); GOMODCACHE: $(du -sh "$gomodcache" | cut -f1)"
+        mkdir -p "$gomoddownload"
+        echo "GOCACHE to save: $(du -sh "$gocache" | cut -f1); GOMODCACHE/cache/download: $(du -sh "$gomoddownload" | cut -f1)"
         {
           echo "gocache=${gocache}"
-          echo "gomodcache=${gomodcache}"
+          echo "gomoddownload=${gomoddownload}"
         } >> "$GITHUB_OUTPUT"
 
     - name: Save the Go cache
@@ -58,6 +66,6 @@ runs:
       with:
         # The same paths, in the same order, as setup-go-cache's restore.
         path: |
-          ${{ steps.prep.outputs.gomodcache }}
+          ${{ steps.prep.outputs.gomoddownload }}
           ${{ steps.prep.outputs.gocache }}
         key: ${{ inputs.key }}
