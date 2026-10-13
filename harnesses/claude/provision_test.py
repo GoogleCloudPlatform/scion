@@ -927,7 +927,10 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         scion_harness.reconcile_agent_plugins(ctx, inst)
 
     def state(self) -> dict[str, Any]:
-        with open(os.path.join(self.root, "state-claude.json")) as f:
+        path = os.path.join(self.root, "state-claude.json")
+        if not os.path.exists(path):
+            return {}
+        with open(path) as f:
             return json.load(f)["plugins"]
 
     def status(self) -> dict[str, Any]:
@@ -1181,17 +1184,33 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(json.loads(self.read("p", ".claude-plugin", "plugin.json"))["name"], "p")
 
     def test_provision_reconciles_last(self) -> None:
-        with open(os.path.join(self.inputs, "mcp-servers.json"), "w") as f:
-            json.dump({"mcp_servers": {"srv": {"transport": "stdio", "command": "echo"}}}, f)
+        # The universal MCP merge and the instructions write come first;
+        # plugin reconcile runs last (design 2.1). The MCP merge is stubbed:
+        # CLAUDE_MCP_MAPPING resolves ~/.claude.json at import time.
         self.stage({"p": {}})
         ctx = self.ctx()
         ctx.select_auth = lambda _: scion_harness.ResolvedAuth("none")  # type: ignore[method-assign]
+        order: list[str] = []
+        real_reconcile = scion_harness.reconcile_agent_plugins
+        real_instructions = scion_harness.project_instructions
+
+        def reconcile(*a: Any, **k: Any) -> None:
+            order.append("plugins")
+            real_reconcile(*a, **k)
+
+        def instructions(*a: Any, **k: Any) -> Any:
+            order.append("instructions")
+            return real_instructions(*a, **k)
+
         with mock.patch.object(provision, "_detect_claude_version", return_value="2.1.296"), \
+                mock.patch.object(scion_harness, "apply_mcp_servers_simple",
+                                  side_effect=lambda *a, **k: order.append("mcp") or 0), \
+                mock.patch.object(scion_harness, "project_instructions", side_effect=instructions), \
+                mock.patch.object(scion_harness, "reconcile_agent_plugins", side_effect=reconcile), \
                 env_vars(SCION_MODEL=None, ANTHROPIC_MODEL=None, SCION_THINKING_LEVEL=None):
             provision.provision(ctx)
+        self.assertEqual(order, ["mcp", "instructions", "plugins"])
         self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
-        with open(os.path.join(self.home, ".claude.json")) as f:
-            self.assertIn("srv", json.load(f)["mcpServers"])
         # provision() reuses its own `claude --version`.
         self.assertEqual(self.cli.calls, [])
 

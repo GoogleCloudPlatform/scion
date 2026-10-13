@@ -479,6 +479,8 @@ def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any
             command = f"{root}/{command[2:]}"
         out_env = {k: _expand_plugin_placeholders(v, root, data_dir) for k, v in env.items()}
         # Set last (spec 9.1), replacing any same-name entry.
+        out_env.pop("PLUGIN_ROOT", None)
+        out_env.pop("PLUGIN_DATA", None)
         out_env["PLUGIN_ROOT"] = root
         out_env["PLUGIN_DATA"] = data_dir
         return {
