@@ -518,6 +518,7 @@ var testAdminFileLiveKeyPolicy = map[string]testAdminPolicy{
 // testAdminExperimentPolicy classifies every registered experiment. All
 // are deny: test identities never change an experiment.
 var testAdminExperimentPolicy = map[string]testAdminPolicy{
+	experiments.FederationProjectVisitors:    testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.terminal_workspace":                 testAdminPolicyDeny,
