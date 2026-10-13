@@ -48,11 +48,17 @@ import (
 // policyInstance is one Runtime Broker server (flat or legacy) backed by
 // the real agent manager and Kubernetes runtime on its own fake API.
 type policyInstance struct {
-	srv        *Server
-	mgr        *agent.AgentManager
-	projectDir string
-	mu         sync.Mutex
-	pvcs       []*corev1.PersistentVolumeClaim
+	srv *Server
+	mgr *agent.AgentManager
+	// projectRoot is a linked project's root (it holds a .scion directory),
+	// the form a dispatch's project path takes; projectID is its Hub
+	// project ID, which a flat instance records each start's ownership
+	// under. Each instance has its own project, so concurrent starts on two
+	// instances share no project directory.
+	projectRoot string
+	projectID   string
+	mu          sync.Mutex
+	pvcs        []*corev1.PersistentVolumeClaim
 }
 
 // writePolicyHome points HOME at a temp dir holding settings (the global
@@ -77,8 +83,11 @@ func writePolicyHome(t *testing.T, settings string) {
 // legacy Runtime Broker when inst is nil.
 func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig) *policyInstance {
 	t.Helper()
-	p := &policyInstance{projectDir: filepath.Join(t.TempDir(), "project", ".scion")}
-	if err := os.MkdirAll(p.projectDir, 0o755); err != nil {
+	p := &policyInstance{projectRoot: filepath.Join(t.TempDir(), "project"), projectID: "pid-legacy"}
+	if inst != nil {
+		p.projectID = "pid-" + inst.Key
+	}
+	if err := os.MkdirAll(filepath.Join(p.projectRoot, config.DotScion), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	clientset := k8sfake.NewClientset()
@@ -115,12 +124,15 @@ func newPolicyInstance(t *testing.T, inst *config.V1RuntimeBrokerInstanceConfig)
 
 // start serves one create through the server's request middleware (where a
 // flat instance attaches its policy) and starts the agent, with one shared
-// dir, through the real agent manager on the request's context.
+// dir, through the real agent manager on the request's context. The start
+// carries the project ID and a per-agent ID, as a Hub dispatch does, so a
+// flat instance can record its ownership.
 func (p *policyInstance) start(name string) error {
 	var startErr error
 	handler := p.srv.profileResolutionMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sc, sce := p.srv.buildStartContext(r.Context(), startContextInputs{
-			Name: name, ProjectPath: p.projectDir, Operation: opCreate,
+			Name: name, AgentID: "agent-id-" + name, ProjectID: p.projectID,
+			ProjectPath: p.projectRoot, Operation: opCreate,
 			Config: &CreateAgentConfig{}, HTTPRequest: r,
 		})
 		if sce != nil {

@@ -190,7 +190,8 @@ func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
 // TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults: on a flat
 // instance the shared-dir PVC defaults are the instance's runtime_target
 // values, not dropped and not the active profile's; legacy resolution still
-// applies the active profile's.
+// applies the active profile's. The instance value is a default at the
+// profile's rung: an agent's own kubernetes.shared_dir_* still wins over it.
 func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) {
 	r := newFlatResolutionRun(t)
 	r.mgr = NewManager(&runtime.MockRuntime{
@@ -200,28 +201,36 @@ func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) 
 			return "mock-id", nil
 		},
 	})
-	start := func(ctx context.Context, name string) runtime.RunConfig {
+	start := func(ctx context.Context, name string, inline *api.ScionConfig) runtime.RunConfig {
 		t.Helper()
 		_, err := r.mgr.Start(ctx, api.StartOptions{
-			Name:        name,
-			ProjectPath: r.fixture.projectScionDir,
-			NoAuth:      true,
-			Env:         map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
-			SharedDirs:  []api.SharedDir{{Name: "scratchpad"}},
+			Name:         name,
+			ProjectPath:  r.fixture.projectScionDir,
+			NoAuth:       true,
+			Env:          map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
+			SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
+			InlineConfig: inline,
 		})
 		require.NoError(t, err)
 		return r.runs[len(r.runs)-1]
 	}
 
-	flat := start(flatCtx(), "flat-sd")
+	flat := start(flatCtx(), "flat-sd", nil)
 	require.NotNil(t, flat.Kubernetes, "the instance's shared-dir defaults reach the run config")
 	assert.Equal(t, "instance-rwx", flat.Kubernetes.SharedDirStorageClass)
 	assert.Equal(t, "40Gi", flat.Kubernetes.SharedDirSize)
 
-	legacy := start(context.Background(), "legacy-sd")
+	legacy := start(context.Background(), "legacy-sd", nil)
 	require.NotNil(t, legacy.Kubernetes)
 	assert.Equal(t, "profile-rwx", legacy.Kubernetes.SharedDirStorageClass, "legacy resolution applies the active profile")
 	assert.Equal(t, "77Gi", legacy.Kubernetes.SharedDirSize)
+
+	// The agent's own value wins over the instance default; the field it
+	// leaves unset still takes the instance value.
+	own := start(flatCtx(), "flat-sd-own", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "60Gi"}})
+	require.NotNil(t, own.Kubernetes)
+	assert.Equal(t, "60Gi", own.Kubernetes.SharedDirSize, "the agent's kubernetes.shared_dir_size outranks the instance default")
+	assert.Equal(t, "instance-rwx", own.Kubernetes.SharedDirStorageClass, "an unset agent class takes the instance default")
 }
 
 func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {

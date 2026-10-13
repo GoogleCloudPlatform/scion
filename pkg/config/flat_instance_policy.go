@@ -35,6 +35,9 @@ type FlatInstancePolicy struct {
 func NewFlatInstancePolicy(inst V1RuntimeBrokerInstanceConfig) *FlatInstancePolicy {
 	p := &FlatInstancePolicy{InstanceKey: inst.Key}
 	if inst.RuntimeTarget != nil {
+		// Every pointer, map or slice field of V1RuntimeTargetConfig must
+		// be copied here, so the policy never shares state with the entry
+		// (TestNewFlatInstancePolicy_CopiesEveryReferenceField enforces it).
 		p.Target = *inst.RuntimeTarget
 		p.Target.KubernetesServiceAccountMappings = copyStringMap(inst.RuntimeTarget.KubernetesServiceAccountMappings)
 	}

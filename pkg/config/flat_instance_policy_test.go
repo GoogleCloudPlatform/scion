@@ -81,6 +81,57 @@ func TestNewFlatInstancePolicy_DeepCopies(t *testing.T) {
 	}
 }
 
+// TestNewFlatInstancePolicy_CopiesEveryReferenceField: every pointer, map
+// or slice field of V1RuntimeTargetConfig is copied, so a field added later
+// cannot be shared between the policy and the entry. A field of a kind this
+// test cannot populate fails it, so the test is extended with the field.
+func TestNewFlatInstancePolicy_CopiesEveryReferenceField(t *testing.T) {
+	target := &V1RuntimeTargetConfig{}
+	v := reflect.ValueOf(target).Elem()
+	var refFields []string
+	for i := 0; i < v.NumField(); i++ {
+		f, name := v.Field(i), v.Type().Field(i).Name
+		switch f.Kind() {
+		case reflect.Map:
+			if f.Type().Key().Kind() != reflect.String || f.Type().Elem().Kind() != reflect.String {
+				t.Fatalf("field %s: unsupported map type %s; extend this test", name, f.Type())
+			}
+			f.Set(reflect.ValueOf(map[string]string{"k": "v"}))
+		case reflect.Pointer:
+			if f.Type().Elem().Kind() != reflect.Bool {
+				t.Fatalf("field %s: unsupported pointer type %s; extend this test", name, f.Type())
+			}
+			b := true
+			f.Set(reflect.ValueOf(&b))
+		case reflect.Slice, reflect.Interface, reflect.Chan, reflect.Func:
+			t.Fatalf("field %s: unsupported kind %s; extend this test", name, f.Kind())
+		default:
+			continue
+		}
+		refFields = append(refFields, name)
+	}
+	p := NewFlatInstancePolicy(V1RuntimeBrokerInstanceConfig{Key: "k", RuntimeTarget: target})
+	pv := reflect.ValueOf(&p.Target).Elem()
+	for _, name := range refFields {
+		f := v.FieldByName(name)
+		switch f.Kind() {
+		case reflect.Map:
+			f.SetMapIndex(reflect.ValueOf("k"), reflect.ValueOf("changed"))
+			if got := pv.FieldByName(name).MapIndex(reflect.ValueOf("k")); !got.IsValid() || got.String() != "v" {
+				t.Errorf("field %s is shared between the policy and the entry", name)
+			}
+		case reflect.Pointer:
+			f.Elem().SetBool(false)
+			if got := pv.FieldByName(name); got.IsNil() || !got.Elem().Bool() {
+				t.Errorf("field %s is shared between the policy and the entry", name)
+			}
+		}
+	}
+	if len(refFields) == 0 {
+		t.Fatal("V1RuntimeTargetConfig has no reference field; the test checks nothing")
+	}
+}
+
 func TestForFlatInstance_ViewAndNoMutation(t *testing.T) {
 	vs := legacySharedDirSettings()
 	vs.ImageRegistry = "registry.example/global"
