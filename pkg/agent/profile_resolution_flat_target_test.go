@@ -331,7 +331,7 @@ func TestSettingsLoads_FlatPathsUseRequestView(t *testing.T) {
 	}
 	sort.Strings(unreviewed)
 	if len(unreviewed) > 0 {
-		t.Fatalf("settings loads that bypass the request's flat instance view (use LoadEffectiveSettingsFor or LoadGlobalSettingsWithOverlayFor, or review the site and add it to nonForLoadAllowList):\n%s",
+		t.Fatalf("settings loads that do not read the request's flat instance view (use LoadEffectiveSettingsFor or LoadGlobalSettingsWithOverlayFor, or review the site and add it to nonForLoadAllowList):\n%s",
 			strings.Join(unreviewed, "\n"))
 	}
 	for key := range nonForLoadAllowList {
