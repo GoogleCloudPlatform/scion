@@ -452,7 +452,7 @@ func chatSearchKeys(t *testing.T, rec *httptest.ResponseRecorder) []string {
 	return keys
 }
 
-func sortedKeys(in ...string) []string {
+func chatSortedKeys(in ...string) []string {
 	out := append([]string(nil), in...)
 	sort.Strings(out)
 	return out
@@ -478,17 +478,17 @@ func TestChatSearchToken_DMRowsNeedInboxRead(t *testing.T) {
 	assert.Equal(t, []string{f.topicA}, chatSearchKeys(t, f.call(t, noInbox, http.MethodGet, unscoped, nil)))
 
 	projA := f.mint(t, f.admin, projectBoundary(f.projA), "project:read", "agent:read", "inbox:read")
-	assert.Equal(t, sortedKeys(f.topicA, dmA), chatSearchKeys(t, f.call(t, projA, http.MethodGet, project, nil)))
-	assert.Equal(t, sortedKeys(f.topicA, dmA), chatSearchKeys(t, f.call(t, projA, http.MethodGet, unscoped, nil)))
+	assert.Equal(t, chatSortedKeys(f.topicA, dmA), chatSearchKeys(t, f.call(t, projA, http.MethodGet, project, nil)))
+	assert.Equal(t, chatSortedKeys(f.topicA, dmA), chatSearchKeys(t, f.call(t, projA, http.MethodGet, unscoped, nil)))
 
 	hub := f.mint(t, f.admin, hubBoundary(), "project:read", "agent:read", "inbox:read")
-	assert.Equal(t, sortedKeys(f.topicA, f.topicB, dmA, dmB), chatSearchKeys(t, f.call(t, hub, http.MethodGet, unscoped, nil)))
+	assert.Equal(t, chatSortedKeys(f.topicA, f.topicB, dmA, dmB), chatSearchKeys(t, f.call(t, hub, http.MethodGet, unscoped, nil)))
 
 	hubNoAgentRead := f.mint(t, f.admin, hubBoundary(), "project:read", "inbox:read")
-	assert.Equal(t, sortedKeys(f.topicA, f.topicB), chatSearchKeys(t, f.call(t, hubNoAgentRead, http.MethodGet, unscoped, nil)))
+	assert.Equal(t, chatSortedKeys(f.topicA, f.topicB), chatSearchKeys(t, f.call(t, hubNoAgentRead, http.MethodGet, unscoped, nil)))
 
 	assert.Equal(t, http.StatusForbidden, f.call(t, noInbox, http.MethodGet, "/api/v1/chat/search?q=needle&key="+dmA, nil).Code)
-	assert.Equal(t, sortedKeys(f.topicA, f.topicB, dmA, dmB), chatSearchKeys(t, f.session(t, f.admin, http.MethodGet, unscoped, nil)))
+	assert.Equal(t, chatSortedKeys(f.topicA, f.topicB, dmA, dmB), chatSearchKeys(t, f.session(t, f.admin, http.MethodGet, unscoped, nil)))
 }
 
 // chatUpload posts one text file to the upload route with a bearer key
