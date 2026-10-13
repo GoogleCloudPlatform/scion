@@ -50,7 +50,7 @@ scion hub add prod https://scion.yourcompany.com
 scion use my-project
 ```
 
-`scion use <project>` (alias of `scion project use`) searches every registered Hub and asks you to pick one when several have the project. `scion use --hub prod` switches the current Hub, and `scion use` on its own shows the effective Hub and project and where each came from. A nickname works anywhere `--hub` takes a URL. `scion server start` adds the local workstation Hub as `local`.
+`scion use <project>` (alias of `scion project use`) searches every registered Hub and asks you to pick one when several have the project. `scion use --hub prod` switches the current Hub, and `scion use` on its own shows the effective Hub and project and where each came from. A nickname works anywhere `--hub` takes a URL. A background workstation `scion server start` adds the local Hub as `local` (`--foreground` does not add it).
 
 The current context applies only outside a scion project directory. Flags, `SCION_HUB_ENDPOINT` and a linked project directory take precedence; `scion hub link` records the project's Hub in the hub list, so a linked checkout keeps targeting its own Hub after you switch. The list and the current context are stored in `~/.scion/context.yaml`. See [`scion project use`](/scion/reference/cli/#scion-project) and [`scion hub`](/scion/reference/cli/#scion-hub).
 

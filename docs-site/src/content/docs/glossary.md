@@ -134,7 +134,7 @@ A project whose workspace is created and managed by Scion in the hub-controlled 
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
 
 ### Hub list
-The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. `scion server start` adds the local workstation Hub as `local`. Agent containers never read it.
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
 
 ### Current context
 The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
