@@ -156,10 +156,11 @@ func TestDeadlinesRenewalExtends(t *testing.T) {
 }
 
 // TestDeadlinesRefusedRenewalsChangeNothing: a renewal bound to another
-// stream_id or open_jti, a stream grant presented as a renewal, a replayed
-// renewal, one that does not extend the deadline, one past the cap and
-// one signed with an unknown kid each leave the deadline and the stream as
-// they were.
+// stream_id or open_jti, a stream grant presented as a renewal, a consumed
+// jti in an otherwise valid extending renewal, the exact resubmission of an
+// applied renewal, one that does not extend the deadline, one past the cap
+// and one signed with an unknown kid each leave the deadline, the stream and
+// the jti cache as they were.
 func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	df := newDeadlineFixture(t)
 	ctx := context.Background()
@@ -208,6 +209,7 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 		{"other open_jti", 3, df.renewal(t, now.Add(testInterval), func(c *grant.RenewalClaims) { c.OpenJTI = "open-jti-2" }), grant.ErrStreamBinding},
 		{"stream grant as renewal", 3, openGrant, grant.ErrMalformed},
 		{"replayed jti", 3, replayed, grant.ErrReplay},
+		{"exact resubmission", 3, used, grant.ErrAuthzUntil},
 		{"does not extend", 3, df.renewal(t, before, nil), grant.ErrAuthzUntil},
 		{"past the cap", 3, df.renewal(t, now.Add(testInterval+DeadlineGrace+time.Second), nil), grant.ErrAuthzUntil},
 		{"unknown kid", 3, unknownKid, grant.ErrUnknownKey},
@@ -215,6 +217,7 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			jtis := df.cache.Len()
 			if _, err := df.d.Renew(ctx, testBinding, tc.stream, tc.token); !errors.Is(err, tc.want) {
 				t.Fatalf("err = %v, want %v", err, tc.want)
 			}
@@ -223,6 +226,9 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 			}
 			if n := df.rec.count(); n != 0 {
 				t.Fatalf("stream closed by a refused renewal (%d)", n)
+			}
+			if n := df.cache.Len(); n != jtis {
+				t.Fatalf("jti cache holds %d entries after a refused renewal, was %d", n, jtis)
 			}
 		})
 	}
