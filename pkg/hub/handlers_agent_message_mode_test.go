@@ -653,44 +653,34 @@ func TestSetMessageMode_InvalidModeRejected(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 12: MessageMode validation in template
+// Test 12: a template's message mode is not set through the template API
 // ---------------------------------------------------------------------------
 
-func TestSetMessageMode_TemplateValidation(t *testing.T) {
+// TestSetMessageMode_TemplateConfigRefused: message_mode is a
+// scion-agent.yaml key validated by LoadConfig; the template API refuses a
+// config body whatever its mode (ptone/scion#4223).
+func TestSetMessageMode_TemplateConfigRefused(t *testing.T) {
 	srv, _, _, _, _, _ := smmSetup(t)
 
-	t.Run("valid mode accepted", func(t *testing.T) {
-		body := map[string]interface{}{
-			"name": "valid-template",
-			"config": map[string]interface{}{
-				"messageMode": "branch",
-			},
-		}
-		rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
-		// Should not be a 400 validation error about message mode.
-		if rr.Code == http.StatusBadRequest {
-			var errResp map[string]interface{}
-			json.Unmarshal(rr.Body.Bytes(), &errResp)
-			if msg, ok := errResp["message"].(string); ok {
-				if msg == "invalid template message mode: branch" {
-					t.Fatalf("valid mode 'branch' should be accepted")
-				}
+	for _, mode := range []string{"branch", "invalid_mode"} {
+		t.Run(mode, func(t *testing.T) {
+			body := map[string]interface{}{
+				"name":   "mode-template-" + mode,
+				"config": map[string]interface{}{"messageMode": mode},
 			}
-		}
-	})
-
-	t.Run("invalid mode rejected", func(t *testing.T) {
-		body := map[string]interface{}{
-			"name": "invalid-template",
-			"config": map[string]interface{}{
-				"messageMode": "invalid_mode",
-			},
-		}
-		rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
-		if rr.Code != http.StatusBadRequest {
-			t.Fatalf("expected 400 for invalid template mode, got %d: %s", rr.Code, rr.Body.String())
-		}
-	})
+			rr := doRequest(t, srv, http.MethodPost, "/api/v1/templates", body)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("expected 400, got %d: %s", rr.Code, rr.Body.String())
+			}
+			var errResp ErrorResponse
+			if err := json.Unmarshal(rr.Body.Bytes(), &errResp); err != nil {
+				t.Fatalf("decode: %v: %s", err, rr.Body.String())
+			}
+			if errResp.Error.Code != ErrCodeTemplateConfigInFile {
+				t.Errorf("error code = %q, want %q", errResp.Error.Code, ErrCodeTemplateConfigInFile)
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

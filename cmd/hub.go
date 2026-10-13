@@ -2509,6 +2509,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
+	// Do not link the global project from a git repository that is not a
+	// scion project.
+	if err := hubsync.RefuseGlobalFallbackLink(isGlobal, gp != ""); err != nil {
+		return err
+	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
@@ -2728,6 +2733,13 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		} else {
 			util.Debugf("Registered local broker %s as provider for project %s", localBrokerName, effectiveHubProjectID)
 		}
+	}
+
+	// Always record the hub project ID in this project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file.
+	if err := config.UpdateSetting(resolvedPath, "hub.projectId", effectiveHubProjectID, isGlobal); err != nil {
+		return fmt.Errorf("failed to save hub project ID: %w", err)
 	}
 
 	// Enable Hub integration and mark as linked for this project

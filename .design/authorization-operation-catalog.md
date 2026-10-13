@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 217
+**Operations:** 218
 
 ## Table of Contents
 
@@ -18,26 +18,14 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
 - [agent.update](#agentupdate) — Update agent configuration or metadata
-- [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
-- [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
-- [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
-- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries
-- [agent.messages.read](#agentmessagesread) — Read an agent's message history and message logs
-- [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
-- [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
-- [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action
 - [agent.attach](#agentattach) — Attach to an agent session via WebSocket
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
-- [agent.port.list](#agentportlist) — List an agent's exposed ports
-- [agent.port.register](#agentportregister) — Register, delete or clear an agent's exposed ports
-- [agent.port.tunnel](#agentporttunnel) — Open the calling agent's own port tunnel
+- [agent.stopall](#agentstopall) — Stop all running agents in a project
 - [agent.setmessagemode](#agentsetmessagemode) — Change an agent's message mode
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
 - [agent.secrets.access](#agentsecretsaccess) — List, read and write the secrets available to the calling agent: its project's and its creating user's
-- [agent.stopall](#agentstopall) — Stop all running agents on the hub
-- [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
@@ -57,7 +45,20 @@
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
-- [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+- [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
+- [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+- [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
+- [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+- [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+- [artifact.link.revoke](#artifactlinkrevoke) — Revoke one share link of an artifact
+- [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+- [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+- [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
+- [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+- [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+- [artifact.version.read](#artifactversionread) — List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
 - [project.env.read](#projectenvread) — Read a project's environment variables (list or one key)
 - [project.env.write](#projectenvwrite) — Set or delete a project environment variable
 - [project.secret.read](#projectsecretread) — Read a project's secret metadata (list or one key)
@@ -237,7 +238,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agents` |
-| http_route | POST | `/api/v1/projects/{projectId}/agents` |
 
 **Principals:** `user`, `agent`
 
@@ -285,7 +285,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | DELETE | `/api/v1/agents/{id}` |
-| http_route | DELETE | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -562,7 +561,6 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}` |
-| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`, `agent`, `agent_delegated`
 
@@ -648,13 +646,10 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/agents/{id}` |
-| http_route | PATCH | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `agent.update`
 
@@ -662,295 +657,11 @@
 
 **Effects:** `update-resource`
 
-**Denial Codes:** `forbidden`, `conflict`
+**Denial Codes:** `forbidden`
 
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestAgentUpdateToken_PassthroughGateStillApplies`
-- `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
-
----
-
-## agent.status.update
-
-**Domain:** agent
-
-**Description:** Report an agent's status: the agent itself, or a user who may update the agent
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/{id}/status` |
-| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/status` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.update`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestAgentSubRoute_CatalogDrift`
-
----
-
-## agent.workspace.read
-
-**Domain:** agent
-
-**Description:** Read an agent's workspace sync status
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/workspace` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.workspace.sync
-
-**Domain:** agent
-
-**Description:** Sync an agent's workspace from or to the agent
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/{id}/workspace/sync-from` |
-| http_route | POST | `/api/v1/agents/{id}/workspace/sync-to` |
-| http_route | POST | `/api/v1/agents/{id}/workspace/sync-to/finalize` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.update`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.logs.read
-
-**Domain:** agent
-
-**Description:** Read an agent's runtime logs and Cloud Logging entries
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/logs` |
-| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/logs` |
-| http_route | GET | `/api/v1/agents/{id}/cloud-logs` |
-| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.messages.read
-
-**Domain:** agent
-
-**Description:** Read an agent's message history and message logs
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/messages` |
-| http_route | GET | `/api/v1/agents/{id}/message-logs` |
-| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.metrics.read
-
-**Domain:** agent
-
-**Description:** Read an agent's aggregate session metrics
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/metrics/summary` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.lifecycle.keys
-
-**Domain:** agent
-
-**Description:** Send keystrokes to an agent's session
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/{id}/keys` |
-| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/keys` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.attach`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.action.message
-
-**Domain:** agent
-
-**Description:** Send a message to an agent through its message action
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/{id}/message` |
-| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.message`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `emit-external-effect`
-
-### Audit
-
-- **Event Type:** `agent.message.send`
-- **Context Fields:** actor_id, project_id
-- **After Fields:** message_id, target_agent_id
-- **Atomic:** No
-- **Non-Atomic Justification:** Message dispatch is fire-and-forget; audit recorded before dispatch
-
-### External Effect Policy
-
-- **Delivery:** `fire_and_forget`
-- **Failure Mode:** `log_and_continue`
-- **Idempotency:** message ID
-- **Retry:** no retry for user-sent messages
-- **Auth Before Emit:** Yes
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -996,6 +707,7 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/ports` |
 | http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy` |
 | http_route | POST | `/api/v1/agents/{id}/ports/{port}/proxy` |
 | http_route | PUT | `/api/v1/agents/{id}/ports/{port}/proxy` |
@@ -1005,8 +717,6 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.port_access`
 
@@ -1022,92 +732,25 @@
 
 ---
 
-## agent.port.list
+## agent.stopall
 
 **Domain:** agent
 
-**Description:** List an agent's exposed ports
+**Description:** Stop all running agents in a project
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/ports` |
+| http_route | POST | `/api/v1/agents/stop-all` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+**Credentials:** `session_jwt`
 
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+**Base Permission:** `agent.stop_all`
 
-**Base Permission:** `agent.read`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
-
----
-
-## agent.port.register
-
-**Domain:** agent
-
-**Description:** Register, delete or clear an agent's exposed ports
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/{id}/ports` |
-| http_route | DELETE | `/api/v1/agents/{id}/ports/{port}` |
-| http_route | DELETE | `/api/v1/agents/{id}/ports` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.port_access`
-
-**Resource Resolver:** agent-from-url
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`, `conflict`
-
-### Tests
-
-- `pkg/hub:TestPortRegistration_UsesAgentRecordTarget`
-- `pkg/hub:TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder`
-
----
-
-## agent.port.tunnel
-
-**Domain:** agent
-
-**Description:** Open the calling agent's own port tunnel
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| websocket | GET | `/api/v1/agents/{id}/ports/tunnel` |
-
-**Principals:** `agent`
-
-**Credentials:** `agent_jwt`
-
-**Bearer:** `non_user` (pinned by `TestPortTunnel_OnlyTheAgentItself`)
-
-**Resource Resolver:** agent-self
+**Resource Resolver:** project-from-url
 
 **Effects:** `update-resource`
 
@@ -1115,11 +758,7 @@
 
 ### Tests
 
-- `pkg/hub:TestPortTunnel_OnlyTheAgentItself`
-
-### Exemptions
-
-- **internal_only:** Only the agent itself opens its port tunnel, with its own agent JWT and the port-forward scope; every user is refused (scope: agent self access) — waives: `base_permission`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -1136,11 +775,9 @@
 | http_route | POST | `/api/v1/agents/{id}/set_message_mode` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/set_message_mode` |
 
-**Principals:** `user`, `agent`
+**Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `agent.set_message_mode`
 
@@ -1153,7 +790,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestSetMessageModeToken_ProjectAdminDenialStillApplies`
 
 ---
 
@@ -1301,71 +937,6 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; no user permission applies; the project and user scope IDs come from the token (scope: agent self access) — waives: `base_permission`
-
----
-
-## agent.stopall
-
-**Domain:** agent
-
-**Description:** Stop all running agents on the hub
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/agents/stop-all` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `agent.stop_all`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary`
-
----
-
-## agent.stopall.project
-
-**Domain:** agent
-
-**Description:** Stop all running agents in a project
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/projects/{projectId}/agents/stop-all` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
-
-**Base Permission:** `agent.stop_all`
-
-**Resource Resolver:** project-from-url
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary`
 
 ---
 
@@ -2185,7 +1756,7 @@
 
 **Domain:** artifact
 
-**Description:** Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+**Description:** Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 
 ### Entry Points
 
@@ -2210,6 +1781,504 @@
 ### Tests
 
 - `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## artifact.update
+
+**Domain:** artifact
+
+**Description:** Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (expiry_set, expiry_cleared, moved)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** oldExpiresAt, fromScope, droppedGrantId
+- **After Fields:** newExpiresAt, toScope
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestPatchExpiry`
+- `pkg/artifacts:TestPatchRehome`
+
+---
+
+## artifact.grant.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestGrantsAdminGate`
+
+---
+
+## artifact.grant.put
+
+**Domain:** artifact
+
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/hub:TestArtifactCanGrantReviewOnRoutes`
+- `pkg/hub:TestArtifactHostMayGrantReview_ScopedToken`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestReviewGrantAllowed`
+- `pkg/artifacts:TestReviewGrantDenied`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed) (scope: artifact grant creation and change) — waives: `audit_obligation`
+
+---
+
+## artifact.grant.delete
+
+**Domain:** artifact
+
+**Description:** Remove one grant from an artifact; the home project's grant cannot be removed
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/grants/{grantId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (grant_removed)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantId, subjectKind, subjectRef, permission
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `home_grant`
+
+### Tests
+
+- `pkg/hub:TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestOwnerPathsRecordEvents`
+
+---
+
+## artifact.link.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.link.create
+
+**Domain:** artifact
+
+**Description:** Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkManagePermissions`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked) (scope: artifact share link creation) — waives: `audit_obligation`
+
+---
+
+## artifact.link.revoke
+
+**Domain:** artifact
+
+**Description:** Revoke one share link of an artifact
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/links/{linkId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (link_revoked)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** linkId
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.delete
+
+**Domain:** artifact
+
+**Description:** Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (deleted)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantsRemoved, linksRevoked
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactDeleteOfOrphanOnRoutes`
+- `pkg/artifacts:TestDeleteArtifactAllowed`
+- `pkg/artifacts:TestDeleteArtifactRefused`
+- `pkg/artifacts:TestStoreChangeAndEventCommitTogether`
+
+---
+
+## artifact.version.create
+
+**Domain:** artifact
+
+**Description:** Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.upload
+
+**Domain:** artifact
+
+**Description:** Upload one manifest file of a pending version; only the principal that started the version may upload to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/artifacts/{id}/versions/{seq}/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.finalize
+
+**Domain:** artifact
+
+**Description:** Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/finalize` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/hub:TestArtifactsReviewOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.view
+
+**Domain:** artifact
+
+**Description:** Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/view` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsHTMLViewOnRoutes`
+- `pkg/artifacts:TestViewMintAuthorization`
+
+---
+
+## artifact.version.read
+
+**Domain:** artifact
+
+**Description:** List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/versions` |
+| http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestListVersionsDiscarded`
 
 ---
 
