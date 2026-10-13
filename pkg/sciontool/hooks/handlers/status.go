@@ -186,10 +186,11 @@ type eventResult struct {
 // Handle processes an event and updates the agent status.
 func (h *StatusHandler) Handle(event *hooks.Event) error {
 	// A sub-agent that ends no longer holds a question open. Its entry is
-	// removed from the notification wait's owner list, and when it was the
-	// last owner the wait is cleared to working. A background sub-agent's
-	// SubagentStop can come after the parent's turn has ended, with no
-	// parent tool-end left to clear the wait.
+	// removed from the notification wait's owner list. When it was the last
+	// owner, the wait is cleared to working, or it becomes the parent's own
+	// wait when one is recorded (see restoreParentWait). A background
+	// sub-agent's SubagentStop can come after the parent's turn has ended,
+	// with no parent tool-end left to clear the wait.
 	if event.Name == hooks.EventSubagentEnd && isSubagentEvent(event) {
 		return h.releaseNotificationWaitOwner(subagentID(event))
 	}

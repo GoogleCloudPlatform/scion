@@ -154,8 +154,9 @@ func TestParentWaitOwners_ParentAnswersFirst(t *testing.T) {
 
 // Edge 1: the parent's Stop keeps its recorded question, a later parent
 // Notification does not turn it into a notification wait, and neither that
-// Notification nor another sub-agent's question replaces the parent's
-// message on the Hub. The other sub-agent is still recorded as an owner.
+// Notification nor another sub-agent's question (AskUserQuestion or
+// Notification) replaces the parent's message on the Hub. Each other
+// sub-agent is still recorded as an owner.
 func TestParentWaitOwners_ParentQuestionNotDowngraded(t *testing.T) {
 	sh, hh, sent := claudeHubSetup(t)
 	ownerHeldWithParentQuestion(t, sh, hh, sent, "ExitPlanMode")
@@ -169,10 +170,17 @@ func TestParentWaitOwners_ParentQuestionNotDowngraded(t *testing.T) {
 	assert.Equal(t, parentWaitAgent, info[parentWaitKey], "not downgraded")
 	assert.Empty(t, got, "the plan approval message is kept")
 
-	got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "Notification", "", parentHeldSubB))
-	assert.Equal(t, []string{parentHeldSubA, parentHeldSubB}, waitOwnersOf(info))
+	// A sub-agent's question (the HubHandler's tool-start path).
+	got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "PreToolUse", "AskUserQuestion", parentHeldSubB))
+	assert.Equal(t, []string{parentHeldSubA, parentHeldSubB}, waitOwnersOf(info), "B is recorded")
 	assert.Equal(t, parentWaitAgent, info[parentWaitKey])
-	assert.Empty(t, got)
+	assert.Empty(t, got, "B's question does not replace the plan approval message")
+
+	// A sub-agent's Notification (the HubHandler's Notification path).
+	got, info = parentHeldStep(t, sh, hh, sent, parentHeldSub(t, "Notification", "", parentHeldSubC))
+	assert.Equal(t, []string{parentHeldSubA, parentHeldSubB, parentHeldSubC}, waitOwnersOf(info), "C is recorded")
+	assert.Equal(t, parentWaitAgent, info[parentWaitKey])
+	assert.Empty(t, got, "C's Notification does not replace the plan approval message")
 }
 
 // Edge 2: the last owner's own answer leaves the parent's Notification wait
