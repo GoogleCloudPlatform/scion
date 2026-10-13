@@ -373,7 +373,7 @@ Standalone mode runs the Discord bot as an independent service, communicating wi
 - The binary detects standalone mode via `--standalone` flag or `DISCORD_STANDALONE=true` env var
 - A Postgres advisory lock held on a dedicated database connection ensures only one instance opens the Discord Gateway at a time (Discord enforces one WebSocket session per bot token)
 - The lock holder periodically verifies the connection is alive; on loss, it closes the Gateway and re-enters standby
-- All instances serve gRPC and respond to health checks regardless of lock state
+- All instances serve gRPC and answer health checks; only the lock holder reports `SERVING` (see [Health Checks (Cloud Run)](#health-checks-cloud-run))
 - The lock holder runs the Gateway; standby instances retry every ~30s
 - On primary failure, Postgres releases the session-level lock and a standby promotes after a takeover delay (~60–90s) to prevent dual-Gateway storms
 - Outbound messages (hub → Discord) are delivered via REST API, which works from any instance — only the Gateway connection is serialized
@@ -421,6 +421,36 @@ docker run -e DATABASE_URL=... -e DISCORD_BOT_TOKEN=... scion-discord
 | `GRPC_PORT` | No | `50051` | gRPC listen port |
 | `CONFIG_FILE` | No | — | Path to local YAML config file |
 | `UPDATE_HOOK` | No | — | Command to run on update signal (default: exit for platform restart) |
+
+### Health Checks (Cloud Run)
+
+In standalone mode the binary registers the standard gRPC health service (`grpc.health.v1.Health`) on `GRPC_PORT`. The status is set on the overall service (empty service name), so a probe does not need a service name.
+
+The status is `SERVING` only while the instance holds the gateway lock. It is `NOT_SERVING` while the instance is starting, while it is a standby, after it loses the lock, and when the database or the database proxy is unreachable.
+
+Timing, from the lock loop's 30 s interval and its 5 s connection check timeout:
+
+- **Detection:** the lock holder pings its dedicated lock connection once per interval. If the connection is refused, the status becomes `NOT_SERVING` within 30 s of the failure. If the connection hangs, the 5 s timeout applies and the status becomes `NOT_SERVING` within 35 s.
+- **Recovery:** the instance re-acquires the lock without a restart. The lock must be acquirable on two consecutive ticks (the takeover delay), so the status returns to `SERVING` 30–60 s after the database is reachable again.
+- **Startup:** the status starts as `NOT_SERVING`. Startup retries the initial database connection until it succeeds, then the lock loop needs two consecutive ticks, so `SERVING` comes at least 30 s after the database is reachable. A new instance that starts while another instance holds the lock (for example during a revision rollout) stays `NOT_SERVING` until it takes the lock.
+
+Recommended probe configuration:
+
+- Keep the default TCP startup probe. Do not use the gRPC health check as a startup probe: a new instance reports `NOT_SERVING` for as long as another instance holds the lock, so the startup probe can fail during a rollout.
+- Use a gRPC liveness probe only when the service runs a single instance (`max-instances` 1). With more than one instance, standbys report `NOT_SERVING` and fail the liveness probe.
+
+Example liveness probe for the container spec (assumes `max-instances` 1 and the default `GRPC_PORT` of `50051`):
+
+```yaml
+livenessProbe:
+  grpc:
+    port: 50051
+  initialDelaySeconds: 60
+  periodSeconds: 10
+  failureThreshold: 9
+```
+
+With these values the probe tolerates 90 s of `NOT_SERVING`, which covers the 30–60 s takeover delay when a new instance waits for the lock. A database or proxy failure leads to `NOT_SERVING` within 35 s and a failed liveness probe about 90 s later, so Cloud Run restarts the container about 2 minutes after the failure. While the database stays unreachable, each restarted container reports `NOT_SERVING` and is restarted again until the database returns.
 
 ### Hub Configuration for gRPC Mode
 
