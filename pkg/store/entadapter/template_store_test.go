@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -305,6 +306,63 @@ func TestSetTemplateAgentConfig(t *testing.T) {
 	ok, err = ts.SetTemplateAgentConfig(ctx, uuid.New().String(), &api.ScionConfig{Model: "x"}, want)
 	require.NoError(t, err)
 	assert.False(t, ok, "a missing row writes nothing")
+}
+
+// TestSetTemplateAgentConfigLosesToRacingMetadataEdit: a metadata edit that
+// commits after SetTemplateAgentConfig read the row, and before its
+// conditional UPDATE runs, wins. The snapshot is not written and the row
+// keeps the edit's Updated time instead of the older one the store read
+// (ptone/scion#4674). TestSetTemplateAgentConfig covers the other side: an
+// unchanged row written by CreateTemplate (time.Now(), stored on SQLite with
+// its monotonic-clock suffix) still matches the Updated precondition.
+func TestSetTemplateAgentConfigLosesToRacingMetadataEdit(t *testing.T) {
+	ts := newTestTemplateStore(t)
+	ctx := context.Background()
+
+	tmpl := &store.Template{
+		ID: uuid.New().String(), Name: "race", Slug: "race", Harness: "claude",
+		Scope: store.TemplateScopeGlobal, Status: store.TemplateStatusActive,
+		ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs,
+	}
+	require.NoError(t, ts.CreateTemplate(ctx, tmpl))
+	before, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	uid, err := uuid.Parse(tmpl.ID)
+	require.NoError(t, err)
+	// A fixed later time, so the racing value differs from the stored one
+	// at any storage precision.
+	raced := before.Updated.Add(time.Second)
+
+	// The snapshot write is the only bulk Update in this test; the racing
+	// edit (an UpdateOne, as UpdateTemplate issues) runs once, just before
+	// it, after SetTemplateAgentConfig has read the row.
+	racedOnce := false
+	ts.client.Template.Use(func(next ent.Mutator) ent.Mutator {
+		return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+			if m.Op() == ent.OpUpdate && !racedOnce {
+				racedOnce = true
+				if err := ts.client.Template.UpdateOneID(uid).
+					SetDescription("raced edit").
+					SetUpdated(raced).
+					Exec(ctx); err != nil {
+					return nil, err
+				}
+			}
+			return next.Mutate(ctx, m)
+		})
+	})
+
+	ok, err := ts.SetTemplateAgentConfig(ctx, tmpl.ID, &api.ScionConfig{Model: "snap"},
+		store.TemplateContentPrecondition{ContentHash: "hash-1", Layout: store.TemplateLayoutBlobs})
+	require.NoError(t, err)
+	require.True(t, racedOnce, "the racing edit ran")
+	assert.False(t, ok, "a row whose Updated time changed after the read is not written")
+
+	got, err := ts.GetTemplate(ctx, tmpl.ID)
+	require.NoError(t, err)
+	assert.True(t, raced.Equal(got.Updated), "the racing edit's Updated time is kept: got %v, want %v", got.Updated, raced)
+	assert.Equal(t, "raced edit", got.Description)
+	assert.Nil(t, got.AgentConfig, "the snapshot is not written")
 }
 
 func TestUpdateTemplateNotFound(t *testing.T) {
