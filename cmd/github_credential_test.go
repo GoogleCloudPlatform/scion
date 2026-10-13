@@ -158,9 +158,11 @@ func TestResolveInstallSource_SendsGitHubCredential(t *testing.T) {
 
 // TestRunTemplateImport_SendsGitHubCredential verifies that 'templates
 // import' passes the CLI credential to the fetch of a GitHub folder URL. The
-// run is a dry run, so nothing is written to any project.
+// run is a dry run from a temporary directory with a temporary HOME, so it
+// can resolve or write nothing in a real project.
 func TestRunTemplateImport_SendsGitHubCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
 	clearGitHubCredentialEnv(t)
 	t.Setenv("GH_ACME_CORP__PRIVATE_TEMPLATES", "fake-repo-cred")
 	t.Setenv(credTestOwnerKey, "fake-owner-cred")
