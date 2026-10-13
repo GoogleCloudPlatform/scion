@@ -203,6 +203,8 @@ interface FrameRequest {
   failed?: boolean;
   /** The page's own top-level document (Open in new tab), not a frame request. */
   topLevelDocument: boolean;
+  /** The request's frame was not available (a navigation issued before its frame existed). */
+  frameUnavailable?: boolean;
   /**
    * The Cookie header as sent: read is false until the browser's full
    * request headers were read. An unread header is unknown, never "no
@@ -239,6 +241,8 @@ const r2 = {
   markdownRefused: undefined as string | undefined,
   /** The markdown artifact's id from its create (for the cleanup). */
   markdownCreatedId: undefined as string | undefined,
+  /** Any other artifact id seen on landing (cleaned up as well). */
+  extraArtifactIds: [] as string[],
   /** v3 exists: its versions POST answered 201 and the page showed v3 (current). */
   v3Published: false,
   /** Saved download files (in memory), checked absent after delete and in the cleanup. */
@@ -255,6 +259,8 @@ const r2 = {
   consoleCounts: {} as Record<string, number>,
   /** Restricted: set when a frame request carried the viewer's session. */
   sessionBearingFrameRequest: false,
+  /** Restricted: the whole-run frame session sweep. */
+  frameSessionAll: null as null | Record<string, number>,
   chat: {} as Record<string, unknown>,
 };
 
@@ -350,10 +356,14 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
     if (new URL(req.url()).hostname === REMOTE_IMAGE_HOST) r2.remoteHostHits++;
     if (!isBundleRequest(req)) return;
     let topLevelDocument = false;
+    let frameUnavailable = false;
     try {
       topLevelDocument = req.isNavigationRequest() && req.frame().parentFrame() === null;
     } catch {
-      topLevelDocument = false;
+      // Only a navigation issued before its frame exists has no frame: a new
+      // page's top-level document (an iframe's element always exists first).
+      frameUnavailable = true;
+      topLevelDocument = req.isNavigationRequest();
     }
     const rec: FrameRequest = {
       who,
@@ -362,6 +372,7 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
       path: redactPath(new URL(req.url()).pathname),
       resourceType: req.resourceType(),
       topLevelDocument,
+      ...(frameUnavailable ? { frameUnavailable } : {}),
       cookieHeader: { read: false, present: null, names: [] },
     };
     records.set(req, rec);
@@ -409,18 +420,28 @@ function watchContext(context: BrowserContext, who: Key | 'anonymous'): void {
  * document), after every pending header read settled (bounded wait). An
  * unread header counts as unknown, which fails a session check.
  */
-async function frameSessionFacts(
-  records: FrameRequest[]
-): Promise<{ total: number; unread: number; bearing: number }> {
+async function frameSessionFacts(records: FrameRequest[]): Promise<{
+  total: number;
+  unread: number;
+  bearing: number;
+  unverified: number;
+}> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   await Promise.race([
     Promise.allSettled([...r2.pendingHeaderReads]),
-    new Promise((resolve) => setTimeout(resolve, 5_000)),
+    new Promise((resolve) => {
+      timer = setTimeout(resolve, 5_000);
+    }),
   ]);
+  if (timer) clearTimeout(timer);
   const frameOnly = records.filter((q) => !q.topLevelDocument);
   return {
     total: frameOnly.length,
     unread: frameOnly.filter((q) => !q.cookieHeader.read).length,
     bearing: frameOnly.filter((q) => q.cookieHeader.present === true).length,
+    // Recorded only: a failed or unanswered request's headers may be the
+    // provisional ones, which never show a Cookie header.
+    unverified: frameOnly.filter((q) => q.failed || q.status === undefined).length,
   };
 }
 
@@ -907,7 +928,7 @@ function preBundle(): string | undefined {
 }
 function preMarkdown(): string | undefined {
   if (r2.markdown) return undefined;
-  return r2.markdownRefused ?? 'no markdown was published (R2-07)';
+  return r2.markdownRefused ?? 'the markdown publish did not complete (R2-07)';
 }
 function preV3(): string | undefined {
   return r2.v3Published ? undefined : 'v3 was not published (R2-09)';
@@ -931,11 +952,35 @@ const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fr
   })
 );
 
+/**
+ * Why this run may not carry the isolation rows, or undefined when it may:
+ * the render config, list/github reporters only, no trace, video or
+ * screenshot, no debugger. Checked from the resolved run settings, so CLI
+ * overrides (--reporter, --trace, --ui, --debug) cannot bypass it.
+ */
+function runSettingsRefusal(): string | undefined {
+  const info = test.info();
+  const configFile = path.basename(info.config.configFile ?? '');
+  if (configFile !== 'playwright.render.config.ts') return WRONG_CONFIG;
+  // JSON is allowed: with trace, video and screenshot off it has no
+  // attachments, and the isolation rows' step errors are generic.
+  const allowed = new Set(['list', 'github', 'json']);
+  if (!info.config.reporter.every(([name]) => allowed.has(name))) return WRONG_CONFIG;
+  const use = info.project.use as { trace?: unknown; video?: unknown; screenshot?: unknown };
+  const off = (v: unknown): boolean => {
+    if (v === undefined || v === 'off') return true;
+    return typeof v === 'object' && v !== null && (v as { mode?: unknown }).mode === 'off';
+  };
+  if (!off(use.trace) || !off(use.video) || !off(use.screenshot)) return WRONG_CONFIG;
+  if (process.env.PWDEBUG) return WRONG_CONFIG;
+  return undefined;
+}
+
 /** Set by playwright.render.config.ts, the only config without an HTML reporter. */
 const UNDER_RENDER_CONFIG = process.env.E2E_R2_RENDER_CONFIG === '1';
 const WRONG_CONFIG =
-  'run with e2e/artifacts-access/playwright.render.config.ts ' +
-  '(no HTML reporter for the isolation rows)';
+  'run with e2e/artifacts-access/playwright.render.config.ts, reporters list, github or ' +
+  'json only, and no --trace, --ui or --debug (isolation rows)';
 
 // ---- NOT RUN by design: declared outside the serial group so each body runs.
 test.describe('render rows not run at this build', () => {
@@ -971,6 +1016,12 @@ test.describe.serial('artifact page view and render (R2)', () => {
 
   test.beforeAll(async ({ browser }) => {
     j.seedRows();
+    // Refuse before any identity or page exists.
+    const refusal = runSettingsRefusal();
+    if (refusal) {
+      j.state.setupError = `beforeAll: ${refusal}`;
+      throw new Error(refusal);
+    }
     try {
       const t = j.resolveTarget();
       j.state.target = t;
@@ -1116,7 +1167,9 @@ async function runMain(browser: Browser): Promise<void> {
     expect(landed, 'lands on the artifact').toBe(true);
     const id = new URL(page.url()).pathname.split('/').pop()!;
     expect.soft(id, 'landed on the created artifact').toBe(pub.createdId);
-    r2.bundle = { id, title };
+    // The created id stays the bundle; a different landed id is cleaned up too.
+    if (pub.createdId && id !== pub.createdId) r2.extraArtifactIds.push(id);
+    r2.bundle = { id: pub.createdId ?? id, title };
     await expect(headerTitle(page)).toHaveText(title);
     await expect(page.locator(SELECTORS.versionMenu)).toContainText('v1 (current)');
     r.ui.landed = redactPath(new URL(page.url()).pathname);
@@ -1360,14 +1413,16 @@ async function runMain(browser: Browser): Promise<void> {
         await htmlFrame(page).locator('#api-nav').click();
         const apiNavStatus = (await apiNav).status();
         await settle(page);
-        // Every frame request of the owner so far (R2-02..R2-05), by step.
+        // Every frame request of the owner so far (R2-01..R2-05), by step.
         const session = await frameSessionFacts(
           requestsIn('owner', ['R2-01', 'R2-02', 'R2-03', 'R2-04', 'R2-05'])
         );
         if (session.bearing > 0 || apiNavStatus === 200) r2.sessionBearingFrameRequest = true;
         if (apiNavStatus !== 200 && apiNavStatus !== 401) {
-          // An ordinary finding; its status stays in the restricted probe record.
-          j.finding('R2-05', ISOLATION_FAIL);
+          // An ordinary finding, kept in the restricted evidence only (no
+          // annotation, so no output tells which check it was); the status
+          // is in the probe record.
+          j.state.findings.push({ id: 'R2-05', text: ISOLATION_FAIL });
         }
         const probeRec = {
           who: 'owner',
@@ -1421,28 +1476,42 @@ async function runMain(browser: Browser): Promise<void> {
         await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached' });
         const frameSrc = (await htmlFrameAttributes(page)).src ?? '';
         r2.step = 'R2-06-popup';
-        const [popup] = await Promise.all([
-          j.who('owner').context.waitForEvent('page'),
-          previewBarButton(page, 'Open in new tab').click(),
-        ]);
-        await popup.waitForLoadState('load');
-        const samePath =
-          new URL(popup.url()).pathname === new URL(frameSrc, popup.url()).pathname;
-        const rendered = await textIs(popup.locator('#ver'), 'R2 bundle v1');
-        const result = await readProbe(popup);
-        await settle(popup);
-        const mine = requestsIn('owner', ['R2-06-popup']).filter((q) => q.topLevelDocument);
-        const popupPath = new URL(popup.url()).pathname;
-        const doc = mine.find((q) => redactPath(popupPath) === q.path);
-        // The popup's own sub-resources: requests whose document is the popup.
-        const sub = r2.frameRequests.filter(
-          (q) => q.who === 'owner' && q.step === 'R2-06-popup' && !q.topLevelDocument
-        );
-        const session = await frameSessionFacts(sub);
-        if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
-        const headers = await viewHeaders('owner', frameSrc, r);
-        await popup.close();
-        r2.step = 'R2-06';
+        let popup: Page | undefined;
+        let phase: {
+          samePath: boolean;
+          rendered: boolean;
+          result: Record<string, unknown>;
+          doc: FrameRequest | undefined;
+          sub: FrameRequest[];
+          session: Awaited<ReturnType<typeof frameSessionFacts>>;
+          headers: Record<string, string | number>;
+        };
+        try {
+          [popup] = await Promise.all([
+            j.who('owner').context.waitForEvent('page'),
+            previewBarButton(page, 'Open in new tab').click(),
+          ]);
+          await popup.waitForLoadState('load');
+          const samePath =
+            new URL(popup.url()).pathname === new URL(frameSrc, popup.url()).pathname;
+          const rendered = await textIs(popup.locator('#ver'), 'R2 bundle v1');
+          const result = await readProbe(popup);
+          await settle(popup);
+          const popupPath = redactPath(new URL(popup.url()).pathname);
+          const doc = requestsIn('owner', ['R2-06-popup']).find(
+            (q) => q.topLevelDocument && q.path === popupPath
+          );
+          // The popup's own sub-resources (and the app page's frame, if it reloads).
+          const sub = requestsIn('owner', ['R2-06-popup']).filter((q) => !q.topLevelDocument);
+          const session = await frameSessionFacts(sub);
+          if (session.bearing > 0) r2.sessionBearingFrameRequest = true;
+          const headers = await viewHeaders('owner', frameSrc, r);
+          phase = { samePath, rendered, result, doc, sub, session, headers };
+        } finally {
+          await popup?.close();
+          r2.step = 'R2-06';
+        }
+        const { samePath, rendered, result, doc, sub, session, headers } = phase;
         const rec = {
           who: 'owner',
           step: 'R2-06',
@@ -1520,8 +1589,13 @@ async function runMain(browser: Browser): Promise<void> {
         refuse(`finalize ${String(finalize?.status ?? 'missing')}`);
         return;
       }
+      // Published (create 201, finalize 2xx): the markdown rows may run.
+      if (pub.createdId) r2.markdown = { id: pub.createdId, title };
       expect(landed, 'lands on the markdown artifact').toBe(true);
-      r2.markdown = { id: new URL(page.url()).pathname.split('/').pop()!, title };
+      const landedId = new URL(page.url()).pathname.split('/').pop()!;
+      expect.soft(landedId, 'landed on the created markdown').toBe(pub.createdId);
+      r2.markdown = { id: pub.createdId ?? landedId, title };
+      if (landedId !== pub.createdId) r2.extraArtifactIds.push(landedId);
       expect.soft(pub.entry, 'entry defaults to index.md').toBe('index.md');
 
       const md = await openMarkdown('owner');
@@ -1962,6 +2036,7 @@ async function runMain(browser: Browser): Promise<void> {
           frame: {
             sandboxTokens: tokens(attrs.sandbox),
             referrerpolicy: attrs.referrerpolicy,
+            title: attrs.title,
             ...info,
           },
           heading,
@@ -1982,6 +2057,7 @@ async function runMain(browser: Browser): Promise<void> {
         checks.untrustedBar = labels.some((l) => bar === barText(l));
         checks.sandboxExact = JSON.stringify(rec.frame.sandboxTokens) === '["allow-scripts"]';
         checks.referrerPolicy = attrs.referrerpolicy === 'no-referrer';
+        checks.frameTitle = attrs.title === `${r2.bundle!.title} (sandboxed)`;
         checks.viewSrc = info.viewSeq === 3 && info.viewIdMatches && info.entry === 'index.html';
         checks.heading = heading === 'R2 bundle v3';
         checks.image = chart === CHART_SIZE.width;
@@ -2154,6 +2230,16 @@ async function runMain(browser: Browser): Promise<void> {
   r2.step = 'R2-20';
   await runChatRow();
 
+  // Whole-run sweep: every frame request of every identity (restricted;
+  // decides no row). A session-bearing or unread one sets the restricted
+  // flag that the grader escalates by direct message.
+  const all = await frameSessionFacts(r2.frameRequests.filter((q) => q.who !== 'anonymous'));
+  r2.frameSessionAll = all;
+  if (all.bearing > 0 || all.unread > 0) {
+    r2.sessionBearingFrameRequest = true;
+    j.state.findings.push({ id: 'frame-session-sweep', text: ISOLATION_FAIL });
+  }
+
   // Every identity still holds its own session after the rows.
   const checks = await j.identityChecks();
   j.state.evidence.identityChecksAfterRows = checks;
@@ -2294,6 +2380,7 @@ function createdArtifacts(): Array<[string, string]> {
   if (r2.bundle) out.push(['bundle', r2.bundle.id]);
   const md = r2.markdown?.id ?? r2.markdownCreatedId;
   if (md) out.push(['markdown', md]);
+  r2.extraArtifactIds.forEach((id, i) => out.push([`extra ${i + 1}`, id]));
   return out;
 }
 
@@ -2485,6 +2572,7 @@ async function runCleanup(testInfo: {
   ev.publishes = r2.publishes;
   ev.chat = r2.chat;
   ev.sessionBearingFrameRequest = r2.sessionBearingFrameRequest;
+  ev.frameSessionAll = r2.frameSessionAll;
   ev.rows = j.state.rows;
   ev.findings = j.state.findings;
   ev.hardFailures = j.state.hardFailures;

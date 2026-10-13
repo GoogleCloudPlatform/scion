@@ -2,7 +2,7 @@
 
 A Playwright journey of the artifact page's view and render, graded at the UI. It lives in the same suite directory as
 the access journey (`README.md`) and shares its global setup, state file and output dir. It has its own config,
-`playwright.render.config.ts`, which has no HTML reporter (see Grading), and it skips itself under any other config. See
+`playwright.render.config.ts`, which has no HTML reporter (see Grading), and it refuses any other config. See
 the header of `artifacts-render.pw.ts` for the rows.
 
 ## Run
@@ -55,8 +55,14 @@ anchor.
   CI).
 - A frame request whose Cookie header could not be read counts as unknown, which fails the session check. It never
   counts as "no session".
-- Rows depend on facts, not on other rows passing: the bundle exists, the markdown was published, v3 exists. Only
-  the R2-01 smoke and a refused markdown publish make rows `not run`.
+- Rows depend on facts, not on other rows passing: the bundle exists, the markdown was published, v3 exists, the
+  owner's view URL was minted. A failed R2-01 smoke stops every later row; a refused markdown publish makes the
+  markdown rows `not run` with the cause.
+- The journey refuses to run (before any identity exists) unless the resolved settings are the render config,
+  reporters list, github or json only, and trace, video and screenshot off. So `--reporter=html`, `--trace`, `--ui`
+  and `--debug` are refused for this suite: they would record each inner action of the isolation rows.
+- After the rows, a whole-run sweep checks every frame request of every identity for a Cookie header. It decides no
+  row; its result is restricted evidence (`frameSessionAll`).
 - R2-17b (view expiry) and R2-21 (an HTML bundle in the chat preview) are declared and skipped with a `NOT RUN`
   annotation. The view lifetime is a fixed constant, and the chat HTML preview is not on this build.
 - R2-20x is recorded only (status `observed`).
