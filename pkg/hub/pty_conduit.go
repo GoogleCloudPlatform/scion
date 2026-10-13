@@ -143,6 +143,20 @@ func (s *Server) resolvePTYPath(ctx context.Context, identity Identity, agent *s
 	if isManagedAgentRuntime(agent.Runtime) {
 		return s.managedPTYPath(ctx, identity, agent)
 	}
+	// Flat placement check (requirePinnedPlacement), before either path is
+	// chosen: a pinned agent whose saved placement is inconsistent is
+	// refused with its own 409 before any upgrade, on the preflight and the
+	// WebSocket alike, whether the attach would take the broker path or the
+	// agent's conduit session. An unpinned agent with no Runtime Broker
+	// keeps the 422 below.
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		var refusal *RuntimeTargetRefusal
+		if errors.As(err, &refusal) {
+			return ptyRefusal(refusal.Status, refusal.Code, refusal.Message, "")
+		}
+		slog.Error("PTY: agent placement check failed", "agent_id", agent.ID, "error", err)
+		return ptyRefusal(http.StatusInternalServerError, ErrCodeInternalError, "Internal server error", "")
+	}
 	if agent.RuntimeBrokerID == "" {
 		return ptyRefusal(http.StatusUnprocessableEntity, ErrCodeNoRuntimeBroker,
 			"Agent has no runtime broker", "")

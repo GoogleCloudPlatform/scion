@@ -173,6 +173,13 @@ func deleteClaimStopping(a *store.Agent) bool {
 // It returns the plan when this request now holds the claim, or nil when the
 // claim affected no row (the caller re-reads to decide).
 func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agentDeleteParams) (*agentDeletionPlan, error) {
+	// Flat placement pre-check (requirePinnedPlacement), before the claim
+	// writes anything: an agent whose saved placement is inconsistent is
+	// refused with a *PlacementConflictError (409), force or not, and its
+	// row and accounting are kept. A failed check is not observed absence.
+	if err := s.deletePlacementPreCheck(ctx, agentID); err != nil {
+		return nil, err
+	}
 	now := deleteClock()
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
@@ -316,6 +323,28 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		}, nil
 	}
 	return nil, nil
+}
+
+// deletePlacementPreCheck is claimAgentDeletion's placement check on the
+// current row. It is skipped where the delete reaches no Runtime Broker or
+// has already torn down: a managed runtime, a soft-deleted row (the claim
+// does not match it), and a finalizing row (its re-claim skips the
+// dispatch, ptone/scion#2890). A row that is gone is left to the claim,
+// which then affects nothing. An unpinned agent with no Runtime Broker
+// passes, as before (checkAgentPinnedPlacement).
+func (s *Server) deletePlacementPreCheck(ctx context.Context, agentID string) error {
+	row, err := s.store.GetAgent(ctx, agentID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if isManagedAgentRuntime(row.Runtime) || !row.DeletedAt.IsZero() || row.DeletionState == store.DeletionStateFinalizing {
+		return nil
+	}
+	_, err = checkAgentPinnedPlacement(ctx, s.store, row)
+	return err
 }
 
 // storedDeletionRequest decodes a's stored delete request. ok is false when
@@ -767,6 +796,18 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 		s.agentLifecycleLog.Warn("delete engine: dispatch refused as stale; abandoning the claim",
 			"agent_id", agent.ID, "claim", e.plan.claim, "not_after", notAfter.UTC().Format(time.RFC3339), "error", err)
 		return e.abandonWith(staleDispatchMessage), false
+	}
+	if refusal, ok := placementRefusalOf(err); ok {
+		// The dispatcher's placement backstop refused the delete before
+		// sending anything: the agent's saved placement is inconsistent
+		// (requirePinnedPlacement). As for a run mismatch, finalizing
+		// could orphan a running workload and release its capacity with
+		// no evidence of teardown, so the delete fails as a conflict and
+		// restores the prior phase, under force and best-effort too.
+		s.agentLifecycleLog.Warn("delete engine: agent placement is inconsistent; nothing was dispatched, not finalizing",
+			"agent_id", agent.ID, "claim", e.plan.claim, "code", refusal.Code,
+			"force", req.Force, "best_effort", bestEffort)
+		return e.rollback(store.DeletionCodeConflict, refusal.Message), false
 	}
 	var refused *DeleteRunMismatchError
 	if errors.As(err, &refused) && refuseDeleteRunMismatch(req.Force, bestEffort) {

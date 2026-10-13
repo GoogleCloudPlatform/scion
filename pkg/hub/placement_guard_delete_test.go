@@ -1,0 +1,330 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package hub
+
+// Tests of the saved-placement guard on the paths that would otherwise end
+// an agent's accounting: the delete engine (pre-check and backstop, under
+// force and best-effort too), env-gather recreate under cleanupMode=force,
+// the queued-dispatch drain, and the ambiguous duplicate-run answers.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
+)
+
+// placementRefusalFor is the placement refusal a Runtime Broker dispatch of
+// a gets from another node's backstop, rebuilt from the dispatch row as a
+// plain *RuntimeTargetRefusal (dispatchFailureError).
+func placementRefusalFor(a *store.Agent) *RuntimeTargetRefusal {
+	return stalePinRefusal(a, "test: refused by the executing node's backstop")
+}
+
+// --- delete ------------------------------------------------------------------
+
+// A delete of an agent whose saved placement is inconsistent is refused
+// before the claim, force or not: 409 with the placement code, nothing
+// dispatched, the row and its accounting untouched.
+func TestAgentDelete_PlacementPreCheckRefusesBeforeClaim(t *testing.T) {
+	for _, query := range []string{"", "?force=true"} {
+		t.Run("query="+query, func(t *testing.T) {
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			a := f.stalePinnedAgent(t, "stale-delete", string(state.PhaseRunning))
+			reserveBrokerSlot(t, f.s, f.legacy, a.ID)
+			before := mustGetAgent(t, f.s, a.ID)
+
+			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+query, nil)
+			requireAPIError(t, rec, http.StatusConflict, ErrCodeRuntimeTargetPinStale)
+
+			assert.False(t, f.client.deleteCalled, "nothing is dispatched")
+			after := mustGetAgent(t, f.s, a.ID)
+			assert.True(t, after.DeletedAt.IsZero(), "the row is kept")
+			assert.Equal(t, before.DeletionState, after.DeletionState, "no claim is taken")
+			assert.Equal(t, before.DeletionClaim, after.DeletionClaim)
+			assert.Equal(t, before.Phase, after.Phase)
+			assert.Equal(t, before.RunIntent, after.RunIntent)
+			assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
+		})
+	}
+}
+
+// The dispatcher backstop's refusal (here as rebuilt from another node's
+// dispatch row) is classified like a run mismatch: the delete fails as a
+// conflict and the row is kept, under force and for a best-effort
+// (created, no launch) dispatch too.
+func TestAgentDelete_PlacementBackstopRefusesUnderForceAndBestEffort(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		phase state.Phase
+		query string
+	}{
+		{"running, force", state.PhaseRunning, "?force=true"},
+		{"running, plain", state.PhaseRunning, ""},
+		{"created no launch (best-effort), plain", state.PhaseCreated, ""},
+		{"created no launch (best-effort), force", state.PhaseCreated, "?force=true"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newRunMismatchFixture(t, "pg-del-"+uuid.NewString()[:8], tc.phase)
+			refusal := placementRefusalFor(f.agent)
+			f.client.answer = func(string) error { return refusal }
+
+			r := f.del(t, tc.query)
+			require.Equal(t, http.StatusConflict, r.rec.Code, r.rec.Body.String())
+			code, details := errorBody(t, r.rec)
+			assert.Equal(t, ErrCodeConflict, code)
+			assert.Equal(t, store.DeletionCodeConflict, details["deletionCode"])
+			assert.Contains(t, r.rec.Body.String(), "saved placement is inconsistent")
+
+			got := mustGetAgent(t, f.store, f.agent.ID)
+			assert.True(t, got.DeletedAt.IsZero(), "the row is not finalized")
+			assert.Equal(t, store.DeletionStateFailed, got.DeletionState)
+			assert.Equal(t, store.DeletionCodeConflict, got.DeletionCode)
+			assert.Equal(t, string(tc.phase), got.Phase, "the prior phase is restored")
+			assert.Equal(t, []string{"run-a"}, f.client.deleted(), "no previous-run delete after the refusal")
+		})
+	}
+}
+
+// --- env-gather recreate ---------------------------------------------------------
+
+// envGatherPlacementClient answers every delete with a placement refusal
+// once refuse is set.
+type envGatherPlacementClient struct {
+	*envGatherMockBrokerClient
+	refuse  bool
+	refusal error
+}
+
+func (c *envGatherPlacementClient) DeleteAgent(_ context.Context, _, _, _, _ string, _ DeleteAgentOptions) error {
+	if !c.refuse {
+		return nil
+	}
+	return c.refusal
+}
+
+// Env-gather recreate does not let cleanupMode=force override a placement
+// refusal of its delete: the provisioning row is kept and the request gets
+// the placement 409.
+func TestEnvGatherRecreate_PlacementRefusalNotOverriddenByForce(t *testing.T) {
+	for _, cleanupMode := range []string{"", "force"} {
+		t.Run("cleanupMode="+cleanupMode, func(t *testing.T) {
+			srv, st := testServer(t)
+			ctx := context.Background()
+			suffix := uuid.NewString()[:8]
+			project := &store.Project{ID: tid("pg-eg-project-" + suffix), Name: "pg-eg-" + suffix, Slug: "pg-eg-" + suffix}
+			require.NoError(t, st.CreateProject(ctx, project))
+			broker := &store.RuntimeBroker{ID: tid("pg-eg-broker-" + suffix), Name: "pg-eg-broker-" + suffix, Slug: "pg-eg-broker-" + suffix,
+				Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline}
+			require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
+			require.NoError(t, st.AddProjectProvider(ctx, &store.ProjectProvider{
+				ProjectID: project.ID, BrokerID: broker.ID, BrokerName: "test-broker", LocalPath: "/tmp/test-project",
+			}))
+			client := &envGatherPlacementClient{envGatherMockBrokerClient: &envGatherMockBrokerClient{
+				gatherReturnEnvReqs: &RemoteEnvRequirementsResponse{AgentID: "x", Required: []string{"GEMINI_API_KEY"}, Needs: []string{"GEMINI_API_KEY"}},
+			}}
+			d := NewHTTPAgentDispatcherWithClient(st, client, true, slog.Default())
+			d.SetTokenGenerator(&fakeMintingTokenGenerator{store: st})
+			srv.SetDispatcher(d)
+
+			body := map[string]interface{}{"name": "pg-eg-agent", "projectId": project.ID, "template": "claude", "gatherEnv": true}
+			rec1 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+			require.Equal(t, http.StatusAccepted, rec1.Code, rec1.Body.String())
+			var resp1 CreateAgentResponse
+			require.NoError(t, json.Unmarshal(rec1.Body.Bytes(), &resp1))
+			oldID := resp1.Agent.ID
+			old := mustGetAgent(t, st, oldID)
+
+			client.refusal = placementRefusalFor(old)
+			client.refuse = true
+			if cleanupMode != "" {
+				body["cleanupMode"] = cleanupMode
+			}
+			rec2 := doRequest(t, srv, http.MethodPost, "/api/v1/agents", body)
+			require.Equal(t, http.StatusConflict, rec2.Code, rec2.Body.String())
+			code, _ := errorBody(t, rec2)
+			assert.Equal(t, ErrCodeRuntimeTargetPinStale, code)
+			_, err := st.GetAgent(ctx, oldID)
+			require.NoError(t, err, "the provisioning row is kept")
+		})
+	}
+}
+
+// --- drain -------------------------------------------------------------------
+
+// A queued stop of a pinned agent whose placement is inconsistent is
+// settled failed with placement_conflict and not dispatched; the agent's
+// stop_queued state and its reservation are left as they are.
+func TestDrain_PlacementConflictKeepsStopQueuedAndReservation(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.stalePinnedAgentWith(t, "stale-drain", string(state.PhaseRunning), func(a *store.Agent) {
+		a.ContainerStatus = containerStatusStopQueued
+	})
+	require.Equal(t, containerStatusStopQueued, a.ContainerStatus)
+	reserveBrokerSlot(t, f.s, f.legacy, a.ID)
+	row := &store.BrokerDispatch{ID: tid("drain-stop-" + t.Name()), BrokerID: a.RuntimeBrokerID, AgentID: a.ID, Op: "stop"}
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
+
+	f.srv.ReconcileBroker(ctx, a.RuntimeBrokerID)
+
+	failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DispatchStateFailed, failed.State)
+	assert.True(t, strings.HasPrefix(failed.Error, drainPlacementConflictCode+": "), "error: %q", failed.Error)
+	var refusal *RuntimeTargetRefusal
+	require.True(t, errors.As(dispatchFailureError(failed), &refusal), "the originator rebuilds the refusal")
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, refusal.Code)
+	assert.False(t, f.client.stopCalled, "nothing is dispatched")
+
+	got := mustGetAgent(t, f.s, a.ID)
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "stop_queued is kept")
+	assert.Equal(t, a.Phase, got.Phase)
+	assert.Equal(t, int64(1), brokerReservationCount(t, f.s, f.legacy.ID), "the reservation is kept")
+}
+
+// A row queued for another Runtime Broker than the pinned agent's own is
+// refused even when the pin itself is consistent.
+func TestDrain_PlacementConflictForRowOfAnotherRuntimeBroker(t *testing.T) {
+	ctx := context.Background()
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	a := f.pinnedAgent(t, "pinned-drain", string(state.PhaseRunning))
+	row := &store.BrokerDispatch{ID: tid("drain-other-" + t.Name()), BrokerID: f.legacy.ID, AgentID: a.ID, Op: "stop"}
+	require.NoError(t, f.s.InsertBrokerDispatch(ctx, row))
+
+	f.srv.ReconcileBroker(ctx, f.legacy.ID)
+
+	failed, err := f.s.GetBrokerDispatch(ctx, row.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.DispatchStateFailed, failed.State)
+	assert.True(t, strings.HasPrefix(failed.Error, drainPlacementConflictCode+": "), "error: %q", failed.Error)
+	assert.False(t, f.client.stopCalled)
+	assert.Equal(t, a.ContainerStatus, mustGetAgent(t, f.s, a.ID).ContainerStatus)
+}
+
+// A claimless delete intent whose agent row is gone is still sent to a
+// flat Runtime Broker: the target takes the pin of the Runtime Broker the
+// intent names, so the dispatcher's backstop does not read it as an
+// unpinned agent on a flat row.
+func TestDrain_RowlessDeleteTargetTakesFlatPin(t *testing.T) {
+	f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+	target := &store.Agent{ID: "gone", Slug: "gone", RuntimeBrokerID: f.flat.ID}
+	f.srv.pinRowlessDeleteTarget(context.Background(), target)
+	assert.True(t, target.PinValid())
+	assert.Equal(t, f.flat.RuntimeTarget.ID, target.PinnedRuntimeTargetID)
+	_, err := requirePinnedPlacement(context.Background(), f.s, target)
+	assert.NoError(t, err)
+
+	legacy := &store.Agent{ID: "gone-legacy", Slug: "gone-legacy", RuntimeBrokerID: f.legacy.ID}
+	f.srv.pinRowlessDeleteTarget(context.Background(), legacy)
+	assert.False(t, legacy.IsPinned(), "a legacy row gives no pin")
+}
+
+// --- run_in_progress / run_already_started -----------------------------------
+
+// ambiguousStartOutcome is what a start that failed with a given broker
+// answer leaves behind.
+type ambiguousStartOutcome struct {
+	revoked      bool
+	runReverted  bool
+	claimState   store.StartClaimState
+	phase        string
+	runIntent    store.RunIntent
+	reservations int64
+}
+
+// startOutcomeFor runs the same harness for brokerErr: a dispatcher start
+// (credential revoke, run revert) and a claimed start through
+// startAgentCore (claim state, phase, intent, capacity).
+func startOutcomeFor(t *testing.T, name string, brokerErr error) ambiguousStartOutcome {
+	t.Helper()
+	ctx := context.Background()
+	var out ambiguousStartOutcome
+
+	// Dispatcher leg.
+	memStore := createTestStore(t)
+	broker := newTestBrokerForRevoke(t, memStore, "amb-"+name)
+	project := &store.Project{ID: tid("amb-project-" + name), Name: "amb-" + name, Slug: "amb-" + name}
+	require.NoError(t, memStore.CreateProject(ctx, project))
+	agent := &store.Agent{ID: tid("amb-agent-" + name), Name: "amb", Slug: "amb", ProjectID: project.ID,
+		RuntimeBrokerID: broker.ID, Phase: string(state.PhaseStopped)}
+	require.NoError(t, memStore.CreateAgent(ctx, agent))
+	_, err := memStore.SetAgentRunID(ctx, agent.ID, "run-prev", nil)
+	require.NoError(t, err)
+	agent = mustGetAgent(t, memStore, agent.ID)
+
+	client := &mockRuntimeBrokerClient{returnErr: brokerErr}
+	d := NewHTTPAgentDispatcherWithClient(memStore, client, false, slog.Default())
+	gen := &fakeMintingTokenGenerator{store: memStore}
+	d.SetTokenGenerator(gen)
+	require.Error(t, d.DispatchAgentStart(ctx, agent, "", false))
+	require.Len(t, gen.jtis, 1)
+	out.revoked = getTestAgentCredential(t, memStore, gen.lastJTI()).RevokedAt != nil
+	out.runReverted = mustGetAgent(t, memStore, agent.ID).RunID == "run-prev"
+
+	// Claimed start leg.
+	f, cd, a := newClaimFixture(t)
+	cd.start = func(context.Context, *store.Agent) error { return brokerErr }
+	require.Error(t, f.srv.startAgentCore(ctx, a, StartOpts{Kind: store.StartClaimCreate}))
+	got := getAgent(t, f.s, a.ID)
+	out.claimState = got.StartClaimState
+	out.phase = got.Phase
+	out.runIntent = got.RunIntent
+	out.reservations = brokerReservationCount(t, f.s, f.brokerID)
+	return out
+}
+
+func TestDispatch_RunInProgressIsAmbiguous(t *testing.T) {
+	timeout := startOutcomeFor(t, "timeout", fmt.Errorf("failed to send request: %w", context.DeadlineExceeded))
+	require.False(t, timeout.revoked, "a timeout does not revoke")
+	require.False(t, timeout.runReverted, "a timeout does not revert the run")
+	require.Equal(t, store.StartClaimUnconfirmed, timeout.claimState, "a timeout keeps the claim unconfirmed")
+
+	// The harness tells a confirmed rejection apart.
+	rejected := startOutcomeFor(t, "rejected", brokerEnvelope(t, http.StatusConflict, "conflict", nil))
+	require.True(t, rejected.revoked)
+	require.True(t, rejected.runReverted)
+	require.NotEqual(t, timeout, rejected)
+
+	for _, code := range []string{brokerErrorCodeRunInProgress, brokerErrorCodeRunAlreadyStarted} {
+		t.Run(code, func(t *testing.T) {
+			e := brokerEnvelope(t, http.StatusConflict, code, nil)
+			assert.False(t, isConfirmedBrokerRejection(e))
+			assert.False(t, isConfirmedStartNotActedOnError(e))
+			assert.Equal(t, startUnconfirmed, startOutcomeOf(e))
+			// The same answer with a 500 status is not confirmed either.
+			assert.False(t, isConfirmedBrokerRejection(brokerEnvelope(t, http.StatusInternalServerError, code, nil)))
+
+			got := startOutcomeFor(t, code, e)
+			assert.False(t, got.revoked, "no credential revoke")
+			assert.False(t, got.runReverted, "no run revert")
+			assert.Equal(t, store.StartClaimUnconfirmed, got.claimState, "the claim is kept unconfirmed")
+			assert.Equal(t, timeout, got, "the end state equals the response-timeout case")
+		})
+	}
+}

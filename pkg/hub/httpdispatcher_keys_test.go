@@ -42,6 +42,16 @@ func newKeysDispatcherFixture(t *testing.T) (*HTTPAgentDispatcher, *mockKeysBrok
 	if err := memStore.CreateRuntimeBroker(ctx, broker); err != nil {
 		t.Fatalf("failed to create runtime broker: %v", err)
 	}
+	// DispatchAgentKeys loads the target's agent row for its placement
+	// backstop, so the agent exists on that broker.
+	project := &store.Project{ID: tid("project-1"), Name: "keys-project", Slug: "keys-project"}
+	if err := memStore.CreateProject(ctx, project); err != nil {
+		t.Fatalf("failed to create project: %v", err)
+	}
+	agent := &store.Agent{ID: tid("agent-1"), Slug: "test-agent", Name: "test-agent", ProjectID: project.ID, RuntimeBrokerID: broker.ID}
+	if err := memStore.CreateAgent(ctx, agent); err != nil {
+		t.Fatalf("failed to create agent: %v", err)
+	}
 
 	mockClient := &mockKeysBrokerClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}}
 	dispatcher := NewHTTPAgentDispatcherWithClient(memStore, mockClient, false, slog.Default())

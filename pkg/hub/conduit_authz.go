@@ -298,6 +298,19 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 			return nil, nil, err
 		}
 	}
+	// Flat placement guard (requirePinnedPlacement), after the permission
+	// checks so a caller without permission learns nothing about the
+	// agent's placement. Every grant reaching an agent is refused for a
+	// pinned agent whose saved placement is inconsistent, the agent-port
+	// proxy, the TCP tunnel and the agent PTY path alike, for user and
+	// agent callers: fail closed on conduit access, as resolvePTYPath does
+	// for attach. The refusal is a *PlacementConflictError (409), never an
+	// authorization result. callAgentControl mints no grant and is not
+	// covered: it only queues a credential refresh on the agent's own
+	// session (Hub-internal credential upkeep).
+	if _, err := checkAgentPinnedPlacement(ctx, s.store, agent); err != nil {
+		return nil, nil, err
+	}
 
 	params, err := conduitStreamParams(req)
 	if err != nil {

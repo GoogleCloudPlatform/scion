@@ -121,6 +121,8 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 			d := NewHTTPAgentDispatcherWithClient(s, NewAuthenticatedBrokerClient(s, false), false, slog.Default())
 			d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 			agent := &store.Agent{ID: tid("rr-agent"), Name: "w", Slug: "w", ProjectID: project.ID, RuntimeBrokerID: broker.ID, Runtime: tc.runtime}
+			// DispatchAgentKeys loads the agent row for its placement backstop.
+			require.NoError(t, s.CreateAgent(ctx, agent))
 
 			require.NoError(t, d.DispatchAgentStop(ctx, agent))
 			require.NoError(t, d.DispatchAgentRestart(ctx, agent))

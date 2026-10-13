@@ -604,6 +604,19 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
+	// Flat placement pre-check for stop and suspend (requirePinnedPlacement),
+	// before the stop intent, the offline-stop queue (queueOfflineStop) and
+	// any dispatch: a refused stop writes nothing, so no stop_queued state
+	// is recorded and the agent's capacity is untouched.
+	if action == api.AgentActionStop || action == api.AgentActionSuspend {
+		if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+			if !writeRuntimeTargetRefusal(w, err) {
+				writeErrorFromErr(w, err, "")
+			}
+			return
+		}
+	}
+
 	// The start claim a stop supersedes: the one held when the stop is
 	// recorded. It is released once the stop's dispatch succeeds.
 	stopSupersedes := agent.StartClaimID
@@ -1579,6 +1592,17 @@ func (s *Server) handleStopAllAgents(w http.ResponseWriter, r *http.Request, pro
 			res := stopAllResult{
 				ID:   agent.ID,
 				Name: agent.Name,
+			}
+
+			// Flat placement pre-check, as for a single stop: before the
+			// stop intent, so a refused agent is left exactly as it is.
+			if _, err := s.pinnedPlacementBroker(ctx, agent); err != nil {
+				res.Status = "error"
+				res.Error = err.Error()
+				mu.Lock()
+				results = append(results, res)
+				mu.Unlock()
+				return
 			}
 
 			supersedes := agent.StartClaimID

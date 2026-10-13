@@ -1926,6 +1926,11 @@ func (d *HTTPAgentDispatcher) dispatchProvision(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 
 	endpoint, err := d.getProvisioningBrokerEndpoint(ctx, agent)
 	if err != nil {
@@ -2276,6 +2281,11 @@ func (e *ErrEnvStillMissing) Error() string {
 // action. This makes the finalize HA-safe: the replay can land on any broker
 // replica because it carries the complete request state.
 func (d *HTTPAgentDispatcher) DispatchFinalizeEnv(ctx context.Context, agent *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
+	// Flat placement backstop: the first pass pinned the agent, so this
+	// refuses only a pin corrupted between the two passes.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return nil, err
+	}
 	return d.finalizeEnv(ctx, agent, env, false)
 }
 
@@ -3717,6 +3727,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 	ctx = withDispatchAgentID(ctx, agent.ID)
 
@@ -3869,6 +3884,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -3922,6 +3942,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentResetAuth(ctx context.Context, agent 
 // was deleted, and the caller must not finalize the agent's row.
 func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *store.Agent, deleteFiles, removeBranch, softDelete bool, deletedAt time.Time) error {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
@@ -4017,6 +4042,11 @@ func (d *HTTPAgentDispatcher) deletePreviousRuns(ctx context.Context, agent *sto
 	if agent.RunID == "" {
 		return nil
 	}
+	// Flat placement backstop, as in DispatchAgentDelete: a previous-run
+	// delete is a delete too.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	for i := len(agent.PreviousRunIDs) - 1; i >= 0; i-- {
 		prev := agent.PreviousRunIDs[i]
 		if prev == "" || prev == agent.RunID {
@@ -4053,6 +4083,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4079,6 +4114,13 @@ func (d *HTTPAgentDispatcher) DispatchAgentMessage(ctx context.Context, agent *s
 // as agentkeys.ErrNotDispatched: both failures are proven, Hub-side, before
 // any request could have reached a broker.
 func (d *HTTPAgentDispatcher) DispatchAgentKeys(ctx context.Context, target agentkeys.Target, operationID string, executeBefore time.Time, keys string) (agentkeys.BrokerResult, error) {
+	// Flat placement backstop, first: target is not an agent, so the row
+	// is loaded and checked, and target must name the agent's current
+	// Runtime Broker. Every failure is proven Hub-side, before anything is
+	// built or sent (agentkeys.ErrNotDispatched).
+	if err := d.keysPlacementBackstop(ctx, target); err != nil {
+		return agentkeys.BrokerResult{}, fmt.Errorf("%w: %w", agentkeys.ErrNotDispatched, err)
+	}
 	// Fail closed on a missing or already-past deadline before spending a
 	// network round trip on it: BrokerRequest.ExecuteBefore's doc requires a
 	// zero value to fail closed, and contract §4.3 lists "the Hub's own
@@ -4142,6 +4184,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentLogs(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4157,6 +4204,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
 		return "", 0, err
 	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
+		return "", 0, err
+	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
@@ -4170,6 +4222,11 @@ func (d *HTTPAgentDispatcher) DispatchAgentExec(ctx context.Context, agent *stor
 // DispatchCheckAgentPrompt checks if an agent has a non-empty prompt.md file.
 func (d *HTTPAgentDispatcher) DispatchCheckAgentPrompt(ctx context.Context, agent *store.Agent) (bool, error) {
 	if err := requireRuntimeBrokerAssigned(agent); err != nil {
+		return false, err
+	}
+	// Flat placement backstop (requirePinnedPlacement): first after the
+	// assignment check, before any store write or broker call.
+	if err := d.placementBackstop(ctx, agent); err != nil {
 		return false, err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)

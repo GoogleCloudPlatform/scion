@@ -86,6 +86,14 @@ server:
 
 Only `docker` targets and a single entry are accepted in this release. A process with `server.broker.instances` hosts only the flat instance, not a regular Runtime Broker. Startup is refused if the Hub is not in the same process or if the entry does not validate. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
 
+#### Inconsistent agent placement
+
+Every operation that reaches a Runtime Broker for an existing pinned agent first checks the agent's saved placement: start, restart, stop, suspend, delete, reset-auth, messages, keys, logs, exec, attach, conduit streams and port proxying, workspace sync, and dispatches queued for a Runtime Broker that was offline. Reading the agent (get, list, status) is not checked. The placement is inconsistent when the agent's pin does not name the Runtime Broker it is assigned to, the pin is incomplete, the agent has no Runtime Broker, the Runtime Broker no longer serves a single runtime target, or that Runtime Broker serves another runtime target. The Hub then refuses the operation with `409 runtime_target_pin_stale` (or `409 runtime_target_mismatch`), or with `409 runtime_broker_missing` when the Runtime Broker the agent is pinned to is no longer registered. Nothing is sent to any Runtime Broker, and Scion never looks for another one to run the agent on.
+
+An ordinary delete is refused in the same way, with or without `force`: removing the agent's record without reaching its Runtime Broker could leave a running workload behind and release its capacity with no evidence that it was torn down. The agent's record and its accounting stay as they are. No per-agent repair is available in this release; the recovery path is tracked in [ptone/scion#4844](https://github.com/ptone/scion/issues/4844).
+
+Because such an agent's record stays, it also counts as a live agent of its project: a project delete without `force` is refused while it remains ([ptone/scion#4811](https://github.com/ptone/scion/issues/4811)). A project delete with `force` removes the project's agent records with only best-effort runtime deletes. That is an operator's explicit, project-wide choice; Scion never selects it, or suggests it, for an agent whose placement is inconsistent.
+
 ## Moving an Agent to Another Runtime Broker
 
 `scion reincarnate <agent> --broker <name|id>` moves an agent to another Runtime Broker, for example to drain a broker or to reach different hardware. The agent keeps its ID, slug, and generation chain, and its workspace, uncommitted and unpushed changes included. The move is a [reincarnation](/scion/reference/cli/#scion-reincarnate): the agent starts a new generation on the target with a Hub-built preamble and the handoff you provide.

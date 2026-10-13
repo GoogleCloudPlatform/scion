@@ -23,6 +23,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerownership"
@@ -524,57 +525,250 @@ func flatDefaultProfileDroppedWarning(profile, brokerID string) string {
 
 // --- pinned placement (lifecycle) ----------------------------------------
 
-func stalePinRefusal(a *store.Agent) *RuntimeTargetRefusal {
-	return &RuntimeTargetRefusal{
-		Code:   ErrCodeRuntimeTargetPinStale,
-		Status: http.StatusConflict,
-		Message: fmt.Sprintf("agent %s is pinned to Runtime Broker %q but assigned to Runtime Broker %s; its placement must be repaired explicitly (delete and recreate it)",
-			a.ID, a.PinnedRuntimeBrokerID, a.RuntimeBrokerID),
-		Details: map[string]interface{}{
-			"agentId":               a.ID,
-			"pinnedRuntimeBrokerId": a.PinnedRuntimeBrokerID,
-			"runtimeBrokerId":       a.RuntimeBrokerID,
-		},
+// ErrCodeRuntimeBrokerMissing is the 409 for a pinned agent whose Runtime
+// Broker row no longer exists. Hub-only, like the other placement codes.
+const ErrCodeRuntimeBrokerMissing = "runtime_broker_missing"
+
+// inconsistentPlacementDocsURL is the docs anchor every placement refusal
+// cites: what an inconsistent saved placement means and what an operator
+// can (and cannot) do about it.
+const inconsistentPlacementDocsURL = "https://googlecloudplatform.github.io/scion/" +
+	"hosted/ha/multi-broker/#inconsistent-agent-placement"
+
+// inconsistentPlacementMessage is the frozen guidance text of a placement
+// refusal. It never suggests deleting and recreating the agent or a
+// project force delete: an ordinary delete refuses the same agent.
+func inconsistentPlacementMessage(a *store.Agent, reason string) string {
+	return fmt.Sprintf("agent %s is pinned to Runtime Broker %q (target %q) but its saved placement is inconsistent (%s); "+
+		"Scion will not operate on it through another Runtime Broker. "+
+		"No per-agent repair is available in this release (tracked in ptone/scion#4844); see %s.",
+		a.ID, a.PinnedRuntimeBrokerID, a.PinnedRuntimeTargetID, reason, inconsistentPlacementDocsURL)
+}
+
+// placementRefusalDetails are the details of a placement refusal: the
+// agent, its pin and the Runtime Broker it is assigned to.
+func placementRefusalDetails(a *store.Agent) map[string]interface{} {
+	return map[string]interface{}{
+		"agentId":               a.ID,
+		"pinnedRuntimeBrokerId": a.PinnedRuntimeBrokerID,
+		"pinnedRuntimeTargetId": a.PinnedRuntimeTargetID,
+		"runtimeBrokerId":       a.RuntimeBrokerID,
 	}
 }
 
-// checkPinnedPlacement is the pure stale-pin pre-check for start-shaped
-// dispatches of an existing agent. It reads only the agent and its Runtime
-// Broker row. A pin is valid only while it names the agent's current
-// Runtime Broker; an agent on a flat row with no pin is stale too. A missing
-// Runtime Broker row is not a placement refusal (nil), so today's
-// missing-Runtime-Broker handling applies.
+// stalePinRefusal is the 409 runtime_target_pin_stale for agent a whose
+// saved placement is inconsistent for reason.
+func stalePinRefusal(a *store.Agent, reason string) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:    ErrCodeRuntimeTargetPinStale,
+		Status:  http.StatusConflict,
+		Message: inconsistentPlacementMessage(a, reason),
+		Details: placementRefusalDetails(a),
+	}
+}
+
+// runtimeBrokerMissingRefusal is the 409 runtime_broker_missing for a
+// pinned agent whose Runtime Broker row is gone.
+func runtimeBrokerMissingRefusal(a *store.Agent) *RuntimeTargetRefusal {
+	return &RuntimeTargetRefusal{
+		Code:   ErrCodeRuntimeBrokerMissing,
+		Status: http.StatusConflict,
+		Message: inconsistentPlacementMessage(a,
+			fmt.Sprintf("the Runtime Broker this agent is pinned to, %s, is no longer registered", a.RuntimeBrokerID)),
+		Details: placementRefusalDetails(a),
+	}
+}
+
+// PlacementConflictError is a refusal by requirePinnedPlacement: the
+// agent's saved placement does not allow a broker-reaching operation.
+// Nothing was dispatched and nothing was written. It wraps the
+// *RuntimeTargetRefusal that handlers write with its own status, code and
+// details (writeRuntimeTargetRefusal), and it answers HTTPStatus so a
+// handler that writes errors with writeErrorFromErr gets the same 409.
+//
+// The delete engine treats it like a run mismatch (refuseDeletePlacement):
+// a delete never finalizes from it, under force or best-effort too.
+type PlacementConflictError struct {
+	Refusal *RuntimeTargetRefusal
+}
+
+func (e *PlacementConflictError) Error() string { return e.Refusal.Error() }
+
+func (e *PlacementConflictError) Unwrap() error { return e.Refusal }
+
+// HTTPStatus implements the apierr status interface.
+func (e *PlacementConflictError) HTTPStatus() (int, string, string) {
+	return e.Refusal.Status, e.Refusal.Code, e.Refusal.Message
+}
+
+func placementConflict(r *RuntimeTargetRefusal) *PlacementConflictError {
+	return &PlacementConflictError{Refusal: r}
+}
+
+// placementRefusalCodes are the codes requirePinnedPlacement refuses with.
+var placementRefusalCodes = map[string]bool{
+	ErrCodeRuntimeTargetPinStale: true,
+	ErrCodeRuntimeBrokerMissing:  true,
+	ErrCodeRuntimeTargetMismatch: true,
+}
+
+// placementRefusalOf returns the placement refusal err carries: a
+// *PlacementConflictError raised on this node, or a *RuntimeTargetRefusal
+// with a placement code rebuilt from a cross-node dispatch row (which
+// travels as a plain refusal, dispatchFailureError). Either way the Hub
+// refused before anything was sent.
+func placementRefusalOf(err error) (*RuntimeTargetRefusal, bool) {
+	var pc *PlacementConflictError
+	if errors.As(err, &pc) && pc.Refusal != nil {
+		return pc.Refusal, true
+	}
+	var r *RuntimeTargetRefusal
+	if errors.As(err, &r) && r != nil && placementRefusalCodes[r.Code] {
+		return r, true
+	}
+	return nil, false
+}
+
+// requirePinnedPlacement is the complete saved-placement check for a
+// broker-reaching operation on an existing agent. It runs after the
+// operation's authorization and before any dispatch, claim, intent,
+// reservation, credential or run-ID write, and it only reads: the agent
+// and its Runtime Broker row.
+//
+//   - unpinned, no Runtime Broker: errNoRuntimeBrokerAssigned (today's
+//     requireRuntimeBrokerAssigned answer);
+//   - unpinned, Runtime Broker row missing: nil (today's handling applies);
+//   - unpinned, legacy row: nil (the legacy path is unchanged);
+//   - unpinned, flat row: 409 runtime_target_pin_stale;
+//   - pinned with an incomplete pin, no Runtime Broker, a pin naming
+//     another Runtime Broker, or a row that is not flat: 409
+//     runtime_target_pin_stale;
+//   - pinned, Runtime Broker row missing: 409 runtime_broker_missing;
+//   - pinned, the row serves another runtime target: 409
+//     runtime_target_mismatch;
+//   - pinned and consistent: nil, with the row.
+//
+// Every refusal is a *PlacementConflictError. A store failure is returned
+// as is (a 500 for the caller, with nothing dispatched).
+func requirePinnedPlacement(ctx context.Context, st store.Store, a *store.Agent) (*store.RuntimeBroker, error) {
+	if a == nil {
+		return nil, errNoRuntimeBrokerAssigned
+	}
+	if !a.IsPinned() {
+		if a.RuntimeBrokerID == "" {
+			return nil, errNoRuntimeBrokerAssigned
+		}
+		broker, err := st.GetRuntimeBroker(ctx, a.RuntimeBrokerID)
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		if broker.IsFlat() {
+			return broker, placementConflict(stalePinRefusal(a,
+				fmt.Sprintf("it has no pin, but its Runtime Broker %s serves a single runtime target", a.RuntimeBrokerID)))
+		}
+		return broker, nil
+	}
+	if a.PinnedRuntimeBrokerID == "" || a.PinnedRuntimeTargetType == "" {
+		return nil, placementConflict(stalePinRefusal(a, "the pin is incomplete"))
+	}
+	if a.RuntimeBrokerID == "" {
+		return nil, placementConflict(stalePinRefusal(a, "it has no Runtime Broker assigned"))
+	}
+	if !a.PinValid() {
+		return nil, placementConflict(stalePinRefusal(a,
+			fmt.Sprintf("it is assigned to Runtime Broker %s", a.RuntimeBrokerID)))
+	}
+	broker, err := st.GetRuntimeBroker(ctx, a.RuntimeBrokerID)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, placementConflict(runtimeBrokerMissingRefusal(a))
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !broker.IsFlat() {
+		return broker, placementConflict(stalePinRefusal(a,
+			fmt.Sprintf("Runtime Broker %s does not serve a single runtime target", a.RuntimeBrokerID)))
+	}
+	if broker.RuntimeTarget.ID != a.PinnedRuntimeTargetID {
+		return broker, placementConflict(runtimeTargetMismatchRefusal(
+			api.CheckExpectedRuntimeTarget(broker.ID, broker.RuntimeTarget.ID, a.PinnedRuntimeTargetID)))
+	}
+	return broker, nil
+}
+
+// placementBackstop is the dispatcher's saved-placement check
+// (requirePinnedPlacement) for every broker-reaching method of an existing
+// agent. It runs inside the dispatcher method, so it also covers a caller
+// with no handler pre-check and a queued dispatch executed on the node that
+// holds the broker connection.
+func (d *HTTPAgentDispatcher) placementBackstop(ctx context.Context, agent *store.Agent) error {
+	_, err := requirePinnedPlacement(ctx, d.store, agent)
+	return err
+}
+
+// keysPlacementBackstop is placementBackstop for DispatchAgentKeys, whose
+// target is not an agent: it loads the agent row, checks it, and requires
+// target to name the agent's current Runtime Broker.
+func (d *HTTPAgentDispatcher) keysPlacementBackstop(ctx context.Context, target agentkeys.Target) error {
+	agent, err := d.store.GetAgent(ctx, target.AgentID)
+	if err != nil {
+		return fmt.Errorf("load agent %s for the placement check: %w", target.AgentID, err)
+	}
+	if _, err := requirePinnedPlacement(ctx, d.store, agent); err != nil {
+		return err
+	}
+	if target.RuntimeBrokerID != agent.RuntimeBrokerID {
+		return placementConflict(stalePinRefusal(agent,
+			fmt.Sprintf("the request names Runtime Broker %s", target.RuntimeBrokerID)))
+	}
+	return nil
+}
+
+// checkPinnedPlacement is the handler pre-check form of
+// requirePinnedPlacement (checkAgentPinnedPlacement on the Server's store).
 func (s *Server) checkPinnedPlacement(agent *store.Agent) error {
 	_, err := s.pinnedPlacementBroker(context.Background(), agent)
 	return err
 }
 
 // pinnedPlacementBroker is checkPinnedPlacement returning the agent's
-// Runtime Broker row (nil when it has none or the row is missing).
+// Runtime Broker row (nil when it has none or an unpinned agent's row is
+// missing).
 func (s *Server) pinnedPlacementBroker(ctx context.Context, agent *store.Agent) (*store.RuntimeBroker, error) {
 	return checkAgentPinnedPlacement(ctx, s.store, agent)
 }
 
-// checkAgentPinnedPlacement is the store-level body of checkPinnedPlacement,
-// shared with the dispatcher's start/restart backstop.
+// checkAgentPinnedPlacement is requirePinnedPlacement for a caller that
+// itself handles an agent with no Runtime Broker at all: an unpinned agent
+// with no Runtime Broker passes (nil, nil), so that caller's existing
+// handling applies (a stop records the stopped status, a start answers its
+// own missing-Runtime-Broker error). Every other state is
+// requirePinnedPlacement's answer, so a pinned agent with no Runtime Broker
+// or a missing row is refused.
 func checkAgentPinnedPlacement(ctx context.Context, st store.Store, agent *store.Agent) (*store.RuntimeBroker, error) {
-	if agent == nil || agent.RuntimeBrokerID == "" || st == nil {
+	if st == nil || agent == nil || (!agent.IsPinned() && agent.RuntimeBrokerID == "") {
 		return nil, nil
 	}
-	broker, err := st.GetRuntimeBroker(ctx, agent.RuntimeBrokerID)
-	if errors.Is(err, store.ErrNotFound) {
-		return nil, nil
+	return requirePinnedPlacement(ctx, st, agent)
+}
+
+// profileDefaultSAUnlessPinned is projectProfileDefaultSA for the create
+// paths: a pinned agent never gets a profile written onto it (the flat
+// contract), so the per-profile default lookup is skipped for it. It reads
+// the in-memory pin set before this point (applyPinnedPlacement), with no
+// broker read, so it cannot fail open.
+func (s *Server) profileDefaultSAUnlessPinned(ctx context.Context, agent *store.Agent, runtimeBrokerID string, project *store.Project) (profile, saID string) {
+	if agent.IsPinned() {
+		return "", ""
 	}
-	if err != nil {
-		return nil, err
+	requestProfile := ""
+	if agent.AppliedConfig != nil {
+		requestProfile = agent.AppliedConfig.Profile
 	}
-	if agent.IsPinned() && !agent.PinValid() {
-		return broker, stalePinRefusal(agent)
-	}
-	if broker.IsFlat() && !agent.IsPinned() {
-		return broker, stalePinRefusal(agent)
-	}
-	return broker, nil
+	return s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, requestProfile)
 }
 
 // lifecyclePlacementCheck applies the lifecycle-branch checks for resuming or
