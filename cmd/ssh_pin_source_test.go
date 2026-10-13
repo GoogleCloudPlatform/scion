@@ -103,6 +103,34 @@ func TestTunnelCLI_PinFlagsDoNotChangeOutcome(t *testing.T) {
 	}
 }
 
+// The flags steer only the hint also when it fires: for an existing agent
+// whose pin differs, the hint is printed with the flags, and the tunnel
+// then fails the same way with and without them (the fake hub has no
+// conduit route, a terminal exit 11 with no retry). The pin file is never
+// written.
+func TestTunnelCLI_PinMismatchDoesNotChangeOutcome(t *testing.T) {
+	hub := twoProjectHub(t, "tok")
+	pinFile := filepath.Join(t.TempDir(), "known_hosts")
+	alias := "scion.h.a.b-c"
+	pin := renderKnownHosts(map[string]string{alias: mustNormKey(t, testSSHPublicKey(t))})
+	require.NoError(t, os.WriteFile(pinFile, []byte(pin), 0o600))
+	run := func(extra ...string) (int, string, string) {
+		args := append([]string{"tunnel", "--stdio", "--ssh", "--hub", hub.srv.URL, "--project", "a"}, extra...)
+		return tunnelRunCLIOutput(t, nil, func() { t.Setenv("SCION_HUB_TOKEN", "tok") }, append(args, "b-c")...)
+	}
+	hint := "agent was recreated; run scion vscode --hub " + hub.srv.URL + " --project a b-c"
+
+	codeWithout, stderrWithout, outWithout := run()
+	codeWith, stderrWith, outWith := run("--known-hosts", pinFile, "--host-key-alias", alias)
+
+	assert.Equal(t, tunnelclient.ExitNoTunnelSupport, codeWithout, "stderr %q", stderrWithout)
+	assert.Equal(t, codeWithout, codeWith)
+	assert.Equal(t, stderrWithout, stderrWith)
+	assert.Contains(t, outWith, hint, "the mismatch path is reached with the flags")
+	assert.NotContains(t, outWithout, "agent was recreated")
+	assert.Equal(t, pin, readTestFile(t, pinFile), "the pin file is never written")
+}
+
 // With a pin source the hint reads only that file: a mismatch prints a
 // scion vscode command with the pinned hub, project and agent; a match, a
 // missing pin or a missing file is silent; a stale ssh-config pin for the

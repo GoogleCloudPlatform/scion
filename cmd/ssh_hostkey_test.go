@@ -45,11 +45,11 @@ func TestCheckSSHHostKeyPin_MismatchPrintsRecreatedHint(t *testing.T) {
 	require.Equal(t, tunnelclient.ExitOK, runSSHConfig(context.Background(), env, nil, true), errb.String())
 
 	var stderr bytes.Buffer
-	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c"))
+	require.NoError(t, checkSSHHostKeyPinIn(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c", sshPinSource{}))
 	assert.Empty(t, stderr.String(), "matching key: no output")
 
 	hub.rotateKey(t, "ag-c")
-	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c"))
+	require.NoError(t, checkSSHHostKeyPinIn(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c", sshPinSource{}))
 	assert.Equal(t, sshRecreatedHint+"\n", stderr.String())
 }
 
@@ -58,7 +58,7 @@ func TestCheckSSHHostKeyPin_NoPinNoOutput(t *testing.T) {
 	hub := twoProjectHub(t, "tok")
 	stubSSHTransport(t)
 	var stderr bytes.Buffer
-	require.NoError(t, checkSSHHostKeyPin(context.Background(), &stderr, t.TempDir(), hub.srv.URL, "tok", "a-b", "c"))
+	require.NoError(t, checkSSHHostKeyPinIn(context.Background(), &stderr, t.TempDir(), hub.srv.URL, "tok", "a-b", "c", sshPinSource{}))
 	assert.Empty(t, stderr.String())
 }
 
@@ -73,7 +73,7 @@ func TestCheckSSHHostKeyPin_DeletedAgentExitsAgentNotFoundPromptly(t *testing.T)
 
 	var stderr bytes.Buffer
 	start := time.Now()
-	err := checkSSHHostKeyPin(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c")
+	err := checkSSHHostKeyPinIn(context.Background(), &stderr, home, hub.srv.URL, "tok", "a-b", "c", sshPinSource{})
 	assert.Less(t, time.Since(start), 5*time.Second)
 	require.Error(t, err)
 	assert.Equal(t, tunnelclient.ExitAgentNotFound, tunnelclient.CodeOf(err))
@@ -166,7 +166,7 @@ func TestAgentSSHHostKey_HubResponseContract(t *testing.T) {
 	assert.Equal(t, "", got, "an absent field means no key")
 }
 
-// checkSSHHostKeyPin refuses an endpoint that is not a plain origin as given,
+// checkSSHHostKeyPinIn refuses an endpoint that is not a plain origin as given,
 // before normalising it, and sends no request.
 func TestCheckSSHHostKeyPin_RefusesRawEndpointBeforeNormalizing(t *testing.T) {
 	var requests atomic.Int32
@@ -186,7 +186,7 @@ func TestCheckSSHHostKeyPin_RefusesRawEndpointBeforeNormalizing(t *testing.T) {
 		"not a url",
 	} {
 		var stderr bytes.Buffer
-		err := checkSSHHostKeyPin(context.Background(), &stderr, t.TempDir(), bad, "tok", "p", "a")
+		err := checkSSHHostKeyPinIn(context.Background(), &stderr, t.TempDir(), bad, "tok", "p", "a", sshPinSource{})
 		assert.Equal(t, tunnelclient.ExitUsage, tunnelclient.CodeOf(err), bad)
 		assert.Empty(t, stderr.String(), bad)
 	}

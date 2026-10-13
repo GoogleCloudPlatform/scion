@@ -81,6 +81,14 @@ func tunnelRunCLI(t *testing.T, stdin io.Reader, args ...string) (int, string) {
 // home and working directories are isolated.
 func tunnelRunCLIWith(t *testing.T, stdin io.Reader, setup func(), args ...string) (int, string) {
 	t.Helper()
+	code, stderr, _ := tunnelRunCLIOutput(t, stdin, setup, args...)
+	return code, stderr
+}
+
+// tunnelRunCLIOutput is tunnelRunCLIWith that also returns what the command
+// wrote to its own stdout and stderr (for example the host-key hint).
+func tunnelRunCLIOutput(t *testing.T, stdin io.Reader, setup func(), args ...string) (int, string, string) {
+	t.Helper()
 	isolateRootHook(t)
 	for _, k := range []string{"SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE", "SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT", "SCION_PROJECT_ID", "XDG_RUNTIME_DIR"} {
 		t.Setenv(k, "")
@@ -107,12 +115,12 @@ func tunnelRunCLIWith(t *testing.T, stdin io.Reader, setup func(), args ...strin
 	rootCmd.SetArgs(args)
 	cmd, err := rootCmd.ExecuteC()
 	if err == nil {
-		return 0, ""
+		return 0, "", out.String()
 	}
 	require.True(t, plainErrorCommands[topLevelName(cmd)], "%s must report plain errors", cmd.CommandPath())
 	var stderr bytes.Buffer
 	code := reportPlainError(&stderr, err)
-	return code, stderr.String()
+	return code, stderr.String(), out.String()
 }
 
 func tunnelAssertOneLine(t *testing.T, stderr string) {

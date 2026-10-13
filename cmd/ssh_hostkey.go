@@ -189,18 +189,13 @@ func (h *sshHubConn) resolveSSHProjectID(ctx context.Context, project string) (i
 	return "", "", tunnelclient.Errorf(tunnelclient.ExitAgentNotFound, "project not found: %s", project)
 }
 
-// checkSSHHostKeyPin is the host-key check for scion tunnel --ssh. It fetches
-// the agent's current host key and compares it with the line ssh-config
-// pinned for this hub, project and agent. On a mismatch it prints the
-// recreated hint to stderr and returns nil, so ssh goes on to report the
-// mismatch itself. A missing agent returns exit 4 promptly.
-func checkSSHHostKeyPin(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string) error {
-	return checkSSHHostKeyPinIn(ctx, stderr, home, endpoint, token, project, agent, sshPinSource{})
-}
-
-// checkSSHHostKeyPinIn is checkSSHHostKeyPin with the pin read from pin,
-// or from the ssh-config files when pin is the zero value. It only prints
-// a hint: it never accepts, refuses or writes a pin.
+// checkSSHHostKeyPinIn is the host-key check for scion tunnel --ssh. It
+// fetches the agent's current host key and compares it with the pin: the
+// line in pin.knownHosts named pin.alias, or, when pin is the zero value,
+// the line ssh-config pinned for this hub, project and agent. On a mismatch
+// it prints the recreated hint to stderr and returns nil, so ssh goes on to
+// report the mismatch itself. A missing agent returns exit 4 promptly. It
+// only prints a hint: it never accepts, refuses or writes a pin.
 func checkSSHHostKeyPinIn(ctx context.Context, stderr io.Writer, home, endpoint, token, project, agent string, pin sshPinSource) error {
 	// The endpoint as given must be a plain origin before it is normalized.
 	if _, err := sshEndpointURL(endpoint); err != nil {
@@ -294,17 +289,11 @@ func checkPinnedSSHHostKey(stderr io.Writer, p sshPaths, endpoint, projectSlug, 
 // it never delays scion tunnel --ssh by more than this.
 const sshHostKeyHintTimeout = 5 * time.Second
 
-// tunnelSSHHostKeyHint prints the recreated-agent hint for scion tunnel
-// --ssh when the agent's current host key differs from the pinned one. It
-// is a hint only: every error (no project, no credential, a failed hub
-// request, a missing known-hosts file) is ignored, and the tunnel always
-// continues, so ssh itself refuses a changed key.
-func tunnelSSHHostKeyHint(cmd *cobra.Command, ssh bool, endpoint, project, agent string) {
-	tunnelSSHHostKeyHintIn(cmd, ssh, endpoint, project, agent, sshPinSource{})
-}
-
-// tunnelSSHHostKeyHintIn is tunnelSSHHostKeyHint with the pin read from
-// pin (see checkSSHHostKeyPinIn).
+// tunnelSSHHostKeyHintIn prints the recreated-agent hint for scion tunnel
+// --ssh when the agent's current host key differs from the pin (see
+// checkSSHHostKeyPinIn). It is a hint only: every error (no project, no
+// credential, a failed hub request, a missing known-hosts file) is ignored,
+// and the tunnel always continues, so ssh itself refuses a changed key.
 func tunnelSSHHostKeyHintIn(cmd *cobra.Command, ssh bool, endpoint, project, agent string, pin sshPinSource) {
 	if !ssh || project == "" {
 		return
