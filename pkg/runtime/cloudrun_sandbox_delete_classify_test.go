@@ -69,15 +69,15 @@ func TestClassifySandboxDelete(t *testing.T) {
 	}
 }
 
-func TestSandboxDeleteOutputForLog(t *testing.T) {
+func TestSandboxCommandOutputForLog(t *testing.T) {
 	short := "Error: sandbox not found"
-	if got := sandboxDeleteOutputForLog(short); got != short {
-		t.Errorf("sandboxDeleteOutputForLog(short) = %q, want it unchanged", got)
+	if got := sandboxCommandOutputForLog(short); got != short {
+		t.Errorf("sandboxCommandOutputForLog(short) = %q, want it unchanged", got)
 	}
-	long := strings.Repeat("x", maxSandboxDeleteOutput)
-	got := sandboxDeleteOutputForLog(long)
-	if want := strings.Repeat("x", maxSandboxDeleteOutputLog) + "...(truncated)"; got != want {
-		t.Errorf("sandboxDeleteOutputForLog(64 KiB) has length %d, want %d", len(got), len(want))
+	long := strings.Repeat("x", maxSandboxCommandOutput)
+	got := sandboxCommandOutputForLog(long)
+	if want := strings.Repeat("x", maxSandboxCommandOutputLog) + "...(truncated)"; got != want {
+		t.Errorf("sandboxCommandOutputForLog(64 KiB) has length %d, want %d", len(got), len(want))
 	}
 }
 
