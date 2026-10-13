@@ -16,6 +16,10 @@ The Experiments tab lists every experiment this hub version knows about: its tit
 - **The admin value applies on every page load where the experiments request succeeds.** If that request fails for a given page load (a transient error, a mixed-version replica during a rollout, an expired session), the browser falls back to its localStorage override, then to the compiled default, for that page load only; the next successful load restores the admin value.
 - **If the stored experiment settings become unreadable:** every server-layer experiment turns off (regardless of its default or any override), every web-only experiment returns to its registry default (so a disabled default-on UI experiment can reappear until the row is reset), an error is logged on the hub, and the tab shows a banner with a **"Reset all to defaults"** button that clears every stored override, including overrides for experiments not known to this hub version.
 
+## For agents
+
+An agent can see which experiments are on with `scion whoami --full`, which reads `GET /api/v1/experiments` live (see [`scion whoami`](/scion/reference/cli/#scion-whoami)). That includes `hub.artifacts`. The environment variable `SCION_HUB_EXPERIMENTS` covers only the experiments dispatched to agents (currently `hub.conduit`), fixed when the agent starts; it is not the list of enabled experiments.
+
 ## For developers: launching an experiment
 
 1. Open or link a tracking issue.

@@ -2446,5 +2446,84 @@ class TestAtomicWriteJsonSymlinkGuards(unittest.TestCase):
         self.assertTrue(second.startswith(".out.json.tmp-"))
 
 
+class VertexLocationPrecedenceTest(unittest.TestCase):
+    """GOOGLE_CLOUD_LOCATION > GOOGLE_CLOUD_REGION > CLOUD_ML_REGION (ptone/scion#4719)."""
+
+    def _resolve(self, env: dict[str, str], **kwargs: Any) -> tuple[tuple[str, str], list[str]]:
+        warnings: list[str] = []
+        got = sh.resolve_vertex_location(lambda k: env.get(k, ""), warn_fn=warnings.append, **kwargs)
+        return got, warnings
+
+    def test_key_order(self) -> None:
+        self.assertEqual(
+            sh.vertex_location_keys(),
+            ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION"),
+        )
+        self.assertEqual(
+            sh.vertex_location_keys(preferred=("P",), include_ml_region=False, fallback=("F",)),
+            ("P", "GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "F"),
+        )
+
+    def test_only_region(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_REGION": "us-central1"}),
+            (("GOOGLE_CLOUD_REGION", "us-central1"), []),
+        )
+
+    def test_only_location(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5"}),
+            (("GOOGLE_CLOUD_LOCATION", "us-east5"), []),
+        )
+
+    def test_both_equal(self) -> None:
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-east5"}),
+            (("GOOGLE_CLOUD_LOCATION", "us-east5"), []),
+        )
+
+    def test_both_differ_location_wins_with_one_warning(self) -> None:
+        got, warnings = self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(got, ("GOOGLE_CLOUD_LOCATION", "us-east5"))
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_LOCATION='us-east5'", warnings[0])
+        self.assertIn("GOOGLE_CLOUD_REGION='us-central1'", warnings[0])
+
+    def test_conflict_compares_raw_values(self) -> None:
+        # Same rule as the Go resolver: values are compared untrimmed.
+        got, warnings = self._resolve({"GOOGLE_CLOUD_LOCATION": "us-east5 ", "GOOGLE_CLOUD_REGION": "us-east5"})
+        self.assertEqual(got, ("GOOGLE_CLOUD_LOCATION", "us-east5 "))
+        self.assertEqual(len(warnings), 1)
+
+    def test_neither(self) -> None:
+        self.assertEqual(self._resolve({}), (("", ""), []))
+
+    def test_cloud_ml_region_is_last_fallback(self) -> None:
+        self.assertEqual(
+            self._resolve({"CLOUD_ML_REGION": "europe-west4"}),
+            (("CLOUD_ML_REGION", "europe-west4"), []),
+        )
+        self.assertEqual(
+            self._resolve({"CLOUD_ML_REGION": "europe-west4"}, include_ml_region=False),
+            (("", ""), []),
+        )
+        self.assertEqual(
+            self._resolve({"GOOGLE_CLOUD_REGION": "us-central1", "CLOUD_ML_REGION": "europe-west4"})[0],
+            ("GOOGLE_CLOUD_REGION", "us-central1"),
+        )
+
+    def test_preferred_key_wins_without_warning(self) -> None:
+        got, warnings = self._resolve(
+            {"VERTEX_REGION": "asia-east1", "GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"},
+            preferred=("VERTEX_REGION",),
+        )
+        self.assertEqual(got, ("VERTEX_REGION", "asia-east1"))
+        self.assertEqual(warnings, [])
+
+    def test_no_warn_fn_is_silent(self) -> None:
+        env = {"GOOGLE_CLOUD_LOCATION": "us-east5", "GOOGLE_CLOUD_REGION": "us-central1"}
+        self.assertEqual(sh.resolve_vertex_location(env.get), ("GOOGLE_CLOUD_LOCATION", "us-east5"))
+
+
 if __name__ == "__main__":
     unittest.main()

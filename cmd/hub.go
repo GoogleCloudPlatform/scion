@@ -554,18 +554,38 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 		return info
 	}
 
-	// Proxy-auth mode: transport auth is active but no PAT/token configured.
-	// This checks only transport auth presence, not hub proxy mode, because:
-	// (a) getAuthInfo is informational — it doesn't enforce access control,
-	// (b) the client cannot know the hub's proxy-auth mode at this point,
-	// (c) the hub validates the IAP assertion server-side, which is the real guard.
-	if src, err := transportauth.FromEnv(); src != nil && err == nil {
-		info.Method = "Proxy-auth (transport)"
-		info.MethodType = "proxy-auth"
-		info.Source = "transport auth"
-		return info
-	}
+	return noCredentialAuthInfo()
+}
 
+// noCredentialAuthInfo is the authInfo for a hub the CLI has no credential
+// for: proxy auth when transport auth is active, otherwise none.
+//
+// Proxy-auth mode: transport auth is active but no PAT/token configured.
+// This checks only transport auth presence, not hub proxy mode, because:
+// (a) getAuthInfo is informational — it doesn't enforce access control,
+// (b) the client cannot know the hub's proxy-auth mode at this point,
+// (c) the hub validates the IAP assertion server-side, which is the real guard.
+func noCredentialAuthInfo() authInfo {
+	if src, err := transportauth.FromEnv(); src != nil && err == nil {
+		return authInfo{
+			Method:     "Proxy-auth (transport)",
+			MethodType: "proxy-auth",
+			Source:     "transport auth",
+		}
+	}
+	return authInfo{Method: "none", MethodType: "none"}
+}
+
+// scopeDevAuth limits a dev token to the hubs that can accept it. A dev
+// token is valid only on the workstation server that wrote it, which
+// listens on a loopback address, so for any other hub info is replaced by
+// what getAuthInfo gives without a dev token (noCredentialAuthInfo: proxy
+// auth when transport auth is active, otherwise none). 'scion use', 'hub
+// status' and 'hub list' report a hub's credential with this rule.
+func scopeDevAuth(info authInfo, endpoint string) authInfo {
+	if info.IsDevAuth && !isLocalhostEndpoint(endpoint) {
+		info = noCredentialAuthInfo()
+	}
 	return info
 }
 
@@ -579,7 +599,12 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
 	}
+	return hubClientForEndpoint(settings, endpoint)
+}
 
+// hubClientForEndpoint returns a client for the hub at endpoint, with the
+// credential getHubClient would choose for that endpoint.
+func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
 	// Get auth info for logging
@@ -783,8 +808,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	enabledScope := getHubEnabledScope(resolvedPath, isGlobal, settings)
 	endpointScope := getHubEndpointScope(isGlobal, target)
 
-	// Get authentication info
-	authInfo := getAuthInfo(settings, endpoint)
+	// Get authentication info: the credential this hub can accept.
+	authInfo := scopeDevAuth(getAuthInfo(settings, endpoint), endpoint)
 
 	if isJSONOutput() {
 		status := map[string]interface{}{
@@ -891,8 +916,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	}
 	fmt.Printf("Configured: %v\n", settings.IsHubConfigured())
 
-	// Show project_id from top-level setting (where it's now stored)
-	fmt.Printf("Project ID: %s\n", valueOrNone(settings.ProjectID))
+	fmt.Printf("Project ID: %s\n", hubStatusProjectID(settings, target))
 	if settings.Hub != nil {
 		fmt.Printf("Broker ID:  %s\n", valueOrNone(settings.Hub.BrokerID))
 	}
@@ -1012,6 +1036,18 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// hubStatusProjectID returns the value of the Project ID line of hub status.
+// Outside a project directory with a project selected with 'scion use', it
+// is that project's hub ID, marked as the current context, as in the
+// Project Context section. Otherwise it is the project_id of the resolved
+// settings.
+func hubStatusProjectID(settings *config.Settings, t useTarget) string {
+	if t.ProjectSource == useSourceContext && t.ProjectID != "" {
+		return t.ProjectID + " (current context)"
+	}
+	return valueOrNone(settings.ProjectID)
 }
 
 // printProjectContext prints information about the current project's registration and available brokers.
@@ -2563,7 +2599,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if hubProject != nil && hubProject.Name == projectName {
 		// Already linked — still call register so the server can backfill
 		// the membership group if it was created before group support.
-		if _, err := registerProjectOnHub(ctx, client, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
+		if _, err := registerProjectOnHub(ctx, client, endpoint, hubLookupID, projectName, resolvedPath, isGlobal); err != nil {
 			util.Debugf("Failed to register during re-link (non-fatal): %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "Project '%s' is already linked to the Hub (ID: %s)\n", projectName, projectID)
@@ -2634,7 +2670,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				// Register with the selected project's ID so the hub creates
 				// the membership group (and adds this user as owner) if it
 				// doesn't already exist.
-				if _, err := registerProjectOnHub(ctx, client, selectedID, projectName, resolvedPath, isGlobal); err != nil {
+				if _, err := registerProjectOnHub(ctx, client, endpoint, selectedID, projectName, resolvedPath, isGlobal); err != nil {
 					util.Debugf("Failed to register during link (non-fatal): %v", err)
 				}
 				// Store the hub project ID separately — don't overwrite the
@@ -2646,7 +2682,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 				fmt.Fprintf(os.Stderr, "Linked to existing project (ID: %s)\n", selectedID)
 			case hubsync.ProjectChoiceRegisterNew:
 				// Register as a new project on the Hub using the local project_id.
-				hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+				hubProjectID, err := registerProjectOnHub(ctx, client, endpoint, projectID, projectName, resolvedPath, isGlobal)
 				if err != nil {
 					return err
 				}
@@ -2660,7 +2696,7 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 			}
 		} else {
 			// No matching projects - create new one
-			hubProjectID, err := registerProjectOnHub(ctx, client, projectID, projectName, resolvedPath, isGlobal)
+			hubProjectID, err := registerProjectOnHub(ctx, client, endpoint, projectID, projectName, resolvedPath, isGlobal)
 			if err != nil {
 				return err
 			}
@@ -2820,8 +2856,10 @@ func offerTemplateSyncOnLink(projectPath, endpoint, projectID string, isGlobal b
 	})
 }
 
-// registerProjectOnHub registers a new project on the Hub.
-func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
+// registerProjectOnHub registers a new project on the Hub. endpoint is the
+// hub's endpoint, used to choose the registration's labels (see
+// hubsync.LinkedProjectLabels).
+func registerProjectOnHub(ctx context.Context, client hubclient.Client, endpoint, projectID, projectName, projectPath string, isGlobal bool) (string, error) {
 	var gitRemote string
 	if !isGlobal {
 		gitRemote = util.GetGitRemote()
@@ -2832,6 +2870,7 @@ func registerProjectOnHub(ctx context.Context, client hubclient.Client, projectI
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      projectPath,
+		Labels:    hubsync.LinkedProjectLabels(endpoint, gitRemote),
 	}
 
 	resp, err := client.Projects().Register(ctx, req)

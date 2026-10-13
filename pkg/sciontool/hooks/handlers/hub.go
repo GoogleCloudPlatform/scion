@@ -237,6 +237,12 @@ func (h *HubHandler) Handle(event *hooks.Event) error {
 			log.Debug("Hub: Skipping waiting_for_input from sub-agent (local status held)")
 			return nil
 		}
+		// Any Notification, the parent's included, leaves limits_exceeded
+		// and crashed in place locally; the Hub follows.
+		if h.isLocalTerminal() {
+			log.Debug("Hub: Skipping waiting_for_input (local status terminal)")
+			return nil
+		}
 		// Agent is waiting for input
 		message := "Waiting on parent"
 		if event.Data.Message != "" {
@@ -329,6 +335,12 @@ func isLocalSubagentEndRelease() bool {
 // blocked, completed, limits_exceeded or crashed.
 func (h *HubHandler) isLocalHeldNonWaiting() bool {
 	return isHeldNonWaitingActivity(readLocalActivity())
+}
+
+// isLocalTerminal reports whether the local agent-info.json holds a
+// terminal activity: limits_exceeded or crashed (state.Activity.IsTerminal).
+func (h *HubHandler) isLocalTerminal() bool {
+	return state.Activity(readLocalActivity()).IsTerminal()
 }
 
 // readLocalActivity returns the activity recorded in the local

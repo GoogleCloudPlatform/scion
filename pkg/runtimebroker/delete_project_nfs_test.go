@@ -405,7 +405,7 @@ func TestDeleteProject_NFS_DeletedProjectsLiveAgentRetryRemovesTree(t *testing.T
 	assertGone(t, treeA)
 }
 
-func TestNewProjectAgentsInUse(t *testing.T) {
+func TestNewProjectAgentsInUseReason(t *testing.T) {
 	srv, _, _ := newNFSDeleteTestServer(t)
 	mgr := srv.manager.(*filteringMockManager)
 	ctx := context.Background()
@@ -420,14 +420,14 @@ func TestNewProjectAgentsInUse(t *testing.T) {
 	if known[""] {
 		t.Fatal("the snapshot must never hold an empty key")
 	}
-	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); inUse || err != nil {
-		t.Fatalf("known agents only: inUse=%v err=%v, want false", inUse, err)
+	if inUse, reason, err := srv.newProjectAgentsInUseReason(ctx, scopeProjA, known); inUse || reason != "" || err != nil {
+		t.Fatalf("known agents only: inUse=%v reason=%q err=%v, want false with no reason", inUse, reason, err)
 	}
 	// Same empty AgentInfo.ID and the same pod name as a known agent (a
 	// re-created agent with the same name), but a new agent_id: in use.
 	mgr.agents = append(mgr.agents, liveAgent("agent-new", scopeProjA))
-	if inUse, _ := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse {
-		t.Fatal("a new running agent of the project must count as in use")
+	if inUse, reason, _ := srv.newProjectAgentsInUseReason(ctx, scopeProjA, known); !inUse || reason != projectInUseHere {
+		t.Fatalf("a new running agent of the project: inUse=%v reason=%q, want in use on this instance", inUse, reason)
 	}
 	mgr.agents = mgr.agents[:len(mgr.agents)-1]
 
@@ -436,20 +436,20 @@ func TestNewProjectAgentsInUse(t *testing.T) {
 	keyless := api.AgentInfo{Phase: string(state.PhaseRunning),
 		Labels: map[string]string{"scion.agent": "true", "scion.project_id": scopeProjA}}
 	mgr.agents = append(mgr.agents, keyless)
-	if inUse, _ := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse {
-		t.Fatal("a running agent without a key must count as in use")
+	if inUse, reason, _ := srv.newProjectAgentsInUseReason(ctx, scopeProjA, known); !inUse || reason != projectInUseHere {
+		t.Fatalf("a running agent without a key: inUse=%v reason=%q, want in use on this instance", inUse, reason)
 	}
 	if ids, _ := srv.projectAgentIDs(ctx, scopeProjA); ids[""] {
 		t.Fatal("a keyless agent must not put an empty key in the snapshot")
 	}
 	mgr.agents = mgr.agents[:len(mgr.agents)-1]
 	mgr.listErr = errors.New("list failed")
-	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, known); !inUse || err == nil {
-		t.Fatalf("listing error: inUse=%v err=%v, want true with error", inUse, err)
+	if inUse, reason, err := srv.newProjectAgentsInUseReason(ctx, scopeProjA, known); !inUse || reason != projectInUseListingFailed || err == nil {
+		t.Fatalf("listing error: inUse=%v reason=%q err=%v, want in use, the listing reason and the error", inUse, reason, err)
 	}
 	srv.manager = nil
-	if inUse, err := srv.newProjectAgentsInUse(ctx, scopeProjA, nil); inUse || err != nil {
-		t.Fatalf("nil manager: inUse=%v err=%v, want false", inUse, err)
+	if inUse, reason, err := srv.newProjectAgentsInUseReason(ctx, scopeProjA, nil); inUse || reason != "" || err != nil {
+		t.Fatalf("nil manager: inUse=%v reason=%q err=%v, want false with no reason", inUse, reason, err)
 	}
 }
 
