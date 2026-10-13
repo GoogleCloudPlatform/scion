@@ -138,6 +138,7 @@ func createUnknownOutcome(t *testing.T, err error, gather bool) (*Server, store.
 	t.Helper()
 	disp := &keepRecordingCreateDispatcher{failingCreateDispatcher: failingCreateDispatcher{createErr: err}}
 	srv, s, project := setupCreateAgentServer(t, disp)
+	setAgentQuotaLimits(t, s) // reservations are taken only under a limit
 	srv.startClaimsOn = true
 	srv.events = &createdCountingPublisher{EventPublisher: srv.events}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", CreateAgentRequest{
