@@ -2570,11 +2570,12 @@ authDone:
 	// Record the running phase, runtime and profile before the container
 	// starts rather than after it: some runtimes do not let the host write
 	// files in the container (ptone/scion#4766). Once up, the container
-	// reports its own phase (sciontool init writes "running"). This covers
-	// only the running-phase write: the "error" write on a failed launch
-	// below still writes agent-info.json after Run. (The run ID record
-	// after the create, when the pre-start List failed, goes to the
-	// host-owned host state file, ptone/scion#4771.)
+	// reports its own phase (sciontool init writes "running"). A failed
+	// launch is recorded in the host-owned host state file
+	// (ptone/scion#4815, see setStartFailedRunID); the record is cleared
+	// here, before Run, and set below when Run fails. (The run ID record
+	// after the create, when the pre-start List failed, goes to the same
+	// file, ptone/scion#4771.)
 	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
@@ -2586,14 +2587,24 @@ authDone:
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
 	}
+	if err := setStartFailedRunID(RunOwnerTargetFor(opts), ""); err != nil {
+		slog.Warn("Start: failed to clear the failed-start record in the host state file; list may show this agent as errored",
+			"agent", opts.Name, "run_id", runID, "error", err)
+	}
 	id, err := m.Runtime.Run(ctx, runCfg)
 	if err != nil {
 		// agent-info.json was set to "running" above, before the runtime
 		// launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom agent forever. This write comes after Run, so on a
-		// runtime whose Run fails after creating the container it may run
-		// while the container exists; tracked in ptone/scion#4815.
+		// workspace but record the error so list/status do not report a
+		// phantom agent forever. Some runtimes do not let the host write
+		// files in the container, so the record that always lands is the
+		// one in the host-owned host state file, which list reads
+		// (ptone/scion#4815). The agent-info.json write is kept, best
+		// effort, for readers of that file; it may fail on such runtimes.
+		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
+			slog.Warn("Start: failed to record the failed start in the host state file",
+				"agent", opts.Name, "run_id", runID, "error", recErr)
+		}
 		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
 			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
 		}
