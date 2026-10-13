@@ -170,15 +170,10 @@ func hubAuthLabel(info authInfo) string {
 }
 
 // hubAuthFor computes, from local state only, how the CLI authenticates to
-// endpoint. A dev token is valid only on the workstation server that wrote
-// it, which listens on a loopback address, so for any other hub it does not
-// count and the hub has no credential.
+// endpoint, with the dev token counting only for a loopback hub (see
+// scopeDevAuth).
 func hubAuthFor(endpoint string) authInfo {
-	info := getAuthInfo(&config.Settings{}, endpoint)
-	if info.IsDevAuth && !isLocalhostEndpoint(endpoint) {
-		return authInfo{Method: "none", MethodType: "none"}
-	}
-	return info
+	return scopeDevAuth(getAuthInfo(&config.Settings{}, endpoint), endpoint)
 }
 
 // hubAuthToken returns the credential 'hub list --check' sends to the hub at

@@ -473,8 +473,7 @@ func TestHubStatus_ContextProject(t *testing.T) {
 	assert.Contains(t, out, "Project:    foo\n")
 	assert.Contains(t, out, "Type:       hub project (current context)\n")
 	assert.Contains(t, out, "Hub Project:  Foo (ID: "+ctxTestProjectID+")\n")
-	assert.Contains(t, out, "Project ID: "+ctxTestProjectID+" (current context)\n",
-		"the header names the context project, as the Project Context section does")
+	assert.Contains(t, out, "Project ID: "+ctxTestProjectID+" (current context)\n", "the header names the context project")
 	assert.NotContains(t, out, "Project ID: (not configured)")
 	assert.NotContains(t, out, "Linked: no")
 	assert.NotContains(t, out, "hub link")

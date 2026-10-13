@@ -17,6 +17,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1207,4 +1208,67 @@ func TestHubList_CheckSendsOnlyEntryTransport(t *testing.T) {
 	for _, a := range audiences {
 		assert.Equal(t, "entry-aud", a)
 	}
+}
+
+// TestUseShow_DevTokenScope: bare 'scion use' applies the dev token rule of
+// 'hub list': a remote hub with only a dev token has no credential.
+func TestUseShow_DevTokenScope(t *testing.T) {
+	setupRegistryTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	saveTestContext(t, ctxTestHub, ctxTestProjectID)
+
+	stdout, _, err := runScion(t, "use")
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "Auth:     not logged in; run 'scion hub auth login --hub prod'\n", "remote hub, dev token only")
+	assert.NotContains(t, stdout, "Dev auth")
+
+	stdout, _, err = runScion(t, "use", "--format", "json")
+	require.NoError(t, err)
+	var got struct {
+		Effective struct {
+			Auth map[string]interface{} `json:"auth"`
+		} `json:"effective"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got))
+	assert.Equal(t, map[string]interface{}{"method": "none"}, got.Effective.Auth)
+}
+
+// TestHubStatus_DevTokenScope: hub status applies the same dev token rule.
+// A hub that is not on a loopback name gets no dev token credential, so
+// its auth method is none and nothing is verified with it. The fake hub
+// listens on 127.0.0.2, which the CLI does not treat as loopback, and
+// would accept the dev token if it were sent for verification.
+func TestHubStatus_DevTokenScope(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	ln, err := net.Listen("tcp", "127.0.0.2:0")
+	if err != nil {
+		t.Skipf("127.0.0.2 is not available here: %v", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case "/api/v1/auth/me":
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "u1", "email": "dev@example.com"})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	_ = srv.Listener.Close()
+	srv.Listener = ln
+	srv.Start()
+	t.Cleanup(srv.Close)
+	saveTestContext(t, srv.URL, ctxTestProjectID)
+	outputFormat = "json"
+	t.Cleanup(func() { outputFormat = "" })
+
+	out := runHubStatusForTest(t)
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, "none", got["authMethod"], "a non-loopback hub gets no dev token credential")
+	assert.Equal(t, false, got["isDevAuth"])
+	_, verified := got["authVerified"]
+	assert.False(t, verified, "no credential, so nothing is verified")
 }

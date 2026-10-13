@@ -569,6 +569,18 @@ func getAuthInfo(settings *config.Settings, endpoint string) authInfo {
 	return info
 }
 
+// scopeDevAuth limits a dev token to the hubs that can accept it. A dev
+// token is valid only on the workstation server that wrote it, which
+// listens on a loopback address, so for any other hub info is replaced by
+// no credential. 'scion use', 'hub status' and 'hub list' report a hub's
+// credential with this rule.
+func scopeDevAuth(info authInfo, endpoint string) authInfo {
+	if info.IsDevAuth && !isLocalhostEndpoint(endpoint) {
+		return authInfo{Method: "none", MethodType: "none"}
+	}
+	return info
+}
+
 func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	// With a hub profile selected, the client comes only from the profile:
 	// none of the credentials below is read, and there is no fallback.
@@ -783,8 +795,8 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 	enabledScope := getHubEnabledScope(resolvedPath, isGlobal, settings)
 	endpointScope := getHubEndpointScope(isGlobal, target)
 
-	// Get authentication info
-	authInfo := getAuthInfo(settings, endpoint)
+	// Get authentication info: the credential this hub can accept.
+	authInfo := scopeDevAuth(getAuthInfo(settings, endpoint), endpoint)
 
 	if isJSONOutput() {
 		status := map[string]interface{}{
