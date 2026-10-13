@@ -157,7 +157,7 @@ Settings (in the `artifacts` section): `remote_images_enabled` (default `true`),
 
 An artifact whose entry file is HTML (a single page or a small site published as a folder) is shown in a sandboxed frame. The page's scripts run, but in an isolated origin with no access to the hub page around it, to your session or to the hub's API.
 
-- The frame loads the version through a **view URL**, `/api/v1/artifacts/view/<capability>/<entry>`, issued to a reader of the artifact and valid for 30 minutes. Relative links in the bundle (`img/chart.png`, `css/site.css`) resolve under it, so the page loads its own files. The view URL names one version of one artifact and gives access to nothing else; it is not a share link.
+- The frame loads the version through a **view URL**, `/api/v1/artifacts/view/<capability>/<entry>`, issued to a reader of the artifact and valid for 30 minutes. Relative links in the bundle (`img/chart.png`, `css/site.css`) resolve under it, so the page loads its own files. The view URL names one version of one artifact and gives access to nothing else; it is not a share link. `scion artifact view <ref>` prints one from the CLI; with `--check` it also reports `href` and `src` links in the version's HTML files that name no file of the version (see the [CLI reference](/scion/reference/cli/#scion-artifact)).
 - Every view response carries a `Content-Security-Policy` with a `sandbox` directive, so the page stays isolated even when the URL is opened directly. The page may load scripts, styles, images, fonts and media only from its own files under the view URL; it cannot make network requests from script, embed other frames or plugins, submit forms, open windows or navigate the page around it.
 - **Remote images are not loaded in HTML artifacts; include them in the bundle.** When an HTML entry references images by absolute `http(s)` URL, the publish response and the CLI print that warning, and the viewer shows it above the frame.
 
@@ -176,6 +176,8 @@ A share link lets anyone who holds it open an artifact's current version in a br
   - Or set the artifact to expire, under **Retention** in the Share dialog or with `PATCH /api/v1/artifacts/{id}`. From the moment it expires, its share links stop working.
 
 ## Grants
+
+From the CLI, `scion artifact grants <ref>` lists an artifact's grants and adds, changes or removes one (see the [CLI reference](/scion/reference/cli/#scion-artifact)).
 
 A grant gives someone else access to one artifact. The subject is a person or an agent (`user:<id>`, `agent:<id>`) or a project (its members and agents), with one of three permissions: **read** (open the artifact and its versions), **write** (also publish new versions) and **admin** (also manage its grants and share links, change its expiry and move it). The owner holds admin implicitly.
 

@@ -310,6 +310,14 @@ func Execute() {
 		rootCmd.Long = ""
 	}
 
+	// "<group> <unknown> --help" is an unknown command, not the group's
+	// help (ptone/scion#4579). Checked after the mode restrictions, so a
+	// subcommand the mode removed is unknown too.
+	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
+		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
+		os.Exit(1)
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil && topLevelName(cmd) == "ssh" {
 		// scion ssh follows the ssh convention: any failure before the
