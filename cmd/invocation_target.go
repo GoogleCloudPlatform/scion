@@ -136,7 +136,9 @@ func mergedHubEndpoint(projectDir string) string {
 // contextSkippedSubtrees are top-level commands for which the current
 // context is never applied. The server and the runtime broker take their
 // hub endpoint from the global settings (it is the endpoint the server
-// advertises to its agents), so 'scion use' must never retarget them.
+// advertises to its agents), so 'scion use' must never retarget them. A
+// --hub nickname is still resolved for them, as for every command: it is
+// an explicit choice, not the context.
 var contextSkippedSubtrees = map[string]bool{
 	"server":         true,
 	"runtime-broker": true,
@@ -240,6 +242,10 @@ func hubWithoutEndpointError(name string) error {
 // It records hubSource and projectSource. A context file that cannot be
 // read is a warning, and the invocation proceeds without it, unless --hub
 // is a nickname, which then cannot be resolved.
+//
+// For the server and runtime-broker subtrees (contextSkippedSubtrees) only
+// a --hub nickname is resolved; nothing else is filled, and without a
+// nickname context.yaml is not read.
 func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	hubSource = ""
 	projectSource = ""
@@ -247,12 +253,16 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
-	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
+	if contextDisabled(mode) {
 		return nil
 	}
 	// --no-hub turns the hub off, and a context project is a hub project.
 	// Remove this check together with the --no-hub flag.
 	if noHub {
+		return nil
+	}
+	nicknameOnly := contextSkippedSubtrees[topLevelName(cmd)]
+	if nicknameOnly && !isHubNickname(hubEndpoint) {
 		return nil
 	}
 	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
@@ -266,6 +276,9 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	}
 	if err := resolveHubNickname(ctx); err != nil {
 		return err
+	}
+	if nicknameOnly {
+		return nil
 	}
 	// config subcommands act on local settings files, never on a hub
 	// project, so they never get an injected project (they still see the
