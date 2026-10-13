@@ -64,7 +64,7 @@ A `RoleBinding` contains the following fields:
 * **Principal ID**: The identifier of the specific principal.
 * **Scope Type**: The scope bounds, either `system` (global permissions) or `project` (project-restricted permissions).
 * **Scope ID**: Empty for `system` scope, or the specific project ID for `project` scope.
-* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and project membership reads (for example the project member list and membership checks) count only bindings inside their window.
+* **Activation Window (`not_before` / `expires_at`)**: Optional time bounds during which the binding is active. Outside its window a binding grants nothing, and membership checks (for example who counts as a project member for access and messaging) count only bindings inside their window. The project members list still shows bindings outside their window, so they can be managed.
 
 ### Agent Synthetic RoleBindings
 At runtime, agents do not require static RoleBindings to be manually created. Instead, the authorization engine dynamically extracts the agent's JWT claims and scopes and constructs **synthetic project-scoped role bindings** so that agent actions can be evaluated through the unified authorization pipeline.

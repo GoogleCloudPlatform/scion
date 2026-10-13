@@ -39,11 +39,12 @@ Human-readable times use a 24-hour clock and always include a zone. `--tz` and `
 4. The current project selected with [`scion use`](#scion-project) on the current Hub, for commands that need a project. Not used inside agent containers.
 5. The global project (`~/.scion`).
 
-**Hub resolution order.** The Hub is chosen the same way: the `--hub` flag, then
-`SCION_HUB_ENDPOINT` / `SCION_HUB_URL`, then the directory project (its link entry from
-`scion hub link`, then its `hub.endpoint` setting), then the current Hub selected with
-`scion use`, then `hub.endpoint` in the global settings. Inside a scion project directory,
-commands keep targeting that project and its Hub whatever `scion use` selected. The hub list and
+**Hub resolution order.** The `--hub` flag, then `SCION_HUB_ENDPOINT`. Inside a scion project
+directory: the project's link entry from `scion hub link`, then `hub.endpoint` in its settings
+(the project's own, else the global one), then the current Hub selected with `scion use`. Outside
+a project directory: the current Hub, then `hub.endpoint` in the global settings. `SCION_HUB_URL`
+comes last; while it is set, link entries and the current Hub are not used. Inside a scion project
+directory, commands keep targeting that project whatever `scion use` selected. The hub list and
 current context live in the per-user file `~/.scion/context.yaml` (mode `0600`); agent
 containers never read it.
 
@@ -1395,7 +1396,7 @@ Manages Scion server components (Hub and Broker).
         - `--enable-hub`: Enable the Hub server component.
         - `--enable-runtime-broker`: Enable the Runtime Broker component.
         - `--port <int>`: Port to listen on.
-        - `--host <addr>`: Listen address of the Hub API and web server (default `0.0.0.0`). The Runtime Broker listener is set by `server.broker.host` instead; in workstation mode it defaults to `127.0.0.1`, and `0.0.0.0` counts as unset.
+        - `--host <addr>`: Listen address of the Hub API and web server (default `127.0.0.1` in workstation mode, `0.0.0.0` in hosted mode). The Runtime Broker listener is set by `server.broker.host` instead; in workstation mode it defaults to `127.0.0.1`, and `0.0.0.0` counts as unset.
         - `--db <string>`: Database driver/connection.
         - `--dev-auth`: Enable dev-auth authentication.
         - `--debug`: Set the server's default log level to `debug`. It changes logging only; see [Controlling the Log Level](/scion/hosted/single-node/observability/#controlling-the-log-level).

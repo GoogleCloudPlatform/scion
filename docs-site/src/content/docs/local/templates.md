@@ -78,7 +78,7 @@ Keep harness-specific settings **out** of the template. `auth_selectedType` and 
 
 ### Environment keys are ignored
 
-A template describes the agent's job, not the environment it runs in. These keys in a template are **ignored**, with a warning in the agent's start output and the Runtime Broker log:
+A template describes the agent's job, not the environment it runs in. These keys in a template are **ignored** with a warning: in the `scion start` output for local agents, and in the Runtime Broker log for Hub-dispatched agents (the Hub also logs one when such a template is uploaded):
 
 - `image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes`.
 - `env` entries whose name starts with `SCION_`, the platform's own namespace.
