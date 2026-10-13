@@ -18,10 +18,13 @@ package cmd
 
 import (
 	"context"
+	"errors"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -121,4 +124,46 @@ func TestStartConduit_ExternalRelayNeedsExperiment(t *testing.T) {
 	// In-process mode with the experiment off still starts nothing.
 	cfg.Hub.Conduit = config.HubConduitConfig{}
 	assert.NoError(t, startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+}
+
+// TestStartConduit_ExternalRelayMode: with hub.conduit on, external relay
+// mode starts the external runtime instead of a relay, never traps
+// SIGTERM (there is nothing to drain), and any failure is fatal, outside
+// hosted HA too.
+func TestStartConduit_ExternalRelayMode(t *testing.T) {
+	t.Cleanup(resetServerFlags)
+	srv := conduitHubServer(t, true)
+	cfg := &config.GlobalConfig{}
+	cfg.Hub.Conduit = config.HubConduitConfig{RelayMode: "external", PeerSecret: relayModeTestPeerSecret}
+
+	prevExt, prevRelay, prevNotify := startConduitExternalFn, startConduitRelayFn, conduitSignalNotify
+	t.Cleanup(func() {
+		startConduitExternalFn, startConduitRelayFn, conduitSignalNotify = prevExt, prevRelay, prevNotify
+	})
+	relayStarted, trapped := false, false
+	startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
+		relayStarted = true
+		return nil
+	}
+	conduitSignalNotify = func(chan<- os.Signal, ...os.Signal) { trapped = true }
+
+	var extErr error
+	externalCalls := 0
+	startConduitExternalFn = func(context.Context, *config.GlobalConfig, *hub.Server) error {
+		externalCalls++
+		return extErr
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	t.Cleanup(func() { cancel(); wg.Wait() })
+
+	require.NoError(t, startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1)))
+	assert.Equal(t, 1, externalCalls)
+	assert.False(t, relayStarted, "no in-process relay in external mode")
+	assert.False(t, trapped, "SIGTERM is not trapped without a relay")
+
+	extErr = errors.New("boom")
+	err := startConduit(ctx, cancel, cfg, srv, "https://hub.example.com", &wg, make(chan error, 1))
+	require.Error(t, err, "a failure is fatal outside hosted HA too")
+	assert.Contains(t, err.Error(), "conduit external relay mode")
 }

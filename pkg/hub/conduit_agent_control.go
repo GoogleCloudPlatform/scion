@@ -93,11 +93,11 @@ func (s *Server) RequestAgentTokenRotation(ctx context.Context, agentID string) 
 // registry would filter a session that lacks it, which would report a
 // connected agent as having no session.
 func (s *Server) callAgentControl(ctx context.Context, agentID, route string, want int) error {
-	if !s.conduitServing() {
+	if !s.conduitRoutable() {
 		return router.ErrNoSession
 	}
-	rt := s.conduit.Load()
-	if rt == nil || rt.router == nil {
+	rtr := s.conduitRouter()
+	if rtr == nil {
 		return router.ErrNoSession
 	}
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -113,7 +113,7 @@ func (s *Server) callAgentControl(ctx context.Context, agentID, route string, wa
 		Want:  registry.Want{ProjectID: agent.ProjectID},
 		Agent: agentIncarnationFacts(agent),
 	}
-	return rt.router.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+	return rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		if !slices.Contains(res.Session.Info().Capabilities.GetRpc(), route) {
 			return fmt.Errorf("%w: agent %s, route %s", ErrAgentControlNotAdvertised, agent.ID, route)
 		}

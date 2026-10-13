@@ -145,7 +145,7 @@ func (s *Server) StartConduitRelay(ctx context.Context, opts ConduitRelayOptions
 		slog.Info("Conduit relay not started: hub.conduit is off (turning it on takes effect after a restart)")
 		return nil
 	}
-	if s.conduit.Load() != nil {
+	if s.conduit.Load() != nil || s.conduitExternal.Load() != nil {
 		return errors.New("conduit relay already started")
 	}
 	if opts.RequireHA && !s.ConduitGrantRingShared() {
@@ -369,22 +369,22 @@ func (s *Server) DrainConduitForShutdown(grace time.Duration, capDrain bool) {
 // default horizons.
 func (s *Server) conduitRegistryReapHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
-		rt := s.conduit.Load()
-		if rt == nil {
+		reg, _, clk := s.conduitRegistry()
+		if reg == nil {
 			return
 		}
-		now := rt.now()
-		if n, err := rt.registry.ReapStaleRelays(ctx, 0, now); err != nil {
+		now := clk()
+		if n, err := reg.ReapStaleRelays(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: reaping sessions of stale relays failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: reaped sessions of stale relays", "count", n)
 		}
-		if n, err := rt.registry.ReapStaleSessions(ctx, 0, now); err != nil {
+		if n, err := reg.ReapStaleSessions(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: reaping stale sessions failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: reaped stale sessions", "count", n)
 		}
-		if n, err := rt.registry.PruneRelayInstances(ctx, 0, now); err != nil {
+		if n, err := reg.PruneRelayInstances(ctx, 0, now); err != nil {
 			slog.Warn("Conduit registry: pruning idle relay rows failed", "error", err)
 		} else if n > 0 {
 			slog.Info("Conduit registry: pruned idle relay rows", "count", n)
@@ -398,22 +398,27 @@ func (s *Server) conduitRegistryReapHandler() func(ctx context.Context) {
 // session) and deletes the agent's epoch counter. Errors are logged; rows
 // left behind are reaped and are already unroutable (no agent row).
 func (s *Server) conduitForgetAgent(ctx context.Context, agentID string) {
-	rt := s.conduit.Load()
-	if rt == nil || agentID == "" {
+	reg, st, _ := s.conduitRegistry()
+	if reg == nil || agentID == "" {
 		return
 	}
-	rt.relay.CloseSessionsOf(registry.PrincipalAgent, agentID, conduit.CloseUnauthenticated, relay.ReasonUnauthenticated+": agent deleted")
-	ps, err := rt.store.ListPrincipalSessions(ctx, registry.PrincipalAgent, agentID)
+	// The local close needs a local relay. In external relay mode the
+	// owner relay closes the sessions when its session re-check sees the
+	// agent gone (the agent deletion event, or its next sweep).
+	if rt := s.conduit.Load(); rt != nil {
+		rt.relay.CloseSessionsOf(registry.PrincipalAgent, agentID, conduit.CloseUnauthenticated, relay.ReasonUnauthenticated+": agent deleted")
+	}
+	ps, err := st.ListPrincipalSessions(ctx, registry.PrincipalAgent, agentID)
 	if err != nil {
 		slog.Warn("Conduit: listing sessions of a deleted agent failed", "agent_id", agentID, "error", err)
 	} else {
 		for _, v := range ps.Sessions {
-			if _, err := rt.registry.DeleteSessionCAS(ctx, v.Session.SessionID, v.Session.RelayInstanceID, v.Session.RelayGeneration); err != nil {
+			if _, err := reg.DeleteSessionCAS(ctx, v.Session.SessionID, v.Session.RelayInstanceID, v.Session.RelayGeneration); err != nil {
 				slog.Warn("Conduit: deleting a session of a deleted agent failed", "agent_id", agentID, "session_id", v.Session.SessionID, "error", err)
 			}
 		}
 	}
-	if err := rt.registry.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agentID); err != nil {
+	if err := reg.ForgetPrincipalEpoch(ctx, registry.PrincipalAgent, agentID); err != nil {
 		slog.Warn("Conduit: deleting the epoch row of a deleted agent failed", "agent_id", agentID, "error", err)
 	}
 }
@@ -477,6 +482,18 @@ type conduitAdmission struct {
 // 1d-i incarnation policy (launch-id match, the legacy-fallback fence,
 // gen-N fallback).
 func (s *Server) handleConduit(w http.ResponseWriter, r *http.Request) {
+	if rt := s.conduitExternal.Load(); rt != nil {
+		// External relay mode: this hub holds no conduit sessions.
+		switch {
+		case !s.experimentEnabled(conduitExperiment):
+			NotFound(w, "route")
+		case r.Method != http.MethodGet:
+			MethodNotAllowed(w, http.MethodGet)
+		default:
+			s.refuseConduitExternal(w, r, rt)
+		}
+		return
+	}
 	a, ok := s.decideConduit(w, r)
 	if !ok {
 		return

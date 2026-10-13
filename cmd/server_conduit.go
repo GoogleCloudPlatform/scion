@@ -198,6 +198,9 @@ var (
 	conduitSignalStop   = signal.Stop
 	// startConduitRelayFn starts the relay (startConduitRelay).
 	startConduitRelayFn = startConduitRelay
+	// startConduitExternalFn starts external relay mode
+	// (startConduitExternal).
+	startConduitExternalFn = startConduitExternal
 	// conduitShutdownDrain is the trap's drain: the hub's SIGTERM drain
 	// with the configured grace.
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
@@ -311,6 +314,15 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 	if !hubSrv.ConduitEnabled() {
 		return nil
 	}
+	if cfg.Hub.Conduit.ExternalRelay() {
+		// External relay mode: no relay here, so nothing to drain on
+		// SIGTERM. Its configuration was chosen explicitly, so every
+		// failure is fatal, in and outside hosted HA.
+		if err := startConduitExternalFn(ctx, cfg, hubSrv); err != nil {
+			return fmt.Errorf("conduit external relay mode: %w", err)
+		}
+		return nil
+	}
 	requireHA := hostedHAGuardsRequired(cfg)
 	err := startConduitRelayFn(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
@@ -408,6 +420,30 @@ func startConduitRelay(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hu
 			}
 		}()
 	}
+	return nil
+}
+
+// startConduitExternal starts the hub's side of external relay mode
+// (design §3.9): relay-peer auth keyed from the dedicated peer secret, and
+// the routing runtime over the shared registry. validateServerPreflight
+// has already checked peer_secret; the hub's session secret is passed only
+// so peer auth refuses an equal peer secret again.
+func startConduitExternal(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Server) error {
+	id := hub.ConduitInstanceID(cfg.Hub.Conduit.InstanceID)
+	opts := conduitPeerAuthOptions(ctx, cfg, id, metadata.OnGCE())
+	opts.PeerSecret = cfg.Hub.Conduit.PeerSecretValue()
+	opts.SharedSecret = sessionSecretValue()
+	if opts.PeerSecret == "" {
+		return errors.New("server.hub.conduit.peer_secret is required when server.hub.conduit.relay_mode is external")
+	}
+	auth, mode, err := hub.NewConduitPeerAuth(opts)
+	if err != nil {
+		return err
+	}
+	if err := hubSrv.StartConduitExternal(ctx, hub.ConduitExternalOptions{InstanceID: id, PeerAuth: auth}); err != nil {
+		return err
+	}
+	slog.Info("Conduit external relay mode started: this hub runs no relay", "instance_id", id, "peer_auth", mode)
 	return nil
 }
 

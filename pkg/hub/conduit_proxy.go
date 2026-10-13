@@ -60,8 +60,8 @@ var errConduitNoRoute = errors.New("conduit: no router on this node")
 // exactly the resolved session. Errors wrap router.ErrNoSession when the
 // agent has no eligible session.
 func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *store.Agent, port int) (net.Conn, error) {
-	rt := s.conduit.Load()
-	if rt == nil || rt.router == nil {
+	rtr := s.conduitRouter()
+	if rtr == nil {
 		return nil, errConduitNoRoute
 	}
 	if _, isUser := identity.(UserIdentity); isUser && s.conduitAuthz.Load() == nil {
@@ -78,7 +78,7 @@ func (s *Server) openConduitPort(ctx context.Context, identity Identity, agent *
 		Agent: agentIncarnationFacts(agent),
 	}
 	var conn net.Conn
-	err := rt.router.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
+	err := rtr.Do(ctx, req, func(ctx context.Context, res router.Resolved) error {
 		tok, _, err := s.mintConduitGrant(ctx, conduitGrantRequest{
 			Identity: identity,
 			Agent:    agent,

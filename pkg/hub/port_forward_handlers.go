@@ -406,7 +406,7 @@ func (s *Server) proxyAgentPort(w http.ResponseWriter, r *http.Request, agentID 
 	// form (127.0.0.0/8, ::1, ::ffff:127.0.0.1, localhost) qualifies and is
 	// retargeted: the stream always goes to conduitProxyHost (127.0.0.1)
 	// inside the agent.
-	conduitOn := s.conduitServing()
+	conduitOn := s.conduitRoutable()
 	if conduitOn && isLoopbackHost(exposed.Host) {
 		conn, err := s.openConduitPort(r.Context(), GetIdentityFromContext(r.Context()), agent, exposed.Port)
 		switch {
