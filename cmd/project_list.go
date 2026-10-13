@@ -62,7 +62,8 @@ Scripts that parse the output of 'scion project list' should use
 before it listed projects across hubs, JSON included.
 
 --local flags orphaned project directories (where the workspace no longer
-exists). Use 'scion project prune' to clean them up.`,
+exists, or the recorded workspace is itself a scion .scion directory). Use
+'scion project prune' to clean them up.`,
 	RunE: runProjectList,
 }
 
