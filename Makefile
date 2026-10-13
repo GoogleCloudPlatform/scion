@@ -16,7 +16,7 @@ GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null || echo $(shell go
 
 .DEFAULT_GOAL := help
 
-.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check
+.PHONY: all build build-a2a-bridge test-a2a-integration install test test-fast test-hub-sqlite test-sqlite-nonhub test-cmd-sqlite test-fast-ci test-launch-store-postgres test-store-postgres test-store-postgres-others test-store-postgres-env-check test-store-postgres-integrationtest test-store-postgres-entadapter test-store-postgres-tail testpart-selftest test-hub-postgres test-hub-postgres-env-check test-hub-postgres-default test-hub-postgres-integration hub-postgres-integration-shards test-webchat-postgres test-conduit-authz-postgres test-artifacts-postgres test-fixture-coverage hubshard-parity build-hub-shard test-hub-shard test-hub-shards vet-hub-shard vet lint lint-ci vet-integration vet-integration-ci vet-integration-extras compat-literals check-annotation-prefix check-authz-guards check-conversation-upsert-guard check-hub-store-reassign check-security-marker-gates cli-time-zones time-literals check-setenv-guard check-harness-coverage check-authorization-catalog check-route-authz-manifest check-method-not-allowed check-debug-defaults check-custom golangci-lint web web-typecheck web-lint web-test fmt fmt-check tidy-extras ci ci-full clean help container-sciontool container-scion container-binaries proto proto-check ent-check tidy-check
 
 ## all: Build the web frontend and compile the Go binary (run 'make install' separately to install)
 all: web build
@@ -460,8 +460,11 @@ test-store-postgres-entadapter: test-store-postgres-env-check
 		fi; \
 	fi
 
-# test-store-postgres-tail: the storetest, pkg/ent/entc and cmd runs of
-# test-store-postgres (after entadapter).
+# test-store-postgres-tail: the storetest, pkg/store/enttest, pkg/ent/entc
+# and cmd runs of test-store-postgres (after entadapter). The enttest run
+# includes TestSchemaSnapshot_MatchesAutoMigrate, which checks that the
+# schema snapshot the harness provisions test schemas from matches
+# entc.AutoMigrate.
 test-store-postgres-tail: test-store-postgres-env-check
 	@go test -tags integration -count=1 -timeout 10m -v \
 		-run '^TestCompositeStore_CRUDParity$$/^group$$/^MembershipCleanup$$' \
@@ -475,6 +478,19 @@ test-store-postgres-tail: test-store-postgres-env-check
 	fi; \
 	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-storetest.log; then \
 		echo "ERROR: one or more storetest group/MembershipCleanup cases were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi
+	@go test -tags integration -count=1 -timeout 10m -v \
+		./pkg/store/enttest/ > /tmp/test-launch-store-postgres-enttest.log 2>&1; \
+	status=$$?; \
+	cat /tmp/test-launch-store-postgres-enttest.log; \
+	if [ $$status -ne 0 ]; then exit $$status; fi; \
+	if grep -qE '^[[:space:]]*--- SKIP' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: one or more pkg/store/enttest Postgres tests were skipped -- see '--- SKIP' lines above." >&2; \
+		exit 1; \
+	fi; \
+	if ! grep -qE '^--- PASS: TestSchemaSnapshot_MatchesAutoMigrate ' /tmp/test-launch-store-postgres-enttest.log; then \
+		echo "ERROR: the schema snapshot equivalence test did not run." >&2; \
 		exit 1; \
 	fi
 	@go test -tags integration -count=1 -timeout 10m -v \
@@ -913,12 +929,15 @@ proto:
 ## ent-check: Verify generated ent code (pkg/ent) matches pkg/ent/schema
 # Regenerates in place, then fails if anything under pkg/ent (tracked diff
 # or new untracked files -- a new schema adds new directories, which
-# git diff alone does not see) or go.mod/go.sum changed. The generator runs
-# with -mod=mod, so a codegen dependency missing from go.sum shows up as a
-# go.mod/go.sum diff, which is a real failure. Run on a clean pkg/ent tree:
+# git diff alone does not see) or go.mod/go.sum changed. The generator is
+# declared as a module tool (the tool directive in go.mod) and runs through
+# go tool ent, so go mod tidy keeps the go.sum lines it needs (see tidy-check;
+# ptone/scion#4799). Run on a clean pkg/ent tree:
 # uncommitted pkg/ent edits read as drift (ptone/scion#2746).
 # Exit codes: 1 = drift; 3 = go generate itself failed (not drift), shown by
-# make as "Error 3".
+# make as "Error 3". Besides a schema compile or module download error, exit 3
+# also covers a go.sum entry the generator needs but is missing: go tool runs
+# read-only, so it fails instead of adding it (run make tidy-check).
 # Keep in sync with the ent-generate-check step in .github/workflows/ci.yml:
 # it greps for the "go generate ./pkg/ent failed (not drift)" line below.
 ent-check:
@@ -931,6 +950,25 @@ ent-check:
 		exit 1; \
 	fi; \
 	echo "ent generated code is up to date."
+
+## tidy-check: Verify go.mod/go.sum are tidy (go mod tidy would change nothing)
+# Uses go mod tidy -diff, which prints the edits tidy would make and changes no
+# files, so it does not depend on the state of the working tree. Catches a
+# go.mod/go.sum that disagrees with tidy, for example go.sum lines that a tool
+# or generator needs but tidy would drop (ptone/scion#4799).
+# Exit codes: 1 = not tidy; 3 = go mod tidy itself failed (not drift), shown by
+# make as "Error 3".
+# Keep in sync with the tidy-check step in .github/workflows/ci.yml: it greps
+# for the "go mod tidy -diff failed (not drift)" line below.
+tidy-check:
+	@echo "Checking go.mod/go.sum are tidy..."
+	@out="$$(mktemp)"; \
+	go mod tidy -diff >"$$out"; rc=$$?; \
+	if [ "$$rc" -eq 0 ]; then rm -f "$$out"; echo "go.mod/go.sum are tidy."; exit 0; fi; \
+	if [ ! -s "$$out" ]; then rm -f "$$out"; echo "go mod tidy -diff failed (not drift)"; exit 3; fi; \
+	cat "$$out"; rm -f "$$out"; \
+	echo "go.mod/go.sum are not tidy. Run 'go mod tidy' and commit the result."; \
+	exit 1
 
 ## proto-check: Verify generated protobuf code is up to date
 proto-check:

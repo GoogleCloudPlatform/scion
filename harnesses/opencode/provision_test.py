@@ -539,5 +539,81 @@ class ConfigSchemaTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(home_dir, ".opencode.json")))
 
 
+class VertexLocationPrecedenceTest(unittest.TestCase):
+    """GOOGLE_CLOUD_LOCATION wins over GOOGLE_CLOUD_REGION (ptone/scion#4719)."""
+
+    def _overlay(self, env: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = os.path.join(tmp, ".scion", "harness")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+                json.dump({"env_vars": list(env)}, f)
+            clear = {k: "" for k in ("GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "VERTEX_LOCATION")}
+            with unittest.mock.patch.dict(os.environ, {**clear, **env}):
+                ctx = scion_harness.ProvisionContext("opencode", {"harness_bundle_dir": bundle})
+                warnings: list[str] = []
+                ctx.warn = warnings.append
+                return provision._vertex_env_overlay(ctx), warnings
+
+    def test_location_wins_over_region_with_warning(self) -> None:
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "proj-1",
+            "GOOGLE_CLOUD_REGION": "us-central1",
+            "GOOGLE_CLOUD_LOCATION": "europe-west4",
+        })
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(overlay["GOOGLE_CLOUD_REGION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
+    def test_region_alone(self) -> None:
+        overlay, warnings = self._overlay({"GOOGLE_CLOUD_PROJECT": "proj-1", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${GOOGLE_CLOUD_REGION}")
+        self.assertEqual(warnings, [])
+
+    def test_location_beats_vertex_location(self) -> None:
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "proj-1",
+            "VERTEX_LOCATION": "asia-east1",
+            "GOOGLE_CLOUD_LOCATION": "europe-west4",
+        })
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(warnings, [])
+
+    def test_cloud_ml_region_not_read(self) -> None:
+        # opencode does not read CLOUD_ML_REGION; VERTEX_LOCATION is chosen.
+        overlay, warnings = self._overlay({
+            "GOOGLE_CLOUD_PROJECT": "proj-1",
+            "CLOUD_ML_REGION": "europe-west4",
+            "VERTEX_LOCATION": "asia-east1",
+        })
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${VERTEX_LOCATION}")
+        self.assertEqual(warnings, [])
+
+    def test_secret_file_only_location_not_compared(self) -> None:
+        # opencode resolves the location only from candidate env_vars. A
+        # LOCATION staged only as a secret file is not used, so it must not
+        # produce a "using GOOGLE_CLOUD_LOCATION" warning (ptone/scion#4719).
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = os.path.join(tmp, ".scion", "harness")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            secret = os.path.join(tmp, "GOOGLE_CLOUD_LOCATION")
+            with open(secret, "w", encoding="utf-8") as f:
+                f.write("europe-west4")
+            with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+                json.dump({
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+                    "env_secret_files": {"GOOGLE_CLOUD_LOCATION": secret},
+                }, f)
+            clear = {k: "" for k in ("GOOGLE_CLOUD_LOCATION", "CLOUD_ML_REGION", "VERTEX_LOCATION")}
+            with unittest.mock.patch.dict(os.environ, {**clear, "GOOGLE_CLOUD_REGION": "us-central1"}):
+                ctx = scion_harness.ProvisionContext("opencode", {"harness_bundle_dir": bundle})
+                warnings: list[str] = []
+                ctx.warn = warnings.append
+                overlay = provision._vertex_env_overlay(ctx)
+        self.assertEqual(overlay["VERTEX_LOCATION"], "${GOOGLE_CLOUD_REGION}")
+        self.assertEqual(warnings, [])
+
+
 if __name__ == "__main__":
     unittest.main()

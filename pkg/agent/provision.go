@@ -577,7 +577,13 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 	// reflects the override.
 	if opts.HarnessAuth != "" && cfg != nil {
 		cfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(cfg, "", "  ")
+		// cfg carries the environment values ProvisionAgent merged in for
+		// its caller; the file keeps the agent's own (ptone/scion#4561).
+		persisted := cfg
+		if env, ok := readPersistedAgentEnvironment(agentDir); ok {
+			persisted = withEnvironment(cfg, env)
+		}
+		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
 			_ = os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), cfgData, 0644)
 		}
@@ -2189,7 +2195,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// 2e. Merge settings env, auth, and resources if available
+	// 2e. Merge settings env, volumes and auth if available. The volumes,
+	// like the harness-config image, pull policy and volumes above, are
+	// environment values: kept in the returned config, not persisted
+	// (ptone/scion#4561).
 	if settings != nil {
 		hConfig, err := settings.ResolveHarnessConfig(profileName, harnessConfigName)
 		if err == nil {
@@ -2225,27 +2234,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			// Pinned by TestBrokerMode_HarnessConfigEnvOutranksTemplateEnv.
 			finalScionCfg = config.MergeScionConfig(settingsCfg, finalScionCfg)
 		}
-
-		// Merge profile-level resources (lower priority than template/agent-level resources).
-		effectiveProfile := profileName
-		if effectiveProfile == "" {
-			effectiveProfile = settings.ActiveProfile
-		}
-		if p, ok := settings.Profiles[effectiveProfile]; ok && p.Resources != nil {
-			if finalScionCfg.Resources == nil {
-				cpy := *p.Resources
-				finalScionCfg.Resources = &cpy
-			}
-			merged := config.MergeResourceSpec(p.Resources, finalScionCfg.Resources)
-			finalScionCfg.Resources = merged
-		}
-
-		// Merge harness-override resources on top of everything.
-		if p, ok := settings.Profiles[effectiveProfile]; ok && p.HarnessOverrides != nil {
-			if ho, ok := p.HarnessOverrides[harnessConfigName]; ok && ho.Resources != nil {
-				finalScionCfg.Resources = config.MergeResourceSpec(finalScionCfg.Resources, ho.Resources)
-			}
-		}
 	}
 
 	// Hub operational agent_defaults: below the template and below inline
@@ -2267,15 +2255,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// the broker chain in file mode, just above broker settings in Postgres
 	// mode. That is deliberate; see design §3.2.4 and alternative A7.
 	//
-	// Note the asymmetry for Resources: "above this broker's own settings.yaml
-	// defaults" means default_resources ONLY. Broker profile resources and
-	// harness overrides live in that same file but are merged in step 2e ABOVE,
-	// so they win per-field over the hub default_resources applied here — while
-	// broker default_max_turns loses to hub default_max_turns. The hub tier
-	// therefore sits in a different place for Resources than for the three
-	// scalars. That falls out of the insertion point the design specifies and is
-	// the conservative direction (§3.2.4 explicitly does not want hub defaults
-	// silently overriding broker profile resources).
+	// Note the asymmetry for Resources: hub agent_defaults.resources ranks
+	// above default_resources ONLY. Broker profile resources and harness
+	// overrides win per-field over it, while broker default_max_turns loses
+	// to hub default_max_turns. That is the conservative direction (§3.2.4
+	// explicitly does not want hub defaults silently overriding broker
+	// profile resources). Resources are resolved by
+	// resolveEnvironmentResources below and again by Start, never persisted.
 	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
 		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
 			finalScionCfg.MaxTurns = hd.MaxTurns
@@ -2285,14 +2271,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
 			finalScionCfg.MaxDuration = hd.MaxDuration
-		}
-		if hd.Resources != nil {
-			// Hub defaults in BASE position: per-field merge with the
-			// agent/template value winning any field it sets. MergeResourceSpec
-			// returns base itself when override is nil, so copy first rather
-			// than aliasing the context's spec into the persisted config.
-			base := *hd.Resources
-			finalScionCfg.Resources = config.MergeResourceSpec(&base, finalScionCfg.Resources)
 		}
 	}
 
@@ -2308,44 +2286,32 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		if finalScionCfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
 			finalScionCfg.MaxDuration = settings.DefaultMaxDuration
 		}
-		if settings.DefaultResources != nil {
-			if finalScionCfg.Resources == nil {
-				cpy := *settings.DefaultResources
-				finalScionCfg.Resources = &cpy
-			} else {
-				// Merge: settings defaults are lower priority, so use them as base
-				finalScionCfg.Resources = config.MergeResourceSpec(settings.DefaultResources, finalScionCfg.Resources)
-			}
-		}
 	}
 
-	// Apply built-in resource defaults as the LOWEST-priority tier, below the
-	// settings defaults above. Docker and Podman emit cgroup flags only for
-	// non-empty fields, so an agent that reaches this point with no CPU limit
-	// runs completely unconstrained and can saturate every core on the host.
+	// Resources: settings default_resources < hub agent_defaults.resources
+	// < profile resources < the agent's own < profile harness_overrides, then
+	// the built-in CPU default as the LOWEST-priority tier
+	// (applyEnvironmentResources). Docker and Podman emit cgroup flags only
+	// for non-empty fields, so an agent with no CPU limit runs completely
+	// unconstrained and can saturate every core on the host; only the CPU
+	// limit is filled in, and only when nothing else supplied one. Gated by
+	// runtime.enforce_resource_defaults (default true). The built-in limit
+	// also never conflicts with a larger CPU request (ptone/scion#3407).
 	//
-	// Only the CPU limit is filled in, and only when nothing else supplied one;
-	// MergeResourceSpec keeps every field that a higher tier already set, so an
-	// explicit memory-only configuration still gains a CPU limit here.
-	// Gated by runtime.enforce_resource_defaults (default true) so an operator
-	// can restore the previous unlimited behaviour without a rollback.
-	//
-	// ApplyBuiltinDefaultResources also keeps the built-in limit from
-	// conflicting with a larger CPU request (ptone/scion#3407): a larger
-	// resources.requests.cpu raises the built-in limit, and a larger
-	// kubernetes.resources.requests.cpu sets kubernetes.resources.limits.cpu,
-	// which only the Kubernetes runtime reads.
-	if finalScionCfg != nil && config.ShouldEnforceResourceDefaults(settings) {
-		applyBuiltinResourceDefaults(finalScionCfg)
-	}
+	// These are environment values: they are applied to the config returned
+	// here, but not persisted to scion-agent.json; Start applies them from
+	// current settings on every start (ptone/scion#4561).
+	applyEnvironmentResources(ctx, finalScionCfg, settings, profileName, harnessConfigName)
 
 	// Mount the resolved workspace if an external source was determined
+	var workspaceVolume *api.VolumeMount
 	if workspaceSource != "" {
-		finalScionCfg.Volumes = append(finalScionCfg.Volumes, api.VolumeMount{
+		workspaceVolume = &api.VolumeMount{
 			Source:   workspaceSource,
 			Target:   "/workspace",
 			ReadOnly: false,
-		})
+		}
+		finalScionCfg.Volumes = append(finalScionCfg.Volumes, *workspaceVolume)
 	}
 	if explicitWorkspace {
 		finalScionCfg.ExplicitWorkspace = true
@@ -2418,7 +2384,15 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// See persistProvisionedWorktreeRepoRootIfValid.
 	persistProvisionedWorktreeRepoRootIfValid(agentDir, api.ProvisionedWorktreeRepoRootFromContext(ctx), workspaceSource)
 
-	agentCfgData, err := json.MarshalIndent(finalScionCfg, "", "  ")
+	// scion-agent.json carries only the requester's own environment values
+	// (the inline image, kubernetes, resources and volumes) and the workspace
+	// mount resolved above. The harness-config file, settings, profile, hub
+	// default and built-in values merged into finalScionCfg are applied by
+	// Start from current settings on every start, so a later settings or
+	// profile change reaches the agent on its next start (ptone/scion#4561).
+	// The returned config keeps the merged values (see the reload below).
+	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
+	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
 	}
@@ -2534,11 +2508,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Reload config to get harness updates (e.g. Env vars injected by harness)
+	// Reload config to get harness updates (e.g. Env vars injected by harness).
+	// The reloaded file holds only the agent's own environment values; the
+	// returned config carries the effective ones merged above (for the
+	// create response and other callers), which Start re-derives from
+	// current settings on every start (ptone/scion#4561).
+	effectiveEnv := environmentOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = updatedCfg
+		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
@@ -3053,37 +3032,6 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 		if profile != "" {
 			info.Profile = profile
 		}
-	})
-}
-
-// AgentDeleteState is the part of agent-info.json a soft delete marks
-// (Phase and DeletedAt), captured so the mark can be undone.
-type AgentDeleteState struct {
-	Phase     string
-	DeletedAt time.Time
-}
-
-// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
-// ok is false when the file cannot be read.
-func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
-	info := getSavedAgentInfo(agentName, projectPath)
-	if info == nil {
-		return AgentDeleteState{}, false
-	}
-	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
-}
-
-// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
-// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
-// file still shows the mark (Phase "deleted"), so a phase a newer start has
-// written since the snapshot is kept.
-func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
-	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		if info.Phase != "deleted" {
-			return
-		}
-		info.Phase = st.Phase
-		info.DeletedAt = st.DeletedAt
 	})
 }
 

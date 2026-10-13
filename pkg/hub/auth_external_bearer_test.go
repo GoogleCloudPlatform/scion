@@ -538,6 +538,8 @@ func TestNoTokenInfoOutsideGoogleCredentialValidator(t *testing.T) {
 	// recursive walk already includes pkg/hub/apierr.
 	// pkgmove:scan-covers pkg/hub/internal/principal
 	// recursive walk already includes pkg/hub/internal/principal.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
