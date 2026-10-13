@@ -585,7 +585,7 @@ func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, us
 func seedUserTemplates(t *testing.T, ctx context.Context, s store.Store, userID string) (keep, del string) {
 	t.Helper()
 	now := time.Now()
-	ids := []string{tid("li-user-template"), tid("li-user-template-del")}
+	ids := []string{tid("li-user-template-" + userID), tid("li-user-template-del-" + userID)}
 	for i, name := range []string{"li-user-template", "li-user-template-del"} {
 		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: ids[i], Name: name, Slug: name, Harness: "claude",
 			Scope: store.TemplateScopeUser, ScopeID: userID, OwnerID: userID, CreatedBy: userID, Status: store.TemplateStatusActive, Created: now, Updated: now}))

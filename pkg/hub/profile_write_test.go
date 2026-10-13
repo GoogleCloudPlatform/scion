@@ -474,10 +474,11 @@ func TestGenericUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, owned.Status, result.Items[0].Status)
 }
 
-// TestGenericUserTemplateWrites_SessionAndTokenUnchanged pins that a
-// session and a user access credential keep their behaviour on the
-// /api/v1/templates user-scope create, patch and delete.
-func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector pins that
+// a session creates, patches and deletes its user-scope templates through
+// /api/v1/templates, and that a user access credential without a template
+// selector is refused on each of them.
+func TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	writes := func(id, name string) []profileRequest {
 		return []profileRequest{
@@ -492,7 +493,7 @@ func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 		want []int
 	}{
 		{"session", f.session, []int{http.StatusCreated, http.StatusOK, http.StatusNoContent}},
-		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
+		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}},
 	}
 	for _, tc := range cases {
 		tmpl := createUserTemplate(t, f.store, f.alice.ID, tc.name+"-generic")

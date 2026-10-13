@@ -35,13 +35,27 @@ func isUserTemplateOwner(t *store.Template, uid string) bool {
 }
 
 // authorizeUserTemplates checks action on the caller's user-scope
-// templates (templateUserScopeResource), before any record is read. An
-// interactive session or a dev credential passes as the owner of its own
-// user scope. A user access token needs the template selector for the
-// action (template:read, template:create, template:update or
-// template:delete) on a hub boundary. It writes 403 on denial.
+// templates (templateUserScopeResource), before any record is read. A
+// user access token needs the template selector for the action
+// (template:read, template:create, template:update or template:delete) on
+// a hub boundary. Every other caller reads its own templates without a
+// further check, and a write is checked as the owner of its own user
+// scope. It writes 403 on denial.
 func (s *Server) authorizeUserTemplates(w http.ResponseWriter, r *http.Request, userIdent UserIdentity, action Action) bool {
+	if action == ActionRead && !isUserAccessTokenRequest(r, userIdent) {
+		return true
+	}
 	return s.authorize(w, r, templateUserScopeResource(userIdent), action)
+}
+
+// isUserAccessTokenRequest reports whether the request is made with a user
+// access token: the identity is a token identity, or the credential record
+// names a user access token.
+func isUserAccessTokenRequest(r *http.Request, userIdent UserIdentity) bool {
+	if _, isToken := userIdent.(*ScopedUserIdentity); isToken {
+		return true
+	}
+	return GetCredentialContextFromContext(r.Context()).Kind == CredentialKindUAT
 }
 
 // handleUserMeTemplates routes GET/POST on /api/v1/users/me/templates.
