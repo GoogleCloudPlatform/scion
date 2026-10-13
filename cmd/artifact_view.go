@@ -219,12 +219,12 @@ func checkBundleLinks(ctx context.Context, svc hubclient.ArtifactService, id str
 		var buf bytes.Buffer
 		rc, err := svc.OpenFile(ctx, id, v.Seq, f.Path)
 		if err != nil {
-			return 0, nil, fmt.Errorf("read %s: %w%s", f.Path, err, artifactErrorHint(err, false))
+			return 0, nil, fmt.Errorf("read %s: %w%s", safeText(f.Path), err, artifactErrorHint(err, false))
 		}
 		err = copyVerified(&buf, rc, f.SHA256, f.Size)
 		_ = rc.Close()
 		if err != nil {
-			return 0, nil, fmt.Errorf("read %s: %w", f.Path, err)
+			return 0, nil, fmt.Errorf("read %s: %w", safeText(f.Path), err)
 		}
 		for _, l := range relativeLinks(buf.Bytes()) {
 			if target, ok := resolveBundleLink(f.Path, l.target); ok && !linkPresent(present, target) {

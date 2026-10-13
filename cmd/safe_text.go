@@ -21,8 +21,10 @@ import (
 
 // safeText returns s for one cell or line of terminal output: every
 // control character (C0 and C1, DEL, newline and tab included), the line
-// and paragraph separators U+2028 and U+2029, and the bidirectional
-// embedding, override and isolate characters are replaced with U+FFFD.
+// and paragraph separators U+2028 and U+2029, and every format character
+// (Unicode category Cf, which holds the bidirectional embedding, override,
+// isolate and mark characters) except the zero-width joiner and
+// non-joiner are replaced with U+FFFD.
 // Text written by other principals, such as an artifact title or a file
 // path in a bundle, then cannot carry terminal escape sequences, break a
 // table row, or reorder what is shown.
@@ -43,9 +45,16 @@ func unsafeTextRune(r rune) bool {
 	switch {
 	case unicode.IsControl(r):
 		return true
-	case r == ' ' || r == ' ':
+	case r == '\u2028' || r == '\u2029':
 		return true
-	case r >= '‪' && r <= '‮', r >= '⁦' && r <= '⁩':
+	case r == '\u200c' || r == '\u200d':
+		// Zero-width non-joiner and joiner: emoji sequences and several
+		// scripts need them, and they cannot reorder text.
+		return false
+	case unicode.Is(unicode.Cf, r):
+		// Format characters: the bidirectional embeddings, overrides,
+		// isolates and marks (U+202A to U+202E, U+2066 to U+2069,
+		// U+200E, U+200F, U+061C), zero-width spaces and U+FEFF.
 		return true
 	}
 	return false

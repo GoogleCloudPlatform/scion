@@ -37,7 +37,8 @@ import (
 // help path is unchanged: args ask for help (--help or -h, before any
 // "--"); the command args resolve to has subcommands and is Runnable; at
 // least one positional argument is left once flags and their values are
-// removed (Find returns the leftover arguments with their flags); and the
+// removed (Find returns the leftover arguments with their flags); the
+// first of them does not name one of the command's subcommands; and the
 // command's own Args validator rejects those positional arguments with an
 // error other than pflag.ErrHelp (which the groups use for "help" and for
 // no arguments). A command that accepts positional arguments passes its
@@ -53,6 +54,15 @@ func unknownSubcommandHelpError(root *cobra.Command, args []string) error {
 	positional := positionalArgs(target, rest)
 	if len(positional) == 0 {
 		return nil
+	}
+	// A real subcommand named after --help ("scion artifact --help list"):
+	// Find did not descend because, not knowing the help flag yet, it
+	// took the name for the flag's value. Leave it to cobra, which prints
+	// the group's help.
+	for _, c := range target.Commands() {
+		if c.Name() == positional[0] || c.HasAlias(positional[0]) {
+			return nil
+		}
 	}
 	if verr := target.ValidateArgs(positional); verr == nil || errors.Is(verr, pflag.ErrHelp) {
 		return nil

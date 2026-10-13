@@ -66,6 +66,11 @@ func TestUnknownSubcommandHelpError(t *testing.T) {
 		{"artifact", "--debug", "--help"},
 		{"hub", "--hub", "https://hub.example", "--help"},
 		{"artifact", "list", "--format", "json", "--help"},
+		// A real subcommand after --help: Find took it for the help
+		// flag's value, and cobra prints the group's help.
+		{"artifact", "--help", "list"},
+		{"hub", "-h", "status"},
+		{"config", "--help", "get"},
 	} {
 		assert.NoError(t, unknownSubcommandHelpError(rootCmd, args), "%q", args)
 	}
@@ -121,6 +126,7 @@ func TestUnknownSubcommandHelpCLI(t *testing.T) {
 		{"artifact", "--help"},
 		{"artifact", "publish", "--help"},
 		{"help", "artifact"},
+		{"artifact", "--help", "list"},
 	} {
 		res := runSSHCLI(t, dir, home, nil, args...)
 		assert.Equal(t, 0, res.code, "%q: %s", args, res.stderr)
