@@ -269,7 +269,7 @@ scion start <name> --task "..." [--template claude] [--profile docker-local]
    d. Creates a git worktree at `agents/<name>/workspace/` on a new branch (slugified agent name).
    e. Runs harness-specific provisioning (`harness.Provision()`).
    f. Writes `scion-agent.json` and `agent-info.json`.
-4. **Image resolution**: Resolves the container image from the harness-config, settings, the profile override and the CLI override (never the template). Pulls if not present.
+4. **Image resolution**: Resolves the container image from the harness-config, settings, the agent's inline config, the profile override and the CLI override (never the template). Pulls if not present.
 5. **Container launch** (`runtime.Run`):
    a. Builds container run arguments (volumes, env vars, labels, resource limits).
    b. Mounts the agent home at `/home/<user>` and workspace at `/workspace`.

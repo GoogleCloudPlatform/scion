@@ -17,13 +17,13 @@ A template now describes the agent's **job** (harness config, model, instruction
 **Templates and environment keys** ([ptone/scion#4524](https://github.com/ptone/scion/issues/4524), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
 
 - A template's `telemetry`, `hub`, `image`, `resources`, `kubernetes` and `volumes` are ignored with a warning, and the Hub no longer copies a template's image, env or telemetry into agents. `GET /api/v1/admin/validate-resources` lists the affected templates (`templateConfigFindings`). Move these values to the harness-config or settings.
-- Template `env:` variables are now a lowest-precedence fallback: each applies only when no other source sets the key. Previously they beat settings harness-config env. Their values are no longer expanded from the broker host's environment. `SCION_*` keys and the harness-config's auth keys are never taken from a template. Template env is read from the template's current version on every start, so edits take effect on the next start.
+- Template `env:` variables are now a lowest-precedence fallback: each applies only when no other source sets the key. Previously they beat settings harness-config env. Their values are no longer expanded from the broker host's environment. `SCION_*` keys and the harness-config's required auth keys (its `required_env[].any_of` keys) are never taken from a template; keep all credentials out of templates. Template env is read from the template's current version on every start, so edits take effect on the next start.
 - Existing agents: a template env key baked into an agent's stored config with the same value as the template is treated as the fallback from the agent's next start.
 
 **Precedence** ([ptone/scion#4222](https://github.com/ptone/scion/issues/4222), [ptone/scion#4223](https://github.com/ptone/scion/issues/4223), [ptone/scion#4218](https://github.com/ptone/scion/issues/4218), [ptone/scion#4217](https://github.com/ptone/scion/issues/4217)):
 
 - The Hub default model and thinking level apply only when neither the template nor the project sets one. The template beats the Hub default; the project still beats the template.
-- Requester telemetry is on/off only. Other inline telemetry fields are ignored with a warning, on every Runtime Broker.
+- For Hub-created agents, requester telemetry is on/off only. Other inline telemetry fields are ignored with a warning, on every Runtime Broker.
 - Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and `SCION_TELEMETRY_ENABLED`.
 - When a template sets both `harness_config` and `default_harness_config`, `default_harness_config` wins.
 - On the Hub, an explicit `harness:` key in a template wins over inferring the harness from the template's name.
@@ -42,7 +42,7 @@ A template now describes the agent's **job** (harness config, model, instruction
 - Agents created before this change keep their already-baked values until they are reprovisioned.
 - Agents created before ptone/scion#4222 keep a copy of the Hub default telemetry in their stored config until they are reprovisioned. Starting them no longer resends it.
 
-**Upgrade order:** upgrade the Hub before the Runtime Brokers. A newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create, and, until the Hub is upgraded, gets the live template env only through the template version the agent was created from.
+**Upgrade order:** upgrade the Hub before the Runtime Brokers. Until the Hub is upgraded, a newer Runtime Broker talking to an older Hub receives Hub `agent_defaults.resources` only at create. It also gets no live template env: the older Hub sends no template identity on start, so the Runtime Broker uses the template version the agent was provisioned from if that version is still in its cache, and otherwise applies no template env, with a start warning.
 
 ## `scion project list` lists projects across hubs
 

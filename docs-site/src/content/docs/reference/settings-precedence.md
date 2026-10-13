@@ -23,12 +23,12 @@ settings and profiles, the hub and the project, never from the template. Every k
 
 An environment key in a template is ignored when the template is loaded. The agent start
 prints `template <name> sets environment key(s) <keys>; ignored (environment comes from
-settings)`, the hub logs the same text when the template is committed, and
+settings)`, the hub logs a warning naming the keys when the template is committed, and
 `GET /api/v1/admin/validate-resources` lists the template under `templateConfigFindings` (see
 the [API reference](/scion/reference/api/#admin-apiv1admin)). Uploads are not rejected. The
 requester's own inline config (`--config`, the create API, the web form) can still set `image`,
-`resources`, `kubernetes` and `volumes` for that one agent; for `telemetry` it can only turn
-telemetry on or off.
+`resources`, `kubernetes` and `volumes` for that one agent. For a Hub-created agent, its
+`telemetry` can only turn telemetry on or off.
 
 ### The job-key ladder
 
@@ -39,11 +39,15 @@ built-in defaults
   < harness-config base (its config.yaml)
     < broker settings (settings.yaml on the broker)
       < hub defaults (agent_defaults)
-        < template chain (the default template, then the named template)
+        < template (see the note below)
           < project defaults (project settings and scion.io/default-* annotations)
             < requester inline config
               < requester CLI flags (--model, --harness-config, ...)
 ```
+
+The template rung is the template chain (the default template, then the named template) where
+the broker resolves a key. The hub's own rungs for `model`, `thinking_level` and `harness_config`
+read only the named template's `agentConfig` snapshot.
 
 **`Changed in this release`:** the hub defaults sit **below** the template for every job key.
 Before, a hub `default_model` (and `default_thinking_level`) beat the template's value; now the
@@ -68,8 +72,9 @@ broker settings (settings.yaml telemetry)
 **`Changed in this release`:**
 
 - A template's `telemetry:` block is ignored (it is an environment key).
-- The requester can only turn telemetry on or off. Other inline telemetry fields are ignored,
-  with a create warning, on every broker.
+- For a Hub-created agent, the requester can only turn telemetry on or off. Other inline
+  telemetry fields are ignored, with a create warning, on every broker. (A local
+  `scion start --config` still applies its full `telemetry` block.)
 - Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and
   `SCION_TELEMETRY_ENABLED`.
 - Hub telemetry defaults and project policy travel to the broker as separate tiers on every
@@ -86,15 +91,20 @@ for the job's own tools:
 - **Lowest precedence.** Each variable is set only when no other source sets the key. That
   includes every [System A](#system-a--environment-variables) source (hub, project, user and
   broker scopes, request env, harness-config env) and the env the runtime adds itself: resolved
-  auth env, harness env, telemetry env, the hub default auto-expose value and env-type secrets.
-  A source whose value is empty adds no entry, so the template fills such a key.
+  auth env, harness env, telemetry env and env-type secrets.
+  For a broker-dispatched agent, a source whose value is empty adds no entry, so the template
+  fills such a key. (Locally, a required env key left empty still fails the start.)
 - **Literal values.** No `${VAR}` expansion against the broker host and no passthrough of an
   empty value from the host. An empty value is skipped with a warning; a value containing
   `${...}` is used as written, with a warning.
 - **`SCION_*` keys are ignored.** That namespace belongs to the platform.
-- **Never a credential.** The harness-config's auth-candidate keys (every key its auth
-  metadata lists, for any auth type) are never filled from a template, even when nothing else
-  sets them. Template env does not count toward auth detection or the env-gather required keys.
+- **Not for required credentials.** The keys listed in the `required_env[].any_of` sets of the
+  harness-config's auth metadata, for any auth type, are never filled from a template, even when
+  nothing else sets them. Template env does not count toward auth detection or the env-gather
+  required keys. Other keys a harness reads for credentials, such as its alternative or
+  auto-detected keys, are not in that set, so a template can fill them (a [known
+  gap](#known-gap--template-env-can-fill-credential-keys-outside-required_env)). Supply
+  credentials as secrets or hub env, never in a template.
 - **Live.** It is never written into `scion-agent.json`. It is recomputed from the current
   template on every start, so a template edit takes effect on the agent's next start. If the
   template can no longer be found, the start warns and applies no template env.
@@ -511,19 +521,21 @@ above it left the key unset:
 | Highest | the agent-create request (`config.env`), or the auto-expose control on the agent's configure page | the agent's explicit config, so it survives reincarnate |
 | | the project annotation `scion.io/auto-expose-ports-enabled` | written by the hub at create and re-derived at reincarnate, never recorded as explicit |
 | | harness-config env | the harness config |
-| | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
-| Lowest | template env | the template; a [fallback](#template-env-is-a-lowest-precedence-fallback) applied only when no tier above sets the key (`Changed in this release`: it was a tier above the hub default) |
+| Lowest | the hub default, `auto_expose_ports.enabled` in the hub settings | not stored on the agent; the hub sends it on every create, start and restart, and the broker applies it after the tiers above |
 
 Because the hub default is read at each dispatch, changing it changes what an agent that inherits
 it gets at its next start. Reincarnate re-reads the project annotation, so an annotation changed
 since the agent was created takes effect there; a value the user set explicitly carries over
 unchanged.
 
+A template cannot set `SCION_AUTO_EXPOSE_PORTS`: it is a `SCION_*` key, which template env
+ignores (`Changed in this release`: template env used to be a tier of this order).
+
 Agents created by an older hub may still carry a project or hub value stamped into their inline
 config, where it looks explicit. The rerunnable maintenance migration `auto-expose-env-normalize` (run it
 from the hub admin maintenance page, or with
-`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project and
-template exactly as reincarnate would. A running agent keeps the old value in its container until
+`POST /api/v1/admin/maintenance/migrations/auto-expose-env-normalize/run`) removes such a stamp and re-derives the value from the project
+exactly as reincarnate would. A running agent keeps the old value in its container until
 it is next provisioned or reincarnated. A run that had to skip agents (its log reports
 `skipped N agent(s)`) still shows as completed, and the maintenance page does not offer completed
 migrations again, so re-run it with the `POST` call above.
@@ -533,10 +545,9 @@ The other auto-expose variables (`SCION_AUTO_EXPOSE_MODE`, `SCION_AUTO_EXPOSE_PO
 the ordinary env rules on this page.
 
 :::caution[Two edges of this order]
-- **A storage-scope value outranks harness-config and template env.** A
-  `SCION_AUTO_EXPOSE_PORTS` set with `scion hub env set` (any scope) fills the key before the
-  broker applies the harness-config tier, so it beats it, and template env never replaces a key
-  that is already set. It still loses to an explicit value and to the project annotation, and it
+- **A storage-scope value outranks harness-config env.** A `SCION_AUTO_EXPOSE_PORTS` set with
+  `scion hub env set` (any scope) fills the key before the broker applies the harness-config
+  tier, so it beats it. It still loses to an explicit value and to the project annotation, and it
   beats the hub default.
 - **A local CLI start on the broker host gets no hub default.** The hub default reaches the broker
   only with a hub dispatch. An agent started from the `scion` CLI on the broker machine itself
@@ -719,6 +730,15 @@ For keys that belong to an `any_of` auth candidate set, `pkg/agent/run.go` **del
 a harness config expecting unconditional delivery, note that **delivery is conditional on the
 resolved auth method.**
 
+### `Known gap` — template env can fill credential keys outside `required_env`
+
+Template env never fills the keys in the `required_env[].any_of` sets of the harness-config's
+auth metadata (see [Template env is a lowest-precedence
+fallback](#template-env-is-a-lowest-precedence-fallback)). The intended rule covers every key the
+auth metadata lists. Today the other keys it lists, such as alternative or auto-detected
+credential keys, are not suppressed, so a template that sets one of them fills it when nothing
+else does. Keep credentials out of templates. Tracked as [ptone/scion#4968](https://github.com/ptone/scion/issues/4968).
+
 ### `Known gap` — `runtimes.<name>.env` in `settings.yaml` has no effect
 
 `ResolveRuntime` merges profile env into `V1RuntimeConfig.Env`, and **nothing reads that field.**
@@ -825,7 +845,7 @@ harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest
         >  the agent's own resources  (the requester's inline config, plus the
                                        project scion.io/default-resources-* the hub stamps into it)
         >  profiles.<p>.resources  (broker settings.yaml)
-        >  hub agent_defaults.resources                     <- Postgres mode only; see below
+        >  hub agent_defaults.resources                     <- database-backed hubs only (not file mode); see below
         >  default_resources       (broker settings.yaml)
         >  BuiltinDefaultResources()                        <- floor
 ```
@@ -845,7 +865,7 @@ This is not a rule you can repair by flipping an inequality — there is no sing
 
 #### Where the hub tier sits, and why it moves with the storage mode
 
-In Postgres mode the hub sends `agent_defaults.resources` and the broker merges it just above
+In a database-backed hub (SQLite or Postgres, not file mode) the hub sends `agent_defaults.resources` and the broker merges it just above
 `default_resources`. In **file mode the hub sends nothing**: a co-located broker reads the same
 `settings.yaml` itself, so those values land at `default_resources`, the bottom of the broker
 chain. See [The rank of hub `agent_defaults` depends on the hub's storage
@@ -1168,12 +1188,11 @@ chain](#resources-interleaves-and-cannot-be-given-one-rank).
 
 ### The rank of hub `agent_defaults` depends on the hub's storage mode
 
-Independently of the question above, the rank differs by hub mode, and this has not previously
-been stated anywhere user-facing:
+The rank also differs by hub mode:
 
 | Hub mode | Rank of hub `agent_defaults` |
 | --- | --- |
-| **Postgres mode** | Just **above** the broker's own `settings.yaml` defaults |
+| **Database-backed** (SQLite or Postgres) | Just **above** the broker's own `settings.yaml` defaults |
 | **File mode** | **Bottom** of the broker chain |
 
 In file mode the hub sends nothing, so a co-located broker reads the same `settings.yaml` and
@@ -1186,9 +1205,9 @@ Note also the `resources` asymmetry described in
 own `settings.yaml` defaults" means `default_resources` **only**. Broker profile resources and
 harness overrides live in the same file and are merged *above* the hub tier.
 
-**This is why the hub rung in the `resources` chain is marked "Postgres mode only".** The two
+**This is why the hub rung in the `resources` chain is marked "database-backed hubs only".** The two
 rows of the table above are two *different* positions in that chain — just above
-`default_resources` in Postgres mode, at `default_resources` in file mode.
+`default_resources` in a database-backed hub, at `default_resources` in file mode.
 
 ### `Known gap` — some hub `agent_defaults` are provision-time-only
 

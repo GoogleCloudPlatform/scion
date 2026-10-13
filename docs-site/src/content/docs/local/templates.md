@@ -65,7 +65,7 @@ Common fields:
 | `skills` | Skill references to resolve at provision time — see [Skills](#skills). |
 | `env` | Environment variables for the job's own tools: a fallback, see [Template env](#template-env). |
 | `mcp_servers` | MCP server definitions, translated per harness. |
-| `secrets` | Names of the secrets the job requires (values come from hub or project secrets). |
+| `secrets` | Names of the secrets the job requires (values come from user, project, hub or broker secrets). |
 | `services`, `max_turns`, `max_model_calls`, `max_duration`, `thinking_level`, `command_args`, `task_flag` | Further job settings. |
 | `message_mode` | Hub only: the initial message mode for agents created from the template. |
 
@@ -83,7 +83,7 @@ A template sets **job keys**: what the agent does. Where and how it runs comes f
 | Kubernetes settings | Settings runtimes and profiles |
 | Telemetry | Settings `telemetry`, the hub telemetry config, or project telemetry policy |
 
-A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`), and turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
+A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`); for a Hub-created agent, its inline `telemetry` can only turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
 
 ### Template env
 
@@ -92,7 +92,7 @@ A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in
 - It applies only when no other source sets the key: settings and harness-config env, hub, project and user env, request env, secrets, and the auth, harness and telemetry env the runtime adds all win over it.
 - Values are literal. `${VAR}` is not expanded, and an empty value is not filled from the broker host.
 - `SCION_*` keys are ignored.
-- The harness-config's auth and credential keys are never filled from a template. Supply credentials as secrets or hub env.
+- The required auth keys of the harness-config (its `required_env[].any_of` keys) are never filled from a template. Other credential keys a harness reads are not protected this way, so supply credentials as secrets or hub env, never in a template.
 - Edits take effect on the agent's next start: the broker reads the template's current env on every start, and never stores it in the agent's config.
 
 :::tip
@@ -135,9 +135,9 @@ scion start coord --type ./templates/coordinator
 When you do not pass `--harness-config`, Scion resolves it in this order:
 
 1. **CLI flag** — `--harness-config` (alias `--harness`).
-2. **Project default** — the project's `scion.io/default-harness-config` setting.
+2. **Project default** (Hub-created agents only) — the project's `scion.io/default-harness-config` setting.
 3. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`, else its `harness_config`. When both are set, `default_harness_config` wins.
-4. **Hub default** — `agent_defaults.default_harness_config` on the hub.
+4. **Hub default** (Hub-created agents only) — `agent_defaults.default_harness_config` on the hub.
 5. **System default** — `default_harness_config` in the active profile, then in `settings.yaml`.
 
 ## Template composition & inheritance
