@@ -530,6 +530,10 @@ async function artifactsListAccess(key: IdentityKey): Promise<string | null> {
   return ((await artifactsRowAccess(r).textContent()) ?? '').replace(/\s+/g, ' ').trim();
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 /** The owner's "Owner:" label as another identity would see it. */
 function ownerLabels(): string[] {
   const o = who('owner');
@@ -946,7 +950,11 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect.soft(snap.title, 'title').toBe(journey.artifact!.title);
       expect.soft(snap.previewRendered, 'preview rendered').toBe(true);
       expect.soft(snap.versionLabel, 'version menu').toContain('v1 (current)');
-      expect.soft(ownerLabels().some((l) => snap.owner === `Owner: ${l}`), `owner label (${snap.owner})`).toBe(true);
+      // Names resolve after the first render (ids until then): poll the label.
+      await expect
+        .soft(ownerMeta(await pageOf('member')), 'owner label names the owner')
+        .toHaveText(new RegExp(`^\\s*Owner: (${ownerLabels().map(escapeRegExp).join('|')})\\s*$`));
+      r.ui.ownerLabel = ((await ownerMeta(await pageOf('member')).textContent()) ?? '').trim();
       const caps = await capabilities('member', r);
       expect.soft(caps.status, 'member GET').toBe(200);
     });
@@ -1216,10 +1224,12 @@ test.describe.serial('artifact access per role (R1)', () => {
         const v2 = historyRow(ownerPage, 2);
         await expect(v2).toBeVisible();
         const grantee = who('grantee');
+        // Names resolve after the first render (ids until then): poll the cell.
+        const granteeLabels = [grantee.displayName, grantee.email].filter((x) => x !== '');
+        await expect
+          .soft(historyPublishedBy(v2), 'v2 published by the grantee')
+          .toHaveText(new RegExp(`^\\s*(${granteeLabels.map(escapeRegExp).join('|')})\\s*$`));
         r.ui.v2PublishedBy = ((await historyPublishedBy(v2).textContent()) ?? '').trim();
-        expect
-          .soft([grantee.displayName, grantee.email], `v2 published by (${String(r.ui.v2PublishedBy)})`)
-          .toContain(r.ui.v2PublishedBy);
         const read = await capabilities('owner', r);
         const body = read.body as {
           artifact?: { ownerKind?: string; ownerRef?: string; currentSeq?: number };
