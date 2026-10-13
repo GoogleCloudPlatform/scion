@@ -516,6 +516,7 @@ Conversations are referenced using one of three forms:
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
     - `leave <conversation-ref>`: Leave a conversation.
     - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+    - `group <command>`: Manage the project's thread groups. See [`scion conversation group`](#scion-conversation-group) below.
 - **Flags (on `list`):**
     - `--kind <string>`: Filter by kind (`direct`, `group`).
     - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
@@ -529,12 +530,38 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `create`):**
     - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
+    - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing. Requires the `hub.chat_thread_groups` experiment.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
     - `--json`: Output in JSON format.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
+
+### `scion conversation group`
+
+Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Requires Hub mode and the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/) (default off). On a Hub with the experiment off, every subcommand fails with `thread groups are not enabled on this hub (experiment hub.chat_thread_groups)`.
+
+A `<group>` argument is a group ID, or a group name resolved within the project (`--project <id>`, defaulting to the current project) through the project's group list. Names are compared as the Hub compares them: trimmed and case-insensitive. A name that matches no group is an error. A name that matches more than one group (including an ID that is also another group's name) is an error that lists each match by name and ID; use the group ID then. An ID that is not in the project's list is looked up directly, and the Hub decides whether you can read it. A `<conversation-ref>` takes the same forms as the other `scion conversation` commands.
+
+**Usage:** `scion conversation group [command] [flags]`
+
+- **Commands:**
+    - `list`: List the project's thread groups, sorted by name. Text output has the columns `NAME`, `THREADS` (the number of member threads) and `ID`.
+    - `get <group>`: Show a thread group and its member threads (name, conversation ID and when it was added).
+    - `create <name>`: Create a thread group. A name is 1 to 100 characters after trimming, with no control characters. A name already used in the project, compared case-insensitively, returns `409`. A project can have at most 100 groups (`422`).
+    - `rename <group> <new-name>`: Rename a thread group. The name rules of `create` apply.
+    - `delete <group>`: Delete a thread group. Its threads become ungrouped; no thread or message is deleted. Asks for confirmation; without a terminal it needs `--yes`. Only users may delete a thread group: the command is not available in agent mode, and the Hub answers `403` to an agent.
+    - `add <group> <conversation-ref>`: Add a thread to a thread group, moving it out of any other group of the project. Adding a thread that is already in the group changes nothing. The thread must be a group conversation of the group's project; direct conversations and the project's `#general` thread are refused. A group holds at most 500 threads (`422`).
+    - `remove <group> <conversation-ref>`: Remove a thread from a thread group. The thread is not deleted. Removing a thread that is not in the group changes nothing.
+- **Flags (on every subcommand):**
+    - `--project <string>`: Project ID: the project to list or create groups in, and the project a `<group>` name is resolved in. Defaults to the Hub-linked project, then the local project, as for `scion conversation create`. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`. As on `scion conversation create`, this local flag takes a project ID and replaces the global `-g/--project` for these commands.
+- **Flags (on `list`, `get` and `create`):**
+    - `--json`: Output in JSON format. `list` prints `{"threadGroups": [...]}`, the Hub's list body; `get` and `create` print one thread group: `id`, `projectId`, `name`, `createdBy`, `createdByKind` (`user` or `agent`), `createdAt`, `updatedAt` and `threads`, where each thread has `conversationId`, `threadId` (the web chat thread ID, empty for a conversation with no web thread), `name`, `addedBy` and `addedAt`. `threads` is always a list, never `null`.
+- **Flags (on `delete`):**
+    - `-y, --yes`: Answer Yes to the confirmation prompt.
+
+In agent mode (inside agent containers), every subcommand except `delete` is available.
 
 ### `scion logs`
 
@@ -810,7 +837,7 @@ Manages the Scion workspace (Project).
 - `scion project list` (alias `ls`): List the projects on all registered hubs, each with its hub, merged with the project directories on this machine (a linked directory shows its local path; an unlinked one shows hub `-`). Offline unless `--refresh` is given.
     - Flags: `--hub <hub>` (only that hub's projects; a nickname or URL), `--refresh` (fetch the project list of each logged-in hub, or of `--hub`, first), `--local` (list the project directories on this machine instead, with their type, agent count, status and workspace path).
     - Scripts that parse `scion project list` should use `scion project list --local`, which keeps the earlier output, JSON included.
-- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up.
+- `scion project prune`: Detect and remove project configurations whose workspace directories no longer exist. This stops any running containers associated with orphaned projects before cleaning up. A git project configuration with no agents and no recorded workspace path shows as `unverified` in `scion project list --local` and is never removed.
 - `scion project status [project]` (alias `health`): Show agent status for a project from the Hub: counts per lifecycle phase and per activity, a per-agent table (template, harness, phase, activity), and troubleshooting hints for blocked, stalled, or errored agents. Uses the current project when no name is given.
     - Flags: `--all` (report across all projects on the Hub), `--json` (JSON output).
 - `scion project service-accounts` (alias `sa`): Manage GCP service accounts registered for the project.
@@ -1144,8 +1171,10 @@ Open a tunnel from your machine to a port inside an agent, or to the agent's SSH
     - `--local-port <int>`: Local port to listen on. Default: a random free port.
     - `--ssh`: Reach the agent's SSH service instead of a port.
     - `--stdio`: Carry the tunnel on stdin and stdout instead of a local listener, for use as an ssh `ProxyCommand`.
+    - `--known-hosts <path>`: With `--ssh`, the absolute path of the known-hosts file holding the agent's pinned host key, for the host-key hint only. Requires `--host-key-alias`. Written into Host blocks by `scion vscode`.
+    - `--host-key-alias <host>`: With `--ssh`, the name of the pin in `--known-hosts` (the Host block's `HostKeyAlias`). Requires `--known-hosts`.
 
-By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated.
+By default the tunnel listens on `127.0.0.1` and prints the address it forwards to stderr. `--hub` and `--project` make the command independent of the working directory. The command never prompts. Exit codes: `0` success, `1` other error, `2` usage error, `3` no usable credential or identity changed, `4` agent not found, `5` not permitted, `6` Hub unreachable or unavailable, `7` tunnel closed by policy, `8` tunnel limit reached, `9` agent not running, `10` agent unreachable, `11` Hub does not support tunnels, `130` interrupted, `143` terminated. With `--ssh`, the command prints a one-line hint when the agent's host key no longer matches its pin. Without `--known-hosts` it reads the `scion ssh-config` pins. The hint never changes host-key verification: ssh's `StrictHostKeyChecking` and the Host block's `UserKnownHostsFile` remain the only check.
 
 ```bash
 scion tunnel my-agent --port 5173
@@ -1154,6 +1183,25 @@ scion tunnel --stdio --ssh --hub https://hub.example.com --project my-project my
 ```
 
 - `scion tunnel status [--json]`: Show the open tunnels of your running `scion tunnel` processes: the Hub endpoint, the credential identity (kind, subject and scope, never the secret), the session IDs and the open tunnels. With `--hub`, only tunnels to that Hub are shown. Reads local state only and never prompts.
+
+### `scion vscode`
+
+Open VS Code Remote-SSH on an agent's `/workspace` through the Hub, without editing `~/.ssh/config`. It sits alongside `scion ssh-config` and does not replace it. Requires the `hub.conduit` [experiment](/scion/reference/experiments/) on the Hub. Not available in agent mode.
+
+**Usage:** `scion vscode <agent> [--path <dir>] [--prune]`
+
+- **Flags:**
+    - `--path <dir>`: Remote folder to open. Default: `/workspace`.
+    - `--prune`: Also remove the Host blocks and pins of this Hub's agents that no longer exist, from a complete listing only. The agent named is still written and opened; with an incomplete listing nothing is changed and VS Code is not started.
+
+The Hub and project are resolved as for `scion tunnel`, including the project selected with `scion use`. Each run writes the agent's Host block and pinned host key into `~/.scion/vscode/ssh_config` and `~/.scion/vscode/known_hosts` and keeps every other agent's entries. Its ProxyCommand passes `--known-hosts` and `--host-key-alias`, so a recreated agent is reported with the command that refreshes it: `scion vscode --hub <endpoint> --project <project> <agent>`. It checks the agent with one SSH tunnel, then runs `code --user-data-dir ~/.scion/vscode/user-data --remote ssh-remote+scion.<hub-label>.<project>.<agent> <path>`, where `<hub-label>` is the label a `scion ssh-config` include file already records for this Hub, or else one derived from the Hub's host name that no other Hub's entries use. That user data directory's `settings.json` sets `remote.SSH.configFile`, which is application-scoped and cannot be set per profile; your own VS Code settings are never changed, and extensions are shared. The command never prompts. Exit codes are those of `scion tunnel`; `1` when `code` is missing or fails to start, or when the user data `settings.json` has comments and does not already hold the managed values (the error names the file).
+
+Terminals in these windows open in the agent's tmux session: the default `Scion agent` profile joins it with the `agent` window selected, `Scion shell` selects the `shell` window, and `Container shell` is a plain login shell; VS Code's auto-detected `tmux`, `bash`, `zsh` and `sh` profiles are hidden. Switch windows with `Ctrl-b n`. Closing a terminal leaves no extra tmux session behind, and switching windows does not move the web terminal. If the agent has no tmux session, the Scion profiles open a login shell instead. The scion profiles in that `settings.json` are reset on every run; a default terminal or keybinding choice you make there is kept.
+
+```bash
+scion vscode my-agent
+scion vscode my-project/my-agent --path /workspace/web
+```
 
 ### `scion expose` / `scion unexpose`
 
