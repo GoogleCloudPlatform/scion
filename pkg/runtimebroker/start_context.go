@@ -2232,6 +2232,20 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 	// then find it matching.
 	s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
 
+	// A linked project's path is often its own .scion config directory
+	// (the provider path that linking records). That project already has
+	// its config: there is no marker to write inside it, and no external
+	// config dir to create for it. Treating the .scion directory as a
+	// project root would write a stray <repo>/.scion/.scion marker and a
+	// project-configs entry the project never uses.
+	if isOwnProjectConfigDir(in.ProjectPath) {
+		if s.config.Debug {
+			s.agentLifecycleLog.Debug("Project path is the project's own .scion directory; not recording hub project files",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+		}
+		return
+	}
+
 	scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 	if config.IsProjectMarkerFile(scionPath) {
@@ -2265,10 +2279,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				}
 			}
 			// Ensure external split storage directories exist.
-			if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-				_ = os.MkdirAll(extPath, 0755)
-				_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-			}
+			ensureMarkerExternalDirs(marker)
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
 					"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
@@ -2311,7 +2322,17 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	} else if in.ProjectID != "" {
-		// .scion doesn't exist — create project dir and write a marker file
+		// .scion doesn't exist — create project dir and write a marker file.
+		// A marker needs a slug: ReadProjectMarker rejects one without, and
+		// its external dir would be named "__<id>". Without a slug nothing
+		// is written, except for the global directory, whose marker records
+		// the global project's id with an empty slug (see
+		// isGlobalDirProjectID); it still gets no external dir.
+		if in.ProjectSlug == "" && !config.IsGlobalProjectDir(in.ProjectPath) {
+			s.agentLifecycleLog.Warn("Hub-managed project dispatch has no project slug; not writing a .scion marker",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+			return
+		}
 		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
 			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
@@ -2325,10 +2346,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
 					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 			} else {
-				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-					_ = os.MkdirAll(extPath, 0755)
-					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-				}
+				ensureMarkerExternalDirs(marker)
 				if s.config.Debug {
 					s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
 						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
@@ -2336,6 +2354,35 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	}
+}
+
+// ensureMarkerExternalDirs creates the external split storage directories
+// (<project-configs>/<slug>__<id>/.scion and its agents dir) of a marker. A
+// marker without a slug gets none: "__<id>" names no project.
+func ensureMarkerExternalDirs(marker *config.ProjectMarker) {
+	if marker.ProjectSlug == "" {
+		return
+	}
+	if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+		_ = os.MkdirAll(extPath, 0755)
+		_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+	}
+}
+
+// isOwnProjectConfigDir reports whether projectPath is itself an existing
+// project's .scion config directory, such as a linked checkout's
+// <repo>/.scion, rather than a project root that holds one. The broker's
+// global directory is excluded: it is the global project's root, and its
+// marker is handled by recordHubProjectFiles as before.
+func isOwnProjectConfigDir(projectPath string) bool {
+	if filepath.Base(filepath.Clean(projectPath)) != config.DotScion {
+		return false
+	}
+	info, err := os.Stat(projectPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return !config.IsGlobalProjectDir(projectPath)
 }
 
 // telemetryPolicy returns the telemetry policy for this dispatch: the start or
