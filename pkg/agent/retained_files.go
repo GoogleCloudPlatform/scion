@@ -63,12 +63,12 @@ var (
 // The caller holds the agent-files lock, so the files cannot be
 // re-provisioned between this check and the removal.
 func CheckRetainedAgentFiles(agentName, projectPath string) error {
-	if _, err := checkAgentDirContained(projectPath, agentName, false); err != nil {
-		return fmt.Errorf("retained files: %w", err)
-	}
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		return fmt.Errorf("retained files: %w: %v", ErrAgentProjectUnresolved, err)
+	}
+	if _, err := checkAgentDirContained(projectDir, agentName, false); err != nil {
+		return fmt.Errorf("retained files: %w", err)
 	}
 
 	dirs := []string{filepath.Join(projectDir, "agents", agentName)}

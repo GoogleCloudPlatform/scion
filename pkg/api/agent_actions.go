@@ -109,14 +109,15 @@ const AgentIDQueryParam = "agentId"
 // delete that removes the retained files of a soft-deleted agent once the
 // soft-delete retention window has passed (ptone/scion#4744). The broker
 // treats the delete as a files delete (deleteFiles=true, never soft) and
-// removes the files only when no runtime entry holds the agent and its
-// agent-info.json carries the soft-delete mark; otherwise it answers 409
-// with BrokerErrorCodeRetainedFilesRefused and removes nothing.
+// removes the files only when no runtime entry holds the agent, no start of
+// the agent is in flight on the broker, and its agent-info.json carries the
+// soft-delete mark; otherwise it answers 409 with
+// BrokerErrCodeRetainedFilesRefused and removes nothing (it does not cancel
+// an in-flight start either).
+//
+// Caller contract: a hub restore does not clear the broker's soft-delete
+// mark (only a later start rewrites agent-info.json), so the mark alone does
+// not prove the agent is still deleted. The caller must send this only for
+// an agent record that is still soft-deleted, and past its retention window,
+// when the delete is dispatched.
 const PurgeRetainedQueryParam = "purgeRetained"
-
-// BrokerErrorCodeRetainedFilesRefused is the broker error code of a
-// PurgeRetainedQueryParam delete that removed nothing because the files are
-// not the retained files of a soft-deleted agent: a runtime entry still
-// holds the agent, its agent-info.json carries no soft-delete mark, or one
-// of its directories is a symlink. A retry gets the same answer.
-const BrokerErrorCodeRetainedFilesRefused = "retained_files_refused"

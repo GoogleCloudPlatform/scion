@@ -2455,8 +2455,12 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// below, leaving the start to run on and fail long after the agent is
 	// gone. A key that matches no in-flight start is a harmless no-op. A
 	// delete naming a run leaves a start of a different run alone
-	// (ptone/scion#2550).
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+	// (ptone/scion#2550). A purge of retained files cancels nothing: it
+	// refuses while any start of the agent is in flight (see
+	// retainedPurgeRefusal), since that start may be of a restored agent.
+	if !purgeRetained {
+		s.cancelLocalLaunchForRun(launchKey{ProjectID: projectID, Slug: id}, hubAgentID, runID)
+	}
 
 	s.agentLifecycleLog.Debug("Agent delete: resolving target",
 		"agent_id", id, "project_id", projectID, "run_id", runID)
@@ -2584,7 +2588,10 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 	// launch is a harmless no-op. Not redundant with the early cancel: this
 	// key carries the resolved entry's project, which the early one lacks
 	// when the delete names no projectId. Run-aware for the same reason.
-	s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, hubAgentID, runID)
+	// Never for a purge of retained files (see the early cancel above).
+	if !purgeRetained {
+		s.cancelLocalLaunchForRun(launchKey{ProjectID: agentProjectID, Slug: target.name}, hubAgentID, runID)
+	}
 
 	filesToDelete := deleteFiles
 	if deleteFiles && projectPath == "" && projectID != "" {
@@ -2664,16 +2671,21 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 
 	// A purge of retained files removes them only while they are still the
 	// retained files of a soft-deleted agent: no runtime entry holds the
-	// agent, its agent-info.json carries the soft-delete mark and none of
-	// its directories is a symlink. The agent-files lock is held, so the
-	// check stays true until the removal below.
+	// agent, no start of it is in flight here (of any run or agent ID: a
+	// start still provisioning has no runtime entry yet and has not
+	// rewritten agent-info.json), its agent-info.json carries the
+	// soft-delete mark and none of its directories is a symlink. The
+	// agent-files lock is held, so a start that registers after this check
+	// waits for the removal before it provisions.
 	if purgeRetained {
-		if reason := retainedPurgeRefusal(target, projectPath); reason != "" {
+		inFlight := s.launchRegistry.anyInFlight(launchKey{ProjectID: projectID, Slug: id}) ||
+			s.launchRegistry.anyInFlight(launchKey{ProjectID: agentProjectID, Slug: target.name})
+		if reason := retainedPurgeRefusal(target, projectPath, inFlight); reason != "" {
 			span.SetStatus(codes.Error, "retained files refused")
 			s.agentLifecycleLog.Info("Agent retained files purge refused; nothing removed",
 				"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 				"container_id", target.containerID, "reason", reason)
-			RetainedFilesRefused(w, "Retained files not removed: "+reason)
+			RetainedFilesRefused(w, reason)
 			return
 		}
 	}
@@ -7248,20 +7260,24 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
 
 // checkRetainedAgentFiles checks that an agent's files are still the
-// retained files of a soft-deleted agent; a variable so tests can count the
-// calls.
+// retained files of a soft-deleted agent; a variable so tests can replace
+// its answer. Tests that replace it must not call t.Parallel, since every
+// Server shares it.
 var checkRetainedAgentFiles = agent.CheckRetainedAgentFiles
 
 // retainedPurgeRefusal returns why a purge of retained files must remove
 // nothing for target (ptone/scion#4744), or "" when the files may be
 // removed: a runtime entry still holds the agent (a live agent, or one this
-// broker cannot tell is gone), the agent's project directory is unknown, or
+// broker cannot tell is gone), a start of the agent is in flight
+// (launchInFlight), the agent's project directory is unknown, or
 // checkRetainedAgentFiles refuses the files (no soft-delete mark, or a
 // symlinked agent directory). The reasons name no host path.
-func retainedPurgeRefusal(target *deleteTarget, projectPath string) string {
+func retainedPurgeRefusal(target *deleteTarget, projectPath string, launchInFlight bool) string {
 	switch {
 	case target.containerID != "":
 		return "a runtime entry still holds the agent"
+	case launchInFlight:
+		return "a start of the agent is in flight"
 	case projectPath == "":
 		return "the agent's project directory could not be resolved"
 	}

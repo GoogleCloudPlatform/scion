@@ -19,11 +19,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -51,14 +53,23 @@ func markSoftDeleted(t *testing.T, info string) {
 	}
 }
 
-// brokerErrorCode returns the error code of a broker error response.
-func brokerErrorCode(t *testing.T, body []byte) string {
+// assertRetainedRefused checks that rec is the 409 retained_files_refused
+// answer, with a reason in its details containing want.
+func assertRetainedRefused(t *testing.T, rec *httptest.ResponseRecorder, want string) {
 	t.Helper()
-	var resp ErrorResponse
-	if err := json.Unmarshal(body, &resp); err != nil {
-		t.Fatalf("decode error response %q: %v", body, err)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
 	}
-	return resp.Error.Code
+	var resp ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error response %q: %v", rec.Body.String(), err)
+	}
+	if resp.Error.Code != api.BrokerErrCodeRetainedFilesRefused {
+		t.Errorf("error code = %q, want %q", resp.Error.Code, api.BrokerErrCodeRetainedFilesRefused)
+	}
+	if reason, _ := resp.Error.Details[api.BrokerErrDetailReason].(string); !strings.Contains(reason, want) {
+		t.Errorf("details reason = %q, want it to contain %q", reason, want)
+	}
 }
 
 func TestDeleteAgent_PurgeRetained_RemovesMarkedFilesAndLogs(t *testing.T) {
@@ -93,12 +104,7 @@ func TestDeleteAgent_PurgeRetained_RefusesLiveAgentFiles(t *testing.T) {
 	agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
 
 	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if code := brokerErrorCode(t, rec.Body.Bytes()); code != api.BrokerErrorCodeRetainedFilesRefused {
-		t.Errorf("error code = %q, want %q", code, api.BrokerErrorCodeRetainedFilesRefused)
-	}
+	assertRetainedRefused(t, rec, "soft-delete mark")
 	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
 		t.Fatalf("a live agent's files were touched: %v", err)
 	}
@@ -117,12 +123,7 @@ func TestDeleteAgent_PurgeRetained_RefusesWhileRuntimeEntryHoldsAgent(t *testing
 	entries = []api.AgentInfo{labelled("dev", "cid-b", scopeProjB, projectDir)}
 
 	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected 409, got %d: %s", rec.Code, rec.Body.String())
-	}
-	if code := brokerErrorCode(t, rec.Body.Bytes()); code != api.BrokerErrorCodeRetainedFilesRefused {
-		t.Errorf("error code = %q, want %q", code, api.BrokerErrorCodeRetainedFilesRefused)
-	}
+	assertRetainedRefused(t, rec, "runtime entry")
 	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
 		t.Fatalf("files of an agent a runtime entry holds were removed: %v", err)
 	}
@@ -156,11 +157,49 @@ func TestDeleteAgent_PurgeRetained_DoesNotFollowSymlinkedAgentDir(t *testing.T) 
 	}
 
 	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root))
-	if rec.Code < 400 {
-		t.Fatalf("expected a refusal, got %d: %s", rec.Code, rec.Body.String())
-	}
+	assertRetainedRefused(t, rec, "symlink")
 	if _, err := os.Stat(filepath.Join(outside, "workspace", "work.txt")); err != nil {
 		t.Fatalf("files outside the agent's directory were removed through a symlink: %v", err)
+	}
+	if fi, err := os.Lstat(agentDir); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("the symlinked agent directory was removed or replaced (lstat: %v)", err)
+	}
+}
+
+// A start of the agent in flight on the broker (of any run) may be the
+// start of a restored agent that has not rewritten agent-info.json yet: the
+// purge refuses, removes nothing and does not cancel the start.
+func TestDeleteAgent_PurgeRetained_RefusesWhileStartInFlight(t *testing.T) {
+	for _, tc := range []struct {
+		name, launchRun, query string
+	}{
+		{name: "no run IDs"},
+		{name: "same run", launchRun: "run-a", query: "&runId=run-a"},
+		{name: "launch of a run, purge names none", launchRun: "run-b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var entries []api.AgentInfo
+			srv := newRealManagerScopeServer(t, &entries)
+			root := makeLinkedGitProject(t, scopeProjB, "dev")
+			agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
+			markSoftDeleted(t, info)
+			cancels := 0
+			lr := newLaunchRecord("sync-1", "", "start", "", time.Time{}, func() { cancels++ })
+			lr.RunID = tc.launchRun
+			srv.launchRegistry.Begin(launchKey{ProjectID: scopeProjB, Slug: "dev"}, lr)
+
+			rec := doDelete(t, srv, "dev", purgeRetainedQuery(root)+tc.query)
+			assertRetainedRefused(t, rec, "start of the agent is in flight")
+			if cancels != 0 {
+				t.Errorf("in-flight start cancelled %d times by a purge", cancels)
+			}
+			if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
+				t.Fatalf("files were removed while a start was in flight: %v", err)
+			}
+			if _, err := os.Stat(info); err != nil {
+				t.Fatalf("agent-info.json was removed while a start was in flight: %v", err)
+			}
+		})
 	}
 }
 
@@ -190,22 +229,25 @@ func TestRetainedPurgeRefusal(t *testing.T) {
 	checkRetainedAgentFiles = func(string, string) error { return checkErr }
 	target := &deleteTarget{name: "dev"}
 
-	if got := retainedPurgeRefusal(target, "/p"); got != "" {
+	if got := retainedPurgeRefusal(target, "/p", false); got != "" {
 		t.Errorf("clean check refused: %q", got)
 	}
 	checkErr = agent.ErrRetainedFilesNotMarked
-	if got := retainedPurgeRefusal(target, "/p"); !strings.Contains(got, "soft-delete mark") {
+	if got := retainedPurgeRefusal(target, "/p", false); !strings.Contains(got, "soft-delete mark") {
 		t.Errorf("unmarked files: %q", got)
 	}
 	checkErr = agent.ErrRetainedFilesSymlink
-	if got := retainedPurgeRefusal(target, "/p"); !strings.Contains(got, "symlink") {
+	if got := retainedPurgeRefusal(target, "/p", false); !strings.Contains(got, "symlink") {
 		t.Errorf("symlinked dir: %q", got)
 	}
 	checkErr = nil
-	if got := retainedPurgeRefusal(target, ""); got == "" {
+	if got := retainedPurgeRefusal(target, "", false); got == "" {
 		t.Error("an unresolved project directory was allowed")
 	}
-	if got := retainedPurgeRefusal(&deleteTarget{name: "dev", containerID: "cid"}, "/p"); got == "" {
+	if got := retainedPurgeRefusal(&deleteTarget{name: "dev", containerID: "cid"}, "/p", false); got == "" {
 		t.Error("a target held by a runtime entry was allowed")
+	}
+	if got := retainedPurgeRefusal(target, "/p", true); !strings.Contains(got, "in flight") {
+		t.Errorf("start in flight: %q", got)
 	}
 }

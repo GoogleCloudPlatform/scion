@@ -68,11 +68,22 @@ const (
 	// relays it like any other broker failure; the CLI reads
 	// BrokerErrDetailReason from its details to show the cause and the fix.
 	BrokerErrCodeLocalWorktreeRefused = "local_worktree_refused"
+
+	// BrokerErrCodeRetainedFilesRefused marks a PurgeRetainedQueryParam
+	// delete that removed nothing because the files are not, or may not
+	// be, the retained files of a soft-deleted agent (409): a runtime entry
+	// still holds the agent, a start of it is in flight, its project
+	// directory is unknown, its agent-info.json carries no soft-delete mark,
+	// or one of its directories is a symlink (ptone/scion#4744). The cause
+	// is in BrokerErrDetailReason. A retry gets the same answer while that
+	// state lasts.
+	BrokerErrCodeRetainedFilesRefused = "retained_files_refused"
 )
 
 // BrokerErrDetailReason is the details key of a
-// BrokerErrCodeLocalWorktreeRefused error: the client-facing message, with
-// any remote shown without credentials.
+// BrokerErrCodeLocalWorktreeRefused error (the client-facing message, with
+// any remote shown without credentials) and of a
+// BrokerErrCodeRetainedFilesRefused error (the cause, naming no host path).
 const BrokerErrDetailReason = "reason"
 
 // Values of details.cause on a broker runtime_error answer to a create
