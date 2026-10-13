@@ -85,6 +85,10 @@ message Capabilities {
   string endpoint_incarnation = 3;
   string exec_scope = 4;
   TransportLimits transport_limits = 5;
+  // Optional protocol features the endpoint supports, as canonical
+  // lowercase names (for example "stream_renewal": the target enforces
+  // stream authorization deadlines and accepts renewal grants).
+  repeated string features = 6;
 }
 
 message TransportLimits {
@@ -186,6 +190,13 @@ message StreamOpen {
 message StreamAccept {
   uint32 stream_id = 1;
   uint32 initial_window = 2;
+  // target_session_id and target_stream_id are set only by the owning
+  // relay on an internal relay-to-relay hop: the session id and stream id
+  // of the stream on the target's own session, as the target sees it. The
+  // opening relay uses them to request and deliver stream renewals. They
+  // are empty ("" and 0) on every other StreamAccept.
+  string target_session_id = 3;
+  uint32 target_stream_id = 4;
 }
 
 // StreamData carries at most 64 KiB of payload. fin half-closes the
