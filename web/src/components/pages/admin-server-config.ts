@@ -4639,22 +4639,27 @@ export class ScionPageAdminServerConfig extends LitElement {
     const isMetrics = exporter === 'metrics';
     const key = isMetrics ? HUB_METRICS_ENABLED_KEY : HUB_TRACING_ENABLED_KEY;
     const value = isMetrics ? this.hubMetricsEnabled : this.hubTracingEnabled;
+    const loaded = isMetrics ? this.loadedHubMetricsEnabled : this.loadedHubTracingEnabled;
     const running = this.observabilityExport?.[exporter];
     const set = (v: boolean | null) => {
       if (isMetrics) this.hubMetricsEnabled = v;
       else this.hubTracingEnabled = v;
     };
-    // An unset switch shows the state the earlier rule gave at startup.
-    const checked = value ?? running?.enabled ?? false;
+    // An unset switch is drawn in the state the earlier rule gave at
+    // startup, or off when the hub did not report it; the label next to
+    // the toggle says the switch is unset either way.
+    const unsetChecked = running?.enabled ?? false;
+    const checked = value ?? unsetChecked;
+    // Toggling a switch that is not stored back to the state it showed
+    // while unset leaves it unset, so toggling twice sends nothing.
+    const onToggle = (on: boolean) => set(loaded === null && on === unsetChecked ? null : on);
     const defaultRule = isMetrics
-      ? 'on when server.hub.gcp_project_id is set'
-      : 'on when SCION_TRACING_ENABLED and server.hub.gcp_project_id are set';
-    const display =
-      value === null
-        ? `Default (${running?.enabled ? 'on' : 'off'})`
-        : value
-          ? 'Enabled'
-          : 'Disabled';
+      ? 'on when SCION_SERVER_HUB_GCPPROJECTID is set'
+      : 'on when SCION_TRACING_ENABLED and SCION_SERVER_HUB_GCPPROJECTID are set';
+    const defaultLabel = running
+      ? `Default (${running.enabled ? 'on' : 'off'})`
+      : 'Default (state not reported)';
+    const display = value === null ? defaultLabel : value ? 'Enabled' : 'Disabled';
     return html`<div class="form-field full-width">
       ${this.renderFieldValue(
         key,
@@ -4663,7 +4668,7 @@ export class ScionPageAdminServerConfig extends LitElement {
             class="hub-export-switch"
             data-key=${key}
             ?checked=${checked}
-            @sl-change=${(e: Event) => set((e.target as HTMLInputElement).checked)}
+            @sl-change=${(e: Event) => onToggle((e.target as HTMLInputElement).checked)}
             >${isMetrics ? 'Export hub metrics' : 'Export hub traces'}</sl-switch
           >${value !== null
             ? html`<sl-button
@@ -4674,7 +4679,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                 @click=${() => set(null)}
                 >Use default</sl-button
               >`
-            : nothing}`
+            : html`<span class="hint hub-export-default-state" data-key=${key}
+                >${defaultLabel}</span
+              >`}`
       )}
       <span class="hint hub-export-restart" data-key=${key}
         >${value === null ? `Not set: ${defaultRule}. ` : ''}Applies after restart.</span
@@ -4701,8 +4708,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         ><code>${project.id}</code> (source: ${project.source})</span
       >
       <span class="hint"
-        >server.hub.gcp_project_id when set (env or settings file), else the GCP metadata server.
-        Not editable here.</span
+        >SCION_SERVER_HUB_GCPPROJECTID when set, else the project of the Google Cloud metadata
+        server. Not editable here.</span
       >`;
   }
 

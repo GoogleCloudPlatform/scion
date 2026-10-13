@@ -4891,6 +4891,45 @@ describe('hub observability export switches', () => {
     expect(pending!.textContent).toContain(TRACING_KEY);
   });
 
+  it('labels an unset switch as the default next to the toggle', async () => {
+    element = await render(obsConfig(undefined));
+    const metrics = query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`);
+    const tracing = query(element, `.hub-export-default-state[data-key="${TRACING_KEY}"]`);
+    expect(metrics!.textContent).toContain('Default (on)');
+    expect(tracing!.textContent).toContain('Default (off)');
+  });
+
+  it('labels an unset switch as not reported when the hub gives no status, not as off', async () => {
+    element = await render(obsConfig(undefined, { observability_export: undefined }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const label = query(element, `.hub-export-default-state[data-key="${key}"]`);
+      expect(label, key).not.toBeNull();
+      expect(label!.textContent).toContain('Default (state not reported)');
+      expect(label!.textContent).not.toContain('Default (off)');
+    }
+  });
+
+  it('toggling an unset switch twice leaves it unset and sends nothing', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+    });
+    // Metrics runs at startup, so the unset toggle starts checked.
+    const sw = exportSwitch(element, METRICS_KEY)! as HTMLInputElement;
+    sw.checked = false;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBe(false);
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBeNull();
+    expect(query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+  });
+
   it('toggling the switch sets the value that is saved', async () => {
     const bodies: Array<Record<string, any>> = [];
     element = await render(obsConfig(undefined), (body) => {
