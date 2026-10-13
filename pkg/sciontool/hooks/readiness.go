@@ -15,55 +15,95 @@
 package hooks
 
 import (
+	"encoding/json"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
 
-// This file is the single home of the harness-readiness tables: which
-// harnesses report readiness through hooks, and which normalized hook events
-// count as "the harness is up and reading input". `sciontool init` records the
-// mode in state.HarnessInitRunFile; `sciontool hook` writes
-// state.HarnessReadyFile on the first qualifying event. The agent runtime
-// waits on these files before pasting a buffered message.
+// This file is the single home of the harness-readiness rules: how the
+// harness's ready spec reaches `sciontool init`, which normalized hook events
+// count as "the harness is up and reading input", and how a session-start is
+// classified by its source. `sciontool init` records the spec in
+// state.HarnessInitRunFile; `sciontool hook` writes state.HarnessReadyFile on
+// the first qualifying event. The agent runtime waits on these files before
+// pasting a buffered message. No harness name is checked here: whether a
+// harness reports readiness through hooks is its config's ready.strategy.
 
-// hookReadyHarnesses lists the SCION_HARNESS values whose hooks fire at
-// startup, before any user input, so the runtime can wait for the ready
-// marker. Every other harness uses settle mode. Absent on purpose:
-//   - codex: its SessionStart fires only after the first prompt, so it can
-//     never gate the delivery of that prompt.
-//   - opencode: its only early event, session.created, fires when a session
-//     is created, which the captured runs show only after a client creates
-//     one; no capture shows an event before the first prompt.
-//   - muse and muse-code: no capture shows an event before the first prompt.
-var hookReadyHarnesses = map[string]bool{
-	"claude":     true,
-	"gemini":     true,
-	"gemini-cli": true,
-	// copilot: hook mode relies on the documented sessionStart timing (fires
-	// when a new or resumed session begins); it has not been confirmed with
-	// a startup capture. If sessionStart fires lazily, the first message
-	// waits until the delivery deadline.
-	"copilot":    true,
-	"grok":       true,
-	"grok-build": true,
+// LoadReadySpec returns the ready spec the broker passed in
+// state.HarnessReadyEnv (JSON of api.ReadySpec), read with getenv. When the
+// variable is missing (a broker older than the ready spec) or is not a valid
+// spec, it logs at Info and returns the default delay spec, which is safe for
+// every harness: hook harnesses then wait the delay settle instead of their
+// ready marker until the broker is upgraded. Unknown JSON fields are ignored.
+func LoadReadySpec(getenv func(string) string) api.ReadySpec {
+	fallback := state.DefaultReadySpec(state.ReadyStrategyDelay)
+	raw := getenv(state.HarnessReadyEnv)
+	if raw == "" {
+		log.Info("Harness readiness: %s not set (broker predates the ready spec); using strategy %s with settle %s",
+			state.HarnessReadyEnv, fallback.Strategy, fallback.Settle)
+		return fallback
+	}
+	var spec api.ReadySpec
+	if err := json.Unmarshal([]byte(raw), &spec); err != nil {
+		log.Info("Harness readiness: %s is not valid JSON (%v); using strategy %s with settle %s",
+			state.HarnessReadyEnv, err, fallback.Strategy, fallback.Settle)
+		return fallback
+	}
+	if err := state.CheckReadySpec(spec); err != nil {
+		log.Info("Harness readiness: %s is not a valid ready spec (%v); using strategy %s with settle %s",
+			state.HarnessReadyEnv, err, fallback.Strategy, fallback.Settle)
+		return fallback
+	}
+	return spec
 }
 
-// HarnessReadyMode returns the readiness mode (state.ReadyModeHook or
-// state.ReadyModeSettle) for a SCION_HARNESS value. Unknown and empty values
-// use settle mode.
-func HarnessReadyMode(harness string) string {
-	if hookReadyHarnesses[strings.ToLower(strings.TrimSpace(harness))] {
-		return state.ReadyModeHook
+// SessionStartKind classifies a session-start by its source.
+type SessionStartKind int
+
+const (
+	// SessionNew is a new harness session or run: startup, resume, new,
+	// fork, no source, and any unknown source.
+	SessionNew SessionStartKind = iota
+	// SessionInPlace restarts a session inside a harness that was already
+	// running: clear and compact.
+	SessionInPlace
+)
+
+// sessionStartSources maps the known normalized session-start sources
+// (lower case, after dialect mapping) to their kind. A harness that spells a
+// source differently maps it in its dialect. Any future source that restarts
+// a session inside a running harness must be added as SessionInPlace.
+var sessionStartSources = map[string]SessionStartKind{
+	"startup": SessionNew,
+	"resume":  SessionNew,
+	"new":     SessionNew,
+	"fork":    SessionNew,
+	"":        SessionNew,
+	"clear":   SessionInPlace,
+	"compact": SessionInPlace,
+}
+
+// ClassifySessionStart returns the kind of a session-start with source,
+// compared after trimming space and lower-casing. An unknown source is
+// SessionNew, as every session-start was before sources were classified; it
+// is logged at Debug.
+func ClassifySessionStart(source string) SessionStartKind {
+	key := strings.ToLower(strings.TrimSpace(source))
+	kind, known := sessionStartSources[key]
+	if !known {
+		log.Debug("Unknown session-start source %q; treating it as a new session", source)
+		return SessionNew
 	}
-	return state.ReadyModeSettle
+	return kind
 }
 
 // readinessEvents lists the normalized events (after dialect mapping) that
 // show the harness is running and reading input. Scion lifecycle events
 // (pre-start, post-start, pre-stop) and session-end never qualify.
-// session-start qualifies for every source except those in
-// nonReadinessSessionSources; see IsReadinessEvent.
+// session-start qualifies only for a new session; see IsReadinessEvent.
 var readinessEvents = map[string]bool{
 	EventSessionStart:     true,
 	EventPromptSubmit:     true,
@@ -77,25 +117,17 @@ var readinessEvents = map[string]bool{
 	EventResponseComplete: true,
 }
 
-// nonReadinessSessionSources are the session-start sources that do not
-// count: clear and compact restart a session inside a harness that was
-// already running, so they say nothing about a new run being ready. Any
-// future source that restarts a session inside a running harness must be
-// added here.
-var nonReadinessSessionSources = map[string]bool{
-	"clear":   true,
-	"compact": true,
-}
-
 // IsReadinessEvent reports whether a normalized event marks the harness as
-// ready for input. A session-start counts for any source (startup, resume,
-// new, none, ...) except clear and compact.
+// ready for input. A session-start counts only when it is a new session
+// (ClassifySessionStart): clear and compact restart a session inside a
+// harness that was already running, so they say nothing about a new run
+// being ready.
 func IsReadinessEvent(ev *Event) bool {
 	if ev == nil || !readinessEvents[ev.Name] {
 		return false
 	}
 	if ev.Name == EventSessionStart {
-		return !nonReadinessSessionSources[strings.ToLower(strings.TrimSpace(ev.Data.Source))]
+		return ClassifySessionStart(ev.Data.Source) == SessionNew
 	}
 	return true
 }

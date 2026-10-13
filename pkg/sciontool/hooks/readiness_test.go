@@ -15,25 +15,15 @@
 package hooks
 
 import (
+	"encoding/json"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 )
-
-func TestHarnessReadyMode(t *testing.T) {
-	hook := []string{"claude", "gemini", "gemini-cli", "copilot", "grok", "grok-build", "Claude"}
-	settle := []string{"codex", "opencode", "muse", "muse-code", "antigravity", "hermes", "generic", "", "unknown-harness"}
-	for _, h := range hook {
-		if got := HarnessReadyMode(h); got != state.ReadyModeHook {
-			t.Errorf("HarnessReadyMode(%q) = %q, want hook", h, got)
-		}
-	}
-	for _, h := range settle {
-		if got := HarnessReadyMode(h); got != state.ReadyModeSettle {
-			t.Errorf("HarnessReadyMode(%q) = %q, want settle", h, got)
-		}
-	}
-}
 
 func TestIsReadinessEvent(t *testing.T) {
 	yes := []*Event{
@@ -64,4 +54,91 @@ func TestIsReadinessEvent(t *testing.T) {
 			t.Errorf("IsReadinessEvent(%+v) = true, want false", ev)
 		}
 	}
+}
+
+// TestClassifySessionStart covers every source in the design's table, plus
+// case and space handling and unknown values.
+func TestClassifySessionStart(t *testing.T) {
+	logToTemp(t)
+	tests := []struct {
+		source string
+		want   SessionStartKind
+	}{
+		{"startup", SessionNew},
+		{"resume", SessionNew},
+		{"new", SessionNew},
+		{"fork", SessionNew},
+		{"", SessionNew},
+		{"   ", SessionNew},
+		{"something-else", SessionNew},
+		{"weird", SessionNew},
+		{"clear", SessionInPlace},
+		{"compact", SessionInPlace},
+		{"Clear", SessionInPlace},
+		{" COMPACT\n", SessionInPlace},
+		{"Startup", SessionNew},
+	}
+	for _, tt := range tests {
+		if got := ClassifySessionStart(tt.source); got != tt.want {
+			t.Errorf("ClassifySessionStart(%q) = %v, want %v", tt.source, got, tt.want)
+		}
+	}
+}
+
+func TestLoadReadySpec_MissingEnvDefaultsDelay(t *testing.T) {
+	logToTemp(t)
+	want := api.ReadySpec{Strategy: state.ReadyStrategyDelay, Settle: 8 * time.Second}
+	for name, env := range map[string]map[string]string{
+		"missing":              {},
+		"empty":                {state.HarnessReadyEnv: ""},
+		"not JSON":             {state.HarnessReadyEnv: "strategy=hook"},
+		"JSON null":            {state.HarnessReadyEnv: "null"},
+		"unknown strategy":     {state.HarnessReadyEnv: `{"Strategy":"pane","Settle":500000000,"Timeout":30000000000}`},
+		"hook without timeout": {state.HarnessReadyEnv: `{"Strategy":"hook","Settle":1500000000}`},
+		"delay with timeout":   {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":8000000000,"Timeout":30000000000}`},
+		"settle over max":      {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":61000000000}`},
+		"negative settle":      {state.HarnessReadyEnv: `{"Strategy":"delay","Settle":-1}`},
+	} {
+		got := LoadReadySpec(func(k string) string { return env[k] })
+		if got != want {
+			t.Errorf("%s: LoadReadySpec = %+v, want %+v", name, got, want)
+		}
+	}
+}
+
+func TestLoadReadySpec_ValidEnv(t *testing.T) {
+	logToTemp(t)
+	for _, spec := range []api.ReadySpec{
+		{Strategy: state.ReadyStrategyHook, Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second},
+		{Strategy: state.ReadyStrategyHook, Settle: 0, Timeout: 10 * time.Second},
+		{Strategy: state.ReadyStrategyDelay, Settle: 3 * time.Second},
+	} {
+		raw, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := LoadReadySpec(func(k string) string {
+			if k == state.HarnessReadyEnv {
+				return string(raw)
+			}
+			return ""
+		})
+		if got != spec {
+			t.Errorf("LoadReadySpec(%s) = %+v, want %+v", raw, got, spec)
+		}
+	}
+	// Unknown fields from a newer broker are ignored.
+	got := LoadReadySpec(func(string) string {
+		return `{"Strategy":"hook","Settle":2000000000,"Timeout":30000000000,"PaneRegex":"x"}`
+	})
+	if want := (api.ReadySpec{Strategy: "hook", Settle: 2 * time.Second, Timeout: 30 * time.Second}); got != want {
+		t.Errorf("unknown field: got %+v, want %+v", got, want)
+	}
+}
+
+// logToTemp points the sciontool log at a temp file, so tests never append
+// to a real agent log.
+func logToTemp(t *testing.T) {
+	t.Helper()
+	log.SetLogPath(filepath.Join(t.TempDir(), "agent.log"))
 }

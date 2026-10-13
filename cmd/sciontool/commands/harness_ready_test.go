@@ -16,17 +16,20 @@ package commands
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 )
 
@@ -71,28 +74,42 @@ func sessionStart(source string) *hooks.Event {
 	return &hooks.Event{Name: hooks.EventSessionStart, Data: hooks.EventData{Source: source}}
 }
 
+// hookSpec is the default hook ready spec, for tests where only the nonce
+// matters: the hook writes the marker whatever the spec says.
+var hookSpec = state.DefaultReadySpec(state.ReadyStrategyHook)
+
 func TestWriteInitRunFile_ModeContentAndPermissions(t *testing.T) {
 	dir := t.TempDir()
 	initRun, _ := useReadinessPaths(t, dir)
 
-	for harness, wantMode := range map[string]string{
-		"claude":  state.ReadyModeHook,
-		"gemini":  state.ReadyModeHook,
-		"codex":   state.ReadyModeSettle,
-		"generic": state.ReadyModeSettle,
-		"":        state.ReadyModeSettle,
+	for _, tc := range []struct {
+		spec     api.ReadySpec
+		wantMode string
+	}{
+		{state.DefaultReadySpec(state.ReadyStrategyHook), state.ReadyModeHook},
+		{state.DefaultReadySpec(state.ReadyStrategyDelay), state.ReadyModeSettle},
+		{api.ReadySpec{Strategy: state.ReadyStrategyHook, Settle: 2 * time.Second, Timeout: 30 * time.Second}, state.ReadyModeHook},
+		{api.ReadySpec{Strategy: state.ReadyStrategyDelay, Settle: 3 * time.Second}, state.ReadyModeSettle},
 	} {
-		nonce, err := writeInitRunFile(harness)
-		require.NoError(t, err, harness)
+		name := fmt.Sprintf("%+v", tc.spec)
+		nonce, err := writeInitRunFile(tc.spec)
+		require.NoError(t, err, name)
 		gotNonce, gotMode := readInitRun(t, initRun)
-		assert.Equal(t, nonce, gotNonce, harness)
-		assert.Equal(t, wantMode, gotMode, harness)
+		assert.Equal(t, nonce, gotNonce, name)
+		assert.Equal(t, tc.wantMode, gotMode, name)
+
+		data, _ := os.ReadFile(initRun)
+		assert.Equal(t, state.FormatInitRunSpec(nonce, tc.spec), string(data), name)
+		assert.Equal(t, 2, strings.Count(string(data), "\n"), "two lines")
+		assert.LessOrEqual(t, len(data), readinessFileMaxBytes, name)
+		run, ok := state.ParseInitRunSpec(string(data))
+		require.True(t, ok, name)
+		assert.True(t, run.HasSpec, name)
+		assert.Equal(t, tc.spec, run.Spec, name)
 
 		fi, err := os.Stat(initRun)
 		require.NoError(t, err)
-		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), harness)
-		data, _ := os.ReadFile(initRun)
-		assert.Equal(t, 1, strings.Count(string(data), "\n"), "one line")
+		assert.Equal(t, os.FileMode(0o644), fi.Mode().Perm(), name)
 	}
 	assertNoTempFiles(t, dir)
 }
@@ -101,14 +118,14 @@ func TestWriteInitRunFile_NewNonceAndStaleMarkerRemoved(t *testing.T) {
 	dir := t.TempDir()
 	initRun, ready := useReadinessPaths(t, dir)
 
-	first, err := writeInitRunFile("claude")
+	first, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 	markHarnessReady(sessionStart("startup"))
 	got, ok := readMarker(t, ready)
 	require.True(t, ok)
 	require.Equal(t, first, got)
 
-	second, err := writeInitRunFile("claude")
+	second, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 	assert.NotEqual(t, first, second, "each run gets a fresh nonce")
 	_, err = os.Lstat(ready)
@@ -125,7 +142,7 @@ func TestWriteInitRunFile_SymlinkedDirectoryRefused(t *testing.T) {
 	require.NoError(t, os.Symlink(realDir, link))
 	useReadinessPaths(t, link)
 
-	_, err := writeInitRunFile("claude")
+	_, err := writeInitRunFile(hookSpec)
 	require.Error(t, err)
 	entries, _ := os.ReadDir(realDir)
 	assert.Empty(t, entries, "nothing written through the symlinked directory")
@@ -138,7 +155,7 @@ func TestWriteInitRunFile_SymlinkAtLeafReplacedNotFollowed(t *testing.T) {
 	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
 	require.NoError(t, os.Symlink(victim, initRun))
 
-	_, err := writeInitRunFile("claude")
+	_, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 	data, _ := os.ReadFile(victim)
 	assert.Equal(t, "keep", string(data))
@@ -159,7 +176,7 @@ func TestMarkHarnessReady_QualifyingEvents(t *testing.T) {
 	for _, ev := range qualifying {
 		dir := t.TempDir()
 		_, ready := useReadinessPaths(t, dir)
-		nonce, err := writeInitRunFile("claude")
+		nonce, err := writeInitRunFile(hookSpec)
 		require.NoError(t, err)
 		markHarnessReady(ev)
 		got, ok := readMarker(t, ready)
@@ -182,7 +199,7 @@ func TestMarkHarnessReady_NonQualifyingEvents(t *testing.T) {
 	}
 	dir := t.TempDir()
 	_, ready := useReadinessPaths(t, dir)
-	_, err := writeInitRunFile("claude")
+	_, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 	for _, ev := range nonQualifying {
 		markHarnessReady(ev)
@@ -194,7 +211,7 @@ func TestMarkHarnessReady_NonQualifyingEvents(t *testing.T) {
 func TestMarkHarnessReady_ReplacesStaleMarkerKeepsCurrent(t *testing.T) {
 	dir := t.TempDir()
 	_, ready := useReadinessPaths(t, dir)
-	nonce, err := writeInitRunFile("claude")
+	nonce, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 
 	// A marker from another run (e.g. written by a hook that raced the
@@ -216,11 +233,12 @@ func TestMarkHarnessReady_ReplacesStaleMarkerKeepsCurrent(t *testing.T) {
 
 func TestMarkHarnessReady_MissingOrGarbledInitRun(t *testing.T) {
 	for name, content := range map[string]*string{
-		"missing":   nil,
-		"garbled":   strPtr("not a marker\n"),
-		"bad mode":  strPtr("nonce=abcd mode=other\n"),
-		"two lines": strPtr("nonce=abcd mode=hook\nnonce=abcd mode=hook\n"),
-		"too large": strPtr("nonce=" + strings.Repeat("a", 400) + " mode=hook\n"),
+		"missing":                    nil,
+		"garbled":                    strPtr("not a marker\n"),
+		"bad mode":                   strPtr("nonce=abcd mode=other\n"),
+		"bad line 1, valid line 2":   strPtr("nonce=abcd mode=other\nstrategy=hook settle_ms=1500 deadline_ms=90000\n"),
+		"empty line 1, valid line 2": strPtr("\nstrategy=hook settle_ms=1500 deadline_ms=90000\n"),
+		"too large":                  strPtr("nonce=" + strings.Repeat("a", 400) + " mode=hook\n"),
 	} {
 		dir := t.TempDir()
 		initRun, ready := useReadinessPaths(t, dir)
@@ -230,6 +248,24 @@ func TestMarkHarnessReady_MissingOrGarbledInitRun(t *testing.T) {
 		markHarnessReady(sessionStart("startup"))
 		_, err := os.Lstat(ready)
 		assert.True(t, os.IsNotExist(err), "%s: no marker expected", name)
+	}
+}
+
+// A two-line init-run file (line 2 the ready spec) is a current run: the
+// marker gets line 1's nonce, whatever line 2 holds.
+func TestMarkHarnessReady_TwoLineInitRun(t *testing.T) {
+	for name, line2 := range map[string]string{
+		"spec":    "strategy=hook settle_ms=1500 deadline_ms=90000",
+		"garbled": "not key value pairs",
+		"future":  "strategy=hook settle_ms=1500 deadline_ms=90000 events=a,b",
+	} {
+		dir := t.TempDir()
+		initRun, ready := useReadinessPaths(t, dir)
+		require.NoError(t, os.WriteFile(initRun, []byte("nonce=abcd mode=hook\n"+line2+"\n"), 0o644))
+		markHarnessReady(sessionStart("startup"))
+		got, ok := readMarker(t, ready)
+		require.True(t, ok, "%s: marker expected", name)
+		assert.Equal(t, "abcd", got, name)
 	}
 }
 
@@ -248,7 +284,7 @@ func TestMarkHarnessReady_SymlinkedInitRunRefused(t *testing.T) {
 func TestMarkHarnessReady_SymlinkedMarkerNotFollowed(t *testing.T) {
 	dir := t.TempDir()
 	_, ready := useReadinessPaths(t, dir)
-	nonce, err := writeInitRunFile("claude")
+	nonce, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 	victim := filepath.Join(t.TempDir(), "victim")
 	require.NoError(t, os.WriteFile(victim, []byte("keep"), 0o600))
@@ -291,7 +327,7 @@ func TestProcessHookData_WritesReadyMarker(t *testing.T) {
 	t.Cleanup(func() { hookDialect = oldDialect })
 
 	_, ready := useReadinessPaths(t, t.TempDir())
-	nonce, err := writeInitRunFile("claude")
+	nonce, err := writeInitRunFile(hookSpec)
 	require.NoError(t, err)
 
 	clearData, _ := json.Marshal(map[string]interface{}{"hook_event_name": "SessionStart", "source": "clear"})
@@ -345,7 +381,7 @@ func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 	type tc struct {
 		name      string
 		dialect   string
-		harness   string // SCION_HARNESS for the init-run mode
+		harness   string // the harness the case stands for; the hook writes the marker whatever the init-run spec
 		yaml      string // repo-relative dialect.yaml to stage; "" = built-in
 		payload   func(t *testing.T) []byte
 		wantReady bool
@@ -388,7 +424,7 @@ func TestProcessHookData_DialectSessionStartReadiness(t *testing.T) {
 			}
 
 			_, ready := useReadinessPaths(t, t.TempDir())
-			nonce, err := writeInitRunFile(c.harness)
+			nonce, err := writeInitRunFile(hookSpec)
 			require.NoError(t, err)
 
 			require.NoError(t, processHookData(c.payload(t)))
@@ -418,7 +454,7 @@ func TestWriteInitRunFile_RemovalFailureLoggedAtWarn(t *testing.T) {
 	require.NoError(t, os.Chmod(dir, 0o555))
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	_, err := writeInitRunFile("claude")
+	_, err := writeInitRunFile(hookSpec)
 	require.Error(t, err, "the write cannot succeed in a read-only directory")
 	data, _ := os.ReadFile(logPath)
 	assert.Contains(t, string(data), "[WARN]")

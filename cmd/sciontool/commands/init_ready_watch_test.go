@@ -55,15 +55,16 @@ func newReadyWatchFixture(t *testing.T) *readyWatchFixture {
 
 func (f *readyWatchFixture) cfg(nonce, mode string, start time.Time) readyWatchConfig {
 	return readyWatchConfig{
-		Nonce:         nonce,
-		Mode:          mode,
-		Start:         start,
-		PollInterval:  5 * time.Millisecond,
-		Settle:        60 * time.Millisecond,
-		Deadline:      150 * time.Millisecond,
-		MarkerReady:   harnessReadyMarkerMatches,
-		LocalActivity: f.status.CurrentActivity,
-		ReplaceLocal:  f.status.ReplaceActivityIf,
+		Nonce:          nonce,
+		Mode:           mode,
+		Start:          start,
+		PollInterval:   5 * time.Millisecond,
+		Settle:         60 * time.Millisecond,
+		Deadline:       150 * time.Millisecond,
+		FallbackSettle: 60 * time.Millisecond,
+		MarkerTime:     harnessReadyMarkerTime,
+		LocalActivity:  f.status.CurrentActivity,
+		ReplaceLocal:   f.status.ReplaceActivityIf,
 		Report: func(_ context.Context, a state.Activity, _ string) error {
 			f.mu.Lock()
 			defer f.mu.Unlock()
@@ -98,17 +99,17 @@ func equalActivities(a, b []state.Activity) bool {
 	return true
 }
 
-// afterFirstPoll wraps cfg.MarkerReady so that write runs once, right after
+// afterFirstPoll wraps cfg.MarkerTime so that write runs once, right after
 // the watcher's first poll has found no marker. This places the hook event
 // after the watch began without a sleep: on every poll the watcher checks
 // the marker before the deadline, so any poll after the first sees it, even
 // if it runs after the deadline.
 func afterFirstPoll(t *testing.T, cfg *readyWatchConfig, write func()) {
 	t.Helper()
-	inner := cfg.MarkerReady
+	inner := cfg.MarkerTime
 	polled := false
-	cfg.MarkerReady = func(nonce string) bool {
-		ready := inner(nonce)
+	cfg.MarkerTime = func(nonce string) (time.Time, bool) {
+		at, ready := inner(nonce)
 		if !polled {
 			polled = true
 			if ready {
@@ -116,7 +117,7 @@ func afterFirstPoll(t *testing.T, cfg *readyWatchConfig, write func()) {
 			}
 			write()
 		}
-		return ready
+		return at, ready
 	}
 }
 
@@ -218,12 +219,20 @@ func TestWatchHarnessReady_Settle(t *testing.T) {
 	}
 }
 
-// No nonce (init-run file write failed) uses the settle rule, like the
-// runtime's no-init-run fallback.
+// No nonce (init-run file write failed) in hook mode uses the session-age
+// rule with FallbackSettle, like the runtime's no-init-run fallback, not the
+// hook spec's post-marker settle.
 func TestWatchHarnessReady_NoNonceSettles(t *testing.T) {
 	f := newReadyWatchFixture(t)
-	if got := watchHarnessReady(context.Background(), f.cfg("", state.ReadyModeHook, time.Now())); got != readyOutcomeSettled {
+	cfg := f.cfg("", state.ReadyModeHook, time.Now())
+	cfg.Settle = 0
+	cfg.FallbackSettle = 120 * time.Millisecond
+	start := time.Now()
+	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeSettled {
 		t.Fatalf("outcome = %s, want settled", got)
+	}
+	if waited := time.Since(start); waited < 120*time.Millisecond {
+		t.Errorf("returned after %s, before FallbackSettle", waited)
 	}
 }
 
@@ -264,13 +273,139 @@ func TestWatchHarnessReady_Cancelled(t *testing.T) {
 	}
 }
 
-func TestHarnessReadyMarkerMatches(t *testing.T) {
+func TestHarnessReadyMarkerTime(t *testing.T) {
 	newReadyWatchFixture(t)
-	if harnessReadyMarkerMatches("abc") {
+	if _, ok := harnessReadyMarkerTime("abc"); ok {
 		t.Error("missing marker matched")
 	}
 	writeMarker(t, "abc")
-	if !harnessReadyMarkerMatches("abc") || harnessReadyMarkerMatches("def") {
-		t.Error("marker nonce comparison wrong")
+	at, ok := harnessReadyMarkerTime("abc")
+	if !ok {
+		t.Fatal("current marker not matched")
+	}
+	fi, err := os.Stat(harnessReadyFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !at.Equal(fi.ModTime()) {
+		t.Errorf("marker time = %v, want mtime %v", at, fi.ModTime())
+	}
+	if _, ok := harnessReadyMarkerTime("def"); ok {
+		t.Error("marker from another run matched")
+	}
+	// A symlinked marker never counts.
+	target := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(target, []byte(state.FormatReadyMarker("abc")), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(harnessReadyFilePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, harnessReadyFilePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := harnessReadyMarkerTime("abc"); ok {
+		t.Error("symlinked marker matched")
+	}
+}
+
+// Hook mode: readiness is the marker's mtime plus Settle, not the moment the
+// marker is first seen. The watcher must not report working before then.
+func TestWatchHarnessReady_HookAppliesSettleAfterMarker(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.Settle = 300 * time.Millisecond
+	cfg.Deadline = 10 * time.Second
+	var reportedAt time.Time
+	inner := cfg.Report
+	cfg.Report = func(ctx context.Context, a state.Activity, m string) error {
+		reportedAt = time.Now()
+		return inner(ctx, a, m)
+	}
+	// The marker is written but the hook's local write did not happen, so
+	// the watcher itself reports working.
+	afterFirstPoll(t, &cfg, func() { writeMarker(t, nonce) })
+	got := watchHarnessReady(context.Background(), cfg)
+	if got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	fi, err := os.Stat(harnessReadyFilePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fi.ModTime().Add(cfg.Settle); reportedAt.Before(want) {
+		t.Errorf("reported working at %v, before marker mtime + settle %v", reportedAt, want)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityWorking}) {
+		t.Errorf("hub reports = %v, want [working]", r)
+	}
+}
+
+// Hook mode: a marker written longer than Settle ago is ready at once.
+func TestWatchHarnessReady_HookOldMarkerReadyAtOnce(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	writeMarker(t, nonce)
+	old := time.Now().Add(-time.Minute)
+	if err := os.Chtimes(harnessReadyFilePath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.Settle = 30 * time.Second
+	cfg.Deadline = 60 * time.Second
+	start := time.Now()
+	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+	if waited := time.Since(start); waited > 5*time.Second {
+		t.Errorf("waited %s for a marker written a minute ago", waited)
+	}
+}
+
+// Hook mode: the deadline comes from the spec, not state.ReadyDeadline.
+func TestWatchHarnessReady_SpecDeadline(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	cfg := f.cfg("abc123", state.ReadyModeHook, time.Now())
+	cfg.Settle = 0
+	cfg.Deadline = 200 * time.Millisecond
+	start := time.Now()
+	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeDeadline {
+		t.Fatalf("outcome = %s, want deadline", got)
+	}
+	waited := time.Since(start)
+	if waited < 200*time.Millisecond {
+		t.Errorf("returned after %s, before the spec deadline", waited)
+	}
+	if waited > 10*time.Second {
+		t.Errorf("returned after %s; the spec deadline is 200ms", waited)
+	}
+	if r := f.reports(); !equalActivities(r, []state.Activity{state.ActivityWorking}) {
+		t.Errorf("hub reports = %v, want [working]", r)
+	}
+}
+
+// Hook mode: once the marker is seen, its settle is waited out even when
+// that runs past the deadline, as the runtime does.
+func TestWatchHarnessReady_MarkerSettleOutlastsDeadline(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	nonce := "abc123"
+	cfg := f.cfg(nonce, state.ReadyModeHook, time.Now())
+	cfg.Settle = 400 * time.Millisecond
+	cfg.Deadline = 100 * time.Millisecond
+	afterFirstPoll(t, &cfg, func() { writeMarker(t, nonce) })
+	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeHookMarker {
+		t.Fatalf("outcome = %s, want %s", got, readyOutcomeHookMarker)
+	}
+}
+
+// Settle mode: a zero settle is used as given (ready at Start).
+func TestWatchHarnessReady_ZeroSettle(t *testing.T) {
+	f := newReadyWatchFixture(t)
+	cfg := f.cfg("abc123", state.ReadyModeSettle, time.Now())
+	cfg.Settle = 0
+	cfg.PollInterval = time.Hour
+	if got := watchHarnessReady(context.Background(), cfg); got != readyOutcomeSettled {
+		t.Fatalf("outcome = %s, want settled", got)
 	}
 }
