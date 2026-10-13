@@ -170,3 +170,38 @@ func TestRequireHub_ContextHubDoesNotRelink(t *testing.T) {
 	assert.Zero(t, writes.Load(), "no register or create request")
 	assert.Equal(t, before, readFileT(t, settingsFile), "project settings unchanged")
 }
+
+// TestRequireHub_ContextHubAutoLinksNeverLinkedProject pins phase 3's
+// auto-link through the hub selected with 'scion use' (the hub 'scion server
+// start' registers): a directory project that was never linked, with the v1
+// settings 'scion init' writes (its own local ID as hub.project_id), is
+// linked to the local workstation hub without a prompt by any requireHub
+// command, here 'scion list'.
+func TestRequireHub_ContextHubAutoLinksNeverLinkedProject(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	srv, registers := unregisteredLinkHub(t)
+	saveTestContext(t, srv.URL, "")
+	root := t.TempDir()
+	settingsFile := filepath.Join(root, ".scion", "settings.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(settingsFile), 0o755))
+	require.NoError(t, os.WriteFile(settingsFile,
+		[]byte("schema_version: \"1\"\nhub:\n  project_id: dir-project-id\n"), 0o644))
+	t.Chdir(root)
+	origYes, origNI := autoConfirm, nonInteractive
+	t.Cleanup(func() { autoConfirm, nonInteractive = origYes, origNI })
+	autoConfirm, nonInteractive = false, false
+
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "list"), ModeHuman))
+	require.Equal(t, targetSourceContext, hubSource)
+	require.Empty(t, projectPath, "the directory project is used")
+
+	var ctx *HubContext
+	var err error
+	_, stderr := captureStdIO(t, func() { ctx, err = requireHub(projectPath) })
+	require.NoError(t, err)
+	require.NotNil(t, ctx)
+	assert.EqualValues(t, 1, registers.Load(), "linked without a prompt (no terminal, no --yes)")
+	assert.Contains(t, stderr, "Linking project ")
+	assert.NotContains(t, stderr, "Link project with Hub?")
+}

@@ -182,6 +182,73 @@ func TestEnsureHubReady_HubFromContextControls(t *testing.T) {
 	}
 }
 
+// writeGlobalSettingsFile writes content as the global settings, moves into
+// HOME so the global project is resolved, and returns the file path.
+func writeGlobalSettingsFile(t *testing.T, home, content string) string {
+	t.Helper()
+	globalDir := filepath.Join(home, ".scion")
+	if err := os.MkdirAll(globalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(globalDir, "settings.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(home)
+	return path
+}
+
+// TestEnsureHubReady_HubFromContextV1Settings pins the guard against the v1
+// settings format, where 'scion init' stores the project's own local ID as
+// hub.project_id: a project that was never linked is auto-linked on the
+// local workstation hub selected with 'scion use' (the hub registered by
+// 'scion server start'), and one whose own settings record hub.linked=true
+// is still refused there.
+func TestEnsureHubReady_HubFromContextV1Settings(t *testing.T) {
+	const v1 = "schema_version: \"1\"\nhub:\n  project_id: v1-local-id\n"
+	tests := []struct {
+		name     string
+		settings string
+		wantErr  bool
+	}{
+		{name: "never linked: auto-linked", settings: v1},
+		{name: "linked (hub.linked=true): refused", settings: v1 + "  linked: true\n", wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			home := clearHubCredentialEnv(t)
+			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+			server, writes, paths := contextGuardHub(t, false)
+			writeGlobalSettingsFile(t, home, tc.settings)
+			// No terminal and no -y: a prompt that ran would decline.
+			out := withPromptIO(t, strings.NewReader(""), false)
+
+			_, err := EnsureHubReady("", EnsureHubReadyOptions{
+				EndpointOverride: server.URL,
+				HubFromContext:   true,
+			})
+			if tc.wantErr {
+				if err == nil || err.Error() != wantMustBeLinked {
+					t.Fatalf("EnsureHubReady error = %v, want %q", err, wantMustBeLinked)
+				}
+				if got := writes.Load(); got != 0 {
+					t.Errorf("hub write requests = %d (%v), want 0", got, *paths)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("EnsureHubReady: %v", err)
+			}
+			if writes.Load() == 0 {
+				t.Error("expected the project to be registered on the hub")
+			}
+			if !strings.Contains(out.String(), "Linking project ") {
+				t.Errorf("output %q does not report the local auto-link", out.String())
+			}
+		})
+	}
+}
+
 // TestEnsureHubReady_RecordLinkAfterRegistration: when EnsureHubReady
 // registers or links a project, RecordLink gets the hub endpoint, the ID
 // the hub knows the project by and the project path. A refused

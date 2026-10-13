@@ -327,6 +327,20 @@ func projectExplicitlyUnlinked(projectPath string, isGlobal bool) bool {
 	return linked != nil && !*linked
 }
 
+// projectWasLinked reports whether the project was linked to a hub: its own
+// settings record hub.linked=true, or it carries an explicit hub project ID
+// that differs from its local project ID (a link made before the link state
+// was recorded). A non-empty hub project ID alone does not count: in the v1
+// settings format a project's own local ID is stored as hub.project_id, so
+// every initialised project has one, linked or not.
+func projectWasLinked(projectPath string, isGlobal bool, settings *config.Settings) bool {
+	if linked := ProjectLinkedSetting(projectPath, isGlobal); linked != nil && *linked {
+		return true
+	}
+	hubID := settings.GetHubProjectID()
+	return hubID != "" && hubID != settings.ProjectID
+}
+
 // errProjectMustBeLinked is the error for a project that has to be linked to
 // the hub before the operation.
 func errProjectMustBeLinked() error {
@@ -536,8 +550,10 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 
 		// A project linked to a hub must not be linked again, or registered,
 		// on the hub selected with 'scion use': nothing below runs (no ID or
-		// name match, no auto-link, no prompt, no registration).
-		if opts.HubFromContext && settings.GetHubProjectID() != "" {
+		// name match, no auto-link, no prompt, no registration). A project
+		// that was never linked is not refused: it goes on to the local
+		// auto-link like any other.
+		if opts.HubFromContext && projectWasLinked(resolvedPath, isGlobal, settings) {
 			return nil, errProjectMustBeLinked()
 		}
 
