@@ -248,6 +248,22 @@ func trackedStartOf(runID string) func(t *testing.T, srv *Server) (func() bool, 
 	}
 }
 
+func TestDeleteAgent_PurgeRetained_RejectsLocalOnly(t *testing.T) {
+	var entries []api.AgentInfo
+	srv := newRealManagerScopeServer(t, &entries)
+	root := makeLinkedGitProject(t, scopeProjB, "dev")
+	agentDir, info := writeLinkedAgentFiles(t, resolvedScionDir(t, root), "dev")
+	markSoftDeleted(t, info)
+
+	rec := doDelete(t, srv, "dev", purgeRetainedQuery(root)+"&localOnly=true")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(agentDir, "workspace", "work.txt")); err != nil {
+		t.Fatalf("files were removed by a rejected request: %v", err)
+	}
+}
+
 // retainedPurgeRefusal maps each refusal of checkRetainedAgentFiles to a
 // reason that names no host path, and allows only a clean check.
 func TestRetainedPurgeRefusal(t *testing.T) {
