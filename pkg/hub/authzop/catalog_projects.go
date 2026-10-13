@@ -601,7 +601,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.update",
 		Domain:      "artifact",
-		Description: "Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on, changes which project's members read the artifact through the home grant, and drops a target-project grant it replaces",
+		Description: "Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}", Method: "PATCH"},
 		},
@@ -617,8 +617,8 @@ var projectOperations = []OperationSpec{
 		AuditObligation: &AuditObligation{
 			EventType:     "artifact_event (expiry_set, expiry_cleared, moved)",
 			ContextFields: []string{"artifact_id", "actor_kind", "actor_ref", "authority"},
-			BeforeFields:  []string{"old_expiry", "fromScope"},
-			AfterFields:   []string{"new_expiry", "toScope", "droppedGrantId"},
+			BeforeFields:  []string{"oldExpiresAt", "fromScope", "droppedGrantId"},
+			AfterFields:   []string{"newExpiresAt", "toScope"},
 			Atomic:        true,
 		},
 		DenialCodes: []DenialCode{DenialResourceNotFound, DenialForbidden, "cross_project_sharing_disabled"},
@@ -653,7 +653,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.grant.put",
 		Domain:      "artifact",
-		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (MayGrantReview), to a user who can already read it, never replacing a read, write or admin grant; every other request from such a caller gets the same 403",
+		Description: "Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/grants", Method: "POST"},
 		},
@@ -669,10 +669,14 @@ var projectOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub", Function: "TestArtifactsGrantsOnRoutes"},
 			{Package: "pkg/hub", Function: "TestArtifactCanGrantReviewOnRoutes"},
+			{Package: "pkg/hub", Function: "TestArtifactHostMayGrantReview_ScopedToken"},
 			{Package: "pkg/artifacts", Function: "TestGrantsAdminGate"},
 			{Package: "pkg/artifacts", Function: "TestReviewGrantAllowed"},
 			{Package: "pkg/artifacts", Function: "TestReviewGrantDenied"},
 		},
+		// No exemption kind names a known audit gap; route_guarded is the
+		// closest (the route is reached only through the manage check), and
+		// the gap itself is tracked in ptone/scion#4882.
 		Exemptions: []Exemption{{
 			Kind:   ExemptionRouteGuarded,
 			Reason: "The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed)",
@@ -717,7 +721,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.link.list",
 		Domain:      "artifact",
-		Description: "List an artifact's unexpired share links (ids, creator, expiry; never the tokens) and the hub's link lifetimes",
+		Description: "List an artifact's unexpired share links (ids, creator, expiry; never the tokens)",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/links", Method: "GET"},
 		},
@@ -755,6 +759,7 @@ var projectOperations = []OperationSpec{
 			{Package: "pkg/hub", Function: "TestArtifactsShareLinkOnRoutes"},
 			{Package: "pkg/artifacts", Function: "TestLinkManagePermissions"},
 		},
+		// See artifact.grant.put for the exemption kind.
 		Exemptions: []Exemption{{
 			Kind:   ExemptionRouteGuarded,
 			Reason: "The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked)",
@@ -919,7 +924,7 @@ var projectOperations = []OperationSpec{
 	{
 		ID:          "artifact.version.read",
 		Domain:      "artifact",
-		Description: "List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and files",
+		Description: "List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list",
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/artifacts/{id}/versions/{seq}", Method: "GET"},
