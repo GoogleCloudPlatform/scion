@@ -176,7 +176,7 @@ interface RowRecord {
   ui: Record<string, unknown>;
   api: ApiRecord[];
   errors: string[];
-  /** A leg of the row could not run: the row cannot pass (oracle rule 3). */
+  /** A leg of the row could not run: a row with a skipped leg cannot pass. */
   legNotRun?: string;
 }
 
@@ -1055,10 +1055,29 @@ test.describe.serial('artifact access per role (R1)', () => {
       expect(created.status(), 'publish create').toBe(201);
       smoke.stopped = false;
 
-      // The dialog finalizes and the list opens the artifact page.
-      await expect(page).toHaveURL(
-        new RegExp(`/projects/${journey.projects.home}/artifacts/[0-9a-f-]+$`)
-      );
+      // The dialog finalizes and the list opens the artifact page. A refused
+      // finalize is a FINDING as well (the run then stops through the smoke).
+      try {
+        await expect(page).toHaveURL(
+          new RegExp(`/projects/${journey.projects.home}/artifacts/[0-9a-f-]+$`)
+        );
+      } catch (err) {
+        const refused = who('owner').requests.find(
+          (q) =>
+            q.method === 'POST' &&
+            /^\/api\/v1\/artifacts\/[^/]+\/versions\/1\/finalize$/.test(q.path) &&
+            (q.status === 401 || q.status === 403)
+        );
+        if (refused) {
+          smoke.finalizeStatus = refused.status ?? null;
+          finding(
+            'R1-01',
+            `member session cannot finalize a publish (${String(refused.status)}); ` +
+              'no scope or role workaround'
+          );
+        }
+        throw err;
+      }
       const id = new URL(page.url()).pathname.split('/').pop()!;
       journey.artifact = { id, title };
       const finalize = who('owner').requests.find(
@@ -1080,8 +1099,8 @@ test.describe.serial('artifact access per role (R1)', () => {
         ownerRef: art?.ownerRef ?? null,
       };
     });
-    // Oracle rule 3: a failed smoke stops every later graded row, whatever
-    // failed in it (cleanup still deletes a published artifact).
+    // A failed smoke stops every later graded row, whatever failed in it
+    // (cleanup still deletes a published artifact).
     if (!smokePassed) {
       const first = journey.rows['R1-01']?.errors[0] ?? 'no error recorded';
       journey.stopped ??= `not run: smoke precondition failed (R1-01: ${first})`;
@@ -1652,6 +1671,8 @@ test.describe.serial('artifact access per role (R1)', () => {
     }
     cleanup.memberRemovals = removals;
     // Each removed binding re-read by absence, before the projects go.
+    const membersAnchor: Record<string, boolean> = {};
+    cleanup.membersAnchor = membersAnchor;
     for (const name of ['home', 'side'] as const) {
       const projectId = journey.projects[name];
       const mine = journey.bindings.filter((b) => b.project === name);
@@ -1660,13 +1681,19 @@ test.describe.serial('artifact access per role (R1)', () => {
         const res = await api('owner', 'GET', `/api/v1/projects/${projectId}/members`);
         const items =
           ((res.body ?? {}) as { items?: Array<{ id: string; principalId?: string }> }).items ?? [];
+        // Positive anchor: the owner's own binding must be listed, or an
+        // unexpected body would read every binding as absent.
+        const ownerId = who('owner').id;
+        const anchored = res.status === 200 && items.some((i) => i.principalId === ownerId);
+        membersAnchor[name] = anchored;
         for (const b of mine) {
           const userId = journey.ids[b.key]?.id;
           const present = items.some(
             (i) => i.id === b.id || (!!userId && i.principalId === userId)
           );
-          states[`binding ${b.key}@${name}`] =
-            res.status === 200 ? (present ? 'present' : 'absent') : 'unknown';
+          let state: 'present' | 'absent' | 'unknown' = 'unknown';
+          if (anchored) state = present ? 'present' : 'absent';
+          states[`binding ${b.key}@${name}`] = state;
         }
       } catch (err) {
         residue.push(`cleanup error (members of ${name}): ${firstLine(err)}`);
@@ -1792,8 +1819,10 @@ test.describe.serial('artifact access per role (R1)', () => {
     if (journey.tmpDir) fs.rmSync(journey.tmpDir, { recursive: true, force: true });
 
     // Rows nothing reached keep "not run", with the first hard failure as the cause.
+    // A row stays "not reached" only after a beforeAll failure or a test-level
+    // throw, so those name the cause first.
     const cause =
-      journey.setupError ?? journey.stopped ?? journey.hardFailures[0] ?? journey.testError;
+      journey.setupError ?? journey.testError ?? journey.stopped ?? journey.hardFailures[0];
     for (const r of Object.values(journey.rows)) {
       if (r.status === 'not run' && r.reason === NOT_REACHED && cause) {
         r.reason = `${NOT_REACHED}: ${cause}`;
