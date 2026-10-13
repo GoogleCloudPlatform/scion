@@ -248,7 +248,7 @@ const adminForbiddenMessage = "only the artifact's owner or a user with an admin
 // never administer an artifact, its own included (sharing is user-only), so
 // the user text would read as if it were not the owner (ptone/scion#4576).
 // It too is the same for every artifact and every refusal.
-const agentAdminForbiddenMessage = "agents cannot share artifacts or change their grants, share links, expiry or home project; " +
+const agentAdminForbiddenMessage = "agents cannot share artifacts or change an artifact's grants, share links, expiry or home project; " +
 	"users do that: the artifact's owner when the owner is a user, or a user with an admin grant; " +
 	"on an artifact owned by an agent, the agent's delegating user or an admin of the artifact's home project may also grant review access"
 

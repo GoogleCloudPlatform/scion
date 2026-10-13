@@ -132,12 +132,19 @@ func Diff(parent, clean []byte) []Hunk {
 }
 
 // splitLines splits on LF, keeping the terminator, so that a missing final
-// newline is a difference.
+// newline is a difference ("d\n" is not "d"). A text that ends with LF has
+// no empty line after it: bytes.SplitAfter's trailing empty element is
+// dropped, so both sides of a final-newline change have the same number of
+// lines and line counts include no phantom line.
 func splitLines(b []byte) [][]byte {
 	if len(b) == 0 {
 		return nil
 	}
-	return bytes.SplitAfter(b, []byte("\n"))
+	ls := bytes.SplitAfter(b, []byte("\n"))
+	if len(ls[len(ls)-1]) == 0 {
+		ls = ls[:len(ls)-1]
+	}
+	return ls
 }
 
 func newHunk(line int, p, c [][]byte) Hunk {
@@ -162,8 +169,7 @@ func finalNewline(parent, clean []byte) string {
 }
 
 // whitespaceOnly reports whether the lines p and c hold the same text once
-// every space, tab, CR and LF is removed. It reads each byte once and
-// allocates nothing.
+// every space, tab, CR and LF is removed.
 func whitespaceOnly(p, c [][]byte) bool {
 	var pr, cr byteReader
 	pr.lines, cr.lines = p, c

@@ -31,8 +31,8 @@ func TestAdminRefusalTextByCaller(t *testing.T) {
 	f := newFixture(t, false)
 	id := f.publish(agentA, "doc.md", []byte("# doc"), "").Artifact.ID
 	const otherID = "00000000-0000-4000-8000-000000000001"
-	routes := func(id string) []struct{ method, path, body string } {
-		base := "/api/v1/artifacts/" + id
+	routes := func(aid string) []struct{ method, path, body string } {
+		base := "/api/v1/artifacts/" + aid
 		return []struct{ method, path, body string }{
 			{http.MethodGet, base + "/links", ""},
 			{http.MethodPost, base + "/links", `{}`},
@@ -62,14 +62,18 @@ func TestAdminRefusalTextByCaller(t *testing.T) {
 			}
 		}
 	}
-	// An agent that cannot read the artifact learns nothing: each route
-	// answers exactly what it answers for an artifact that does not exist.
+	// A caller that cannot read the artifact, agent or user, learns nothing:
+	// each route answers 404, exactly what it answers for an artifact that
+	// does not exist.
 	missing := routes("00000000-0000-4000-8000-0000000000ff")
-	for i, rt := range routes(id) {
-		got := response(f.do(&agentX, rt.method, rt.path, []byte(rt.body), jsonHdr))
-		want := response(f.do(&agentX, missing[i].method, missing[i].path, []byte(missing[i].body), jsonHdr))
-		if got != want {
-			t.Errorf("unreadable %s %s:\n%s\nwant (missing artifact):\n%s", rt.method, rt.path, got, want)
+	for _, p := range []principal{agentX, outside} {
+		for i, rt := range routes(id) {
+			rec := f.do(&p, rt.method, rt.path, []byte(rt.body), jsonHdr)
+			got := response(rec)
+			want := response(f.do(&p, missing[i].method, missing[i].path, []byte(missing[i].body), jsonHdr))
+			if rec.Code != http.StatusNotFound || got != want {
+				t.Errorf("unreadable as %s, %s %s:\n%s\nwant 404 as for a missing artifact:\n%s", p.ref, rt.method, rt.path, got, want)
+			}
 		}
 	}
 }
