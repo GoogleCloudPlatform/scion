@@ -377,9 +377,8 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	// and nothing in newTestStore waits for it to run. Until it first
 	// runs, its stack shows only OpenDB's gowrap frame, so the guard
 	// cannot see it yet and a scan taken now can wrongly pass
-	// (ptone/scion#4900). Wait until this store's connectionOpener (one
-	// that OpenDB created on this goroutine) is running before checking
-	// the guard.
+	// (ptone/scion#4900). Wait until every connectionOpener OpenDB started
+	// on this goroutine is running before checking the guard.
 	awaitStoreConnectionOpener(t, testID)
 	var out bytes.Buffer
 	if checkLeaksExcluding(&out, 0, 0, false, baseline) {
@@ -395,11 +394,14 @@ func TestLeakGuardReportsUnclosedStore(t *testing.T) {
 	}
 }
 
-// awaitStoreConnectionOpener waits until a goroutine created by
-// database/sql.OpenDB on goroutine creator is running connectionOpener. It
-// finds the goroutine with this file's own stack parser rather than the
-// guard's scan, so a guard that fails to match the goroutine still fails
-// the guard check that follows.
+// awaitStoreConnectionOpener waits until at least one goroutine created by
+// database/sql.OpenDB on goroutine creator is running connectionOpener and
+// none of them is still waiting to start. The first store a process opens
+// also builds the shared template through a second OpenDB on the same
+// goroutine, so seeing one running opener alone does not mean the new
+// store's is running. It finds them with this file's own stack parser
+// rather than the guard's scan, so a guard that fails to match the store's
+// goroutine still fails the guard check that follows.
 func awaitStoreConnectionOpener(t *testing.T, creator int64) {
 	t.Helper()
 	const opener = "database/sql.(*DB).connectionOpener"
@@ -407,19 +409,24 @@ func awaitStoreConnectionOpener(t *testing.T, creator int64) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		created = created[:0]
+		found := false
 		for _, g := range liveGoroutines() {
 			if g.parent != creator || !strings.Contains(g.stack, "created by database/sql.OpenDB") {
 				continue
 			}
 			if strings.Contains(g.stack, opener) {
-				return
+				found = true
+				continue
 			}
 			created = append(created, g.stack)
 		}
+		if found && len(created) == 0 {
+			return
+		}
 		if time.Now().After(deadline) {
 			sort.Strings(created)
-			t.Fatalf("the new store's %s goroutine (created by database/sql.OpenDB in goroutine %d) is not running after 5s; goroutines OpenDB created on it:\n\n%s",
-				opener, creator, strings.Join(created, "\n\n"))
+			t.Fatalf("the %s goroutines (created by database/sql.OpenDB in goroutine %d) are not all running after 5s (running opener seen: %t); goroutines OpenDB created on it that are not running it:\n\n%s",
+				opener, creator, found, strings.Join(created, "\n\n"))
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
