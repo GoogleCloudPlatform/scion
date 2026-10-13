@@ -2501,26 +2501,15 @@ authDone:
 		// dropCheckedSharedDirs saves the record; nothing reads it after this.
 		_ = dropCheckedSharedDirs(agentDir, sharedDirRecord, passed, opts.Name)
 	}
-	id, err := m.Runtime.Run(ctx, runCfg)
-	if err != nil {
-		// Provisioning writes agent-info.json in "created" state before the
-		// runtime launch. If the launch itself fails, keep the provisioned
-		// workspace but flip the local state to "error" so list/status do not
-		// report a phantom created agent forever.
-		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
-			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
-		}
-		return nil, classifyLaunchRuntimeError(err, resolvedImage)
-	}
-	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
-		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
-	if recordAfterCreate {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-				"agent", opts.Name, "run_id", runID, "error", err)
-		}
-	}
-
+	// Record the running phase, runtime and profile before the container
+	// starts rather than after it: some runtimes do not let the host write
+	// files in the container (ptone/scion#4766). Once up, the container
+	// reports its own phase (sciontool init writes "running"). This covers
+	// only the running-phase write: the "error" write on a failed launch
+	// below, and the run ID record after the create when the pre-start
+	// List failed (recordAfterCreate, moving in ptone/scion#4771), still
+	// write agent-info.json after Run.
+	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
 	// confuses readers that only understand the canonical lifecycle phases
@@ -2530,6 +2519,29 @@ authDone:
 	status := string(state.PhaseRunning)
 	if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, status, m.Runtime.Name(), profileName); updateErr != nil {
 		util.Debugf("Start: failed to update local agent status to %q: %v", status, updateErr)
+	}
+	id, err := m.Runtime.Run(ctx, runCfg)
+	if err != nil {
+		// agent-info.json was set to "running" above, before the runtime
+		// launch. If the launch itself fails, keep the provisioned
+		// workspace but flip the local state to "error" so list/status do not
+		// report a phantom agent forever. This write comes after Run, so on a
+		// runtime whose Run fails after creating the container it may run
+		// while the container exists; tracked in ptone/scion#4815.
+		if updateErr := UpdateAgentConfig(opts.Name, opts.ProjectPath, "error", m.Runtime.Name(), profileName); updateErr != nil {
+			util.Debugf("Start: failed to mark agent error in local config: %v", updateErr)
+		}
+		return nil, classifyLaunchRuntimeError(err, resolvedImage)
+	}
+	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
+		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
+	// This write runs while the container may be up; it moves out of
+	// agent-info.json in ptone/scion#4771.
+	if recordAfterCreate {
+		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
+			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+				"agent", opts.Name, "run_id", runID, "error", err)
+		}
 	}
 
 	// Fetch fresh info and verify the container is actually running

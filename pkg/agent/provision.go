@@ -3056,37 +3056,6 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 	})
 }
 
-// AgentDeleteState is the part of agent-info.json a soft delete marks
-// (Phase and DeletedAt), captured so the mark can be undone.
-type AgentDeleteState struct {
-	Phase     string
-	DeletedAt time.Time
-}
-
-// GetAgentDeleteState reads the Phase and DeletedAt of agent-info.json.
-// ok is false when the file cannot be read.
-func GetAgentDeleteState(agentName string, projectPath string) (AgentDeleteState, bool) {
-	info := getSavedAgentInfo(agentName, projectPath)
-	if info == nil {
-		return AgentDeleteState{}, false
-	}
-	return AgentDeleteState{Phase: info.Phase, DeletedAt: info.DeletedAt}, true
-}
-
-// RestoreAgentDeleteState writes st's Phase and DeletedAt back to
-// agent-info.json, undoing a soft-delete mark. It changes nothing unless the
-// file still shows the mark (Phase "deleted"), so a phase a newer start has
-// written since the snapshot is kept.
-func RestoreAgentDeleteState(agentName string, projectPath string, st AgentDeleteState) error {
-	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		if info.Phase != "deleted" {
-			return
-		}
-		info.Phase = st.Phase
-		info.DeletedAt = st.DeletedAt
-	})
-}
-
 // MarkAgentSoftDeleted sets Phase "deleted" and, when deletedAt is not
 // zero, DeletedAt in one locked update of agent-info.json, so a concurrent
 // writer never sees or keeps only half of the soft-delete mark.
