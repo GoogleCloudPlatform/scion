@@ -62,6 +62,15 @@ func (s *Server) resolveFederatedVisitor(ctx context.Context, identity Federated
 	return NewVisitorIdentity(u.ID, fu.IssuerURL(), fu.Subject(), email, fu.DisplayName()), nil
 }
 
+// federationHubUserTokensEnabled is the auth middleware's per-request gate
+// for user access credentials from hub issuers
+// (AuthConfig.FederationHubUserTokensEnabled): true while the
+// federation.project_visitors experiment is enabled. It is read on every
+// request, so a change to the experiment applies to the next request.
+func (s *Server) federationHubUserTokensEnabled() bool {
+	return s.experimentEnabled(experiments.FederationProjectVisitors)
+}
+
 // visitorRouteRefusalMessage is the one response message for every route a
 // visitor is refused, so the response does not distinguish routes.
 const visitorRouteRefusalMessage = "You don't have access to this resource"

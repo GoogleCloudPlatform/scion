@@ -72,6 +72,21 @@ type federationClaims struct {
 	Email         string   `json:"email,omitempty"`
 	EmailVerified bool     `json:"email_verified,omitempty"`
 	Name          string   `json:"name,omitempty"`
+	// TokenKind is the scion_token_kind claim a Scion hub sets on the
+	// tokens it signs ("user" or "agent"). Tokens from hubs that predate
+	// the claim carry none. Read only for issuer_type hub.
+	TokenKind string `json:"scion_token_kind,omitempty"`
+}
+
+// FederationAuthOptions holds per-request inputs to
+// FederationAuthenticator.AuthenticateWithOptions that do not come from the
+// federation configuration.
+type FederationAuthOptions struct {
+	// AcceptHubUserTokens is true when this hub accepts user access
+	// credentials from peer hubs at all (the federation.project_visitors
+	// experiment). When false, a hub issuer's user-kind token is refused
+	// whatever the issuer's accept_user_tokens says.
+	AcceptHubUserTokens bool
 }
 
 // isGoogleUserIssuerMissingAudience reports whether issuer is the Google
@@ -236,8 +251,25 @@ func (a *FederationAuthenticator) IssuerConfig(issuerURL string) (config.Trusted
 }
 
 // Authenticate validates a federation OIDC identity token and returns the
-// authenticated FederatedIdentity on success.
+// authenticated FederatedIdentity on success. It refuses user-kind tokens
+// from hub issuers; AuthenticateWithOptions can accept them.
 func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIdentity, error) {
+	return a.AuthenticateWithOptions(tokenString, FederationAuthOptions{})
+}
+
+// AuthenticateWithOptions validates a federation OIDC identity token and
+// returns the authenticated FederatedIdentity on success.
+//
+// For an issuer with issuer_type hub, the token's scion_token_kind claim
+// selects the identity (see extractHubTokenIdentity): "agent", or no kind
+// (tokens from hubs that predate the claim), yields a
+// FederatedAgentIdentity exactly as before the claim existed; "user" yields
+// a FederatedUserIdentity only when opts.AcceptHubUserTokens and the
+// issuer's accept_user_tokens are both true. The issuer configuration is the
+// one this authenticator was built from, which the server replaces on every
+// federation configuration reload, so a changed flag applies to the next
+// request.
+func (a *FederationAuthenticator) AuthenticateWithOptions(tokenString string, opts FederationAuthOptions) (FederatedIdentity, error) {
 	// 1. Parse JWT with algorithm pinning — rejects wrong algorithms at parse time.
 	tok, err := jwt.ParseSigned(tokenString, a.algorithms)
 	if err != nil {
@@ -316,7 +348,7 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 	var identity FederatedIdentity
 	switch issuerType {
 	case IssuerTypeHub:
-		identity, err = extractHubClaims(&claims, entry.config, scopes)
+		identity, err = extractHubTokenIdentity(&claims, entry.config, scopes, opts)
 	case IssuerTypeServiceAccount:
 		identity, err = extractServiceAccountClaims(&claims, entry.config, scopes)
 	case IssuerTypeUser:
@@ -328,9 +360,15 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 		return nil, err
 	}
 
-	// 9. Apply issuer constraints based on type.
-	switch issuerType {
-	case IssuerTypeHub:
+	// 9. Apply issuer constraints based on type. A hub issuer's user
+	// access credential carries no agent claims; extractHubUserClaims has
+	// already applied its constraints (allowed_emails, allowed_domains), so
+	// the agent constraints below apply to agent tokens only.
+	_, hubUser := identity.(*FederatedUserIdentity)
+	switch {
+	case issuerType == IssuerTypeHub && hubUser:
+		// Constrained in extractHubUserClaims.
+	case issuerType == IssuerTypeHub:
 		if len(entry.config.AllowedProjects) > 0 {
 			if !contains(entry.config.AllowedProjects, claims.ProjectID) {
 				return nil, fmt.Errorf("federation: project %q not in allowed_projects", claims.ProjectID)
@@ -349,7 +387,7 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 				}
 			}
 		}
-	case IssuerTypeServiceAccount, IssuerTypeUser:
+	case issuerType == IssuerTypeServiceAccount, issuerType == IssuerTypeUser:
 		if len(entry.config.AllowedEmails) > 0 {
 			var email string
 			if sid, ok := identity.(*FederatedServiceIdentity); ok {
@@ -370,6 +408,76 @@ func (a *FederationAuthenticator) Authenticate(tokenString string) (FederatedIde
 	)
 
 	return identity, nil
+}
+
+// extractHubTokenIdentity builds the identity for a token from an issuer
+// with issuer_type hub, by its scion_token_kind claim:
+//   - "agent", or no kind (tokens from hubs that predate the claim): a
+//     FederatedAgentIdentity through extractHubClaims, exactly as before the
+//     claim existed;
+//   - "user": a FederatedUserIdentity through extractHubUserClaims, only
+//     when opts.AcceptHubUserTokens and the issuer's accept_user_tokens are
+//     both true;
+//   - any other value is refused.
+//
+// Every refusal is an error, which the auth middleware answers like any
+// other verification failure (401 "invalid federation token").
+func extractHubTokenIdentity(claims *federationClaims, issuerCfg config.TrustedIssuerConfig,
+	scopes []AgentTokenScope, opts FederationAuthOptions) (FederatedIdentity, error) {
+	switch claims.TokenKind {
+	case "", tokenKindAgent:
+		return extractHubClaims(claims, issuerCfg, scopes)
+	case tokenKindUser:
+		if !opts.AcceptHubUserTokens {
+			return nil, fmt.Errorf("federation: user tokens from hub issuers are not accepted")
+		}
+		if !issuerCfg.AcceptUserTokens {
+			return nil, fmt.Errorf("federation: issuer %q does not have accept_user_tokens", claims.Issuer)
+		}
+		return extractHubUserClaims(claims, issuerCfg)
+	default:
+		return nil, fmt.Errorf("federation: unknown scion_token_kind %q", claims.TokenKind)
+	}
+}
+
+// hasHubAgentClaims reports whether claims carry any claim of a hub agent
+// identity token (project_id, agent_name, ancestry, root_user).
+func hasHubAgentClaims(claims *federationClaims) bool {
+	return claims.ProjectID != "" || claims.AgentName != "" || len(claims.Ancestry) > 0 || claims.RootUser != ""
+}
+
+// extractHubUserClaims builds the FederatedUserIdentity for a user access
+// credential (scion_token_kind "user") from a hub issuer that accepts them.
+// The credential must carry a subject, an email with email_verified true,
+// and no agent claim; the email must pass the issuer's allowed_emails and
+// allowed_domains (exact, case-insensitive domain match). The identity gets
+// no scopes: the issuer's default_scopes are agent scopes. Its role is
+// "viewer", as for a user issuer without a default_role.
+func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssuerConfig) (FederatedIdentity, error) {
+	if hasHubAgentClaims(claims) {
+		return nil, fmt.Errorf("federation: user token carries agent claims")
+	}
+	if claims.Subject == "" {
+		return nil, fmt.Errorf("federation: user token missing sub claim")
+	}
+	if claims.Email == "" {
+		return nil, fmt.Errorf("federation: user token missing email claim")
+	}
+	if !claims.EmailVerified {
+		return nil, fmt.Errorf("federation: user token email is not verified")
+	}
+	if len(issuerCfg.AllowedEmails) > 0 && !matchesAllowedEmails(issuerCfg.AllowedEmails, claims.Email) {
+		return nil, fmt.Errorf("federation: email %q not in allowed_emails", claims.Email)
+	}
+	if len(issuerCfg.AllowedDomains) > 0 {
+		domain, ok := domainOf(claims.Email)
+		if !ok || !containsFold(issuerCfg.AllowedDomains, domain) {
+			return nil, fmt.Errorf("federation: email domain of %q not in allowed_domains", claims.Email)
+		}
+	}
+	return NewFederatedUserIdentity(
+		claims.Issuer, claims.Subject, claims.Email, claims.Name, "viewer", nil,
+	), nil
 }
 
 // extractHubClaims extracts Scion hub agent claims. This is the existing
