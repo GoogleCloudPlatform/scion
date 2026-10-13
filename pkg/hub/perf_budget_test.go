@@ -158,8 +158,10 @@ var perfBudgets = []perfBudget{
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
 		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
 		// are its new config.message_mode editability row, the rest is main's own drift
-		// since the 14029 baseline (e8c1576a7, #3112).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
+		// since the 14029 baseline (e8c1576a7, #3112). 14324: CI's measurement
+		// with the config.agent_plugins editability row added (ptone/scion#4933;
+		// measured with the row at T2, kept within the margin at TX).
+		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14324},
 	},
 	{
 		// Store calls: per-request sender standing (upstream #3101).
@@ -170,8 +172,10 @@ var perfBudgets = []perfBudget{
 		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
 		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
 		// are its new config.message_mode editability row, the rest is main's own drift
-		// since the 14029 baseline (e8c1576a7, #3112).
-		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
+		// since the 14029 baseline (e8c1576a7, #3112). 14324: CI's measurement
+		// with the config.agent_plugins editability row added (ptone/scion#4933;
+		// measured with the row at T2, kept within the margin at TX).
+		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14324},
 	},
 }
 

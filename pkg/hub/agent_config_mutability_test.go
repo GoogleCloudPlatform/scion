@@ -68,6 +68,7 @@ var wantEditTier = map[string]EditTier{
 	"gcp_identity": EditTierPrincipal,
 
 	"projectId":                        EditTierImmutable,
+	"config.agent_plugins":             EditTierImmutable,
 	"template":                         EditTierImmutable,
 	"harnessConfig":                    EditTierImmutable,
 	"runtimeBrokerId":                  EditTierImmutable,
