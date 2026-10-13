@@ -327,25 +327,9 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
-	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
+	cfg, hub, err := tunnelClientConfig(settings, endpoint, cmd.ErrOrStderr())
 	if err != nil {
-		return tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
-	}
-	hub := &tunnelHub{endpoint: endpoint, src: src, mode: mode}
-	var apply func(h http.Header) error
-	if src != nil {
-		apply = func(h http.Header) error { return transportauth.ApplyHeaders(h, src, mode) }
-	}
-	cfg := tunnelclient.Config{
-		Endpoint:          endpoint,
-		ResolveCredential: func() tunnelclient.Credential { return tunnelCredential(endpoint) },
-		Hub:               hub,
-		ApplyTransport:    apply,
-		ClientVersion:     version.Short(),
-		Stderr:            cmd.ErrOrStderr(),
-	}
-	if store, err := tunnelStateStore(); err == nil {
-		cfg.State = store
+		return err
 	}
 	ctx, signalled, stop := tunnelSignalContext(cmd.Context())
 	defer stop()
@@ -361,6 +345,33 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return tunnelNotFoundError(te, hub.lookupMissed.Load(), args[0], target)
 	}
 	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+}
+
+// tunnelClientConfig builds the tunnel client configuration for endpoint:
+// the transport auth from settings, the CLI credential chain and the state
+// store. The returned hub records agent lookup misses.
+func tunnelClientConfig(settings *config.Settings, endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
+	if err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
+	}
+	hub := &tunnelHub{endpoint: endpoint, src: src, mode: mode}
+	var apply func(h http.Header) error
+	if src != nil {
+		apply = func(h http.Header) error { return transportauth.ApplyHeaders(h, src, mode) }
+	}
+	cfg := tunnelclient.Config{
+		Endpoint:          endpoint,
+		ResolveCredential: func() tunnelclient.Credential { return tunnelCredential(endpoint) },
+		Hub:               hub,
+		ApplyTransport:    apply,
+		ClientVersion:     version.Short(),
+		Stderr:            stderr,
+	}
+	if store, err := tunnelStateStore(); err == nil {
+		cfg.State = store
+	}
+	return cfg, hub, nil
 }
 
 // tunnelNotFoundError names the project and its source in te when the

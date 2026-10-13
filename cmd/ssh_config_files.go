@@ -470,6 +470,12 @@ func sshShellQuote(s string) string {
 // absolute path; the label, project and agent must be slugs and the endpoint
 // must have no whitespace or control characters.
 func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (string, error) {
+	return renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, sshKnownHostsRef(label))
+}
+
+// renderSSHHostBlockKnown is renderSSHHostBlock with knownHostsRef as the
+// UserKnownHostsFile line, for host files kept outside ~/.ssh/config.d.
+func renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef string) (string, error) {
 	if !filepath.IsAbs(exe) {
 		return "", fmt.Errorf("scion executable path %q is not absolute", exe)
 	}
@@ -493,7 +499,7 @@ func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (st
 	b.WriteString("Host " + host + "\n")
 	b.WriteString("  ProxyCommand " + proxy + "\n")
 	b.WriteString("  HostKeyAlias " + host + "\n")
-	b.WriteString("  UserKnownHostsFile " + sshKnownHostsRef(label) + "\n")
+	b.WriteString("  UserKnownHostsFile " + knownHostsRef + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
 	return b.String(), nil
 }
