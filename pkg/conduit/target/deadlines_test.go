@@ -166,7 +166,6 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	ctx := context.Background()
 	df.clk.Advance(48 * time.Minute)
 	now := df.clk.Now()
-	before := df.deadline(t)
 
 	// A renewal is applied; its jti is then reused by a token that would
 	// otherwise extend the deadline. (Resubmitting the same token is
@@ -176,7 +175,7 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	if _, err := df.d.Renew(ctx, testBinding, 3, used); err != nil {
 		t.Fatalf("first use of the jti: %v", err)
 	}
-	before = df.deadline(t)
+	before := df.deadline(t)
 	replayed := df.renewal(t, now.Add(testInterval), func(c *grant.RenewalClaims) { c.JTI = usedJTI })
 
 	openGrant, err := grant.Mint(df.f.signer, func() grant.Claims {
