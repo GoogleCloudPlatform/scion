@@ -166,7 +166,7 @@ func (s SubjectSelector) MatchesPrincipalClosure(
 // (authz_boundary_test.go) pins that the two never diverge.
 func NormalizePrincipalType(t string) string {
 	switch t {
-	case "user", "dev", "federated_user":
+	case "user", "dev", "federated_user", "visitor":
 		return "user"
 	case "agent", "federated_agent":
 		return "agent"

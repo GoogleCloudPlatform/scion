@@ -29,7 +29,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Project, RuntimeBroker, Template } from '../../shared/types.js';
+import type {
+  AgentLaunch,
+  AgentPhase,
+  Project,
+  RuntimeBroker,
+  Template,
+} from '../../shared/types.js';
 
 interface HarnessConfigEntry {
   id: string;
@@ -40,7 +46,7 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-import { isSharedWorkspace } from '../../shared/types.js';
+import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import { defaultTriggersHint } from '../../shared/notification-triggers.js';
@@ -56,7 +62,8 @@ import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
 import { showToast } from '../../utils/toast.js';
-import type { AgentOtherInlineConfig, ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
+import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
 import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
 
@@ -120,8 +127,9 @@ export class ScionPageAgentCreate extends LitElement {
 
   /**
    * Whether the currently selected broker/profile combination is reliably
-   * known to resolve to a Kubernetes runtime. Block is not offered in that
-   * case. This deliberately does not guess: with no broker selected, no
+   * known to resolve to a Kubernetes runtime. The GCP identity hint then says
+   * what Block means there, and the service accounts' mapping state is asked
+   * for that target. This deliberately does not guess: with no broker selected, no
    * matching profile, or (with no profile chosen) a broker whose available
    * profiles mix runtime types, this is false.
    */
@@ -154,12 +162,6 @@ export class ScionPageAgentCreate extends LitElement {
       projectSettings: this.projectSettings,
       hubSettings: this.hubSettings,
     });
-  }
-
-  /** Template-supplied inline config the form does not edit, shown read-only. */
-  private get otherInlineConfig(): AgentOtherInlineConfig | null {
-    const kubernetes = this.selectedTemplate?.config?.kubernetes;
-    return kubernetes ? { config: { kubernetes }, source: 'from the template' } : null;
   }
 
   private get form(): ScionAgentConfigForm | null {
@@ -389,11 +391,10 @@ export class ScionPageAgentCreate extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    // Block is not offered for a Kubernetes runtime target. Hand the GCP
-    // identity state the current target whenever the broker/profile
-    // selection or the broker list changes; it corrects the displayed mode
-    // (normalizeGcpModeForTarget) in the same update cycle. Whether an
-    // explicit identity is sent is gated separately by gcpIdentityUserSet.
+    // Hand the GCP identity state the current target whenever the
+    // broker/profile selection or the broker list changes: its hint
+    // describes Block on a Kubernetes target. Whether an explicit identity
+    // is sent is gated separately by gcpIdentityUserSet.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
@@ -851,6 +852,10 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
+        // Take the hub's async launch path when it has it on
+        // (server.hub.async_agent_launch); a hub with it off ignores this
+        // and answers synchronously as before.
+        acceptAsyncLaunch: true,
       };
 
       if (this.templateId) body.template = this.templateId;
@@ -891,9 +896,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       const result = (await response.json()) as {
-        agent?: { id: string; status?: string; phase?: string };
+        agent?: { id: string; status?: string; phase?: AgentPhase; launch?: AgentLaunch };
         id?: string;
+        warnings?: string[];
       };
+      // The hub's create warnings (for example, a token issued without
+      // the artifact scopes); the toast stack outlives the navigation. The
+      // start response may repeat one; `shownWarnings` toasts it once.
+      const shownWarnings = new Set<string>();
+      showResponseWarnings(result, shownWarnings);
       const agent = result.agent;
       const agentId = agent?.id || result.id;
 
@@ -902,9 +913,14 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       // Start the agent unless the create response shows it already started.
+      // An async launch the hub accepted is the hub's to finish: while it
+      // runs, and after it failed (the hub refuses that start with 409
+      // agent_create_incomplete), the agent page shows its progress or
+      // failure instead.
       const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
       const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-      if (!alreadyStarted) {
+      const hubLaunch = !!agent && (isAgentLaunching(agent) || isIncompleteCreate(agent));
+      if (!alreadyStarted && !hubLaunch) {
         // The agent exists, so a failed start, including a rejected fetch,
         // is reported and its page still opens, where the user can start
         // it again without creating a second agent. The toast stack
@@ -918,6 +934,8 @@ export class ScionPageAgentCreate extends LitElement {
           if (!startResp.ok) {
             const fallback = `HTTP ${startResp.status}`;
             startError = (await parseApiError(startResp, fallback)).message;
+          } else {
+            await showResponseBodyWarnings(startResp, shownWarnings);
           }
         } catch (startErr) {
           startError =
@@ -1019,7 +1037,6 @@ export class ScionPageAgentCreate extends LitElement {
             mode="create"
             .placeholders=${this.placeholders}
             .gcpIdentity=${this.gcp}
-            .otherInlineConfig=${this.otherInlineConfig}
             ?branchAvailable=${!!this.selectedProject?.gitRemote &&
             !isSharedWorkspace(this.selectedProject)}
             ?disabled=${this.submitting}

@@ -60,7 +60,7 @@ func TestCloudRunSandboxDeleteWithTimeout_NormalCompletion(t *testing.T) {
 	rt := newWorkaroundTestRuntime(t, mockBin)
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-ok", AgentID: "agent-ok"})
 
-	err := rt.deleteWithTimeout(context.Background(), "sb-ok")
+	err := rt.deleteWithTimeout(context.Background(), "sb-ok", rt.observe("sb-ok"))
 	if err != nil {
 		t.Fatalf("deleteWithTimeout() error = %v, want nil", err)
 	}
@@ -78,7 +78,7 @@ func TestCloudRunSandboxDeleteWithTimeout_Timeout(t *testing.T) {
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-hang", AgentID: "agent-hang"})
 
 	start := time.Now()
-	err := rt.deleteWithTimeout(context.Background(), "sb-hang")
+	err := rt.deleteWithTimeout(context.Background(), "sb-hang", rt.observe("sb-hang"))
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -105,7 +105,7 @@ func TestCloudRunSandboxDeleteWithTimeout_ContextCancellation(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := rt.deleteWithTimeout(ctx, "sb-ctx")
+	err := rt.deleteWithTimeout(ctx, "sb-ctx", rt.observe("sb-ctx"))
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -126,7 +126,7 @@ func TestCloudRunSandboxDeleteWithTimeout_ProcessErrorNonFatal(t *testing.T) {
 	rt := newWorkaroundTestRuntime(t, mockBin)
 	rt.state.add(&sandboxStateEntry{SandboxName: "sb-err", AgentID: "agent-err"})
 
-	err := rt.deleteWithTimeout(context.Background(), "sb-err")
+	err := rt.deleteWithTimeout(context.Background(), "sb-err", rt.observe("sb-err"))
 	if err != nil {
 		t.Fatalf("deleteWithTimeout() error = %v, want nil (process error is non-fatal)", err)
 	}
@@ -154,7 +154,7 @@ func TestCloudRunSandboxDeleteWithTimeout_CancelsWatcher(t *testing.T) {
 	rt.watchMu.Unlock()
 
 	// deleteOrWorkaround cancels the watcher before dispatching.
-	err := rt.deleteOrWorkaround(context.Background(), "sb-watch")
+	err := rt.deleteOrWorkaround(context.Background(), "sb-watch", rt.observe("sb-watch"))
 	if err != nil {
 		t.Fatalf("deleteOrWorkaround() error = %v", err)
 	}

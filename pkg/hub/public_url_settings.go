@@ -90,6 +90,13 @@ func storedManagedPublicURL(ops *OperationalSettings) string {
 	ops.mu.RLock()
 	state, ok := ops.cache["endpoints"]
 	ops.mu.RUnlock()
+	return managedPublicURL(state, ok)
+}
+
+// managedPublicURL returns the public_url of the endpoints cache entry
+// state (ok reports whether there is one) when the entry is managed, or "".
+// See storedManagedPublicURL for the origin rule.
+func managedPublicURL(state sectionState, ok bool) string {
 	if !ok || state.Origin == "seeded" {
 		return ""
 	}
@@ -97,10 +104,12 @@ func storedManagedPublicURL(ops *OperationalSettings) string {
 }
 
 // echoedPublicURL reports whether a settings save sends back the public URL
-// the GET view shows (the value in effect from the database, or else the
-// bootstrap value). Such a value is an echo, not a change: it is dropped from
-// the save so a bootstrap value is never stored as a saved value, and a
-// later settings.yaml change still takes effect (ptone/scion#3905).
+// the GET view shows (Snapshot's PublicURL: the saved value, or else the
+// bootstrap value without the SCION_SEED_* layer). Such a value is an echo,
+// not a change: it is dropped from the save so a bootstrap value is never
+// stored as a saved value, and a later settings.yaml change still takes
+// effect (ptone/scion#3905). A seed value, which startup ignores, is not an
+// echo (ptone/scion#4826).
 func echoedPublicURL(ops *OperationalSettings, req *ServerConfigUpdateRequest) bool {
 	if ops == nil || req == nil || req.Server == nil || req.Server.Hub == nil {
 		return false
@@ -137,34 +146,37 @@ func publicURLFromSectionDoc(doc json.RawMessage) string {
 }
 
 // publicURLInEffectDoc returns the endpoints document doc with public_url
-// set to the bootstrap value when doc leaves it unset, for comparing the
-// value in effect before and after a save. With no public_url stored, the
-// hub resolves its endpoint from the bootstrap material at startup
-// (StoredPublicURL), so a row that omits the key does not change it. doc is
-// returned as it is when it sets public_url, when there is no bootstrap
-// value, or when it cannot be decoded.
-func publicURLInEffectDoc(ops *OperationalSettings, doc json.RawMessage) json.RawMessage {
-	if ops == nil || ops.bootstrapKoanf == nil || publicURLFromSectionDoc(doc) != "" {
-		return doc
-	}
-	boot := ops.bootstrapKoanf.String(config.PublicURLKey)
-	if boot == "" {
-		return doc
-	}
+// set to the public URL the hub resolves at its next start, for comparing
+// the value in effect before and after a save: saved, the public_url saved
+// in a managed endpoints row, or with none saved, operator, the operator
+// endpoint (HubEndpoints().Operator: environment, flags, settings.yaml and
+// fallbacks). The bootstrap material is not used: it may hold a
+// SCION_SEED_* value that startup ignores (StoredPublicURL,
+// ptone/scion#4826). public_url is removed when both are "". doc is returned
+// as it is when it cannot be decoded.
+func publicURLInEffectDoc(doc json.RawMessage, saved, operator string) json.RawMessage {
 	m := map[string]json.RawMessage{}
 	if len(doc) > 0 {
 		if err := json.Unmarshal(doc, &m); err != nil {
 			return doc
 		}
 	}
-	v, err := json.Marshal(boot)
-	if err != nil {
-		return doc
-	}
 	if m == nil {
 		m = map[string]json.RawMessage{}
 	}
-	m["public_url"] = v
+	value := saved
+	if value == "" {
+		value = operator
+	}
+	if value == "" {
+		delete(m, "public_url")
+	} else {
+		v, err := json.Marshal(value)
+		if err != nil {
+			return doc
+		}
+		m["public_url"] = v
+	}
 	out, err := json.Marshal(m)
 	if err != nil {
 		return doc

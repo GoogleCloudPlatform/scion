@@ -989,6 +989,56 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Worktree-per-agent mode, linked checkout on the workstation ---
+	// A worktree-per-agent dispatch for a linked project, sent by the
+	// co-located hub to a non-Kubernetes runtime, gets a worktree of the
+	// project's own checkout from ProvisionAgent's local worktree engine
+	// (<repo>/.scion/agents/<slug>/workspace): no clone, no base clone, and
+	// the user's local commits and branches are visible. GitClone and
+	// Workspace stay empty so ProvisionAgent takes that path. If the
+	// checkout fails verification the dispatch is refused rather than falling
+	// back to a clone; see resolveLinkedCheckout. Start and restart re-send
+	// the same workspace inputs and are routed the same way, so
+	// ProvisionAgent reuses the agent's worktree by branch; an agent whose
+	// workspace is a broker-managed worktree (its own or joined) or a clone
+	// keeps it (existingNonLocalWorkspace). Only workstation-mode servers
+	// route.
+	linkedCheckout := false
+	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+		decision := resolveLinkedCheckout(linkedCheckoutInput{
+			WorkspaceMode:                in.WorkspaceMode,
+			GitClone:                     in.Config.GitClone,
+			ProjectPath:                  in.ProjectPath,
+			ProjectPathFromContainer:     in.ProjectPathFromContainer,
+			HubGlobalProject:             in.HubGlobalProject,
+			Colocated:                    s.dispatchFromColocatedHub(ctx, in.HTTPRequest, hubConn),
+			RuntimeName:                  dispatchRuntimeType,
+			HasExistingNonLocalWorkspace: in.Operation != opCreate && existingNonLocalWorkspace(in),
+			WorkstationMode:              s.config.WorkstationMode,
+		})
+		switch {
+		case decision.Refusal != "":
+			span.SetStatus(codes.Error, decision.Refusal)
+			return nil, &startContextError{
+				Status:  http.StatusConflict,
+				Message: decision.Refusal,
+				Code:    ErrCodeLocalWorktreeRefused,
+				Details: map[string]interface{}{api.BrokerErrDetailReason: decision.Refusal},
+			}
+		case decision.Route:
+			linkedCheckout = true
+			opts.Workspace = ""
+			opts.GitClone = nil
+			s.agentLifecycleLog.Info("Worktree-per-agent: using a local worktree of the linked checkout",
+				"agent_id", in.AgentID, "repo_root", decision.RepoRoot)
+		default:
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Worktree-per-agent: linked checkout not used",
+					"agent_id", in.AgentID, "reason", decision.Reason)
+			}
+		}
+	}
+
 	// --- Worktree-per-agent mode ---
 	// When the hub sets WorkspaceMode to worktree-per-agent and the project
 	// is git-backed, provision a shared base clone + per-agent worktree on
@@ -998,7 +1048,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
-	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
@@ -1008,7 +1058,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Git clone mode ---
-	if !worktreeProvisioned && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -1060,12 +1110,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// insufficient because shared-plain may or may not be git-backed.
 	//
 	// Priority:
-	//  1. worktreeProvisioned: host-side worktree was set up — always git.
+	//  1. worktreeProvisioned or linkedCheckout: host-side worktree was (or
+	//     will be) set up — always git.
 	//  2. opts.GitClone != nil: in-container clone configured — always git.
 	//  3. opts.Workspace on disk: shared-plain git workspace (check .git).
 	//  4. in.ResolvedEnv fallback: hub-injected on start/restart paths before
 	//     the on-disk workspace exists (e.g. clone-per-agent pre-clone).
-	isGitWorkspace := worktreeProvisioned || opts.GitClone != nil
+	isGitWorkspace := worktreeProvisioned || linkedCheckout || opts.GitClone != nil
 	if !isGitWorkspace && opts.Workspace != "" {
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
@@ -2337,7 +2388,25 @@ func resolveTelemetryOverride(policy *bool, env map[string]string) *bool {
 //   - use_host_credentials, re-read from the global settings on every start
 //     so turning it off applies to the next start, is on (fails closed).
 func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
-	if !s.config.HostCredentials || hubConn == nil || !hubConn.IsColocated {
+	if !s.config.HostCredentials || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return config.UseHostCredentials(globalDir)
+}
+
+// dispatchFromColocatedHub reports whether this dispatch is bound to the hub
+// co-located in this process, and that binding is not just a guess: when
+// HMAC auth identified the sending hub it must be the co-located one, and
+// with more than one hub connection the X-Scion-Hub-Connection header must
+// name it (so the unauthenticated fallback in resolveHubConnection never
+// picks it for a remote hub). As defence in depth, the co-located hub
+// endpoint must also be on a loopback host.
+func (s *Server) dispatchFromColocatedHub(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if hubConn == nil || !hubConn.IsColocated {
 		return false
 	}
 	authName := authenticatingHubConnFromContext(ctx)
@@ -2359,14 +2428,7 @@ func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, 
 			return false
 		}
 	}
-	if !isLoopbackEndpointURL(hubConn.HubEndpoint) {
-		return false
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return false
-	}
-	return config.UseHostCredentials(globalDir)
+	return isLoopbackEndpointURL(hubConn.HubEndpoint)
 }
 
 // isLoopbackEndpointURL reports whether endpoint is a URL whose host is

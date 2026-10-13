@@ -205,11 +205,17 @@ func TestNotificationDispatcher_DispatchFailure(t *testing.T) {
 		return len(env.dispatcher.getCalls()) == 1
 	}, 2*time.Second, 50*time.Millisecond)
 
-	// Even on dispatch failure, notification is stored and marked dispatched (best-effort)
+	// A failed delivery stores the notification but does NOT mark it
+	// dispatched, so the dispatch sweep retries it (ptone/scion#2743).
+	// The dispatch call is recorded before dispatchToAgent finishes. It runs
+	// synchronously in the dispatcher goroutine, and Stop waits for that
+	// goroutine, so the final state is settled after Stop (the deferred Stop
+	// is a no-op).
+	env.nd.Stop()
 	notifs, err := env.store.GetNotifications(context.Background(), store.SubscriberTypeAgent, env.subscriber.Slug, false)
 	require.NoError(t, err)
-	assert.Len(t, notifs, 1)
-	assert.True(t, notifs[0].Dispatched)
+	require.Len(t, notifs, 1)
+	assert.False(t, notifs[0].Dispatched, "a failed delivery must not be marked dispatched")
 }
 
 func TestNotificationDispatcher_UserSubscriber(t *testing.T) {
@@ -740,9 +746,8 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	// as a fallback for deployments without broker plugins.
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -784,9 +789,8 @@ func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
 	// No broker proxy set — should fall back to channel registry
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -824,9 +828,8 @@ func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) 
 	// Set up a recording channel via the registry
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -852,9 +855,8 @@ func TestNotificationDispatcher_NoChannelDispatchForAgentSubscriber(t *testing.T
 	// Set up a recording channel — should NOT receive anything for agent subscribers
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()

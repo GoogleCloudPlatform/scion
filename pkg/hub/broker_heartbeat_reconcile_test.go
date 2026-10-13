@@ -750,3 +750,71 @@ func TestHeartbeat_NoListingMarksOfflineBrokerOnline(t *testing.T) {
 	assert.Equal(t, store.BrokerStatusOnline, broker.Status, "the heartbeat marks the broker online")
 	f.assertAgentsUnchanged(before)
 }
+
+// TestHeartbeat_StartingPhase (ptone/scion#4756): a complete inventory
+// whose entries report Phase and ContainerStatus "starting" (a start the
+// runtime has not confirmed, for example one interrupted by a crash) does
+// not stop, error or drop the agent, and the missing-agent reconcile does
+// not treat it as missing. A provisioning row moves to starting, a starting
+// row stays starting, and a running row stays running through the
+// heartbeat's active-phase regression guard (intentional). A stopped or
+// error row stays terminal: the heartbeat's terminal guard keeps a phase an
+// explicit lifecycle write set (telling a crash-left start from a stale
+// report is left to ptone/scion#4757 / ptone/scion#4759). An omitted
+// running agent in the same inventory gets a missing clock, which shows the
+// reconcile ran.
+func TestHeartbeat_StartingPhase(t *testing.T) {
+	f := newReconcileFixture(t)
+	provisioning := f.addAgent("provisioning", string(state.PhaseProvisioning), "")
+	starting := f.addAgent("starting", string(state.PhaseStarting), "")
+	running := f.addAgent("running", string(state.PhaseRunning), "working")
+	stopped := f.addAgent("stopped", string(state.PhaseStopped), "")
+	errored := f.addAgent("errored", string(state.PhaseError), "")
+	omitted := f.addAgent("omitted", string(state.PhaseRunning), "working")
+	reported := []*store.Agent{provisioning, starting, running, stopped, errored}
+
+	send := func() {
+		hbAgents := make([]brokerAgentHeartbeat, 0, len(reported))
+		for _, a := range reported {
+			hbAgents = append(hbAgents, brokerAgentHeartbeat{
+				Slug:            a.Slug,
+				Phase:           string(state.PhaseStarting),
+				ContainerStatus: "starting",
+				RuntimeTarget:   "docker",
+			})
+		}
+		f.send(brokerHeartbeatRequest{
+			Status:    store.BrokerStatusOnline,
+			Inventory: completeInventory(),
+			Projects:  []brokerProjectHeartbeat{{ProjectID: f.projectID, Agents: hbAgents}},
+		})
+	}
+
+	check := func(round string) {
+		t.Helper()
+		want := map[string]string{
+			provisioning.ID: string(state.PhaseStarting),
+			starting.ID:     string(state.PhaseStarting),
+			running.ID:      string(state.PhaseRunning),
+			stopped.ID:      string(state.PhaseStopped),
+			errored.ID:      string(state.PhaseError),
+		}
+		for _, a := range reported {
+			got := f.get(a.ID)
+			assert.Equal(t, want[a.ID], got.Phase, "%s: phase of %s", round, a.Slug)
+			assert.Equal(t, "starting", got.ContainerStatus, "%s: container status of %s", round, a.Slug)
+			assert.Empty(t, got.ExitReason, "%s: exit reason of %s", round, a.Slug)
+			assert.Nil(t, got.ExitCode, "%s: exit code of %s", round, a.Slug)
+			assert.True(t, got.DeletedAt.IsZero(), "%s: %s is not deleted", round, a.Slug)
+			assert.False(t, f.hasClock(a.ID), "%s: %s must not start a missing clock", round, a.Slug)
+		}
+		assert.Equal(t, "working", f.get(running.ID).Activity, "%s: running activity is kept", round)
+	}
+
+	send()
+	check("first heartbeat")
+	require.True(t, f.hasClock(omitted.ID), "the omitted agent starts a missing clock, so the reconcile ran")
+
+	send()
+	check("second heartbeat")
+}

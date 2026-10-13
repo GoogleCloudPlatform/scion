@@ -20,12 +20,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
 )
@@ -489,6 +491,13 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	if err := ensureProjectSettingsFile(externalConfigDir, opt); err != nil {
 		return err
 	}
+	// Record the repo root and project type, so that project discovery can
+	// tell this config from an orphaned one. Bookkeeping only: a failure is
+	// logged, not fatal (the CLI records it again when it resolves the
+	// project).
+	if err := RecordGitWorkspace(projectDir); err != nil {
+		slog.Warn("failed to record the workspace path of the project", "project", projectDir, "error", err)
+	}
 
 	// Create external agents directory for agent homes
 	externalAgentsDir, err := GetGitProjectExternalAgentsDir(projectDir)
@@ -792,7 +801,7 @@ const defaultSandboxBin = "/usr/local/gcp/bin/sandbox"
 // identifies the single-node hosted tier, which needs a cloudrun-sandbox
 // profile instead of the workstation defaults.
 func isCloudRunSandboxEnvironment() bool {
-	return os.Getenv("CLOUD_RUN_INSTANCE") != "" && sandboxBinExists(defaultSandboxBin)
+	return cloudrunenv.IsInstance() && sandboxBinExists(defaultSandboxBin)
 }
 
 // sandboxBinExists is a test seam for isCloudRunSandboxEnvironment.

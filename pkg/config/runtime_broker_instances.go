@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -93,7 +94,8 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		switch t.Type {
 		case RuntimeTargetTypeDocker:
 			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
-				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount}} {
+				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount},
+				{"shared_dir_storage_class", t.SharedDirStorageClass}, {"shared_dir_size", t.SharedDirSize}} {
 				if field, v := f.field, f.v; v != "" {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
 						Message: "field not valid for runtime target type docker"})
@@ -115,6 +117,9 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			}
 			if err := ValidateKubernetesServiceAccountMappings(t.KubernetesServiceAccountMappings); err != nil {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings", Message: err.Error()})
+			}
+			if err := ValidateSharedDirSize(t.SharedDirSize); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.shared_dir_size", Message: err.Error()})
 			}
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
@@ -149,6 +154,23 @@ func RuntimeBrokerInstanceDuplicateKeys(instances []V1RuntimeBrokerInstanceConfi
 			errs = append(errs, duplicateInstanceKeyError(i, j, inst.Key))
 		} else {
 			firstIndex[inst.Key] = i
+		}
+	}
+	return errs
+}
+
+// RuntimeBrokerInstanceSharedDirSizes reports every runtime_target
+// shared_dir_size that is not a positive Kubernetes quantity, which the JSON
+// schema cannot express; scion config validate (ValidateSettings) runs it
+// after the schema pass, as ValidateRuntimeBrokerInstances does at load.
+func RuntimeBrokerInstanceSharedDirSizes(instances []V1RuntimeBrokerInstanceConfig) []ValidationError {
+	var errs []ValidationError
+	for i, inst := range instances {
+		if inst.RuntimeTarget == nil {
+			continue
+		}
+		if err := ValidateSharedDirSize(inst.RuntimeTarget.SharedDirSize); err != nil {
+			errs = append(errs, ValidationError{Path: fmt.Sprintf("server.broker.instances[%d].runtime_target.shared_dir_size", i), Message: err.Error()})
 		}
 	}
 	return errs
@@ -215,6 +237,9 @@ func LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceCon
 	if err := checkInstanceScalarsAreStrings(instRaw); err != nil {
 		return nil, err
 	}
+	if err := checkInstanceKeys(instRaw); err != nil {
+		return nil, err
+	}
 	data, err := yamlv3.Marshal(instRaw)
 	if err != nil {
 		return nil, fmt.Errorf("server.broker.instances: %w", err)
@@ -263,7 +288,80 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 			if !ok {
 				return fmt.Errorf("%s.runtime_target must be a mapping", p)
 			}
-			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace"); err != nil {
+			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace",
+				"shared_dir_storage_class", "shared_dir_size"); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// reservedInstanceKeys and reservedRuntimeTargetKeys are keys of the frozen
+// instance schema (.design/flat-runtime-brokers/contract-appendix-p3.md
+// FC1) that this release does not apply yet. The strict loader refuses each
+// with an explicit error rather than reporting it as unknown or dropping
+// it, so a key is never accepted without its effect. A change that wires a
+// key removes it here, adds the Go field and adds it to the JSON schema.
+var (
+	reservedInstanceKeys      = []string{"agent_defaults"}
+	reservedRuntimeTargetKeys = []string{
+		"gke", "priority_class_name", "safe_to_evict",
+		"shared_dir_storage_backend", "shared_dir_storage_backends",
+		"home_storage_backend", "home_storage_leaf",
+	}
+)
+
+// knownYAMLKeys returns the yaml keys of struct type v's fields.
+func knownYAMLKeys(v interface{}) map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeOf(v)
+	for i := 0; i < t.NumField(); i++ {
+		if name, _, _ := strings.Cut(t.Field(i).Tag.Get("yaml"), ","); name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}
+
+var (
+	knownInstanceKeys      = knownYAMLKeys(V1RuntimeBrokerInstanceConfig{})
+	knownRuntimeTargetKeys = knownYAMLKeys(V1RuntimeTargetConfig{})
+)
+
+// checkInstanceKeys refuses every key of an instance entry or its
+// runtime_target that the strict decode would not apply, naming its
+// settings path: a reserved key (frozen, not yet supported) or an unknown
+// one. Keys are checked in sorted order so the first error is stable.
+func checkInstanceKeys(instRaw interface{}) error {
+	list, _ := instRaw.([]interface{})
+	check := func(path string, m map[string]interface{}, known map[string]bool, reserved []string) error {
+		keys := make([]string, 0, len(m))
+		for k := range m {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if known[k] {
+				continue
+			}
+			for _, r := range reserved {
+				if k == r {
+					return fmt.Errorf("%s.%s: this key is reserved for flat Runtime Broker instances but not supported in this release; remove it", path, k)
+				}
+			}
+			return fmt.Errorf("%s.%s: unknown key", path, k)
+		}
+		return nil
+	}
+	for i, e := range list {
+		p := fmt.Sprintf("server.broker.instances[%d]", i)
+		m, _ := e.(map[string]interface{})
+		if err := check(p, m, knownInstanceKeys, reservedInstanceKeys); err != nil {
+			return err
+		}
+		if tm, ok := m["runtime_target"].(map[string]interface{}); ok {
+			if err := check(p+".runtime_target", tm, knownRuntimeTargetKeys, reservedRuntimeTargetKeys); err != nil {
 				return err
 			}
 		}
@@ -323,6 +421,8 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
+				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
+				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 			}
 		}
 		out = append(out, o)
@@ -347,6 +447,8 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				Kubeconfig:                       i.RuntimeTarget.Kubeconfig,
 				KubernetesBlockServiceAccount:    i.RuntimeTarget.KubernetesBlockServiceAccount,
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
+				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
+				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
 			}
 		}
 		out = append(out, o)

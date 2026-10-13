@@ -222,7 +222,7 @@ This provides the agent container with an ambient identity, which the underlying
 This is the out-of-band setup that GCP identity mode `passthrough` relies on. To have the Hub choose the GSA for each agent, use [GCP identity mode `assign`](#gcp-identity-mode-assign-workload-identity-mapping) instead.
 
 :::tip[GOOGLE_CLOUD_PROJECT / GOOGLE_CLOUD_LOCATION]
-Vertex AI auth also needs a project key (usually `GOOGLE_CLOUD_PROJECT`) and, for harnesses that require one, a region key — `GOOGLE_CLOUD_LOCATION` for most of those, though some (e.g. Claude, Gemini) also accept `CLOUD_ML_REGION` or `GOOGLE_CLOUD_REGION`. Rather than setting these per project, set them once at hub scope:
+Vertex AI auth also needs a project key (usually `GOOGLE_CLOUD_PROJECT`) and, for harnesses that require one, a region key — `GOOGLE_CLOUD_LOCATION` for most of those, though some (e.g. Claude, Gemini) also accept `CLOUD_ML_REGION` or `GOOGLE_CLOUD_REGION` (if several are set, `GOOGLE_CLOUD_LOCATION` wins, then `GOOGLE_CLOUD_REGION`). Rather than setting these per project, set them once at hub scope:
 
 ```bash
 scion hub env set --scope hub --always GOOGLE_CLOUD_PROJECT=<project>
