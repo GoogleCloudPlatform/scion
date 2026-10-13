@@ -57,11 +57,3 @@ func deprecatedHubModeKeys(settings *config.Settings) []string {
 	}
 	return keys
 }
-
-// yesNo renders b as "yes" or "no".
-func yesNo(b bool) string {
-	if b {
-		return "yes"
-	}
-	return "no"
-}

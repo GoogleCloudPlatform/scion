@@ -24,9 +24,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// runHubStatusForTest runs 'scion hub status' for the global project with
+// runGlobalHubStatusForTest runs 'scion hub status' for the global project with
 // globalSettings as its settings file and returns stdout.
-func runHubStatusForTest(t *testing.T, globalSettings, format string) string {
+func runGlobalHubStatusForTest(t *testing.T, globalSettings, format string) string {
 	t.Helper()
 	home := os.Getenv("HOME")
 	require.NoError(t, os.MkdirAll(filepath.Join(home, ".scion"), 0o755))
@@ -46,7 +46,7 @@ func runHubStatusForTest(t *testing.T, globalSettings, format string) string {
 
 func TestHubStatus_NoEndpoint(t *testing.T) {
 	hermeticCLIEnv(t)
-	out := runHubStatusForTest(t, "project_id: status-p\n", "")
+	out := runGlobalHubStatusForTest(t, "project_id: status-p\n", "")
 	assert.Contains(t, out, "Hub Status")
 	assert.Contains(t, out, "Endpoint:   (not configured)")
 	assert.Contains(t, out, "No hub selected. Add one with 'scion hub add <name> <url>'")
@@ -70,7 +70,7 @@ func TestHubStatus_LinkWording(t *testing.T) {
 			if tc.linked != "" {
 				settings += "hub:\n" + tc.linked
 			}
-			out := runHubStatusForTest(t, settings, "")
+			out := runGlobalHubStatusForTest(t, settings, "")
 			assert.Contains(t, out, tc.want)
 			assert.NotContains(t, out, tc.dontWant)
 			assert.Contains(t, out, "Local workstation: yes", "a loopback hub reached with the dev token")
@@ -81,13 +81,13 @@ func TestHubStatus_LinkWording(t *testing.T) {
 
 func TestHubStatus_DeprecatedKeysNote(t *testing.T) {
 	withFakeHub(t)
-	out := runHubStatusForTest(t, "project_id: status-p\nhub:\n  enabled: false\n  local_only: true\n", "")
+	out := runGlobalHubStatusForTest(t, "project_id: status-p\nhub:\n  enabled: false\n  local_only: true\n", "")
 	assert.Contains(t, out, "hub.enabled, hub.local_only set in settings; deprecated and ignored")
 }
 
 func TestHubStatus_JSON(t *testing.T) {
 	withFakeHub(t)
-	out := runHubStatusForTest(t, "project_id: status-p\nhub:\n  enabled: true\n", "json")
+	out := runGlobalHubStatusForTest(t, "project_id: status-p\nhub:\n  enabled: true\n", "json")
 	var status map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(out), &status), "output: %s", out)
 	for _, gone := range []string{"enabled", "enabledScope", "enabledInherited", "cliOverride"} {
