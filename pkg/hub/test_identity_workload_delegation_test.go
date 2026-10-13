@@ -1569,6 +1569,48 @@ func TestWorkloadDelegation_WebLoginCodeForOwnIdentity(t *testing.T) {
 	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted while web sessions are unavailable")
 }
 
+// X3b with WS2 (ptone/scion#4240): on a proxy auth mode hub, a workload
+// delegation mints a web-login code for its own member identity only while
+// the hub lists at least one driver principal. Without one it gets the 404
+// unavailable answer with the no-driver-principals cause, and no code is
+// minted.
+func TestWorkloadDelegation_WebLoginCodeOnProxyHubFollowsDriverPrincipals(t *testing.T) {
+	e := newX2Env(t, true)
+	x2EnableWebSessions(t, e)
+
+	grantor, _ := e.bindingGrantor(t, "x2-web-proxy-grantor")
+	d1 := e.delegate(t, grantor, nil)
+	rec := e.mint(t, d1.ID)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	i1 := tiDecode(t, rec).Identity
+	path := "/api/v1/test-identities/" + i1.ID + "/web-login-code"
+
+	e.srv.config.AuthMode = "proxy"
+	e.srv.config.ProxyAuth = &fakeProxyAuthenticator{}
+	e.srv.proxyDrivers = newDriverPrincipalSet([]string{"web-driver@x2-proj.iam.gserviceaccount.com"})
+	webOn, cause := e.srv.testIdentityWebSessionGate()
+	require.True(t, webOn, "proxy auth mode with a driver principal: web sessions available (cause %q)", cause)
+
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var resp TestIdentityWebCodeResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Code)
+	require.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "one code minted with a driver principal configured")
+
+	e.srv.proxyDrivers = nil
+	webOn, cause = e.srv.testIdentityWebSessionGate()
+	require.False(t, webOn)
+	require.Equal(t, testIdentityWebCauseNoDriverPrincipals, cause)
+
+	rec = e.workload(t, http.MethodPost, path, x2Token(t, x2TokenOpts{}), d1.ID, nil, nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), testIdentityWebReasonUnavailable)
+	assert.Contains(t, rec.Body.String(), testIdentityWebCauseNoDriverPrincipals)
+	assert.NotContains(t, rec.Body.String(), `"code":"`, "no code in the answer")
+	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted without a driver principal")
+}
+
 // X3b (ptone/scion#4240): a workload delegation gets the same 404 as for
 // an unknown identity on another delegation's identity, on the grantor's
 // own (session-issued) identity and on an admin-kind identity; nothing is
