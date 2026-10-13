@@ -495,9 +495,9 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 // bootstrapAppliesWhenAbsent reports whether a section key keeps its
 // bootstrap value when a managed DB row omits it. That is the case for
 // endpoints hub_name and public_url: a managed endpoints row carries them
-// only after an admin sets them. For hub_name, Snapshot falls back to the
-// bootstrap value; for public_url, the hub's endpoint resolution at startup
-// does (ptone/scion#3905).
+// only after an admin sets them, and Snapshot falls back to the bootstrap
+// value (for public_url, so does the hub's endpoint resolution at startup,
+// ptone/scion#3905).
 func bootstrapAppliesWhenAbsent(section, key string) bool {
 	return section == "endpoints" && (key == "hub_name" || key == "public_url")
 }
@@ -873,8 +873,8 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	// (applyRunningValuesForUnsetKeys) leaves the key unset: it is neither
 	// written nor reported (ptone/scion#3904).
 	echoedRunning := s.echoedRunningValueKeys(r.Context(), ops, &req.ServerConfigUpdateRequest)
-	// An echo of the saved public URL is not a change either
-	// (ptone/scion#3905, ptone/scion#4826).
+	// An echo of the public URL GET shows is not stored either, so a
+	// bootstrap value never becomes a saved value (ptone/scion#3905).
 	if echoedPublicURL(ops, &req.ServerConfigUpdateRequest) {
 		echoedRunning[config.PublicURLKey] = true
 	}

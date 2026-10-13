@@ -104,10 +104,12 @@ func managedPublicURL(state sectionState, ok bool) string {
 }
 
 // echoedPublicURL reports whether a settings save sends back the public URL
-// the GET view shows: the value an admin saved (Snapshot's PublicURL). Such
-// a value is an echo, not a change, so it is dropped from the save. Only the
-// saved value counts: GET never shows a bootstrap or seed value in the field
-// (ptone/scion#3905, ptone/scion#4826).
+// the GET view shows (Snapshot's PublicURL: the saved value, or else the
+// bootstrap value without the SCION_SEED_* layer). Such a value is an echo,
+// not a change: it is dropped from the save so a bootstrap value is never
+// stored as a saved value, and a later settings.yaml change still takes
+// effect (ptone/scion#3905). A seed value, which startup ignores, is not an
+// echo (ptone/scion#4826).
 func echoedPublicURL(ops *OperationalSettings, req *ServerConfigUpdateRequest) bool {
 	if ops == nil || req == nil || req.Server == nil || req.Server.Hub == nil {
 		return false

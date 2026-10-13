@@ -160,10 +160,10 @@ type Layer1Snapshot struct {
 
 	// Endpoints
 	// PublicURL is, in a DB-backed snapshot, the server.hub.public_url an
-	// admin saved in a managed endpoints row, or "" when none is saved. It
-	// is not the endpoint in effect: that is resolved at startup
-	// (Server.HubEndpoints) and may come from settings.yaml or the
-	// environment (ptone/scion#4826).
+	// admin saved in a managed endpoints row, else the bootstrap value
+	// without the SCION_SEED_* layer (settings.yaml and the environment). A
+	// seed value, which startup ignores, is never used (ptone/scion#4826).
+	// The endpoint in effect is Server.HubEndpoints.
 	PublicURL string
 	// HubName is the configured hub_name. "" does NOT mean "leave alone":
 	// ApplySnapshot resets the running name (and the GCP secret label) to
@@ -235,6 +235,12 @@ type OperationalSettings struct {
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
 
+	// unseededPublicURL is server.hub.public_url from the bootstrap merge
+	// without the SCION_SEED_* layer, valid when hasUnseededPublicURL
+	// (SetUnseededBootstrap). Guarded by mu.
+	unseededPublicURL    string
+	hasUnseededPublicURL bool
+
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
 	remoteImagesWarnedRev atomic.Int64
@@ -278,6 +284,22 @@ func NewOperationalSettings(
 		envKoanf:       envKoanf,
 		cache:          make(map[string]sectionState),
 	}
+}
+
+// SetUnseededBootstrap records the bootstrap merge without the SCION_SEED_*
+// layer (config.LoadUnseededBootstrapKoanfWithConfigPath). The hub's
+// endpoint resolution at startup ignores seed values, so with no saved
+// public URL, Snapshot takes the public URL the admin view shows from this
+// merge rather than from the full bootstrap merge (ptone/scion#4826).
+// Without it (tests, embedded servers) the full bootstrap merge is used.
+func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.unseededPublicURL = k.String(config.PublicURLKey)
+	o.hasUnseededPublicURL = true
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
@@ -391,6 +413,12 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		dbSections[name] = ss.Value
 	}
 	endpoints, hasEndpoints := o.cache["endpoints"]
+	bootstrapPublicURL := ""
+	if o.hasUnseededPublicURL {
+		bootstrapPublicURL = o.unseededPublicURL
+	} else if o.bootstrapKoanf != nil {
+		bootstrapPublicURL = o.bootstrapKoanf.String(config.PublicURLKey)
+	}
 	o.mu.RUnlock()
 
 	// Build the merged koanf: bootstrap fallback, overlaid by DB sections.
@@ -444,12 +472,17 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
 	}
 
-	// public_url is the value an admin saved, or "": a seeded endpoints row
-	// and the bootstrap material may hold a SCION_SEED_* value that startup
-	// ignores (StoredPublicURL), so neither is shown as the field value.
-	// The value in effect is reported separately (PublicURLStatus); echo
-	// detection compares against this saved value only (ptone/scion#4826).
+	// public_url is the value an admin saved in a managed endpoints row,
+	// else the bootstrap value without the SCION_SEED_* layer: with none
+	// saved, the hub resolves its endpoint from settings.yaml and the
+	// environment at startup (ptone/scion#3905) and ignores seed values
+	// (StoredPublicURL). A seeded row is rewritten from the full bootstrap
+	// merge, seed layer included, so its value is not used either
+	// (ptone/scion#4826).
 	snap.PublicURL = managedPublicURL(endpoints, hasEndpoints)
+	if snap.PublicURL == "" {
+		snap.PublicURL = bootstrapPublicURL
+	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
 	// directly from DB docs or bootstrap koanf rather than going through the
