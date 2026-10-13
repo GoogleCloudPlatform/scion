@@ -579,7 +579,12 @@ func getHubClient(settings *config.Settings) (hubclient.Client, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("hub endpoint not configured; set SCION_HUB_ENDPOINT or use --hub flag")
 	}
+	return hubClientForEndpoint(settings, endpoint)
+}
 
+// hubClientForEndpoint returns a client for the hub at endpoint, with the
+// credential getHubClient would choose for that endpoint.
+func hubClientForEndpoint(settings *config.Settings, endpoint string) (hubclient.Client, error) {
 	var opts []hubclient.Option
 
 	// Get auth info for logging
