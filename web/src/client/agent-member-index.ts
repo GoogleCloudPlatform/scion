@@ -31,7 +31,7 @@
  */
 export class AgentMemberIndex {
   private phases = new Map<string, string>();
-  private snapshot: { total: number; running: number } | null = null;
+  private snapshot: { total: number; running: number; approximate: boolean } | null = null;
 
   /** Replace the whole index, e.g. from a `stats.agents` response. Leaves count-only mode. */
   seed(entries: ReadonlyArray<readonly [string, string]>): void {
@@ -42,10 +42,17 @@ export class AgentMemberIndex {
   /**
    * Enter count-only mode with the counts of a response that omitted
    * `stats.agents`. The index holds no IDs until the next {@link seed}.
+   * `approximate` is the response's `stats.totalApproximate`: the counts
+   * are lower bounds.
    */
-  seedCounts(total: number, running: number): void {
+  seedCounts(total: number, running: number, approximate = false): void {
     this.phases = new Map();
-    this.snapshot = { total, running };
+    this.snapshot = { total, running, approximate };
+  }
+
+  /** Whether the counts are lower bounds (a count-only snapshot marked approximate). */
+  get approximate(): boolean {
+    return this.snapshot?.approximate ?? false;
   }
 
   /** Whether the index holds a counts-only snapshot (see {@link seedCounts}). */
@@ -83,7 +90,7 @@ export class AgentMemberIndex {
 
   /** "Agents" and "Running" counts: `index.size` and the running count, or the count-only snapshot. */
   get stats(): { total: number; running: number } {
-    if (this.snapshot) return { ...this.snapshot };
+    if (this.snapshot) return { total: this.snapshot.total, running: this.snapshot.running };
     let running = 0;
     for (const phase of this.phases.values()) {
       if (phase === 'running') running++;

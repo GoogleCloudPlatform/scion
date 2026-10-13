@@ -323,7 +323,7 @@ func syncFromViaHub(hubCtx *HubContext, agentID, agentName, localPath string) er
 	}
 
 	// Build local file hash map for incremental sync
-	localFiles, err := transfer.CollectFiles(localPath, transfer.DefaultExcludePatterns)
+	localFiles, err := collectWorkspaceFiles(localPath, nil)
 	if err != nil && syncDryRun {
 		// In dry-run mode, local path may not exist
 		localFiles = nil
@@ -415,10 +415,7 @@ func syncToViaHub(hubCtx *HubContext, agentID, agentName, localPath string) erro
 	statusf("Scanning local workspace...\n")
 
 	// Collect local files
-	excludePatterns := append([]string{}, transfer.DefaultExcludePatterns...)
-	excludePatterns = append(excludePatterns, syncExclude...)
-
-	localFiles, err := transfer.CollectFiles(localPath, excludePatterns)
+	localFiles, err := collectWorkspaceFiles(localPath, syncExclude)
 	if err != nil {
 		return fmt.Errorf("failed to scan local workspace: %w", err)
 	}

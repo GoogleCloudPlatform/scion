@@ -283,7 +283,7 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 	ignored := api.WarningEmptyPerAgentWorkspaceFilesIgnored
 	tz := "TZ in config.env is ignored"
 	for _, tc := range []struct {
-		name             string // the CLI sends notes.txt and .scion/settings.yaml
+		name             string // the CLI sends notes.txt; the root .scion is excluded
 		createWarnings   []string
 		upload           bool
 		finalizeWarnings []string
@@ -297,7 +297,7 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 		{name: "finalize: files ignored", upload: true, finalizeWarnings: []string{ignored, tz},
 			want: []string{"Warning: " + ignored, "Warning: " + tz}, notWant: []string{"Workspace uploaded:"}},
 		{name: "finalize: uploaded", upload: true,
-			want: []string{"Workspace uploaded: 2 files"}, notWant: []string{"Warning:"}},
+			want: []string{"Workspace uploaded: 1 files"}, notWant: []string{"Warning:"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, k := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID"} {
@@ -394,6 +394,11 @@ func TestStartAgentViaHub_WorkspaceFilesWarningWiring(t *testing.T) {
 			})
 			require.NoError(t, runErr, stderr)
 			require.NotEmpty(t, sentFiles, "the CLI must have sent the local non-git files")
+			var sentPaths []string
+			for _, f := range sentFiles {
+				sentPaths = append(sentPaths, f.Path)
+			}
+			assert.Equal(t, []string{"notes.txt"}, sentPaths, "the workspace-root .scion must not be sent")
 			assert.Equal(t, tc.upload, finalized, "finalize must run exactly on the upload path")
 			for _, w := range tc.want {
 				assert.Equal(t, 1, strings.Count(stderr, w), "want %q exactly once in:\n%s", w, stderr)

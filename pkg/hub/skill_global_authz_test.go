@@ -229,7 +229,6 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	// Create a raw store — no testServer, so no automatic seeding.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	ctx := context.Background()
 
 	// ── Simulate the pre-upgrade state (revision 3 hub-admin, no global-catalog-author) ──
@@ -292,9 +291,19 @@ func TestSeedReconcile_GlobalCatalogAuthorAppearsOnUpgrade(t *testing.T) {
 	assert.True(t, hasCreateGlobal,
 		"hub-admin should have skill.create_global after revision 3 → 4 upgrade")
 
-	// Verify the revision marker was updated.
+	// Verify the revision marker was updated to the code-declared
+	// revision (4 when skill.create_global was added; later revisions add
+	// further permissions).
+	codeRevision := 0
+	for _, role := range BuiltInRoles() {
+		if role.Name == store.SystemRoleHubAdmin {
+			codeRevision = role.Revision
+		}
+	}
+	require.GreaterOrEqual(t, codeRevision, 4)
 	marker := getAppliedBuiltInRoleMarker(ctx, s, store.SystemRoleHubAdmin)
-	assert.Equal(t, 4, marker.Revision, "hub-admin revision marker should be 4 after upgrade")
+	assert.Equal(t, codeRevision, marker.Revision,
+		"hub-admin revision marker should match the code revision after upgrade")
 }
 
 // TestSeedReconcile_OperatorOverrideRespected verifies that when an operator
@@ -377,18 +386,4 @@ func TestGlobalWriteAction_MapsCorrectly(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
-}
-
-// createNamedTestUser creates a user with a given name prefix and role.
-func createNamedTestUser(t *testing.T, s store.Store, namePrefix, role string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(namePrefix),
-		Email:       namePrefix + "@test.com",
-		DisplayName: namePrefix,
-		Role:        role,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
 }

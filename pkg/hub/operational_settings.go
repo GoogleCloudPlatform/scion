@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"maps"
 	"math/rand"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,16 +95,24 @@ type Layer1Snapshot struct {
 	AuthorizedDomains []string
 
 	// Lifecycle
-	AutoSuspendStalled    bool
-	StalledThreshold      string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetention   string // DB-backed snapshots only (see type comment)
-	SoftDeleteRetainFiles bool   // DB-backed snapshots only (see type comment)
+	AutoSuspendStalled  bool
+	StalledThreshold    string // DB-backed snapshots only (see type comment)
+	SoftDeleteRetention string // DB-backed snapshots only (see type comment); "" = startup value
+	// SoftDeleteRetainFiles is nil when unset; ApplySnapshot then uses the
+	// startup value. DB-backed snapshots only (see type comment).
+	SoftDeleteRetainFiles *bool
 
 	// Start claim timing (durations as strings; empty keeps the startup value)
 	StartClaimLeaseTTL         string
 	StartMaxDuration           string
 	StartUnconfirmedHold       string
 	StartCreateUnconfirmedHold string
+
+	// GCP service-account permission check (gcp_iam section). DB-backed
+	// snapshots only; "" means no stored or file value, and ApplySnapshot
+	// then uses the deploy-time value (resolveGCPIAMSettings).
+	GCPIAMCheckMode         string
+	GCPIAMDenyUnknownPolicy string
 
 	// Maintenance
 	AdminMode          bool
@@ -150,12 +159,24 @@ type Layer1Snapshot struct {
 	DefaultGCPIdentityServiceAccountID string
 
 	// Endpoints
+	// PublicURL is, in a DB-backed snapshot, the server.hub.public_url an
+	// admin saved in a managed endpoints row, else a bootstrap value. When
+	// the server has set the unseeded bootstrap (SetUnseededBootstrap, as
+	// startup does), that value comes from the merge without the
+	// SCION_SEED_* layer (settings.yaml and the environment), so a seed
+	// value, which startup ignores, is excluded (ptone/scion#4826). When it
+	// is unset (tests, embedded servers), the full bootstrap merge, seed
+	// layer included, is used. The endpoint in effect is
+	// Server.HubEndpoints.
 	PublicURL string
 	// HubName is the configured hub_name. "" does NOT mean "leave alone":
 	// ApplySnapshot resets the running name (and the GCP secret label) to
 	// this replica's startup name. Every snapshot constructor must set it.
 	HubName       string
 	ImageRegistry string
+	// MonitoringDashboardURL is server.hub.monitoring_dashboard_url; ""
+	// means unset (no Health page link). Every snapshot constructor sets it.
+	MonitoringDashboardURL string
 
 	// GitHub App (non-secret fields only)
 	GitHubAppID           int64
@@ -166,6 +187,16 @@ type Layer1Snapshot struct {
 
 	// Notifications
 	NotificationChannels []config.V1NotificationChannelConfig
+
+	// FromOperationalSettings marks a DB-backed snapshot
+	// (OperationalSettings.Snapshot), which carries the complete set of
+	// Layer-1 values. ApplySnapshot then treats an unset value as cleared
+	// and returns it to the startup value, and rebuilds the notification
+	// channel registry from NotificationChannels (an empty list removes
+	// every channel). A snapshot built from the file
+	// (BuildLayer1SnapshotFromFile) leaves it false: there an unset value
+	// keeps the running value, and the registry is left as it is.
+	FromOperationalSettings bool
 
 	// Federation
 	FederationConfig *config.FederationConfig // nil when federation section not present
@@ -207,6 +238,12 @@ type OperationalSettings struct {
 	envKoanf       *koanf.Koanf    // env-only koanf for merge
 	mu             sync.RWMutex
 	cache          map[string]sectionState // section name → cached value + revision
+
+	// unseededPublicURL is server.hub.public_url from the bootstrap merge
+	// without the SCION_SEED_* layer, valid when hasUnseededPublicURL
+	// (SetUnseededBootstrap). Guarded by mu.
+	unseededPublicURL    string
+	hasUnseededPublicURL bool
 
 	// remoteImagesWarnedRev is the artifacts revision whose invalid remote
 	// image setting was last logged.
@@ -251,6 +288,22 @@ func NewOperationalSettings(
 		envKoanf:       envKoanf,
 		cache:          make(map[string]sectionState),
 	}
+}
+
+// SetUnseededBootstrap records the bootstrap merge without the SCION_SEED_*
+// layer (config.LoadUnseededBootstrapKoanfWithConfigPath). The hub's
+// endpoint resolution at startup ignores seed values, so with no saved
+// public URL, Snapshot takes the public URL the admin view shows from this
+// merge rather than from the full bootstrap merge (ptone/scion#4826).
+// Without it (tests, embedded servers) the full bootstrap merge is used.
+func (o *OperationalSettings) SetUnseededBootstrap(k *koanf.Koanf) {
+	if k == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.unseededPublicURL = k.String(config.PublicURLKey)
+	o.hasUnseededPublicURL = true
 }
 
 // Refresh re-reads all hub_settings rows from the store, diffs revisions
@@ -363,6 +416,13 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	for name, ss := range o.cache {
 		dbSections[name] = ss.Value
 	}
+	endpoints, hasEndpoints := o.cache["endpoints"]
+	bootstrapPublicURL := ""
+	if o.hasUnseededPublicURL {
+		bootstrapPublicURL = o.unseededPublicURL
+	} else if o.bootstrapKoanf != nil {
+		bootstrapPublicURL = o.bootstrapKoanf.String(config.PublicURLKey)
+	}
 	o.mu.RUnlock()
 
 	// Build the merged koanf: bootstrap fallback, overlaid by DB sections.
@@ -385,17 +445,25 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 		// Extract this section from the file fallback and load it.
 		doc, err := opsettings.ExtractSectionFromKoanf(o.bootstrapKoanf, sec.Name)
 		if err != nil {
+			slog.Error("operational settings: cannot read bootstrap section", "section", sec.Name, "error", err)
 			continue
 		}
-		_ = loadSectionDocIntoKoanf(merged, sec.Name, doc)
+		if err := loadSectionDocIntoKoanf(merged, sec.Name, doc); err != nil {
+			slog.Error("operational settings: cannot load bootstrap section", "section", sec.Name, "error", err)
+		}
 	}
 
 	// Layer: DB sections (highest precedence — DB wins over bootstrap).
+	// A section that cannot be loaded is logged; its keys stay unset
+	// (ptone/scion#4108).
 	for name, doc := range dbSections {
-		_ = loadSectionDocIntoKoanf(merged, name, doc)
+		if err := loadSectionDocIntoKoanf(merged, name, doc); err != nil {
+			slog.Error("operational settings: cannot load section document", "section", name, "error", err)
+		}
 	}
 
 	snap := buildSnapshotFromKoanf(merged)
+	snap.FromOperationalSettings = true
 
 	// hub_name is the one endpoints key that keeps its bootstrap value when
 	// a DB row omits it: a managed endpoints row carries hub_name only after
@@ -406,6 +474,18 @@ func (o *OperationalSettings) Snapshot() Layer1Snapshot {
 	// here: GET returns this value and clients echo it back to any replica.
 	if snap.HubName == "" && o.bootstrapKoanf != nil {
 		snap.HubName = o.bootstrapKoanf.String("server.hub.hub_name")
+	}
+
+	// public_url is the value an admin saved in a managed endpoints row,
+	// else the bootstrap value without the SCION_SEED_* layer: with none
+	// saved, the hub resolves its endpoint from settings.yaml and the
+	// environment at startup (ptone/scion#3905) and ignores seed values
+	// (StoredPublicURL). A seeded row is rewritten from the full bootstrap
+	// merge, seed layer included, so its value is not used either
+	// (ptone/scion#4826).
+	snap.PublicURL = managedPublicURL(endpoints, hasEndpoints)
+	if snap.PublicURL == "" {
+		snap.PublicURL = bootstrapPublicURL
 	}
 
 	// Map-of-objects sections (runtimes, profiles, harness_configs): extract
@@ -563,6 +643,10 @@ func (o *OperationalSettings) maintenanceFromCache(dbSections map[string]json.Ra
 	return ms.AdminMode, ms.MaintenanceMessage
 }
 
+// ErrSectionValidation is wrapped by Update when the section document fails
+// schema validation, so callers can report a client error instead of 500.
+var ErrSectionValidation = errors.New("validation failed")
+
 // Update validates the section document, upserts it via the store, and
 // refreshes the local cache. Returns the new revision.
 func (o *OperationalSettings) Update(
@@ -575,7 +659,7 @@ func (o *OperationalSettings) Update(
 ) (int64, error) {
 	// Validate via opsettings registry.
 	if errs := opsettings.Validate(section, doc); len(errs) > 0 {
-		return 0, fmt.Errorf("validation failed for section %q: %v", section, errs)
+		return 0, fmt.Errorf("%w for section %q: %v", ErrSectionValidation, section, errs)
 	}
 
 	result, err := o.store.UpsertHubSetting(ctx, section, doc, updatedBy, expectedRevision, origin)
@@ -847,11 +931,18 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.AutoSuspendStalled = k.Bool("server.hub.auto_suspend_stalled")
 	snap.StalledThreshold = k.String("server.hub.stalled_threshold")
 	snap.SoftDeleteRetention = k.String("server.hub.soft_delete_retention")
-	snap.SoftDeleteRetainFiles = k.Bool("server.hub.soft_delete_retain_files")
+	if k.Exists("server.hub.soft_delete_retain_files") {
+		v := k.Bool("server.hub.soft_delete_retain_files")
+		snap.SoftDeleteRetainFiles = &v
+	}
 	snap.StartClaimLeaseTTL = k.String("server.hub.start_claim_lease_ttl")
 	snap.StartMaxDuration = k.String("server.hub.start_max_duration")
 	snap.StartUnconfirmedHold = k.String("server.hub.start_unconfirmed_hold")
 	snap.StartCreateUnconfirmedHold = k.String("server.hub.start_create_unconfirmed_hold")
+
+	// GCP service-account permission check
+	snap.GCPIAMCheckMode = k.String(gcpIAMCheckModeKey)
+	snap.GCPIAMDenyUnknownPolicy = k.String(gcpIAMDenyUnknownKey)
 
 	// Telemetry — extract via the section struct for full fidelity.
 	if k.Exists("telemetry.enabled") {
@@ -884,10 +975,17 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	}
 	teleSub := k.Cut("telemetry")
 	if teleSub != nil && len(teleSub.Keys()) > 0 {
+		// A decode failure is logged rather than dropped silently: it
+		// leaves the telemetry config unset, which GET and the running
+		// hub both show (ptone/scion#4108).
 		data, err := json.Marshal(teleSub.Raw())
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode telemetry settings", "error", err)
+		} else {
 			var tc config.V1TelemetryConfig
-			if json.Unmarshal(data, &tc) == nil {
+			if err := json.Unmarshal(data, &tc); err != nil {
+				slog.Error("operational settings: cannot decode telemetry settings; telemetry config left unset", "error", err)
+			} else {
 				snap.TelemetryConfig = &tc
 			}
 		}
@@ -922,6 +1020,7 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	snap.PublicURL = k.String("server.hub.public_url")
 	snap.HubName = k.String("server.hub.hub_name")
 	snap.ImageRegistry = k.String("image_registry")
+	snap.MonitoringDashboardURL = k.String(config.MonitoringDashboardURLKey)
 
 	// GitHub App
 	snap.GitHubAppID = k.Int64("server.github_app.app_id")
@@ -934,9 +1033,13 @@ func buildSnapshotFromKoanf(k *koanf.Koanf) Layer1Snapshot {
 	if k.Exists("server.notification_channels") {
 		raw := k.Get("server.notification_channels")
 		data, err := json.Marshal(raw)
-		if err == nil {
+		if err != nil {
+			slog.Error("operational settings: cannot encode notification channels", "error", err)
+		} else {
 			var channels []config.V1NotificationChannelConfig
-			if json.Unmarshal(data, &channels) == nil {
+			if err := json.Unmarshal(data, &channels); err != nil {
+				slog.Error("operational settings: cannot decode notification channels; no channels applied", "error", err)
+			} else {
 				snap.NotificationChannels = channels
 			}
 		}
@@ -1013,6 +1116,9 @@ func BuildLayer1SnapshotFromFile(gc *config.GlobalConfig) Layer1Snapshot {
 		// The configured hub_name ("" when unset); ApplySnapshot resolves
 		// "" to the startup default, as at startup.
 		HubName: gc.Hub.HubName,
+		// Applied live in file mode too, so a settings.yaml edit followed
+		// by a reload changes the Health page link without a restart.
+		MonitoringDashboardURL: gc.Hub.MonitoringDashboardURL,
 	}
 
 	if gc.TelemetryConfig != nil {
@@ -1092,29 +1198,52 @@ func (s *Server) startupHubNameOrDefault() string {
 func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	applied := []string{}
 
+	// GCP service-account permission check: decided before s.mu is taken
+	// (the decision reads the store), applied below under s.mu.
+	iamT, iamOK := s.decideGCPIAMReload(snap)
+
 	s.mu.Lock()
 
-	// Telemetry
-	if snap.TelemetryEnabled != nil {
-		oldVal := s.config.TelemetryDefault
-		s.config.TelemetryDefault = snap.TelemetryEnabled
-		if oldVal == nil || *oldVal != *snap.TelemetryEnabled {
-			applied = append(applied, "telemetry_default")
+	// Telemetry. In a DB-backed snapshot an unset value (cleared, or the
+	// section removed) returns to the startup value rather than keeping
+	// the last applied one (ptone/scion#3904); in a file snapshot it keeps
+	// the running value.
+	telemetryDefault := copyBoolPtr(snap.TelemetryEnabled)
+	if telemetryDefault == nil {
+		telemetryDefault = copyBoolPtr(s.config.TelemetryDefault)
+		if snap.FromOperationalSettings {
+			telemetryDefault = copyBoolPtr(s.startupLayer1.TelemetryDefault)
 		}
 	}
+	if !boolPtrEqual(s.config.TelemetryDefault, telemetryDefault) {
+		applied = append(applied, "telemetry_default")
+	}
+	s.config.TelemetryDefault = telemetryDefault
+	telemetryConfig := s.config.TelemetryConfig
 	if snap.TelemetryConfig != nil {
-		s.config.TelemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+		telemetryConfig = config.ConvertV1TelemetryToAPI(snap.TelemetryConfig)
+	} else if snap.FromOperationalSettings {
+		telemetryConfig = s.startupLayer1.TelemetryConfig
+	}
+	if !reflect.DeepEqual(s.config.TelemetryConfig, telemetryConfig) {
 		applied = append(applied, "telemetry_config")
 	}
+	s.config.TelemetryConfig = telemetryConfig
 
-	// Auto-expose ports
-	if snap.AutoExposePortsEnabled != nil {
-		oldVal := s.config.AutoExposePortsDefault
-		s.config.AutoExposePortsDefault = snap.AutoExposePortsEnabled
-		if oldVal == nil || *oldVal != *snap.AutoExposePortsEnabled {
-			applied = append(applied, "auto_expose_ports_default")
+	// Auto-expose ports. In a DB-backed snapshot an unset value (cleared,
+	// or the section removed) returns to the startup value
+	// (ptone/scion#3904); in a file snapshot it keeps the running value.
+	autoExpose := copyBoolPtr(snap.AutoExposePortsEnabled)
+	if autoExpose == nil {
+		autoExpose = copyBoolPtr(s.config.AutoExposePortsDefault)
+		if snap.FromOperationalSettings {
+			autoExpose = copyBoolPtr(s.startupLayer1.AutoExposePortsDefault)
 		}
 	}
+	if !boolPtrEqual(s.config.AutoExposePortsDefault, autoExpose) {
+		applied = append(applied, "auto_expose_ports_default")
+	}
+	s.config.AutoExposePortsDefault = autoExpose
 
 	// Project defaults
 	if snap.DefaultScratchpad != nil {
@@ -1192,6 +1321,20 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "start_claim")
 	}
 
+	// GCP service-account permission check: both keys are applied together
+	// under s.mu, only when admitted, and only if the applied pair is still
+	// the one the decision started from.
+	iamChanged := false
+	if iamOK && s.gcpIAMSettingsLocked() == iamT.From {
+		iamChanged = s.applyGCPIAMSettingsLocked(iamT.To)
+	}
+	if s.gcpIAMApproved != nil && *s.gcpIAMApproved == iamT {
+		s.gcpIAMApproved = nil
+	}
+	if iamChanged {
+		applied = append(applied, gcpIAMSection)
+	}
+
 	// User access mode
 	if snap.UserAccessMode != "" {
 		s.config.UserAccessMode = snap.UserAccessMode
@@ -1223,16 +1366,27 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "default_user_role")
 	}
 
-	// GitHub App non-sensitive config
+	// GitHub App non-sensitive config. In a DB-backed snapshot without an
+	// app_id the startup values are used, so clearing the section reverts
+	// to them rather than keeping the last applied app (ptone/scion#3904);
+	// an unset private_key_path then keeps the startup path. A file
+	// snapshot without an app_id keeps the running values. The in-memory
+	// private key and webhook secret are kept as-is (loaded from the
+	// secrets backend).
+	gh := githubAppPublicFrom(s.config.GitHubAppConfig)
+	if snap.FromOperationalSettings {
+		gh = s.startupLayer1.GitHubApp
+	}
 	if snap.GitHubAppID != 0 {
-		s.config.GitHubAppConfig.AppID = snap.GitHubAppID
-		s.config.GitHubAppConfig.APIBaseURL = snap.GitHubAPIBaseURL
-		s.config.GitHubAppConfig.WebhooksEnabled = snap.GitHubWebhooksEnabled
-		s.config.GitHubAppConfig.InstallationURL = snap.GitHubInstallationURL
+		gh.AppID = snap.GitHubAppID
+		gh.APIBaseURL = snap.GitHubAPIBaseURL
+		gh.WebhooksEnabled = snap.GitHubWebhooksEnabled
+		gh.InstallationURL = snap.GitHubInstallationURL
 		if snap.GitHubPrivateKeyPath != "" {
-			s.config.GitHubAppConfig.PrivateKeyPath = snap.GitHubPrivateKeyPath
+			gh.PrivateKeyPath = snap.GitHubPrivateKeyPath
 		}
-		// In-memory private key and webhook secret are kept as-is (loaded from secrets backend)
+	}
+	if s.setGitHubAppPublicLocked(gh) {
 		applied = append(applied, "github_app")
 	}
 
@@ -1250,14 +1404,67 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 		applied = append(applied, "hub_name")
 	}
 
+	// Monitoring dashboard link: written unconditionally so that clearing
+	// the key removes the link. A value that fails validation (one that
+	// did not come through the admin API) is not applied.
+	monitoringURL := snap.MonitoringDashboardURL
+	if monitoringURL != "" && config.ValidateMonitoringDashboardURL(monitoringURL) != nil {
+		slog.Warn("ignoring invalid server.hub.monitoring_dashboard_url; the Health page shows no monitoring link")
+		monitoringURL = ""
+	}
+	if s.config.MonitoringDashboardURL != monitoringURL {
+		s.config.MonitoringDashboardURL = monitoringURL
+		applied = append(applied, "monitoring_dashboard_url")
+	}
+
 	// Image registry (#985) — wire DB value to the consumption path.
 	// resolveImageRegistry() reads s.config.MaintenanceConfig.ImageRegistry.
-	if snap.ImageRegistry != "" {
-		old := s.config.MaintenanceConfig.ImageRegistry
-		s.config.MaintenanceConfig.ImageRegistry = snap.ImageRegistry
-		if old != snap.ImageRegistry {
-			applied = append(applied, "image_registry")
+	// In a DB-backed snapshot an unset value returns to the startup
+	// registry (ptone/scion#3904); in a file snapshot it keeps the running
+	// value (for example one set through /system/registry).
+	imageRegistry := snap.ImageRegistry
+	if imageRegistry == "" {
+		imageRegistry = s.config.MaintenanceConfig.ImageRegistry
+		if snap.FromOperationalSettings {
+			imageRegistry = s.startupLayer1.ImageRegistry
 		}
+	}
+	if s.config.MaintenanceConfig.ImageRegistry != imageRegistry {
+		s.config.MaintenanceConfig.ImageRegistry = imageRegistry
+		applied = append(applied, "image_registry")
+	}
+
+	// Soft-delete retention and retain-files. Consumers read them through
+	// softDeleteSettings, so a change applies to the next delete and the
+	// next purge. In a DB-backed snapshot an unset value returns to the
+	// startup value; in a file snapshot it keeps the running value. An
+	// invalid retention keeps the running one (ptone/scion#3904).
+	retention := s.config.SoftDeleteRetention
+	if snap.FromOperationalSettings {
+		retention = s.startupLayer1.SoftDeleteRetention
+	}
+	if snap.SoftDeleteRetention != "" {
+		if d, err := time.ParseDuration(snap.SoftDeleteRetention); err != nil || d < 0 {
+			slog.Warn("invalid soft_delete_retention duration, keeping current value", "value", snap.SoftDeleteRetention, "error", err)
+			retention = s.config.SoftDeleteRetention
+		} else {
+			retention = d
+		}
+	}
+	if s.config.SoftDeleteRetention != retention {
+		s.config.SoftDeleteRetention = retention
+		applied = append(applied, "soft_delete_retention")
+	}
+	retainFiles := s.config.SoftDeleteRetainFiles
+	if snap.FromOperationalSettings {
+		retainFiles = s.startupLayer1.SoftDeleteRetainFiles
+	}
+	if snap.SoftDeleteRetainFiles != nil {
+		retainFiles = *snap.SoftDeleteRetainFiles
+	}
+	if s.config.SoftDeleteRetainFiles != retainFiles {
+		s.config.SoftDeleteRetainFiles = retainFiles
+		applied = append(applied, "soft_delete_retain_files")
 	}
 
 	// Agent defaults (hub operational agent_defaults section).
@@ -1301,6 +1508,18 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	s.config.AgentDefaults = newDefaults
 
 	s.mu.Unlock()
+
+	if iamChanged {
+		s.invalidateCallerPermissionCaches()
+	}
+
+	// Notification channels: the new registry is built outside s.mu and
+	// then swapped in whole. A registry is never changed after it is
+	// built, so a dispatch already holding the old one finishes on it
+	// (ptone/scion#3904).
+	if snap.FromOperationalSettings && s.applyNotificationChannels(snap.NotificationChannels) {
+		applied = append(applied, "notification_channels")
+	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
 	// correct label value. Log handlers have a similar limitation (§7.4).
@@ -1346,7 +1565,13 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	// When federation is disabled (nil config or Enabled=false), clear the
 	// authenticator so the middleware returns 401. This ensures disabling
 	// federation at runtime actually takes effect.
-	if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
+	if s.testAdminTierOn() && federationConfigured(snap.FederationConfig) {
+		// G8: while the test admin tier is on no federation trust is ever
+		// installed, whatever the stored settings say. Startup refuses such
+		// a snapshot (cmd); this keeps a later reload from installing one.
+		s.federationAuth.Store(nil)
+		logTestAdminFederationSkipped()
+	} else if snap.FederationConfig == nil || !snap.FederationConfig.Enabled {
 		s.federationAuth.Store(nil)
 		if snap.FederationConfig != nil {
 			slog.Info("Federation disabled via config, authenticator cleared")
@@ -1581,6 +1806,26 @@ func (o *OperationalSettings) CrossProjectMessagingEnabled() bool {
 	return false // field omitted → compiled default → OFF
 }
 
+// ReadinessMarks returns whether the web client writes readiness marks
+// (the "profiling" section's readiness_marks key). It is false when the
+// section is absent, the document is malformed or the key is unset.
+//
+// Hot-reloadable: reads from the DB-backed cache.
+func (o *OperationalSettings) ReadinessMarks() bool {
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+
+	state, ok := o.cache["profiling"]
+	if !ok || state.Malformed {
+		return false
+	}
+	var ps opsettings.ProfilingSettings
+	if err := json.Unmarshal(state.Value, &ps); err != nil {
+		return false
+	}
+	return ps.ReadinessMarks != nil && *ps.ReadinessMarks
+}
+
 // Artifacts returns the resolved artifact service settings (the
 // "artifacts" section). It returns opsettings.DefaultArtifactsConfig when
 // the section is absent, and fails closed (opsettings.MalformedArtifactsConfig:
@@ -1694,7 +1939,11 @@ type ExperimentsSnapshot struct {
 func (o *OperationalSettings) ExperimentsSnapshot() ExperimentsSnapshot {
 	o.mu.RLock()
 	defer o.mu.RUnlock()
+	return o.experimentsSnapshotLocked()
+}
 
+// Caller holds mu. Snapshot mapping and cloning retain their existing semantics.
+func (o *OperationalSettings) experimentsSnapshotLocked() ExperimentsSnapshot {
 	state, ok := o.cache["experiments"]
 	if !ok {
 		return ExperimentsSnapshot{Overrides: map[string]bool{}}
@@ -1752,23 +2001,19 @@ func (o *OperationalSettings) ReadAuthoritativeExperiments(ctx context.Context) 
 	return ExperimentsReadResult{Overrides: overrides, Revision: setting.Revision}
 }
 
-// applySnapshotLogLevel applies the log-level portion of the snapshot.
+// applySnapshotLogLevel applies server.log_level to the shared level state
+// at setting precedence (logging.SetLogLevelSetting), so the installed level
+// filter and the handlers built with logging.ResolveLogLeveler follow it.
+// SCION_LOG_LEVEL and the --debug flag still win. An empty level reverts the
+// setting to the built-in default (info).
+//
+// It deliberately does not call slog.SetLogLoggerLevel: that changes only the
+// level of the standard-library log bridge, and also re-levels log.Printf
+// lines so that they bypass the level filter.
+//
 // This is separated from applySnapshot because log level is a Layer-0 setting
-// (per design §3.1) and is only changed in file mode via reloadSettings.
+// (per design §3.1) and is only changed in file mode via reloadSettings or a
+// workstation server-config save.
 func applySnapshotLogLevel(level string) {
-	if level == "" {
-		return
-	}
-	var lvl slog.Level
-	switch level {
-	case "debug":
-		lvl = slog.LevelDebug
-	case "info":
-		lvl = slog.LevelInfo
-	case "warn":
-		lvl = slog.LevelWarn
-	case "error":
-		lvl = slog.LevelError
-	}
-	slog.SetLogLoggerLevel(lvl)
+	logging.ApplyLogLevelSetting("server.log_level", level)
 }

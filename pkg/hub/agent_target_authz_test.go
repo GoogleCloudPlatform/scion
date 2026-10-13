@@ -17,13 +17,11 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -38,53 +36,6 @@ import (
 
 // --- helpers ---------------------------------------------------------------
 
-// markEdgeBackfillComplete records the delegation edge backfill marker, after
-// which every agent caller needs an active delegation edge.
-func markEdgeBackfillComplete(t *testing.T, s store.Store) {
-	t.Helper()
-	_, err := s.UpsertHubSetting(context.Background(), "migration_delegation_edge_backfill_v1",
-		json.RawMessage(`{"schema_version":1,"completed":true}`), "migration", 0, "seeded")
-	require.NoError(t, err)
-}
-
-// addProjectEdge records an active delegation edge in the project scope and
-// returns its ID.
-func addProjectEdge(t *testing.T, s store.Store, delegatorType, delegatorID, delegateID, projectID string) string {
-	t.Helper()
-	id := uuid.NewString()
-	require.NoError(t, s.CreateDelegationEdge(context.Background(), &store.DelegationEdge{
-		ID:            id,
-		DelegatorType: delegatorType,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    delegateID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       projectID,
-		Role:          string(AgentRoleFull),
-		Active:        true,
-	}))
-	return id
-}
-
-// revokeDelegateEdges deactivates every active delegation edge of the agent
-// delegateID, attributed to a test op ID, and fails the test when there was
-// none to deactivate.
-func revokeDelegateEdges(t *testing.T, s store.Store, delegateID string) {
-	t.Helper()
-	n, err := s.DeactivateDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, delegateID,
-		store.Deactivation{Cause: store.EdgeDeactivationAgentHardDelete, OpID: "test-revoke-" + uuid.NewString()})
-	require.NoError(t, err)
-	require.Positive(t, n, "an active edge to revoke")
-}
-
-// decodeTargetAPIError decodes an error response body.
-func decodeTargetAPIError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
-	t.Helper()
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), "body: %s", rec.Body.String())
-	return resp.Error
-}
-
 // assertAgentTargetDenied asserts the neutral 403 for an agent action and
 // whether it carries the delegation-ceiling detail (its only detail).
 func assertAgentTargetDenied(t *testing.T, rec *httptest.ResponseRecorder, ceiling bool) {
@@ -98,44 +49,6 @@ func assertAgentTargetDenied(t *testing.T, rec *httptest.ResponseRecorder, ceili
 	} else {
 		assert.Empty(t, apiErr.Details)
 	}
-}
-
-// requestAsIdentity serves a request through the route mux with identity in
-// the context (as both the caller and, for users, the user identity).
-func requestAsIdentity(t *testing.T, srv *Server, identity Identity, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	ctx := contextWithIdentity(req.Context(), identity)
-	if user, ok := identity.(UserIdentity); ok {
-		ctx = context.WithValue(ctx, userContextKey{}, user)
-	}
-	rec := httptest.NewRecorder()
-	srv.mux.ServeHTTP(rec, req.WithContext(ctx))
-	return rec
-}
-
-func hubMemberUser(t *testing.T, s store.Store, id string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID: tid(id), Email: id + "@target.test", DisplayName: id,
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	ensureHubMembership(context.Background(), s, u.ID)
-	return u
-}
-
-func authUser(u *store.User) *AuthenticatedUser {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, "api")
 }
 
 // connectFixtureBroker marks the fixture broker connected and points target
@@ -485,37 +398,6 @@ func TestAgentFullHistory_Messages(t *testing.T) {
 		assert.True(t, capabilityAllows(caps, ActionLifecycle))
 		assert.False(t, capabilityAllows(caps, ActionAttach))
 	})
-}
-
-// syncRecorder is a flushable response writer safe for concurrent reads.
-type syncRecorder struct {
-	mu     sync.Mutex
-	header http.Header
-	body   bytes.Buffer
-	code   int
-}
-
-func (r *syncRecorder) Header() http.Header { return r.header }
-func (r *syncRecorder) WriteHeader(code int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.code == 0 {
-		r.code = code
-	}
-}
-func (r *syncRecorder) Write(p []byte) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.code == 0 {
-		r.code = http.StatusOK
-	}
-	return r.body.Write(p)
-}
-func (r *syncRecorder) Flush() {}
-func (r *syncRecorder) String() string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.body.String()
 }
 
 // streamMessagesAs opens GET /agents/{id}/messages/stream as identity,

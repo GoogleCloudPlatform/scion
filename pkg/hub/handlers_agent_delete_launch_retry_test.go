@@ -20,10 +20,8 @@ package hub
 
 import (
 	"context"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"sync"
 	"testing"
 	"time"
 
@@ -32,26 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// deleteCountingEventPublisher counts PublishAgentDeleted calls, so a test
-// can assert a concurrent double-delete only ever publishes once.
-type deleteCountingEventPublisher struct {
-	noopEventPublisher
-	mu    sync.Mutex
-	count int
-}
-
-func (p *deleteCountingEventPublisher) PublishAgentDeleted(_ context.Context, _, _ string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.count++
-}
-
-func (p *deleteCountingEventPublisher) Count() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.count
-}
 
 func TestPerformAgentDelete_H3_RetriesOnVersionConflictFromLaunchTerminal(t *testing.T) {
 	srv, s := testServer(t)
@@ -268,34 +246,4 @@ func TestPerformAgentDelete_H3_ConcurrentDoubleDeleteShortCircuits(t *testing.T)
 	require.NoError(t, err)
 	assert.True(t, final.DeletedAt.Equal(firstDeleted.DeletedAt), "the second delete must not overwrite the first delete's DeletedAt")
 	assert.Equal(t, 1, events.Count(), "the second, redundant delete must not publish AgentDeleted again")
-}
-
-// quotaReleaseCountingStore counts project quota releases: every
-// releaseAgentQuotas call looks up max_agents_per_project once.
-type quotaReleaseCountingStore struct {
-	store.Store
-	mu    sync.Mutex
-	count int
-}
-
-func (c *quotaReleaseCountingStore) GetLimitDefinitionByName(ctx context.Context, name string) (*store.LimitDefinition, error) {
-	if name == "max_agents_per_project" {
-		c.mu.Lock()
-		c.count++
-		c.mu.Unlock()
-	}
-	return c.Store.GetLimitDefinitionByName(ctx, name)
-}
-
-// countQuotaReleases swaps srv's quota service for one that counts
-// releaseAgentQuotas calls and returns the counter.
-func countQuotaReleases(t *testing.T, srv *Server) func() int {
-	t.Helper()
-	cs := &quotaReleaseCountingStore{Store: srv.store}
-	srv.quotaService = &QuotaService{store: cs, logger: slog.Default()}
-	return func() int {
-		cs.mu.Lock()
-		defer cs.mu.Unlock()
-		return cs.count
-	}
 }

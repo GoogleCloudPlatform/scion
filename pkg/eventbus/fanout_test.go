@@ -343,6 +343,32 @@ func TestFanOutEventBus_ChannelRoutingReservedInprocess(t *testing.T) {
 	if !strings.Contains(err.Error(), "reserved for internal use") {
 		t.Fatalf("unexpected error message: %v", err)
 	}
+	if !errors.Is(err, ErrReservedChannel) {
+		t.Fatalf("expected ErrReservedChannel, got %v", err)
+	}
+	if errors.Is(err, ErrInProcessPublish) {
+		t.Fatalf("a reserved channel is not an inprocess publish failure: %v", err)
+	}
+	inproc.mu.Lock()
+	defer inproc.mu.Unlock()
+	if len(inproc.published) != 0 {
+		t.Fatalf("nothing should be published for a reserved channel, got %d", len(inproc.published))
+	}
+}
+
+func TestBusChannel_RoutingKey(t *testing.T) {
+	fan := NewFanOutEventBus([]NamedEventBus{
+		{Name: InProcessBusName, Bus: newStubEventBus()},
+		{Name: "chat-app", ChannelID: "gchat", Bus: newStubEventBus()},
+		{Name: "slack", Bus: newStubEventBus()},
+	}, slog.Default())
+	got := map[string]string{}
+	for _, ch := range fan.BusChannels() {
+		got[ch.Name] = ch.RoutingKey()
+	}
+	if got["chat-app"] != "gchat" || got["slack"] != "slack" || len(got) != 2 {
+		t.Fatalf("unexpected routing keys: %v", got)
+	}
 }
 
 func TestFanOutEventBus_ChannelRoutingPublishError(t *testing.T) {

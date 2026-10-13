@@ -17,8 +17,10 @@ package hub
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -145,7 +147,13 @@ const (
 // unreachable (ErrMessageDeferred). The caller must set a deadline on ctx
 // (typically 30s). Returns nil on success, ErrBrokerTimeout if the deadline
 // expires while still retrying, or the original error for non-transient failures.
-func dispatchWithBrokerRetry(ctx context.Context, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+//
+// recordLog is where the hub writes this message's record to the message
+// log, once, before the first attempt (see logMessageRecord). Callers that
+// write their own record pass nil.
+func dispatchWithBrokerRetry(ctx context.Context, recordLog *slog.Logger, dispatcher AgentDispatcher, agent *store.Agent, msg string, urgent bool, structuredMsg *messages.StructuredMessage) error {
+	logMessageRecord(recordLog, agent, structuredMsg)
+	urgent = effectiveInterrupt(agent, urgent)
 	backoff := brokerRetryInitialBackoff
 	for {
 		err := dispatcher.DispatchAgentMessage(ctx, agent, msg, urgent, structuredMsg)
@@ -167,6 +175,32 @@ func dispatchWithBrokerRetry(ctx context.Context, dispatcher AgentDispatcher, ag
 	}
 }
 
+// agentStillInitializing reports whether a stored agent is running but its
+// harness has not shown it reads input yet: the one case where
+// state.AgentState.AcceptsInput is false for a running agent that reported
+// an activity. A running agent with no activity at all is treated as before
+// (images and brokers that predate the initializing activity).
+func agentStillInitializing(agent *store.Agent) bool {
+	return agent != nil && state.Phase(agent.Phase) == state.PhaseRunning &&
+		state.Activity(agent.Activity) == state.ActivityInitializing
+}
+
+// effectiveInterrupt returns whether an interrupt/urgent message may be
+// pasted at once. The broker delivers an interrupt immediately, bypassing
+// its message buffer and that buffer's harness-readiness wait. An agent that
+// is still initializing gets an ordinary buffered delivery instead, so the
+// message waits for the harness rather than racing its startup. The message
+// is still delivered; only the interrupt is dropped. Images that predate the
+// initializing activity report working at once and keep their interrupt.
+func effectiveInterrupt(agent *store.Agent, urgent bool) bool {
+	if !urgent || !agentStillInitializing(agent) {
+		return urgent
+	}
+	slog.Info("Delivering interrupt as a buffered message: agent is still initializing",
+		"agent_id", agent.ID, "phase", agent.Phase, "activity", agent.Activity)
+	return false
+}
+
 // StoreAffinityLookup returns an affinity lookup backed by runtime_brokers: the
 // owner is connected_hub_id, and "alive" means last_heartbeat is within
 // freshness. (Liveness is inferred from heartbeat freshness because there is no
@@ -183,4 +217,18 @@ func StoreAffinityLookup(st store.Store, freshness time.Duration) func(ctx conte
 		alive := !b.LastHeartbeat.IsZero() && time.Since(b.LastHeartbeat) < freshness
 		return *b.ConnectedHubID, alive
 	}
+}
+
+// logMessageRecord writes the hub's message record for structuredMsg to the
+// message log. The rule: each message gets one record, written when the hub
+// hands the message to delivery and before the outcome is known, so
+// deferred and failed deliveries keep theirs. Outcome lines are tagged
+// log_kind=event. A nil logger, agent or message writes nothing.
+func logMessageRecord(l *slog.Logger, agent *store.Agent, structuredMsg *messages.StructuredMessage) {
+	if l == nil || agent == nil || structuredMsg == nil {
+		return
+	}
+	attrs := []any{"agent_id", agent.ID, "project_id", agent.ProjectID}
+	attrs = append(attrs, structuredMsg.LogAttrs()...)
+	l.Info("message handed to delivery", attrs...)
 }

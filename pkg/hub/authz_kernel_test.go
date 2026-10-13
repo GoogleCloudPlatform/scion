@@ -20,40 +20,7 @@ import (
 	"time"
 )
 
-// testNow is a fixed time used across all kernel tests for determinism.
-var testNow = time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
-
 // --- Helper builders ---
-
-func makeRole(id, name, scopeType string, perms ...string) *RolePermissions {
-	return NewRolePermissions(id, name, scopeType, perms)
-}
-
-func makeBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID string) CandidateBinding {
-	return CandidateBinding{
-		BindingID:        bindingID,
-		RoleDefinitionID: roleDefID,
-		PrincipalType:    principalType,
-		PrincipalID:      principalID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-	}
-}
-
-func makeTimedBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID string, notBefore, expiresAt time.Time) CandidateBinding {
-	cb := makeBinding(bindingID, roleDefID, principalType, principalID, scopeType, scopeID)
-	cb.NotBefore = notBefore
-	cb.ExpiresAt = expiresAt
-	return cb
-}
-
-func closureOf(ids ...string) map[string]struct{} {
-	m := make(map[string]struct{}, len(ids))
-	for _, id := range ids {
-		m[id] = struct{}{}
-	}
-	return m
-}
 
 func membershipPaths(paths map[string][]string) map[string][]string {
 	return paths

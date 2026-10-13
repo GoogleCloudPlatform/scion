@@ -36,20 +36,33 @@ var chatOperations = []OperationSpec{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/conversations/{id}/messages", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/topics/{id}", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/dms", Method: "GET"},
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/unread-count", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/search", Method: "GET"},
 			// handleChatAttachments (upload) is POST-only; only the
-			// by-ID download route (handleChatAttachmentByID) is GET.
+			// by-ID download route (handleChatAttachmentByID) is GET. An
+			// upload without a project is a profile write, refused to a
+			// federated caller (requireProfileWriter).
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/chat/attachments/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser},
-		Credentials:      []CredentialKind{CredentialSessionJWT},
-		ResourceResolver: "project-from-url",
+		Principals:  []PrincipalKind{PrincipalUser},
+		Credentials: []CredentialKind{CredentialSessionJWT},
+		// The project is resolved from the addressed row: a topic key from
+		// the topic, an attachment from the file (its uploader, its
+		// project, or a readable message it is attached to), and a DM key
+		// from its participants. A reference inside a request (reply
+		// target, read marker, attachment) must belong to the same
+		// conversation. On the conversation routes a refusal answers as
+		// not found (Thread / Attachment not found); the reason is logged.
+		ResourceResolver: "project-from-row",
 		BasePermission:   "project.read",
 		Effects:          []SecurityEffect{EffectReadOne, EffectListScoped},
 		DelegationKind:   DelegationNone,
 		AuthorityEval:    AuthorityEvalNone,
-		DenialCodes:      []DenialCode{DenialForbidden},
-		TestRefs:         []TestRef{{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"}},
+		DenialCodes:      []DenialCode{DenialForbidden, DenialResourceNotFound},
+		TestRefs: []TestRef{
+			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
+			{Package: "pkg/hub", Function: "TestChatProfileWrites_FederatedUserRefused"},
+		},
 	},
 }

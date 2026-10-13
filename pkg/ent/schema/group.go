@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"entgo.io/ent"
+	"entgo.io/ent/dialect/entsql"
+	"entgo.io/ent/schema"
 	"entgo.io/ent/schema/edge"
 	"entgo.io/ent/schema/field"
 	"github.com/google/uuid"
@@ -26,6 +28,14 @@ import (
 // Group holds the schema definition for the Group entity.
 type Group struct {
 	ent.Schema
+}
+
+// Mixin of the Group. FixtureProvenanceMixin holds the creation-time
+// test-identity provenance stamp (fixture_root_id, fixture_issuer_id).
+func (Group) Mixin() []ent.Mixin {
+	return []ent.Mixin{
+		FixtureProvenanceMixin{},
+	}
 }
 
 // Fields of the Group.
@@ -63,6 +73,13 @@ func (Group) Fields() []ent.Field {
 		field.UUID("owner_id", uuid.UUID{}).
 			Optional().
 			Nillable(),
+	}
+}
+
+// Annotations of the Group: the fixture stamp CHECK (fixtureStampCheck).
+func (Group) Annotations() []schema.Annotation {
+	return []schema.Annotation{
+		entsql.Annotation{Checks: fixtureStampCheck("groups")},
 	}
 }
 

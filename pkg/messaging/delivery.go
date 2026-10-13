@@ -36,6 +36,7 @@ type ConversationInfo struct {
 // It replaces the old deliveryMessage struct in pkg/messages/format.go.
 type DeliveryEnvelope struct {
 	Timestamp    string            `json:"timestamp"`
+	MessageID    string            `json:"message_id,omitempty"` // persisted message ID; omitted when there is no stored row
 	Conversation *ConversationInfo `json:"conversation,omitempty"`
 	From         string            `json:"from"`            // PrincipalRef
 	To           []string          `json:"to,omitempty"`    // addressee PrincipalRefs
@@ -61,6 +62,10 @@ type DeliveryOptions struct {
 // "conversation" key is omitted from the envelope rather than fabricated.
 // If the message has the plain delivery option, only the msg text is returned.
 //
+// The envelope's "message_id" carries msg.ID, the persisted message row's ID,
+// so a recipient can refer to the exact message it received. When msg.ID is
+// empty (no stored row), the key is omitted rather than fabricated.
+//
 // isMention, when true, sets the envelope's type to "mention" (instead of
 // "message") and forces the "to" field to be present even for a single
 // addressee. Both are set explicitly by the routing call site that knows
@@ -79,6 +84,7 @@ func FormatNewDelivery(
 
 	env := DeliveryEnvelope{
 		Timestamp:    msg.CreatedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
+		MessageID:    msg.ID,
 		Conversation: convInfo,
 		From:         string(msg.From),
 		Type:         typeString(msg.Kind, isMention, isReply),

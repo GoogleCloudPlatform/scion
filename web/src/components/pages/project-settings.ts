@@ -39,6 +39,8 @@ import type {
 } from '../../shared/types.js';
 import { can, canAny } from '../../shared/types.js';
 import { isBrokerKubernetesOnly } from '../../shared/runtime-kind.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
+import { projectServiceAccountListUrl } from '../../shared/gcp-sa-assign-status.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
 import type { AccessBoundarySummary } from '../../shared/access-boundaries.js';
@@ -168,6 +170,10 @@ export class ScionPageProjectSettings extends LitElement {
 
   @state()
   private dropdownTemplates: Template[] = [];
+
+  /** The Default Template list failed to load (the saved value is kept). */
+  @state()
+  private dropdownTemplatesLoadFailed = false;
 
   @state()
   private harnessConfigs: HarnessConfigEntry[] = [];
@@ -599,6 +605,10 @@ export class ScionPageProjectSettings extends LitElement {
       color: var(--scion-text-muted, #64748b);
     }
 
+    .config-field .field-help-error {
+      color: var(--sl-color-danger-600, #dc2626);
+    }
+
     .config-actions {
       display: flex;
       align-items: center;
@@ -954,9 +964,7 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyLoading = true;
     this.messagingPolicyError = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`);
       if (res.ok) {
         this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       }
@@ -975,17 +983,14 @@ export class ScionPageProjectSettings extends LitElement {
     this.messagingPolicyError = null;
     this.messagingPolicySuccess = null;
     try {
-      const res = await apiFetch(
-        `/api/v1/projects/${this.projectId}/messaging-policy`,
-        {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            crossProjectInbound: value,
-            expectedRevision: this.messagingPolicy.revision,
-          }),
-        }
-      );
+      const res = await apiFetch(`/api/v1/projects/${this.projectId}/messaging-policy`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          crossProjectInbound: value,
+          expectedRevision: this.messagingPolicy.revision,
+        }),
+      });
       if (res.status === 409) {
         this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
         await this.loadMessagingPolicy();
@@ -993,15 +998,12 @@ export class ScionPageProjectSettings extends LitElement {
         return;
       }
       if (!res.ok) {
-        throw new Error(
-          await extractApiError(res, 'Failed to save')
-        );
+        throw new Error(await extractApiError(res, 'Failed to save'));
       }
       this.messagingPolicy = (await res.json()) as ProjectMessagingPolicy;
       this.messagingPolicySuccess = 'Messaging policy saved.';
     } catch (err) {
-      this.messagingPolicyError =
-        err instanceof Error ? err.message : 'Failed to save policy';
+      this.messagingPolicyError = err instanceof Error ? err.message : 'Failed to save policy';
       this.messagingPolicy = { ...this.messagingPolicy, crossProjectInbound: previous }; // revert
     } finally {
       this.messagingPolicySaving = false;
@@ -1053,9 +1055,9 @@ export class ScionPageProjectSettings extends LitElement {
           ? html`
               <sl-alert variant="warning" open>
                 <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
-                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned off
-                at the Hub level. Your configured selection below is preserved and will take effect
-                when the Hub administrator enables cross-project messaging.
+                <strong>Disabled by Hub administrator.</strong> Cross-project messaging is turned
+                off at the Hub level. Your configured selection below is preserved and will take
+                effect when the Hub administrator enables cross-project messaging.
               </sl-alert>
             `
           : ''}
@@ -1115,8 +1117,9 @@ export class ScionPageProjectSettings extends LitElement {
                 style="margin-top: 0.5rem; font-size: 0.8125rem; color: var(--scion-text-muted, #64748b);"
               >
                 Choosing &ldquo;${policyLabels[currentValue]}&rdquo; can admit external messages to
-                existing project-mode agents. It does not grant those agents external send authority.
-                Replying requires their own Hub mode and the peer project&rsquo;s consent.
+                existing project-mode agents. It does not grant those agents external send
+                authority. Replying requires their own Hub mode and the peer project&rsquo;s
+                consent.
               </p>
             `
           : ''}
@@ -1196,8 +1199,10 @@ export class ScionPageProjectSettings extends LitElement {
         `/api/v1/templates?${params.toString()}`,
         'templates'
       );
+      this.dropdownTemplatesLoadFailed = false;
     } catch (err) {
       console.error('Failed to load dropdown templates:', err);
+      this.dropdownTemplatesLoadFailed = true;
     }
   }
 
@@ -1383,16 +1388,10 @@ export class ScionPageProjectSettings extends LitElement {
     return this.brokers.every((b) => isBrokerKubernetesOnly(b));
   }
 
-  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
-  private static readonly gcpIdentityK8sHintText =
-    'Block is not supported on the Kubernetes runtime: this project’s runtime brokers are ' +
-    'Kubernetes. Choose Passthrough or Assign Service Account instead.';
-
   /**
    * Short explanation rendered into the GCP identity select's `help-text`
    * slot when this project's linked brokers are reliably Kubernetes-only:
-   * block is disabled in that case (existing stored "block" values still
-   * display; the server rejects saving a new one).
+   * what a Block default means there (ptone/scion#4077).
    *
    * Rendered as a slotted child of the `<sl-select>` (not a sibling
    * `aria-describedby` reference) because the element that receives focus is
@@ -1403,7 +1402,26 @@ export class ScionPageProjectSettings extends LitElement {
    */
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.projectIsKubernetesOnly) return nothing;
-    return html`<div slot="help-text">${ScionPageProjectSettings.gcpIdentityK8sHintText}</div>`;
+    return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
+  }
+
+  /**
+   * The default picker's field help. On a Kubernetes-bound project the
+   * generic "Block prevents access" does not hold (the pod's service account
+   * can still get a federated token), so Block is left to the help-text slot
+   * (KUBERNETES_BLOCK_HINT).
+   */
+  private get gcpIdentityFieldHelp(): string {
+    if (this.projectIsKubernetesOnly) {
+      return (
+        'Controls the GCP identity of new agents. "Passthrough" allows host identity, "Assign" ' +
+        'binds a specific service account, and "Block" works as described above.'
+      );
+    }
+    return (
+      'Controls GCP metadata server access for new agents. "Block" prevents access, ' +
+      '"Passthrough" allows host identity, "Assign" binds a specific service account.'
+    );
   }
 
   /**
@@ -1427,13 +1445,12 @@ export class ScionPageProjectSettings extends LitElement {
           ? String(saEntry.hubValue)
           : '';
       // No service account configured: the consumption-side ladder falls
-      // through to "Block" the same way an unverified one does, which this
-      // project's Kubernetes runtime rejects at dispatch.
+      // through to "Block" the same way an unverified one does; the
+      // help-text slot says what Block means on Kubernetes.
       if (!saID && this.projectIsKubernetesOnly) {
         return html`<span class="field-help"
           >Inherited from hub: the hub default is "Assign", but no service account is configured, so
-          it falls back to "Block" — rejected at dispatch for this project's Kubernetes runtime. Set
-          a project-level default of Passthrough or Assign Service Account.</span
+          it falls back to "Block".</span
         >`;
       }
       const sa = this.gcpServiceAccounts.find((s) => s.id === saID);
@@ -1467,13 +1484,6 @@ export class ScionPageProjectSettings extends LitElement {
         on other brokers get "Block".</span
       >`;
     }
-    if (mode.hubValue === 'block' && this.projectIsKubernetesOnly) {
-      return html`<span class="field-help"
-        >Inherited from hub: the hub default is "Block", but this project's runtime brokers are
-        Kubernetes, which rejects it at dispatch. Set a project-level default of Passthrough or
-        Assign Service Account.</span
-      >`;
-    }
     return nothing;
   }
 
@@ -1494,7 +1504,9 @@ export class ScionPageProjectSettings extends LitElement {
   private async loadGCPServiceAccounts(): Promise<void> {
     try {
       const response = await apiFetch(
-        `/api/v1/projects/${this.projectId}/gcp-service-accounts?includeHubScoped=true`
+        // No assignStatus: the project default applies to every runtime
+        // profile, so there is no single target to report a mapping for.
+        projectServiceAccountListUrl(this.projectId, null)
       );
       if (response.ok) {
         const data = (await response.json()) as { items?: GCPServiceAccount[] };
@@ -1537,6 +1549,12 @@ export class ScionPageProjectSettings extends LitElement {
     }
   }
 
+  /** A failed save's message, announced to screen readers (role="alert"). */
+  private renderSettingsError(): TemplateResult | typeof nothing {
+    if (!this.settingsError) return nothing;
+    return html`<span class="config-status error" role="alert">${this.settingsError}</span>`;
+  }
+
   private async handleSaveConfig(): Promise<void> {
     this.settingsSaving = true;
     this.settingsError = null;
@@ -1575,25 +1593,30 @@ export class ScionPageProjectSettings extends LitElement {
           ? this.defaultCustomModelId
           : this.defaultModelSelection;
 
+      // The PUT keeps any field the body leaves out, so every field this
+      // page manages is sent: "" / 0 / {} clears it, and null resets a
+      // tri-state field (telemetry, auto-expose, thinking level) to inherit.
+      // Fields this page does not manage (activeProfile, the per-profile
+      // service account map) are left out so a save keeps them.
       const body: ProjectSettings = {
-        defaultTemplate: this.configDefaultTemplate || undefined,
-        defaultHarnessConfig: this.configDefaultHarnessConfig || undefined,
-        defaultHarnessAuth: this.configDefaultHarnessAuth || undefined,
-        defaultModel: defaultModel || undefined,
+        defaultTemplate: this.configDefaultTemplate || '',
+        defaultHarnessConfig: this.configDefaultHarnessConfig || '',
+        defaultHarnessAuth: this.configDefaultHarnessAuth || '',
+        defaultModel: defaultModel || '',
         telemetryEnabled: this.configTelemetryEnabled,
         autoExposePortsEnabled: this.configAutoExposePortsEnabled,
-        defaultMaxTurns: this.configDefaultMaxTurns || undefined,
-        defaultMaxModelCalls: this.configDefaultMaxModelCalls || undefined,
-        defaultMaxDuration: this.configDefaultMaxDuration || undefined,
-        defaultResources,
+        defaultMaxTurns: this.configDefaultMaxTurns || 0,
+        defaultMaxModelCalls: this.configDefaultMaxModelCalls || 0,
+        defaultMaxDuration: this.configDefaultMaxDuration || '',
+        defaultResources: defaultResources ?? {},
         defaultThinkingLevel: this.defaultThinkingLevel,
-        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || undefined,
+        defaultGCPIdentityMode: this.configDefaultGCPIdentityMode || '',
         defaultGCPIdentityServiceAccountID:
           this.configDefaultGCPIdentityMode === 'assign'
-            ? this.configDefaultGCPIdentitySAID || undefined
-            : undefined,
-        maxAgentRole: this.configMaxAgentRole || undefined,
-        defaultAgentRole: this.configDefaultAgentRole || undefined,
+            ? this.configDefaultGCPIdentitySAID || ''
+            : '',
+        maxAgentRole: this.configMaxAgentRole || '',
+        defaultAgentRole: this.configDefaultAgentRole || '',
       };
 
       const response = await apiFetch(`/api/v1/projects/${this.projectId}/settings`, {
@@ -1679,8 +1702,7 @@ export class ScionPageProjectSettings extends LitElement {
         sectionTitle="Members"
         sectionDescription="Users and groups with access to this project. Each member holds at most one built-in tier (owner, admin or member) and may also hold custom project roles."
       ></scion-project-members-editor>
-      ${this.renderResourcesSection()}
-      ${this.renderMessagingPolicySection()}
+      ${this.renderResourcesSection()} ${this.renderMessagingPolicySection()}
       ${this.renderGitHubAppSection()}
       <scion-boundary-summary-notice
         label="Access constraints affecting this project"
@@ -2130,9 +2152,17 @@ export class ScionPageProjectSettings extends LitElement {
                     (t) => html` <sl-option value=${t.name}>${t.displayName || t.name}</sl-option> `
                   )}
                 </sl-select>
-                <span class="field-help"
-                  >Template used when creating agents without specifying one.</span
-                >
+                ${this.dropdownTemplatesLoadFailed
+                  ? html`<span class="field-help field-help-error"
+                      >Could not load
+                      templates.${this.configDefaultTemplate
+                        ? ` The saved default (${this.configDefaultTemplate}) is kept.`
+                        : ''}
+                      Reload the page to try again.</span
+                    >`
+                  : html`<span class="field-help"
+                      >Template used when creating agents without specifying one.</span
+                    >`}
               </div>
 
               <div
@@ -2473,23 +2503,12 @@ export class ScionPageProjectSettings extends LitElement {
                         : 'None (default to block)'
                     )}</sl-option
                   >
-                  <sl-option
-                    value="block"
-                    ?disabled=${this.projectIsKubernetesOnly}
-                    title=${this.projectIsKubernetesOnly
-                      ? ScionPageProjectSettings.gcpIdentityK8sHintText
-                      : nothing}
-                    >Block</sl-option
-                  >
+                  <sl-option value="block">Block</sl-option>
                   <sl-option value="passthrough">Passthrough</sl-option>
                   <sl-option value="assign">Assign Service Account</sl-option>
                   ${this.renderKubernetesBlockHint()}
                 </sl-select>
-                <span class="field-help"
-                  >Controls GCP metadata server access for new agents. "Block" prevents access,
-                  "Passthrough" allows host identity, "Assign" binds a specific service
-                  account.</span
-                >
+                <span class="field-help">${this.gcpIdentityFieldHelp}</span>
                 ${this.renderInheritedGCPIdentityHint()}
               </div>
 
@@ -2547,8 +2566,9 @@ export class ScionPageProjectSettings extends LitElement {
                                 (sa) => html`
                                   <sl-option value=${sa.id}>
                                     ${sa.displayName || sa.email}
-                                    <small>(${sa.email})</small
-                                    >${sa.scope === 'hub' ? ' (Hub)' : ''}
+                                    <small>(${sa.email})</small>${sa.scope === 'hub'
+                                      ? ' (Hub)'
+                                      : ''}
                                   </sl-option>
                                 `
                               )
@@ -2559,7 +2579,9 @@ export class ScionPageProjectSettings extends LitElement {
                       </div>
                       <span class="field-help"
                         >The GCP service account to assign to new agents by default. Only verified
-                        accounts are shown.</span
+                        accounts are shown. This default applies to any runtime profile that has no
+                        default of its own, so no mapping state is shown here; the agent create and
+                        configure pickers show it for the agent's Kubernetes profile.</span
                       >
                     </div>
                   `
@@ -2755,9 +2777,7 @@ export class ScionPageProjectSettings extends LitElement {
         ${canEdit && this.activeConfigTab !== 'brokers'
           ? html`
               <div class="config-actions">
-                ${this.settingsError
-                  ? html`<span class="config-status error">${this.settingsError}</span>`
-                  : ''}
+                ${this.renderSettingsError()}
                 ${this.settingsSuccess
                   ? html`<span class="config-status success">${this.settingsSuccess}</span>`
                   : ''}

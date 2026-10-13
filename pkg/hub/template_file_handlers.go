@@ -16,8 +16,6 @@ package hub
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -25,12 +23,10 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"gopkg.in/yaml.v3"
 )
 
 // maxTemplateFileSize is the maximum file size (in bytes) that can be read
@@ -83,54 +79,6 @@ type TemplateFileWriteResponse struct {
 	ModTime string `json:"modTime"`
 }
 
-const scionAgentConfigFile = "scion-agent.yaml"
-
-// detectHarnessFromContent parses scion-agent.yaml content and returns
-// the harness type and default harness config name.
-// Falls back to templateName-based inference.
-func detectHarnessFromContent(data []byte, templateName string) templateConfigInfo {
-	var raw struct {
-		HarnessConfig        string `yaml:"harness_config"`
-		DefaultHarnessConfig string `yaml:"default_harness_config"`
-		Harness              string `yaml:"harness"`
-	}
-
-	// Normalize hyphenated keys to underscored before parsing
-	var node yaml.Node
-	if err := yaml.Unmarshal(data, &node); err == nil {
-		if node.Kind == yaml.DocumentNode {
-			for _, child := range node.Content {
-				if child.Kind == yaml.MappingNode {
-					for i := 0; i < len(child.Content); i += 2 {
-						key := child.Content[i]
-						if key.Kind == yaml.ScalarNode {
-							key.Value = strings.ReplaceAll(key.Value, "-", "_")
-						}
-					}
-				}
-			}
-		}
-		_ = node.Decode(&raw)
-	}
-
-	if raw.HarnessConfig != "" {
-		return templateConfigInfo{
-			Harness:              inferHarnessFromName(raw.HarnessConfig),
-			DefaultHarnessConfig: raw.HarnessConfig,
-		}
-	}
-	if raw.DefaultHarnessConfig != "" {
-		return templateConfigInfo{
-			Harness:              inferHarnessFromName(raw.DefaultHarnessConfig),
-			DefaultHarnessConfig: raw.DefaultHarnessConfig,
-		}
-	}
-	if raw.Harness != "" {
-		return templateConfigInfo{Harness: raw.Harness}
-	}
-	return templateConfigInfo{Harness: inferHarnessFromName(templateName)}
-}
-
 // handleTemplateFiles dispatches template file operations.
 // filePath is empty for listing, non-empty for single-file operations.
 //
@@ -172,6 +120,8 @@ func (s *Server) handleTemplateFiles(w http.ResponseWriter, r *http.Request, tem
 		if !s.authorizeTemplateReadRoute(w, r, template) {
 			return
 		}
+	} else if !requireTemplateProfileWriter(w, r, template) {
+		return
 	} else if !s.authorize(w, r, templateResource(template), ActionUpdate) {
 		return
 	}
@@ -232,6 +182,28 @@ func (s *Server) handleTemplateFileList(w http.ResponseWriter, r *http.Request, 
 func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string) {
 	ctx := r.Context()
 
+	raw := r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream")
+
+	// A raw read that names a hash serves that blob of this template (the
+	// local-storage download URLs of a blob row carry it). The hash does not
+	// have to be in the current manifest, so a hydration that started
+	// before a commit still gets the version it began with
+	// (ptone/scion#4221).
+	if hash := r.URL.Query().Get("hash"); raw && hash != "" && isBlobLayout(template) {
+		hex, ok := templateBlobHex(hash)
+		if !ok {
+			BadRequest(w, "Invalid hash")
+			return
+		}
+		stor := s.GetStorage()
+		if stor == nil {
+			RuntimeError(w, "Storage not configured")
+			return
+		}
+		s.streamTemplateObject(w, r, stor, templateBlobPath(template.StoragePath, hex), filePath)
+		return
+	}
+
 	// Find the file in the manifest
 	var found *store.TemplateFile
 	for i := range template.Files {
@@ -252,29 +224,8 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Raw binary download for local storage proxy flow
-	if r.URL.Query().Get("raw") != "" || strings.Contains(r.Header.Get("Accept"), "application/octet-stream") {
-		objectPath := template.StoragePath + "/" + filePath
-		reader, _, err := stor.Download(ctx, objectPath)
-		if err != nil {
-			if errors.Is(err, storage.ErrNotFound) {
-				NotFound(w, "Template file")
-				return
-			}
-			RuntimeError(w, "Failed to read file from storage")
-			return
-		}
-		defer func() { _ = reader.Close() }()
-
-		safeName := filepath.Base(filePath)
-		contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeName})
-
-		w.Header().Set("Content-Type", "application/octet-stream")
-		w.Header().Set("Content-Disposition", contentDisposition)
-		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
-		w.WriteHeader(http.StatusOK)
-		if _, err := io.Copy(w, reader); err != nil {
-			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
-		}
+	if raw {
+		s.streamTemplateObject(w, r, stor, templateObjectPath(template, *found), filePath)
 		return
 	}
 
@@ -285,7 +236,7 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	objectPath := template.StoragePath + "/" + filePath
+	objectPath := templateObjectPath(template, *found)
 	reader, _, err := stor.Download(ctx, objectPath)
 	if err != nil {
 		if err == storage.ErrNotFound {
@@ -317,6 +268,32 @@ func (s *Server) handleTemplateFileRead(w http.ResponseWriter, r *http.Request, 
 		Encoding: "utf-8",
 		Hash:     found.Hash,
 	})
+}
+
+// streamTemplateObject streams one stored object as a raw file download
+// named after filePath.
+func (s *Server) streamTemplateObject(w http.ResponseWriter, r *http.Request, stor storage.Storage, objectPath, filePath string) {
+	reader, obj, err := stor.Download(r.Context(), objectPath)
+	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			NotFound(w, "Template file")
+			return
+		}
+		RuntimeError(w, "Failed to read file from storage")
+		return
+	}
+	defer func() { _ = reader.Close() }()
+
+	safeName := filepath.Base(filePath)
+	contentDisposition := mime.FormatMediaType("attachment", map[string]string{"filename": safeName})
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", contentDisposition)
+	setDownloadContentLength(w, obj)
+	w.WriteHeader(http.StatusOK)
+	if _, err := io.Copy(w, reader); err != nil {
+		slog.Error("Error streaming file to client", "path", objectPath, "error", err)
+	}
 }
 
 // handleTemplateFileWrite writes content to a template file.
@@ -358,53 +335,22 @@ func (s *Server) handleTemplateFileWrite(w http.ResponseWriter, r *http.Request,
 		}
 	}
 
-	// Upload content to storage
-	objectPath := template.StoragePath + "/" + filePath
 	content := []byte(req.Content)
-	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
-		ContentType: "text/plain; charset=utf-8",
-	})
+	if refuseUnusableBundledHarnessConfig(w, filePath, content) {
+		return
+	}
+
+	// Store the content as a blob, then commit it.
+	fileHash, blobPath, err := s.writeTemplateFileBlob(ctx, stor, template, content)
 	if err != nil {
 		RuntimeError(w, "Failed to write file to storage")
 		return
 	}
-
-	// Compute file hash
-	h := sha256.Sum256(content)
-	fileHash := "sha256:" + hex.EncodeToString(h[:])
 	fileSize := int64(len(content))
 
-	// Update the manifest
-	fileFound := false
-	for i := range template.Files {
-		if template.Files[i].Path == filePath {
-			template.Files[i].Size = fileSize
-			template.Files[i].Hash = fileHash
-			fileFound = true
-			break
-		}
-	}
-	if !fileFound {
-		// New file — add to manifest
-		template.Files = append(template.Files, store.TemplateFile{
-			Path: filePath,
-			Size: fileSize,
-			Hash: fileHash,
-		})
-	}
-
-	// Recompute content hash
-	template.ContentHash = computeContentHash(template.Files)
-
-	// Re-detect harness type and default harness config when the config file changes
-	if filePath == scionAgentConfigFile {
-		cfgInfo := detectHarnessFromContent(content, template.Name)
-		template.Harness = cfgInfo.Harness
-		template.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-	}
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	next := upsertTemplateFile(template.Files, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash})
+	if err := s.commitTemplateFiles(ctx, template, next, commitOpts{written: map[string]bool{blobPath: true}}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -434,51 +380,40 @@ func (s *Server) handleTemplateFileWriteRaw(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Upload to storage
-	objectPath := template.StoragePath + "/" + filePath
-	_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
-		ContentType: "application/octet-stream",
-	})
+	if refuseUnusableBundledHarnessConfig(w, filePath, data) {
+		return
+	}
+
+	// An upload URL (?uploadId=) only stages the file: finalize hashes and
+	// commits the whole upload in one compare-and-swap, so nothing here
+	// touches the row or what readers see (ptone/scion#4221).
+	if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+		if !validTemplateUploadID(uploadID) {
+			BadRequest(w, "Invalid uploadId")
+			return
+		}
+		staged := templateStagedObjectPath(s.templateContentBase(template), uploadID, filePath)
+		if _, err := stor.Upload(ctx, staged, bytes.NewReader(data), storage.UploadOptions{
+			ContentType: "application/octet-stream",
+		}); err != nil {
+			RuntimeError(w, "Failed to write file to storage")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	// Store the content as a blob, then commit it.
+	fileHash, blobPath, err := s.writeTemplateFileBlob(ctx, stor, template, data)
 	if err != nil {
 		RuntimeError(w, "Failed to write file to storage")
 		return
 	}
-
-	// Compute file hash
-	h := sha256.Sum256(data)
-	fileHash := "sha256:" + hex.EncodeToString(h[:])
 	fileSize := int64(len(data))
 
-	// Update the manifest
-	fileFound := false
-	for i := range template.Files {
-		if template.Files[i].Path == filePath {
-			template.Files[i].Size = fileSize
-			template.Files[i].Hash = fileHash
-			fileFound = true
-			break
-		}
-	}
-	if !fileFound {
-		template.Files = append(template.Files, store.TemplateFile{
-			Path: filePath,
-			Size: fileSize,
-			Hash: fileHash,
-		})
-	}
-
-	// Recompute content hash
-	template.ContentHash = computeContentHash(template.Files)
-
-	// Re-detect harness type and default harness config when the config file changes
-	if filePath == scionAgentConfigFile {
-		cfgInfo := detectHarnessFromContent(data, template.Name)
-		template.Harness = cfgInfo.Harness
-		template.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-	}
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	next := upsertTemplateFile(template.Files, store.TemplateFile{Path: filePath, Size: fileSize, Hash: fileHash})
+	if err := s.commitTemplateFiles(ctx, template, next, commitOpts{written: map[string]bool{blobPath: true}}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -512,8 +447,14 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	var uploaded []TemplateFileEntry
-
+	// Read and check every part before uploading any, so a refused part
+	// (an invalid path, an oversized file, or an unusable bundled
+	// harness-config) leaves storage untouched.
+	type uploadPart struct {
+		path string
+		data []byte
+	}
+	var parts []uploadPart
 	for fieldName, fileHeaders := range r.MultipartForm.File {
 		for _, fh := range fileHeaders {
 			relPath := fieldName
@@ -541,60 +482,40 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 				return
 			}
 
-			// Upload to storage
-			objectPath := template.StoragePath + "/" + relPath
-			_, err = stor.Upload(ctx, objectPath, bytes.NewReader(data), storage.UploadOptions{
-				ContentType: "application/octet-stream",
-			})
-			if err != nil {
-				RuntimeError(w, "Failed to upload file to storage")
+			if refuseUnusableBundledHarnessConfig(w, relPath, data) {
 				return
 			}
-
-			// Compute file hash
-			h := sha256.Sum256(data)
-			fileHash := "sha256:" + hex.EncodeToString(h[:])
-			fileSize := int64(len(data))
-
-			// Update or add to manifest
-			fileFound := false
-			for i := range template.Files {
-				if template.Files[i].Path == relPath {
-					template.Files[i].Size = fileSize
-					template.Files[i].Hash = fileHash
-					fileFound = true
-					break
-				}
-			}
-			if !fileFound {
-				template.Files = append(template.Files, store.TemplateFile{
-					Path: relPath,
-					Size: fileSize,
-					Hash: fileHash,
-				})
-			}
-
-			// Re-detect harness type and default harness config when the config file changes
-			if relPath == scionAgentConfigFile {
-				cfgInfo := detectHarnessFromContent(data, template.Name)
-				template.Harness = cfgInfo.Harness
-				template.DefaultHarnessConfig = cfgInfo.DefaultHarnessConfig
-			}
-
-			uploaded = append(uploaded, TemplateFileEntry{
-				Path:    relPath,
-				Size:    fileSize,
-				ModTime: template.Updated.UTC().Format("2006-01-02T15:04:05Z"),
-				Mode:    "0644",
-			})
+			parts = append(parts, uploadPart{path: relPath, data: data})
 		}
 	}
 
-	// Recompute content hash
-	template.ContentHash = computeContentHash(template.Files)
+	var uploaded []TemplateFileEntry
+	next := template.Files
+	written := make(map[string]bool, len(parts))
+	for _, part := range parts {
+		relPath, data := part.path, part.data
 
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+		// Store the content as a blob; the commit below makes it visible.
+		fileHash, blobPath, err := s.writeTemplateFileBlob(ctx, stor, template, data)
+		if err != nil {
+			RuntimeError(w, "Failed to upload file to storage")
+			return
+		}
+		written[blobPath] = true
+		fileSize := int64(len(data))
+
+		next = upsertTemplateFile(next, store.TemplateFile{Path: relPath, Size: fileSize, Hash: fileHash})
+
+		uploaded = append(uploaded, TemplateFileEntry{
+			Path:    relPath,
+			Size:    fileSize,
+			ModTime: template.Updated.UTC().Format("2006-01-02T15:04:05Z"),
+			Mode:    "0644",
+		})
+	}
+
+	if err := s.commitTemplateFiles(ctx, template, next, commitOpts{written: written}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -608,45 +529,29 @@ func (s *Server) handleTemplateFileUpload(w http.ResponseWriter, r *http.Request
 func (s *Server) handleTemplateFileDelete(w http.ResponseWriter, r *http.Request, template *store.Template, filePath string) {
 	ctx := r.Context()
 
-	// Find and remove the file from the manifest
-	idx := -1
+	found := false
 	for i := range template.Files {
 		if template.Files[i].Path == filePath {
-			idx = i
+			found = true
 			break
 		}
 	}
-	if idx == -1 {
+	if !found {
 		NotFound(w, "Template file")
 		return
 	}
 
-	stor := s.GetStorage()
-	if stor == nil {
+	if s.GetStorage() == nil {
 		RuntimeError(w, "Storage not configured")
 		return
 	}
 
-	// Delete from storage
-	objectPath := template.StoragePath + "/" + filePath
-	if err := stor.Delete(ctx, objectPath); err != nil && err != storage.ErrNotFound {
-		RuntimeError(w, "Failed to delete file from storage")
-		return
-	}
-
-	// Remove from manifest
-	template.Files = append(template.Files[:idx], template.Files[idx+1:]...)
-
-	// Recompute content hash
-	template.ContentHash = computeContentHash(template.Files)
-
-	// Re-detect harness type when the config file is removed
-	if filePath == scionAgentConfigFile {
-		template.Harness = inferHarnessFromName(template.Name)
-	}
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	// The commit drops the file from the manifest and re-derives the index
+	// (removing scion-agent.yaml clears DefaultHarnessConfig and AgentConfig).
+	// The removed file's blob stays for in-flight hydrations until the blob
+	// garbage collector's grace period has passed.
+	if err := s.commitTemplateFiles(ctx, template, removeTemplateFile(template.Files, filePath), commitOpts{}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 

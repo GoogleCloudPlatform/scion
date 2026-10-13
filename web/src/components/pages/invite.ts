@@ -28,6 +28,13 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  standaloneTestHubBannerStyles,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
+
 const INVITE_CODE_KEY = 'scion_invite_code';
 
 type InviteState = 'loading' | 'unauthenticated' | 'redeeming' | 'success' | 'error' | 'no-code';
@@ -46,7 +53,13 @@ export class ScionPageInvite extends LitElement {
   @state()
   private githubEnabled = false;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this, { standalone: true });
+
   static override styles = css`
+    ${testHubBannerStyles}
+    ${standaloneTestHubBannerStyles}
+
     :host {
       display: flex;
       align-items: center;
@@ -217,6 +230,7 @@ export class ScionPageInvite extends LitElement {
 
   override render() {
     return html`
+      ${renderTestHubBanner(this._testHubBanner.status)}
       <div class="card">
         ${this.pageState === 'loading' || this.pageState === 'redeeming'
           ? this.renderLoading()

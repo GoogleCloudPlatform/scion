@@ -17,6 +17,8 @@ package autoexpose
 import (
 	"context"
 	"fmt"
+	"net"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -117,7 +119,7 @@ func TestReconciler_NewPortsExposed(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 2 {
@@ -142,7 +144,7 @@ func TestReconciler_StalePortsUnexposed(t *testing.T) {
 		{Port: 5000, BindAddr: "0.0.0.0"},
 	}
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	if len(client.registeredPorts()) != 2 {
 		t.Fatalf("expected 2 ports after first tick, got %v", client.registeredPorts())
@@ -152,7 +154,7 @@ func TestReconciler_StalePortsUnexposed(t *testing.T) {
 	r.scan = func() ([]ListenSocket, error) {
 		return []ListenSocket{{Port: 3000, BindAddr: "0.0.0.0"}}, nil
 	}
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 1 || ports[0] != 3000 {
@@ -176,7 +178,7 @@ func TestReconciler_AllowlistFiltering(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 1 || ports[0] != 3000 {
@@ -196,7 +198,7 @@ func TestReconciler_AllowlistEmpty(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 0 {
@@ -217,7 +219,7 @@ func TestReconciler_DenylistFiltering(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 2 {
@@ -244,7 +246,7 @@ func TestReconciler_MinPortFiltering(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) != 1 || ports[0] != 3000 {
@@ -264,7 +266,7 @@ func TestReconciler_DeniedPortsFiltering(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	// 8080 is no longer denied, so both 3000 and 8080 should be registered.
@@ -288,13 +290,13 @@ func TestReconciler_NeverUnexposeManualPorts(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	// Now stop listening on port 5000.
 	r.scan = func() ([]ListenSocket, error) {
 		return []ListenSocket{{Port: 3000, BindAddr: "0.0.0.0"}}, nil
 	}
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	// Port 5000 should still be registered (manual port not touched).
 	ports := client.registeredPorts()
@@ -334,7 +336,7 @@ func TestReconciler_MaxPortsLimit(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	if len(ports) > 3 {
@@ -361,7 +363,7 @@ func TestReconciler_ConflictHandledGracefully(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	// Port 3000 should NOT be tracked as auto-exposed after 409 —
 	// it may have been manually registered.
@@ -385,7 +387,7 @@ func TestReconciler_NoOpAtSteadyState(t *testing.T) {
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
 
 	// First tick: registers port.
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 	if len(client.registeredPorts()) != 1 {
 		t.Fatal("expected 1 port after first tick")
 	}
@@ -397,7 +399,7 @@ func TestReconciler_NoOpAtSteadyState(t *testing.T) {
 		registerCalled = true
 		return nil
 	}
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 	client.registerCb = origRegister
 
 	if registerCalled {
@@ -419,7 +421,7 @@ func TestReconciler_FilterPorts_CombinedDeniedAndDenylist(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, cfg, sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	ports := client.registeredPorts()
 	// 8080 is no longer in denied ports, so 3000 and 8080 should be registered.
@@ -436,7 +438,7 @@ func TestReconciler_LabelSetCorrectly(t *testing.T) {
 	}
 
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	client.mu.Lock()
 	defer client.mu.Unlock()
@@ -465,7 +467,7 @@ func TestReconciler_ConflictDoesNotAutoUnexposeManualPort(t *testing.T) {
 
 	r := newTestReconciler(client, defaultTestConfig(), sockets)
 	// First tick: 3000 not in cache yet, tries to register, gets 409.
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	// Port 3000 must NOT be in autoExposed.
 	if r.autoExposed[3000] {
@@ -476,7 +478,7 @@ func TestReconciler_ConflictDoesNotAutoUnexposeManualPort(t *testing.T) {
 	r.scan = func() ([]ListenSocket, error) {
 		return nil, nil
 	}
-	r.reconcileOnce(context.Background())
+	_ = r.reconcileOnce(context.Background())
 
 	// The manually-registered port 3000 must still be in the hub.
 	ports := client.registeredPorts()
@@ -507,5 +509,40 @@ func TestIsConflictError(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("isConflictError(%v) = %v, want %v", tt.err, got, tt.want)
 		}
+	}
+}
+
+// TestReconciler_IPv6OnlyListenerRegisteredAsLoopback: a listener bound
+// only to ::1 is found by the real /proc scan and registered with the
+// logical loopback host 127.0.0.1. The conduit TCP target reaches it
+// through its refused-on-127.0.0.1 retry on ::1 (see
+// TestAgentTCPLoopbackFallback in pkg/sciontool/conduit), so no
+// bind-address-specific registration is needed.
+func TestReconciler_IPv6OnlyListenerRegisteredAsLoopback(t *testing.T) {
+	if _, err := os.Stat("/proc/net/tcp6"); err != nil {
+		t.Skip("no /proc/net/tcp6 on this host")
+	}
+	l, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback on this host: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+	port := l.Addr().(*net.TCPAddr).Port
+
+	client := newMockHubClient()
+	cfg := defaultTestConfig()
+	cfg.FilterMode = FilterModeAllowlist
+	cfg.FilterPorts = []int{port}
+	r := NewReconciler(client, cfg) // real ScanListeners
+	_ = r.reconcileOnce(context.Background())
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	ep, ok := client.ports[port]
+	if !ok {
+		t.Fatalf("::1-only port %d not registered; registered %v", port, client.ports)
+	}
+	if ep.Host != "127.0.0.1" {
+		t.Fatalf("registered host = %q, want 127.0.0.1", ep.Host)
 	}
 }

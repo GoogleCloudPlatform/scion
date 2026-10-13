@@ -15,10 +15,13 @@
 package handlers
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
@@ -40,6 +43,23 @@ func hookRun(t *testing.T, store SessionStateStore, ev *hooks.Event) *telemetry.
 	return got
 }
 
+// testLockTimeoutGenerous is the lock wait for tests that check counts under
+// contention, not timing: on a loaded CI runner a goroutine can wait longer
+// than the 2s production default, which would make the test flaky
+// (ptone/scion#3731).
+const testLockTimeoutGenerous = 30 * time.Second
+
+// testLockTimeoutShort is the lock wait for tests that deliberately hold the
+// lock elsewhere and expect Update to time out.
+const testLockTimeoutShort = 50 * time.Millisecond
+
+// testLockElapsedMax bounds how long a short-timeout lock attempt may take,
+// with generous slack for loaded CI runners. It is test-owned so the check
+// does not depend on the production default; TestFileSessionState_LockWaitDefault
+// asserts it stays below sessionStateLockTimeout so the bound still proves the
+// override applied.
+const testLockElapsedMax = 1500 * time.Millisecond
+
 func toolEvent(sessionID, tool string) *hooks.Event {
 	ev := sessionEvent(hooks.EventToolEnd, sessionID)
 	ev.Data.ToolName = tool
@@ -47,6 +67,8 @@ func toolEvent(sessionID, tool string) *hooks.Event {
 }
 
 func TestFileSessionState_CarriesCountsAcrossHandlers(t *testing.T) {
+	scrubTelemetryEnv(t)
+	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	store := NewFileSessionState(t.TempDir())
 
 	model := sessionEvent(hooks.EventModelEnd, "s1")
@@ -87,6 +109,7 @@ func TestFileSessionState_CarriesCountsAcrossHandlers(t *testing.T) {
 // Parallel hook processes (for example PostToolUse for parallel tool calls)
 // must serialize on the lock and lose no counts.
 func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 
@@ -98,7 +121,7 @@ func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
 			defer wg.Done()
 			// Each goroutine gets its own store value, as separate
 			// processes would, so each opens its own lock file description.
-			hookRun(t, &FileSessionState{Path: store.Path}, toolEvent("s1", "Bash"))
+			hookRun(t, &FileSessionState{Path: store.Path, lockTimeout: testLockTimeoutGenerous}, toolEvent("s1", "Bash"))
 		}()
 	}
 	wg.Wait()
@@ -113,6 +136,7 @@ func TestFileSessionState_ConcurrentRunsLoseNoCounts(t *testing.T) {
 }
 
 func TestFileSessionState_UnusableFileStartsFresh(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for name, content := range map[string]string{
 		"corrupt":       "{not json",
 		"wrong version": `{"version":99,"aggregator":{"session_id":"old","open":true,"turn_count":7}}`,
@@ -140,6 +164,7 @@ func TestFileSessionState_UnusableFileStartsFresh(t *testing.T) {
 
 // A session-start with a new ID replaces a stale, unreported session.
 func TestFileSessionState_NewSessionStartResetsStaleState(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "old"))
 	hookRun(t, store, toolEvent("old", "Bash"))
@@ -160,6 +185,7 @@ func TestFileSessionState_NewSessionStartResetsStaleState(t *testing.T) {
 // the hook does not fail.
 func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 	store := NewFileSessionState(t.TempDir())
+	store.lockTimeout = testLockTimeoutShort
 	if err := os.MkdirAll(filepath.Dir(store.Path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -174,9 +200,12 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 
 	agg := telemetry.NewAggregator()
 	applied := 0
-	err = store.Update(agg, toolEvent("s1", "Bash"), func() bool { applied++; return false })
-	if err == nil {
-		t.Error("Update succeeded while the lock was held elsewhere")
+	err = store.Update(agg, toolEvent("s1", "Bash"), func() (telemetry.SessionSummary, bool) { applied++; return telemetry.SessionSummary{}, false })
+	if !errors.Is(err, ErrSessionStateUnavailable) {
+		t.Errorf("Update error = %v, want ErrSessionStateUnavailable", err)
+	}
+	if err != nil && !strings.Contains(err.Error(), "timed out after "+testLockTimeoutShort.String()) {
+		t.Errorf("Update error = %v, want a lock timeout after %s", err, testLockTimeoutShort)
 	}
 	if applied != 1 {
 		t.Errorf("apply called %d times, want 1", applied)
@@ -190,6 +219,7 @@ func TestFileSessionState_LockUnavailableStillApplies(t *testing.T) {
 // merged into the next session when that session's session-start is also
 // missed: any event with a different session ID discards the stale state.
 func TestFileSessionState_DifferentSessionIDDiscardsStaleStateWithoutStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "old"))
 	hookRun(t, store, toolEvent("old", "Bash"))
@@ -212,6 +242,7 @@ func TestFileSessionState_DifferentSessionIDDiscardsStaleStateWithoutStart(t *te
 // Events without a session ID cannot be attributed elsewhere, so they keep
 // counting into the persisted session.
 func TestFileSessionState_EventWithoutSessionIDKeepsState(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("", "Bash"))
@@ -224,9 +255,11 @@ func TestFileSessionState_EventWithoutSessionIDKeepsState(t *testing.T) {
 // If the lock cannot be taken on session-end, the summary would be built
 // without the session's persisted counts, so it is not reported.
 func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("s1", "Bash"))
+	store.lockTimeout = testLockTimeoutShort
 
 	held, err := os.OpenFile(store.Path+".lock", os.O_RDWR, 0o600)
 	if err != nil {
@@ -237,17 +270,34 @@ func TestFileSessionState_LockUnavailableOnSessionEndSkipsReport(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	start := time.Now()
 	if s := hookRun(t, store, sessionEvent(hooks.EventSessionEnd, "s1")); s != nil {
 		t.Errorf("reported summary %+v while the state was unavailable", *s)
 	}
 	if _, err := os.Stat(store.Path); err != nil {
 		t.Errorf("state file should be left in place: %v", err)
 	}
+	if elapsed := time.Since(start); elapsed >= testLockElapsedMax {
+		t.Errorf("session-end waited %s (bound %s), want the %s test lock timeout to apply", elapsed, testLockElapsedMax, testLockTimeoutShort)
+	}
+}
+
+func TestFileSessionState_LockWaitDefault(t *testing.T) {
+	if testLockElapsedMax >= sessionStateLockTimeout {
+		t.Fatalf("testLockElapsedMax %s must stay below the default lock timeout %s", testLockElapsedMax, sessionStateLockTimeout)
+	}
+	if got := NewFileSessionState(t.TempDir()).lockWait(); got != sessionStateLockTimeout {
+		t.Errorf("default lockWait = %s, want %s", got, sessionStateLockTimeout)
+	}
+	if got := (&FileSessionState{lockTimeout: time.Second}).lockWait(); got != time.Second {
+		t.Errorf("overridden lockWait = %s, want 1s", got)
+	}
 }
 
 // A repeated session-start with the same ID (Claude on /compact or resume)
 // keeps the session's counts across hook processes.
 func TestFileSessionState_SameIDSessionStartKeepsCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	hookRun(t, store, sessionEvent(hooks.EventSessionStart, "s1"))
 	hookRun(t, store, toolEvent("s1", "Bash"))

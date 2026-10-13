@@ -129,6 +129,9 @@ type agentDeletionPlan struct {
 	// skipDispatch: a re-claim of a lease-expired finalizing row. Teardown
 	// already ran, so the engine goes straight to finalize.
 	skipDispatch bool
+	// fallback: req was derived because the finalizing row had no usable
+	// stored request, so what its teardown kept is unknown.
+	fallback bool
 }
 
 // agentDeleteParams are the caller's request parameters.
@@ -137,6 +140,12 @@ type agentDeleteParams struct {
 	removeBranch bool
 	force        bool
 	requestedBy  string
+	// hard always removes the row, whatever the soft-delete retention,
+	// without force's skipping of broker failures. Exception: a finalizing
+	// re-claim with a stored request keeps that request
+	// (ptone/scion#4183). Only the test identity purge (fixture_purge.go)
+	// sets it; no request parameter maps to it.
+	hard bool
 }
 
 // deleteClaimStopping reports whether a claim moves a's phase to stopping
@@ -168,11 +177,19 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 	lease := now.Add(deleteLease)
 	deleting := store.DeletionStateDeleting
 	empty := ""
+	// The soft-delete settings are read per delete, so a saved change
+	// applies to the next delete (ptone/scion#3904). They are read here,
+	// before the store call, so the Derive callback below does not take
+	// s.mu inside the claim transaction.
+	retention, retainFiles := s.softDeleteSettings()
 
 	var (
 		claim    int64
 		oldState string
 		req      store.DeletionRequestInfo
+		// fallback: req was derived because a finalizing row had no
+		// usable stored request (logged once the claim is confirmed).
+		fallback bool
 	)
 	set := store.DeletionFields{
 		State:         &deleting,
@@ -185,6 +202,7 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			claim = cur.DeletionClaim + 1
 			oldState = cur.DeletionState
+			fallback = false
 			// Capture prior once per delete attempt: a re-claim of an
 			// abandoned row keeps the original prior.
 			if cur.DeletionState == store.DeletionStateNone || cur.DeletionState == store.DeletionStateFailed {
@@ -198,28 +216,67 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 				}
 			}
 			post := *cur
-			post.DeletionState = store.DeletionStateDeleting
-			if deleteClaimStopping(cur) {
-				stopping := string(state.PhaseStopping)
-				f.Phase = &stopping
-				post.Phase = stopping
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				// A re-claim of an abandoned finalizing row: teardown
+				// already ran (skipDispatch). Keep it finalizing so it
+				// keeps holding the row (DeletionHoldsRow) even if this
+				// engine dies too, and leave the phase alone
+				// (ptone/scion#2890).
+				finalizing := store.DeletionStateFinalizing
+				f.State = &finalizing
+				post.DeletionState = store.DeletionStateFinalizing
+			} else {
+				f.State = &deleting
+				post.DeletionState = store.DeletionStateDeleting
+				if deleteClaimStopping(cur) {
+					stopping := string(state.PhaseStopping)
+					f.Phase = &stopping
+					post.Phase = stopping
+				}
 			}
-			// Soft unless force, no retention, or an incomplete async create
-			// (T1 §0c, evaluated on the post-claim row): those are always
-			// hard-deleted so the name can be reused.
-			req = store.DeletionRequestInfo{
-				DeleteFiles:  p.deleteFiles,
-				RemoveBranch: p.removeBranch,
-				Force:        p.force,
-				RequestedBy:  p.requestedBy,
-				Soft:         s.config.SoftDeleteRetention > 0 && !p.force && !post.IsIncompleteCreate(),
+			// writeRequest stores a newly derived request.
+			writeRequest := func() {
+				if b, err := json.Marshal(req); err == nil {
+					rs := string(b)
+					f.Request = &rs
+				}
 			}
-			if req.Soft && s.config.SoftDeleteRetainFiles {
-				req.DeleteFiles = false
-			}
-			if b, err := json.Marshal(req); err == nil {
-				rs := string(b)
-				f.Request = &rs
+			if cur.DeletionState == store.DeletionStateFinalizing {
+				if stored, ok := storedDeletionRequest(cur); ok {
+					// Teardown ran under the stored request, so the
+					// finish keeps its soft/hard decision (and the whole
+					// request), whatever this retry asked for and
+					// whatever retention says now (ptone/scion#4183), as
+					// the in_doubt re-claim does; even a hard (purge)
+					// claim keeps it. The column is left untouched.
+					req = stored
+				} else {
+					// No usable stored request: decide from the current
+					// configuration and p.hard only, never from this
+					// retry's force, deleteFiles or removeBranch (the
+					// dispatch is skipped).
+					fallback = true
+					req = store.DeletionRequestInfo{
+						RequestedBy: p.requestedBy,
+						Soft:        retention > 0 && !p.hard && !post.IsIncompleteCreate(),
+					}
+					writeRequest()
+				}
+			} else {
+				// Soft unless force, hard, no retention, or an incomplete
+				// async create (T1 §0c, evaluated on the post-claim row):
+				// those are always hard-deleted so the name can be reused.
+				req = store.DeletionRequestInfo{
+					DeleteFiles:  p.deleteFiles,
+					RemoveBranch: p.removeBranch,
+					Force:        p.force,
+					RequestedBy:  p.requestedBy,
+					Soft:         retention > 0 && !p.force && !p.hard && !post.IsIncompleteCreate(),
+				}
+				if req.Soft && retainFiles {
+					req.DeleteFiles = false
+				}
+				writeRequest()
 			}
 		},
 	}
@@ -245,15 +302,31 @@ func (s *Server) claimAgentDeletion(ctx context.Context, agentID string, p agent
 			// lease expired); treat as not claimed.
 			return nil, nil
 		}
+		if fallback {
+			s.agentLifecycleLog.Warn("delete claim: finalizing row has no stored request; using the current retention setting",
+				"agent_id", agentID, "claim", claim)
+		}
 		return &agentDeletionPlan{
 			claim:        claim,
 			snapshot:     row,
 			req:          req,
 			prior:        row.ParseDeletionPrior(),
 			skipDispatch: oldState == store.DeletionStateFinalizing,
+			fallback:     fallback,
 		}, nil
 	}
 	return nil, nil
+}
+
+// storedDeletionRequest decodes a's stored delete request. ok is false when
+// it is missing or unreadable; unlike Agent.ParseDeletionRequest, that is
+// never read as the zero (hard) request.
+func storedDeletionRequest(a *store.Agent) (store.DeletionRequestInfo, bool) {
+	var req store.DeletionRequestInfo
+	if a.DeletionRequest == "" || json.Unmarshal([]byte(a.DeletionRequest), &req) != nil {
+		return store.DeletionRequestInfo{}, false
+	}
+	return req, true
 }
 
 // runAgentDeletion starts the engine for plan on a context detached from
@@ -485,6 +558,10 @@ func (e *deletionEngine) abandonOutcome() deletionOutcome {
 // (or the executing hub node) refused the dispatch as stale.
 const staleDispatchMessage = "the broker received the delete after its deadline and did nothing; retry the delete"
 
+// managedDeleteFailedPrefix starts the runtime_error message of a managed
+// delete whose cloud cleanup failed; the backend error follows.
+const managedDeleteFailedPrefix = "Failed to delete managed agent cloud resources: "
+
 // abandonWith abandons the claim (see abandon) and returns failed{abandoned}
 // with msg.
 func (e *deletionEngine) abandonWith(msg string) deletionOutcome {
@@ -623,16 +700,24 @@ func (e *deletionEngine) dispatch() (out deletionOutcome, ok bool) {
 	}()
 
 	// Managed agent: clean up cloud resources directly, skip the broker.
-	// Errors are logged, as before (follow-up 4).
+	// A failure (including no managed backend on this hub) fails the delete
+	// and restores the prior phase, as a broker error does; force=true logs
+	// it and continues (ptone/scion#2883).
 	if isManagedAgentRuntime(agent.Runtime) {
-		if err := s.managedAgentDelete(ctx, agent); err != nil {
-			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources",
-				"agent_id", agent.ID, "error", err)
-		}
+		err := s.managedAgentDelete(ctx, agent)
 		if e.isLost() {
 			return e.lost(), false
 		}
-		return deletionOutcome{}, true
+		if err == nil {
+			return deletionOutcome{}, true
+		}
+		if req.Force {
+			s.agentLifecycleLog.Warn("Failed to delete managed agent cloud resources (force=true, continuing)",
+				"agent_id", agent.ID, "error", err)
+			return deletionOutcome{}, true
+		}
+		s.agentLifecycleLog.Error("Failed to delete managed agent cloud resources", "agent_id", agent.ID, "error", err)
+		return e.rollback(store.DeletionCodeRuntimeError, managedDeleteFailedPrefix+err.Error()), false
 	}
 
 	dispatcher := s.GetDispatcher()
@@ -825,6 +910,10 @@ func (e *deletionEngine) rollback(code, msg string) deletionOutcome {
 		Error:    &msg,
 		Derive: func(cur *store.Agent, f *store.DeletionFields) {
 			if prior.LaunchID != "" && (cur.LaunchState != store.LaunchStateActive || cur.LaunchID != prior.LaunchID) {
+				// C2: the launch has ended, so the phase=stopped this
+				// restores is published as a real transition, and a stopped
+				// lifecycle hook firing on this failed delete is intended
+				// (ptone/scion#2891).
 				stopped := string(state.PhaseStopped)
 				noActivity := ""
 				f.Phase = &stopped
@@ -907,6 +996,8 @@ const deleteInDoubtMessage = "teardown may still complete on the broker; retry o
 // failInDoubt fails the delete with in_doubt without restoring a live phase:
 // the hub does not know whether the container still exists. Start stays
 // blocked while the intent is outstanding (deleteBlocksStart).
+// If the intent completed meanwhile, recheckInDoubt deletes again and its
+// outcome is returned instead.
 func (e *deletionEngine) failInDoubt() deletionOutcome {
 	e.stopRenewal()
 	ctx, cancel := context.WithTimeout(e.base, deleteStepTimeout)
@@ -925,7 +1016,16 @@ func (e *deletionEngine) failInDoubt() deletionOutcome {
 	if n == 0 {
 		return e.lost()
 	}
-	e.publishStatus(ctx)
+	if h := inDoubtWrittenHook; h != nil {
+		h(e.agentID())
+	}
+	if out, ok := e.recheckInDoubt(); ok {
+		// No in_doubt status: watchers see the re-claim's delete instead.
+		return out
+	}
+	pctx, pcancel := context.WithTimeout(e.base, deleteStepTimeout)
+	defer pcancel()
+	e.publishStatus(pctx)
 	return deletionOutcome{kind: deletionOutcomeFailed, code: code, message: msg}
 }
 

@@ -20,7 +20,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -237,37 +236,8 @@ func TestListProjectAgentsSorted_PagedRaced_PageSizeBound_StaysUnderRacedCeiling
 	assert.LessOrEqual(t, want, 4504, "the raced exception to the decision ceiling")
 }
 
-// racingAllMembersStore mutates every candidate's Labels (via the real
-// store, bypassing the read path) the first time ListAgentMembers is
-// called, simulating every page item racing between the member read and the
-// full-row read -- the n-items generalization of
-// mutatingAfterMembersStore, which only races one row.
-type racingAllMembersStore struct {
-	store.Store
-	fault *storeFaultSwitch // nil: always active
-	once  sync.Once
-}
-
 // newRacingAllMembersStore is the installStoreFault wrap func for
 // racingAllMembersStore.
 func newRacingAllMembersStore(inner store.Store, fault *storeFaultSwitch) *racingAllMembersStore {
 	return &racingAllMembersStore{Store: inner, fault: fault}
-}
-
-func (r *racingAllMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	members, err := r.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	if err != nil || !r.fault.Active() {
-		return members, err
-	}
-	r.once.Do(func() {
-		for _, m := range members {
-			a, gerr := r.GetAgent(ctx, m.ID)
-			if gerr != nil {
-				continue
-			}
-			a.Labels = map[string]string{"raced": "true"}
-			_ = r.UpdateAgent(ctx, a)
-		}
-	})
-	return members, nil
 }

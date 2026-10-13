@@ -17,70 +17,15 @@
 package hub
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
-
-// setupUserTemplateTest creates a test server with two users (alice and bob)
-// and returns the server, store, and both users. Both users have hub membership.
-func setupUserTemplateTest(t *testing.T) (*Server, store.Store, *store.User, *store.User) {
-	t.Helper()
-
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	alice := &store.User{
-		ID:          tid("ut-alice"),
-		Email:       "alice@test.com",
-		DisplayName: "Alice",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-
-	bob := &store.User{
-		ID:          tid("ut-bob"),
-		Email:       "bob@test.com",
-		DisplayName: "Bob",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, bob))
-
-	ensureHubMembership(ctx, s, alice.ID)
-	ensureHubMembership(ctx, s, bob.ID)
-
-	return srv, s, alice, bob
-}
-
-// createUserTemplate creates a user-scoped template directly in the store.
-func createUserTemplate(t *testing.T, s store.Store, ownerID, name string) *store.Template {
-	t.Helper()
-	tmpl := &store.Template{
-		ID:        api.NewUUID(),
-		Name:      name,
-		Slug:      api.Slugify(name),
-		Harness:   "antigravity",
-		Scope:     store.TemplateScopeUser,
-		ScopeID:   ownerID,
-		OwnerID:   ownerID,
-		CreatedBy: ownerID,
-		Status:    store.TemplateStatusActive,
-	}
-	require.NoError(t, s.CreateTemplate(context.Background(), tmpl))
-	return tmpl
-}
 
 // TestListUserTemplates_IsolationBetweenUsers verifies that listing
 // /api/v1/users/me/templates returns only the caller's user-scoped templates.

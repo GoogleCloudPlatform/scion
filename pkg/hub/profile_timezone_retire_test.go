@@ -517,3 +517,32 @@ func TestPutServerConfigDB_ProfilesWithoutTimezoneAccepted(t *testing.T) {
 		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
 	}
 }
+
+// A stored default_thinking_level of 0 fails the agent_defaults schema; the
+// timezone copy drops it with a warning that names its path, instead of
+// failing the write (ptone/scion#3898).
+func TestRetireProfileTimezones_CopyDropsInvalidStoredThinkingLevel(t *testing.T) {
+	ctx := context.Background()
+	st := newFakeHubSettingStore()
+	st.seedWithOrigin("profiles", json.RawMessage(`{"a":{"runtime":"docker","timezone":"Asia/Tokyo"}}`), "managed")
+	st.seedWithOrigin("agent_defaults", json.RawMessage(`{"default_template":"claude","default_thinking_level":0}`), "seeded")
+	ops := NewOperationalSettings(st, emptyKoanf(), emptyKoanf())
+	if _, err := ops.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	log, buf := retireTestLogger()
+
+	if err := RetireProfileTimezones(ctx, ops, ProfileTimezoneRetireInput{DBTier: true}, log); err != nil {
+		t.Fatalf("RetireProfileTimezones: %v", err)
+	}
+	_, adDoc := mustRow(t, st, "agent_defaults")
+	if adDoc["default_timezone"] != "Asia/Tokyo" || adDoc["default_template"] != "claude" {
+		t.Errorf("agent_defaults = %v, want the copied zone and the other keys kept", adDoc)
+	}
+	if _, ok := adDoc["default_thinking_level"]; ok {
+		t.Errorf("invalid default_thinking_level kept: %v", adDoc)
+	}
+	if !strings.Contains(buf.String(), "agent_defaults.default_thinking_level") {
+		t.Errorf("no warning naming agent_defaults.default_thinking_level; log:\n%s", buf)
+	}
+}

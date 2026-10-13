@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -62,6 +63,29 @@ func (t defaultTier) setting() string {
 		return fmt.Sprintf("the project's per-profile default service account for profile %q", t.profile)
 	}
 	return "the " + t.name + "'s default GCP identity setting"
+}
+
+// fixer and fix name who changes the default and where (ptone/scion#4019):
+// the settings field to update and the API route or page that carries it.
+func (t defaultTier) fixer() string {
+	if t == defaultTierHub {
+		return "a hub admin"
+	}
+	return "a project admin"
+}
+
+func (t defaultTier) fix() string {
+	switch {
+	case t.profile != "":
+		return fmt.Sprintf("the %q entry of defaultGCPIdentityServiceAccountIDByProfile in the project settings "+
+			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)", t.profile)
+	case t == defaultTierHub:
+		return "agent_defaults.default_gcp_identity_service_account_id in the hub's server config " +
+			"(PUT /api/v1/admin/server-config, or the admin server-config page)"
+	default:
+		return "defaultGCPIdentityServiceAccountID in the project settings " +
+			"(PUT /api/v1/projects/<project>/settings, or the project's settings page)"
+	}
 }
 
 // projectProfileDefaultSA returns the per-profile default GCP service
@@ -142,11 +166,29 @@ func pinResolvedProfile(ac *store.AgentAppliedConfig, profile string) {
 // A default that names an unavailable, unverified, or unauthorized account
 // fails resolution rather than silently falling back to block (P10): the
 // operator set the default, so the operator needs to hear that it is broken.
-// The returned error is either a plain error (not available / not verified)
-// or a *saAssignDenial (authorization gate), so a caller with an HTTP
-// response can render either the same way resolveDefaultSAAssignment does.
+// The returned error is a *defaultSAUnusableError (not available / not
+// verified), a *saAssignDenial (authorization gate), an *errGCPSAAmbiguous
+// (the reference matched more than one account), or any other error, which
+// is an internal failure (for example the store) and not a statement about
+// the default. A caller with an HTTP response renders them the way
+// resolveDefaultSAAssignment does.
 func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, error) {
-	sa, err := s.store.GetGCPServiceAccount(ctx, saID)
+	sa, err := s.resolveGCPServiceAccountRef(ctx, projectID, saID)
+	var amb *errGCPSAAmbiguous
+	if errors.As(err, &amb) {
+		slog.Warn(tier.name+"-default SA assignment failed: service account reference is ambiguous",
+			"surface", surface,
+			"project_id", projectID,
+			"sa_ref", saID)
+		return nil, amb
+	}
+	// An internal failure is not "not available": reporting it as one would
+	// tell the operator to fix a default that is fine. Only ErrNotFound is
+	// folded into the not-available answer below, together with an
+	// unreachable account, so those two stay indistinguishable.
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, err
+	}
 	// Scope-aware admissibility (P4 item F), same predicate as the two
 	// caller-supplied assign sites. A default may legitimately nominate a
 	// hub-scoped account; a project-scoped one is only usable in its own
@@ -157,16 +199,20 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 			"project_id", projectID,
 			"sa_id", saID,
 			"err", err)
-		return nil, fmt.Errorf("%s GCP service account is not available in this project; "+
-			"update %s", tier.subject(), tier.setting())
+		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not available in this project; "+
+			"update %s: %s must change or clear %s.", tier.subject(), tier.setting(), tier.fixer(), tier.fix())}
 	}
 	if !gcpServiceAccountVerified(sa) {
 		slog.Warn(tier.name+"-default SA assignment failed: service account not verified",
 			"surface", surface,
 			"project_id", projectID,
 			"sa_id", sa.ID, "sa_email", sa.Email)
-		return nil, fmt.Errorf("%s GCP service account is not verified; "+
-			"verify it before it can be assigned to agents", tier.subject())
+		// Naming the account follows the spec §9 Q1 rule: the caller is
+		// creating an agent in this project, and the account is reachable
+		// from it.
+		return nil, &defaultSAUnusableError{msg: fmt.Sprintf("%s GCP service account is not verified: "+
+			"the hub cannot obtain tokens for %s. %s Or %s can point %s at a verified account.",
+			tier.subject(), sa.Email, identityVerifyRemedy(sa.Scope), tier.fixer(), tier.fix())}
 	}
 
 	// P10: Authorization gate for default SA assignment.
@@ -190,7 +236,7 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	//   2. Hub ActionAssign authorization.
 	//   3. GCP actAs check via callerPrincipal, using the identity on ctx.
 	//   4. Audit record via EvaluateActAs with the given surface.
-	if denial := s.evaluateSAAssignment(ctx, r, sa, surface); denial != nil {
+	if denial := s.evaluateSAAssignment(ctx, r, sa, projectID, surface); denial != nil {
 		slog.Warn(tier.name+"-default SA assignment denied by authorization gate",
 			"surface", surface,
 			"project_id", projectID,
@@ -206,11 +252,21 @@ func (s *Server) resolveDefaultSAAssignmentCore(ctx context.Context, r *http.Req
 	}, nil
 }
 
+// defaultSAUnusableError is resolveDefaultSAAssignmentCore's refusal of a
+// configured default that is not available or not verified: a 400 the
+// operator fixes by updating the default. It is a type rather than a plain
+// error so callers can tell it from an internal failure without matching
+// message text.
+type defaultSAUnusableError struct{ msg string }
+
+func (e *defaultSAUnusableError) Error() string { return e.msg }
+
 // resolveDefaultSAAssignment is the HTTP-transport wrapper around
 // resolveDefaultSAAssignmentCore for the interactive/API create path: on
-// failure it writes the appropriate HTTP error (the core's plain errors as a
-// 400 validation error, a *saAssignDenial through its own write method) and
-// returns ok=false.
+// failure it writes the appropriate HTTP error (a *defaultSAUnusableError as
+// a 400 validation error, a *saAssignDenial and an *errGCPSAAmbiguous through
+// their own writers, anything else as a plain 500 that does not echo the
+// error) and returns ok=false.
 func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.ResponseWriter, r *http.Request, projectID, saID, surface string, tier defaultTier) (*store.GCPIdentityConfig, bool) {
 	cfg, err := s.resolveDefaultSAAssignmentCore(ctx, r, projectID, saID, surface, tier)
 	if err == nil {
@@ -220,7 +276,20 @@ func (s *Server) resolveDefaultSAAssignment(ctx context.Context, w http.Response
 		denial.write(w)
 		return nil, false
 	}
-	writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+	if writeGCPSAAmbiguous(w, err) {
+		return nil, false
+	}
+	var unusable *defaultSAUnusableError
+	if errors.As(err, &unusable) {
+		writeError(w, http.StatusBadRequest, ErrCodeIdentityDefaultInvalid, unusable.Error(), nil)
+		return nil, false
+	}
+	// An internal failure. Always a plain 500, never mapped through
+	// writeErrorFromErr: a wrapped store sentinel would come out as a 404 or
+	// 409, which would read as a statement about the default.
+	slog.ErrorContext(ctx, tier.name+"-default SA assignment failed: internal error",
+		"surface", surface, "project_id", projectID, "error", err)
+	InternalError(w)
 	return nil, false
 }
 
@@ -276,7 +345,7 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 		return false, ""
 	}
 	state := s.waitForEmbeddedBroker(ctx)
-	if state.id != "" && state.id == runtimeBrokerID {
+	if state.has(runtimeBrokerID) {
 		return s.hubDefaultRuntimeAllowed(ctx, runtimeBrokerID, profileName, agentName, projectID)
 	}
 	switch {
@@ -288,14 +357,14 @@ func (s *Server) hubDefaultPassthroughAllowed(ctx context.Context, runtimeBroker
 		slog.Warn("hub-default GCP passthrough denied: co-located broker registration still pending",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID, "waited", embeddedBrokerWaitTimeout)
-	case state.id == "":
+	case len(state.ids) == 0:
 		slog.Info("hub-default GCP passthrough denied: hub has no embedded broker registered",
 			"surface", SurfaceHubDefault, "project_id", projectID,
 			"broker", runtimeBrokerID)
 	default:
 		slog.Info("hub-default GCP passthrough denied: broker is not the hub's embedded broker",
 			"surface", SurfaceHubDefault, "project_id", projectID,
-			"broker", runtimeBrokerID, "embedded_broker", state.id)
+			"broker", runtimeBrokerID, "embedded_brokers", state.sortedIDs())
 	}
 	return false, ""
 }
@@ -341,6 +410,17 @@ func (s *Server) hubDefaultRuntimeAllowed(ctx context.Context, runtimeBrokerID, 
 			"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
 			"broker", runtimeBrokerID, "profile", profileName, "error", err)
 		return false, ""
+	}
+	// A flat Runtime Broker serves one runtime target: the gate evaluates
+	// its type and pins no profile.
+	if broker.IsFlat() {
+		if !hubDefaultPassthroughRuntimeTypes[broker.RuntimeTarget.Type] {
+			slog.Info("hub-default GCP passthrough denied: flat Runtime Broker target is not a local container runtime",
+				"surface", SurfaceHubDefault, "project_id", projectID, "agent", agentName,
+				"broker", runtimeBrokerID, "runtime_target_type", broker.RuntimeTarget.Type)
+			return false, ""
+		}
+		return true, ""
 	}
 	resolvedProfile, runtimeType, ok := resolveAgentRuntimeProfileType(broker, profileName)
 	if !ok {

@@ -16,6 +16,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   apiMatcherFor,
@@ -28,9 +33,25 @@ import {
   displayStatusLabel,
   computePreStaleIds,
   resolveBatchTickSettled,
+  expectedFirstPageCount,
+  pageCountFor,
+  summarizePageChanges,
+  walkEndReason,
+  mapWithConcurrency,
   summarizeBurstScenario,
   BURST_TARGET_ROTATION,
+  READINESS_MARK_PREFIX,
+  READINESS_MARK_NAMES,
+  expectedReadinessMarks,
+  readinessMarksFrom,
+  checkReadinessMarks,
+  summarizeReadinessMarks,
+  wallClockSamples,
+  compareMedianRatio,
+  buildWallClockBaseline,
+  checkMedianRatioOptions,
 } from './lib.mjs';
+import { readFileSync } from 'node:fs';
 
 // ---- apiMatcherFor: a regression test against the real page URLs ----------
 // Match against the REAL URLs each page actually fetches, not an assumed
@@ -502,4 +523,403 @@ test('summarizeBurstScenario handles an all-invalid scenario without crashing', 
   assert.equal(s.perAgentMaxSettleMs, null);
   assert.equal(s.runMedianMinMs, null);
   assert.equal(s.runMedianMaxMs, null);
+});
+
+test('expectedFirstPageCount: one full page, or every agent when fewer', () => {
+  assert.equal(expectedFirstPageCount(25, 100, 100), 25);
+  assert.equal(expectedFirstPageCount(25, 10, 10), 10);
+  assert.equal(expectedFirstPageCount(50, 500, 500), 50);
+  // The pager total wins over the seeded count when known.
+  assert.equal(expectedFirstPageCount(25, 100, 12), 12);
+  // Unknown total falls back to the seeded count.
+  assert.equal(expectedFirstPageCount(25, 100, null), 25);
+  assert.equal(expectedFirstPageCount(25, 7, undefined), 7);
+  // No agents: nothing to render.
+  assert.equal(expectedFirstPageCount(25, 0, 0), 0);
+});
+
+test('expectedFirstPageCount: no pager (no page size) expects every agent', () => {
+  assert.equal(expectedFirstPageCount(null, 100, null), 100);
+  assert.equal(expectedFirstPageCount(0, 100, 100), 100);
+  assert.equal(expectedFirstPageCount(undefined, 25, 25), 25);
+});
+
+test('pageCountFor', () => {
+  assert.equal(pageCountFor(25, 100), 4);
+  assert.equal(pageCountFor(25, 101), 5);
+  assert.equal(pageCountFor(25, 25), 1);
+  assert.equal(pageCountFor(25, 0), 1);
+  assert.equal(pageCountFor(null, 100), null);
+  assert.equal(pageCountFor(25, null), null);
+});
+
+test('summarizePageChanges: completed changes of populated runs only', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 300 },
+        { toPageIndex: 3, ok: false, ms: null },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChanges: [{ toPageIndex: 1, ok: true, ms: 200 }],
+    },
+    // A run that never populated contributes no page changes.
+    { outcome: 'loaded-not-rendered', pageSize: 25, pageCount: 4, pageChanges: [] },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageSize, 25);
+  assert.equal(s.pageCount, 4);
+  assert.equal(s.pageChangeAttemptCount, 4);
+  assert.equal(s.pageChangeSuccessCount, 3);
+  assert.equal(s.pageChangeFailureCount, 1);
+  assert.equal(s.medianPageChangeMs, 200);
+  assert.equal(s.minPageChangeMs, 100);
+  assert.equal(s.maxPageChangeMs, 300);
+});
+
+test('summarizePageChanges: a single page, no pager, or mixed page sizes', () => {
+  const single = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 1, pageChanges: [] },
+  ]);
+  assert.equal(single.pageChangeAttemptCount, 0);
+  assert.equal(single.medianPageChangeMs, null);
+  assert.equal(single.pageCount, 1);
+
+  const none = summarizePageChanges([{ outcome: 'populated', pageSize: null, pageCount: null }]);
+  assert.equal(none.pageSize, null);
+  assert.equal(none.pageCount, null);
+
+  const mixed = summarizePageChanges([
+    { outcome: 'populated', pageSize: 25, pageCount: 4, pageChanges: [] },
+    { outcome: 'populated', pageSize: 50, pageCount: 2, pageChanges: [] },
+  ]);
+  assert.deepEqual(mixed.pageSize, [25, 50]);
+  assert.deepEqual(mixed.pageCount, [4, 2]);
+});
+
+test('summarizePageChanges: counts walks that stopped before the last page', () => {
+  const results = [
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'completed',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+        { toPageIndex: 3, ok: true, ms: 100 },
+      ],
+    },
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 4,
+      pageChangesStopReason: 'next-unavailable-before-last-page',
+      pageChanges: [
+        { toPageIndex: 1, ok: true, ms: 100 },
+        { toPageIndex: 2, ok: true, ms: 100 },
+      ],
+    },
+    // A legitimately short view ends with no-next-page and is not counted.
+    {
+      outcome: 'populated',
+      pageSize: 25,
+      pageCount: 1,
+      pageChangesStopReason: 'no-next-page',
+      pageChanges: [],
+    },
+  ];
+  const s = summarizePageChanges(results);
+  assert.equal(s.pageWalkEarlyStopCount, 1);
+  assert.equal(s.pageChangeAttemptCount, 5);
+  assert.equal(s.pageChangeFailureCount, 0);
+  assert.equal(summarizePageChanges([]).pageWalkEarlyStopCount, 0);
+});
+
+test('walkEndReason: how a walk with Next disabled ended', () => {
+  const pager = (o) => ({ pageSize: 25, pageIndex: 0, total: 100, hasNext: false, ...o });
+  // Last page of 4: the normal end.
+  assert.equal(walkEndReason(pager({ pageIndex: 3 })), 'no-next-page');
+  // Page index 2 of 4 with Next disabled: an early stop.
+  assert.equal(walkEndReason(pager({ pageIndex: 2 })), 'next-unavailable-before-last-page');
+  // Unknown or capped total: no later page can be shown to exist.
+  assert.equal(walkEndReason(pager({ pageIndex: 1, total: null })), 'no-next-page');
+  assert.equal(
+    walkEndReason(pager({ pageIndex: 1, total: { loaded: 2000, capped: true } })),
+    'no-next-page'
+  );
+  // Total 0.
+  assert.equal(walkEndReason(pager({ total: 0 })), 'no-next-page');
+  // A one-page view.
+  assert.equal(walkEndReason(pager({ total: 20 })), 'no-next-page');
+  // Next still available, or no pager: not an end.
+  assert.equal(walkEndReason(pager({ hasNext: true })), null);
+  assert.equal(walkEndReason(null), null);
+});
+
+test('mapWithConcurrency: bounded in-flight calls, results in input order', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const items = Array.from({ length: 25 }, (_, i) => i);
+  const out = await mapWithConcurrency(items, 4, async (n) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await new Promise((r) => setTimeout(r, 1 + (n % 3)));
+    inFlight--;
+    return n * 2;
+  });
+  assert.equal(peak, 4);
+  assert.deepEqual(
+    out,
+    items.map((n) => n * 2)
+  );
+  assert.deepEqual(await mapWithConcurrency([], 4, async (n) => n), []);
+});
+
+// ---- readiness marks ------------------------------------------------------
+
+test('readiness mark names match the web client', () => {
+  const src = readFileSync(new URL('../src/client/readiness-marks.ts', import.meta.url), 'utf8');
+  const webNames = [...src.matchAll(/'(scion:ready:[a-z-]+)'/g)].map((m) => m[1]);
+  assert.deepEqual(webNames, Object.values(READINESS_MARK_NAMES));
+  assert.ok(src.includes(`READINESS_MARK_PREFIX = '${READINESS_MARK_PREFIX}'`));
+});
+
+test('expectedReadinessMarks pairs the data mark with the view mark', () => {
+  assert.deepEqual(expectedReadinessMarks('project-grid'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-grid',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-list'), [
+    'scion:ready:agents-data',
+    'scion:ready:rows-list',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('project-graph-embedded'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('standalone-graph'), [
+    'scion:ready:agents-data',
+    'scion:ready:graph',
+  ]);
+  assert.deepEqual(expectedReadinessMarks('other'), []);
+});
+
+test('readinessMarksFrom keeps readiness marks only, first of each name', () => {
+  const got = readinessMarksFrom([
+    { name: 'scion:ready:agents-data', startTime: 812.345 },
+    { name: 'something-else', startTime: 1 },
+    { name: 'scion:ready:agents-data', startTime: 999 },
+    { name: 'scion:ready:graph', startTime: 1200.04 },
+  ]);
+  assert.deepEqual(got, { 'scion:ready:agents-data': 812.3, 'scion:ready:graph': 1200 });
+  assert.deepEqual(readinessMarksFrom(undefined), {});
+});
+
+test('checkReadinessMarks: on reports missing marks, off reports any mark', () => {
+  const expected = ['scion:ready:agents-data', 'scion:ready:rows-grid'];
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, true), {
+    missing: ['scion:ready:rows-grid'],
+    unexpected: [],
+  });
+  assert.deepEqual(checkReadinessMarks({}, expected, false), { missing: [], unexpected: [] });
+  assert.deepEqual(checkReadinessMarks({ 'scion:ready:agents-data': 5 }, expected, false), {
+    missing: [],
+    unexpected: ['scion:ready:agents-data'],
+  });
+});
+
+test('summarizeReadinessMarks: populated runs only, cold and warm split', () => {
+  const runs = [
+    {
+      outcome: 'populated',
+      cold: true,
+      readinessMarks: { 'scion:ready:graph': 300 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 100 },
+      readinessMarksMissing: ['scion:ready:agents-data'],
+      readinessMarksUnexpected: [],
+    },
+    {
+      outcome: 'populated',
+      cold: false,
+      readinessMarks: { 'scion:ready:graph': 200 },
+      readinessMarksMissing: [],
+      readinessMarksUnexpected: ['scion:ready:graph'],
+    },
+    { outcome: 'still-loading', cold: false, readinessMarks: { 'scion:ready:graph': 9999 } },
+  ];
+  const s = summarizeReadinessMarks(runs);
+  assert.deepEqual(s.readinessMarks['scion:ready:graph'], {
+    count: 3,
+    medianMs: 200,
+    minMs: 100,
+    maxMs: 300,
+    medianMsCold: 300,
+    medianMsWarm: 150,
+  });
+  assert.equal(s.readinessMarksMissingRunCount, 1);
+  assert.equal(s.readinessMarksUnexpectedRunCount, 1);
+});
+
+// ---- wall-clock median-ratio budgets ----------------------------------------
+
+const apiReport = {
+  scenarios: [
+    {
+      name: 'project-agents-list',
+      attempts: [
+        { success: true, totalMs: 100 },
+        { success: true, totalMs: 120 },
+        { success: false, totalMs: 9000 },
+        { success: true, totalMs: 110 },
+      ],
+    },
+  ],
+};
+const browserReport = {
+  scenarios: {
+    'project-grid': {
+      runs: [
+        { cold: true, outcome: 'populated', navToPopulatedMs: 5000 },
+        { cold: false, outcome: 'populated', navToPopulatedMs: 1400 },
+        { cold: false, outcome: 'loaded-not-rendered', navToPopulatedMs: null },
+        { cold: false, outcome: 'populated', navToPopulatedMs: 1600 },
+      ],
+    },
+  },
+};
+
+test('wallClockSamples keeps successful api attempts and warm populated browser runs only', () => {
+  const s = wallClockSamples({ api: apiReport, browser: browserReport });
+  assert.deepEqual(s['api:project-agents-list'], [100, 120, 110]);
+  // The cold run is the warm-up; the unpopulated run is not a sample.
+  assert.deepEqual(s['browser:project-grid'], [1400, 1600]);
+});
+
+test('compareMedianRatio passes at the ratio and fails just above it', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const at = compareMedianRatio({ 'api:x': [125, 125, 125] }, baseline, {
+    ratio: 1.25,
+    minTrials: 3,
+  });
+  assert.equal(at.ok, true);
+  assert.equal(at.rows[0].status, 'ok');
+  const over = compareMedianRatio({ 'api:x': [126, 126, 126] }, baseline, {
+    ratio: 1.25,
+    minTrials: 3,
+  });
+  assert.equal(over.ok, false);
+  assert.equal(over.rows[0].status, 'over');
+});
+
+test('compareMedianRatio uses the median, so one slow trial does not fail', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const r = compareMedianRatio({ 'api:x': [100, 101, 99, 5000, 102] }, baseline, { minTrials: 5 });
+  assert.equal(r.ok, true);
+  assert.equal(r.rows[0].medianMs, 101);
+});
+
+test('compareMedianRatio fails a metric with too few or no trials, and reports new metrics', () => {
+  const baseline = {
+    ratio: 1.25,
+    minTrials: 7,
+    metrics: { 'api:x': { medianMs: 100 }, 'api:y': { medianMs: 50 } },
+  };
+  const r = compareMedianRatio({ 'api:x': [100, 100], 'api:z': [1] }, baseline);
+  assert.equal(r.ok, false);
+  const byMetric = Object.fromEntries(r.rows.map((row) => [row.metric, row.status]));
+  assert.deepEqual(byMetric, { 'api:x': 'insufficient', 'api:y': 'insufficient', 'api:z': 'new' });
+});
+
+test('buildWallClockBaseline stores medians and refuses too few trials', () => {
+  const b = buildWallClockBaseline(
+    { 'api:x': [3, 1, 2] },
+    { commit: 'abc' },
+    { minTrials: 3, smoke: true }
+  );
+  assert.deepEqual(b, {
+    commit: 'abc',
+    smoke: true,
+    ratio: 1.25,
+    minTrials: 3,
+    metrics: { 'api:x': { medianMs: 2, trials: 3 } },
+  });
+  assert.throws(
+    () => buildWallClockBaseline({ 'api:x': [1] }, {}, { minTrials: 3, smoke: true }),
+    /need at least 3/
+  );
+  const full = buildWallClockBaseline({ 'api:x': Array(10).fill(5) }, {});
+  assert.equal(full.minTrials, 10);
+  assert.equal('smoke' in full, false);
+});
+
+test('buildWallClockBaseline refuses a trial minimum below the default unless it is a smoke run', () => {
+  assert.throws(
+    () => buildWallClockBaseline({ 'api:x': [1, 2, 3] }, {}, { minTrials: 3 }),
+    /only a smoke run/
+  );
+  assert.throws(() => buildWallClockBaseline({}, {}), /no samples/);
+});
+
+test('a smoke baseline is refused by a normal check and accepted by a smoke check', () => {
+  const smoke = buildWallClockBaseline({ 'api:x': [1, 2, 3] }, {}, { minTrials: 2, smoke: true });
+  assert.throws(() => compareMedianRatio({ 'api:x': [1, 2, 3] }, smoke), /smoke run/);
+  assert.equal(compareMedianRatio({ 'api:x': [1, 2, 3] }, smoke, { smoke: true }).ok, true);
+});
+
+test('compareMedianRatio refuses an empty baseline instead of passing it', () => {
+  assert.throws(() => compareMedianRatio({ 'api:x': [1] }, { metrics: {} }), /no metrics/);
+  assert.throws(() => compareMedianRatio({ 'api:x': [1] }, {}), /no metrics/);
+});
+
+test('an unusable ratio or trial minimum is an error, not a pass', () => {
+  const baseline = { metrics: { 'api:x': { medianMs: 100 } } };
+  const samples = { 'api:x': Array(10).fill(1000) };
+  for (const ratio of [NaN, 0, -1, Infinity]) {
+    assert.throws(() => compareMedianRatio(samples, baseline, { ratio }), /ratio must be/);
+    assert.throws(() => buildWallClockBaseline(samples, {}, { ratio }), /ratio must be/);
+  }
+  for (const minTrials of [NaN, 0, 1.5, -2]) {
+    assert.throws(() => compareMedianRatio(samples, baseline, { minTrials }), /minimum trials/);
+  }
+  // From the baseline file, too.
+  assert.throws(() => compareMedianRatio(samples, { ...baseline, ratio: 'x' }), /ratio must be/);
+  assert.doesNotThrow(() => checkMedianRatioOptions({}));
+});
+
+test('median-ratio.mjs exits 2 on a setup error and 1 over budget', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'median-ratio-'));
+  const api = join(dir, 'api.json');
+  const base = join(dir, 'base.json');
+  const bad = join(dir, 'bad.json');
+  writeFileSync(
+    api,
+    JSON.stringify({
+      scenarios: [{ name: 's', attempts: Array(10).fill({ success: true, totalMs: 200 }) }],
+    })
+  );
+  writeFileSync(base, JSON.stringify({ metrics: { 'api:s': { medianMs: 100 } } }));
+  writeFileSync(bad, '{ not json');
+  const cli = fileURLToPath(new URL('./median-ratio.mjs', import.meta.url));
+  const run = (...args) => spawnSync(process.execPath, [cli, ...args], { encoding: 'utf8' }).status;
+  assert.equal(run('--baseline', base, '--api', api), 1, 'over budget');
+  assert.equal(run('--baseline', base, '--api', api, '--ratio', '1,25'), 2, 'NaN ratio');
+  assert.equal(run('--baseline', base, '--api', api, '--min-trials', '0'), 2, 'zero trials');
+  assert.equal(run('--baseline', bad, '--api', api), 2, 'unparsable baseline');
+  assert.equal(run('--baseline', base, '--api', join(dir, 'missing.json')), 2, 'missing report');
+  assert.equal(run('--baseline', base, '--api', api, '--ratio', '3'), 0, 'within a 3x ratio');
 });

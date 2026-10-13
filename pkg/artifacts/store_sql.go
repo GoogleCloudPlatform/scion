@@ -57,6 +57,10 @@ var migrations = []migration{
 	{name: migrationRemoteFiles, sqlite: sqliteRemoteFiles, postgres: postgresRemoteFiles},
 	{name: migrationVersionUploads, sqlite: sqliteVersionUploads, postgres: postgresVersionUploads},
 	{name: migrationFinalizeClaims, sqlite: sqliteFinalizeClaims, postgres: postgresFinalizeClaims},
+	{name: migrationLinkTokens, sqlite: sqliteLinkTokens, postgres: postgresLinkTokens},
+	{name: migrationBlobGC, sqlite: sqliteBlobGC, postgres: postgresBlobGC},
+	{name: migrationOrphans, sqlite: sqliteOrphans, postgres: postgresOrphans},
+	{name: migrationVersionFailReason, sqlite: sqliteVersionFailReason, postgres: postgresVersionFailReason},
 }
 
 const ledgerSQLite = `CREATE TABLE IF NOT EXISTS artifact_migrations (
@@ -365,27 +369,49 @@ func (s *sqlStore) GetArtifactByKey(ctx context.Context, scopeKind, scopeRef, ow
 }
 
 // MarkReceived implements Store.
-func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string) error {
-	res, err := s.db.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+func (s *sqlStore) MarkReceived(ctx context.Context, versionID, path, mediaType string, siblings map[string]string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin mark received: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
 		WHERE version_id = ? AND path = ? AND origin = ?
 		AND EXISTS (SELECT 1 FROM artifact_version WHERE id = ? AND state = ?)`),
 		true, mediaType, versionID, path, FileOriginUpload, versionID, VersionStatePending)
 	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
 	}
-	if n, err := res.RowsAffected(); err != nil {
+	n, err := res.RowsAffected()
+	if err != nil {
 		return fmt.Errorf("artifacts: mark received: %w", err)
-	} else if n == 1 {
-		return nil
 	}
-	if _, err := s.GetFile(ctx, versionID, path); err != nil {
-		return err
+	if n != 1 {
+		_ = tx.Rollback()
+		if _, err := s.GetFile(ctx, versionID, path); err != nil {
+			return err
+		}
+		return ErrConflict
 	}
-	return ErrConflict
+	// Files of the same version with the same digest share the one stored
+	// object, so they arrive together (one upload per digest), each with
+	// the media type the caller detected for its own path.
+	for p, mt := range siblings {
+		if p == path {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_file SET received = ?, media_type = ?
+			WHERE version_id = ? AND path = ? AND origin = ? AND received = ?
+			AND sha256 = (SELECT sha256 FROM artifact_file WHERE version_id = ? AND path = ?)`),
+			true, mt, versionID, p, FileOriginUpload, false, versionID, path); err != nil {
+			return fmt.Errorf("artifacts: mark same-digest file received: %w", err)
+		}
+	}
+	return commit(tx)
 }
 
 // FinalizeVersion implements Store.
-func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File) (*Artifact, error) {
+func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq int, claim time.Time, extra []File, base int) (*Artifact, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: begin finalize: %w", err)
@@ -414,6 +440,27 @@ func (s *sqlStore) FinalizeVersion(ctx context.Context, artifactID string, seq i
 	}
 	if state != VersionStateFinalizing || !claimedAt.Valid || !claimedAt.Time.Equal(claimToken(claim)) {
 		return nil, ErrConflict
+	}
+	if base > 0 {
+		if base >= seq {
+			return nil, ErrStaleBase
+		}
+		var current sql.NullInt64
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT current_seq FROM artifact WHERE id = ?`), artifactID).Scan(&current); err != nil {
+			return nil, fmt.Errorf("artifacts: read current version: %w", err)
+		}
+		if !current.Valid || int(current.Int64) != base {
+			return nil, ErrStaleBase
+		}
+		var between int
+		if err := tx.QueryRowContext(ctx, s.rebind(`SELECT COUNT(*) FROM artifact_version
+			WHERE artifact_id = ? AND seq > ? AND seq < ? AND kind = ? AND state IN (?, ?)`),
+			artifactID, base, seq, VersionKindPublish, VersionStatePending, VersionStateFinalizing).Scan(&between); err != nil {
+			return nil, fmt.Errorf("artifacts: read pending versions: %w", err)
+		}
+		if between > 0 {
+			return nil, ErrPendingNewer
+		}
 	}
 	if err := s.insertFiles(ctx, tx, versionID, extra); err != nil {
 		return nil, err
@@ -478,15 +525,32 @@ func (s *sqlStore) ReleaseFinalize(ctx context.Context, artifactID string, seq i
 
 // ListVersions implements Store.
 func (s *sqlStore) ListVersions(ctx context.Context, artifactID string, before, limit int) ([]Version, error) {
-	if limit <= 0 {
+	return s.listVersionsIn(ctx, artifactID, before, limit, VersionStateReady)
+}
+
+// ListVersionHistory implements Store.
+func (s *sqlStore) ListVersionHistory(ctx context.Context, artifactID string, before, limit int) ([]Version, error) {
+	return s.listVersionsIn(ctx, artifactID, before, limit, VersionStateReady, VersionStateFailed)
+}
+
+// listVersionsIn returns up to limit versions of an artifact in one of
+// states, newest first, with a seq below before (0 = from the newest).
+func (s *sqlStore) listVersionsIn(ctx context.Context, artifactID string, before, limit int, states ...string) ([]Version, error) {
+	if limit <= 0 || len(states) == 0 {
 		return nil, nil
 	}
 	if before <= 0 {
 		before = math.MaxInt32
 	}
+	marks := strings.TrimSuffix(strings.Repeat("?, ", len(states)), ", ")
+	args := []any{artifactID}
+	for _, st := range states {
+		args = append(args, st)
+	}
+	args = append(args, before)
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT `+versionColumns+`
-		FROM artifact_version WHERE artifact_id = ? AND state = ? AND seq < ? ORDER BY seq DESC LIMIT `+strconv.Itoa(limit)),
-		artifactID, VersionStateReady, before)
+		FROM artifact_version WHERE artifact_id = ? AND state IN (`+marks+`) AND seq < ? ORDER BY seq DESC LIMIT `+strconv.Itoa(limit)),
+		args...)
 	if err != nil {
 		return nil, fmt.Errorf("artifacts: list versions: %w", err)
 	}
@@ -543,6 +607,40 @@ func (s *sqlStore) ReapPending(ctx context.Context, cutoff time.Time, limit int)
 	return reaped, nil
 }
 
+// DiscardFinalize implements Store.
+func (s *sqlStore) DiscardFinalize(ctx context.Context, artifactID string, seq int, claim time.Time, reason string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin discard: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	// Lock the artifact row first, as FinalizeVersion does.
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ?`), s.timeArg(time.Now()), artifactID); err != nil {
+		return fmt.Errorf("artifacts: lock artifact: %w", err)
+	}
+	var versionID string
+	err = tx.QueryRowContext(ctx, s.rebind(`SELECT id FROM artifact_version
+		WHERE artifact_id = ? AND seq = ? AND state = ? AND claimed_at = ?`),
+		artifactID, seq, VersionStateFinalizing, s.timeArg(claimToken(claim))).Scan(&versionID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrConflict
+	}
+	if err != nil {
+		return fmt.Errorf("artifacts: discard version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, claimed_at = NULL, fail_reason = ? WHERE id = ?`),
+		VersionStateFailed, nullString(reason), versionID); err != nil {
+		return fmt.Errorf("artifacts: fail version: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(`DELETE FROM artifact_file WHERE version_id = ?`), versionID); err != nil {
+		return fmt.Errorf("artifacts: drop manifest: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("artifacts: commit discard: %w", err)
+	}
+	return nil
+}
+
 // reapVersion fails one pending version and drops its manifest in a
 // transaction, soft-deleting its artifact if nothing else is left. It
 // reports false when the version was finalized in the meantime.
@@ -556,8 +654,8 @@ func (s *sqlStore) reapVersion(ctx context.Context, versionID, artifactID string
 	if _, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact SET updated_at = ? WHERE id = ?`), now, artifactID); err != nil {
 		return false, fmt.Errorf("artifacts: lock artifact: %w", err)
 	}
-	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ? WHERE id = ? AND state IN (?, ?)`),
-		VersionStateFailed, versionID, VersionStatePending, VersionStateFinalizing)
+	res, err := tx.ExecContext(ctx, s.rebind(`UPDATE artifact_version SET state = ?, fail_reason = ? WHERE id = ? AND state IN (?, ?)`),
+		VersionStateFailed, FailReasonExpired, versionID, VersionStatePending, VersionStateFinalizing)
 	if err != nil {
 		return false, fmt.Errorf("artifacts: fail version: %w", err)
 	}
@@ -592,12 +690,14 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 		seq                  sql.NullInt64
 		expires, created     dbTime
 		updated, deletedTime dbTime
+		orphaned             dbTime
 	)
 	err := s.db.QueryRowContext(ctx, s.rebind(`SELECT
-		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at
+		id, scope_kind, scope_ref, owner_kind, owner_ref, "key", title, current_seq, expires_at, created_at, updated_at, deleted_at,
+		orphaned_at
 		FROM artifact WHERE `+where+` AND deleted_at IS NULL`), args...).Scan(
 		&a.ID, &a.ScopeKind, &a.ScopeRef, &a.OwnerKind, &a.OwnerRef, &key, &a.Title, &seq,
-		&expires, &created, &updated, &deletedTime)
+		&expires, &created, &updated, &deletedTime, &orphaned)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -610,20 +710,22 @@ func (s *sqlStore) getArtifact(ctx context.Context, where string, args ...any) (
 	a.CreatedAt = created.Time
 	a.UpdatedAt = updated.Time
 	a.DeletedAt = deletedTime.ptr()
+	a.OrphanedAt = orphaned.ptr()
 	return &a, nil
 }
 
 // versionColumns is the artifact_version column list scanVersion reads.
-const versionColumns = "id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state"
+const versionColumns = "id, artifact_id, seq, kind, entry_path, note, total_bytes, file_count, created_by_kind, created_by_ref, created_at, state, fail_reason"
 
 func scanVersion(r rowScanner) (Version, error) {
 	var (
-		v                   Version
-		note, byKind, byRef sql.NullString
-		created             dbTime
+		v                           Version
+		note, byKind, byRef, reason sql.NullString
+		created                     dbTime
 	)
 	err := r.Scan(&v.ID, &v.ArtifactID, &v.Seq, &v.Kind, &v.EntryPath, &note, &v.TotalBytes, &v.FileCount,
-		&byKind, &byRef, &created, &v.State)
+		&byKind, &byRef, &created, &v.State, &reason)
+	v.FailReason = reason.String
 	v.Note = note.String
 	v.CreatedByKind = byKind.String
 	v.CreatedByRef = byRef.String
@@ -789,9 +891,10 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 			key, kind                 sql.NullString
 			seq                       sql.NullInt64
 			expires, created, updated dbTime
+			orphaned                  dbTime
 		)
 		if err := rows.Scan(&c.ID, &c.ScopeKind, &c.ScopeRef, &c.OwnerKind, &c.OwnerRef, &key, &c.Title,
-			&seq, &expires, &created, &updated, &kind); err != nil {
+			&seq, &expires, &created, &updated, &orphaned, &kind); err != nil {
 			return nil, fmt.Errorf("artifacts: scan candidate: %w", err)
 		}
 		c.Key = key.String
@@ -799,6 +902,7 @@ func (s *sqlStore) ListCandidates(ctx context.Context, q CandidateQuery) ([]Cand
 		c.ExpiresAt = expires.ptr()
 		c.CreatedAt = created.Time
 		c.UpdatedAt = updated.Time
+		c.OrphanedAt = orphaned.ptr()
 		c.CurrentKind = kind.String
 		out = append(out, c)
 	}
@@ -863,10 +967,11 @@ func (s *sqlStore) candidateQuery(q CandidateQuery) (string, []any) {
 // candidateColumns is the column list every arm of the candidate query
 // selects; the union and its outer ORDER BY rely on the names.
 const candidateColumns = `a.id, a.scope_kind, a.scope_ref, a.owner_kind, a.owner_ref, a."key", a.title,
-		a.current_seq, a.expires_at, a.created_at, a.updated_at, v.kind AS current_kind`
+		a.current_seq, a.expires_at, a.created_at, a.updated_at, a.orphaned_at, v.kind AS current_kind`
 
 // writeCandidateFilters appends the conditions every candidate arm shares:
-// live, not expired, the search, the review filter and the keyset position.
+// live, not expired, the search, the review filter, the home scope and the
+// keyset position.
 //
 // Search folds case the way the database folds it, so a pattern and a
 // column are always compared under the same rules: SQLite's LIKE ignores
@@ -890,6 +995,26 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 		b.WriteString(" AND v.kind = ?")
 		*args = append(*args, VersionKindReview)
 	}
+	if q.HomeScope != "" {
+		// Shared with the project: an unexpired scope grant to it, found
+		// through the (artifact_id, subject_kind, subject_ref) unique index.
+		shared := `EXISTS (SELECT 1 FROM artifact_grant sg WHERE sg.artifact_id = a.id AND sg.subject_kind = ?
+			AND sg.subject_ref = ? AND (sg.expires_at IS NULL OR sg.expires_at > ?) AND sg.permission IN (?, ?, ?))`
+		sharedArgs := []any{SubjectScope, q.HomeScope, now, GrantRead, GrantWrite, GrantAdmin}
+		switch {
+		case q.ScopeShares && q.SharedOnly:
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref <> ? AND " + shared)
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		case q.ScopeShares:
+			b.WriteString(" AND a.scope_kind = ? AND (a.scope_ref = ? OR " + shared + ")")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+			*args = append(*args, sharedArgs...)
+		default:
+			b.WriteString(" AND a.scope_kind = ? AND a.scope_ref = ?")
+			*args = append(*args, ScopeKindProject, q.HomeScope)
+		}
+	}
 	if q.After != nil {
 		at := s.timeArg(q.After.UpdatedAt)
 		b.WriteString(" AND (a.updated_at < ? OR (a.updated_at = ? AND a.id < ?))")
@@ -902,4 +1027,77 @@ func (s *sqlStore) writeCandidateFilters(b *strings.Builder, args *[]any, q Cand
 func escapeLike(v string) string {
 	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
 	return r.Replace(v)
+}
+
+// AddMessageRefs implements Store.
+func (s *sqlStore) AddMessageRefs(ctx context.Context, messageID string, refs []MessageRef) error {
+	if messageID == "" || len(refs) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("artifacts: begin message refs: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, r := range refs {
+		if _, err := tx.ExecContext(ctx, s.rebind(`INSERT INTO artifact_message_ref
+			(message_id, artifact_id, seq) VALUES (?, ?, ?)
+			ON CONFLICT (message_id, artifact_id) DO NOTHING`),
+			messageID, r.ArtifactID, nullInt(r.Seq)); err != nil {
+			return fmt.Errorf("artifacts: insert message ref: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("artifacts: commit message refs: %w", err)
+	}
+	return nil
+}
+
+// maxMessageRefQueryIDs bounds the message ids in one ListMessageRefs
+// query, well under SQLite's bound-parameter limit.
+const maxMessageRefQueryIDs = 500
+
+// ListMessageRefs implements Store.
+func (s *sqlStore) ListMessageRefs(ctx context.Context, messageIDs []string) (map[string][]MessageRef, error) {
+	out := make(map[string][]MessageRef)
+	for start := 0; start < len(messageIDs); start += maxMessageRefQueryIDs {
+		end := min(start+maxMessageRefQueryIDs, len(messageIDs))
+		if err := s.listMessageRefsChunk(ctx, messageIDs[start:end], out); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// listMessageRefsChunk adds the references of one chunk of message ids to
+// out, in one query.
+func (s *sqlStore) listMessageRefsChunk(ctx context.Context, chunk []string, out map[string][]MessageRef) error {
+	args := make([]any, len(chunk))
+	for i, id := range chunk {
+		args[i] = id
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?, ", len(chunk)), ", ")
+	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT message_id, artifact_id, seq
+		FROM artifact_message_ref WHERE message_id IN (`+placeholders+`)
+		ORDER BY message_id, artifact_id`), args...)
+	if err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			msgID string
+			r     MessageRef
+			seq   sql.NullInt64
+		)
+		if err := rows.Scan(&msgID, &r.ArtifactID, &seq); err != nil {
+			return fmt.Errorf("artifacts: scan message ref: %w", err)
+		}
+		r.Seq = int(seq.Int64)
+		out[msgID] = append(out[msgID], r)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("artifacts: list message refs: %w", err)
+	}
+	return nil
 }

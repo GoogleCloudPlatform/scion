@@ -52,6 +52,10 @@ type BuiltInRole struct {
 	ScopeType   string
 	Revision    int
 	Permissions []string
+	// NoMembership marks a role whose bindings do not make the principal
+	// a project member (RoleDefinition.ConfersMembership false). It is
+	// set only on project-visitor.
+	NoMembership bool
 }
 
 // builtInRoleRevisionKey returns the hub-setting key used to track the last
@@ -93,14 +97,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleSuperAdmin,
 			Description: "Full platform administrator with all permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    1,
+			Revision:    5, // R5: drop Reserved agent.log_append (ptone/scion#4230); R4: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R3: drop Reserved permissions (ptone/scion#3652); R2: add broker.auto_provide (ptone/scion#2104)
 			Permissions: allPermissionIDs(),
 		},
 		{
 			Name:        store.SystemRoleHubAdmin,
 			Description: "Hub administrator with scopeable admin permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4,
+			Revision:    7, // R7: agent delegation grant management (agent.delegation.revoke, .credential.revoke, .list, .read); R6: drop Reserved hub.federation.read, hub.federation.update, hub.teams_manifest.update, user.list (ptone/scion#4229); R5: hub.env_vars.read
 			Permissions: hubAdminPermissionIDs(),
 		},
 		{
@@ -124,7 +128,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubMember,
 			Description: "Hub member with read access to directory resources and project creation",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    4, // R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
+			Revision:    5, // R5: drop Reserved user.list (ptone/scion#4229); R4: self-scoped inbox.read, inbox.write, user_skill_injection.update; R3: add broker.create (ptone/scion#2138)
 			Permissions: hubMemberPermissionIDs(),
 		},
 		{
@@ -133,7 +137,7 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.SystemRoleHubViewer,
 			Description: "Hub viewer with read-only access to directory resources",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2,
+			Revision:    3, // R3: drop Reserved user.list (ptone/scion#4229)
 			Permissions: hubViewerPermissionIDs(),
 		},
 
@@ -143,14 +147,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.ProjectRoleOwner,
 			Description: "Project owner with full project permissions",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    9, // R9: project.manage_visitors; R8: agent delegation grant management for project-bounded grants; R7: project.set_messaging_policy; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectOwnerPermissionIDs(),
 		},
 		{
 			Name:        store.ProjectRoleAdmin,
 			Description: "Project admin with most project permissions (no delete, no set_message_mode)",
 			ScopeType:   store.RoleScopeProject,
-			Revision:    6, // R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
+			Revision:    8, // R8: project.manage_visitors; R7: agent delegation grant management for project-bounded grants; R6: artifact.read, artifact.create; R5: agent.port_access for owners and admins; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectAdminPermissionIDs(),
 		},
 		{
@@ -159,6 +163,18 @@ func BuiltInRoles() []BuiltInRole {
 			ScopeType:   store.RoleScopeProject,
 			Revision:    5, // R5: artifact.read, artifact.create; R4: add gcp_service_account.assign (ptone/scion#2147)
 			Permissions: projectMemberCuratedPermissionIDs(),
+		},
+		{
+			// project-visitor: the grant given to a federated account
+			// (ptone/scion#4603). It is not membership (NoMembership), it
+			// is bound only by the store's CreateVisitorRoleBinding, and
+			// it carries no project.read.
+			Name:         store.ProjectRoleVisitor,
+			Description:  "Federated visitor who may message and list the project's agents; not a project member",
+			ScopeType:    store.RoleScopeProject,
+			Revision:     1,
+			Permissions:  projectVisitorPermissionIDs(),
+			NoMembership: true,
 		},
 
 		// ── Agent roles (system-scoped, used for agent JWT scope mapping) ─
@@ -181,14 +197,14 @@ func BuiltInRoles() []BuiltInRole {
 			Name:        store.AgentRoleDefBaseline,
 			Description: "Baseline agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
+			Revision:    3, // R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleBaseline),
 		},
 		{
 			Name:        store.AgentRoleDefFull,
 			Description: "Full agent permissions",
 			ScopeType:   store.RoleScopeSystem,
-			Revision:    2, // R2: artifact.create, artifact.update via project:artifact:write
+			Revision:    3, // R3: drop artifact.update (Reserved, ptone/scion#3652); R2: artifact.create, artifact.update via project:artifact:write
 			Permissions: agentRolePermissionIDs(AgentRoleFull),
 		},
 	}
@@ -203,8 +219,8 @@ func BuiltInRoles() []BuiltInRole {
 func hubMemberPermissionIDs() []string {
 	return []string{
 		// User directory (read-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read",
-		"user.list",
 		// Group directory (read-only)
 		"group.read",
 		"group.list",
@@ -257,7 +273,6 @@ func hubMemberPermissionIDs() []string {
 func hubViewerPermissionIDs() []string {
 	return []string{
 		"user.read",
-		"user.list",
 		"group.read",
 		"group.list",
 		"template.read",
@@ -319,6 +334,14 @@ func projectOwnerPermissionIDs() []string {
 		"agent.set_message_mode",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// owner assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
@@ -339,8 +362,14 @@ func projectOwnerPermissionIDs() []string {
 		"project.delete",
 		"project.list",
 		"project.manage",
+		// project.manage_visitors: grant and revoke visitor access for
+		// federated accounts (owners and admins, not members).
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
+		// Project owners hold project.set_messaging_policy; the messaging
+		// policy handler also applies the direct-owner rule.
+		"project.set_messaging_policy",
 		"project.update",
 		// Scheduled event management
 		"scheduled_event.create",
@@ -396,6 +425,14 @@ func projectAdminPermissionIDs() []string {
 		"agent.read",
 		"agent.stop_all",
 		"agent.update",
+		// Agent delegation grant management (.design/agent-delegation.md
+		// §7, §18.5). Held on the project, it covers only grants bounded to
+		// this project; a hub-bounded grant on an agent in the project is
+		// out of reach.
+		"agent.delegation.credential.revoke",
+		"agent.delegation.list",
+		"agent.delegation.read",
+		"agent.delegation.revoke",
 		// GCP service account management (project-scoped). Lets a project
 		// admin assign project-scoped service accounts in the project
 		// (ptone/scion#2147). When gcpIamCheckMode is enforce, the immediate
@@ -411,6 +448,7 @@ func projectAdminPermissionIDs() []string {
 		// Project management (no delete, no hub-level create/clone/register)
 		"project.list",
 		"project.manage",
+		"project.manage_visitors",
 		"project.read",
 		"project.secret_read",
 		"project.update",
@@ -483,6 +521,19 @@ func projectMemberCuratedPermissionIDs() []string {
 		"template.create",
 		"template.list",
 		"template.read",
+	}
+}
+
+// projectVisitorPermissionIDs returns the permission set for the
+// project-visitor role: message the project's agents, and list and read
+// them. It holds no project.read and nothing that creates or changes a
+// resource. Agent list and read responses for a visitor are to be limited
+// to name, slug and status by a later change (ptone/scion#4603).
+func projectVisitorPermissionIDs() []string {
+	return []string{
+		"agent.list",
+		"agent.message",
+		"agent.read",
 	}
 }
 
@@ -619,10 +670,45 @@ func ensureDevUserRoleBinding(ctx context.Context, s store.Store) {
 //
 // Reconciliation is idempotent: running twice with the same code produces the
 // same result.
+//
+// A role whose stored revision is higher than this build's is left alone. That
+// happens when a newer build has already started on this database; one
+// warning names every such role (ptone/scion#4233).
 func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
+	var newer []storedNewerRole
 	for _, role := range BuiltInRoles() {
-		reconcileBuiltInRole(ctx, s, role)
+		if stored, isNewer := reconcileBuiltInRole(ctx, s, role); isNewer {
+			newer = append(newer, storedNewerRole{Name: role.Name, StoredRevision: stored, BuildRevision: role.Revision})
+		}
 	}
+	warnStoredRoleRevisionsNewer(newer)
+}
+
+// storedNewerRole is a built-in role whose stored revision is higher than
+// the running build's.
+type storedNewerRole struct {
+	Name           string
+	StoredRevision int
+	BuildRevision  int
+}
+
+// storedRoleRevisionsNewerMessage is the startup warning logged when stored
+// built-in role revisions are newer than the running build's.
+const storedRoleRevisionsNewerMessage = "Stored built-in role revisions are newer than this Hub build's. " +
+	"A newer Hub build has started on this database; this build does not lower the roles, so it runs with the newer build's permission lists. " +
+	"Running an older Hub binary after a newer build has started (a binary rollback) is unsupported."
+
+// warnStoredRoleRevisionsNewer logs one warning naming each role, its stored
+// revision and this build's revision. It logs nothing for an empty list.
+func warnStoredRoleRevisionsNewer(roles []storedNewerRole) {
+	if len(roles) == 0 {
+		return
+	}
+	names := make([]string, 0, len(roles))
+	for _, r := range roles {
+		names = append(names, fmt.Sprintf("%s (stored revision %d, this build's revision %d)", r.Name, r.StoredRevision, r.BuildRevision))
+	}
+	slog.Warn(storedRoleRevisionsNewerMessage, "roles", strings.Join(names, "; "), "count", len(roles))
 }
 
 // reconcileBuiltInRole creates or updates a single built-in role definition.
@@ -630,7 +716,10 @@ func reconcileBuiltInRoles(ctx context.Context, s store.Store) {
 // permission list. This ensures reconciliation fires when the dynamic
 // permission list changes (e.g., a new permission added to the registry
 // expands the super-admin set), even if the code revision is unchanged.
-func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) {
+//
+// It returns the stored revision and true when the stored revision is higher
+// than role.Revision (the role is then left unchanged); otherwise 0 and false.
+func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) (storedRevision int, storedNewer bool) {
 	codeMarker := builtInRoleMarker{
 		Revision: role.Revision,
 		PermHash: permListHash(role.Permissions),
@@ -641,36 +730,51 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		if !errors.Is(err, store.ErrNotFound) {
 			slog.Warn("failed to check for existing role definition",
 				"name", role.Name, "error", err)
-			return
+			return 0, false
 		}
 		// Role does not exist — create it.
+		confers := !role.NoMembership
 		rd := &store.RoleDefinition{
-			Name:        role.Name,
-			Description: role.Description,
-			ScopeType:   role.ScopeType,
-			Permissions: role.Permissions,
-			System:      true,
+			Name:              role.Name,
+			Description:       role.Description,
+			ScopeType:         role.ScopeType,
+			Permissions:       role.Permissions,
+			System:            true,
+			ConfersMembership: &confers,
 		}
 		if _, err := s.CreateRoleDefinition(ctx, rd); err != nil {
 			slog.Warn("failed to seed role definition",
 				"name", role.Name, "error", err)
-			return
+			return 0, false
 		}
 		// Record the applied revision marker.
 		recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 		slog.Info("seeded role definition",
 			"name", role.Name, "scope_type", role.ScopeType,
 			"revision", role.Revision, "perm_hash", codeMarker.PermHash)
-		return
+		return 0, false
 	}
 
-	// Role exists — check if reconciliation is needed.
+	// Role exists. A role that must not confer membership is only ever
+	// created by this seed, so an existing row of that name that is not a
+	// system role, or that confers membership, is a custom role an
+	// operator created first: leave it alone (its bindings stay
+	// membership), and the store refuses visitor grants of it.
+	if role.NoMembership && (!existing.System || existing.ConfersProjectMembership()) {
+		slog.Warn("a role definition with a built-in role's name exists and is not the built-in role; leaving it unchanged",
+			"name", role.Name, "system", existing.System)
+		return 0, false
+	}
+
+	// Check if reconciliation is needed.
 	applied := getAppliedBuiltInRoleMarker(ctx, s, role.Name)
 	if applied.Revision > role.Revision {
-		return // stored revision is higher — operator override, do not downgrade
+		// Stored revision is higher (a newer build re-revisioned the role):
+		// do not downgrade. reconcileBuiltInRoles warns.
+		return applied.Revision, true
 	}
 	if applied.Revision == role.Revision && applied.PermHash == codeMarker.PermHash {
-		return // same revision with matching permission hash — no changes needed
+		return 0, false // same revision with matching permission hash — no changes needed
 	}
 	// Reconcile: either the code revision is higher, or the permission list
 	// changed at the same revision (R-6: dynamic lists like allPermissionIDs).
@@ -680,7 +784,7 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		slog.Warn("failed to reconcile role definition permissions",
 			"name", role.Name, "from_revision", applied.Revision,
 			"to_revision", role.Revision, "error", err)
-		return
+		return 0, false
 	}
 	recordBuiltInRoleMarker(ctx, s, role.Name, codeMarker)
 	slog.Info("reconciled role definition permissions",
@@ -688,6 +792,7 @@ func reconcileBuiltInRole(ctx context.Context, s store.Store, role BuiltInRole) 
 		"to_revision", role.Revision,
 		"perm_hash", codeMarker.PermHash,
 		"permissions_count", len(role.Permissions))
+	return 0, false
 }
 
 // getAppliedBuiltInRoleMarker reads the last-applied revision marker for a
@@ -734,11 +839,15 @@ func recordBuiltInRoleMarker(ctx context.Context, s store.Store, roleName string
 	}
 }
 
-// allPermissionIDs returns IDs for all permissions in the registry.
+// allPermissionIDs returns IDs for all permissions in the registry except
+// the Reserved rows, which no role may hold (see Permission.Reserved).
 func allPermissionIDs() []string {
-	ids := make([]string, len(permissions.Registry))
-	for i, p := range permissions.Registry {
-		ids[i] = p.ID
+	ids := make([]string, 0, len(permissions.Registry))
+	for _, p := range permissions.Registry {
+		if p.IsReserved() {
+			continue
+		}
+		ids = append(ids, p.ID)
 	}
 	return ids
 }
@@ -752,8 +861,8 @@ func hubAdminPermissionIDs() []string {
 	// This set is a product decision; changes require architect or sponsor review.
 	included := map[string]bool{
 		// User management (not suspend/promote — those remain super-admin-only)
+		// user.list is Reserved: no route checks it (ptone/scion#4229).
 		"user.read":   true,
-		"user.list":   true,
 		"user.update": true,
 		"user.invite": true,
 		// Group management
@@ -781,19 +890,22 @@ func hubAdminPermissionIDs() []string {
 		"hub.scheduler.read":          true,
 		"hub.scheduler.update":        true,
 		// Scheduled event management (hub-wide visibility and control)
-		"scheduled_event.read":      true,
-		"scheduled_event.list":      true,
-		"scheduled_event.create":    true,
-		"scheduled_event.delete":    true,
-		"scheduled_event.update":    true,
-		"hub.federation.read":       true,
-		"hub.federation.update":     true,
-		"hub.teams_manifest.read":   true,
-		"hub.teams_manifest.update": true,
-		"hub.github_app.read":       true,
-		"hub.github_app.update":     true,
-		"hub.metrics.read":          true,
-		"hub.validate.execute":      true,
+		"scheduled_event.read":   true,
+		"scheduled_event.list":   true,
+		"scheduled_event.create": true,
+		"scheduled_event.delete": true,
+		"scheduled_event.update": true,
+		// hub.federation.read, hub.federation.update and
+		// hub.teams_manifest.update are Reserved: no route checks them
+		// (ptone/scion#4229).
+		"hub.teams_manifest.read": true,
+		"hub.github_app.read":     true,
+		"hub.github_app.update":   true,
+		"hub.metrics.read":        true,
+		"hub.validate.execute":    true,
+		// Hub-level environment variables: list only. Writes and every
+		// secret surface stay with the legacy admin check.
+		"hub.env_vars.read": true,
 		// Quota management
 		"quota.read":   true,
 		"quota.create": true,
@@ -824,6 +936,13 @@ func hubAdminPermissionIDs() []string {
 		// operators who are not super-admins can manage them via the web UI.
 		"access_constraint.read":  true,
 		"access_constraint.admin": true,
+		// Agent delegation grant management, for any grant
+		// (.design/agent-delegation.md §7, §18.5). Not issuance, not
+		// exchange.
+		"agent.delegation.revoke":            true,
+		"agent.delegation.credential.revoke": true,
+		"agent.delegation.list":              true,
+		"agent.delegation.read":              true,
 	}
 
 	var ids []string
@@ -1479,6 +1598,21 @@ func warnOwnerOnlyLegacyProject(ctx context.Context, s store.Store, p *store.Pro
 		"project_id", p.ID, "owner_id", p.OwnerID, "created_by", p.CreatedBy)
 }
 
+// reconcileSkipsUser reports whether ReconcileSuperAdminBindings must leave
+// u out of both passes and the effect-guard count: every row that is not
+// positively human, i.e. a hub test identity of any kind (member or admin)
+// or an unrecognized kind. It classifies the row already listed
+// (classifyUserKind, the classification behind kindForPrincipal), so it
+// adds no read and no read-error mode.
+func reconcileSkipsUser(u *store.User) bool {
+	k, err := classifyUserKind(u)
+	if err != nil {
+		slog.Warn("super-admin reconciliation: unrecognized user kind; leaving the user untouched", "user_id", u.ID, "error", err)
+		return true
+	}
+	return !k.isHuman()
+}
+
 // ReconcileSuperAdminBindings ensures bidirectional consistency between
 // User.Role == "admin", the AdminEmails config list, and system-scoped
 // super-admin role bindings (Phase 1F, D11 revocability fix). On startup:
@@ -1554,6 +1688,14 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 				return false, err
 			}
 			for i := range users.Items {
+				// A hub test identity of any kind is skipped by pass 2,
+				// so it never counts toward the intended admin set. The
+				// kind is read through kindForPrincipal; a user whose kind
+				// cannot be read is not counted either (an undercount can
+				// only refuse demotions, never cause one).
+				if reconcileSkipsUser(&users.Items[i]) {
+					continue
+				}
 				if adminSet[strings.ToLower(users.Items[i].Email)] {
 					intendedAdminCount++
 					continue
@@ -1618,6 +1760,16 @@ func ReconcileSuperAdminBindings(ctx context.Context, s store.Store, adminEmails
 		for i := range users.Items {
 			u := &users.Items[i]
 			inAdminList := adminSet[strings.ToLower(u.Email)]
+			// A hub test identity of any kind is neither promoted (even if
+			// an operator lists its address in admin_emails) nor demoted:
+			// its role and its expiring bindings are fixed at issuance. A
+			// user whose kind cannot be read is left untouched.
+			if reconcileSkipsUser(u) {
+				if inAdminList {
+					slog.Warn("skipping admin promotion of a test identity listed in admin_emails", "user_id", u.ID)
+				}
+				continue
+			}
 
 			if inAdminList {
 				// Forward: ensure admin role and super-admin binding.
@@ -1979,6 +2131,13 @@ func removeHubMembershipTx(ctx context.Context, tx store.Store, userID string) e
 	err = tx.RemoveGroupMember(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("remove user from hub-members group: %w", err)
+	}
+	if err == nil {
+		// A hub-scope change: re-evaluate the user's project standing in
+		// the caller's transaction (ptone/scion#3433).
+		if err := enqueueMembershipLossTx(ctx, tx, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 	}
 	return nil
 }

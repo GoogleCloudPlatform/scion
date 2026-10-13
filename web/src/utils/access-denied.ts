@@ -39,6 +39,18 @@ const ACTION_LABELS: Record<string, string> = {
   execute: 'execute',
   promote: 'promote',
   suspend: 'suspend',
+  assign: 'assign',
+};
+
+/**
+ * Friendly sentences for denial error codes that arrive without structured
+ * detail. The client falls back to the error code as the "action" when a 403
+ * carries no denied_action, and these codes are not actions, so they must
+ * not be shown as one. The server's own message is preferred; the sentence
+ * is used only when that message is missing or generic.
+ */
+const DENIAL_CODE_SENTENCES: Record<string, string> = {
+  identity_assign_denied: "You're not permitted to assign this service account.",
 };
 
 /**
@@ -73,6 +85,16 @@ export function formatAccessDenied(detail: AccessDeniedDetail): {
     !detail.reason ||
     detail.reason === 'Insufficient permissions' ||
     detail.reason === ACCESS_DENIED_UNREADABLE_REASON;
+
+  // A denial code in the action slot (no structured detail): show the
+  // server's message, or the code's friendly sentence, and never the code.
+  const codeSentence = detail.action ? DENIAL_CODE_SENTENCES[detail.action] : undefined;
+  if (codeSentence) {
+    return {
+      primary: isGeneric ? codeSentence : detail.reason!,
+      secondary: detail.resource ? `Resource: ${detail.resource}` : undefined,
+    };
+  }
 
   const primary = isGeneric ? "You don't have permission to perform this action." : detail.reason!;
 

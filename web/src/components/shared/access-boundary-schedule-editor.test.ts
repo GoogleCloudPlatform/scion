@@ -19,8 +19,6 @@
  * display-timezone arrival (tz-refactor task 11, review round 4, R4-1).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 

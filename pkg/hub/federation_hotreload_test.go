@@ -32,6 +32,7 @@ import (
 // --- Deliverable 10a: Hot-reload via ApplySnapshot ---
 
 func TestApplySnapshot_FederationHotReload(t *testing.T) {
+	t.Parallel()
 	// Create a minimal Server with the fields ApplySnapshot needs.
 	srv := &Server{}
 	srv.config.Mode = "dev"
@@ -93,6 +94,7 @@ func TestApplySnapshot_FederationHotReload(t *testing.T) {
 }
 
 func TestApplySnapshot_FederationValidationFailure(t *testing.T) {
+	t.Parallel()
 	// Create a minimal Server.
 	srv := &Server{}
 	srv.config.Mode = "dev"
@@ -122,6 +124,7 @@ func TestApplySnapshot_FederationValidationFailure(t *testing.T) {
 }
 
 func TestApplySnapshot_FederationNilClearsAuthenticator(t *testing.T) {
+	t.Parallel()
 	// Create a minimal Server with an existing authenticator.
 	srv := &Server{}
 	initialAuth := &FederationAuthenticator{}
@@ -141,6 +144,7 @@ func TestApplySnapshot_FederationNilClearsAuthenticator(t *testing.T) {
 }
 
 func TestApplySnapshot_FederationDisabledClearsAuthenticator(t *testing.T) {
+	t.Parallel()
 	// Create a minimal Server with an existing authenticator.
 	srv := &Server{}
 	srv.config.Mode = "dev"
@@ -205,6 +209,7 @@ func TestApplySnapshot_FederationDisabledClearsAuthenticator(t *testing.T) {
 // --- Deliverable 10b: Concurrent access ---
 
 func TestFederationAuth_ConcurrentAccess(t *testing.T) {
+	t.Parallel()
 	// Initial value.
 	auth1 := &FederationAuthenticator{}
 	fedAuth := newFedAuthPointer(auth1)
@@ -247,6 +252,7 @@ func TestFederationAuth_ConcurrentAccess(t *testing.T) {
 // --- Deliverable 10c: buildSingleSectionDoc federation case ---
 
 func TestBuildSingleSectionDoc_Federation(t *testing.T) {
+	t.Parallel()
 	enabled := true
 	req := &ServerConfigUpdateRequest{
 		Federation: &config.V1FederationConfig{
@@ -304,6 +310,7 @@ func TestBuildSingleSectionDoc_Federation(t *testing.T) {
 }
 
 func TestBuildSingleSectionDoc_Federation_Nil(t *testing.T) {
+	t.Parallel()
 	req := &ServerConfigUpdateRequest{
 		Federation: nil,
 	}
@@ -330,6 +337,7 @@ func TestBuildSingleSectionDoc_Federation_Nil(t *testing.T) {
 // --- Deliverable 10d: Validation rejection ---
 
 func TestConvertFederationSettingsToConfig(t *testing.T) {
+	t.Parallel()
 	enabled := true
 	fs := opsettings.FederationSettings{
 		Enabled: &enabled,
@@ -378,6 +386,7 @@ func TestConvertFederationSettingsToConfig(t *testing.T) {
 }
 
 func TestConvertFederationSettingsToConfig_ValidationErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		fs   opsettings.FederationSettings
@@ -462,6 +471,7 @@ func TestConvertFederationSettingsToConfig_ValidationErrors(t *testing.T) {
 // --- Deliverable 10e: Middleware loads from atomic pointer ---
 
 func TestMiddleware_LoadsFromAtomicPointer(t *testing.T) {
+	t.Parallel()
 	// Start with no authenticator (nil pointer value).
 	fedAuth := newFedAuthPointer(nil)
 
@@ -498,6 +508,7 @@ func TestMiddleware_LoadsFromAtomicPointer(t *testing.T) {
 }
 
 func TestMiddleware_NilFederationAuthField(t *testing.T) {
+	t.Parallel()
 	// When FederationAuth field itself is nil (not just the pointer value).
 	cfg := AuthConfig{
 		Mode:           "production",
@@ -530,6 +541,7 @@ func TestMiddleware_NilFederationAuthField(t *testing.T) {
 // This is the gap that masked R1: federation config was silently dropped
 // because extractKoanfKeysFromRequest emitted no federation koanf keys.
 func TestExtractKoanfKeys_FederationRoundTrip(t *testing.T) {
+	t.Parallel()
 	enabled := true
 	req := &ServerConfigUpdateRequest{
 		Federation: &config.V1FederationConfig{
@@ -621,6 +633,7 @@ func TestExtractKoanfKeys_FederationRoundTrip(t *testing.T) {
 // TestExtractKoanfKeys_FederationNil verifies that when Federation is nil,
 // no server.federation.* keys are emitted and no federation section doc is produced.
 func TestExtractKoanfKeys_FederationNil(t *testing.T) {
+	t.Parallel()
 	req := &ServerConfigUpdateRequest{
 		Federation: nil,
 	}
@@ -646,6 +659,7 @@ func mapKeys2(m map[string]json.RawMessage) []string {
 // --- Deliverable: Duration string validation ---
 
 func TestConvertFederationSettingsToConfig_InvalidDurations(t *testing.T) {
+	t.Parallel()
 	// convertFederationSettingsToConfig silently falls back to zero for invalid
 	// durations. The admin API must reject these before they reach ApplySnapshot.
 	tests := []struct {

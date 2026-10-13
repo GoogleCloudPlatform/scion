@@ -16,7 +16,7 @@ package hub
 
 import (
 	"context"
-	"database/sql"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -32,52 +32,115 @@ import (
 // that the list was truncated. A variable so tests can lower it.
 var healthSummaryBrokerLimit = 100
 
-// healthSummaryBrokerPageSize is the store page size used while counting
-// runtime broker records for the health summary.
-const healthSummaryBrokerPageSize = 500
+// healthSummaryBrokerPageSize is the store page size used while listing
+// runtime broker records for the health summary. A variable so tests can
+// lower it.
+var healthSummaryBrokerPageSize = 500
 
 // HealthSummaryResponse is the composite health summary returned by
 // GET /api/v1/admin/health/summary. It aggregates all subsystem health
 // into a single response for the health dashboard.
 type HealthSummaryResponse struct {
-	Status   string                 `json:"status"`
-	Hub      HealthSummaryHub       `json:"hub"`
-	Database HealthSummaryDB        `json:"database"`
-	Brokers  HealthSummaryBrokers   `json:"runtime_brokers"`
-	Agents   *HealthSummaryAgents   `json:"agents"`   // nil when the agent aggregate is unavailable
-	Dispatch *HealthSummaryDispatch `json:"dispatch"` // nil when dispatch metrics are unavailable
+	// Status is healthy, degraded or unhealthy; see deriveHealthSummaryStatus.
+	Status string `json:"status"`
+	// GeneratedAt is when this hub instance built the summary (UTC).
+	GeneratedAt time.Time `json:"generated_at"`
+	// Attention is the ranked "Needs attention" list; never nil. See
+	// deriveHealthSummaryStatus.
+	Attention []HealthAttentionItem `json:"attention"`
+	Hub       HealthSummaryHub      `json:"hub"`
+	Brokers   HealthSummaryBrokers  `json:"runtime_brokers"`
+	Agents    *HealthSummaryAgents  `json:"agents"` // nil when the agent aggregate is unavailable
+	// Dispatch is nil when a dispatch store count failed.
+	Dispatch *HealthSummaryDispatch `json:"dispatch"`
+
+	// Integrations lists chat and messaging plugins; never nil. It is
+	// empty unless IntegrationsDetail is true. See
+	// health_summary_integrations.go.
+	Integrations []HealthSummaryIntegration `json:"integrations"`
+	// IntegrationsDetail is true when the caller holds
+	// hub.integrations.read, so Integrations and the integration attention
+	// items carry integration identity. Without it they are aggregate only.
+	IntegrationsDetail bool `json:"integrations_detail"`
+	// IntegrationCounts is the non-identifying aggregate of the
+	// integrations, returned to every caller.
+	IntegrationCounts HealthSummaryIntegrationCounts `json:"integration_counts"`
+
+	// ServiceAccountCheck is set while the service account assignment check
+	// cannot run on a live hub instance because the hub's identity lacks
+	// the access it needs. Built from the registry rows.
+	ServiceAccountCheck *HealthSummarySACheck `json:"service_account_check,omitempty"`
+	// HubInstances lists the hub instances (processes) from the
+	// hub-instance registry, read from the database only. Nil when the
+	// registry could not be read ("not reported"). See
+	// health_summary_hub_instances.go.
+	HubInstances *HealthSummaryHubInstances `json:"hub_instances"`
+
+	// Links holds operator-configured links for the Health page. It is
+	// omitted when no link is configured. The route requires
+	// hub.health.read, so only those callers receive it.
+	Links *HealthSummaryLinks `json:"links,omitempty"`
 }
 
-// HealthSummaryHub contains hub-level health information.
+// HealthSummaryLinks holds the operator-configured Health page links.
+type HealthSummaryLinks struct {
+	// MonitoringDashboard is server.hub.monitoring_dashboard_url, an
+	// absolute http(s) URL; omitted when unset.
+	MonitoringDashboard string `json:"monitoring_dashboard,omitempty"`
+}
+
+// HealthSummaryHub is the hub section of the health summary. It describes
+// the whole fleet of hub instances, from the hub-instance registry rows
+// only (see health_summary_fleet.go), so it is the same whichever replica
+// serves the request. Per-instance figures (uptime, checks, database pool)
+// are in the hub_instances section.
 type HealthSummaryHub struct {
-	Status           string `json:"status"`
+	// Status is the fleet status (see fleetHubStatus): healthy, degraded or
+	// unhealthy; unknown when the registry could not be read.
+	Status string `json:"status"`
+	// InstanceID identifies the hub instance (process) that served this
+	// summary. It is the only serving-specific field of the section.
+	InstanceID string `json:"instance_id"`
+	// Version is the version every live instance reports, "mixed" when
+	// they differ, or empty when no instance is live or the registry could
+	// not be read.
 	Version          string `json:"version"`
-	Uptime           string `json:"uptime"`
 	ConnectedBrokers int    `json:"connected_brokers"`
 	ActiveAgents     int    `json:"active_agents"`
 	Projects         int    `json:"projects"`
-	// Checks is the hub's /healthz check map, so a degraded or unhealthy
-	// hub status carries its cause (e.g. colocated_broker) rather than
-	// only the database check surfacing below.
-	Checks map[string]string `json:"checks,omitempty"`
-	// UnhealthyChecks lists the non-healthy checks as "key: value", sorted,
-	// so a dashboard can show the cause without interpreting the map.
-	UnhealthyChecks []string `json:"unhealthy_checks,omitempty"`
-}
-
-// HealthSummaryDB contains database health information.
-// Fields are sourced from Go's sql.DBStats (runtime pool counters) rather than
-// the OTel-based metrics described in the design doc. sql.DBStats provides
-// accurate, zero-latency pool stats without depending on the metrics pipeline,
-// which may itself be the thing that is unhealthy.
-type HealthSummaryDB struct {
-	Status     string `json:"status"`
-	PoolActive int64  `json:"pool_active"`
-	PoolMax    int64  `json:"pool_max"`
-	PoolIdle   int64  `json:"pool_idle"`
-	// PoolWaitCountTotal is the cumulative number of times a caller had to wait
-	// for a DB connection (monotonically increasing counter from sql.DBStats.WaitCount).
-	PoolWaitCountTotal int64 `json:"pool_wait_count_total"`
+	// Instances counts the live instances by status. Null when the
+	// registry could not be read.
+	Instances *HealthSummaryHubFleet `json:"instances"`
+	// UnhealthyChecks lists every non-healthy check of every live
+	// instance, each tagged with its instance: critical checks first, then
+	// by check name and instance label. Never null.
+	UnhealthyChecks []HealthSummaryHubCheck `json:"unhealthy_checks"`
+	// TestIdentitiesEnabled is true when this hub instance runs with
+	// --test-mode=member or above (hub-issued test identities). Read-only:
+	// it reports the startup setting and nothing can change it at runtime.
+	TestIdentitiesEnabled bool `json:"test_identities_enabled"`
+	// TestAdminIdentitiesEnabled is true when this hub instance runs with
+	// the test admin tier on (--test-mode=admin, validated at startup).
+	// Read-only, like TestIdentitiesEnabled.
+	TestAdminIdentitiesEnabled bool `json:"test_admin_identities_enabled"`
+	// TestSuperAdminIdentitiesEnabled is true when the test super-admin
+	// kind is on (--test-mode=super-admin). This binary refuses that level
+	// at startup, so it is always false here.
+	TestSuperAdminIdentitiesEnabled bool `json:"test_super_admin_identities_enabled"`
+	// TestMode is the resolved --test-mode level: off, member, admin or
+	// super-admin. The three booleans above are derived from it.
+	TestMode string `json:"test_mode"`
+	// TestModePreconditions names the preconditions that admitted
+	// TestMode. Empty (never null) when the level is off.
+	TestModePreconditions []string `json:"test_mode_preconditions"`
+	// LiveTestAdminIdentities is the number of live admin-kind test
+	// identities. Null when the count could not be read.
+	LiveTestAdminIdentities *int `json:"live_test_admin_identities"`
+	// TestIdentityWebSessionsEnabled is true when test identity web
+	// sessions are available on this instance (ptone/scion#4240, WS1; the
+	// same value as testIdentityWebSessions in GET
+	// /api/v1/test-infra/status). Read-only.
+	TestIdentityWebSessionsEnabled bool `json:"test_identity_web_sessions_enabled"`
 }
 
 // HealthSummaryBrokers is the runtime broker section of the health
@@ -88,6 +151,9 @@ type HealthSummaryBrokers struct {
 	Total int `json:"total"`
 	// Truncated is true when Total exceeds len(Items).
 	Truncated bool `json:"truncated"`
+	// NotReported is true when the runtime brokers could not be listed;
+	// Items is then empty and Total zero.
+	NotReported bool `json:"not_reported,omitempty"`
 }
 
 // HealthSummaryBroker contains per-broker health information.
@@ -103,7 +169,22 @@ type HealthSummaryBroker struct {
 	Runtime *HealthBrokerRuntime `json:"runtime"`
 	// WorkspaceStorage is null when the broker never reported it.
 	WorkspaceStorage *HealthBrokerStorage `json:"workspace_storage"`
-	Agents           HealthBrokerAgents   `json:"agents"`
+	// Health is the broker's last self-reported health, or null when the
+	// broker never reported it (an older broker). It is as fresh as
+	// LastHeartbeat and never changes Status. For an offline broker it is
+	// the last report before the broker went offline.
+	Health *HealthBrokerSelf  `json:"health"`
+	Agents HealthBrokerAgents `json:"agents"`
+}
+
+// HealthBrokerSelf is a runtime broker's self-reported health.
+type HealthBrokerSelf struct {
+	// Status is healthy, degraded or unhealthy.
+	Status string `json:"status"`
+	// Checks maps each check the broker ran to its result, for example
+	// {"runtime": "unavailable"}. Values are fixed words only (see
+	// api.NormalizeBrokerHealthReport), never free text.
+	Checks map[string]string `json:"checks"`
 }
 
 // HealthBrokerAgents holds per-broker agent counts.
@@ -185,11 +266,24 @@ type HealthAgentRef struct {
 	BrokerID string `json:"broker_id"`
 }
 
-// HealthSummaryDispatch contains dispatch pipeline health.
-// When nil in HealthSummaryResponse, dispatch metrics are not available.
+// healthDispatchFailedWindow is how far back the summary counts failed
+// broker dispatches (failed_broker_dispatch_1h).
+const healthDispatchFailedWindow = time.Hour
+
+// HealthSummaryDispatch contains dispatch pipeline health, counted from the
+// store (messages and broker_dispatch tables), so every hub replica reports
+// the same numbers. Nil in HealthSummaryResponse only when a store count
+// failed ("not reported").
 type HealthSummaryDispatch struct {
+	// StuckMessages: agent-addressed messages still pending after
+	// stuckMessageThreshold (the stuck-message sweep's count).
 	StuckMessages int `json:"stuck_messages"`
-	Failed1h      int `json:"failed_1h"`
+	// StuckBrokerDispatch: broker dispatches in_progress with no update for
+	// dispatchStuckAge (the reaper's staleness threshold).
+	StuckBrokerDispatch int `json:"stuck_broker_dispatch"`
+	// FailedBrokerDispatch1h: broker dispatches that reached failed within
+	// healthDispatchFailedWindow.
+	FailedBrokerDispatch1h int `json:"failed_broker_dispatch_1h"`
 }
 
 // handleHealthSummary handles GET /api/v1/admin/health/summary.
@@ -202,104 +296,122 @@ func (s *Server) handleHealthSummary(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	now := time.Now().UTC()
 
-	// Get base health info
-	healthInfo := s.GetHealthInfo(ctx)
-
-	// Determine overall status early so DB-error branches can degrade it.
-	// Later signals only ever raise severity (worseHealthStatus): an
-	// unhealthy hub must not be reported as merely degraded.
-	overallStatus := HealthStatusHealthy
-	if healthInfo.Status != "" {
-		overallStatus = worseHealthStatus(overallStatus, healthInfo.Status)
-	}
-	degrade := func() { overallStatus = worseHealthStatus(overallStatus, HealthStatusDegraded) }
-
-	// Build hub section
-	hubSummary := HealthSummaryHub{
-		Status:          healthInfo.Status,
-		Version:         healthInfo.ScionVersion,
-		Uptime:          healthInfo.Uptime,
-		Checks:          healthInfo.Checks,
-		UnhealthyChecks: unhealthyChecks(healthInfo.Checks),
-	}
-	if healthInfo.Stats != nil {
-		hubSummary.ConnectedBrokers = healthInfo.Stats.ConnectedBrokers
-		hubSummary.ActiveAgents = healthInfo.Stats.ActiveAgents
-		hubSummary.Projects = healthInfo.Stats.Projects
-	}
-
-	// Build database section
-	dbSummary := HealthSummaryDB{
-		Status: "healthy",
-	}
-	if healthInfo.Checks != nil {
-		if dbStatus, ok := healthInfo.Checks["database"]; ok {
-			dbSummary.Status = dbStatus
-		}
-	}
-	// Get pool stats from sql.DB if available
-	if dbp, ok := s.store.(interface{ DB() *sql.DB }); ok {
-		db := dbp.DB()
-		if db != nil {
-			stats := db.Stats()
-			dbSummary.PoolActive = int64(stats.InUse)
-			dbSummary.PoolIdle = int64(stats.Idle)
-			dbSummary.PoolWaitCountTotal = stats.WaitCount
-			dbSummary.PoolMax = int64(stats.MaxOpenConnections)
-		}
-	}
+	// The summary is a read of the database only: no store Ping, plugin
+	// call or connection pool read. Each hub instance reports its own
+	// checks, pool and plugins through its registry row (see
+	// hub_instance_registry.go), and the hub section is computed from
+	// those rows.
 
 	// Use aggregate queries instead of fetching full agent records.
 	// This avoids deserialising up to 10 000 structs on every 30 s poll.
 	// A nil section means "not reported": the dashboard must not read a
 	// failed aggregate as zero agents with nothing needing attention.
 	var agentsSummary *HealthSummaryAgents
-	agentAgg, err := s.store.AggregateAgentHealth(ctx)
-	if err != nil {
-		slog.Error("health summary: failed to aggregate agent health", "error", err)
-		degrade()
+	agentAgg, agentErr := s.store.AggregateAgentHealth(ctx)
+	if agentErr != nil {
+		slog.Error("health summary: failed to aggregate agent health", "error", agentErr)
 	} else {
 		summary := s.healthSummaryAgents(ctx, agentAgg)
 		agentsSummary = &summary
 	}
 
-	// Build brokers section using pre-computed agent buckets from the aggregate.
-	brokerList, err := s.healthSummaryBrokers(ctx, agentAgg)
-	if err != nil {
-		slog.Error("health summary: failed to list runtime brokers", "error", err)
-		degrade()
+	// One pass over the runtime broker table gives both the runtime broker
+	// rows and the plugin record names for the integrations section.
+	brokerList, pluginRecordNames, brokerErr := s.healthSummaryBrokers(ctx, agentAgg)
+	if brokerErr != nil {
+		slog.Error("health summary: failed to list runtime brokers", "error", brokerErr)
 	}
 
-	// Dispatch section: the dispatchmetrics.Recorder does not currently expose a
-	// Stats() method for reading in-process counters. Rather than returning
-	// hardcoded zeros (which would mislead operators), we omit the dispatch data
-	// and let the dashboard render "data not available". TODO: add a Stats()
-	// method to dispatchmetrics.Recorder to populate this section.
-	var dispatchSummary *HealthSummaryDispatch // nil = unavailable
+	// Dispatch section, from the store. A failed count leaves it nil ("not
+	// reported") rather than reading as zero.
+	dispatchSummary, dispatchErr := s.healthSummaryDispatch(ctx, now)
+	if dispatchErr != nil {
+		slog.Error("health summary: failed to count dispatch health", "error", dispatchErr)
+	}
 
-	// Propagate unhealthy agent/broker signals into overall status.
-	// Stalled agents never count.
-	if agentsSummary != nil && agentsSummary.Errored > 0 {
-		degrade()
+	// Hub instances, from the registry table only. A failed read leaves
+	// the section nil ("not reported"). The same rows give the fleet hub
+	// section and the integrations section: every hub instance, this one
+	// included, reports its checks and its plugins' health through its own
+	// row, so the summary runs no probe of its own.
+	var hubInstances *HealthSummaryHubInstances
+	instanceRows, storeNow, instancesErr := s.store.ListHubInstances(ctx, hubInstanceDisplayWindow)
+	if instancesErr != nil {
+		slog.Error("health summary: failed to list hub instances", "error", instancesErr)
+	} else {
+		hubInstances = buildHealthSummaryHubInstances(instanceRows, storeNow, s.InstanceID())
 	}
-	for _, b := range brokerList.Items {
-		if healthSummaryBrokerStatusIsProblem(b.Status) {
-			degrade()
-			break
-		}
+	integrations := mergeHealthSummaryIntegrations(instanceRows, storeNow, instancesErr == nil, pluginRecordNames)
+
+	// When no store read succeeded, the serving replica cannot read the
+	// database at all: answer 503 with a fixed body and no partial data.
+	if agentErr != nil && brokerErr != nil && dispatchErr != nil && instancesErr != nil {
+		writeHealthSummaryUnavailable(w)
+		return
 	}
+
+	hubSummary := buildHealthSummaryFleetHub(instanceRows, storeNow, instancesErr == nil)
+	hubSummary.InstanceID = s.InstanceID()
+	hubSummary.TestIdentitiesEnabled = s.testIdentities.enabled
+	hubSummary.TestAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindHubAdmin)
+	hubSummary.TestSuperAdminIdentitiesEnabled = s.testAdminTierEnabled(testAdminKindSuperAdmin)
+	hubSummary.TestMode = string(s.TestModeLevel())
+	hubSummary.TestModePreconditions = s.testModePreconditions()
+	hubSummary.TestIdentityWebSessionsEnabled, _ = s.testIdentityWebSessionGate()
+	if n, err := s.liveTestAdminIdentityCount(ctx); err != nil {
+		slog.Error("health summary: failed to count live test admin identities", "error", err)
+	} else {
+		hubSummary.LiveTestAdminIdentities = &n
+	}
+	stats := s.healthStats(ctx)
+	hubSummary.ConnectedBrokers = stats.ConnectedBrokers
+	hubSummary.ActiveAgents = stats.ActiveAgents
+	hubSummary.Projects = stats.Projects
 
 	resp := HealthSummaryResponse{
-		Status:   overallStatus,
-		Hub:      hubSummary,
-		Database: dbSummary,
-		Brokers:  brokerList,
-		Agents:   agentsSummary,
-		Dispatch: dispatchSummary,
+		GeneratedAt:        now,
+		Hub:                hubSummary,
+		Brokers:            brokerList,
+		Agents:             agentsSummary,
+		Dispatch:           dispatchSummary,
+		Integrations:       integrations,
+		IntegrationsDetail: true,
+		IntegrationCounts:  healthSummaryIntegrationCounts(integrations),
+
+		ServiceAccountCheck: healthSummarySACheck(hubInstances),
+		HubInstances:        hubInstances,
+		Links:               s.healthSummaryLinks(),
+	}
+	// The policy sees the full integration list, so the status does not
+	// depend on who asks. Identity is removed afterwards for callers
+	// without hub.integrations.read.
+	resp.Status, resp.Attention = deriveHealthSummaryStatus(&resp)
+	if !s.healthSummaryCanReadIntegrations(r) {
+		omitHealthSummaryIntegrationDetail(&resp)
 	}
 
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// healthSummaryDispatch builds the dispatch section from the store, reusing
+// the sweep's and the reaper's stuck thresholds. It returns nil and the error
+// if either count fails.
+func (s *Server) healthSummaryDispatch(ctx context.Context, now time.Time) (*HealthSummaryDispatch, error) {
+	stuckMessages, err := s.store.CountStuckPendingMessages(ctx, now.Add(-stuckMessageThreshold))
+	if err != nil {
+		return nil, fmt.Errorf("count stuck pending messages: %w", err)
+	}
+	stuck, failed, err := s.store.CountBrokerDispatchHealth(ctx, now.Add(-dispatchStuckAge), now.Add(-healthDispatchFailedWindow))
+	if err != nil {
+		return nil, fmt.Errorf("count broker dispatch health: %w", err)
+	}
+	return &HealthSummaryDispatch{
+		StuckMessages:          stuckMessages,
+		StuckBrokerDispatch:    stuck,
+		FailedBrokerDispatch1h: failed,
+	}, nil
 }
 
 // healthSummaryAgents builds the agents section from the store aggregate.
@@ -400,18 +512,24 @@ func orderedPhaseCounts(byPhase map[string]int) []HealthPhaseCount {
 // are stably sorted ahead of the rest, so capping at
 // healthSummaryBrokerLimit never hides a problem broker behind healthy ones;
 // within each group store order is kept. Total is the full runtime broker
-// count. On a store error it returns an empty, non-nil list with the error.
-func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, error) {
+// count. The same pass returns the plugin names of the plugin records, for
+// the integrations section. On a store error it returns an empty, non-nil
+// list marked NotReported, the plugin names read so far, and the error.
+func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.AgentHealthAggregate) (HealthSummaryBrokers, []string, error) {
 	list := HealthSummaryBrokers{Items: []HealthSummaryBroker{}}
+	var pluginNames []string
 	opts := store.ListOptions{Limit: healthSummaryBrokerPageSize}
 	for {
 		page, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, opts)
 		if err != nil {
-			return HealthSummaryBrokers{Items: []HealthSummaryBroker{}}, err
+			return HealthSummaryBrokers{Items: []HealthSummaryBroker{}, NotReported: true}, pluginNames, err
 		}
 		for i := range page.Items {
 			b := &page.Items[i]
 			if isPluginBroker(b) {
+				if name := pluginRecordName(b); name != "" {
+					pluginNames = append(pluginNames, name)
+				}
 				continue
 			}
 			list.Items = append(list.Items, healthSummaryBroker(b, agentAgg))
@@ -429,13 +547,14 @@ func (s *Server) healthSummaryBrokers(ctx context.Context, agentAgg *store.Agent
 		list.Items = list.Items[:healthSummaryBrokerLimit]
 		list.Truncated = true
 	}
-	return list, nil
+	return list, pluginNames, nil
 }
 
 // healthSummaryBrokerHasProblem reports whether a runtime broker row needs
-// attention: it is not online, or its NFS workspace share is unhealthy.
+// attention: it is not online, it reports itself degraded or unhealthy, or
+// its NFS workspace share is unhealthy.
 func healthSummaryBrokerHasProblem(b HealthSummaryBroker) bool {
-	if healthSummaryBrokerStatusIsProblem(b.Status) {
+	if healthSummaryBrokerStatusIsProblem(b.Status) || healthSummaryBrokerSelfIsProblem(b.Health) {
 		return true
 	}
 	ws := b.WorkspaceStorage
@@ -451,6 +570,13 @@ func healthSummaryBrokerStatusIsProblem(status string) bool {
 	return status != store.BrokerStatusOnline
 }
 
+// healthSummaryBrokerSelfIsProblem reports whether a broker's self-reported
+// health needs attention: degraded or unhealthy. A broker that never
+// reported its health (nil) is not a problem; it is shown as not reported.
+func healthSummaryBrokerSelfIsProblem(h *HealthBrokerSelf) bool {
+	return h != nil && (h.Status == HealthStatusDegraded || h.Status == HealthStatusUnhealthy)
+}
+
 // healthSummaryBroker builds one runtime broker row of the health summary.
 func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggregate) HealthSummaryBroker {
 	row := HealthSummaryBroker{
@@ -460,6 +586,7 @@ func healthSummaryBroker(b *store.RuntimeBroker, agentAgg *store.AgentHealthAggr
 		Status:           b.Status,
 		Runtime:          brokerRuntimeSummary(b),
 		WorkspaceStorage: brokerStorageSummary(b.WorkspaceStorage),
+		Health:           brokerSelfHealthSummary(b.Health),
 	}
 	if !b.LastHeartbeat.IsZero() {
 		hb := b.LastHeartbeat
@@ -506,15 +633,29 @@ func brokerStorageSummary(ws *api.BrokerWorkspaceStorage) *HealthBrokerStorage {
 	return out
 }
 
-// unhealthyChecks returns the non-healthy entries of a check map as sorted
-// "key: value" strings, or nil when every check is healthy.
-func unhealthyChecks(checks map[string]string) []string {
-	var out []string
-	for k, v := range checks {
-		if v != HealthStatusHealthy {
-			out = append(out, k+": "+v)
-		}
+// brokerSelfHealthSummary converts the health a broker reported on its
+// heartbeat, or returns nil when it never reported one. The stored report
+// is normalised again (api.NormalizeBrokerHealthReport), so the response
+// only ever holds fixed values, whatever the row contains. Checks is never
+// null in the response.
+func brokerSelfHealthSummary(stored *api.BrokerHealthReport) *HealthBrokerSelf {
+	h := api.NormalizeBrokerHealthReport(stored)
+	if h == nil {
+		return nil
 	}
-	sort.Strings(out)
+	out := &HealthBrokerSelf{Status: h.Status, Checks: make(map[string]string, len(h.Checks))}
+	for k, v := range h.Checks {
+		out.Checks[k] = v
+	}
 	return out
+}
+
+// healthSummaryUnavailableMessage is the fixed body of the 503 the summary
+// returns when the serving hub instance cannot read the database at all.
+const healthSummaryUnavailableMessage = "Health data not available (database unreachable from this hub instance)"
+
+// writeHealthSummaryUnavailable writes the summary's 503: a fixed message,
+// never the store error.
+func writeHealthSummaryUnavailable(w http.ResponseWriter) {
+	writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable, healthSummaryUnavailableMessage, nil)
 }

@@ -19,15 +19,16 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/suppgroups"
 )
 
-// harnessProvisionHookFilename must stay equal to
+// HarnessProvisionHookFilename must stay equal to
 // pkg/harness.HarnessProvisionHookFilename, the name writeHookWrapper
 // actually stages. Duplicated here, as a plain string, rather than imported:
 // pkg/harness's own test package imports pkg/sciontool/hooks (to exercise
 // project-hook staging against a real LifecycleManager), so the reverse
-// import this package would otherwise need creates a cycle. The two are
-// covered by TestHarnessProvisionHookFilenameMatchesWriter, which fails if
-// they ever diverge.
-const harnessProvisionHookFilename = "20-harness-provision"
+// import this package would otherwise need creates a cycle. It is exported
+// only so that those pkg/harness tests can check the two:
+// TestHarnessProvisionHookFilenameMatchesWriter in pkg/harness fails if they
+// ever diverge.
+const HarnessProvisionHookFilename = "20-harness-provision"
 
 // LifecycleManager handles Scion lifecycle hooks.
 // These are container-level events managed by sciontool init.
@@ -217,6 +218,7 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 		for _, pattern := range patterns {
 			if info, err := os.Stat(pattern); err == nil && !info.IsDir() {
 				if err := m.executeScript(pattern, eventName); err != nil {
+					err = m.annotateHarnessProvisionError(eventName, pattern, err)
 					if m.skipRefusedEntry(dir, pattern, err) {
 						continue
 					}
@@ -244,6 +246,10 @@ func (m *LifecycleManager) runScriptHooks(eventName string) error {
 				}
 				scriptPath := filepath.Join(dirPath, entry.Name())
 				if err := m.executeScript(scriptPath, eventName); err != nil {
+					// A failed harness provisioner's recorded (scrubbed)
+					// error is appended so the pre-start failure message
+					// says why, not just "exit status 1".
+					err = m.annotateHarnessProvisionError(eventName, scriptPath, err)
 					if m.skipRefusedEntry(dir, scriptPath, err) {
 						continue
 					}
@@ -445,7 +451,7 @@ func (m *LifecycleManager) buildEnforcedCmd(scriptFile *os.File, path, eventName
 	cmd.Stderr = os.Stderr
 
 	if asRoot {
-		if eventName == EventPreStart && filepath.Base(path) == harnessProvisionHookFilename {
+		if eventName == EventPreStart && filepath.Base(path) == HarnessProvisionHookFilename {
 			// The wrapper's own root ownership only proves it is the
 			// genuine, broker-delivered file — not that what it execs is
 			// safe to run as root. `sciontool harness provision` and the

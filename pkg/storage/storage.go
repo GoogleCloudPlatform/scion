@@ -76,7 +76,9 @@ type Credentials struct {
 type Object struct {
 	// Name is the object name/path.
 	Name string `json:"name"`
-	// Size is the object size in bytes.
+	// Size is the object size in bytes. On objects returned by Download it
+	// is the number of bytes the reader yields, or -1 when that is unknown
+	// (for example, GCS decompressing a gzip-encoded object on read).
 	Size int64 `json:"size"`
 	// ContentType is the MIME content type.
 	ContentType string `json:"contentType,omitempty"`
@@ -88,6 +90,27 @@ type Object struct {
 	Updated time.Time `json:"updated,omitempty"`
 	// Metadata is custom metadata attached to the object.
 	Metadata map[string]string `json:"metadata,omitempty"`
+	// Generation identifies this version of the object's content, for
+	// providers that version objects (GCS); 0 when the provider does not.
+	Generation int64 `json:"generation,omitempty"`
+}
+
+// ErrPreconditionFailed is returned by DeleteIfGeneration when the object
+// no longer has the given generation.
+var ErrPreconditionFailed = errors.New("object generation does not match")
+
+// GenerationDeleter is implemented by providers that can delete an object
+// only while it still has a given generation (GCS), so a delete that
+// reaches the provider late does not remove content written since.
+// Callers that must not lose content written after a delete was issued use
+// it for such providers; an unconditional Delete is only safe on providers
+// whose delete is synchronous (it never applies after the call returns),
+// such as local storage, which does not implement this interface.
+type GenerationDeleter interface {
+	// DeleteIfGeneration deletes the object at objectPath if its
+	// generation is generation. It returns ErrNotFound when there is no
+	// object and ErrPreconditionFailed when its generation differs.
+	DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error
 }
 
 // SignedURLOptions configures signed URL generation.
@@ -195,6 +218,13 @@ type UploadOptions struct {
 	CacheControl string
 	// Metadata is custom metadata to attach to the object.
 	Metadata map[string]string
+	// Idempotent says that writing these bytes again is harmless (a
+	// content-addressed object always gets the same bytes) and that the
+	// caller retries a failed write itself, with its own bound on attempts
+	// and time: the provider makes one request per call at any size (GCS
+	// turns off its client's retrying and sends the object in a single
+	// non-resumable request) and returns its error.
+	Idempotent bool
 }
 
 // New creates a new storage client based on the configuration.

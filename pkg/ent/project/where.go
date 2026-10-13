@@ -56,6 +56,16 @@ func IDLTE(id uuid.UUID) predicate.Project {
 	return predicate.Project(sql.FieldLTE(FieldID, id))
 }
 
+// FixtureRootID applies equality check predicate on the "fixture_root_id" field. It's identical to FixtureRootIDEQ.
+func FixtureRootID(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureIssuerID applies equality check predicate on the "fixture_issuer_id" field. It's identical to FixtureIssuerIDEQ.
+func FixtureIssuerID(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
 // Name applies equality check predicate on the "name" field. It's identical to NameEQ.
 func Name(v string) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldName, v))
@@ -124,6 +134,106 @@ func GitIdentity(v string) predicate.Project {
 // CrossProjectInboundRevision applies equality check predicate on the "cross_project_inbound_revision" field. It's identical to CrossProjectInboundRevisionEQ.
 func CrossProjectInboundRevision(v int64) predicate.Project {
 	return predicate.Project(sql.FieldEQ(FieldCrossProjectInboundRevision, v))
+}
+
+// FixtureRootIDEQ applies the EQ predicate on the "fixture_root_id" field.
+func FixtureRootIDEQ(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDNEQ applies the NEQ predicate on the "fixture_root_id" field.
+func FixtureRootIDNEQ(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIn applies the In predicate on the "fixture_root_id" field.
+func FixtureRootIDIn(vs ...uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDNotIn applies the NotIn predicate on the "fixture_root_id" field.
+func FixtureRootIDNotIn(vs ...uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldFixtureRootID, vs...))
+}
+
+// FixtureRootIDGT applies the GT predicate on the "fixture_root_id" field.
+func FixtureRootIDGT(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDGTE applies the GTE predicate on the "fixture_root_id" field.
+func FixtureRootIDGTE(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLT applies the LT predicate on the "fixture_root_id" field.
+func FixtureRootIDLT(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDLTE applies the LTE predicate on the "fixture_root_id" field.
+func FixtureRootIDLTE(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldFixtureRootID, v))
+}
+
+// FixtureRootIDIsNil applies the IsNil predicate on the "fixture_root_id" field.
+func FixtureRootIDIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldFixtureRootID))
+}
+
+// FixtureRootIDNotNil applies the NotNil predicate on the "fixture_root_id" field.
+func FixtureRootIDNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldFixtureRootID))
+}
+
+// FixtureIssuerIDEQ applies the EQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDEQ(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDNEQ applies the NEQ predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNEQ(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldNEQ(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIn applies the In predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIn(vs ...uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDNotIn applies the NotIn predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotIn(vs ...uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldNotIn(FieldFixtureIssuerID, vs...))
+}
+
+// FixtureIssuerIDGT applies the GT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGT(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldGT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDGTE applies the GTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDGTE(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldGTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLT applies the LT predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLT(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldLT(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDLTE applies the LTE predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDLTE(v uuid.UUID) predicate.Project {
+	return predicate.Project(sql.FieldLTE(FieldFixtureIssuerID, v))
+}
+
+// FixtureIssuerIDIsNil applies the IsNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDIsNil() predicate.Project {
+	return predicate.Project(sql.FieldIsNull(FieldFixtureIssuerID))
+}
+
+// FixtureIssuerIDNotNil applies the NotNil predicate on the "fixture_issuer_id" field.
+func FixtureIssuerIDNotNil() predicate.Project {
+	return predicate.Project(sql.FieldNotNull(FieldFixtureIssuerID))
 }
 
 // NameEQ applies the EQ predicate on the "name" field.

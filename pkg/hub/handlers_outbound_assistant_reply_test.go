@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -113,13 +112,8 @@ func newAssistantReplyFixture(t *testing.T, withBroker bool) *assistantReplyFixt
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	// Each pooled connection to ":memory:" is a separate, empty database;
-	// pin the pool to one so every query sees the webchat tables.
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	inner := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	inner := NewWebChatStore(db, "sqlite")
 	require.NoError(t, inner.Init())
 	wcs := &webAffinityCountingStore{WebChatStore: inner}
 	srv.SetWebChatStore(wcs)
@@ -128,6 +122,7 @@ func newAssistantReplyFixture(t *testing.T, withBroker bool) *assistantReplyFixt
 		srv: srv, s: s, wcs: wcs, project: project, agent: agent, user: user,
 		telegram: &recordingSpoke{}, teams: &recordingSpoke{},
 	}
+	var err error
 	f.dmKey, err = messages.DMConversationKey("agent", agent.ID, "user", user.ID)
 	require.NoError(t, err)
 
@@ -155,7 +150,6 @@ func newAssistantReplyFixture(t *testing.T, withBroker bool) *assistantReplyFixt
 		srv.SetMessageBrokerProxy(proxy)
 		srv.mu.RLock()
 		proxy.webChatStore = srv.webChatStore
-		proxy.chatNotifier = srv.chatNotifier
 		srv.mu.RUnlock()
 		proxy.subscribeProjectUserMessages(project.ID)
 	} else {

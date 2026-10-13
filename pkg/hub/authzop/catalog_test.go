@@ -53,12 +53,13 @@ func TestCatalogNoDuplicateIDs(t *testing.T) {
 }
 
 // TestCatalogNoDuplicateEntryPoints ensures no two operations claim the same
-// entry point.
+// entry point. Entry points that share a kind, method and pattern are
+// distinct only when their Variant differs.
 func TestCatalogNoDuplicateEntryPoints(t *testing.T) {
 	seen := make(map[string]OperationID)
 	for _, spec := range Catalog {
 		for _, ep := range spec.EntryPoints {
-			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern
+			key := string(ep.Kind) + ":" + ep.Method + ":" + ep.Pattern + "#" + ep.Variant
 			if owner, ok := seen[key]; ok {
 				t.Errorf("entry point %s claimed by both %q and %q", key, owner, spec.ID)
 			}
@@ -254,44 +255,50 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"broker.update":   "Broker-HMAC only, not user-facing",
 		"broker.delete":   "Broker-HMAC only, not user-facing",
 		"broker.dispatch": "Broker-HMAC dispatch, not user-facing",
+		// Checked in the broker registration handler when a request turns
+		// auto-provide on; no route declares it.
+		"broker.auto_provide": "Broker registration handler check, no route declaration",
 
-		// Hub admin permissions — NonRouteUse only (no route declaration)
+		// Hub admin permissions — NonRouteUse only or Reserved (no route declaration)
 		"hub.settings.read":         "NonRouteUse only, no route declaration",
-		"hub.admin_mode.read":       "NonRouteUse only, no route declaration",
-		"hub.integrations.update":   "NonRouteUse only, no route declaration",
-		"hub.allow_list.read":       "NonRouteUse only, no route declaration",
 		"hub.scheduler.update":      "NonRouteUse only, no route declaration",
-		"hub.federation.read":       "NonRouteUse only, no route declaration",
-		"hub.federation.update":     "NonRouteUse only, no route declaration",
-		"hub.teams_manifest.update": "NonRouteUse only, no route declaration",
+		"hub.federation.read":       "Reserved in the permission registry: no route checks it",
+		"hub.federation.update":     "Reserved in the permission registry: no route checks it",
+		"hub.teams_manifest.update": "Reserved in the permission registry: no route checks it",
 		// hub.github_app.read and hub.github_app.update: now route-enforced via route_metadata.go
 		"hub.audit.read": "Super-admin audit explain, NonRouteUse only",
 
 		// User/project permissions — NonRouteUse only
-		"user.list":                    "NonRouteUse only, no route declaration",
+		"user.list":                    "Reserved in the permission registry: no route checks it",
 		"project.clone":                "NonRouteUse only, no route declaration",
 		"project.list":                 "NonRouteUse only, no route declaration",
 		"project.set_messaging_policy": "Inline admin/owner check in project_messaging_policy.go, not route-enforced",
 		"agent.grant_hub_mode":         "Inline authorization in authorize_message_mode_grant.go, not route-enforced",
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
+		"project.manage_visitors":      "Held by project owner and admin roles; the visitor grant routes that check it are added separately (ptone/scion#4603)",
+
+		// Admin test identities: the super-admin kind's capability is
+		// checked by testAdminIssuer, whose issuance answers 404 until the
+		// admin tier's policy phase (A2) adds its operation.
+		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
 
 		// Global catalog permissions — handler-enforced, not a standalone route.
 		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
 
 		// Agent token scopes — not route-enforced
 		"agent.status_update":  "Agent token scope, not route-enforced",
-		"agent.log_append":     "Agent token scope, not route-enforced",
+		"agent.log_append":     "Reserved in the permission registry: no handler checks it",
 		"project.secret_read":  "Agent token scope, not route-enforced",
 		"agent.notify":         "Agent token scope, not route-enforced",
 		"agent.token_refresh":  "Agent token scope, not route-enforced",
 		"agent.port_forward":   "Agent token scope, not route-enforced",
 		"agent.identity_token": "Agent token scope, not route-enforced",
 
-		// Artifact service: read and create are cataloged (P1); update,
-		// delete and manage have no handler behaviour yet.
-		"artifact.update": "Artifact service: new versions land with the two-step publish (ptone/scion#3215)",
-		"artifact.delete": "Artifact service: deletion lands with grants and retention (ptone/scion#3231)",
-		"artifact.manage": "Artifact service: grants and share links land in ptone/scion#3231",
+		// Artifact service: read, create and manage are cataloged. update
+		// and delete are Reserved registry rows (nothing checks them yet;
+		// PATCH and DELETE are gated by artifact.manage).
+		"artifact.update": "Reserved in the permission registry: no artifact route checks it",
+		"artifact.delete": "Reserved in the permission registry: no artifact route checks it",
 
 		// Material delivery and runtime-use permissions — NonRouteUse only
 		// (ptone/scion#2129)
@@ -300,12 +307,6 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"skill_injection.deliver": "Material delivery grant evaluation, NonRouteUse only (ptone/scion#2129)",
 		"secret.use":              "Agent runtime secret retrieval, enforced in material_runtime.go, not route-enforced",
 		"gcp_service_account.use": "Agent GCP token-mint request, NonRouteUse only (ptone/scion#2129)",
-
-		// Self-scoped permissions — checked by Server.authorizeSelfScoped;
-		// their operations are catalogued by the batches that admit them.
-		"inbox.read":                  "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
-		"inbox.write":                 "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
-		"user_skill_injection.update": "Self-scoped, checked by authorizeSelfScoped; no route uses it yet",
 	}
 
 	var unconsumed []string
@@ -1230,30 +1231,33 @@ func TestMutationClassificationBidirectional(t *testing.T) {
 // operation domains and permission resource types. Every operation's base
 // permission must have a Resource type that is compatible with its domain.
 var domainResourceCompatibility = map[string][]string{
-	"project.membership": {"ResourceProject", "ResourceRoleBinding"},
-	"role":               {"ResourceRole"},
-	"role.binding":       {"ResourceRoleBinding"},
-	"group":              {"ResourceGroup"},
-	"access.constraint":  {"ResourceAccessConstraint"},
-	"credential":         {"ResourceUser"},
-	"gcp.identity":       {"ResourceGCPServiceAccount"},
-	"agent":              {"ResourceAgent"},
-	"project":            {"ResourceProject"},
-	"agent.message":      {"ResourceAgent"},
-	"user.admin":         {"ResourceUser"},
-	"secret":             {"ResourceProject"},
-	"hub":                {"ResourceHub"},
-	"hub.admin":          {"ResourceHub", "ResourceProject"},
-	"skill":              {"ResourceSkill"},
-	"template":           {"ResourceTemplate"},
-	"harnessconfig":      {"ResourceHarnessConfig"},
-	"user":               {"ResourceUser"},
-	"broker":             {"ResourceBroker"},
-	"quota":              {"ResourceQuota"},
-	"schedule":           {"ResourceScheduledEvent"},
-	"chat":               {"ResourceProject"},
-	"env":                {"ResourceProject"},
-	"artifact":           {"ResourceArtifact"},
+	"project.membership":  {"ResourceProject", "ResourceRoleBinding"},
+	"role":                {"ResourceRole"},
+	"role.binding":        {"ResourceRoleBinding"},
+	"group":               {"ResourceGroup"},
+	"access.constraint":   {"ResourceAccessConstraint"},
+	"credential":          {"ResourceUser"},
+	"gcp.identity":        {"ResourceGCPServiceAccount"},
+	"agent":               {"ResourceAgent"},
+	"project":             {"ResourceProject"},
+	"agent.message":       {"ResourceAgent"},
+	"user.admin":          {"ResourceUser"},
+	"secret":              {"ResourceProject"},
+	"hub":                 {"ResourceHub"},
+	"hub.admin":           {"ResourceHub", "ResourceProject"},
+	"skill":               {"ResourceSkill"},
+	"template":            {"ResourceTemplate"},
+	"harnessconfig":       {"ResourceHarnessConfig"},
+	"user":                {"ResourceUser"},
+	"broker":              {"ResourceBroker"},
+	"quota":               {"ResourceQuota"},
+	"schedule":            {"ResourceScheduledEvent"},
+	"chat":                {"ResourceProject"},
+	"env":                 {"ResourceProject", "ResourceHub"},
+	"artifact":            {"ResourceArtifact"},
+	"inbox":               {"ResourceInbox"},
+	"user.skillinjection": {"ResourceUserSkillInjection"},
+	"testidentity":        {"ResourceTestIdentity"},
 }
 
 // TestCatalogBasePermissionSemanticsAssertive validates that each operation's

@@ -44,7 +44,7 @@ func (s *AccessConstraintStore) AppendConstraintHistoryTx(ctx context.Context, e
 		return fmt.Errorf("invalid constraint ID: %w", store.ErrInvalidInput)
 	}
 	constraintQuery := s.client.AccessConstraint.Query().Where(accessconstraint.IDEQ(constraintID))
-	if s.usesRowLocks(ctx) {
+	if s.usesRowLocks() {
 		constraintQuery = constraintQuery.ForUpdate()
 	}
 	if _, err := constraintQuery.Only(ctx); err != nil {

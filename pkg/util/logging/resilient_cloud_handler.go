@@ -29,9 +29,19 @@ import (
 // circuitGatedHandler wraps any slog.Handler and skips Handle calls when
 // the circuit breaker is open. Used by request/message loggers to share
 // circuit breaker state with the main handler.
+//
+// Each record it skips is counted as writer=cloud, reason=circuit_open.
 type circuitGatedHandler struct {
 	inner       slog.Handler
 	circuitOpen func() bool
+	stats       *CloudWriteStats // nil means CloudWriter()
+}
+
+func (h *circuitGatedHandler) writeStats() *CloudWriteStats {
+	if h.stats != nil {
+		return h.stats
+	}
+	return CloudWriter()
 }
 
 func (h *circuitGatedHandler) Enabled(ctx context.Context, level slog.Level) bool {
@@ -40,17 +50,18 @@ func (h *circuitGatedHandler) Enabled(ctx context.Context, level slog.Level) boo
 
 func (h *circuitGatedHandler) Handle(ctx context.Context, r slog.Record) error {
 	if h.circuitOpen() {
+		h.writeStats().RecordFailure(CloudReasonCircuitOpen)
 		return nil
 	}
 	return h.inner.Handle(ctx, r)
 }
 
 func (h *circuitGatedHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
-	return &circuitGatedHandler{inner: h.inner.WithAttrs(attrs), circuitOpen: h.circuitOpen}
+	return &circuitGatedHandler{inner: h.inner.WithAttrs(attrs), circuitOpen: h.circuitOpen, stats: h.stats}
 }
 
 func (h *circuitGatedHandler) WithGroup(name string) slog.Handler {
-	return &circuitGatedHandler{inner: h.inner.WithGroup(name), circuitOpen: h.circuitOpen}
+	return &circuitGatedHandler{inner: h.inner.WithGroup(name), circuitOpen: h.circuitOpen, stats: h.stats}
 }
 
 // circuitState represents the state of the circuit breaker.
@@ -136,6 +147,9 @@ type ResilientCloudHandler struct {
 	cb            *circuitBreaker
 	flushInFlight atomic.Bool
 	flushFn       func() error // overridable for testing; defaults to h.logger.Flush
+	// stats receives writer=cloud counts (circuit_open drops and
+	// flush_error); nil means CloudWriter(). Shared by derived handlers.
+	stats *CloudWriteStats
 
 	done chan struct{}
 	wg   sync.WaitGroup
@@ -158,6 +172,9 @@ func NewResilientCloudHandler(inner *CloudHandler, cfg ResilientCloudHandlerConf
 		done:   make(chan struct{}),
 	}
 	h.flushFn = func() error { return h.logger.Flush() }
+	// Publish the circuit state for the circuit_open gauge and the
+	// cloud_logging health key; cleanup withdraws it if still ours.
+	unregister := h.writeStats().RegisterCircuitSource(h.CircuitOpen)
 
 	h.wg.Add(1)
 	go h.healthCheckLoop()
@@ -165,6 +182,7 @@ func NewResilientCloudHandler(inner *CloudHandler, cfg ResilientCloudHandlerConf
 	cleanup := func() {
 		close(h.done)
 		h.wg.Wait()
+		unregister()
 	}
 	return h, cleanup
 }
@@ -186,7 +204,9 @@ func (h *ResilientCloudHandler) Handle(ctx context.Context, r slog.Record) error
 	state := circuitState(h.cb.state.Load())
 	if state == circuitOpen || state == circuitHalfOpen {
 		// Circuit is open or probing — don't feed more entries into the
-		// Cloud Logging buffer to avoid resource accumulation.
+		// Cloud Logging buffer to avoid resource accumulation. The drop is
+		// counted (writer=cloud, reason=circuit_open), never logged.
+		h.writeStats().RecordFailure(CloudReasonCircuitOpen)
 		return nil
 	}
 	// Circuit is closed — forward to inner handler.
@@ -202,6 +222,7 @@ func (h *ResilientCloudHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		config: h.config,
 		cb:     h.cb, // share circuit state across derived handlers
 		done:   h.done,
+		stats:  h.stats,
 	}
 }
 
@@ -214,12 +235,21 @@ func (h *ResilientCloudHandler) WithGroup(name string) slog.Handler {
 		config: h.config,
 		cb:     h.cb,
 		done:   h.done,
+		stats:  h.stats,
 	}
 }
 
 // Client returns the underlying Cloud Logging client for reuse.
 func (h *ResilientCloudHandler) Client() *gcplog.Client {
 	return h.inner.Client()
+}
+
+// writeStats returns the writer=cloud counters this handler reports to.
+func (h *ResilientCloudHandler) writeStats() *CloudWriteStats {
+	if h.stats != nil {
+		return h.stats
+	}
+	return CloudWriter()
 }
 
 // CircuitOpen returns true if the circuit breaker is currently open.
@@ -289,7 +319,20 @@ func (h *ResilientCloudHandler) runHealthCheck() {
 
 // flushWithTimeout calls Flush on the Cloud Logging logger with a timeout.
 // Only one flush runs at a time; concurrent calls return an error immediately.
+// Every failed call (flush error, timeout, or a flush already in flight) is
+// counted once as writer=cloud, reason=flush_error. A Flush error usually
+// summarizes client errors already counted by the OnError hook as
+// reason=error, so the two reasons can overlap for one incident.
 func (h *ResilientCloudHandler) flushWithTimeout() error {
+	err := h.flushOnce()
+	if err != nil {
+		h.writeStats().RecordFailure(CloudReasonFlushError)
+	}
+	return err
+}
+
+// flushOnce is the uncounted flush; see flushWithTimeout.
+func (h *ResilientCloudHandler) flushOnce() error {
 	if !h.flushInFlight.CompareAndSwap(false, true) {
 		return fmt.Errorf("a previous flush is still in progress")
 	}

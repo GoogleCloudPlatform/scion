@@ -32,6 +32,14 @@
 # GitHub CLI version — bump this variable to upgrade gh across all images.
 ARG GH_VERSION=2.100.0
 
+# helm — exact pin, kept in step with .github/workflows/chart-ci.yml. The
+# sha256 values are the linux tarball checksums published at
+# https://get.helm.sh/helm-v<ver>-linux-<arch>.tar.gz.sha256sum; the build
+# fails on a mismatch. Bump all three together.
+ARG HELM_VERSION=3.17.3
+ARG HELM_SHA256_AMD64=ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+ARG HELM_SHA256_ARM64=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e
+
 # Go: a floor and a pin. GO_MIN_VERSION is what scion needs (go.mod);
 # GO_VERSION is what gets installed when the base does not already meet the
 # floor. A base that ships something newer keeps it — these images serve many
@@ -138,6 +146,12 @@ RUN /opt/scion-image-build/lib/install-core-toolchain.sh go "${GO_MIN_VERSION}" 
 
 ARG GH_VERSION
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh gh "${GH_VERSION}"
+
+ARG HELM_VERSION
+ARG HELM_SHA256_AMD64
+ARG HELM_SHA256_ARM64
+RUN /opt/scion-image-build/lib/install-core-toolchain.sh helm \
+    "${HELM_VERSION}" "${HELM_SHA256_AMD64}" "${HELM_SHA256_ARM64}"
 
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh kubectl
 RUN /opt/scion-image-build/lib/install-core-toolchain.sh golangci-lint

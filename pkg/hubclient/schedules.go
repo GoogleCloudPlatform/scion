@@ -125,7 +125,7 @@ func (s *scheduleService) Create(ctx context.Context, req *CreateScheduleRequest
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Schedule](resp)
+	return apiclient.DecodeRequired[Schedule](resp)
 }
 
 // Get retrieves a schedule by ID.
@@ -134,7 +134,7 @@ func (s *scheduleService) Get(ctx context.Context, id string) (*Schedule, error)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Schedule](resp)
+	return apiclient.DecodeRequired[Schedule](resp)
 }
 
 // List returns schedules matching the filter criteria.
@@ -154,7 +154,7 @@ func (s *scheduleService) List(ctx context.Context, opts *ListSchedulesOptions) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListSchedulesResponse](resp)
+	return apiclient.DecodeRequired[ListSchedulesResponse](resp)
 }
 
 // Update updates a schedule.
@@ -163,7 +163,7 @@ func (s *scheduleService) Update(ctx context.Context, id string, req *UpdateSche
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Schedule](resp)
+	return apiclient.DecodeRequired[Schedule](resp)
 }
 
 // Delete deletes a schedule.
@@ -181,7 +181,7 @@ func (s *scheduleService) Pause(ctx context.Context, id string) (*Schedule, erro
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Schedule](resp)
+	return apiclient.DecodeRequired[Schedule](resp)
 }
 
 // Resume resumes a paused schedule.
@@ -190,7 +190,7 @@ func (s *scheduleService) Resume(ctx context.Context, id string) (*Schedule, err
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Schedule](resp)
+	return apiclient.DecodeRequired[Schedule](resp)
 }
 
 // History returns execution history for a schedule.
@@ -204,5 +204,5 @@ func (s *scheduleService) History(ctx context.Context, id string, opts *ListSche
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListScheduledEventsResponse](resp)
+	return apiclient.DecodeRequired[ListScheduledEventsResponse](resp)
 }

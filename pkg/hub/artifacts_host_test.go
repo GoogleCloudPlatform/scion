@@ -34,15 +34,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func artifactTestAgent(agentID, projectID string, scopes ...AgentTokenScope) *agentIdentityWrapper {
-	return &agentIdentityWrapper{AgentTokenClaims: &AgentTokenClaims{
-		Claims:      jwt.Claims{Subject: agentID, ID: "jti-" + agentID},
-		ProjectID:   projectID,
-		Scopes:      scopes,
-		ScopeSchema: CurrentAgentScopeSchema,
-	}}
-}
-
 func TestArtifactHostPrincipal(t *testing.T) {
 	host := newArtifactHost(&Server{})
 	tests := []struct {
@@ -151,7 +142,7 @@ func TestArtifactHostAuthorizeAgentScopes(t *testing.T) {
 
 	writer := contextWithIdentity(context.Background(), artifactTestAgent(agent.ID, project, ScopeProjectArtifactRead, ScopeProjectArtifactWrite))
 	assert.True(t, host.Authorize(writer, project, artifacts.PermissionCreate), "project:artifact:write grants artifact.create in the agent's project")
-	assert.True(t, host.Authorize(writer, project, artifacts.PermissionUpdate), "project:artifact:write grants artifact.update in the agent's project")
+	assert.False(t, host.Authorize(writer, project, artifacts.PermissionUpdate), "artifact.update is Reserved: no agent scope carries it")
 	assert.False(t, host.Authorize(writer, otherProject, artifacts.PermissionCreate), "artifact.create in another real project")
 
 	writeOnly := contextWithIdentity(context.Background(), artifactTestAgent(agent.ID, project, ScopeProjectArtifactWrite))
@@ -176,32 +167,40 @@ func TestArtifactHostAgentWithoutReadScopeIsNotServed(t *testing.T) {
 }
 
 // TestArtifactHostMissingScope: only an agent that presented a real token
-// is told which artifact scope it lacks; users, synthetic in-process
-// identities and unauthenticated callers are told nothing, and an agent
-// holding the scopes is told nothing either.
+// is told which artifact scopes it lacks, every one of them in order
+// (ptone/scion#4571); users, synthetic in-process identities and
+// unauthenticated callers are told nothing, and an agent holding the scopes
+// is told nothing either. MissingScope reports the first of them.
 func TestArtifactHostMissingScope(t *testing.T) {
 	host := newArtifactHost(&Server{})
 	agentCtx := func(scopes ...AgentTokenScope) context.Context {
 		return contextWithIdentity(context.Background(), artifactTestAgent("agent-1", "proj-1", scopes...))
 	}
+	read, write := string(ScopeProjectArtifactRead), string(ScopeProjectArtifactWrite)
 	for name, tc := range map[string]struct {
 		ctx        context.Context
 		permission string
-		want       string
+		want       []string
 	}{
-		"no scopes":              {agentCtx(), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, string(ScopeProjectArtifactWrite)},
-		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, ""},
-		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, ""},
-		"unknown permission":     {agentCtx(), "agent.read", ""},
-		"no identity":            {context.Background(), artifacts.PermissionCreate, ""},
-		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, ""},
-		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, ""},
-		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, ""},
+		"no scopes":              {agentCtx(), artifacts.PermissionCreate, []string{read, write}},
+		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, []string{read, write}},
+		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, []string{read}},
+		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, []string{write}},
+		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, nil},
+		"no scopes, read":        {agentCtx(), artifacts.PermissionRead, []string{read}},
+		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, nil},
+		"unknown permission":     {agentCtx(), "agent.read", nil},
+		"no identity":            {context.Background(), artifacts.PermissionCreate, nil},
+		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, nil},
+		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, nil},
+		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, nil},
 	} {
-		assert.Equal(t, tc.want, host.MissingScope(tc.ctx, tc.permission), name)
+		assert.Equal(t, tc.want, host.MissingScopes(tc.ctx, tc.permission), name)
+		first := ""
+		if len(tc.want) > 0 {
+			first = tc.want[0]
+		}
+		assert.Equal(t, first, host.MissingScope(tc.ctx, tc.permission), name)
 	}
 }
 
@@ -213,8 +212,11 @@ func TestArtifactHostAuthorizeUsers(t *testing.T) {
 
 	admin := createScopeSuperAdmin(t, s, "artifact-superadmin")
 	adminCtx := contextWithIdentity(context.Background(), NewAuthenticatedUser(admin.ID, admin.Email, admin.DisplayName, admin.Role, "web"))
-	for _, p := range []string{artifacts.PermissionRead, artifacts.PermissionCreate, artifacts.PermissionUpdate, artifacts.PermissionDelete, artifacts.PermissionManage} {
+	for _, p := range []string{artifacts.PermissionRead, artifacts.PermissionCreate, artifacts.PermissionManage} {
 		assert.True(t, host.Authorize(adminCtx, project.ID, p), "super-admin holds %s", p)
+	}
+	for _, p := range []string{artifacts.PermissionUpdate, artifacts.PermissionDelete} {
+		assert.False(t, host.Authorize(adminCtx, project.ID, p), "%s is Reserved: no role holds it, super-admin included", p)
 	}
 
 	bobCtx := contextWithIdentity(context.Background(), NewAuthenticatedUser(bob.ID, bob.Email, bob.DisplayName, bob.Role, "web"))
@@ -349,7 +351,8 @@ func TestArtifactRoutesServedWhileExperimentOn(t *testing.T) {
 		{http.MethodPut, "/api/v1/artifacts", http.StatusMethodNotAllowed},
 		{http.MethodGet, "/api/v1/artifacts", http.StatusBadRequest},
 		{http.MethodGet, "/api/v1/artifacts?mine=1", http.StatusServiceUnavailable},
-		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodPut, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusMethodNotAllowed},
+		{http.MethodDelete, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 		{http.MethodGet, "/api/v1/artifacts/00000000-0000-4000-8000-000000000001", http.StatusServiceUnavailable},
 	} {
 		req := httptest.NewRequest(tc.method, tc.path, nil)
@@ -384,25 +387,6 @@ func TestArtifactsGuardViaRegisterRoutes(t *testing.T) {
 	mux := http.NewServeMux()
 	artifacts.NewService(newArtifactHost(srv)).RegisterRoutes(mux, srv.artifactsGuard)
 	serveArtifactRequests(t, mux, NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"))
-}
-
-// addRecordedArtifactEdge records an active, principal-bounded delegation
-// edge with recorded provenance from user delegatorID to agentID in project.
-func addRecordedArtifactEdge(t *testing.T, s store.Store, delegatorID, agentID, project string) {
-	t.Helper()
-	edge := &store.DelegationEdge{
-		DelegatorType: store.DelegationPrincipalUser,
-		DelegatorID:   delegatorID,
-		DelegateType:  store.DelegationPrincipalAgent,
-		DelegateID:    agentID,
-		ScopeType:     store.RoleScopeProject,
-		ScopeID:       project,
-		Role:          string(AgentRoleFull),
-		Active:        true,
-	}
-	edge.EffectCeiling = store.EffectCeiling{Kind: store.EffectCeilingPrincipal}
-	edge.AuthorityProvenance = store.AuthorityProvenance{ProvenanceVersion: store.ProvenanceVersionV1, SourceCredentialKind: store.SourceCredentialSession}
-	require.NoError(t, s.CreateDelegationEdge(context.Background(), edge))
 }
 
 // TestArtifactHostNoEdgeAgentDeniedArtifacts: an agent with no delegation

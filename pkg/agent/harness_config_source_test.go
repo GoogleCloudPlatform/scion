@@ -92,22 +92,8 @@ func infoSource(cfg *api.ScionConfig) string {
 // (agent-info revision) and Start (returned revision) both use the
 // resolved copy.
 func TestHarnessConfigResolution_SingleResolvedProjectDir(t *testing.T) {
-	mockRuntimeForTest(t)
-	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	t.Setenv("HOME", tmpDir)
-	if err := config.InitMachine(getTestHarnesses()); err != nil {
-		t.Fatalf("InitMachine failed: %v", err)
-	}
-	root := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(root, ".scion")
-	if err := config.InitProject(projectScionDir, getTestHarnesses()); err != nil {
-		t.Fatalf("InitProject failed: %v", err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
+	p := newHermeticProject(t)
+	root, projectScionDir := p.root, p.scion
 
 	global, err := config.FindHarnessConfigDir("claude", "")
 	if err != nil {

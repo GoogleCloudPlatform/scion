@@ -129,10 +129,15 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.Kind == VersionKindReview {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
+		return
+	}
 	now := time.Now().UTC()
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Key: key, Title: title, CreatedAt: now, UpdatedAt: now,
+		ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, now, nil)
 	v.Seq = 1
@@ -168,7 +173,7 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 		writeError(w, http.StatusBadRequest, "bad_request", "title, key and scope apply only when creating an artifact")
 		return
 	}
-	b, a, ok := s.writableArtifact(w, r, id)
+	b, a, _, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -187,14 +192,27 @@ func (s *Service) handleCreateVersion(w http.ResponseWriter, r *http.Request, id
 func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, req *CreateVersionRequest, permitted *bool) {
 	ctx := r.Context()
 	kind, ref, _, _ := s.host.Principal(ctx)
-	writable := false
+	var access writeAccess
+	var err error
 	if permitted != nil {
-		writable = s.canWritePermitted(ctx, b, a, *permitted)
+		access, err = s.canWritePermittedErr(ctx, b, a, *permitted)
 	} else {
-		writable = s.canWrite(ctx, b, a)
+		access, err = s.canWriteErr(ctx, b, a)
 	}
-	if !writable {
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return
+	}
+	if access == accessNone {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
+		return
+	}
+	// Refusal 1 of 3 for a review grantee: starting a publish version.
+	if refuseKind(w, access, versionKind(req.Kind)) {
+		return
+	}
+	if req.Kind == VersionKindReview && a.CurrentSeq == 0 {
+		writeError(w, http.StatusConflict, CodeNothingToReview, "a review needs an artifact with a published version")
 		return
 	}
 	var current map[string]File
@@ -211,7 +229,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		}
 	}
 	v, files := pendingVersion(a.ID, req, kind, ref, time.Now().UTC(), current)
-	err := b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
+	err = b.store.CreateVersion(ctx, v, files, MaxPendingVersions)
 	switch {
 	case errors.Is(err, ErrTooManyPending):
 		writeError(w, http.StatusConflict, "too_many_pending",
@@ -233,7 +251,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 // already received.
 func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref string, now time.Time, current map[string]File) (*Version, []File) {
 	v := &Version{
-		ID: uuid.NewString(), ArtifactID: artifactID, Kind: VersionKindPublish, EntryPath: req.Entry,
+		ID: uuid.NewString(), ArtifactID: artifactID, Kind: versionKind(req.Kind), EntryPath: req.Entry,
 		Note: strings.TrimSpace(req.Note), FileCount: len(req.Files), CreatedByKind: kind, CreatedByRef: ref,
 		CreatedAt: now, State: VersionStatePending,
 	}
@@ -252,10 +270,22 @@ func pendingVersion(artifactID string, req *CreateVersionRequest, kind, ref stri
 	return v, files
 }
 
+// versionKind maps a request's kind to a stored kind; "" means publish.
+func versionKind(k string) string {
+	if k == VersionKindReview {
+		return VersionKindReview
+	}
+	return VersionKindPublish
+}
+
 func writePending(w http.ResponseWriter, a *Artifact, v *Version, files []File) {
 	resp := PendingVersionResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files), Upload: UploadInfo{Required: []string{}}}
+	// One upload per digest: files with the same bytes share the stored
+	// object, and uploading one marks the others received.
+	seen := map[string]bool{}
 	for _, f := range files {
-		if f.Pending {
+		if f.Pending && !seen[f.SHA256] {
+			seen[f.SHA256] = true
 			resp.Upload.Required = append(resp.Upload.Required, f.Path)
 		}
 	}
@@ -314,9 +344,8 @@ func validateManifest(w http.ResponseWriter, req *CreateVersionRequest, l Limits
 	switch req.Kind {
 	case "", VersionKindPublish:
 	case VersionKindReview:
-		return bad("review versions are not supported yet")
 	default:
-		return bad("kind must be publish")
+		return bad("kind must be publish or review")
 	}
 	if !utf8.ValidString(req.Note) || utf8.RuneCountInString(req.Note) > maxNoteRunes {
 		return bad(fmt.Sprintf("note must be valid UTF-8 of at most %d characters", maxNoteRunes))
@@ -433,74 +462,127 @@ func truncate(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// canWrite reports whether the caller may append versions to artifact a:
-// its credential must permit publishing (artifact.create) in the home
-// scope, and it must own the artifact or hold an unexpired write or admin
-// grant (a principal grant for it, or a scope grant for a scope the host
-// authorizes it to publish in). The home scope's own read grant never
-// confers write. Publishing a version is publishing; ownership and grants
-// decide which artifacts.
-func (s *Service) canWrite(ctx context.Context, b backend, a *Artifact) bool {
-	return s.canWritePermitted(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+// writeAccess is how the caller may append versions to an artifact: the
+// answer of the one write decision, canWritePermittedErr.
+type writeAccess int
+
+const (
+	// accessNone: the caller may not append versions.
+	accessNone writeAccess = iota
+	// accessReviewGrant: only a review grant matches, and the caller can
+	// read the artifact without it, so it may append versions of kind
+	// review and nothing else (ptone/scion#4538).
+	accessReviewGrant
+	// accessWriteGrant: an unexpired write or admin grant matches.
+	accessWriteGrant
+	// accessOwner: the caller owns the artifact.
+	accessOwner
+)
+
+// canPublish reports whether the access lets the caller publish any kind
+// of version, not only reviews.
+func (w writeAccess) canPublish() bool { return w == accessOwner || w == accessWriteGrant }
+
+// allowsKind reports whether the access lets the caller append (start,
+// upload to or finalize) a version of the stored kind: every kind for a
+// full writer, review only for a review grantee.
+func (w writeAccess) allowsKind(kind string) bool {
+	return w.canPublish() || (w == accessReviewGrant && kind == VersionKindReview)
 }
 
-// canWritePermitted is canWrite with the answer of Host.Permits for
+// CodeReviewOnly is the error code of a request refused because the
+// caller's access allows review versions only.
+const CodeReviewOnly = "review_only"
+
+// refuseKind writes the 403 for a caller whose access does not allow a
+// version of kind and reports whether it did. A review grantee is refused
+// a publish version when it starts one, uploads to one and finalizes one,
+// so a publish never follows a review that was allowed to start.
+func refuseKind(w http.ResponseWriter, access writeAccess, kind string) bool {
+	if access.allowsKind(kind) {
+		return false
+	}
+	writeError(w, http.StatusForbidden, CodeReviewOnly, "your access to this artifact allows review versions only")
+	return true
+}
+
+// canWriteErr reports how the caller may append versions to artifact a:
+// its credential must permit publishing (artifact.create) in the home
+// scope, and it must own the artifact (accessOwner), hold an unexpired
+// write or admin grant (accessWriteGrant), or hold an unexpired review
+// grant while it reads the artifact through the home project or a grant
+// to one of its projects (accessReviewGrant, review versions only). A grant is a principal
+// grant for the caller or a scope grant for a scope the host authorizes it
+// to publish in. The home scope's own read grant never confers write.
+// Publishing a version is publishing; ownership and grants decide which
+// artifacts, and a review grant which kinds.
+//
+// A failed grant read is an error, never a refusal, so a write route
+// answers 500 rather than a 403 a working read would not give, and
+// ArtifactResponse.CanPublish and CanReview state the same decision.
+func (s *Service) canWriteErr(ctx context.Context, b backend, a *Artifact) (writeAccess, error) {
+	return s.canWritePermittedErr(ctx, b, a, s.host.Permits(ctx, a.ScopeRef, PermissionCreate))
+}
+
+// canWritePermittedErr is canWriteErr with the answer of Host.Permits for
 // artifact.create in a's home scope already known, for a caller that has
-// just asked it for that scope.
-func (s *Service) canWritePermitted(ctx context.Context, b backend, a *Artifact, permitted bool) bool {
+// just asked it for that scope. It is the one write decision. A write or
+// admin grant wins over a review grant held at the same time.
+//
+// A review grant never makes an artifact readable (it is in no read set),
+// so its holder must read the artifact another way: through the home
+// project or a grant to one of their projects. That is asked again
+// here, on every use, with canReadWith (the one read decision), so losing
+// the other read path ends review access at once, with nothing to revoke.
+func (s *Service) canWritePermittedErr(ctx context.Context, b backend, a *Artifact, permitted bool) (writeAccess, error) {
 	kind, ref, _, ok := s.host.Principal(ctx)
 	if !ok {
-		return false
+		return accessNone, nil
 	}
 	now := time.Now()
 	if a.ExpiresAt != nil && !now.Before(*a.ExpiresAt) {
-		return false
+		return accessNone, nil
 	}
 	if !permitted {
-		return false
+		return accessNone, nil
 	}
 	if kind == a.OwnerKind && ref == a.OwnerRef {
-		return true
+		return accessOwner, nil
 	}
 	grants, err := b.store.ListGrants(ctx, a.ID)
 	if err != nil {
-		slog.ErrorContext(ctx, "artifacts: list grants failed", "error", err)
-		return false
+		return accessNone, err
 	}
-	for _, g := range grants {
-		if g.ExpiresAt != nil && !now.Before(*g.ExpiresAt) {
-			continue
-		}
-		if g.Permission != GrantWrite && g.Permission != GrantAdmin {
-			continue
-		}
-		switch g.SubjectKind {
-		case SubjectPrincipal:
-			if g.SubjectRef == PrincipalRef(kind, ref) {
-				return true
-			}
-		case SubjectScope:
-			if g.SubjectRef != "" && s.host.Authorize(ctx, g.SubjectRef, PermissionCreate) {
-				return true
-			}
-		}
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForWrite, PermissionCreate, false) {
+		return accessWriteGrant, nil
 	}
-	return false
+	if grantAllows(ctx, s.host, a, grants, now, kind, ref, grantsForReview, PermissionCreate, false) &&
+		canReadWith(ctx, s.host, a, func() ([]Grant, error) { return grants, nil }) {
+		return accessReviewGrant, nil
+	}
+	return accessNone, nil
 }
 
-// writableArtifact loads an artifact the caller may write. An artifact the
-// caller cannot read answers 404, like a missing one; one it can read but
-// not write answers 403.
-func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, bool) {
+// writableArtifact loads an artifact the caller may write, with how it may
+// (canWriteErr). An artifact the caller cannot read answers 404, like a
+// missing one; one it can read but not write answers 403; a failed grant
+// read answers 500. A review grantee passes: each route then refuses the
+// version kinds its access does not allow (refuseKind).
+func (s *Service) writableArtifact(w http.ResponseWriter, r *http.Request, id string) (backend, *Artifact, writeAccess, bool) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
-		return b, nil, false
+		return b, nil, accessNone, false
 	}
-	if !s.canWrite(r.Context(), b, a) {
+	access, err := s.canWriteErr(r.Context(), b, a)
+	if err != nil {
+		writeGrantsReadFailed(w, r, err)
+		return b, nil, accessNone, false
+	}
+	if access == accessNone {
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish versions of this artifact")
-		return b, nil, false
+		return b, nil, accessNone, false
 	}
-	return b, a, true
+	return b, a, access, true
 }
 
 // pendingVersionOf loads pending version seq of a for its creator. Another
@@ -541,12 +623,17 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeNotFound(w)
 		return
 	}
-	b, a, ok := s.writableArtifact(w, r, id)
+	b, a, access, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, false)
 	if !ok {
+		return
+	}
+	// Refusal 2 of 3 for a review grantee: uploading to a publish version
+	// (one it started while it still held write access).
+	if refuseKind(w, access, v.Kind) {
 		return
 	}
 	f, err := b.store.GetFile(ctx, v.ID, filePath)
@@ -591,7 +678,22 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "internal", "could not store the file")
 		return
 	}
-	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType); {
+	// The other pending files of the version with the same bytes share the
+	// stored object: they arrive with this upload, each with the media type
+	// detected for its own path.
+	files, err := b.store.ListFiles(ctx, v.ID)
+	if err != nil {
+		slog.ErrorContext(ctx, "artifacts: list files failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "internal", "could not record the file")
+		return
+	}
+	siblings := map[string]string{}
+	for _, o := range files {
+		if o.Path != filePath && o.Pending && o.SHA256 == f.SHA256 && fileOrigin(o.Origin) == FileOriginUpload {
+			siblings[o.Path] = detectMediaType(o.Path, o.MediaType, spool.head)
+		}
+	}
+	switch err := b.store.MarkReceived(ctx, v.ID, filePath, mediaType, siblings); {
 	case errors.Is(err, ErrConflict), errors.Is(err, ErrNotFound):
 		// ErrNotFound: the version was reaped since it was loaded.
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending")
@@ -608,14 +710,32 @@ func (s *Service) handlePutFile(w http.ResponseWriter, r *http.Request, id strin
 // handleFinalize implements POST /{id}/versions/{seq}/finalize: it checks
 // every manifest file has arrived, flips the version to ready and makes it
 // the artifact's current version (unless a later version already is).
+//
+// A review names the version it was started from in the body
+// ({"base": <seq>}); see finalizeReviewCheck. The body is decoded before
+// the artifact is looked up, so its errors are the same for every id.
 func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id string, seq int) {
 	ctx := r.Context()
-	b, a, ok := s.writableArtifact(w, r, id)
+	freq, ok := decodeFinalize(w, r)
+	if !ok {
+		return
+	}
+	b, a, access, ok := s.writableArtifact(w, r, id)
 	if !ok {
 		return
 	}
 	v, ok := s.pendingVersionOf(w, r, b, a, seq, true)
 	if !ok {
+		return
+	}
+	// Refusal 3 of 3 for a review grantee: finalizing a publish version.
+	// It comes before the claim, so a refused request changes nothing.
+	if refuseKind(w, access, v.Kind) {
+		return
+	}
+	if v.Kind == VersionKindReview && freq.Base <= 0 {
+		writeError(w, http.StatusBadRequest, CodeBaseRequired,
+			`finalizing a review needs the version it was started from: send {"base": <seq>}`)
 		return
 	}
 	files, err := b.store.ListFiles(ctx, v.ID)
@@ -677,8 +797,25 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	// given up, before another one may take its claim over.
 	work, cancel := context.WithTimeout(ctx, finalizeWorkLimit)
 	defer cancel()
+	base := 0
+	if v.Kind == VersionKindReview {
+		var done bool
+		if base, done = s.finalizeReviewCheck(w, r.WithContext(work), b, a, v, files, claim, freq.Base); done {
+			return
+		}
+	}
 	extra, warnings := s.finalizeExtras(w, r.WithContext(work), b, v, files)
-	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra)
+	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
+	if errors.Is(err, ErrStaleBase) {
+		// A version was published between the review check and now.
+		s.discardStaleReview(w, r, b, a.ID, seq, claim)
+		return
+	}
+	if errors.Is(err, ErrPendingNewer) {
+		s.discardReview(w, r, b, a.ID, seq, claim, FailReasonNewerPublishPending,
+			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
+		return
+	}
 	if err != nil && !errors.Is(err, ErrConflict) && !errors.Is(err, ErrNotFound) {
 		// Let the publisher try again, unless another request has claimed
 		// the version since.
@@ -707,7 +844,32 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
+	if ready.Kind == VersionKindReview {
+		s.notifyReview(ctx, updated, ready)
+	}
 	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(updated), Version: versionInfo(ready, files), Warnings: warnings})
+}
+
+// maxFinalizeBodyBytes caps the JSON body of a finalize request.
+const maxFinalizeBodyBytes = 4 << 10
+
+// decodeFinalize reads the optional finalize body. An empty body is an
+// empty request. ok=false means the response was written.
+func decodeFinalize(w http.ResponseWriter, r *http.Request) (FinalizeRequest, bool) {
+	var req FinalizeRequest
+	raw, err := io.ReadAll(io.LimitReader(r.Body, maxFinalizeBodyBytes+1))
+	if err != nil || len(raw) > maxFinalizeBodyBytes {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return req, true
+	}
+	if err := json.Unmarshal(raw, &req); err != nil || req.Base < 0 {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid finalize body")
+		return req, false
+	}
+	return req, true
 }
 
 // finalizeExtras returns the manifest rows the hub adds to a version at
@@ -765,7 +927,9 @@ const (
 )
 
 // handleListVersions implements GET /{id}/versions[?limit=][&before=]: the ready versions,
-// newest first, without their files.
+// newest first, without their files, and in Discarded the failed versions
+// of the same page (ptone/scion#4577). A page walks ready and failed
+// versions together by seq.
 func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
@@ -790,14 +954,18 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		}
 		before = n
 	}
-	versions, err := b.store.ListVersions(r.Context(), a.ID, before, limit)
+	versions, err := b.store.ListVersionHistory(r.Context(), a.ID, before, limit)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list versions failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the versions")
 		return
 	}
-	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions))}
+	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions)), Discarded: []DiscardedVersionInfo{}}
 	for i := range versions {
+		if versions[i].State == VersionStateFailed {
+			resp.Discarded = append(resp.Discarded, discardedVersionInfo(&versions[i]))
+			continue
+		}
 		vi := versionInfo(&versions[i], nil)
 		vi.Files = nil
 		resp.Versions = append(resp.Versions, *vi)
@@ -806,6 +974,16 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		resp.NextBefore = versions[len(versions)-1].Seq
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// discardedVersionInfo is the list entry of a failed version: its number,
+// state, reason and creation time, and nothing else.
+func discardedVersionInfo(v *Version) DiscardedVersionInfo {
+	reason := v.FailReason
+	if reason == "" {
+		reason = FailReasonDiscarded
+	}
+	return DiscardedVersionInfo{Seq: v.Seq, State: v.State, Reason: reason, CreatedAt: v.CreatedAt}
 }
 
 // handleGetVersion implements GET /{id}/versions/{seq}: one ready version
@@ -825,7 +1003,11 @@ func (s *Service) handleGetVersion(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	writeJSON(w, http.StatusOK, ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)})
+	resp := ArtifactResponse{Artifact: artifactInfo(a), Version: versionInfo(v, files)}
+	if !s.capabilities(w, r, b, a, &resp) {
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ReapPending reaps versions left pending longer than PendingVersionTTL

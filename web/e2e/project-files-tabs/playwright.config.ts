@@ -14,6 +14,8 @@
 
 import { defineConfig } from '@playwright/test';
 
+const CI = !!process.env.CI;
+
 // Deliberately separate from the Hub E2E harness: the hub API is supplied
 // entirely by page.route() mocks (see mock-api.ts), so this needs no real
 // backend, credentials, or seeded project agents.
@@ -22,9 +24,24 @@ export default defineConfig({
   testMatch: '**/*.pw.ts',
   timeout: 15_000,
   workers: 1,
-  forbidOnly: !!process.env.CI,
+  // CI-only settings (local runs are unchanged), as in e2e/chat-mobile: one
+  // retry for a timing blip on a shared runner (still reported as flaky), a
+  // global timeout below the 20m job timeout so the report is still written,
+  // and inline annotations plus an HTML report for the uploaded artifact.
+  retries: CI ? 1 : 0,
+  globalTimeout: CI ? 15 * 60_000 : 0,
+  reporter: CI
+    ? [
+        ['github'],
+        ['list'],
+        ['html', { outputFolder: '../../playwright-report/project-files-tabs', open: 'never' }],
+      ]
+    : 'list',
+  forbidOnly: CI,
   outputDir: '../../test-results/project-files-tabs',
   use: {
+    // A trace of the retried attempt in CI.
+    trace: CI ? 'on-first-retry' : 'off',
     baseURL: 'http://127.0.0.1:4530',
     viewport: { width: 1280, height: 900 },
     launchOptions: {
@@ -39,5 +56,7 @@ export default defineConfig({
     cwd: new URL('../../', import.meta.url).pathname,
     url: 'http://127.0.0.1:4530/e2e/project-files-tabs/fixture.html',
     reuseExistingServer: false,
+    // A cold start on a CI runner can exceed Playwright's 60s default (kept locally).
+    timeout: CI ? 120_000 : 60_000,
   },
 });

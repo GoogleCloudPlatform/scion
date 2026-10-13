@@ -26,6 +26,7 @@ import { stopHub } from './hub.js';
 const E2E_ENV_FILE = path.join(os.tmpdir(), 'scion-e2e-env.json');
 const AUTH_DIR = path.join(os.tmpdir(), 'scion-e2e-auth');
 
+// eslint-disable-next-line @typescript-eslint/require-await -- Playwright calls this as an async teardown hook; it stays async so it keeps returning a Promise
 async function globalTeardown(): Promise<void> {
   console.log('\n=== E2E Global Teardown ===\n');
 

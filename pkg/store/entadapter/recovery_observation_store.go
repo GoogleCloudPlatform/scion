@@ -61,7 +61,7 @@ func (s *AgentStore) RecordRecoveryObservations(ctx context.Context, brokerID st
 		return time.Time{}, err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {

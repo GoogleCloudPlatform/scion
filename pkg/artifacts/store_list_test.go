@@ -138,6 +138,24 @@ func TestStoreListCandidates(t *testing.T) {
 			t.Errorf("review pending = %q, want %q", got, want)
 		}
 
+		for scope, want := range map[string][]string{
+			"p-alice": {"member project"},
+			"p-bob":   {"granted"},
+			"p-x":     {"future expiry"},
+			"p-none":  {},
+		} {
+			hq := q
+			hq.HomeScope = scope
+			if got := candidateTitles(t, st, hq); !slices.Equal(got, want) {
+				t.Errorf("home scope %q = %q, want %q", scope, got, want)
+			}
+		}
+		ownedHome := owned
+		ownedHome.HomeScope = "p-other"
+		if got, want := candidateTitles(t, st, ownedHome), []string{"own"}; !slices.Equal(got, want) {
+			t.Errorf("owned only, home scope p-other = %q, want %q", got, want)
+		}
+
 		for search, want := range map[string][]string{
 			"GRANT":   {"granted"},       // title, case-insensitive
 			"own-k":   {"own"},           // key

@@ -49,7 +49,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,96 +57,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// outsideSecret is the content the handlers must never read out of the tree
-// outside the base, and never overwrite.
-const outsideSecret = "TOP-SECRET-HUB-TOKEN-do-not-serve-this"
-
-// outsideTree is the stand-in for everything the hub process can reach but the
-// file browser has no business touching — ~/.scion, hub.db, authorized_keys.
-type outsideTree struct {
-	dir string
-}
-
-// newOutsideTree builds the tree and returns it. It deliberately lives in its
-// own TempDir rather than a sibling of the base, so that a path that reaches
-// it cannot have got there by any route except following a link.
-func newOutsideTree(t *testing.T) *outsideTree {
-	t.Helper()
-	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "secret.txt"), []byte(outsideSecret), 0600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "victim.txt"), []byte("delete me and the test fails"), 0600))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "landing"), 0755))
-	return &outsideTree{dir: dir}
-}
-
-// snapshot records every path and file content under the tree.
-func (o *outsideTree) snapshot(t *testing.T) map[string]string {
-	t.Helper()
-	got := map[string]string{}
-	err := filepath.WalkDir(o.dir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, relErr := filepath.Rel(o.dir, path)
-		if relErr != nil {
-			return relErr
-		}
-		if d.IsDir() {
-			got[rel+"/"] = ""
-			return nil
-		}
-		b, readErr := os.ReadFile(path)
-		if readErr != nil {
-			return readErr
-		}
-		got[rel] = string(b)
-		return nil
-	})
-	require.NoError(t, err)
-	return got
-}
-
-// assertIntact fails if anything outside was created, modified or removed.
-func (o *outsideTree) assertIntact(t *testing.T, before map[string]string) {
-	t.Helper()
-	assert.Equal(t, before, o.snapshot(t),
-		"the tree outside the served directory changed; a handler followed a symlink out of it")
-}
-
-// assertNotLeaked fails if a response body carries content from outside.
-func assertNotLeaked(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	assert.NotContains(t, rec.Body.String(), outsideSecret,
-		"response leaked content from outside the served directory")
-}
-
-// plantSymlinks lays the four link shapes of the matrix into base, alongside
-// one genuinely inside file for the allowed cases to resolve to.
-//
-// The two dangling forms are kept separate on purpose. os.Root refuses every
-// absolute link outright, whether or not its target exists, while a relative
-// link to a missing name inside the base is an ordinary not-found — the two
-// arrive at the handlers as different errors and must both be shown to be safe.
-func plantSymlinks(t *testing.T, base string, outside *outsideTree) {
-	t.Helper()
-
-	require.NoError(t, os.MkdirAll(filepath.Join(base, "real"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(base, "real", "inside.txt"), []byte("inside content"), 0644))
-
-	// Escaping leaf: a link whose target is a file outside the base.
-	require.NoError(t, os.Symlink(filepath.Join(outside.dir, "secret.txt"), filepath.Join(base, "esc_leaf")))
-	// Escaping intermediate directory: a link used as a path component, so
-	// that everything addressed beneath it resolves outside the base.
-	require.NoError(t, os.Symlink(outside.dir, filepath.Join(base, "esc_dir")))
-	// Inside link: resolves back into the base, and is allowed.
-	require.NoError(t, os.Symlink("real/inside.txt", filepath.Join(base, "in_link")))
-	require.NoError(t, os.Symlink("real", filepath.Join(base, "in_dir")))
-	// Dangling, absolute and outside.
-	require.NoError(t, os.Symlink(filepath.Join(outside.dir, "no-such-file"), filepath.Join(base, "dangling")))
-	// Dangling, relative and inside.
-	require.NoError(t, os.Symlink("no-such-file", filepath.Join(base, "dangling_rel")))
-}
 
 // symlinkBase is one of the two trees the browser serves.
 type symlinkBase struct {

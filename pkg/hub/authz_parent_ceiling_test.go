@@ -24,84 +24,11 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-type parentCeilingFixture struct {
-	authz     *AuthzService
-	store     store.Store
-	projectID string
-	userID    string
-}
-
-func newParentCeilingFixture(t *testing.T, name string) parentCeilingFixture {
-	t.Helper()
-	authz, s := setupDelegationCeilingTest(t)
-	f := parentCeilingFixture{
-		authz:     authz,
-		store:     s,
-		projectID: tid("pc-proj-" + name),
-		userID:    tid("pc-user-" + name),
-	}
-	createDCProject(t, s, f.projectID, "pc-"+name)
-	createDCUser(t, s, f.userID, name+"@pc.test", f.projectID, store.ProjectRoleOwner)
-	return f
-}
-
-// chain stores agents ids[0..n-1] in the fixture project: the user
-// delegates to ids[0] and each agent delegates to the next.
-func (f parentCeilingFixture) chain(t *testing.T, ids ...string) {
-	t.Helper()
-	prev, prevType := f.userID, store.DelegationPrincipalUser
-	for _, id := range ids {
-		createDCAgent(t, f.store, id, f.projectID, prev, AgentRoleFull)
-		seedRecordedDelegationEdge(t, f.store, prevType, prev, store.DelegationPrincipalAgent, id,
-			store.RoleScopeProject, f.projectID, string(AgentRoleFull))
-		prev, prevType = id, store.DelegationPrincipalAgent
-	}
-}
-
-func (f parentCeilingFixture) agent(id string) AgentIdentity {
-	return dcAgentIdentity(id, f.projectID, AgentRoleFull)
-}
-
-func (f parentCeilingFixture) projectRead(t *testing.T, id string) Decision {
-	t.Helper()
-	return decidePerm(f.authz, f.agent(id), Resource{Type: "project", ID: f.projectID}, ActionRead, "project.read", false)
-}
-
-func (f parentCeilingFixture) agentCreate(t *testing.T, id string) Decision {
-	t.Helper()
-	return decidePerm(f.authz, f.agent(id), Resource{Type: "agent", ParentType: "project", ParentID: f.projectID}, ActionCreate, "agent.create", false)
-}
-
-// userRoleHolds reports whether userID holds perm through its roles in the
-// project (a project target, so no named relationship applies).
-func userRoleHolds(t *testing.T, a *AuthzService, userID, perm, projectID string) bool {
-	t.Helper()
-	ok, _, err := a.evaluateUserDelegatorAuthority(context.Background(), userID,
-		Resource{Type: "project", ID: projectID}, ActionRead, perm, store.RoleScopeProject, projectID)
-	require.NoError(t, err)
-	return ok
-}
-
-func softDeleteStoredAgent(t *testing.T, s store.Store, id string) {
-	t.Helper()
-	a, err := s.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	a.DeletedAt = time.Now()
-	require.NoError(t, s.UpdateAgent(context.Background(), a))
-}
-
-func assertCeilingDeny(t *testing.T, d Decision, msg string) {
-	t.Helper()
-	assert.False(t, d.Allowed, "%s: reason %q", msg, d.Reason)
-	assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "%s: reason %q", msg, d.Reason)
-}
 
 // assertCeilingDenyCause is assertCeilingDeny plus the DenyCause the
 // ceiling recorded, which selects the SA-assign 403 text.

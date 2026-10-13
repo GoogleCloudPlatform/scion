@@ -19,8 +19,6 @@
  * and the window-level refetch triggers.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, createHarness, settle } from './__fixtures__/agent-store-harness.js';
 import { AGENT_PROBE_INTERVAL_MS, AgentStore, agentQueryKey } from './agent-store.js';

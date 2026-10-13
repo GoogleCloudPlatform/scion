@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -36,10 +35,8 @@ import (
 
 // AccessConstraintStore implements store.AccessConstraintStore using Ent ORM.
 type AccessConstraintStore struct {
-	client      *ent.Client
-	dialectOnce sync.Once
-	dialectName string
-	inTx        bool
+	client *ent.Client
+	inTx   bool
 }
 
 // NewAccessConstraintStore creates a new Ent-backed AccessConstraintStore.
@@ -48,13 +45,10 @@ func NewAccessConstraintStore(client *ent.Client) *AccessConstraintStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-func (s *AccessConstraintStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.AccessConstraint.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// The dialect is read from the driver with no query, the same idiom as
+// BrokerSettingStore.usesRowLocks.
+func (s *AccessConstraintStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // entAccessConstraintToStore converts an Ent AccessConstraint entity to a
@@ -267,9 +261,7 @@ func (s *AccessConstraintStore) UpdateAccessConstraint(ctx context.Context, c *s
 		return nil, err
 	}
 
-	// Detect dialect before starting a transaction to avoid deadlocking on
-	// single-connection SQLite backends (MaxOpenConns=1).
-	rowLocks := s.usesRowLocks(ctx)
+	rowLocks := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {

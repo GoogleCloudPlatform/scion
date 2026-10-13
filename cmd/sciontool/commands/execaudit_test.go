@@ -105,6 +105,10 @@ var execAuditSymbolAllowlist = map[string]map[string]bool{
 	// exec.Command call sites (pkg/util/git.go) are listed in
 	// execAuditFileAllowlist above.
 	"pkg/util": {"NormalizeGitRemote": true, "ClassifyGitError": true, "GitErrAuth": true, "GetHomeDir": true, "ParseBoolEnv": true},
+	// init.go's only use of pkg/provision: GitTokenCredentialHelper is a
+	// string constant (the git credential helper value it writes to the
+	// agent's gitconfig); no exec.Cmd is reachable through it.
+	"pkg/provision": {"GitTokenCredentialHelper": true},
 }
 
 // execAuditTrustedDir is excluded from scanning outright rather than via

@@ -1052,7 +1052,10 @@ func (s *Server) handleProjectMetricsSummary(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusOK, data)
 }
 
-// handleMetricsDashboard serves the metrics dashboard API to any authenticated user.
+// handleMetricsDashboard serves the hub-wide metrics dashboard API.
+// Authorization: the route guard requires hub.metrics.read on the hub
+// (route_metadata.go: admin.metricsDashboard); a user access token needs the
+// hub_metrics:read selector on a hub boundary.
 func (s *Server) handleMetricsDashboard(w http.ResponseWriter, r *http.Request) {
 	identity := GetUserIdentityFromContext(r.Context())
 	if identity == nil {
@@ -1063,12 +1066,10 @@ func (s *Server) handleMetricsDashboard(w http.ResponseWriter, r *http.Request) 
 	s.serveMetricsDashboard(w, r)
 }
 
-// handleAdminMetricsDashboard serves the metrics dashboard API (legacy admin-scoped path).
-// Kept for backward compatibility — delegates to the same handler with relaxed auth.
-// NOTE: This endpoint intentionally no longer requires admin role. The metrics dashboard
-// was moved from admin-only to all-authenticated-users access as part of the metrics
-// dashboard refactoring. The old admin-scoped URL is maintained for browser bookmark
-// backward compatibility and will be removed in a future release.
+// handleAdminMetricsDashboard serves the metrics dashboard API on the legacy
+// /api/v1/admin/metrics-dashboard path. It applies the same rule as
+// handleMetricsDashboard: the route guard requires hub.metrics.read on the
+// hub (route_metadata.go: admin.metricsDashboard.legacy).
 func (s *Server) handleAdminMetricsDashboard(w http.ResponseWriter, r *http.Request) {
 	identity := GetUserIdentityFromContext(r.Context())
 	if identity == nil {

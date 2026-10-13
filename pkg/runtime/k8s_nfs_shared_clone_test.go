@@ -51,7 +51,6 @@ func TestBuildPod_NFSSharedPlainGit_InitContainerClonesSharedWorkspace(t *testin
 
 	require.GreaterOrEqual(t, len(ic.Command), 4)
 	assert.Equal(t, []string{"sciontool", "provision", "--depth", "0"}, ic.Command[:4])
-	assert.NotContains(t, ic.Command, "--wait-for-sentinel")
 
 	env := map[string]string{}
 	for _, e := range ic.Env {

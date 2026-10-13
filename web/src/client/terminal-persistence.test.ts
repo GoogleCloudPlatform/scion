@@ -813,8 +813,6 @@ describe('restore()', () => {
     async (_label, impl) => {
       vi.useFakeTimers();
       const f = fixture();
-      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- vi.fn()'s
-      // generic mock type does not narrow to the async apiFetch signature here.
       f.fetchImpl.mockImplementationOnce(impl);
 
       await f.persistence.restore(false);

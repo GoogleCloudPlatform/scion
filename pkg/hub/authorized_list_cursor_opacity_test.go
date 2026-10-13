@@ -245,19 +245,6 @@ func setupCursorOpacityTemplates(t *testing.T, s store.Store, carolID string) {
 	}
 }
 
-// getTemplatesPage requests /api/v1/templates with the given raw query
-// string as user, and returns the decoded response alongside the raw
-// recorder (for status-code assertions).
-func getTemplatesPage(t *testing.T, srv *Server, user *store.User, rawQuery string) (*httptest.ResponseRecorder, ListTemplatesResponse) {
-	t.Helper()
-	rec := doRequestAsUser(t, srv, user, http.MethodGet, "/api/v1/templates?"+rawQuery, nil)
-	var resp ListTemplatesResponse
-	if rec.Code == http.StatusOK {
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	}
-	return rec, resp
-}
-
 func assertInvalidCursor(t *testing.T, rec *httptest.ResponseRecorder) {
 	t.Helper()
 	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
@@ -464,16 +451,6 @@ func TestListTemplatesCursor_CrossCallerReuseRejected(t *testing.T) {
 	rec2, resp2 := getTemplatesPage(t, srv, carol, "scope=user&limit=1&cursor="+first.NextCursor)
 	require.Equal(t, http.StatusOK, rec2.Code, rec2.Body.String())
 	require.Len(t, resp2.Templates, 1)
-}
-
-// scopedCursorBindingForTemplatesTest reconstructs the exact binding
-// listTemplatesV2 computes for a scope=user request, so tests can Open a
-// real cursor directly. Kept in lockstep with listTemplatesV2's filter
-// construction; if that handler's filter shape changes, update this too.
-func scopedCursorBindingForTemplatesTest(user *store.User, scope, scopeID string) string {
-	filter := store.TemplateFilter{Scope: scope, ScopeID: scopeID, Status: store.TemplateStatusActive}
-	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "api")
-	return scopedCursorBinding("templates", filter, identity)
 }
 
 // ----------------------------------------------------------------------------

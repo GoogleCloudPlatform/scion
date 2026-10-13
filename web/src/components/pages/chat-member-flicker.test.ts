@@ -34,8 +34,6 @@
  *     consumer of the shared `stateManager` (e.g. another page re-seeding).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { apiFetch } from '../../client/api.js';
 
@@ -48,15 +46,16 @@ const fakeState = vi.hoisted(() => {
   t.getDeletedAgentIds = () => new Set<string>();
   t.seedAgents = (list: any[]) => list.forEach((a) => t.agents.set(a.id, a)); // additive, like the real one
   t.removeAgent = (id: string) => t.agents.delete(id); // matches real stateManager.removeAgent: no notify
+  t.getAgent = (id: string) => t.agents.get(id);
+  // Seed epochs record nothing here.
+  t.scopeGeneration = 0;
+  t.beginSeedEpoch = () => Symbol('seed-epoch');
+  t.endSeedEpoch = () => {};
   return t;
 });
 
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  pushRoute: vi.fn((path: string) => {
-    window.history.pushState({}, '', path);
-    return Promise.resolve();
-  }),
+vi.mock('../../client/main.js', async () => ({
+  ...(await import('../../client/__fixtures__/main-stub.js')),
   stateManager: fakeState,
 }));
 vi.mock('../../client/api.js', async (orig) => ({
@@ -104,8 +103,8 @@ const liveMemberResponse = {
 };
 
 function mockMembersResponse(agents: unknown[]): void {
-  vi.mocked(apiFetch).mockImplementation(
-    async () => new Response(JSON.stringify({ humans: [], agents }), { status: 200 })
+  vi.mocked(apiFetch).mockImplementation(() =>
+    Promise.resolve(new Response(JSON.stringify({ humans: [], agents }), { status: 200 }))
   );
 }
 

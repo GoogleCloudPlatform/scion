@@ -30,63 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// addProjectMemberWithRole is a small helper that adds the given user to the
-// project's members group with the requested role.
-func addProjectMemberWithRole(t *testing.T, s store.Store, project *store.Project, userID, role string) {
-	t.Helper()
-	ctx := context.Background()
-	membersGroup, err := s.GetGroupBySlug(ctx, "project:"+project.Slug+":members")
-	require.NoError(t, err)
-	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{
-		GroupID:    membersGroup.ID,
-		MemberType: store.GroupMemberTypeUser,
-		MemberID:   userID,
-		Role:       role,
-	}))
-
-	// Phase 1F: also create the corresponding project role binding, since
-	// isProjectOwnerOrAdmin now uses role bindings as the sole source of truth.
-	groupRoleMap := map[string]string{
-		store.GroupMemberRoleOwner:  store.ProjectRoleOwner,
-		store.GroupMemberRoleAdmin:  store.ProjectRoleAdmin,
-		store.GroupMemberRoleMember: store.ProjectRoleMember,
-	}
-	if roleName, ok := groupRoleMap[role]; ok {
-		rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeProject)
-		require.NoError(t, err, "project role definition %q not found", roleName)
-		_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-			RoleDefinitionID: rd.ID,
-			PrincipalType:    store.RoleBindingPrincipalUser,
-			PrincipalID:      userID,
-			ScopeType:        store.RoleScopeProject,
-			ScopeID:          project.ID,
-			CreatedBy:        "test",
-		})
-		if err != nil && err != store.ErrAlreadyExists {
-			t.Fatalf("failed to create project role binding: %v", err)
-		}
-	}
-}
-
-// makeProjectMemberUser creates a user, adds them to hub-members, and adds them
-// to the project's members group with the given role.
-func makeProjectMemberUser(t *testing.T, s store.Store, project *store.Project, id, name, role string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	u := &store.User{
-		ID:          id,
-		Email:       id + "@test.com",
-		DisplayName: name,
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, u))
-	ensureHubMembership(ctx, s, u.ID)
-	addProjectMemberWithRole(t, s, project, u.ID, role)
-	return u
-}
-
 // =============================================================================
 // AuthzService.CheckAccess: project owner/admin bypass
 // =============================================================================

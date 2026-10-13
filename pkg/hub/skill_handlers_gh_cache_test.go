@@ -18,11 +18,7 @@ package hub
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
-	"crypto/x509"
 	"encoding/json"
-	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -1225,19 +1221,6 @@ func TestResolveGitHubSkill_RefreshFailureBackoffSkipsRetry(t *testing.T) {
 
 	assert.Equal(t, int64(0), calls.Load(),
 		"must not retry a refresh while within the refresh-failure backoff window")
-}
-
-// generateTestGitHubAppKey generates a throwaway RSA private key in PEM
-// format, suitable for configuring a fake GitHub App client in tests.
-func generateTestGitHubAppKey(t *testing.T) string {
-	t.Helper()
-	key, err := rsa.GenerateKey(rand.Reader, 2048)
-	require.NoError(t, err)
-	pemBytes := pem.EncodeToMemory(&pem.Block{
-		Type:  "RSA PRIVATE KEY",
-		Bytes: x509.MarshalPKCS1PrivateKey(key),
-	})
-	return string(pemBytes)
 }
 
 // TestSkillsResolve_GHCacheHitForCredentialedBranchRef is the acceptance test

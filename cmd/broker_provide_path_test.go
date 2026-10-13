@@ -88,17 +88,17 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 						return
 					}
 					_, _ = w.Write([]byte(`{"id":"` + id + `","name":"` + n + `"}`))
-				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/register":
-					var req hubclient.RegisterProjectRequest
+				case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+target+"/providers":
+					var req hubclient.AddProviderRequest
 					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
 					mu.Lock()
-					p := req.Path
+					p := req.LocalPath
 					gotPath = &p
 					mu.Unlock()
-					_, _ = w.Write([]byte(`{"project":{"id":"` + target + `","name":"proj","slug":"proj"}}`))
+					_, _ = w.Write([]byte(`{"provider":{"projectId":"` + target + `","brokerId":"` + req.BrokerID + `"}}`))
 				default:
 					http.NotFound(w, r)
 				}
@@ -156,7 +156,7 @@ func TestRunBrokerProvide_RegisteredPath(t *testing.T) {
 			mu.Lock()
 			defer mu.Unlock()
 			if gotPath == nil {
-				t.Fatal("the hub received no register request")
+				t.Fatal("the hub received no add-provider request")
 			}
 			if !tc.wantLinkedPath {
 				if *gotPath != "" {

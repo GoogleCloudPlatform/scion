@@ -19,11 +19,9 @@ package hub
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,36 +94,6 @@ func TestCreateAgent_MissingEnvVars_ReleasesQuota(t *testing.T) {
 		"a missing-env-vars failure must release the per-broker reservation")
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, disp.capturedAgent.ID),
 		"a missing-env-vars failure must release the per-project reservation")
-}
-
-// failingManagedAgentBackend is a managedagent.ManagedAgentBackend whose
-// CreateInteraction always fails, simulating a cloud-provider error during
-// managed-agent creation (handlers_managed_agents.go's managedAgentCreate).
-// Swapping the package-level managedBackendInst under managedBackendMu is an
-// existing test seam (see stubManagedAgentBackend in
-// handlers_agent_messaging_test.go).
-type failingManagedAgentBackend struct{}
-
-func (failingManagedAgentBackend) Name() string { return "failing-managed" }
-
-func (failingManagedAgentBackend) CreateAgent(_ context.Context, _ managedagent.CreateAgentConfig) (string, error) {
-	return "", fmt.Errorf("simulated managed agent create failure")
-}
-
-func (failingManagedAgentBackend) DeleteAgent(_ context.Context, _ string) error { return nil }
-
-func (failingManagedAgentBackend) CreateInteraction(_ context.Context, _ managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
-	return nil, fmt.Errorf("simulated managed agent create failure")
-}
-
-func (failingManagedAgentBackend) GetInteraction(_ context.Context, _ string) (*managedagent.InteractionState, error) {
-	return nil, fmt.Errorf("not implemented")
-}
-
-func (failingManagedAgentBackend) CancelInteraction(_ context.Context, _ string) error { return nil }
-
-func (failingManagedAgentBackend) StreamInteraction(_ context.Context, _ string, _ string) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("not implemented")
 }
 
 // TestCreateAgent_ManagedAgentCreateFailure_ReleasesQuota exercises the

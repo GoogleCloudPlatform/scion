@@ -87,30 +87,6 @@ func TestListProjectAgentsSorted_DecisionCounts_DesignSizes(t *testing.T) {
 	}
 }
 
-// grantProjectListOnly binds userID to a project-scoped role carrying only
-// "agent.list" — no "agent.read" — so the project's agent.list gate passes
-// but no agent is readable except through a resource-level relationship
-// grant (ownership), independent of any role permission (pkg/hub/
-// authz_relationship_rules.go; confirmed unconditional-of-role-bindings by
-// TestAuthz_OwnerBypass, pkg/hub/authz_test.go). This is how a single
-// caller, one project, one role, reads exactly its owned subset of agents —
-// the project endpoint's agent.read is otherwise all-or-nothing per
-// (principal, project) via role bindings and has no other per-resource
-// visibility narrowing (needed to get a readable count R < n).
-func grantProjectListOnly(t *testing.T, s store.Store, userID, projectID, roleName string) {
-	t.Helper()
-	rd := createTestRoleDefinition(t, s, roleName, store.RoleScopeProject, []string{"agent.list"})
-	_, err := s.CreateRoleBinding(context.Background(), &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // TestListProjectAgentsSorted_DecisionCounts_PartialRead_Paged is the
 // partial-read paged decision-count case: n=1200, R=400 (paged), exactly
 // 1380 decisions (5 + n + 7P with P=25).

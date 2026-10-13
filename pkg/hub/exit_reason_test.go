@@ -33,6 +33,8 @@ func TestIsValidExitReason(t *testing.T) {
 		// Valid: Kubernetes pod disruption reasons
 		{"preempted", true},
 		{"evicted", true},
+		// Valid: OOM kill
+		{"oom_killed", true},
 		// Invalid: non-terminal activities
 		{"working", false},
 		{"thinking", false},
@@ -79,6 +81,8 @@ func TestExitStatusMessage(t *testing.T) {
 		{"empty reason, non-zero exit", state.ExitReason(""), &ec137, "Agent crashed with exit code 137"},
 		{"empty reason, nil exit", state.ExitReason(""), nil, ""},
 		{"limits_exceeded, non-zero exit", state.ExitReasonLimitsExceeded, &ec137, "Agent crashed with exit code 137"},
+		{"oom_killed, non-zero exit", state.ExitReasonOOMKilled, &ec137, "Agent container was killed for exceeding its memory limit, exit code 137"},
+		{"oom_killed, nil exit", state.ExitReasonOOMKilled, nil, "Agent container was killed for exceeding its memory limit"},
 	}
 
 	for _, tc := range tests {
@@ -88,6 +92,21 @@ func TestExitStatusMessage(t *testing.T) {
 				t.Errorf("exitStatusMessage(%q, %v) = %q, want %q", tc.reason, tc.exitCode, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestIsCrashExitCodeMessage(t *testing.T) {
+	for msg, want := range map[string]bool{
+		"Agent crashed with exit code 137": true,
+		"Agent crashed with exit code -1":  true,
+		"Agent crashed with exit code ":    false,
+		"Agent crashed with exit code 1x":  false,
+		"Agent stopped":                    false,
+		"custom":                           false,
+	} {
+		if got := isCrashExitCodeMessage(msg); got != want {
+			t.Errorf("isCrashExitCodeMessage(%q) = %v, want %v", msg, got, want)
+		}
 	}
 }
 

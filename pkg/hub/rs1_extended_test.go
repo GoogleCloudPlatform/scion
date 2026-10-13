@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -27,7 +26,6 @@ import (
 	"go/token"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,11 +117,18 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 		"seed.go":                         "bootstrap seeding: creates initial system/hub-level role bindings, not project membership",
 		"server.go":                       "server initialization: system-level bootstrap, not project membership",
 		"handlers_users_core.go":          "user admin role sync: creates/deletes system-scoped super-admin and hub-member bindings inside atomic role transitions, guarded by CanDelegate and per-field permission checks",
+		"project_fixture_purge.go":        "test identity purge (ptone/scion#4240): removes only the purged test identity's own bindings on a stamped project it keeps, inside the purge transaction under the project lock, right before the identity is deleted; not a membership mutation of any other principal",
 	}
 
 	// Scan all .go files in pkg/hub for direct CreateRoleBinding calls.
 	hubDir := filepath.Join(repoRoot, "pkg", "hub")
-	entries, err := os.ReadDir(hubDir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards Create/DeleteRoleBinding call sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards Create/DeleteRoleBinding call sites.
+	entries, err := readGuardScanDirs(hubDir)
 	require.NoError(t, err)
 
 	fset := token.NewFileSet()
@@ -175,49 +180,6 @@ func TestRS1_AST_BypassPathsDocumented(t *testing.T) {
 // (b) Scoped UAT credential tests — R2-R3: mint real UATs through production
 // token path and exercise actual cross-project denial.
 // ---------------------------------------------------------------------------
-
-// doRequestWithUAT makes an HTTP request authenticated with a real scoped UAT.
-func doRequestWithUAT(t *testing.T, srv *Server, uatKey, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+uatKey)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// rs4MintContext returns a context with the actor identity and credential
-// context required by the RS4 bounded UAT service for audit record creation.
-func rs4MintContext(userID string) context.Context {
-	identity := NewAuthenticatedUser(userID, userID+"@test.com", "Test User", "member", string(ClientTypeAPI))
-	ctx := contextWithIdentity(context.Background(), identity)
-	return contextWithCredentialContext(ctx, CredentialContext{Kind: CredentialKindInteractive, ID: "test-session"})
-}
-
-// mintScopedUAT mints a real scoped UAT through the production token service.
-// RS4: The issuer must have role bindings with the requested scopes in the
-// target project; the context must carry the actor identity for audit.
-func mintScopedUAT(t *testing.T, srv *Server, userID, projectID string, scopes []string) string {
-	t.Helper()
-	ctx := rs4MintContext(userID)
-	key, _, err := srv.uatService.CreateToken(
-		ctx, userID, "test-uat", projectID, scopes, nil,
-	)
-	require.NoError(t, err, "failed to mint scoped UAT")
-	return key
-}
 
 func TestRS1_ScopedUAT_SameProjectAllowed(t *testing.T) {
 	srv, s := testServer(t)
@@ -1470,7 +1432,6 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 	// a DB() method, which simulates a missing raw-DB capability.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store in a type that hides the DB() method.
@@ -1483,16 +1444,10 @@ func TestRS1_D4_IndexInstallationFailClosed(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, noDBStore)
+	_, err = newTestHubServer(t, cfg, noDBStore)
 	require.Error(t, err, "RS1 R4-1: NewServer must fail if D4 index cannot be installed")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R4-1: error must mention D4 membership index")
-}
-
-// noDBStore wraps a store.Store but does NOT expose DB(). This simulates
-// the case where the store doesn't support raw database access.
-type noDBStore struct {
-	store.Store
 }
 
 // TestRS1_D4_DDLFailurePath proves that a DDL execution failure during D4
@@ -1502,7 +1457,6 @@ type noDBStore struct {
 func TestRS1_D4_DDLFailurePath(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	// Wrap the store with one that drops the role_bindings table when DB()
@@ -1518,7 +1472,7 @@ func TestRS1_D4_DDLFailurePath(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, ddlFail)
+	_, err = newTestHubServer(t, cfg, ddlFail)
 	require.Error(t, err, "RS1 R5-2: NewServer must fail when DDL ExecContext returns an error")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"RS1 R5-2: error must mention D4 DDL failure, not just missing DB (got: %s)", err.Error())
@@ -1552,7 +1506,6 @@ func (s *ddlFailStore) DB() *sql.DB {
 func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 	_ = s.DeleteHubSetting(context.Background(), "migration_delegation_edge_backfill_v1")
 
 	realDB := s.(interface{ DB() *sql.DB }).DB()
@@ -1596,7 +1549,7 @@ func TestRS1_D4_CreateIndexFailure_Rollback(t *testing.T) {
 		DisplayName: "Development User",
 		Email:       "dev@localhost",
 	}
-	_, err = New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	require.Error(t, err, "NewServer must fail when CREATE INDEX fails due to conflicting data")
 	assert.Contains(t, err.Error(), "D4 membership index",
 		"error must mention D4 failure (got: %s)", err.Error())
@@ -2612,22 +2565,6 @@ func TestRS1_StaleAuthorityForcedOverlap_Transfer(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-func findRS1RepoRoot(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			t.Fatal("cannot find repo root (no go.mod found)")
-		}
-		dir = parent
-	}
-}
 
 // Suppress unused import warnings for packages used in specific tests.
 var _ = strings.Contains

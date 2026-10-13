@@ -254,7 +254,9 @@ func TestRunLaunch_ClaimCompleted_SkipsRuntimeCheckpoints(t *testing.T) {
 // with hub_unreachable, and the failed report's applied answer cleans up the
 // handles recorded so far.
 func TestRunLaunch_CheckpointUnreachable_FailsHubUnreachableAndCleansUp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	// The earlier checkpoints are answered at once, so this budget is spent
+	// almost entirely on the unreachable pod_create checkpoint.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 	mgr, rtb, _ := runHookedLaunch(t, ctx, func(step string) (*hubclient.AgentLaunchReportResult, error) {
 		if step == "pod_create" {

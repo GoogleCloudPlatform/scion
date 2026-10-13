@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,23 +27,31 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var (
-	artifactPublishTitle string
-	artifactPublishKey   string
-	artifactPublishNote  string
-	artifactPublishEntry string
-	artifactGetOut       string
-	artifactGetForce     bool
+	artifactPublishTitle  string
+	artifactPublishKey    string
+	artifactPublishNote   string
+	artifactPublishEntry  string
+	artifactPublishReview string
+	artifactPublishOf     string
+	artifactGetOut        string
+	artifactGetForce      bool
+	artifactGetClean      bool
+	artifactGetAccept     bool
+	artifactGetKind       string
 )
 
 // artifactCmd is the command group for artifacts.
@@ -60,8 +69,26 @@ Artifacts require Hub mode and the hub.artifacts experiment.
 
 Commands:
   scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
-  scion artifact get <ref> [--out <path>]      Fetch an artifact
-  scion artifact versions <ref>                List an artifact's versions`,
+  scion artifact publish <file|dir> --version-of <ref> [--note]
+  scion artifact publish <file|dir> --review <ref> [--note]
+  scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
+  scion artifact versions <ref>                List an artifact's versions
+  scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
+  scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
+	// Args/Run make this command Runnable so cobra validates subcommand
+	// names, as for "scion hub": an unrecognized subcommand, including one
+	// the CLI mode removed (such as share in agent mode), returns an
+	// "unknown command" error with a non-zero exit instead of falling
+	// through to this command's help with exit status 0. A bare
+	// "artifact", and "artifact help ...", print help through pflag.ErrHelp.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 || args[0] == "help" {
+			return pflag.ErrHelp
+		}
+		return cobra.NoArgs(cmd, args)
+	},
+	// Must be Runnable for the Args validator above to be evaluated.
+	Run: func(cmd *cobra.Command, args []string) {},
 }
 
 var artifactPublishCmd = &cobra.Command{
@@ -78,15 +105,43 @@ folders, whose names start with ".", are left out; symbolic links inside
 the folder are refused). Its entry file, the one the web UI opens, is --entry, or else
 index.html, index.md or README.md at the top of the folder.
 
+An HTML entry file is shown in a sandboxed frame. The page's scripts run in
+an isolated origin; they cannot reach the hub page around the frame, your
+session or the hub's API. Relative links (img/chart.png, css/site.css) load
+the bundle's own files. Remote images are not loaded, so include them in
+the bundle; publishing warns when an HTML entry references them. See "HTML
+artifacts" in the artifacts reference.
+
 With --key, publishing again under the same key adds a new version to the
 same artifact instead of creating another one. Files unchanged since the
 current version are not uploaded again. --note describes the version.
+
+With --version-of <ref>, the file or folder is published as the next
+version of that artifact (yours, or one you may write), keyed or not. A
+single file replaces the current version's entry file, whatever the local
+file is named; the bundle's other files are carried over unchanged. A
+folder is the whole new bundle.
+
+With --review <ref>, the file or folder is published as a review of that
+artifact: a new version of kind review whose text carries CriticMarkup
+marks ({>>comment<<}, {~~old~>new~~}, {++insert++}, {--delete--},
+{==highlight==}). It becomes the artifact's current version and the
+artifact's owner is notified. A review may change nothing outside marks:
+the hub rejects it, listing the changed lines, when its text with every
+mark rejected differs from the version it was made against. That version
+is the current one when the review starts; if another version is
+published before the review is saved, the review is refused and must be
+made again against the new version. A single file reviews the entry file
+of the current version; the other files of a bundle are carried over
+unchanged.
 
 Examples:
   scion artifact publish design.md
   scion artifact publish report.md --title "Q3 report"
   scion artifact publish design.md --key design --note "round 2"
-  scion artifact publish ./site --entry index.html --title "Q3 site"`,
+  scion artifact publish ./site --entry index.html --title "Q3 site"
+  scion artifact publish plan.md --version-of scion://artifact/5f1c2d3e-...
+  scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		settings, client, err := requireArtifactHubClient()
@@ -101,7 +156,9 @@ Examples:
 // none: the hub homes the artifact in the agent's own project. A user names
 // the hub project of the current checkout, never a local-only project id.
 func artifactPublishScope(settings *config.Settings) string {
-	if config.IsHubManagedAgent() {
+	// With a hub profile the agent is not an agent on the target hub: the
+	// project is the one named with --project (requireArtifactHubClient).
+	if config.IsHubManagedAgent() && !hubProfileSelected() {
 		return ""
 	}
 	return settings.GetHubProjectID()
@@ -110,6 +167,9 @@ func artifactPublishScope(settings *config.Settings) string {
 // checkArtifactPublishScope fails a user's publish early, before any
 // upload, when the checkout names no hub project to publish into.
 func checkArtifactPublishScope(settings *config.Settings) error {
+	if hubProfileSelected() && artifactPublishScope(settings) == "" {
+		return errors.New("with a hub profile, name the project on the target hub to publish into with --project <name or id>")
+	}
 	if !config.IsHubManagedAgent() && artifactPublishScope(settings) == "" {
 		return errors.New("this checkout is not linked to a hub project; link it first (scion hub link) to publish artifacts")
 	}
@@ -129,6 +189,18 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 	info, err := os.Stat(file)
 	if err != nil {
 		return err
+	}
+	if artifactPublishReview != "" && artifactPublishOf != "" {
+		return errors.New("--review and --version-of cannot be used together")
+	}
+	if artifactPublishReview != "" || artifactPublishOf != "" {
+		if opts.Title != "" || opts.Key != "" {
+			return errors.New("--title and --key do not apply with --review or --version-of, which add a version to the artifact they name")
+		}
+		if artifactPublishReview != "" {
+			return publishReview(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishReview, opts)
+		}
+		return publishVersionOf(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishOf, opts)
 	}
 	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
 		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
@@ -151,25 +223,37 @@ entry file is written to stdout, or with --out every file of the version
 is written under the --out directory (created if needed), keeping its
 relative path.
 
+--clean and --accept resolve the CriticMarkup marks of a review in every
+text file: --clean rejects them all (the text the reviewer started from),
+--accept accepts them all. --kind publish fetches the newest version of
+kind publish (at or before <ref>'s version), skipping reviews.
+
 Every file is checked against the size and sha256 recorded at publish
-time before it is written; a mismatch writes nothing for that file and
-fails. With --out, only plain relative names are written (none starting
-with "."), never through a symbolic link below the --out directory, and a
-file that already exists is replaced only with --force.
+time before it is written (before --clean or --accept is applied); a
+mismatch writes nothing for that file and fails. With --out, only plain
+relative names are written (none starting with "."), never through a
+symbolic link below the --out directory, and a file that already exists
+is replaced only with --force.
 
 Examples:
   scion artifact get scion://artifact/5f1c2d3e-...
   scion artifact get scion://artifact/5f1c2d3e-...@1 --out ./design.md
-  scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./v2/`,
+  scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./v2/
+  scion artifact get scion://artifact/5f1c2d3e-... --clean
+  scion artifact get scion://artifact/5f1c2d3e-... --kind publish`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		_, client, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
+		opts, err := artifactGetOptions(artifactGetClean, artifactGetAccept, artifactGetKind)
+		if err != nil {
+			return err
+		}
 		ctx, cancel := context.WithTimeout(cmd.Context(), 10*time.Minute)
 		defer cancel()
-		return getArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], artifactGetOut, artifactGetForce)
+		return getArtifactWith(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), args[0], artifactGetOut, artifactGetForce, opts)
 	},
 }
 
@@ -201,8 +285,13 @@ func init() {
 	artifactPublishCmd.Flags().StringVar(&artifactPublishKey, "key", "", "Stable key: publishing again under it adds a version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishNote, "note", "", "Note describing this version")
 	artifactPublishCmd.Flags().StringVar(&artifactPublishEntry, "entry", "", "Entry file of a folder, relative to it")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishOf, "version-of", "", "Publish as the next version of the artifact with this reference")
+	artifactPublishCmd.Flags().StringVar(&artifactPublishReview, "review", "", "Publish as a review (CriticMarkup marks only) of the artifact with this reference")
 	artifactGetCmd.Flags().StringVarP(&artifactGetOut, "out", "o", "", "Write to this file or directory instead of stdout")
 	artifactGetCmd.Flags().BoolVar(&artifactGetForce, "force", false, "Replace files that already exist under --out")
+	artifactGetCmd.Flags().BoolVar(&artifactGetClean, "clean", false, "Reject every CriticMarkup mark in text files (the reviewed baseline)")
+	artifactGetCmd.Flags().BoolVar(&artifactGetAccept, "accept", false, "Accept every CriticMarkup mark in text files")
+	artifactGetCmd.Flags().StringVar(&artifactGetKind, "kind", "", "Fetch the newest version of this kind (publish or review)")
 	artifactCmd.AddCommand(artifactPublishCmd, artifactGetCmd, artifactVersionsCmd)
 	rootCmd.AddCommand(artifactCmd)
 }
@@ -210,6 +299,9 @@ func init() {
 // requireArtifactHubClient loads settings and a hub client, failing with an
 // artifact-specific message outside Hub mode.
 func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
+	if hubProfileSelected() {
+		return requireArtifactProfileClient()
+	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
@@ -284,25 +376,56 @@ func artifactPageURL(hubEndpoint, projectID, id string) string {
 	return strings.TrimRight(hubEndpoint, "/") + "/projects/" + url.PathEscape(projectID) + "/artifacts/" + url.PathEscape(id)
 }
 
+// getOptions are the flags of get that select or transform what is read.
+type getOptions struct {
+	// Mode is the CriticMarkup projection applied to text files.
+	Mode critic.Mode
+	// Kind, when set, selects the newest version of that kind at or
+	// before the version the reference names.
+	Kind string
+}
+
+// artifactGetOptions validates get's --clean, --accept and --kind flags.
+func artifactGetOptions(clean, accept bool, kind string) (getOptions, error) {
+	var o getOptions
+	switch {
+	case clean && accept:
+		return o, errors.New("--clean and --accept cannot be used together")
+	case clean:
+		o.Mode = critic.Clean
+	case accept:
+		o.Mode = critic.Accept
+	}
+	switch kind {
+	case "", artifacts.VersionKindPublish, artifacts.VersionKindReview:
+		o.Kind = kind
+	default:
+		return o, fmt.Errorf("--kind must be %s or %s", artifacts.VersionKindPublish, artifacts.VersionKindReview)
+	}
+	return o, nil
+}
+
 // getArtifact fetches the artifact named by ref. A single file, or a
 // bundle's entry file when outPath is empty, goes to outPath or stdout; a
 // bundle with outPath is written under that directory.
 func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, stderr io.Writer, ref, outPath string, replace bool) error {
+	return getArtifactWith(ctx, svc, stdout, stderr, ref, outPath, replace, getOptions{})
+}
+
+// getArtifactWith is getArtifact with version selection and projection.
+// The projection is applied by the CLI after each file is verified against
+// its recorded digest, with the same package the hub uses for ?resolve=.
+func getArtifactWith(ctx context.Context, svc hubclient.ArtifactService, stdout, stderr io.Writer, ref, outPath string, replace bool, opts getOptions) error {
 	id, seq, err := artifacts.ParseRef(ref)
 	if err != nil {
 		return err
 	}
-	var meta *hubclient.ArtifactResponse
-	if seq > 0 {
-		meta, err = svc.GetVersion(ctx, id, seq)
-	} else {
-		meta, err = svc.Get(ctx, id)
-	}
+	meta, err := artifactVersionFor(ctx, svc, id, seq, opts.Kind)
 	if err != nil {
-		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
+		return err
 	}
-	if meta.Version == nil {
-		return fmt.Errorf("artifact %s has no published version", id)
+	if opts.Kind != "" && (seq == 0 || meta.Version.Seq != seq) {
+		_, _ = fmt.Fprintf(stderr, "Using %s (%s)\n", artifacts.FormatRef(id, meta.Version.Seq), meta.Version.Kind)
 	}
 	// Pin every read to the version whose manifest was just read, so the
 	// digests match even if a new version lands meanwhile.
@@ -312,7 +435,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 	// A bundle (several files, or one file inside a folder) is written as
 	// a tree under --out, keeping relative paths.
 	if outPath != "" && (len(files) > 1 || strings.Contains(entry, "/")) {
-		return writeBundle(ctx, svc, stderr, id, seq, files, outPath, replace)
+		return writeBundle(ctx, svc, stderr, id, seq, files, outPath, replace, opts.Mode)
 	}
 	var want *hubclient.ArtifactFile
 	for i := range files {
@@ -337,7 +460,7 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 			return err
 		}
 		defer func() { _ = spool.Close(); _ = os.Remove(spool.Name()) }()
-		if err := copyVerified(spool, rc, want.SHA256, want.Size); err != nil {
+		if err := copyArtifactFile(spool, rc, *want, opts.Mode); err != nil {
 			return err
 		}
 		if _, err := spool.Seek(0, io.SeekStart); err != nil {
@@ -363,11 +486,62 @@ func getArtifact(ctx context.Context, svc hubclient.ArtifactService, stdout, std
 		return err
 	}
 	defer func() { _ = out.Close() }()
-	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyVerified(w, rc, want.SHA256, want.Size) }); err != nil {
+	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyArtifactFile(w, rc, *want, opts.Mode) }); err != nil {
 		return err
 	}
 	_, _ = fmt.Fprintf(stderr, "Wrote %s\n", filepath.Join(dir, name))
 	return nil
+}
+
+// artifactVersionFor returns the metadata of version seq of artifact id (0
+// = current) or, with kind set, of the newest version of that kind at or
+// before it.
+func artifactVersionFor(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, kind string) (*hubclient.ArtifactResponse, error) {
+	var meta *hubclient.ArtifactResponse
+	var err error
+	if seq > 0 {
+		meta, err = svc.GetVersion(ctx, id, seq)
+	} else {
+		meta, err = svc.Get(ctx, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
+	}
+	if meta.Version == nil {
+		return nil, fmt.Errorf("artifact %s has no published version", id)
+	}
+	if kind == "" || meta.Version.Kind == kind {
+		return meta, nil
+	}
+	versions, err := svc.ListVersions(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("list versions: %w%s", err, artifactErrorHint(err, false))
+	}
+	for _, v := range versions {
+		if v.Seq < meta.Version.Seq && v.Kind == kind {
+			meta, err = svc.GetVersion(ctx, id, v.Seq)
+			if err != nil {
+				return nil, fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
+			}
+			return meta, nil
+		}
+	}
+	return nil, fmt.Errorf("artifact %s has no %s version at or before v%d", id, kind, meta.Version.Seq)
+}
+
+// copyArtifactFile copies a file of an artifact to dst, verified like copyVerified.
+// For a text file and a projection other than Raw, the verified bytes are
+// held in memory (at most f.Size) and their projection is written.
+func copyArtifactFile(dst io.Writer, src io.Reader, f hubclient.ArtifactFile, mode critic.Mode) error {
+	if mode == critic.Raw || !artifacts.IsTextMediaType(f.MediaType) {
+		return copyVerified(dst, src, f.SHA256, f.Size)
+	}
+	var buf bytes.Buffer
+	if err := copyVerified(&buf, src, f.SHA256, f.Size); err != nil {
+		return err
+	}
+	_, err := dst.Write(critic.Project(buf.Bytes(), mode))
+	return err
 }
 
 // artifactErrorHint explains the hub's deliberately uniform answers. A read
@@ -380,12 +554,7 @@ func artifactErrorHint(err error, publishing bool) string {
 	}
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == artifacts.CodeMissingScope:
-		scope := "a required"
-		if v, ok := apiErr.Details["scope"].(string); ok && v != "" {
-			scope = "the " + v
-		}
-		return "\nThis agent's credential does not carry " + scope + " scope, usually because the agent was created " +
-			"before artifacts were available to it. Recreate the agent so it is issued a current credential."
+		return missingScopeHint(apiErr.Details)
 	case apiErr.StatusCode == http.StatusUnauthorized:
 		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
@@ -397,6 +566,44 @@ func artifactErrorHint(err error, publishing bool) string {
 		return "\nYou may not publish artifacts in this project, or may not add versions to this artifact."
 	}
 	return ""
+}
+
+// missingScopeHint is the hint for a 403 missing_scope (ptone/scion#4571).
+// It names every scope the hub reported: details.scopes, or the single
+// details.scope an older hub sends. The usual cause is the scope ceiling of
+// the agent's creator, so recreating the agent from the same parent does
+// not help; a scope re-issue does, once the creator holds the scopes, and
+// only a hub super-admin can run it.
+func missingScopeHint(details map[string]any) string {
+	var scopes []string
+	if list, ok := details["scopes"].([]any); ok {
+		for _, v := range list {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		if v, ok := details["scope"].(string); ok && v != "" {
+			scopes = []string{v}
+		}
+	}
+	what := "a required scope"
+	switch len(scopes) {
+	case 0:
+	case 1:
+		what = "the " + scopes[0] + " scope"
+	default:
+		what = "the " + strings.Join(scopes, " and ") + " scopes"
+	}
+	agent := os.Getenv("SCION_AGENT_SLUG")
+	if agent == "" {
+		agent = "<agent>"
+	}
+	return "\nThis agent's credential does not carry " + what + ". The usual cause is the scope ceiling of the " +
+		"agent's creator; recreating the agent from the same parent gives it the same scopes. Ask the agent's user " +
+		"to have a hub super-admin re-issue its scopes once its creator holds them: scion reset-auth " + agent +
+		" --reissue-scopes (parents before children)."
 }
 
 // copyVerified copies src to dst and fails unless the bytes are exactly
@@ -418,4 +625,30 @@ func copyVerified(dst io.Writer, src io.Reader, wantDigest string, size int64) e
 		return errors.New("artifact content does not match its recorded sha256")
 	}
 	return nil
+}
+
+// requireArtifactProfileClient is requireArtifactHubClient with a hub
+// profile: the client acts as the --as identity on the target hub, no local
+// settings are read, and --project names a project on the target (resolved
+// there by name or id) for publish.
+func requireArtifactProfileClient() (*config.Settings, hubclient.Client, error) {
+	s, err := openHubProfileSession(true)
+	if err != nil {
+		return nil, nil, err
+	}
+	client, err := s.Client()
+	if err != nil {
+		return nil, nil, err
+	}
+	settings := &config.Settings{Hub: &config.HubClientConfig{Endpoint: s.Endpoint()}}
+	if projectPath != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		project, err := resolveProjectNameOrID(ctx, client, projectPath)
+		if err != nil {
+			return nil, nil, err
+		}
+		settings.Hub.ProjectID = project.ID
+	}
+	return settings, client, nil
 }

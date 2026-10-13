@@ -22,21 +22,22 @@ type StatsProvider interface {
 	Stats() sql.DBStats
 }
 
-// poolStatsFrom maps a database/sql DBStats snapshot onto the PoolStats gauge
-// set understood by the Recorder.
+// poolStatsFrom maps a database/sql DBStats snapshot onto the PoolStats
+// understood by the Recorder.
 //
-// Note on Waiting: database/sql does not expose an instantaneous "callers
+// Note on WaitCount: database/sql does not expose an instantaneous "callers
 // currently blocked on a connection" gauge. WaitCount is the cumulative number
 // of times a caller had to wait for a connection, which is the canonical
 // pool-saturation signal: a flat WaitCount means the pool is never exhausted, a
 // rising one means callers are queuing (the trigger for the pooler decision in
-// CONNECTION-BUDGET.md). It is reported as-is so dashboards can rate() it.
+// CONNECTION-BUDGET.md). The recorder exports it as a counter
+// (scion.db.pool.connections.wait_count) so dashboards can rate() it.
 func poolStatsFrom(s sql.DBStats) PoolStats {
 	return PoolStats{
-		Active:  int64(s.InUse),
-		Idle:    int64(s.Idle),
-		Waiting: s.WaitCount,
-		Max:     int64(s.MaxOpenConnections),
+		Active:    int64(s.InUse),
+		Idle:      int64(s.Idle),
+		WaitCount: s.WaitCount,
+		Max:       int64(s.MaxOpenConnections),
 	}
 }
 
@@ -45,10 +46,11 @@ func poolStatsFrom(s sql.DBStats) PoolStats {
 // returned stop func is called (whichever happens first). stop is idempotent.
 //
 // It is the P3-6 wiring that feeds the P0-5 monitoring scaffold's pool gauges
-// (scion.db.pool.connections.{active,idle,waiting,max}). When rec is disabled
+// (scion.db.pool.connections.{active,idle,max} and the wait_count counter).
+// pool names the pool (AttrPool). When rec is disabled
 // (no MeterProvider configured) or db is nil, sampling is skipped entirely so
 // there is no idle goroutine in the common no-exporter case.
-func StartPoolSampler(ctx context.Context, rec Recorder, db StatsProvider, interval time.Duration, attrs ...attribute.KeyValue) (stop func()) {
+func StartPoolSampler(ctx context.Context, rec Recorder, pool string, db StatsProvider, interval time.Duration, attrs ...attribute.KeyValue) (stop func()) {
 	if rec == nil || !rec.Enabled() || db == nil {
 		return func() {}
 	}
@@ -63,14 +65,14 @@ func StartPoolSampler(ctx context.Context, rec Recorder, db StatsProvider, inter
 
 		// Emit one snapshot immediately so the gauges are populated without
 		// waiting a full interval.
-		rec.ObservePoolStats(sampleCtx, poolStatsFrom(db.Stats()), attrs...)
+		rec.ObservePoolStats(sampleCtx, pool, poolStatsFrom(db.Stats()), attrs...)
 
 		for {
 			select {
 			case <-sampleCtx.Done():
 				return
 			case <-ticker.C:
-				rec.ObservePoolStats(sampleCtx, poolStatsFrom(db.Stats()), attrs...)
+				rec.ObservePoolStats(sampleCtx, pool, poolStatsFrom(db.Stats()), attrs...)
 			}
 		}
 	}()

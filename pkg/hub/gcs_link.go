@@ -364,26 +364,40 @@ func (s *Server) resolveSenderAgent(ctx context.Context, msg *store.Message) *st
 }
 
 // resolveCurrentSA returns agent's current assigned service account, or nil
-// if the agent has no usable one right now: the current assignment is
-// resolved at request time, with no send-time snapshot. Unassigned,
-// passthrough/block mode, a deleted SA record, or an
-// SA record whose email no longer matches the assignment all return nil.
-func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) *store.GCPServiceAccount {
+// and the audit reason when the agent has no usable one right now. The
+// current assignment is resolved at request time, with no send-time
+// snapshot, and the account must pass the same admissibility rule as token
+// mint (admissibleGCPServiceAccount): verified, reachable from the agent's
+// project, same email as the assignment and, for a hub-scoped account, the
+// enforce check mode.
+//
+// Unassigned, passthrough/block mode, a deleted or unreachable account, or
+// an account whose email no longer matches the assignment answer
+// GCSLinkReasonNoSA; an unverified account or a hub-scoped account without
+// the enforce check mode answer GCSLinkReasonSANotAdmissible; a store error
+// answers GCSLinkReasonSALookupFailed. The caller answers every one of them
+// with the same not-found response.
+func (s *Server) resolveCurrentSA(ctx context.Context, agent *store.Agent) (*store.GCPServiceAccount, GCSLinkFetchReason) {
 	if agent.AppliedConfig == nil || agent.AppliedConfig.GCPIdentity == nil {
-		return nil
+		return nil, GCSLinkReasonNoSA
 	}
 	gcpID := agent.AppliedConfig.GCPIdentity
 	if gcpID.MetadataMode != store.GCPMetadataModeAssign || gcpID.ServiceAccountID == "" || gcpID.ServiceAccountEmail == "" {
-		return nil
+		return nil, GCSLinkReasonNoSA
 	}
-	sa, err := s.store.GetGCPServiceAccount(ctx, gcpID.ServiceAccountID)
-	if err != nil || sa == nil {
-		return nil
+	sa, err := s.admissibleGCPServiceAccount(ctx, gcpID, agent.ProjectID)
+	switch {
+	case err == nil:
+		return sa, ""
+	case errors.Is(err, errGCPSANotVerified), errors.Is(err, errGCPSAHubModeOff):
+		return nil, GCSLinkReasonSANotAdmissible
+	case isGCPAssignmentInadmissible(err):
+		return nil, GCSLinkReasonNoSA
+	default:
+		slog.WarnContext(ctx, "gcs link: service account lookup failed",
+			"agent_id", agent.ID, "sa_id", gcpID.ServiceAccountID, "error", err)
+		return nil, GCSLinkReasonSALookupFailed
 	}
-	if sa.Email != gcpID.ServiceAccountEmail {
-		return nil
-	}
-	return sa
 }
 
 // classifyGCSError maps a GCS Attrs/read error to an audit reason. Only
@@ -565,8 +579,8 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		event.Decision = "deny"
 		event.Reason = GCSLinkReasonBadRequest
-		status = http.StatusMethodNotAllowed
 		MethodNotAllowed(w, http.MethodGet)
+		status = http.StatusMethodNotAllowed
 		emitAudit()
 		return
 	}
@@ -647,10 +661,13 @@ func (s *Server) handleGCSObject(w http.ResponseWriter, r *http.Request) {
 	}
 	event.SenderAgentID = sender.ID
 
-	// Step 9: the sender's current assigned SA.
-	sa := s.resolveCurrentSA(ctx, sender)
+	// Step 9: the sender's current assigned SA, admissible under the same
+	// rule as token mint.
+	// Every reason answers the same not-found response; only the audit
+	// event records which one applied.
+	sa, saReason := s.resolveCurrentSA(ctx, sender)
 	if sa == nil {
-		deny(GCSLinkReasonNoSA, http.StatusNotFound)
+		deny(saReason, http.StatusNotFound)
 		return
 	}
 	event.SAEmail = sa.Email

@@ -60,7 +60,7 @@ func (s *AgentStore) withLockedAgent(ctx context.Context, agentID string, fn loc
 		return err
 	}
 	defer ltx.cleanup()
-	isPG := s.dialect(ctx) == dialect.Postgres
+	isPG := s.dialect() == dialect.Postgres
 	committed := false
 	defer func() {
 		if !committed {
@@ -614,7 +614,7 @@ func (s *AgentStore) StoreClock(ctx context.Context) (time.Time, error) {
 	}
 	defer ltx.cleanup()
 	defer func() { _ = ltx.tx.Rollback() }()
-	now, err := storeNow(ctx, ltx.tx, s.dialect(ctx) == dialect.Postgres)
+	now, err := storeNow(ctx, ltx.tx, s.dialect() == dialect.Postgres)
 	if err != nil {
 		return time.Time{}, err
 	}

@@ -4,11 +4,15 @@ title: Release Notes
 
 Scion release notes are published weekly.
 
-## Latest: Week of September 28 -- October 4, 2026
+## Latest: Week of October 5 -- 11, 2026
 
-Raw keystroke messaging was replaced by a dedicated agent keys API (`scion keys`), and raw message delivery is now removed. A timezone overhaul pinned servers, storage and APIs to UTC and made the Hub the only source of an agent's `TZ`. Agent delete became asynchronous and failure-aware, and asynchronous create arrived as an opt-in. Kubernetes gained per-agent NFS workspaces, Workload Identity and a new Substrate runtime. Security work continued with user access token boundaries, frozen delegation ceilings and project access granted only through role bindings.
+Conduit, still behind its experiment flag, now carries agent terminals, Runtime Broker traffic and user tunnels, including SSH through `scion tunnel`. Agent create, start, stop and delete hold up under races: a create or start that loses to a delete no longer revives the agent, operations are scoped to the run they target, and starts fail closed when credentials or settings cannot be resolved. Access follows membership: removed members' agents are suspended, sharing a Runtime Broker needs its owner's consent, and schedules run under recorded authority. `scion reincarnate` can move agents between Runtime Brokers and change their settings, and the health dashboard was rebuilt around a single attention policy.
 
-[Read the full release notes for this week ->](/scion/release-notes/2026-09-28/)
+[Read the full release notes for this week ->](/scion/release-notes/2026-10-05/)
+
+## `scion project list` lists projects across hubs
+
+`scion project list` (and `scion projects list`) now lists the projects on all your registered hubs, each with its hub, merged with the project directories on this machine. Use `--hub <hub>` to show one hub and `--refresh` to fetch each logged-in hub's project list. The earlier output, the project directories on this machine with their type, agent count, status and workspace, moved to `scion project list --local`, which keeps that format byte for byte, JSON included. **Scripts that parse `scion project list` should switch to `scion project list --local`.**
 
 ## Timezone handling changes
 
@@ -18,7 +22,7 @@ During the week of September 28 ([release notes](/scion/release-notes/2026-09-28
 
 A deleted built-in harness config (for example `claude`) or the built-in `default` template no longer comes back when the Hub restarts or is upgraded ([ptone/scion#3544](https://github.com/ptone/scion/issues/3544)). This also applies to harness configs left unselected in the setup wizard. The Hub records each built-in it has seeded in the `builtin_resources_seeded` Hub setting, and startup only creates built-ins that are not in that record. Built-ins that are new in a release are still added, and built-ins you keep still receive content updates.
 
-Until the explicit restore command arrives (`scion harness-config restore` and `scion templates restore`, the second phase of [ptone/scion#3544](https://github.com/ptone/scion/issues/3544)), the only way to bring a deleted built-in back without re-creating it by hand is to remove the ledger row directly in the Hub database (`DELETE FROM hub_settings WHERE section = 'builtin_resources_seeded';`) and restart the Hub. This is not available through the admin settings API. The restart re-creates **every** missing built-in, including others you deleted and harness configs left unselected in the setup wizard, so delete any you do not want again afterwards.
+To bring a deleted built-in harness config back, re-import it as a global harness config from its canonical URL, `https://github.com/GoogleCloudPlatform/scion/harnesses/<name>` (for example `.../harnesses/claude`). Use the import box on the **Harness Configs** tab of the Hub's **Settings** page, or `POST /api/v1/resources/import`. On a hosted Hub, a copy imported from any other URL (such as a `/tree/<ref>/` URL), or a re-imported `default` template, is usable but user-managed: it does not receive the content bundled with later releases. Workstation Hubs update it either way. See [Recovering a deleted built-in](/scion/reference/harness-settings/#recovering-a-deleted-built-in).
 
 Upgrade note: on the first start after upgrading, the Hub has no record yet, so built-ins you deleted since the last restart before the upgrade reappear once. Delete them again and they stay deleted.
 
@@ -29,6 +33,7 @@ Upgrade note: on the first start after upgrading, the Hub has no record yet, so 
 
 ## Previous Weeks
 
+- [Week of September 28 -- October 4, 2026](/scion/release-notes/2026-09-28/)
 - [Week of September 21 -- 27, 2026](/scion/release-notes/2026-09-21/)
 - [Week of September 14 -- 20, 2026](/scion/release-notes/2026-09-14/)
 - [Week of September 7 -- 13, 2026](/scion/release-notes/2026-09-07/)

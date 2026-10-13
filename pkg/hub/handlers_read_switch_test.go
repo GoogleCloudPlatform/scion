@@ -47,81 +47,6 @@ import (
 // helpers
 // ---------------------------------------------------------------------------
 
-// enableReadSwitch configures OperationalSettings on the server with the
-// ConversationReadSwitch flag ON. After this call, handlers that check
-// s.GetOperationalSettings().ConversationReadSwitch() will enter the
-// Phase 8 conversation-resolution branch.
-func enableReadSwitch(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("ops.Refresh failed: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-	// Canary: verify the switch is actually on. Without this, a silent
-	// failure in enableReadSwitch makes every delta==0 assertion pass
-	// trivially — the handler never enters the read-switch block at all.
-	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
-		t.Fatalf("enableReadSwitch: ConversationEnvelopeSwitch() is still false after setup — " +
-			"every FlagOn test in this file is vacuous without this guard")
-	}
-}
-
-// seedConversation creates a conversation in the store with the given
-// surface and externalRef, returning its auto-assigned ID. The caller uses
-// this to set up the "conversation resolves" precondition.
-func seedConversation(t *testing.T, s store.Store, surface, externalRef, kind string) string {
-	t.Helper()
-	conv := &store.Conversation{
-		Surface:     surface,
-		ExternalRef: externalRef,
-		Kind:        kind,
-		DriftState:  "active",
-	}
-	created, err := s.UpsertConversationByExternalRef(context.Background(), conv)
-	if err != nil {
-		t.Fatalf("seedConversation(%s, %s): %v", surface, externalRef, err)
-	}
-	return created.ID
-}
-
-// rsAgent creates an agent in the store with the given name and projectID.
-// Prefixed "rs" (read-switch) to avoid collision with seedAgent in other
-// test files in the same package.
-func rsAgent(t *testing.T, s store.Store, agentName, projectID string) string {
-	t.Helper()
-	agentID := tid(agentName)
-	agent := &store.Agent{
-		ID:        agentID,
-		Slug:      agentName,
-		Name:      agentName,
-		ProjectID: projectID,
-		OwnerID:   DevUserID, // CO1: owner bypass grants manage access to the dev user
-	}
-	if err := s.CreateAgent(context.Background(), agent); err != nil {
-		t.Fatalf("rsAgent(%s): %v", agentName, err)
-	}
-	return agentID
-}
-
-// rsProject creates a project in the store with required fields populated.
-func rsProject(t *testing.T, s store.Store, projectName string) string {
-	t.Helper()
-	projectID := tid(projectName)
-	project := &store.Project{
-		ID:      projectID,
-		Name:    projectName,
-		Slug:    projectName,
-		OwnerID: DevUserID,
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("rsProject(%s): %v", projectName, err)
-	}
-	return projectID
-}
-
 // fallbackDelta captures the divergence fallback counter before calling fn,
 // then returns the delta after fn completes. This is the only safe way to
 // assert on the global counter given concurrent writers.
@@ -181,6 +106,20 @@ func (s *rsWebChatStore) GetTopicConversationIDIncludingDeleted(_ context.Contex
 	}
 	return t.ConversationID, nil
 }
+func (s *rsWebChatStore) GetTopicConversationIDInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.DeletedAt != nil || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
+func (s *rsWebChatStore) GetTopicConversationIDIncludingDeletedInProject(_ context.Context, projectID, topicID string) (string, error) {
+	t, ok := s.topics[topicID]
+	if !ok || t.ProjectID != projectID {
+		return "", fmt.Errorf("topic not found: %s: %w", topicID, store.ErrNotFound)
+	}
+	return t.ConversationID, nil
+}
 func (s *rsWebChatStore) CreateTopic(context.Context, WebChatTopic) error { return nil }
 func (s *rsWebChatStore) ListTopics(context.Context, string) ([]WebChatTopic, error) {
 	return nil, nil
@@ -205,16 +144,19 @@ func (s *rsWebChatStore) GetReadStates(context.Context, string, []string) ([]Web
 }
 func (s *rsWebChatStore) SetPinned(context.Context, string, string, bool) error { return nil }
 func (s *rsWebChatStore) SetMuted(context.Context, string, string, bool) error  { return nil }
-func (s *rsWebChatStore) IsConversationMuted(context.Context, string, string) (bool, error) {
-	return false, nil
-}
 func (s *rsWebChatStore) GetUserPrefs(context.Context, string) (*WebChatUserPrefs, error) {
 	return nil, nil
 }
 func (s *rsWebChatStore) SetUserPrefs(context.Context, string, WebChatUserPrefs) error { return nil }
-func (s *rsWebChatStore) UpsertDM(context.Context, WebChatDM) error                    { return nil }
-func (s *rsWebChatStore) ListDMs(context.Context, string) ([]WebChatDM, error)         { return nil, nil }
-func (s *rsWebChatStore) TouchDMActivity(context.Context, string, string) error        { return nil }
+func (s *rsWebChatStore) ListUserPrefsPendingThreadGroupMigration(context.Context) ([]WebChatUserPrefs, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) MarkUserPrefsThreadGroupsMigrated(context.Context, string, string, string, string) (bool, error) {
+	return false, nil
+}
+func (s *rsWebChatStore) UpsertDM(context.Context, WebChatDM) error             { return nil }
+func (s *rsWebChatStore) ListDMs(context.Context, string) ([]WebChatDM, error)  { return nil, nil }
+func (s *rsWebChatStore) TouchDMActivity(context.Context, string, string) error { return nil }
 func (s *rsWebChatStore) SearchChatMessages(context.Context, ChatSearchFilter) ([]ChatSearchResult, string, error) {
 	return nil, "", nil
 }
@@ -230,7 +172,10 @@ func (s *rsWebChatStore) GetAttachmentsByMessages(context.Context, []string) (ma
 	return nil, nil
 }
 func (s *rsWebChatStore) LinkAttachmentToMessage(context.Context, string, string) error { return nil }
-func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error       { return nil }
+func (s *rsWebChatStore) ListMessageIDsForAttachment(context.Context, string, int) ([]string, error) {
+	return nil, nil
+}
+func (s *rsWebChatStore) SetMessageReplyTo(context.Context, string, string) error { return nil }
 func (s *rsWebChatStore) GetMessageExt(context.Context, string) (*WebChatMessageExt, error) {
 	return nil, nil
 }
@@ -264,13 +209,6 @@ func (s *rsWebChatStore) PurgeOrphanMentions(context.Context) (int, error) { ret
 // S1 — handleConversationHistory
 // Route: GET /api/v1/chat/conversations/{key}/messages
 // ==========================================================================
-
-// makeDMKey builds a valid 5-part DM key for the dev user and the given agent UUID.
-// Format: dm:agent:<agentUUID>:user:<userUUID> (sorted lexicographically by token).
-func makeDMKey(agentUUID, userUUID string) string {
-	// "agent:" < "user:" lexicographically, so agent token comes first.
-	return fmt.Sprintf("dm:agent:%s:user:%s", agentUUID, userUUID)
-}
 
 func TestReadSwitch_S1_DM_FlagOff(t *testing.T) {
 	srv, _ := testServer(t)

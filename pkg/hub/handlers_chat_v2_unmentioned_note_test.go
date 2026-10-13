@@ -171,8 +171,7 @@ func TestUnmentionedReplyNote_ExplicitTargetsUnchanged(t *testing.T) {
 	posterMsg := seedThreadMsgAt(t, s, def.ProjectID, topicID, "agent:"+poster.Slug, poster.ID,
 		time.Now().UTC().Add(-time.Minute))
 
-	// The mention goroutines these sends start have no observable
-	// completion: agent and unknown names store no notification.
+	// Agent and unknown mention names make no one a member.
 	for _, content := range []string{
 		"@" + poster.Slug + " please check",
 		"please check @" + poster.Slug,
@@ -226,8 +225,8 @@ func TestUnmentionedReplyNote_NoDefaultMentionsRecentHuman(t *testing.T) {
 	if n := len(d.getMessages()); n != 0 {
 		t.Fatalf("expected no agent dispatch, got %d", n)
 	}
-	waitMentionNotified(t, s, bob.ID)
-	assertNotNotified(t, s, carol.ID, DevUserID)
+	waitMentionedMember(t, srv, s, topicID, bob.ID)
+	assertNotMentioned(t, srv, s, topicID, carol.ID)
 }
 
 // No default agent and no agent poster: there is no agent the reply could
@@ -280,44 +279,64 @@ func humanOnlyTopic(t *testing.T, createdBy string) (*Server, store.Store, strin
 	return srv, s, topicID, d, proj.ID
 }
 
-// waitMentionNotified waits for the chat notifier (wired by
-// SetWebChatStore) to store a notification for userID.
-func waitMentionNotified(t *testing.T, s store.Store, userID string) {
+// noteTopicConversation returns the conversation linked to topicID.
+func noteTopicConversation(t *testing.T, srv *Server, topicID string) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		n, err := s.GetNotifications(t.Context(), store.SubscriberTypeUser, userID, false)
-		if err != nil {
-			t.Fatalf("GetNotifications: %v", err)
-		}
-		if len(n) == 1 {
-			return
-		}
-		if len(n) > 1 || time.Now().After(deadline) {
-			t.Fatalf("expected one notification for %s, got %d", userID, len(n))
-		}
-		time.Sleep(20 * time.Millisecond)
+	srv.mu.RLock()
+	wcs := srv.webChatStore
+	srv.mu.RUnlock()
+	convID, err := wcs.GetTopicConversationID(t.Context(), topicID)
+	if err != nil || convID == "" {
+		t.Fatalf("topic %s has no linked conversation: %v", topicID, err)
+	}
+	return convID
+}
+
+// assertNoNotificationRows checks that userID has no notification rows:
+// chat mentions no longer create them.
+func assertNoNotificationRows(t *testing.T, s store.Store, userID string) {
+	t.Helper()
+	n, err := s.GetNotifications(t.Context(), store.SubscriberTypeUser, userID, false)
+	if err != nil {
+		t.Fatalf("GetNotifications: %v", err)
+	}
+	if len(n) != 0 {
+		t.Fatalf("expected no notification for %s, got %d", userID, len(n))
 	}
 }
 
-// assertNotNotified checks that none of userIDs has a notification. Call it
-// after waitMentionNotified: the notifier handles one message's mentions
-// in a single goroutine.
-func assertNotNotified(t *testing.T, s store.Store, userIDs ...string) {
+// waitMentionedMember waits for the background membership write that makes
+// the mentioned userID a member of topicID's thread, and checks that the mention
+// created no notification row.
+func waitMentionedMember(t *testing.T, srv *Server, s store.Store, topicID, userID string) {
 	t.Helper()
+	convID := noteTopicConversation(t, srv, topicID)
+	deadline := time.Now().Add(5 * time.Second)
+	for !isUserParticipant(t, s, convID, userID) {
+		if time.Now().After(deadline) {
+			t.Fatalf("mentioned user %s did not become a member", userID)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	assertNoNotificationRows(t, s, userID)
+}
+
+// assertNotMentioned checks that none of userIDs became a member or got a
+// notification row. Call it after waitMentionedMember: one message's
+// members are written in a single background pass.
+func assertNotMentioned(t *testing.T, srv *Server, s store.Store, topicID string, userIDs ...string) {
+	t.Helper()
+	convID := noteTopicConversation(t, srv, topicID)
 	for _, id := range userIDs {
-		n, err := s.GetNotifications(t.Context(), store.SubscriberTypeUser, id, false)
-		if err != nil {
-			t.Fatalf("GetNotifications: %v", err)
+		if isUserParticipant(t, s, convID, id) {
+			t.Fatalf("expected %s not to become a member", id)
 		}
-		if len(n) != 0 {
-			t.Fatalf("expected no notification for %s, got %d", id, len(n))
-		}
+		assertNoNotificationRows(t, s, id)
 	}
 }
 
 // Two members share a display name: the note mentions the intended one by
-// email local part and only that person is notified.
+// email local part and only that person becomes a member.
 func TestUnmentionedReplyNote_DuplicateDisplayNames(t *testing.T) {
 	srv, s, topicID, _, _, projectID := noRecipientSetupProject(t)
 	bob1 := addHumanMember(t, s, projectID, "bob1@example.com", "Bob Jones")
@@ -331,8 +350,8 @@ func TestUnmentionedReplyNote_DuplicateDisplayNames(t *testing.T) {
 	if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
 		t.Fatalf("got %+v, want body %q dispatched", m, want)
 	}
-	waitMentionNotified(t, s, bob1.ID)
-	assertNotNotified(t, s, bob2.ID, DevUserID)
+	waitMentionedMember(t, srv, s, topicID, bob1.ID)
+	assertNotMentioned(t, srv, s, topicID, bob2.ID)
 }
 
 // With no other human poster, the note falls back to the thread creator.
@@ -374,7 +393,7 @@ func TestUnmentionedReplyNote_ThreadCreatorFallback(t *testing.T) {
 			if m == nil || m.Msg != want || m.DispatchState != store.MessageDispatchDispatched {
 				t.Fatalf("got %+v, want body %q dispatched", m, want)
 			}
-			waitMentionNotified(t, s, owner.ID)
+			waitMentionedMember(t, srv, s, topicID, owner.ID)
 		})
 	}
 }
@@ -400,7 +419,7 @@ func TestUnmentionedReplyNote_TokenSkipsAgentSlug(t *testing.T) {
 	if n := len(d.getMessages()); n != 0 {
 		t.Fatalf("expected no agent dispatch, got %d", n)
 	}
-	waitMentionNotified(t, s, human.ID)
+	waitMentionedMember(t, srv, s, topicID, human.ID)
 }
 
 // A mention that resolves to nobody (a typo) addresses no one, so with no
@@ -418,7 +437,7 @@ func TestUnmentionedReplyNote_UnresolvedMentionGetsNote(t *testing.T) {
 	if n := len(d.getMessages()); n != 0 {
 		t.Fatalf("expected no agent dispatch, got %d", n)
 	}
-	waitMentionNotified(t, s, bob.ID)
+	waitMentionedMember(t, srv, s, topicID, bob.ID)
 }
 
 // Two human and two agent posters: the note picks the most recent of each.
@@ -443,8 +462,8 @@ func TestUnmentionedReplyNote_MostRecentPosters(t *testing.T) {
 	if n := len(d.getMessages()); n != 0 {
 		t.Fatalf("expected no agent dispatch, got %d", n)
 	}
-	waitMentionNotified(t, s, ben.ID)
-	assertNotNotified(t, s, ann.ID)
+	waitMentionedMember(t, srv, s, topicID, ben.ID)
+	assertNotMentioned(t, srv, s, topicID, ann.ID)
 }
 
 // People have talked since the agent last posted: the reply is not

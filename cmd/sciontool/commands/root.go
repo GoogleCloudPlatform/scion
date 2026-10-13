@@ -8,6 +8,7 @@ import (
 	"os"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 )
 
@@ -31,23 +32,52 @@ Commands:
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
-		if logLevel == "debug" {
-			log.SetDebug(true)
-		}
 		if isHookSubcommand(cmd) {
 			log.SetQuiet(true)
 		}
+		applyLogLevelFlag(cmd)
 	},
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	// Decide quiet mode before Init: Init resolves SCION_LOG_LEVEL /
+	// SCION_DEBUG, and the one-time deprecation warning must not reach the
+	// captured stderr of every short-lived hook/status invocation.
+	if isHookInvocation(os.Args[1:]) {
+		log.SetQuiet(true)
+	}
 	log.Init()
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// applyLogLevelFlag routes an explicitly given --log-level through the
+// shared level parser at flag precedence (flag > SCION_LOG_LEVEL >
+// SCION_DEBUG). When the flag is not given, the environment decides, which
+// keeps the historical default (info) when nothing is set.
+func applyLogLevelFlag(cmd *cobra.Command) {
+	f := cmd.Flags().Lookup("log-level")
+	if f == nil || !f.Changed {
+		return
+	}
+	if err := log.ApplyLogLevel(logLevel); err != nil {
+		// Report the spec that was actually applied (an invalid component
+		// entry is dropped, an invalid default falls back to info), and
+		// bypass level filtering so "error,x=loud" is still reported.
+		applied, _ := loglevel.Current()
+		log.WarnAlways("--log-level: %v; using %q", err, applied.String())
+	}
+}
+
+// isHookInvocation reports whether args (without the program name) select
+// a hook/status subcommand, before cobra has parsed them.
+func isHookInvocation(args []string) bool {
+	target, _, err := rootCmd.Find(args)
+	return err == nil && isHookSubcommand(target)
 }
 
 func isHookSubcommand(cmd *cobra.Command) bool {
@@ -62,5 +92,5 @@ func isHookSubcommand(cmd *cobra.Command) bool {
 
 func init() {
 	rootCmd.PersistentFlags().StringVar(&logLevel, "log-level", "info",
-		"Logging verbosity: debug, info, warn, error")
+		"Logging verbosity: debug, info, warn, error, optionally with per-component levels (e.g. info,hooks=debug); overrides SCION_LOG_LEVEL")
 }

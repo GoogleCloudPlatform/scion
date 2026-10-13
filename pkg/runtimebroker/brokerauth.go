@@ -212,95 +212,100 @@ func (m *MultiKeyBrokerAuthMiddleware) UpdateKeys(keys []secretKeyEntry) {
 // against any of the registered secret keys.
 func (m *MultiKeyBrokerAuthMiddleware) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.mu.RLock()
-		enabled := m.enabled
-		allowUnauth := m.allowUnauthenticated
-		keys := m.keys
-		maxSkew := m.maxClockSkew
-		m.mu.RUnlock()
-
-		if !enabled {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Health endpoints are always public — no authentication required.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
-			next.ServeHTTP(w, r)
-			return
-		}
-
-		// Extract HMAC headers
-		brokerID := r.Header.Get(apiclient.HeaderBrokerID)
-		timestamp := r.Header.Get(apiclient.HeaderTimestamp)
-		nonce := r.Header.Get(apiclient.HeaderNonce)
-		signature := r.Header.Get(apiclient.HeaderSignature)
-
-		// If no HMAC headers present, check if unauthenticated requests are allowed
-		if brokerID == "" && timestamp == "" && signature == "" {
-			if allowUnauth {
-				next.ServeHTTP(w, r)
-				return
-			}
-			m.writeError(w, "missing authentication headers")
-			return
-		}
-
-		// Validate required headers
-		if brokerID == "" {
-			m.writeError(w, "missing X-Scion-Broker-ID header")
-			return
-		}
-		if timestamp == "" {
-			m.writeError(w, "missing X-Scion-Timestamp header")
-			return
-		}
-		if signature == "" {
-			m.writeError(w, "missing X-Scion-Signature header")
-			return
-		}
-
-		// Validate timestamp
-		ts, err := strconv.ParseInt(timestamp, 10, 64)
-		if err != nil {
-			m.writeError(w, "invalid timestamp format")
-			return
-		}
-
-		requestTime := time.Unix(ts, 0)
-		clockSkew := time.Since(requestTime)
-		if clockSkew < 0 {
-			clockSkew = -clockSkew
-		}
-		if clockSkew > maxSkew {
-			m.writeError(w, fmt.Sprintf("timestamp outside acceptable range (skew: %v)", clockSkew))
-			return
-		}
-
-		// Decode the signature
-		sigBytes, err := base64.StdEncoding.DecodeString(signature)
-		if err != nil {
-			m.writeError(w, "invalid signature encoding")
-			return
-		}
-
-		// Build canonical string
-		canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
-
-		// Try each key until one matches
-		for _, entry := range keys {
-			if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
-				if entry.hubName != "" {
-					r = r.WithContext(context.WithValue(r.Context(), authenticatingHubConnCtxKey{}, entry.hubName))
-				}
-				next.ServeHTTP(w, r)
-				return
-			}
-		}
-
-		// No key matched
-		m.writeError(w, "invalid signature")
+		m.ServeWith(w, r, next)
 	})
+}
+
+// ServeWith handles r as the handler returned by Middleware(next) does.
+func (m *MultiKeyBrokerAuthMiddleware) ServeWith(w http.ResponseWriter, r *http.Request, next http.Handler) {
+	m.mu.RLock()
+	enabled := m.enabled
+	allowUnauth := m.allowUnauthenticated
+	keys := m.keys
+	maxSkew := m.maxClockSkew
+	m.mu.RUnlock()
+
+	if !enabled {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Health endpoints are always public — no authentication required.
+	if r.URL.Path == "/healthz" || r.URL.Path == "/readyz" {
+		next.ServeHTTP(w, r)
+		return
+	}
+
+	// Extract HMAC headers
+	brokerID := r.Header.Get(apiclient.HeaderBrokerID)
+	timestamp := r.Header.Get(apiclient.HeaderTimestamp)
+	nonce := r.Header.Get(apiclient.HeaderNonce)
+	signature := r.Header.Get(apiclient.HeaderSignature)
+
+	// If no HMAC headers present, check if unauthenticated requests are allowed
+	if brokerID == "" && timestamp == "" && signature == "" {
+		if allowUnauth {
+			next.ServeHTTP(w, r)
+			return
+		}
+		m.writeError(w, "missing authentication headers")
+		return
+	}
+
+	// Validate required headers
+	if brokerID == "" {
+		m.writeError(w, "missing X-Scion-Broker-ID header")
+		return
+	}
+	if timestamp == "" {
+		m.writeError(w, "missing X-Scion-Timestamp header")
+		return
+	}
+	if signature == "" {
+		m.writeError(w, "missing X-Scion-Signature header")
+		return
+	}
+
+	// Validate timestamp
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		m.writeError(w, "invalid timestamp format")
+		return
+	}
+
+	requestTime := time.Unix(ts, 0)
+	clockSkew := time.Since(requestTime)
+	if clockSkew < 0 {
+		clockSkew = -clockSkew
+	}
+	if clockSkew > maxSkew {
+		m.writeError(w, fmt.Sprintf("timestamp outside acceptable range (skew: %v)", clockSkew))
+		return
+	}
+
+	// Decode the signature
+	sigBytes, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		m.writeError(w, "invalid signature encoding")
+		return
+	}
+
+	// Build canonical string
+	canonical := apiclient.BuildCanonicalString(r, timestamp, nonce)
+
+	// Try each key until one matches
+	for _, entry := range keys {
+		if apiclient.VerifyHMAC(entry.secretKey, canonical, sigBytes) {
+			if entry.hubName != "" {
+				r = r.WithContext(context.WithValue(r.Context(), authenticatingHubConnCtxKey{}, entry.hubName))
+			}
+			next.ServeHTTP(w, r)
+			return
+		}
+	}
+
+	// No key matched
+	m.writeError(w, "invalid signature")
 }
 
 // writeError writes an authentication error response.

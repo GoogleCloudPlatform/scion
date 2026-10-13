@@ -44,35 +44,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupDMConversation creates a direct conversation between two agents with
-// proper canonical DM key and participant rows.
-func setupDMConversation(t *testing.T, s store.Store, agentAID, agentBID string) *store.Conversation {
-	t.Helper()
-	ctx := context.Background()
-
-	extRef, err := messages.DMConversationKey("agent", agentAID, "agent", agentBID)
-	require.NoError(t, err)
-
-	now := time.Now().UTC()
-	conv := &store.Conversation{
-		ID:             api.NewUUID(),
-		Kind:           "direct",
-		Surface:        "native",
-		ExternalRef:    extRef,
-		DriftState:     "active",
-		LastActivityAt: now,
-		CreatedAt:      now,
-		// ProjectID intentionally nil — DMs are global.
-	}
-	require.NoError(t, s.CreateConversation(ctx, conv))
-
-	// Add both agents as participants (listing concern).
-	addConvParticipant(t, s, conv.ID, "agent", agentAID)
-	addConvParticipant(t, s, conv.ID, "agent", agentBID)
-
-	return conv
-}
-
 // ---------------------------------------------------------------------------
 // Test: Third principal cannot read DM by adding participant row
 // ---------------------------------------------------------------------------

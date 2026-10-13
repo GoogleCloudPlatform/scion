@@ -17,6 +17,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/substrate"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 // errScionUserLookupDisabledInTests is what scionUserLookup/lookupUserByID
@@ -151,7 +153,7 @@ const selfCheckHelperEnv = "SUBSTRATE_SELFCHECK_HELPER_TEST"
 //  1. Every SCION_HUB*/token/agent-identity env var, plus SCION_HOST_UID/GID
 //     and SCION_KEEPID_UID, is cleared for the entire process: removes the
 //     *input* hub.NewClient()'s own testing.Testing() guard depends on, for
-//     every test here, not just ones that remember to call scrubHubEnv.
+//     every test here, not just ones that remember to call testutil.ScrubHubEnv.
 //  2. scionUserLookup and lookupUserByID default to "not found" for the
 //     whole test binary: no lookup here can resolve a real account, even
 //     when a test overrides the var back to a fake one (scoped with
@@ -182,8 +184,11 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 
-	envVarsToClear := append(append([]string{}, hubEnvVars...),
-		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID")
+	// The log level variables are cleared so tests that read agent.log do
+	// not depend on the caller's SCION_LOG_LEVEL / SCION_DEBUG.
+	envVarsToClear := append(testutil.HubEnvKeys(),
+		"SCION_HOST_UID", "SCION_HOST_GID", "SCION_KEEPID_UID",
+		loglevel.EnvLogLevel, loglevel.EnvDebug)
 	for _, v := range envVarsToClear {
 		_ = os.Unsetenv(v)
 	}
@@ -210,6 +215,7 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	sandboxHomeDir = tmpHome
+	conduitHostKeyDir = filepath.Join(tmpHome, "conduit-hostkey")
 	_ = os.Setenv("HOME", tmpHome)
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpHome, ".config"))
 	if err := disableGoTelemetry(filepath.Join(tmpHome, ".config")); err != nil {
@@ -220,6 +226,10 @@ func TestMain(m *testing.M) {
 	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(tmpHome, ".local", "state"))
 	_ = os.Setenv("SCION_WORKSPACE_PATH", filepath.Join(tmpHome, "workspace"))
 	log.SetLogPath(filepath.Join(tmpHome, "agent.log"))
+	// Keep RunInit and hook tests off the container's real harness
+	// readiness files under /tmp.
+	initRunFilePath = filepath.Join(tmpHome, "scion-init-run")
+	harnessReadyFilePath = filepath.Join(tmpHome, "scion-harness-ready")
 
 	// hub.ReadTokenFile resolves its own home directory independently of
 	// $HOME: resolveTokenHome (pkg/sciontool/hub) prefers a real

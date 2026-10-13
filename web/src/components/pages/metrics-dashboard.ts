@@ -332,7 +332,7 @@ export class ScionPageMetrics extends LitElement {
         throw new Error(await extractApiError(response, `HTTP ${response.status}`));
       }
 
-      const data = await response.json();
+      const data: unknown = await response.json();
       if (this.latestRequestByView.get(view) !== seq) return;
 
       switch (view) {
@@ -399,7 +399,7 @@ export class ScionPageMetrics extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     super.updated(changedProperties);
     for (const key of changedProperties.keys()) {
-      if (ScionPageMetrics.CHART_PROPERTIES.has(key as string)) {
+      if (ScionPageMetrics.CHART_PROPERTIES.has(key)) {
         this.updateCharts();
         break;
       }

@@ -29,8 +29,6 @@
  * no fetched state can overwrite the fixture.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { apiFetch } from '../../../client/api.js';
 import { setPreferredTimeZone } from '../../../utils/time.js';

@@ -317,10 +317,11 @@ need_cmd gcsfuse "GCS volume mounts (pkg/runtime/common.go)"
 need_cmd sudo "scion-base passwordless sudo for the scion user"
 
 # ---------------------------------------------------------------------------
-# chromium — the *name* is what is depended on, not merely a browser being
-# present: .scion/templates/web-dev/scion-agent.yaml runs a `chromium` service,
-# pkg/api/types_test.go expects CHROME_PATH=/usr/bin/chromium, and
-# pkg/hub/suspended_page_browser_test.go does exec.LookPath("chromium").
+# chromium — the base-image contract is a headless browser on PATH under the
+# name chromium, for templates that run a service called chromium. The hub test
+# TestSuspendedPage_HeadlessBrowser_ZeroFanOut
+# (pkg/hub/suspended_page_browser_test.go) also needs a headless browser: it
+# looks for chromium, then google-chrome, and skips if neither is found.
 # On Ubuntu chromium is snap-only and has no apt candidate, so that chain
 # satisfies this by symlinking google-chrome-stable into place.
 # ---------------------------------------------------------------------------
@@ -414,13 +415,13 @@ ${chromium_ver:-(no output)}"
       ok "chromium runs headless"
     else
       fail "chromium is on PATH but failed a headless smoke test — a browser that
-      cannot start headless is no use to the web-dev template. Its stderr:
+      cannot start headless does not meet the base-image contract. Its stderr:
 ${chromium_err:-(no output)}"
     fi
   fi
 else
-  fail "chromium missing from PATH — required by name (not just 'a browser') by
-      .scion/templates/web-dev/scion-agent.yaml and pkg/hub/suspended_page_browser_test.go.
+  fail "chromium missing from PATH — the base-image contract provides a headless
+      browser under the name chromium, for templates that run a chromium service.
       On Ubuntu there is no apt candidate; install google-chrome-stable and
       symlink it to /usr/bin/chromium"
 fi

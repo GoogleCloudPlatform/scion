@@ -180,6 +180,10 @@ const (
 	PrincipalBroker         PrincipalKind = "broker"
 	PrincipalServiceAccount PrincipalKind = "service_account"
 	PrincipalSystem         PrincipalKind = "system"
+	// PrincipalAgentDelegated is an agent acting with an agent delegated
+	// credential (.design/agent-delegation.md §12.1). An operation admits
+	// it only together with CredentialDelegatedAgent.
+	PrincipalAgentDelegated PrincipalKind = "agent_delegated"
 )
 
 // validPrincipalKinds is the closed set of recognized principal kinds.
@@ -189,6 +193,7 @@ var validPrincipalKinds = map[PrincipalKind]bool{
 	PrincipalBroker:         true,
 	PrincipalServiceAccount: true,
 	PrincipalSystem:         true,
+	PrincipalAgentDelegated: true,
 }
 
 // CredentialKind identifies a class of authentication credential
@@ -204,17 +209,27 @@ const (
 	CredentialServiceAccount CredentialKind = "service_account_key"
 	CredentialSystemInternal CredentialKind = "system_internal"
 	CredentialIdentityToken  CredentialKind = "identity_token"
+	// CredentialDelegatedAgent is an agent delegated credential. An
+	// operation admits it only together with PrincipalAgentDelegated.
+	CredentialDelegatedAgent CredentialKind = "delegated_agent"
+	// CredentialWorkloadDelegation is a workload-bound test identity issuer
+	// delegation: a pinned workload's Google ID token plus the id of the
+	// delegation a human issuer created (ptone/scion#4240). It acts for the
+	// delegation's grantor, within the delegation's single scope.
+	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
 var validCredentialKinds = map[CredentialKind]bool{
-	CredentialSessionJWT:     true,
-	CredentialScopedUAT:      true,
-	CredentialAgentJWT:       true,
-	CredentialBrokerToken:    true,
-	CredentialServiceAccount: true,
-	CredentialSystemInternal: true,
-	CredentialIdentityToken:  true,
+	CredentialSessionJWT:         true,
+	CredentialScopedUAT:          true,
+	CredentialAgentJWT:           true,
+	CredentialBrokerToken:        true,
+	CredentialServiceAccount:     true,
+	CredentialSystemInternal:     true,
+	CredentialIdentityToken:      true,
+	CredentialDelegatedAgent:     true,
+	CredentialWorkloadDelegation: true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an

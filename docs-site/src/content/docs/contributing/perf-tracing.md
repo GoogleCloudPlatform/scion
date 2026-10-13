@@ -45,9 +45,9 @@ Each line records:
 
 A phase or store method appears only if the request entered or called it at least once. The `store_` methods counted are the inputs the authorization service reads: `GetEffectiveGroups`, `GetEffectiveGroupsForAgent`, `GetParentGroups`, `GetUserGroups`, `GetGroupMembership`, `GetGroupBySlug`, `ListRoleBindingsForPrincipals`, `ListRoleBindingsForPrincipal`, `GetRoleDefinition`, `GetRoleDefinitionsByIDs`, `GetRoleDefinitionByName`, `ListAccessConstraints`, `GetDelegationEdgesForDelegate`, `GetUser`, `GetUserAccessToken`, `GetAgent`, `GetProject`, `GetProjectMembership` and `GetHubSetting`. They are counted after request-local reuse, so each count is a real store round trip. Reads made in other ways (relationship progeny lookups, reads inside a store transaction) are not counted. The reference's [Counted scope](/scion/reference/server-config/#request-performance-tracing) paragraph has the details.
 
-Every authorization decision emits one decision-audit record, so `audit_records` is the number of decisions the request made. `audit_emit_us` is only the time spent queueing the records; the database write happens later, off the request path.
+Decision records are counted in memory, so `audit_records` is the number of emitted decision records. With the default sampling setting, each authorization decision emits one record. `audit_emit_us` measures the emitter call. This path performs no database write.
 
-The database pool figures are deltas across the whole shared pool while the request ran. They include waits caused by concurrent requests and by the audit writer, so read them as "how contended was the pool", not "how much did this request wait".
+The database pool figures are deltas across the whole shared pool while the request ran. They include waits caused by concurrent requests, so read them as "how contended was the pool", not "how much did this request wait".
 
 ### The log line format
 
@@ -207,7 +207,7 @@ node e2e-perf/large-project-bench.mjs \
   --runs 5
 ```
 
-It runs the `project-grid`, `project-list`, `project-graph-embedded` and `standalone-graph` scenarios, then an SSE burst-update scenario. Other options are `--burst-runs`, `--burst-count` (default `15`), `--burst-only`, `--nav-timeout-ms` and `--populate-timeout-ms` (default `120000` each), `--settle-timeout-ms` (default `30000`) and `--notes`. With tracing on, the same Hub log holds the `perf_trace` lines for the page's API requests and the `sse.events` connect and close lines. The README explains how each run is classified and what each reported statistic means.
+It runs the `project-grid`, `project-list`, `project-graph-embedded` and `standalone-graph` scenarios, then an SSE burst-update scenario. The project grid and list are paged, so those two scenarios time the first page rendered (one page of cards or rows, with the page size read from the pager) and then the latency of a few Next-page clicks; the report records the page size, page count and page-change times. The burst scenario picks its agents from the grid's first page. Other options are `--page-changes` (default `3`), `--burst-runs`, `--burst-count` (default `15`), `--burst-only`, `--nav-timeout-ms` and `--populate-timeout-ms` (default `120000` each), `--settle-timeout-ms` (default `30000`) and `--notes`. With tracing on, the same Hub log holds the `perf_trace` lines for the page's API requests and the `sse.events` connect and close lines. The README explains how each run is classified and what each reported statistic means.
 
 ### Reading the API report
 
@@ -248,6 +248,97 @@ That makes them usable as regression budgets on any CI runner:
 
 Keep the limits in mind. Only request-path reads are counted (see the reference's [Counted scope](/scion/reference/server-config/#request-performance-tracing)), and `audit_records` equals the decision count only while every decision emits one audit record, which is the default. As an example of scale, the run shown above made 88 authorization store calls and 255 decisions for one 25-agent project list. Those numbers come from one machine (SQLite, member caller) at one commit and are an illustration only, not targets.
 
+## Regression budgets in CI
+
+Two CI checks hold the agent-list counts at their current values. Both use a fixed, seeded fixture of 100 agents in one project, as a non-admin project member. Both fail when a count goes over its budget, and the failure message says which count it was and what its budget is.
+
+| Check | Where | What it bounds |
+|---|---|---|
+| Hub counter budgets | `TestPerfBudget_AgentEndpoints` in `pkg/hub/perf_budget_test.go`, run by the **pkg/hub SQLite Tests** job | authorization store calls, authorization decisions, agent-row DB reads and response bytes for the project list (first page, next page, graph), the global list (first page, legacy full, compact) and the agent endpoints |
+| Web counter budgets | `web/e2e-perf/budgets/budgets.pw.ts`, run by the **Web perf budgets** job | DOM element count (including shadow roots) and long-task count for the project page's grid, list and graph views |
+
+Each budget is a baseline, measured on `main`, plus a margin. The baselines and margins are written next to the test that uses them:
+
+- Hub counts: the baseline plus 2%, or plus 2, whichever is larger. Response bytes: the baseline plus 1%. These margins are tight on purpose. The seed is deterministic, so the counts repeat exactly on every run, and response bytes vary by under 0.01% between runs. A single extra read or decision per request sits inside the +2 floor and passes. An N+1 regression (one more read or decision per returned agent) is over every budget.
+- DOM elements: the baseline plus 10 elements. Every measured load must stay within it. The count is taken once the view has written its readiness mark, its lazily mounted Files section has been scrolled into view, and the element count is stable across three reads, and each view also runs one load with the CPU slowed 4x whose count must equal the normal loads'. The DOM count must not depend on how fast the page loads.
+- Long tasks: the baseline plus 50%, or plus 3, whichever is larger, applied to the median of three loads. This is the one counter that depends on the runner's CPU and load. The wide margin and the median are there so that one slow load cannot fail CI.
+
+The web test mocks the API with responses from a small deterministic generator, `web/e2e-perf/budgets/fixture.mjs`. It builds the same 100-agent shape with fixed IDs and times. To keep the generator on the hub's real response shape, the hub test writes the field names and JSON types of the hub's responses for the page's requests to `web/e2e-perf/budgets/fixture-schema.json`. Two checks hold the three in step:
+
+- The hub test fails with "does not match the field names and types of the hub's current responses" when the hub's fields or their types change.
+- `npm run test:e2e-perf` (`fixture.test.mjs`) fails when the generator's fields or types differ from the schema file.
+
+The web test also fails when the page sends a request that the generator does not answer.
+
+### Updating a budget for an intended change
+
+If a change is meant to raise a count, update the baseline in the same change and give the reason in the commit message. If a change lowers a count on purpose, lower the baseline too, so the improvement is held. Because the hub margins are tight (see above), even a small intended change can need a new baseline; a single extra read per request fits inside the +2 floor, but anything per agent does not.
+
+1. **Hub counts.** Run the test verbosely and read the `measured:` line for each request:
+
+   ```sh
+   go test -run '^TestPerfBudget_AgentEndpoints$' -v ./pkg/hub/
+   ```
+
+   Then set that request's `baseline` in `perfBudgets` to the new values. Also update `perfBudgetBaseline`, the label the failure messages print for where the baselines come from: `main <sha>` of the base you measured on, or a short description of the change. The test prints a non-fatal note when a value is below its baseline by more than the margin, which means the baseline is stale.
+
+2. **Web fixture.** If the change adds, renames or removes a field in a response the project page reads, refresh the schema file and commit it:
+
+   ```sh
+   SCION_PERF_BUDGET_WRITE_WEB_SCHEMA=1 go test -run '^TestPerfBudget_AgentEndpoints$' ./pkg/hub/
+   ```
+
+   Then update `fixture.mjs` until `npm run test:e2e-perf` passes (from `web/`). If the page starts sending a new request, add it to `buildFixture()` and to `perfBudgetWebRequests` in `pkg/hub/perf_budget_test.go`, then refresh.
+
+3. **Web counts.** From `web/`, run the suite and read the `measured` line for each view:
+
+   ```sh
+   npm run test:e2e:perf-budgets
+   ```
+
+   Then set the view's `baseline` in `VIEWS` in `budgets.pw.ts`, and update `BASELINE_COMMIT` in the same way. Base the long-task baseline on several runs, not one. The suite also warns (non-fatally) when a measured value is below its baseline by more than the margin.
+
+Wall-clock times are not checked in CI. They are compared as a median ratio against a stored baseline, only on a quiet runner booked for the run. See "Wall-clock budgets" in the perf/bench README.
+
 ## Readiness marks
 
-In-app readiness marks (for example "data arrived" or "rows visible" in the web client) have not landed yet.
+The web client can write [User Timing](https://developer.mozilla.org/en-US/docs/Web/API/Performance/mark) marks that time when a page became usable, measured in the browser rather than from the outside. They are **off by default** and are controlled by the hub's `profiling.readiness_marks` operational setting (see the [setting reference](/scion/reference/admin-settings/#profiling)). Off, the client makes no `performance.mark` calls and the page shell is unchanged.
+
+### Turning them on
+
+The setting lives in the Hub database and changes without a restart. As a hub administrator, on a signed-in browser session (user access tokens are refused), send:
+
+```
+PUT /api/v1/admin/profiling
+{"readiness_marks": true}
+```
+
+Then load the page again: the client reads the setting once per full page load, from the shell's initial data (`readinessMarks`, present only for a signed-in user while the setting is on). `GET /api/v1/profiling` returns the same value to any signed-in caller. Send `{"readiness_marks": false}` to turn them off again.
+
+### The marks
+
+| Name | Written when | Pages |
+| :--- | :--- | :--- |
+| `scion:ready:agents-data` | the first agent result for the current scope is adopted | project detail (grid, list, graph), standalone graph |
+| `scion:ready:rows-grid` | the first frame that shows the grid's first page of cards, or its empty state | project detail, grid view |
+| `scion:ready:rows-list` | the first frame that shows the list's first page of rows, or its empty state | project detail, list view |
+| `scion:ready:graph` | the graph is laid out and fitted to the viewport, or the first frame that shows its empty state | project detail graph view, standalone graph |
+
+- A mark's `startTime` is milliseconds since the document's navigation start. Its `detail` is only `{"view": "grid" | "list" | "graph"}`: marks carry no agent names, ids or row data.
+- Each mark is written **at most once per load**. A load ends on a client-side navigation, on a change of the view scope (for example opening another project) and on a project filter change on the standalone graph; the marks are then cleared so the next load writes them again. Switching between grid, list and graph inside one load does not clear them.
+- A mark deferred to the next frame is dropped if the load ends before that frame, so it never lands in the next load.
+
+Read them in the browser console, or from a Playwright script, with:
+
+```js
+performance.getEntriesByType('mark').filter((m) => m.name.startsWith('scion:ready:'))
+```
+
+### In the browser benchmark
+
+`web/e2e-perf/large-project-bench.mjs` reads the marks of every populated run, before any interaction or page change. Each run records `readinessMarks` (name to ms), and each scenario reports `readinessMarks` with the count and median/min/max per mark, split cold and warm.
+
+- With `--expect-readiness-marks` (the setting is on), each run waits up to 3 seconds for its scenario's two marks: `agents-data` plus `rows-grid`, `rows-list` or `graph`. `readinessMarksMissingRunCount` counts populated runs that still lack one.
+- Without the flag, the setting is expected off. `readinessMarksUnexpectedRunCount` counts populated runs that found any readiness mark. Run once without the flag against a hub with the setting off to check that off writes nothing.
+
+The bench signs in as the seeded member, which is enough to receive the setting.

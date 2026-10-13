@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
-	"sync"
 	"time"
 
 	"entgo.io/ent/dialect"
@@ -64,12 +63,6 @@ type AgentStore struct {
 	client *ent.Client
 	inTx   bool // true when client wraps an ambient WithTx transaction
 
-	// dialect is detected lazily on first use of a lock-taking path and
-	// memoized. SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite
-	// driver rejects the clause outright, so it must be elided there.
-	dialectOnce sync.Once
-	dialectName string
-
 	// afterRunIDRead, when set (tests only), runs between SetAgentRunID's
 	// read and its swap, to simulate a concurrent writer.
 	afterRunIDRead func(agentID string)
@@ -81,14 +74,13 @@ func NewAgentStore(client *ent.Client) *AgentStore {
 }
 
 // usesRowLocks reports whether the backend supports SELECT ... FOR UPDATE.
-// The dialect is captured from a no-op selector the first time it is needed.
-func (s *AgentStore) usesRowLocks(ctx context.Context) bool {
-	s.dialectOnce.Do(func() {
-		_, _ = s.client.Agent.Query().
-			Where(func(sel *entsql.Selector) { s.dialectName = sel.Dialect() }).
-			Exist(ctx)
-	})
-	return s.dialectName == dialect.Postgres
+// SELECT ... FOR UPDATE is only emitted on Postgres; the SQLite driver
+// rejects the clause outright, so it must be elided there. The dialect is
+// read from the driver (a construction-time property) with no query, so it
+// cannot be lost to a failed or cancelled probe and never contends for a
+// connection -- the same idiom as BrokerSettingStore.usesRowLocks.
+func (s *AgentStore) usesRowLocks() bool {
+	return s.client.Driver().Dialect() == dialect.Postgres
 }
 
 // Compile-time assertion that AgentStore satisfies the store.AgentStore
@@ -150,6 +142,16 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		DeletionPrior:       a.DeletionPrior,
 		DeletionRequest:     a.DeletionRequest,
 	}
+	if a.RunIDUpdatedAt != nil {
+		t := *a.RunIDUpdatedAt
+		sa.RunIDUpdatedAt = &t
+	}
+	sa.SSHHostKey = a.SSHHostKey
+	sa.SSHHostKeyRunID = a.SSHHostKeyRunID
+	sa.Fixture = fixtureProvenanceFromColumns(a.FixtureRootID, a.FixtureIssuerID)
+	sa.PinnedRuntimeBrokerID = derefString(a.PinnedRuntimeBrokerID)
+	sa.PinnedRuntimeTargetID = derefString(a.PinnedRuntimeTargetID)
+	sa.PinnedRuntimeTargetType = a.PinnedRuntimeTargetType
 	if a.SoftDeleteOpID != nil {
 		sa.SoftDeleteOpID = *a.SoftDeleteOpID
 	}
@@ -284,8 +286,15 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	// caller's struct happened to carry (e.g. a zero value).
 	a.Generation = 1
 
+	fixtureRoot, fixtureIssuer, err := fixtureStampColumns(a.Fixture)
+	if err != nil {
+		return err
+	}
+
 	create := s.client.Agent.Create().
 		SetID(uid).
+		SetNillableFixtureRootID(fixtureRoot).
+		SetNillableFixtureIssuerID(fixtureIssuer).
 		SetSlug(a.Slug).
 		SetName(a.Name).
 		SetTemplate(a.Template).
@@ -322,6 +331,17 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 	if a.MessageMode != "" {
 		create.SetMessageMode(agent.MessageMode(a.MessageMode))
 	}
+	// Pinned placement (flat Runtime Brokers) is written at create, in the
+	// same transaction as the row, and afterwards only by
+	// SetAgentPinnedRuntimeTarget.
+	if a.PinnedRuntimeTargetID != "" {
+		if a.PinnedRuntimeBrokerID == "" || a.PinnedRuntimeBrokerID != a.RuntimeBrokerID {
+			return fmt.Errorf("%w: pin must name the agent's Runtime Broker", store.ErrInvalidPinnedPlacement)
+		}
+		create.SetPinnedRuntimeBrokerID(a.PinnedRuntimeBrokerID).
+			SetPinnedRuntimeTargetID(a.PinnedRuntimeTargetID).
+			SetPinnedRuntimeTargetType(a.PinnedRuntimeTargetType)
+	}
 	if a.Labels != nil {
 		create.SetLabels(a.Labels)
 	}
@@ -329,6 +349,9 @@ func (s *AgentStore) CreateAgent(ctx context.Context, a *store.Agent) error {
 		create.SetAnnotations(a.Annotations)
 	}
 	if len(a.Ancestry) > 0 {
+		// Principal IDs are stored in canonical UUID form so lookups by ID
+		// (the delegation descendant walk, ancestry filters) match them.
+		a.Ancestry = canonicalPrincipalIDs(a.Ancestry)
 		create.SetAncestry(a.Ancestry)
 	}
 	if cfg := marshalAppliedConfig(a.AppliedConfig); cfg != "" {
@@ -389,6 +412,27 @@ func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 		return nil, mapError(err)
 	}
 	return entAgentToStore(a), nil
+}
+
+// GetAgentRunState implements store.AgentStore.GetAgentRunState: one
+// primary-key read of run_id and deleted_at.
+func (s *AgentStore) GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return store.AgentRunState{}, err
+	}
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldDeletedAt).
+		Only(ctx)
+	if err != nil {
+		return store.AgentRunState{}, mapError(err)
+	}
+	rs := store.AgentRunState{RunID: row.RunID}
+	if row.DeletedAt != nil {
+		rs.DeletedAt = *row.DeletedAt
+	}
+	return rs, nil
 }
 
 // GetAgentBySlug retrieves an agent by its slug within a project.
@@ -1359,6 +1403,9 @@ func agentFilterPredicates(filter store.AgentFilter) ([]predicate.Agent, error) 
 	if filter.HarnessConfig != "" {
 		preds = append(preds, agent.HarnessConfigEQ(filter.HarnessConfig))
 	}
+	if filter.GCPServiceAccountID != "" {
+		preds = append(preds, appliedGCPServiceAccountIDEQ(filter.GCPServiceAccountID))
+	}
 
 	// IDs: narrowing-only restriction to a specific agent ID set (e.g. a CLI
 	// --ancestors relationship query). Fail-closed like AuthorizedProjectIDs:
@@ -1439,10 +1486,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return err
 	}
 
-	// Prime dialect detection before opening the transaction: the detection
-	// probe runs on s.client, which would contend with the open transaction on
-	// single-connection SQLite.
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1490,6 +1534,19 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.ClearExit = false
 		su.ClearMessageIf = ""
 		su.ClearTerminalRemnants = false
+	}
+
+	// The reincarnation guard (the hub's Guard 0b), repeated on the locked
+	// row for a status report (GuardReincarnation): a reincarnation that
+	// started after the hub read the agent owns Phase/Activity/ExitCode/
+	// ExitReason/Message, so the report must not move them. The other
+	// fields (ContainerStatus, heartbeat, ...) still apply, as in the hub.
+	if su.GuardReincarnation && store.ReincarnationInFlight(current.ReincarnationState) {
+		su.Phase = ""
+		su.Activity = ""
+		su.ExitCode = nil
+		su.ExitReason = ""
+		su.Message = ""
 	}
 
 	upd := tx.Agent.UpdateOneID(uid).
@@ -1614,6 +1671,54 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	return tx.Commit()
 }
 
+// SetAgentAnnotation implements store.AgentStore.SetAgentAnnotation. The
+// annotations are read and written back in one transaction (with a row lock
+// where the dialect has one), so two narrow writes of different keys do not
+// drop each other.
+func (s *AgentStore) SetAgentAnnotation(ctx context.Context, agentID, key, value string) error {
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return err
+	}
+	useLock := s.usesRowLocks()
+	tx, err := s.client.Tx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	q := tx.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil())
+	if useLock {
+		q = q.ForUpdate()
+	}
+	current, err := q.Only(ctx)
+	if err != nil {
+		return mapError(err)
+	}
+	annotations := make(map[string]string, len(current.Annotations)+1)
+	for k, v := range current.Annotations {
+		annotations[k] = v
+	}
+	if value == "" {
+		if _, ok := annotations[key]; !ok {
+			return tx.Commit()
+		}
+		delete(annotations, key)
+	} else {
+		annotations[key] = value
+	}
+	upd := tx.Agent.UpdateOneID(uid)
+	if len(annotations) == 0 {
+		upd.ClearAnnotations()
+	} else {
+		upd.SetAnnotations(annotations)
+	}
+	if err := upd.Exec(ctx); err != nil {
+		return mapError(err)
+	}
+	return tx.Commit()
+}
+
 // SetAgentWorkspacePlacement implements store.AgentStore.SetAgentWorkspacePlacement.
 func (s *AgentStore) SetAgentWorkspacePlacement(ctx context.Context, agentID, placement string) error {
 	uid, err := parseUUID(agentID)
@@ -1674,17 +1779,6 @@ func utcExposedPorts(ports []store.ExposedPort) []store.ExposedPort {
 	return out
 }
 
-// PurgeDeletedAgents permanently removes soft-deleted agents older than cutoff.
-func (s *AgentStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
-	deleted, err := s.client.Agent.Delete().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
-		Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-	return deleted, nil
-}
-
 // staleOfflineExcluded lists the terminal/sticky activities that must not be
 // overwritten when sweeping stale agents to "offline".
 var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "offline"}
@@ -1692,7 +1786,7 @@ var staleOfflineExcluded = []string{"completed", "limits_exceeded", "blocked", "
 // MarkStaleAgentsOffline marks running agents whose last heartbeat predates
 // threshold as offline, returning the updated records for event publishing.
 func (s *AgentStore) MarkStaleAgentsOffline(ctx context.Context, threshold time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -1743,9 +1837,13 @@ const containerMissingStatus = "missing"
 // container_missing, that MarkAgentContainerMissing keeps (together with the
 // stored message and exit code) when the agent already has one: the runtime
 // broker recorded why the container went away before it disappeared.
-// These match the ExitReason values added by ptone/scion#2542; switch to
-// those constants once both changes have landed.
-var containerMissingKeptExitReasons = []string{"preempted", "evicted"}
+// An OOM kill is kept too: the container was killed for exceeding its memory
+// limit, which says more than that it later went missing.
+var containerMissingKeptExitReasons = []string{
+	string(state.ExitReasonPreempted),
+	string(state.ExitReasonEvicted),
+	string(state.ExitReasonOOMKilled),
+}
 
 // MarkAgentContainerMissing implements store.AgentStore. See the interface
 // documentation for the guard conditions.
@@ -1771,6 +1869,9 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
 	}
 	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+		// The exec agent_not_found path concludes only for an agent that
+		// was running; the heartbeat reconcile also settles stopping.
+		agent.PhaseEQ(string(state.PhaseRunning)),
 		agent.StateVersionEQ(pre.StateVersion),
 		runID,
 		agent.StartClaimIDIsNil(),
@@ -1798,7 +1899,9 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
 				agent.RuntimeBrokerIDEQ(brokerID),
-				agent.PhaseEQ("running"),
+				// stopping: the container's own shutdown report arrived
+				// but its final stopped report never did (ptone/scion#2669).
+				agent.PhaseIn(string(state.PhaseRunning), string(state.PhaseStopping)),
 				agent.Or(
 					agent.ReincarnationStateIsNil(),
 					agent.ReincarnationStateIn(store.ReincarnationStateNone, store.ReincarnationStateFailed),
@@ -1881,9 +1984,7 @@ func (s *AgentStore) ClearAgentRuntimeTarget(ctx context.Context, id string) (bo
 	if err != nil {
 		return false, 0, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	for i := 0; i < clearRuntimeTargetAttempts; i++ {
 		res, err := s.clearRuntimeTargetOnce(ctx, uid, id, useLock)
 		if err != nil {
@@ -2000,9 +2101,7 @@ func (s *AgentStore) SetAgentRuntimeTarget(ctx context.Context, id string, expec
 	if err != nil {
 		return false, err
 	}
-	// Prime dialect detection before opening a transaction (see
-	// UpdateAgentStatus).
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
 		return false, err
@@ -2079,7 +2178,7 @@ var stalledExcluded = []string{"completed", "limits_exceeded", "blocked", "stall
 // activityThreshold but whose heartbeat is still recent (>= heartbeatRecency)
 // as stalled, preserving the prior activity in stalled_from_activity.
 func (s *AgentStore) MarkStalledAgents(ctx context.Context, activityThreshold, heartbeatRecency time.Time) ([]store.Agent, error) {
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	tx, err := s.client.Tx(ctx)
 	if err != nil {
@@ -2206,6 +2305,13 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 		return nil, fmt.Errorf("invalid currentBrokerID %q: %w", currentBrokerID, parseErr)
 	}
 
+	// A flat Runtime Broker never adopts orphans.
+	if flat, err := s.isFlatRuntimeBroker(ctx, parsedID); err != nil {
+		return nil, err
+	} else if flat {
+		return nil, nil
+	}
+
 	// Collect IDs of all online brokers (excluding the current one, which may
 	// not be stamped online yet during startup).
 	onlineBrokers, err := s.client.RuntimeBroker.Query().
@@ -2226,6 +2332,15 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 	for _, b := range onlineBrokers {
 		excludeIDs = append(excludeIDs, b.ID.String())
 	}
+	// Agents on flat Runtime Brokers are never orphan candidates. The IDs
+	// are collected in Go (runtime_brokers.id is a UUID column and
+	// agents.runtime_broker_id a string). A missing broker row counts as
+	// legacy, so agents of a deleted legacy Runtime Broker stay eligible.
+	flatIDs, err := s.flatRuntimeBrokerIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	excludeIDs = append(excludeIDs, flatIDs...)
 
 	// Terminal phases: agents in these states should not be reassigned.
 	terminalPhases := []string{"stopped", "error"}
@@ -2236,6 +2351,7 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 			agent.RuntimeBrokerIDNEQ(""),        // Must have a broker assignment
 			agent.PhaseNotIn(terminalPhases...), // Not in a terminal state
 			agent.DeletedAtIsNil(),              // Not soft-deleted
+			agent.PinnedRuntimeBrokerIDIsNil(),  // Never move a pinned agent
 		).
 		All(ctx)
 	if err != nil {
@@ -2269,8 +2385,19 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 		return 0, nil
 	}
 
+	// Agents are never bulk-moved onto a flat Runtime Broker.
+	if destUID, err := uuid.Parse(brokerID); err == nil {
+		flat, err := s.isFlatRuntimeBroker(ctx, destUID)
+		if err != nil {
+			return 0, err
+		}
+		if flat {
+			return 0, store.ErrFlatRuntimeBrokerReassign
+		}
+	}
+
 	affected, err := s.client.Agent.Update().
-		Where(agent.IDIn(ids...)).
+		Where(agent.IDIn(ids...), agent.PinnedRuntimeBrokerIDIsNil()).
 		SetRuntimeBrokerID(brokerID).
 		Save(ctx)
 	if err != nil {
@@ -2287,6 +2414,22 @@ func (s *AgentStore) ReassignAgentsToBroker(ctx context.Context, agents []*store
 func (s *AgentStore) ReassignProjectBroker(ctx context.Context, oldBrokerID, newBrokerID string) (int, error) {
 	if oldBrokerID == newBrokerID {
 		return 0, nil
+	}
+
+	// A project default is never repointed to or from a flat Runtime
+	// Broker. A missing row counts as legacy.
+	for _, id := range []string{oldBrokerID, newBrokerID} {
+		uid, err := uuid.Parse(id)
+		if err != nil {
+			continue
+		}
+		flat, err := s.isFlatRuntimeBroker(ctx, uid)
+		if err != nil {
+			return 0, err
+		}
+		if flat {
+			return 0, nil
+		}
 	}
 
 	// Safety guard: check if the old broker is still online. If so, it is a
@@ -2527,6 +2670,9 @@ func (s *AgentStore) setAgentRunIDOnce(ctx context.Context, uid uuid.UUID, agent
 		upd := c.Update().
 			Where(agent.IDEQ(uid), agent.RunIDEQ(row.RunID), runIDWritable(now)).
 			SetRunID(runID)
+		if runID != row.RunID {
+			upd = upd.SetRunIDUpdatedAt(now.UTC())
+		}
 		if len(prevList) > 0 {
 			upd = upd.SetPreviousRunIds(prevList)
 		} else {
@@ -2604,6 +2750,47 @@ func runIDWritable(now time.Time) predicate.Agent {
 	)
 }
 
+// SetAgentSSHHostKey implements store.AgentStore.SetAgentSSHHostKey: one
+// conditional write, applied only while run_id equals runID, no delete
+// holds the row and no key is recorded for runID yet. When it writes
+// nothing, a read of the row tells the outcomes apart.
+func (s *AgentStore) SetAgentSSHHostKey(ctx context.Context, agentID, runID, publicKey string) (store.SSHHostKeyResult, error) {
+	if runID == "" || publicKey == "" {
+		return store.SSHHostKeyNotCurrentRun, nil
+	}
+	uid, err := parseUUID(agentID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.Agent.Update().
+		Where(
+			agent.IDEQ(uid), agent.RunIDEQ(runID), runIDWritable(time.Now()),
+			agent.Or(agent.SSHHostKeyRunIDIsNil(), agent.SSHHostKeyRunIDNEQ(runID)),
+		).
+		SetSSHHostKey(publicKey).
+		SetSSHHostKeyRunID(runID).
+		Save(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	if n > 0 {
+		return store.SSHHostKeyWritten, nil
+	}
+	row, err := s.client.Agent.Query().Where(agent.IDEQ(uid), agent.DeletedAtIsNil()).Only(ctx)
+	switch {
+	case ent.IsNotFound(err):
+		return store.SSHHostKeyNotCurrentRun, nil
+	case err != nil:
+		return 0, mapError(err)
+	case row.RunID != runID || row.SSHHostKeyRunID != runID:
+		// Another run, or a delete holds the row.
+		return store.SSHHostKeyNotCurrentRun, nil
+	case row.SSHHostKey == publicKey:
+		return store.SSHHostKeyUnchanged, nil
+	}
+	return store.SSHHostKeyAlreadySet, nil
+}
+
 // CompareAndSwapAgentRunID implements store.AgentStore.CompareAndSwapAgentRunID.
 // The swap also clears previous_run_ids: the run has settled.
 func (s *AgentStore) CompareAndSwapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string) (bool, error) {
@@ -2616,14 +2803,31 @@ func (s *AgentStore) RevertAgentRunID(ctx context.Context, agentID, mintedRunID,
 	return s.swapAgentRunID(ctx, agentID, mintedRunID, previousRunID, false)
 }
 
-func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool) (bool, error) {
+// AdoptAgentRunID implements store.AgentStore.AdoptAgentRunID: the
+// settling swap, refused while a delete holds the row or when run_id
+// changed after unchangedSince (run_id_updated_at is checked in the same
+// statement as the write).
+func (s *AgentStore) AdoptAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, unchangedSince time.Time) (bool, error) {
+	return s.swapAgentRunID(ctx, agentID, expectedRunID, newRunID, true,
+		runIDWritable(time.Now()),
+		agent.RunIDUpdatedAtNotNil(),
+		agent.RunIDUpdatedAtLTE(unchangedSince.UTC()))
+}
+
+// swapAgentRunID swaps run_id from expectedRunID to newRunID, under any
+// extra predicates, and reports whether it did. A swap that changes the
+// value also sets run_id_updated_at; a same-value swap (a settle) leaves it.
+func (s *AgentStore) swapAgentRunID(ctx context.Context, agentID, expectedRunID, newRunID string, clearPrevious bool, extra ...predicate.Agent) (bool, error) {
 	uid, err := parseUUID(agentID)
 	if err != nil {
 		return false, err
 	}
 	upd := s.client.Agent.Update().
-		Where(agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)).
+		Where(append([]predicate.Agent{agent.IDEQ(uid), agent.RunIDEQ(expectedRunID)}, extra...)...).
 		SetRunID(newRunID)
+	if newRunID != expectedRunID {
+		upd = upd.SetRunIDUpdatedAt(time.Now().UTC())
+	}
 	if clearPrevious {
 		upd = upd.ClearPreviousRunIds()
 	}

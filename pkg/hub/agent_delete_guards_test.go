@@ -33,7 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,74 +40,6 @@ import (
 // Tests for the phase 1a-1 delete guards and start gate (design
 // ptone/scion#2483 §2.1, §2.4). Delete markers are seeded through
 // UpdateAgentDeletion, the only writer of the deletion columns.
-
-// deleteSeed describes a delete marker to seed on an agent.
-type deleteSeed struct {
-	name    string
-	state   string
-	leaseIn time.Duration // lease_at = now + leaseIn
-	code    string
-	intent  bool // also insert an outstanding (pending) broker delete intent
-}
-
-var (
-	seedLiveDeleting     = deleteSeed{name: "live deleting", state: store.DeletionStateDeleting, leaseIn: time.Minute}
-	seedFailedIntent     = deleteSeed{name: "failed with outstanding intent", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeRuntimeError, intent: true}
-	seedInDoubtIntent    = deleteSeed{name: "in_doubt with outstanding intent", state: store.DeletionStateFailed, leaseIn: -time.Minute, code: store.DeletionCodeInDoubt, intent: true}
-	seedExpiredFinalize  = deleteSeed{name: "lease-expired finalizing", state: store.DeletionStateFinalizing, leaseIn: -time.Minute}
-	seedRevokeFailedFinl = deleteSeed{name: "revoke_failed finalizing", state: store.DeletionStateFinalizing, leaseIn: -time.Minute, code: store.DeletionCodeRevokeFailed}
-
-	// Every marker that must block start.
-	blockingSeeds = []deleteSeed{seedLiveDeleting, seedFailedIntent, seedInDoubtIntent, seedExpiredFinalize, seedRevokeFailedFinl}
-)
-
-func seedAgentDeletion(t *testing.T, s store.Store, agentID string, d deleteSeed) {
-	t.Helper()
-	ctx := context.Background()
-	now := time.Now()
-	lease := now.Add(d.leaseIn)
-	st := d.state
-	set := store.DeletionFields{State: &st, BumpClaim: true, LeaseAt: &lease, StartedAt: &now}
-	if d.code != "" {
-		code := d.code
-		set.Code = &code
-	}
-	if d.state == store.DeletionStateFailed {
-		set.FailedAt = &now
-	}
-	n, err := s.UpdateAgentDeletion(ctx, agentID, store.DeletionPredicate{}, set)
-	require.NoError(t, err)
-	require.Equal(t, 1, n)
-	if d.intent {
-		require.NoError(t, s.InsertBrokerDispatch(ctx, &store.BrokerDispatch{
-			ID: uuid.NewString(), BrokerID: uuid.NewString(), AgentID: agentID, Op: brokerDispatchOpDelete,
-		}))
-	}
-}
-
-func requireDeleteInProgress(t *testing.T, rec *httptest.ResponseRecorder) {
-	t.Helper()
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), ErrCodeDeleteInProgress)
-}
-
-// deleteGuardDispatcher counts start and stop dispatches.
-type deleteGuardDispatcher struct {
-	createAgentDispatcher
-	starts int
-	stops  int
-}
-
-func (d *deleteGuardDispatcher) DispatchAgentStart(_ context.Context, agent *store.Agent, _ string, _ bool) error {
-	d.starts++
-	agent.Phase = string(state.PhaseRunning)
-	return nil
-}
-
-func (d *deleteGuardDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	d.stops++
-	return nil
-}
 
 // Acceptance (n), (u), (x): start and restart on every blocking marker →
 // 409 delete_in_progress, with nothing dispatched.
@@ -552,12 +483,6 @@ func TestStartGate_StoreErrorFailsClosed(t *testing.T) {
 	ref := srv.startGate(context.Background(), agent, startEntryStart)
 	require.True(t, ref.refuses())
 	assert.Equal(t, http.StatusInternalServerError, ref.HTTPStatus)
-}
-
-type dispatchErrStore struct{ store.Store }
-
-func (d *dispatchErrStore) HasOutstandingBrokerDispatch(context.Context, string, string) (bool, error) {
-	return false, errors.New("boom")
 }
 
 // AgentStatusEvent always carries the deletion key: populated during a

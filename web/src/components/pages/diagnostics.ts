@@ -211,10 +211,10 @@ export class ScionPageDiagnostics extends LitElement {
     }
   `;
 
-  override async connectedCallback(): Promise<void> {
+  override connectedCallback(): void {
     super.connectedCallback();
-    this.fetchHealth();
-    this.checkCloudLogging();
+    void this.fetchHealth();
+    void this.checkCloudLogging();
   }
 
   private async fetchHealth(): Promise<void> {
@@ -294,11 +294,7 @@ export class ScionPageDiagnostics extends LitElement {
 
   private renderStatusBanner() {
     const health = this.hubHealth;
-    const {
-      statusClass,
-      label: statusLabel,
-      problems,
-    } = healthBannerState(health as Record<string, unknown> | null);
+    const { statusClass, label: statusLabel, problems } = healthBannerState(health);
 
     const cloudStatus = this.cloudLoggingChecked
       ? this.cloudLoggingAvailable

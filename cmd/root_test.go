@@ -546,6 +546,7 @@ func TestExecuteUsageOnError_RunEUsageErrors(t *testing.T) {
 		{"service-accounts list: --assignable with --global", []string{"service-accounts", "list", "--global", "--assignable"}, "--assignable asks which accounts"},
 		{"project skills add: skill URI with --from-directory", []string{"project", "skills", "add", "skill://foo", "--from-directory", "https://github.com/org/repo/tree/main/skills"}, "cannot combine a skill URI argument with --from-directory"},
 		{"start: bad --template-scope", []string{"start", "a1", "--template-scope", "bogus"}, `unknown template scope "bogus"`},
+		{"start: bad --agent-log-level", []string{"start", "a1", "--agent-log-level", "verbose"}, "invalid --agent-log-level value"},
 		{"create: bad --template-scope", []string{"create", "a1", "--template-scope", "bogus"}, `unknown template scope "bogus"`},
 	}
 	for _, tt := range tests {
@@ -1092,20 +1093,14 @@ hub:
 				_ = os.Remove(devTokenPath)
 			}
 
-			// Capture stderr
-			oldStderr := os.Stderr
-			r, w, _ := os.Pipe()
-			os.Stderr = w
-
-			// Call the function (use empty project path as settings won't load in test env)
-			printDevAuthWarningIfNeeded("")
-
-			// Restore stderr and read output
-			_ = w.Close()
-			os.Stderr = oldStderr
-
+			// The warning goes to the writer it is given (the command's
+			// stderr), and never to stdout.
 			var buf bytes.Buffer
-			_, _ = buf.ReadFrom(r)
+			stdout := captureStdout(t, func() {
+				// Use empty project path as settings won't load in test env
+				printDevAuthWarningIfNeeded(&buf, "")
+			})
+			assert.Empty(t, stdout, "the dev auth warning must not go to stdout")
 			output := buf.String()
 
 			if tt.expectWarning {
@@ -1190,18 +1185,6 @@ func TestAgentModeImpliesNonInteractive(t *testing.T) {
 
 		assert.True(t, nonInteractive, "nonInteractive should be auto-enabled in agent mode")
 		assert.True(t, autoConfirm, "autoConfirm should be implied by nonInteractive")
-	})
-
-	t.Run("assistant mode does not auto-enable non-interactive", func(t *testing.T) {
-		t.Setenv("SCION_CLI_MODE", "assistant")
-		autoConfirm = false
-		nonInteractive = false
-		outputFormat = ""
-
-		_ = rootCmd.PersistentPreRunE(&cobra.Command{Use: "scion"}, []string{})
-
-		assert.False(t, nonInteractive, "nonInteractive should not be auto-enabled in assistant mode")
-		assert.False(t, autoConfirm, "autoConfirm should remain false in assistant mode")
 	})
 
 	t.Run("skipped when already non-interactive", func(t *testing.T) {

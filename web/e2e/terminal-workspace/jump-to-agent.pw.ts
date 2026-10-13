@@ -28,7 +28,12 @@
 
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { DENSE_PALETTE_FONT_SIZES, paletteFontSizes } from '../palette-typography.js';
-import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -42,6 +47,7 @@ interface AgentFixture {
   phase: string;
   projectId: string;
   project?: string;
+  projectSlug?: string;
 }
 
 async function setup(
@@ -50,16 +56,9 @@ async function setup(
 ): Promise<{ attaches: () => number; ptyInput: () => string }> {
   let attaches = 0;
   const frames: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.terminal_workspace': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: 'fixture-user', email: 'fixture@example.test' } })
@@ -253,6 +252,43 @@ test('a dismiss refocuses the footer button that opened the palette', async ({ p
     .toBe(true);
 });
 
+test('same-named agents in different projects show their project slugs, with no project request', async ({
+  page,
+}) => {
+  await setup(page, {
+    [agentA]: {
+      ...fixture(agentA, 'Twin'),
+      projectId: 'p-alpha',
+      project: 'Alpha Project',
+      projectSlug: 'alpha-proj',
+    },
+    [agentB]: {
+      ...fixture(agentB, 'Twin'),
+      projectId: 'p-beta',
+      project: 'Beta Project',
+      projectSlug: 'beta-proj',
+    },
+  });
+  await page.goto(`/terminals/${agentA}`);
+  await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+
+  // A project list or single-project read from palette open on.
+  const projectRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/^\/api\/v1\/projects(\/[^/]+)?$/.test(new URL(request.url()).pathname))
+      projectRequests.push(request.url());
+  });
+  await paletteButton(page).click();
+  const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
+  await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
+
+  await page.locator('scion-quick-palette #palette-query-input').fill('beta-proj');
+  await expect(secondary).toHaveText(['beta-proj']);
+  await page.locator('scion-quick-palette #palette-query-input').fill('Alpha Project');
+  await expect(secondary).toHaveText(['alpha-proj']);
+  expect(projectRequests).toEqual([]);
+});
+
 test('the palette uses the same type scale as the chat palette', async ({ page }) => {
   await setup(page, { [agentA]: { ...fixture(agentA, 'Alice-bot'), project: 'Fixture Project' } });
   await page.goto(`/terminals/${agentA}`);
@@ -351,6 +387,29 @@ test('a reload after picking a new agent restores that agent', async ({ page }) 
   await page.reload();
   await expect(page).toHaveURL(new RegExp(`/terminals/${agentB}$`));
   await expect.poll(() => paneIsVisible(page, agentB)).toBe(true);
+});
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the footer button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await setup(page, { [agentA]: fixture(agentA, 'Alice-bot') });
+    await page.goto(`/terminals/${agentA}`);
+    await expect(page.locator('.xterm-helper-textarea').first()).toBeAttached();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
 });
 
 test.describe('on a narrow viewport', () => {
@@ -461,8 +520,8 @@ test('Meta+K opens the palette even with a terminal pane focused', async ({ page
 
 /**
  * After `open`, types `bob` without waiting for the palette and checks it all
- * became the query: the input has focus right after the open, the results
- * are filtered, and nothing reached the focused pane's PTY.
+ * became the query: the input takes focus once the palette shows, the
+ * results are filtered, and nothing reached the focused pane's PTY.
  */
 async function expectTypingRightAfterOpenFilters(
   page: Page,
@@ -473,7 +532,9 @@ async function expectTypingRightAfterOpenFilters(
   await page.keyboard.type('bob');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  // The input takes focus a frame after the dialog shows (Shoelace's
+  // sl-initial-focus, then the palette's next render), so wait for it.
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('bob');
   await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Bob-bot/]);
   expect(ptyInput()).toBe('');

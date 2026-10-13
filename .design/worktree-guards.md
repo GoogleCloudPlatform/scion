@@ -17,7 +17,7 @@ Every agent's worktree is created at `.scion/agents/<name>/workspace` (`pkg/agen
 
 These numeric suffixes are non-deterministic across sessions. If worktrees are pruned and recreated in a different order, the numbering changes. The entries are opaque when inspected via `git worktree list`.
 
-Scion associates agents with worktrees via **branch name** (`FindWorktreeByBranch` at `pkg/util/git.go:289`), not the `.git/worktrees/` entry name, so this doesn't cause functional mis-association at the scion level. But it makes the problem difficult to diagnose when it occurs.
+Scion associates agents with worktrees via **branch name** (`FindWorktreeByBranchIn` at `pkg/util/git.go:408`), not the `.git/worktrees/` entry name, so this doesn't cause functional mis-association at the scion level. But it makes the problem difficult to diagnose when it occurs.
 
 ### 2. `RepoRootDir` returns the worktree root, not the main repo root
 

@@ -23,12 +23,16 @@ import (
 	"io"
 	"log/slog"
 	"mime"
+	"mime/multipart"
 	"net/http"
+	"os"
+	"path"
 	"path/filepath"
-	"strconv"
+	"slices"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -120,7 +124,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 		}
 
 		objectPath := hc.StoragePath + "/" + filePath
-		reader, _, err := stor.Download(ctx, objectPath)
+		reader, obj, err := stor.Download(ctx, objectPath)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				NotFound(w, "Harness config file")
@@ -136,7 +140,7 @@ func (s *Server) handleHarnessConfigFileRead(w http.ResponseWriter, r *http.Requ
 
 		w.Header().Set("Content-Type", "application/octet-stream")
 		w.Header().Set("Content-Disposition", contentDisposition)
-		w.Header().Set("Content-Length", strconv.FormatInt(found.Size, 10))
+		setDownloadContentLength(w, obj)
 		w.WriteHeader(http.StatusOK)
 		if _, err := io.Copy(w, reader); err != nil {
 			slog.Error("Error streaming file to client", "path", objectPath, "error", err)
@@ -238,6 +242,9 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 	}
 
 	content := []byte(req.Content)
+	if isHarnessConfigYAMLPath(filePath) && refuseUnusableProvisionerYAML(w, hc.Name, content) {
+		return
+	}
 	objectPath := hc.StoragePath + "/" + filePath
 	_, err := stor.Upload(ctx, objectPath, strings.NewReader(req.Content), storage.UploadOptions{
 		ContentType: "text/plain; charset=utf-8",
@@ -272,7 +279,7 @@ func (s *Server) handleHarnessConfigFileWrite(w http.ResponseWriter, r *http.Req
 
 	hc.ContentHash = computeContentHash(hc.Files)
 
-	if filePath == "config.yaml" {
+	if isHarnessConfigYAMLPath(filePath) {
 		if entry, err := config.ParseHarnessConfigYAML(content); err == nil {
 			if hc.Config == nil {
 				hc.Config = &store.HarnessConfigData{}
@@ -320,9 +327,34 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Write parts in a stable order.
+	partPaths := make([]string, 0, len(r.MultipartForm.File))
+	for filePath := range r.MultipartForm.File {
+		partPaths = append(partPaths, filePath)
+	}
+	slices.Sort(partPaths)
+
+	// Check every part that resolves to config.yaml before any part is
+	// written, so a refused upload leaves storage and the record unchanged.
+	for _, filePath := range partPaths {
+		headers := r.MultipartForm.File[filePath]
+		if !isHarnessConfigYAMLPath(filePath) || len(headers) == 0 {
+			continue
+		}
+		data, err := readMultipartFile(headers[0])
+		if err != nil {
+			BadRequest(w, "Failed to read multipart file: "+err.Error())
+			return
+		}
+		if refuseUnusableProvisionerYAML(w, hc.Name, data) {
+			return
+		}
+	}
+
 	files := hc.Files
-	entries := make([]HarnessConfigFileEntry, 0, len(r.MultipartForm.File))
-	for filePath, headers := range r.MultipartForm.File {
+	entries := make([]HarnessConfigFileEntry, 0, len(partPaths))
+	for _, filePath := range partPaths {
+		headers := r.MultipartForm.File[filePath]
 		if err := validateWorkspaceFilePath(filePath); err != nil {
 			BadRequest(w, fmt.Sprintf("Invalid file path %q: %s", filePath, err.Error()))
 			return
@@ -407,6 +439,120 @@ func (s *Server) handleHarnessConfigFileUpload(w http.ResponseWriter, r *http.Re
 		Files: entries,
 		Hash:  hc.ContentHash,
 	})
+}
+
+// unusableProvisionerInYAML returns the refusal for configYAML when it
+// parses and declares a provisioner block that could never provision an agent
+// (builtin type, or no command), and nil otherwise. Content that does not
+// parse is left to the existing handling. It is the single content check
+// shared by the file write, multipart upload and import/reimport paths
+// (ptone/scion#3133, ptone/scion#4181).
+func unusableProvisionerInYAML(name string, configYAML []byte) *harness.UnusableProvisionerError {
+	entry, err := config.ParseHarnessConfigYAML(configYAML)
+	if err != nil {
+		return nil
+	}
+	return harness.CheckProvisionerUsable(name, nil, entry)
+}
+
+// writeUnusableProvisioner writes the 422 harness_config_unusable answer that
+// harness-config finalize returns for an unusable provisioner block.
+func writeUnusableProvisioner(w http.ResponseWriter, perr *harness.UnusableProvisionerError) {
+	writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+}
+
+// refuseUnusableProvisionerYAML writes 422 harness_config_unusable and returns
+// true when configYAML parses and declares a provisioner block that could
+// never provision an agent (builtin type, or no command). This is the same
+// check and response as harness-config finalize (ptone/scion#3133). Content
+// that does not parse is left to the existing handling.
+func refuseUnusableProvisionerYAML(w http.ResponseWriter, name string, configYAML []byte) bool {
+	if perr := unusableProvisionerInYAML(name, configYAML); perr != nil {
+		writeUnusableProvisioner(w, perr)
+		return true
+	}
+	return false
+}
+
+// unusableProvisionerImportError is returned by the import driver when one or
+// more discovered harness-configs declare an unusable provisioner block. The
+// import is refused before anything is persisted.
+type unusableProvisionerImportError struct {
+	// perrs holds one refusal per unusable harness-config, ordered by name.
+	perrs []*harness.UnusableProvisionerError
+}
+
+// Error returns the public message, which carries no filesystem paths, since
+// the streaming import endpoints send it to the client as-is.
+func (e *unusableProvisionerImportError) Error() string { return e.publicMessage() }
+
+// publicMessage joins the public message of every refused harness-config.
+func (e *unusableProvisionerImportError) publicMessage() string {
+	msgs := make([]string, 0, len(e.perrs))
+	for _, perr := range e.perrs {
+		msgs = append(msgs, perr.PublicMessage())
+	}
+	return strings.Join(msgs, " ")
+}
+
+// writeUnusableProvisionerImportError writes the finalize-equivalent 422 and
+// returns true when err is an unusableProvisionerImportError.
+func writeUnusableProvisionerImportError(w http.ResponseWriter, err error) bool {
+	var ierr *unusableProvisionerImportError
+	if errors.As(err, &ierr) {
+		writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, ierr.publicMessage(), nil)
+		return true
+	}
+	return false
+}
+
+// checkHarnessConfigDirsProvisioner applies unusableProvisionerInYAML to the
+// config.yaml of every discovered harness-config directory and returns one
+// unusableProvisionerImportError naming all refused configs, ordered by name,
+// or nil when none is refused. A config.yaml that cannot be read is left to
+// the existing import handling.
+func checkHarnessConfigDirsProvisioner(dirs []resourceDir) error {
+	var perrs []*harness.UnusableProvisionerError
+	for _, rd := range dirs {
+		data, err := os.ReadFile(filepath.Join(rd.path, "config.yaml"))
+		if err != nil {
+			continue
+		}
+		if perr := unusableProvisionerInYAML(rd.name, data); perr != nil {
+			perrs = append(perrs, perr)
+		}
+	}
+	if len(perrs) == 0 {
+		return nil
+	}
+	slices.SortStableFunc(perrs, func(a, b *harness.UnusableProvisionerError) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	return &unusableProvisionerImportError{perrs: perrs}
+}
+
+// isHarnessConfigYAMLPath reports whether a harness-config file path names
+// the top-level config.yaml once cleaned, so spellings such as
+// "./config.yaml" get the same checks as the exact name.
+func isHarnessConfigYAMLPath(filePath string) bool {
+	return path.Clean(filePath) == "config.yaml"
+}
+
+// readMultipartFile reads one multipart file part fully.
+func readMultipartFile(fh *multipart.FileHeader) ([]byte, error) {
+	src, err := fh.Open()
+	if err != nil {
+		return nil, fmt.Errorf("open: %w", err)
+	}
+	data, err := io.ReadAll(src)
+	closeErr := src.Close()
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close: %w", closeErr)
+	}
+	return data, nil
 }
 
 func (s *Server) handleHarnessConfigFileDelete(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig, filePath string) {

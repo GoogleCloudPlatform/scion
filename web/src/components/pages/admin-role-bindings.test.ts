@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { ScionPageAdminRoleBindings } from './admin-role-bindings.js';
 
 // ── Mock API responses ──
 
@@ -29,7 +30,7 @@ function makeBindings(count = 3) {
 
 function makeFetchHandler() {
   const calls: string[] = [];
-  const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+  const handler = (url: string | URL | Request, _init?: RequestInit): Promise<Response> => {
     const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
     calls.push(path);
 
@@ -54,15 +55,12 @@ function makeFetchHandler() {
   return { handler, calls };
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let Component: any;
-
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
 ) {
   vi.stubGlobal('fetch', vi.fn(fetchHandler));
   const el = document.createElement('scion-page-admin-role-bindings') as InstanceType<
-    typeof Component
+    typeof ScionPageAdminRoleBindings
   >;
   document.body.appendChild(el);
   await el.updateComplete;
@@ -83,8 +81,7 @@ function query(el: HTMLElement, selector: string): Element | null {
 // ── Tests ──
 
 beforeAll(async () => {
-  const mod = await import('./admin-role-bindings.js');
-  Component = mod.ScionPageAdminRoleBindings;
+  await import('./admin-role-bindings.js');
 });
 
 afterEach(() => {

@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import { DeletionLeaseController, type DeletionClock } from './deletion-badge.js';

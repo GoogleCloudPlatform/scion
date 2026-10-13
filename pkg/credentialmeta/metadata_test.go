@@ -154,3 +154,28 @@ func TestContractConstantsPinServerMetadataBounds(t *testing.T) {
 			MaxNameBytes, MaxPurposeBytes, MaxLabelCount, MaxLabelKeyBytes, MaxLabelValueBytes)
 	}
 }
+
+func TestValidateIssuanceRejectsVerifiedActorLabelKey(t *testing.T) {
+	t.Parallel()
+
+	err := ValidateIssuance("n", "", map[string]string{"verified_actor": "agent:a"})
+	var validationErr *ValidationError
+	if !errors.As(err, &validationErr) || validationErr.Field != "labels" {
+		t.Fatalf("ValidateIssuance() error = %v, want a labels validation error", err)
+	}
+	if strings.Contains(err.Error(), "agent:a") {
+		t.Fatalf("ValidateIssuance() reflected the rejected value: %q", err)
+	}
+}
+
+func TestNewRefAcceptsDelegatedAgentKind(t *testing.T) {
+	t.Parallel()
+
+	ref, err := NewRef(RefInput{Kind: KindDelegatedAgent, ID: "credential-1", BoundaryKind: BoundaryHub})
+	if err != nil {
+		t.Fatalf("NewRef() rejected the delegated agent kind: %v", err)
+	}
+	if ref.Kind() != KindDelegatedAgent {
+		t.Fatalf("NewRef() kind = %q, want %q", ref.Kind(), KindDelegatedAgent)
+	}
+}

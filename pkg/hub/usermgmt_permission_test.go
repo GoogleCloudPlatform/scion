@@ -36,8 +36,8 @@ func TestUserMgmtPermissionConversion(t *testing.T) {
 		resource   string
 		action     string
 	}{
-		{"/api/v1/admin/allow-list", "hub.allow_list.update", "hub", "update"},
-		{"/api/v1/admin/allow-list/", "hub.allow_list.update", "hub", "update"},
+		{"/api/v1/admin/allow-list", "hub.allow_list.read", "hub", "read"},
+		{"/api/v1/admin/allow-list/", "hub.allow_list.read", "hub", "read"},
 		{"/api/v1/admin/users/invite/bulk", "user.invite", "user", "invite"},
 		{"/api/v1/admin/users/invite", "user.invite", "user", "invite"},
 		{"/api/v1/admin/invites", "user.invite", "user", "invite"},
@@ -135,7 +135,7 @@ func TestUserMgmtPermissionConversion(t *testing.T) {
 		identity   UserIdentity
 		wantStatus int
 	}{
-		// Allow-list endpoints: hub.allow_list.update
+		// Allow-list endpoints: the guard checks hub.allow_list.read
 		{"allow_list_super_admin", "/api/v1/admin/allow-list", admin, http.StatusOK},
 		{"allow_list_hub_admin", "/api/v1/admin/allow-list", hubAdmin, http.StatusOK},
 		{"allow_list_member_denied", "/api/v1/admin/allow-list", member, http.StatusForbidden},

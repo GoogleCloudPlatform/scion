@@ -1,0 +1,49 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (2):
+  git mv hub/move_plain.go hub/sub/move_plain.go
+  git mv hub/move_sqlite.go hub/sub/move_sqlite.go
+
+Renames (2):
+  func   otherLimit -> OtherLimit  (hub/move_plain.go:9)
+  func   sqliteLimit -> SqliteLimit  (hub/move_sqlite.go:5)
+
+Alias entries (3):
+  var   Plain = sub.Plain
+  func  otherLimit = sub.OtherLimit
+  func  sqliteLimit = sub.SqliteLimit [!no_sqlite]
+
+Alias files (2):
+  hub/zz_alias_sub.go (17 lines)
+  hub/zz_alias_sub_c1.go (15 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 4. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: file excluded by build constraints (not type-checked) ==
+  hub/stay_nosqlite.go: references moved names by name (aliased conservatively, not type-checked): otherLimit - verify with -tags
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move_plain.go:7: example.com/fx/hub.Plain is now example.com/fx/hub/sub.Plain for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: go:generate directive ==
+  hub/move_plain.go:3: //go:generate echo hi (runs in the new directory)
+
+== INFO: moved file has a build constraint ==
+  hub/move_sqlite.go: constraint "!no_sqlite" (its alias entries carry the same constraint)
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

@@ -18,12 +18,13 @@ import "github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 
 // LabelsMatchFilter reports whether labels satisfy every key/value pair in
 // filter. The Docker, Podman and Apple runtimes apply it to each
-// container's labels, and agent.AgentManager.List's on-disk scan applies it
-// to the label set a created (not yet started) agent's container would
-// carry, so those paths cannot drift. Other runtimes filter their own way
-// and do not use it: Kubernetes passes the filter to the API server as a
-// label selector, which compares every key exactly, including the project
-// path, and Cloud Run has its own List.
+// container's labels, the Cloud Run Sandbox runtime applies it to each
+// tracked sandbox's labels, and agent.AgentManager.List's on-disk scan
+// applies it to the label set a created (not yet started) agent's
+// container would carry, so those paths cannot drift. Other runtimes
+// filter their own way and do not use it: Kubernetes passes the filter to
+// the API server as a label selector, which compares every key exactly,
+// including the project path, and Cloud Run has its own List.
 //
 // Each key is compared with projectkeys.LabelValuesMatch: the project path
 // is compared as a resolved path, every other key exactly. A key that is

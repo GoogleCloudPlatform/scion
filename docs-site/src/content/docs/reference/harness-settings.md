@@ -15,11 +15,25 @@ Each agent has a dedicated "Home" directory that is mounted into the container. 
 
 ## Seeding from Harness-Configs & Templates
 When an agent is created, Scion composes its home directory by layering files from multiple sources:
-1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`).
+1.  **Harness-Config**: Base settings for the specific LLM tool (from `~/.scion/harness-configs/<name>/home/`, or another [harness-config location](#managing-harness-configs)).
 2.  **Template**: Role-specific prompts and configuration (from `.scion/templates/<name>/home/`).
 3.  **Common Files**: Shared dotfiles like `.tmux.conf` and `.zshrc`.
 
 This multi-layered approach allows you to define a "base" Gemini configuration once, and then overlay different "roles" (like Code Reviewer or Security Auditor) on top of it.
+
+### When harness-config changes reach an agent
+
+A harness-config has two parts that reach an agent at different times:
+
+- **`home/` files** (for example `home/.claude/settings.json`, which registers the Claude Code hooks) are copied into the agent home only when the agent is provisioned: when it is created, and when it is [reincarnated](/scion/local/agent-lifecycle/#reincarnating-an-agent). Starting an existing agent reuses its agent home and does not copy them again.
+- **The provisioning bundle** (`config.yaml` and the provisioner scripts) is cleared and staged again from the harness-config on every start.
+
+So after you change a harness-config's `home/` files, an existing agent keeps its old copies through stops and starts. Reincarnate or recreate the agent to pick up the change.
+
+Where the start reads the harness-config from depends on the mode:
+
+- **Workstation:** a local agent uses the harness-config on disk (template-bundled, then project, then global). When the workstation server starts, it syncs the global harness-configs (`~/.scion/harness-configs/`) to the Hub: it imports each one the Hub does not have yet (except a built-in that was deleted on the Hub) and re-uploads each one whose content hash changed.
+- **Hosted:** the Hub stores each harness-config as a record plus its files in storage, written by `scion harness-config sync` (alias `push`) or re-imported by `scion harness-config update`. When the Runtime Broker creates, starts or restarts an agent, it fetches the Hub's current version of the agent's harness-config (cached on the broker by content hash), not the version the agent was created with. A start still keeps the agent's existing `home/` files.
 
 ## Managing Harness-Configs
 
@@ -28,7 +42,11 @@ A **harness-config** is a named, versioned bundle that defines a harness: its `c
 (the `home/` directory, `provision.py`, `dialect.yaml`, `capture_auth.py`, and the shared
 `scion_harness.py` library). Bundles live in `~/.scion/harness-configs/<name>/` (global) or
 `.scion/harness-configs/<name>/` (project-level); project-level configs override global ones with
-the same name.
+the same name. A template can also bundle harness-configs in its own `harness-configs/<name>/`
+directories, and these take precedence over both project and global configs of the same name (any
+directory that fails to load is skipped and the next one is tried). When a Hub dispatch names a
+Hub harness-config, the Hub's copy is used instead of any of these directories; if the Runtime
+Broker cannot fetch it, the start fails rather than falling back to them.
 
 Since all harnesses are now provisioned via container-script (see
 [Supported Agent Harnesses](/scion/supported-harnesses/)), harness-configs are the unit you
@@ -64,8 +82,12 @@ are separate configs, so check the printed scope to see which one you changed.
 
 ### Source-URL tracking and "Refresh from Source"
 
-When a config is installed from a remote source, the Hub records the **`sourceUrl`** it came
-from. You can later re-import (refresh) the config from that source:
+When a config is imported from a URL through the Hub (the import box in the web UI, or
+`POST /api/v1/resources/import`), or installed from a remote source (a URL or rclone URI) with
+`scion harness-config install` in whichever scope it installs to, the Hub records the
+**`sourceUrl`** it came from as metadata. A config installed from a local path or `file://` URL
+records no source URL; to attach one, run `scion harness-config update <name> --url <url>`. You
+can re-import (refresh) a config from its stored source:
 
 ```bash
 # Re-import a single config from its stored source URL
@@ -165,6 +187,44 @@ The force paths still replace the whole config, and they write through symlinks.
 To customize a provisioner, publish it as your own harness-config under a different name. Do
 not edit the bundled scripts in place.
 
+### Changing a harness config affects new agents only
+
+By design, an agent keeps the harness setup it was created with. Its home directory is composed
+once, when the agent is created (see [Seeding from Harness-Configs &
+Templates](#seeding-from-harness-configs--templates)). That directory holds the harness-config's
+`home/` dotfiles, such as Claude's `.claude/settings.json` with its hook registrations, and the
+agent's skills. The skills come from the template chain (including skill references it declares)
+and the platform skills, not from the harness-config. Stopping and starting the agent does not
+copy them again. For a harness that uses container-script provisioning, each start re-stages the
+provisioner bundle (for example `config.yaml`, `provision.py`, `scion_harness.py`,
+`dialect.yaml` and the capture-auth assets) and the hook wrapper script, and then runs
+`provision.py`. Changes to `home/` dotfiles, including hook registrations kept there, therefore
+reach new agents only. Harnesses whose provisioner writes its hook configuration at start (for
+example Copilot, Antigravity and Grok Build) pick up changes to the provisioner on the agent's
+next start.
+
+To give an existing agent the new setup:
+
+1. **Update the harness-config.**
+   - **Local mode:** run `scion harness-config upgrade <name>`. It changes only the local copy
+     in `~/.scion/harness-configs/<name>/`. It adds missing files and settings, but an existing
+     file that changed in the new defaults (for example `home/.claude/settings.json`) keeps your
+     version. To take the new defaults, run `scion harness-config upgrade <name> --force`. This
+     overwrites every file that ships in the embedded defaults, discarding your edits to those
+     files. Files you added yourself are kept.
+   - **Workstation and hosted:** agents use the Hub's copy, which `upgrade` does not change. The
+     Hub refreshes its copy of a built-in harness-config from the binary's defaults when it
+     restarts. In Workstation mode, that restart also resets the bundled configs in
+     `~/.scion/harness-configs/` to the defaults. Publish a harness-config you changed yourself
+     with `scion harness-config sync <name>`.
+2. **Rebuild the agent's home.**
+   - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
+     It keeps the agent's identity and workspace and copies the harness-config's home files, the
+     skills from the template chain (including skill references it declares) and the platform
+     skills in again. It overlays files: files that the new version no longer has stay in place.
+   - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not available):
+     save the agent's work, then delete the agent with `scion delete` and start it again.
+
 ### Deleting
 
 ```bash
@@ -175,6 +235,62 @@ The CLI `delete` removes the config **from the Hub** (matched by name or slug); 
 your local on-disk files. In the web UI, the delete dialog offers an **"Also delete stored files"**
 checkbox to remove the Hub-stored files as well. To remove a local directory, delete it from the
 filesystem or reinstall with `--force`.
+
+### Recovering a deleted built-in
+
+A built-in harness config (such as `claude`) that you delete from the Hub stays deleted. A Hub
+restart or upgrade does not re-create it, and the same applies to built-ins left unselected in
+the setup wizard. To bring one back, re-import it as a **global** harness config from its
+canonical URL:
+
+```text
+https://github.com/GoogleCloudPlatform/scion/harnesses/<name>
+```
+
+In the web UI, open the Hub's **Settings** page, go to the **Harness Configs** tab, and import
+that URL. From the CLI, run
+`scion harness-config install --global https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
+With the API, send a global import (Hub admins only):
+
+```bash
+curl -X POST "$HUB_ENDPOINT/api/v1/resources/import" \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"kind": "harness-config", "scope": "global",
+       "sourceUrl": "https://github.com/GoogleCloudPlatform/scion/harnesses/claude"}'
+```
+
+The URL fetches the repository's main branch. A config re-imported this way counts as a
+built-in again: at its next start the Hub brings it to the version bundled in the Hub binary,
+and later upgrades keep updating it.
+
+Use exactly that URL form. On a **hosted** Hub, a copy from any other URL for the same config,
+such as a `/tree/<ref>/` URL
+(`https://github.com/GoogleCloudPlatform/scion/tree/main/harnesses/claude`), or from a local path,
+is usable but **user-managed**, so it never receives the content bundled with later releases.
+This applies whether you import or install it.
+
+To turn such a copy back into an updating built-in, re-import the canonical URL over it, either
+through the web UI or API import above, with
+`scion harness-config install --global --force <canonical URL>`, or with
+`scion harness-config update <name> --url https://github.com/GoogleCloudPlatform/scion/harnesses/<name>`.
+This updates the existing config in place and records the canonical source URL, so later
+upgrades update it again. You do not need to delete it first.
+
+**Workstation** Hubs re-sync built-ins from `~/.scion/harness-configs` at every start, so a
+re-imported config is updated whichever way you imported it.
+
+The same applies to the built-in `default` template: you can re-import it as a global template
+(`"kind": "template"`, or the **Templates** tab) from
+`https://github.com/GoogleCloudPlatform/scion/resources/templates/default`. On a hosted Hub the
+result is always user-managed and does not receive later bundled updates. Workstation Hubs keep
+it updated.
+
+The Hub must be able to reach GitHub to fetch the URL. An air-gapped Hub needs another source it
+can reach, for example a mirror given as an rclone URI in `sourceUrl` (`:gcs:bucket/path`), or a
+project workspace import (`POST /api/v1/projects/{id}/import-harness-configs` with
+`workspacePath`), which creates a project-scoped config. On a hosted Hub, both give a
+user-managed copy.
 
 ## Configuration (`config.yaml`)
 

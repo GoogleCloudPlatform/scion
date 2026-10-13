@@ -23,11 +23,9 @@
  * dropped, and the next user's first fetch must behave like a first load.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 
-import { PUSH_STORAGE_KEY } from '../../client/push-preference.js';
+import { PUSH_STORAGE_KEYS } from '../../client/push-preference.js';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -52,9 +50,7 @@ vi.mock('../../client/api.js', () => ({
   ),
 }));
 
-vi.mock('../../client/state.js', () => ({
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/state.js', () => import('../../client/__fixtures__/state-stub.js'));
 
 const { stateManager } = await import('../../client/state.js');
 
@@ -64,7 +60,9 @@ let popups: string[] = [];
 
 class FakeNotification {
   static permission: NotificationPermission = 'granted';
-  static requestPermission = vi.fn(async (): Promise<NotificationPermission> => 'granted');
+  static requestPermission = vi.fn(
+    (): Promise<NotificationPermission> => Promise.resolve('granted')
+  );
   constructor(_title: string, options: NotificationOptions = {}) {
     popups.push(options.tag ?? '');
   }
@@ -135,7 +133,7 @@ describe('notification tray: user switch', () => {
     popups = [];
     FakeNotification.permission = 'granted';
     (window as unknown as { Notification: unknown }).Notification = FakeNotification;
-    localStorage.setItem(PUSH_STORAGE_KEY, 'true');
+    localStorage.setItem(PUSH_STORAGE_KEYS.agent, 'true');
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
   });
 

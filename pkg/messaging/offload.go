@@ -22,6 +22,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 )
 
@@ -45,11 +46,23 @@ const (
 	MetaBodySHA256    = "body_sha256"
 )
 
-// reservedMetadataKeys is the set backing StripReservedMetadata.
-var reservedMetadataKeys = map[string]bool{
+// offloadMetadataKeys are the keys OffloadForDelivery owns.
+var offloadMetadataKeys = map[string]bool{
 	MetaBodyOffloaded: true,
 	MetaBodyChars:     true,
 	MetaBodySHA256:    true,
+}
+
+// reservedMetadataKeys is the set backing StripReservedMetadata: the
+// offload keys plus the artifact reference key (ptone/scion#3222). The hub
+// sets artifact references only through its admission step, which runs
+// after this strip, so a value from any other source never reaches an
+// agent.
+var reservedMetadataKeys = map[string]bool{
+	MetaBodyOffloaded:            true,
+	MetaBodyChars:                true,
+	MetaBodySHA256:               true,
+	artifacts.MessageMetadataKey: true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget
@@ -130,14 +143,21 @@ func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
 	return utf8.RuneCountInString(persistedBody) > p.ThresholdRunes
 }
 
-// StripReservedMetadata returns md unchanged if it has none of the three
-// hub-reserved keys. Otherwise it returns a NEW map without them. It never
+// StripReservedMetadata returns md unchanged if it has none of the
+// hub-reserved keys (the three offload keys and the artifact reference
+// key). Otherwise it returns a NEW map without them. It never
 // mutates md, so it is safe on aliased maps. Callers assign the result:
 // sm.Metadata = messaging.StripReservedMetadata(sm.Metadata).
 func StripReservedMetadata(md map[string]string) map[string]string {
+	return stripMetadataKeys(md, reservedMetadataKeys)
+}
+
+// stripMetadataKeys returns md unchanged if it has none of keys, otherwise a
+// new map without them. It never mutates md.
+func stripMetadataKeys(md map[string]string, keys map[string]bool) map[string]string {
 	hasReserved := false
 	for k := range md {
-		if reservedMetadataKeys[k] {
+		if keys[k] {
 			hasReserved = true
 			break
 		}
@@ -147,7 +167,7 @@ func StripReservedMetadata(md map[string]string) map[string]string {
 	}
 	out := make(map[string]string, len(md))
 	for k, v := range md {
-		if reservedMetadataKeys[k] {
+		if keys[k] {
 			continue
 		}
 		out[k] = v
@@ -156,7 +176,7 @@ func StripReservedMetadata(md map[string]string) map[string]string {
 }
 
 // OffloadForDelivery ALWAYS returns a fresh copy (struct copy plus a deep
-// copy of Metadata) with the three hub-reserved keys deleted. It never
+// copy of Metadata) with the three offload keys deleted. It never
 // mutates the input: not the caller's metadata map, not the persisted row.
 //
 // If the body qualifies and a usable fetch form exists — FetchByID, or a
@@ -173,7 +193,9 @@ func OffloadForDelivery(in OffloadInput, p OffloadPolicy) (*messages.StructuredM
 
 	// Always a fresh map: strip (cheap no-op when clean), then clone
 	// unconditionally so the returned copy never aliases the caller's map.
-	stripped := StripReservedMetadata(out.Metadata)
+	// Only the offload keys are stripped here: an artifact reference value
+	// on the input was set by the hub's admission step and stays.
+	stripped := stripMetadataKeys(out.Metadata, offloadMetadataKeys)
 	if stripped != nil {
 		cloned := make(map[string]string, len(stripped))
 		for k, v := range stripped {

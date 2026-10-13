@@ -21,9 +21,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/stretchr/testify/assert"
@@ -57,55 +55,6 @@ import (
 // caller who passes the project.create check, and records that caller as
 // the new broker's owner.
 // ============================================================================
-
-// registerBrokerTestExistingBroker inserts a broker directly into the store
-// (skipping HTTP registration) with a recorded creator and non-default
-// field values, so a denied overwrite attempt can be checked for no effect.
-func registerBrokerTestExistingBroker(t *testing.T, s store.Store, name, createdBy string) *store.RuntimeBroker {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:              tid("register-broker-" + name),
-		Name:            name,
-		Slug:            api.Slugify(name),
-		Version:         "1.0.0-baseline",
-		Status:          store.BrokerStatusOnline,
-		ConnectionState: "connected",
-		Capabilities:    &store.BrokerCapabilities{WebPTY: false, Sync: false, Attach: false},
-		CreatedBy:       createdBy,
-		Created:         time.Now(),
-		Updated:         time.Now(),
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
-	return broker
-}
-
-// countProjectQuotaReservations reads back the number of active
-// max_projects_per_user reservations held by userID, so a test can assert a
-// denied register call did not consume a quota slot.
-func countProjectQuotaReservations(t *testing.T, s store.Store, userID string) int64 {
-	t.Helper()
-	ctx := context.Background()
-	limitDef, err := s.GetLimitDefinitionByName(ctx, "max_projects_per_user")
-	require.NoError(t, err)
-	count, err := s.CountActiveReservations(ctx, limitDef.ID, userID, "system", "system")
-	require.NoError(t, err)
-	return count
-}
-
-// setUserProjectQuotaCeiling overrides the seeded max_projects_per_user limit
-// (default 0, meaning unlimited/unenforced) to a finite value, so
-// CheckAndReserve actually records a reservation instead of skipping
-// enforcement entirely. Without this, a quota-unchanged assertion is
-// vacuous: it would read 0 before and after regardless of ordering, because
-// nothing ever reserves against an unlimited quota.
-func setUserProjectQuotaCeiling(t *testing.T, s store.Store, value int64) {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxProjectsPerUser)
-	require.NoError(t, err, "max_projects_per_user must be seeded by New()/seedLimitDefinitions")
-	def.DefaultValue = value
-	_, err = s.UpdateLimitDefinition(context.Background(), def)
-	require.NoError(t, err)
-}
 
 func TestProjectRegisterEmbeddedBroker_IDMatchNonOwnerDenied(t *testing.T) {
 	srv, s := testServer(t)

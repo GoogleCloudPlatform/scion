@@ -344,7 +344,7 @@ echo -n "your-google-client-secret" | gcloud secrets create google-client-secret
 ## Security Best Practices
 
 1. **Never commit secrets**: Add `.env` to `.gitignore`
-2. **Use HTTPS in production**: OAuth requires HTTPS for redirect URIs
+2. **Use HTTPS in production**: Many OAuth providers require HTTPS redirect URIs for production clients. This is the provider's rule, not the Hub's: the Hub works over plain HTTP, and it marks the session cookie `Secure` only when its base URL starts with `https://`
 3. **Rotate secrets regularly**: Generate new client secrets periodically
 4. **Limit authorized domains**: Only allow domains you trust
 5. **Use short session expiry**: 24 hours is a good default

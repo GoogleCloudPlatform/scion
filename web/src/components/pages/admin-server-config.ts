@@ -31,9 +31,29 @@ import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-ut
 import { normalizeModelAlias } from '../../shared/model-utils.js';
 import type { RuntimeBroker, GCPServiceAccount } from '../../shared/types.js';
 import { formatInstantWithZone, isValidTimeZone } from '../../utils/time.js';
+import { isHttpUrl } from '../../utils/http-url.js';
 import '../shared/timezone-picker.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import { DisplayZoneController } from '../../utils/display-zone-controller.js';
+import {
+  fallbackFieldKey,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+  sectionPathsFromSchema,
+} from '../../shared/settings-save-errors.js';
+import type {
+  SettingsConflict,
+  SettingsFieldError,
+  SettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
 import './admin-experiments.js';
 
 /** GET /api/v1/admin/server-config returns this in place of each secret. */
@@ -103,6 +123,16 @@ export function containsMaskedValue(v: unknown): boolean {
 
 // ── Type definitions matching the Go API response ──
 
+/** GCP identity minting quota from GET /api/v1/admin/gcp-quota. */
+interface GCPQuotaSummary {
+  minting_configured: boolean;
+  gcp_project_id?: string;
+  global_minted: number;
+  global_cap: number;
+  per_project_cap: number;
+  projects?: { project_id: string; project_name: string; minted: number }[];
+}
+
 interface V1CORSConfig {
   enabled?: boolean;
   allowed_origins?: string[];
@@ -115,6 +145,7 @@ interface V1ServerHubConfig {
   port?: number;
   host?: string;
   public_url?: string;
+  monitoring_dashboard_url?: string;
   read_timeout?: string;
   write_timeout?: string;
   cors?: V1CORSConfig;
@@ -210,10 +241,34 @@ interface V1GitHubAppConfig {
   installation_url?: string;
 }
 
+/**
+ * The server.github_app block echoed by the main Server Config save. Every
+ * non-secret field is present, so an empty one goes as an explicit clear (0
+ * or ""): the server keeps the stored value for an omitted key, so dropping
+ * an empty field would restore it.
+ *
+ * The echo is the state when the card last loaded or saved, so a save from a
+ * stale tab can clear a value set elsewhere since then. That last-write-wins
+ * risk applies to every field on this page; optimistic concurrency is
+ * tracked in ptone/scion#3922.
+ */
+function githubAppEcho(
+  appId: number | undefined,
+  apiBaseUrl: string | undefined,
+  installationUrl: string | undefined,
+  webhooksEnabled: boolean
+): V1GitHubAppConfig {
+  return {
+    app_id: appId || 0,
+    api_base_url: apiBaseUrl || '',
+    webhooks_enabled: webhooksEnabled,
+    installation_url: installationUrl || '',
+  };
+}
+
 interface V1ServerConfig {
   mode?: string;
   log_level?: string;
-  log_format?: string;
   hub?: V1ServerHubConfig;
   broker?: V1BrokerConfig;
   database?: V1DatabaseConfig;
@@ -242,6 +297,7 @@ interface V1TelemetryHubConfig {
   report_interval?: string;
 }
 
+/** telemetry.local: accepted but ignored (ptone/scion#4103); no UI edits it. */
 interface V1TelemetryLocalConfig {
   enabled?: boolean;
   file?: string;
@@ -304,7 +360,7 @@ function setCloudRunKey<B extends 'cloudrun' | 'cloudrun_instances'>(
     delete next[key as string];
   }
   if (Object.keys(next).length > 0) {
-    rt[block] = next as V1RuntimeConfig[B];
+    rt[block] = next;
   } else {
     delete rt[block];
   }
@@ -371,6 +427,7 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  public_url_status?: PublicURLStatus;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -388,7 +445,26 @@ interface HarnessConfigEntry {
 interface ReloadResult {
   applied?: string[];
   requires_restart?: string[];
+  // DB-backed saves: the changed Layer-1 keys (koanf paths), split into
+  // those applied to the running hub and those that take effect only after
+  // a hub restart (registry restart_required flag).
+  applied_keys?: string[];
+  pending_restart?: string[];
+  // Workstation hubs: the settings.yaml changes applied live (also listed
+  // in applied, next to the section names).
+  file_applied?: string[];
   error?: string;
+}
+
+/**
+ * How the hub resolved its endpoint (server.hub.public_url) at startup
+ * (ptone/scion#3905). The endpoint is restart-required, so after a save the
+ * value in effect can differ from the stored value until the next restart.
+ */
+interface PublicURLStatus {
+  effective: string;
+  source: string; // "env" | "flag" | "database" | "file" | a fallback label
+  pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
 }
 
 /** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
@@ -413,16 +489,10 @@ interface DeprecatedEnvKeyInfo {
   seed_equivalent: string;
 }
 
-/** Per-field validation error from a 400 validation_failed response. */
-interface ValidationErrorDetail {
-  field: string;
-  message: string;
-}
-
 /** Conflict info from a 409 revision_conflict response. */
 interface ConflictInfo {
   message: string;
-  conflicted: { section: string; expected_revision?: number; current_revision?: number }[];
+  conflicted: SettingsConflict[];
 }
 
 interface UpdateCommitInfo {
@@ -513,9 +583,6 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   'telemetry.cloud.cloud_logging': 'Cloud Logging',
   'telemetry.hub.enabled': 'Hub Reporting Enabled',
   'telemetry.hub.report_interval': 'Hub Report Interval',
-  'telemetry.local.enabled': 'Local Telemetry Enabled',
-  'telemetry.local.file': 'Local Telemetry File',
-  'telemetry.local.console': 'Local Telemetry Console',
   // agent_defaults section
   default_template: 'Default Template',
   default_harness_config: 'Default Harness Config',
@@ -534,6 +601,7 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   default_gcp_identity_service_account_id: 'Default GCP Identity Service Account',
   // endpoints section
   'server.hub.public_url': 'Public URL',
+  'server.hub.monitoring_dashboard_url': 'Monitoring Dashboard URL',
   image_registry: 'Image Registry',
   // github_app section
   'server.github_app': 'GitHub App',
@@ -550,16 +618,22 @@ const KOANF_KEY_LABELS: Record<string, string> = {
   harness_configs: 'Harness Configs',
 };
 
-// server.hub.gcp_iam_* have labels but are file-only on the server (not
-// Layer-1), so they are not in the fallback Layer-1 list.
-const STATIC_LAYER1_KEYS: Set<string> = new Set(
-  Object.keys(KOANF_KEY_LABELS).filter(
-    (k) => k !== 'server.hub.gcp_iam_check_mode' && k !== 'server.hub.gcp_iam_deny_unknown_policy'
-  )
-);
+/** Fallback Layer-1 key list, used until the schema endpoint answers. */
+const STATIC_LAYER1_KEYS: Set<string> = new Set(Object.keys(KOANF_KEY_LABELS));
+
+/** 422 codes for a save that named keys it could not persist; nothing was saved. */
+const KEYS_REJECTED_CODES = new Set([
+  'unpersisted_keys_rejected',
+  'unclassified_keys_rejected',
+  'hub_owned_keys_rejected',
+  'unsaved_keys_rejected',
+]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+
+/** The koanf key of the hub's public URL. */
+const PUBLIC_URL_KEY = 'server.hub.public_url';
 
 /**
  * Workstation fields that `scion server start` overrides at every start
@@ -671,12 +745,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   // Server
   @state() private serverMode = '';
   @state() private logLevel = '';
-  @state() private logFormat = '';
 
   // Hub Server
   @state() private hubPort = 0;
   @state() private hubHost = '';
   @state() private hubPublicUrl = '';
+  @state() private hubMonitoringDashboardUrl = '';
+  /**
+   * The monitoring dashboard URL as loaded, and whether the user edited the
+   * field: a save sends the key only when it was edited and changed, so an
+   * untouched form never writes (or materialises) it.
+   */
+  private loadedMonitoringDashboardUrl = '';
+  private monitoringDashboardUrlTouched = false;
   @state() private hubReadTimeout = '';
   @state() private hubWriteTimeout = '';
   @state() private hubAdminEmails = '';
@@ -686,6 +767,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private hubStalledThreshold = '';
   @state() private hubGcpIamCheckMode = 'off';
   @state() private hubGcpIamDenyUnknownPolicy = 'fail-open';
+  /** The GCP permission-check values as loaded, so a save sends only a changed key. */
+  private loadedGcpIamCheckMode = 'off';
+  private loadedGcpIamDenyUnknownPolicy = 'fail-open';
 
   // Runtime Broker
   @state() private brokerEnabled = false;
@@ -737,9 +821,12 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private telemetryCloudCloudLogging = false;
   @state() private telemetryHubEnabled = false;
   @state() private telemetryHubReportInterval = '';
-  @state() private telemetryLocalEnabled = false;
-  @state() private telemetryLocalFile = '';
-  @state() private telemetryLocalConsole = false;
+  /**
+   * Stored telemetry.local, kept only so a file-mode save (which replaces the
+   * whole telemetry object) writes it back unchanged. No UI edits it: nothing
+   * reads these keys (ptone/scion#4103).
+   */
+  private storedTelemetryLocal: V1TelemetryLocalConfig | undefined;
 
   // Message Broker
   @state() private messageBrokerEnabled = false;
@@ -764,6 +851,16 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GitHub App
   @state() private githubAppConfigured = false;
+  /**
+   * True once GET /api/v1/github-app has succeeded, false after one fails.
+   * Until it is true the card's fields hold defaults, not the stored config,
+   * so the card cannot be saved and the main save does not echo
+   * server.github_app: either would send the defaults as explicit clears
+   * and wipe the stored App. A reload keeps the previous value while it is
+   * in flight (so the reload after a card save does not flash the "did not
+   * load" hint) and sets it from the result.
+   */
+  @state() private githubAppLoaded = false;
   @state() private githubAppId = 0;
   @state() private githubAppApiBaseUrl = '';
   @state() private githubAppWebhooksEnabled = false;
@@ -774,6 +871,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private githubAppInstallationUrl = '';
   @state() private githubAppSaving = false;
   @state() private githubAppError: string | null = null;
+  // Structured error from the last failed GitHub App card save
+  // (PUT /api/v1/github-app, ptone/scion#3923).
+  @state() private githubAppSaveError: SettingsSaveError | null = null;
   @state() private githubAppSuccess: string | null = null;
   @state() private githubAppInstallations: GitHubInstallationInfo[] = [];
   @state() private githubAppInstallationsLoading = false;
@@ -784,14 +884,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // GCP Identity Quota
   @state() private gcpQuotaLoading = false;
-  @state() private gcpQuotaData: {
-    minting_configured: boolean;
-    gcp_project_id?: string;
-    global_minted: number;
-    global_cap: number;
-    per_project_cap: number;
-    projects?: { project_id: string; project_name: string; minted: number }[];
-  } | null = null;
+  @state() private gcpQuotaData: GCPQuotaSummary | null = null;
 
   // Runtimes, Profiles & Harness Configs
   @state() private runtimes: Record<string, V1RuntimeConfig> = {};
@@ -808,6 +901,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
@@ -816,7 +910,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   @state() private resettingSection = false;
 
   // ── Structured save errors (§3.6) ──
-  @state() private validationErrors: Record<string, ValidationErrorDetail[]> | null = null;
+  // Validation entries from a failed save, each mapped to a koanf key when
+  // the server named a field (ptone/scion#3923).
+  @state() private validationErrors: SettingsFieldError[] | null = null;
   @state() private conflictInfo: ConflictInfo | null = null;
   @state() private safetyNetKeys: string[] | null = null;
 
@@ -824,9 +920,14 @@ export class ScionPageAdminServerConfig extends LitElement {
   private settingsTier: 'db' | 'file' = 'file';
   private layer0Editable = false;
   private layer1Keys: Set<string> = new Set(STATIC_LAYER1_KEYS);
+  // Settings section -> koanf paths from the schema endpoint, used to map a
+  // validation error's section-relative path to a form field.
+  private sectionKoanfPaths: Record<string, string[]> | undefined;
   private envKeys: Set<string> = new Set();
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -1587,6 +1688,11 @@ export class ScionPageAdminServerConfig extends LitElement {
       border-radius: 0.25rem;
       margin-right: 0.25rem;
     }
+
+    .conflict-banner-sections code {
+      font-family: var(--sl-font-mono, monospace);
+      font-size: 0.75rem;
+    }
   `;
 
   override connectedCallback(): void {
@@ -1672,6 +1778,7 @@ export class ScionPageAdminServerConfig extends LitElement {
         const keys = Object.values(data.sections).flatMap((s) => s.koanf_paths ?? []);
         if (keys.length > 0) this.layer1Keys = new Set(keys);
       }
+      this.sectionKoanfPaths = sectionPathsFromSchema(data);
     } catch {
       // Fall back to STATIC_LAYER1_KEYS (already the default)
     }
@@ -1718,7 +1825,9 @@ export class ScionPageAdminServerConfig extends LitElement {
       this.defaultModelSelection = '';
       this.defaultCustomModelId = '';
     }
-    this.defaultThinkingLevel = data.default_thinking_level ?? null;
+    // A stored 0 is not a valid level (the server rejects it); show it as
+    // unset so a save sends null instead of failing (ptone/scion#3898).
+    this.defaultThinkingLevel = data.default_thinking_level || null;
     this.defaultMaxAgentRole = data.default_max_agent_role || '';
     this.defaultAgentRole = data.default_agent_role || '';
     this.defaultRuntimeBroker = data.default_runtime_broker || '';
@@ -1732,13 +1841,15 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (srv) {
       this.serverMode = srv.mode || '';
       this.logLevel = srv.log_level || '';
-      this.logFormat = srv.log_format || '';
 
       // Hub
       if (srv.hub) {
         this.hubPort = srv.hub.port || 0;
         this.hubHost = srv.hub.host || '';
         this.hubPublicUrl = srv.hub.public_url || '';
+        this.hubMonitoringDashboardUrl = srv.hub.monitoring_dashboard_url || '';
+        this.loadedMonitoringDashboardUrl = this.hubMonitoringDashboardUrl;
+        this.monitoringDashboardUrlTouched = false;
         this.hubReadTimeout = srv.hub.read_timeout || '';
         this.hubWriteTimeout = srv.hub.write_timeout || '';
         this.hubAdminEmails = (srv.hub.admin_emails || []).join(', ');
@@ -1748,6 +1859,8 @@ export class ScionPageAdminServerConfig extends LitElement {
         this.hubStalledThreshold = srv.hub.stalled_threshold || '';
         this.hubGcpIamCheckMode = srv.hub.gcp_iam_check_mode || 'off';
         this.hubGcpIamDenyUnknownPolicy = srv.hub.gcp_iam_deny_unknown_policy || 'fail-open';
+        this.loadedGcpIamCheckMode = this.hubGcpIamCheckMode;
+        this.loadedGcpIamDenyUnknownPolicy = this.hubGcpIamDenyUnknownPolicy;
       }
 
       // Broker
@@ -1806,6 +1919,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
     // Telemetry
     const tel = data.telemetry;
+    this.storedTelemetryLocal = tel?.local;
     if (tel) {
       this.telemetryEnabled = tel.enabled || false;
       if (tel.cloud) {
@@ -1819,11 +1933,6 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (tel.hub) {
         this.telemetryHubEnabled = tel.hub.enabled || false;
         this.telemetryHubReportInterval = tel.hub.report_interval || '';
-      }
-      if (tel.local) {
-        this.telemetryLocalEnabled = tel.local.enabled || false;
-        this.telemetryLocalFile = tel.local.file || '';
-        this.telemetryLocalConsole = tel.local.console || false;
       }
     }
 
@@ -1841,7 +1950,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.agentSecretsUserScopeOnly = data.agent_secrets?.user_scope_only ?? false;
 
     // Runtimes, profiles, harness_configs — deep-copy into editable state
-    this.runtimes = data.runtimes ? JSON.parse(JSON.stringify(data.runtimes)) : {};
+    this.runtimes = data.runtimes
+      ? (JSON.parse(JSON.stringify(data.runtimes)) as Record<string, V1RuntimeConfig>)
+      : {};
     this.profiles = data.profiles
       ? (JSON.parse(JSON.stringify(data.profiles)) as Record<string, V1ProfileConfig>)
       : {};
@@ -1865,7 +1976,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.publicUrlStatus = data.public_url_status || null;
     this.sectionMetadata = data.section_metadata || null;
+    // The hub leaves a pinned public URL out of superseded_keys
+    // (computeSupersededKeys), so the list is shown as it is.
     this.supersededKeys = data.superseded_keys || null;
     this.deprecatedEnvKeys =
       data.deprecated_env_keys && data.deprecated_env_keys.length > 0
@@ -1965,6 +2079,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    // The public URL is pinned by an operator setting on this node: the hub
+    // uses that value and ignores a saved one (ptone/scion#3905).
+    if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -1989,11 +2106,13 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderReadOnlyBadge(reason: ReadOnlyReason): ReturnType<typeof html> {
     const text =
-      reason === 'bootstrap'
-        ? '🔒 Managed via deployment configuration'
-        : reason === 'flag'
-          ? '🔒 Set by workstation startup defaults / server flags'
-          : '🔒 Set via environment variable';
+      reason === 'pinned'
+        ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
+        : reason === 'bootstrap'
+          ? '🔒 Managed via deployment configuration'
+          : reason === 'flag'
+            ? '🔒 Set by workstation startup defaults / server flags'
+            : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
   }
 
@@ -2006,9 +2125,11 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (reason) {
       return html`${this.renderReadOnlyBadge(reason)}<span class="read-only-value"
           >${displayValue || '—'}</span
-        >`;
+        >${this.renderFieldErrors(koanfKey)}`;
     }
-    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}`;
+    return html`${this.renderSupersededBadge(koanfKey)}${editableTemplate}${this.renderFieldErrors(
+      koanfKey
+    )}`;
   }
 
   /**
@@ -2070,6 +2191,10 @@ export class ScionPageAdminServerConfig extends LitElement {
       }
       if (this.defaultResDisk) defaultResources.disk = this.defaultResDisk;
       payload.default_resources = defaultResources;
+    } else if (ok('default_resources')) {
+      // The server keeps an omitted key, so all-empty resources are sent
+      // as null to clear the stored value (ptone/scion#3719).
+      payload.default_resources = null;
     }
 
     // Default model settings
@@ -2080,8 +2205,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2102,6 +2229,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Hub — only Layer-1 hub fields
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl;
+    this.addMonitoringDashboardUrl(hub, ok);
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2117,7 +2245,18 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.hub.auto_suspend_stalled'))
       hub.auto_suspend_stalled = this.hubAutoSuspendStalled;
     if (ok('server.hub.stalled_threshold')) hub.stalled_threshold = this.hubStalledThreshold;
-    // server.hub.gcp_iam_* are file-only, sent by buildLayer0Payload.
+    // The GCP permission-check keys are sent only when changed: each change
+    // is checked and recorded by the server.
+    if (
+      ok('server.hub.gcp_iam_check_mode') &&
+      this.hubGcpIamCheckMode !== this.loadedGcpIamCheckMode
+    )
+      hub.gcp_iam_check_mode = this.hubGcpIamCheckMode;
+    if (
+      ok('server.hub.gcp_iam_deny_unknown_policy') &&
+      this.hubGcpIamDenyUnknownPolicy !== this.loadedGcpIamDenyUnknownPolicy
+    )
+      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy;
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     // Auth — only Layer-1 auth fields
@@ -2149,7 +2288,9 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ncDb && !containsMaskedValue(ncDb)) {
       server.notification_channels = ncDb;
     }
-    const ghDb = this.rawConfig?.server?.github_app;
+    // github_app is echoed only once the card has loaded it (see
+    // githubAppLoaded); left out, the server keeps what it has stored.
+    const ghDb = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghDb && !containsMaskedValue(ghDb)) {
       server.github_app = ghDb;
     }
@@ -2167,7 +2308,9 @@ export class ScionPageAdminServerConfig extends LitElement {
           endpoint: this.telemetryCloudEndpoint,
           protocol: this.telemetryCloudProtocol,
           provider: this.telemetryCloudProvider,
-          gcp_project_id: this.telemetryCloudGcpProjectId || undefined,
+          // null clears a stored project ID; an omitted key would keep it,
+          // because telemetry is merged key by key (ptone/scion#3717).
+          gcp_project_id: this.telemetryCloudGcpProjectId || null,
           cloud_logging: this.telemetryCloudCloudLogging,
         };
       }
@@ -2175,13 +2318,6 @@ export class ScionPageAdminServerConfig extends LitElement {
         telemetry.hub = {
           enabled: this.telemetryHubEnabled,
           report_interval: this.telemetryHubReportInterval,
-        };
-      }
-      if (ok('telemetry.local.enabled')) {
-        telemetry.local = {
-          enabled: this.telemetryLocalEnabled,
-          file: this.telemetryLocalFile,
-          console: this.telemetryLocalConsole,
         };
       }
       payload.telemetry = telemetry;
@@ -2215,6 +2351,21 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('profiles')) payload.profiles = this.profiles;
 
     return payload;
+  }
+
+  /**
+   * Adds server.hub.monitoring_dashboard_url to a hub payload block only
+   * when the user edited the field and the trimmed value differs from the
+   * loaded one. A cleared field is sent as "", which clears the setting.
+   */
+  private addMonitoringDashboardUrl(
+    hub: Record<string, unknown>,
+    ok: (key: string) => boolean
+  ): void {
+    if (!ok('server.hub.monitoring_dashboard_url') || !this.monitoringDashboardUrlTouched) return;
+    const value = this.hubMonitoringDashboardUrl.trim();
+    if (value === this.loadedMonitoringDashboardUrl) return;
+    hub.monitoring_dashboard_url = value;
   }
 
   /**
@@ -2263,16 +2414,12 @@ export class ScionPageAdminServerConfig extends LitElement {
     const server: Record<string, unknown> = {};
     if (ok('server.mode')) server.mode = this.serverMode || '';
     if (ok('server.log_level')) server.log_level = this.logLevel || '';
-    if (ok('server.log_format')) server.log_format = this.logFormat || '';
 
     const hub: Record<string, unknown> = {};
     if (ok('server.hub.port')) hub.port = this.hubPort || 0;
     if (ok('server.hub.host')) hub.host = this.hubHost || '';
     if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
     if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
-    if (ok('server.hub.gcp_iam_check_mode')) hub.gcp_iam_check_mode = this.hubGcpIamCheckMode || '';
-    if (ok('server.hub.gcp_iam_deny_unknown_policy'))
-      hub.gcp_iam_deny_unknown_policy = this.hubGcpIamDenyUnknownPolicy || '';
     if (Object.keys(hub).length > 0) server.hub = hub;
 
     const broker: Record<string, unknown> = {};
@@ -2382,8 +2529,10 @@ export class ScionPageAdminServerConfig extends LitElement {
           : this.defaultModelSelection;
       payload.default_model = resolvedModel || '';
     }
+    // An unset level is sent as null, which clears it; the server rejects
+    // 0 rather than treating it as a clear (ptone/scion#3898).
     if (ok('default_thinking_level')) {
-      payload.default_thinking_level = this.defaultThinkingLevel ?? 0;
+      payload.default_thinking_level = this.defaultThinkingLevel ?? null;
     }
     if (ok('default_runtime_broker')) {
       payload.default_runtime_broker = this.defaultRuntimeBroker || '';
@@ -2407,21 +2556,23 @@ export class ScionPageAdminServerConfig extends LitElement {
       if (said !== undefined) payload.default_gcp_identity_service_account_id = said;
     }
 
-    // Server
+    // Server — file mode deep-merges each server section, so an omitted
+    // field keeps its stored value. Send every shown field, a cleared one
+    // as "" / 0 / [] (explicit empties delete the key), so clearing a field
+    // in the form still clears it in settings.yaml (ptone/scion#2938).
+    // Masked secrets still showing "********" are left out to keep them.
     const server: Record<string, unknown> = {};
-    if (ok('server.mode')) server.mode = this.serverMode || undefined;
-    if (ok('server.log_level')) server.log_level = this.logLevel || undefined;
-    if (ok('server.log_format')) server.log_format = this.logFormat || undefined;
+    if (ok('server.mode')) server.mode = this.serverMode || '';
+    if (ok('server.log_level')) server.log_level = this.logLevel || '';
 
     // Hub server
     const hub: Record<string, unknown> = {};
-    if (ok('server.hub.port') && this.hubPort) hub.port = this.hubPort;
-    if (ok('server.hub.host') && this.hubHost) hub.host = this.hubHost;
-    if (ok('server.hub.public_url') && this.hubPublicUrl) hub.public_url = this.hubPublicUrl;
-    if (ok('server.hub.read_timeout') && this.hubReadTimeout)
-      hub.read_timeout = this.hubReadTimeout;
-    if (ok('server.hub.write_timeout') && this.hubWriteTimeout)
-      hub.write_timeout = this.hubWriteTimeout;
+    if (ok('server.hub.port')) hub.port = this.hubPort || 0;
+    if (ok('server.hub.host')) hub.host = this.hubHost || '';
+    if (ok('server.hub.public_url')) hub.public_url = this.hubPublicUrl || '';
+    this.addMonitoringDashboardUrl(hub, ok);
+    if (ok('server.hub.read_timeout')) hub.read_timeout = this.hubReadTimeout || '';
+    if (ok('server.hub.write_timeout')) hub.write_timeout = this.hubWriteTimeout || '';
     if (ok('server.hub.admin_emails')) {
       hub.admin_emails = this.hubAdminEmails
         ? this.hubAdminEmails
@@ -2430,8 +2581,8 @@ export class ScionPageAdminServerConfig extends LitElement {
             .filter(Boolean)
         : [];
     }
-    if (ok('server.hub.soft_delete_retention') && this.hubSoftDeleteRetention)
-      hub.soft_delete_retention = this.hubSoftDeleteRetention;
+    if (ok('server.hub.soft_delete_retention'))
+      hub.soft_delete_retention = this.hubSoftDeleteRetention || '';
     if (ok('server.hub.soft_delete_retain_files'))
       hub.soft_delete_retain_files = this.hubSoftDeleteRetainFiles;
     if (ok('server.hub.auto_suspend_stalled'))
@@ -2445,58 +2596,55 @@ export class ScionPageAdminServerConfig extends LitElement {
     // Broker
     const broker: Record<string, unknown> = {};
     if (ok('server.broker.enabled')) broker.enabled = this.brokerEnabled;
-    if (ok('server.broker.port') && this.brokerPort) broker.port = this.brokerPort;
-    if (ok('server.broker.host') && this.brokerHost) broker.host = this.brokerHost;
-    if (ok('server.broker.hub_endpoint') && this.brokerHubEndpoint)
-      broker.hub_endpoint = this.brokerHubEndpoint;
-    if (ok('server.broker.container_hub_endpoint') && this.brokerContainerHubEndpoint)
-      broker.container_hub_endpoint = this.brokerContainerHubEndpoint;
-    if (ok('server.broker.name') && this.brokerName) broker.broker_name = this.brokerName;
-    if (ok('server.broker.nickname') && this.brokerNickname)
-      broker.broker_nickname = this.brokerNickname;
+    if (ok('server.broker.port')) broker.port = this.brokerPort || 0;
+    if (ok('server.broker.host')) broker.host = this.brokerHost || '';
+    if (ok('server.broker.hub_endpoint')) broker.hub_endpoint = this.brokerHubEndpoint || '';
+    if (ok('server.broker.container_hub_endpoint'))
+      broker.container_hub_endpoint = this.brokerContainerHubEndpoint || '';
+    if (ok('server.broker.name')) broker.broker_name = this.brokerName || '';
+    if (ok('server.broker.nickname')) broker.broker_nickname = this.brokerNickname || '';
     if (ok('server.broker.auto_provide')) broker.auto_provide = this.brokerAutoProvide;
     server.broker = broker;
 
     // Database
     const database: Record<string, unknown> = {};
-    if (ok('server.database.driver') && this.dbDriver) database.driver = this.dbDriver;
-    if (ok('server.database.url') && this.dbUrl && this.dbUrl !== '********')
-      database.url = this.dbUrl;
+    if (ok('server.database.driver')) database.driver = this.dbDriver || '';
+    if (ok('server.database.url') && this.dbUrl !== '********') database.url = this.dbUrl || '';
     server.database = database;
 
     // Auth
     const auth: Record<string, unknown> = {};
     if (ok('server.auth.dev_mode')) auth.dev_mode = this.authDevMode;
-    if (ok('server.auth.dev_token') && this.authDevToken && this.authDevToken !== '********')
-      auth.dev_token = this.authDevToken;
-    if (ok('server.auth.authorized_domains') && this.authAuthorizedDomains) {
+    if (ok('server.auth.dev_token') && this.authDevToken !== '********')
+      auth.dev_token = this.authDevToken || '';
+    if (ok('server.auth.authorized_domains')) {
       auth.authorized_domains = this.authAuthorizedDomains
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean);
+        ? this.authAuthorizedDomains
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
     }
-    if (ok('server.auth.user_access_mode') && this.authUserAccessMode) {
-      auth.user_access_mode = this.authUserAccessMode;
+    if (ok('server.auth.user_access_mode')) {
+      auth.user_access_mode = this.authUserAccessMode || '';
     }
-    if (ok('server.auth.default_user_role') && this.authDefaultUserRole) {
-      auth.default_user_role = this.authDefaultUserRole;
+    if (ok('server.auth.default_user_role')) {
+      auth.default_user_role = this.authDefaultUserRole || '';
     }
     server.auth = auth;
 
     // Storage
     const storage: Record<string, unknown> = {};
-    if (ok('server.storage.provider') && this.storageProvider)
-      storage.provider = this.storageProvider;
-    if (ok('server.storage.bucket') && this.storageBucket) storage.bucket = this.storageBucket;
-    if (ok('server.storage.local_path') && this.storageLocalPath)
-      storage.local_path = this.storageLocalPath;
+    if (ok('server.storage.provider')) storage.provider = this.storageProvider || '';
+    if (ok('server.storage.bucket')) storage.bucket = this.storageBucket || '';
+    if (ok('server.storage.local_path')) storage.local_path = this.storageLocalPath || '';
     server.storage = storage;
 
     // Secrets
     const secrets: Record<string, unknown> = {};
-    if (ok('server.secrets.backend') && this.secretsBackend) secrets.backend = this.secretsBackend;
-    if (ok('server.secrets.gcp_project_id') && this.secretsGCPProjectId)
-      secrets.gcp_project_id = this.secretsGCPProjectId;
+    if (ok('server.secrets.backend')) secrets.backend = this.secretsBackend || '';
+    if (ok('server.secrets.gcp_project_id'))
+      secrets.gcp_project_id = this.secretsGCPProjectId || '';
     if (ok('server.secrets.gcp_replication_locations')) {
       secrets.gcp_replication_locations = this.secretsGCPReplicationLocations
         ? this.secretsGCPReplicationLocations
@@ -2511,7 +2659,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (ok('server.message_broker.enabled')) {
       server.message_broker = {
         enabled: this.messageBrokerEnabled,
-        type: ok('server.message_broker.type') ? this.messageBrokerType || undefined : undefined,
+        type: ok('server.message_broker.type') ? this.messageBrokerType || '' : undefined,
       };
     }
 
@@ -2532,7 +2680,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     if (oauthFile && !containsMaskedValue(oauthFile)) {
       server.oauth = oauthFile;
     }
-    const ghFile = this.rawConfig?.server?.github_app;
+    const ghFile = this.githubAppLoaded ? this.rawConfig?.server?.github_app : undefined;
     if (ghFile && !containsMaskedValue(ghFile)) {
       server.github_app = ghFile;
     }
@@ -2570,14 +2718,12 @@ export class ScionPageAdminServerConfig extends LitElement {
           : undefined,
       };
     }
-    if (ok('telemetry.local.enabled')) {
-      telemetry.local = {
-        enabled: this.telemetryLocalEnabled,
-        file: ok('telemetry.local.file') ? this.telemetryLocalFile || undefined : undefined,
-        console: ok('telemetry.local.console') ? this.telemetryLocalConsole : undefined,
-      };
+    if (Object.keys(telemetry).length > 0) {
+      // A file-mode save replaces the whole telemetry object, so echo the
+      // stored telemetry.local back to keep it (ptone/scion#4103).
+      if (this.storedTelemetryLocal) telemetry.local = this.storedTelemetryLocal;
+      payload.telemetry = telemetry;
     }
-    if (Object.keys(telemetry).length > 0) payload.telemetry = telemetry;
 
     // Auto-expose ports
     if (ok('auto_expose_ports.enabled')) {
@@ -2659,79 +2805,118 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveError(res: Response): Promise<void> {
-    let parsed: unknown;
-    try {
-      parsed = await res.json();
-    } catch {
-      this.error = 'Failed to save settings';
-      return;
-    }
-    // A JSON body that is not an object (null, a bare string/number, an
-    // array) carries no error code or message to read, so treat it like a
-    // non-JSON body rather than dereferencing it below.
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      this.error = 'Failed to save settings';
-      return;
-    }
-    const body = parsed as Record<string, unknown>;
+    // Both envelopes the hub sends are read here: flat {error: "<code>",
+    // ...} and the writeError helper's nested {error: {code, message,
+    // details}} (see shared/settings-save-errors.ts, ptone/scion#3923). A
+    // body that is not JSON, or JSON that is not an object (null, a bare
+    // string/number, an array), classifies as generic with no message, so
+    // it shows 'Failed to save settings'.
+    const err = await readSettingsSaveError(res, { sectionKoanfPaths: this.sectionKoanfPaths });
 
-    switch (body.error) {
-      case 'validation_failed':
-        this.validationErrors = (body.errors as Record<string, ValidationErrorDetail[]>) ?? null;
+    switch (err.kind) {
+      case 'validation':
+        this.validationErrors = err.fieldErrors;
         this.scrollToFirstError();
-        break;
+        return;
 
-      case 'revision_conflict':
+      case 'conflict':
         this.conflictInfo = {
-          message:
-            (body.message as string) || 'Settings have been changed since you loaded this page.',
-          conflicted: (body.conflicted as ConflictInfo['conflicted']) ?? [],
+          message: err.message || 'Settings have been changed since you loaded this page.',
+          conflicted: err.conflicted,
         };
-        break;
+        return;
 
-      case 'layer0_rejected': {
-        const keys = (body.keys as string[]) ?? [];
-        this.safetyNetKeys = keys;
-        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', keys);
-        break;
-      }
+      case 'layer0':
+        this.safetyNetKeys = err.keys;
+        console.log('[admin-server-config] layer0_rejected — bootstrap keys in payload:', err.keys);
+        return;
 
-      case 'unpersisted_keys_rejected':
-      case 'unclassified_keys_rejected':
-      case 'hub_owned_keys_rejected':
-      case 'unsaved_keys_rejected': {
-        // Nothing was saved; name the offending keys, as the docs say.
-        const keys = Array.isArray(body.keys) ? (body.keys as string[]) : [];
-        const message = (body.message as string) || 'Some settings could not be saved.';
-        this.error = keys.length > 0 ? `${message} Keys: ${keys.join(', ')}` : message;
-        break;
-      }
-
-      default: {
-        // Pre-existing bug, fixed here because tz-refactor task 12's AC
-        // needs it ("an invalid name shows the server's 422 message"): the
-        // Go writeError() helper (pkg/hub/errors.go), which backs every
-        // plain field-validation 400/422 on this page — default_timezone,
-        // agent_endpoint, default_user_role — responds with
-        // {error: {code, message, details}}, not the flat {error: "<code
-        // string>", ...} shape the cases above handle. body.error is an
-        // object there, so it never matched a case above, body.message is
-        // undefined (the message is nested at body.error.message, not
-        // top-level), and typeof body.error === 'string' is false, so this
-        // fell through to the generic fallback and the real message was
-        // silently lost.
-        const nestedError =
-          typeof body.error === 'object' && body.error !== null
-            ? (body.error as Record<string, unknown>)
-            : null;
-        this.error =
-          (body.message as string) ||
-          (nestedError?.message as string) ||
-          (typeof body.error === 'string' ? body.error : null) ||
-          'An unexpected error occurred';
-        break;
-      }
+      case 'generic':
+        if (KEYS_REJECTED_CODES.has(err.code)) {
+          // Nothing was saved; name the offending keys, as the docs say.
+          const message = err.message || 'Some settings could not be saved.';
+          this.error = err.keys.length > 0 ? `${message} Keys: ${err.keys.join(', ')}` : message;
+          return;
+        }
+        // Generic message, plus the server's message text when it sent
+        // one (flat body.message or nested body.error.message).
+        this.error = genericSaveErrorText(err, 'Failed to save settings');
     }
+  }
+
+  /** Inline validation and deployment-managed messages for one field. */
+  private renderFieldErrors(koanfKey: string): typeof nothing | ReturnType<typeof html> {
+    const messages = [
+      ...fieldErrorMessages(this.validationErrors, koanfKey),
+      ...fieldErrorMessages(this.githubAppFieldErrors, koanfKey),
+    ];
+    const layer0Keys = [
+      ...(this.safetyNetKeys ?? []),
+      ...(this.githubAppSaveError?.kind === 'layer0' ? this.githubAppSaveError.keys : []),
+    ];
+    const layer0 = layer0Keys.some((k) => k === koanfKey || k.startsWith(`${koanfKey}.`));
+    if (messages.length === 0 && !layer0) return nothing;
+    // No role="alert" here: the section summary and the page banner already
+    // announce the errors.
+    return html`${renderFieldErrorMessages(messages, koanfKey)}${layer0
+      ? html`<span class="field-error" data-field-error=${koanfKey}
+          ><code>${koanfKey}</code> is managed by deployment configuration and cannot be changed
+          here.</span
+        >`
+      : nothing}`;
+  }
+
+  /**
+   * Validation entries from a failed GitHub App card save. The card's body
+   * uses the section's leaf names (app_id, private_key, ...), so a path
+   * that maps to no registered koanf path is placed under server.github_app.
+   *
+   * PUT /api/v1/github-app emits no validation, conflict or layer0 body
+   * today (only invalid_request and internal errors). This handling is kept
+   * so the card shows such errors at the field once the handler sends them,
+   * in the same shape as the server-config PUT (ptone/scion#3923).
+   */
+  private get githubAppFieldErrors(): SettingsFieldError[] {
+    const err = this.githubAppSaveError;
+    if (err?.kind !== 'validation') return [];
+    return err.fieldErrors.map((e) =>
+      e.key === null ? { ...e, key: fallbackFieldKey('server.github_app', e.path) } : e
+    );
+  }
+
+  private renderGitHubAppSaveError(): typeof nothing | ReturnType<typeof html> {
+    const err = this.githubAppSaveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') {
+      return renderConflictNotice(err, () => {
+        this.githubAppSaveError = null;
+        this.githubAppError = null;
+        this.githubAppSuccess = null;
+        this.githubAppPrivateKey = '';
+        this.githubAppWebhookSecret = '';
+        void this.loadGitHubAppConfig();
+      });
+    }
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return renderSectionErrorSummary(this.githubAppFieldErrors, 'github_app_card');
+  }
+
+  /**
+   * Validation entries for a settings section: those the server reported
+   * under the section, and those whose key is one of its koanf paths.
+   */
+  private sectionValidationErrors(sectionName: string): SettingsFieldError[] {
+    if (!this.validationErrors) return [];
+    const paths = this.sectionKoanfPaths?.[sectionName] ?? [];
+    return this.validationErrors.filter(
+      (e) =>
+        e.section === sectionName ||
+        (e.key !== null && paths.some((p) => e.key === p || e.key!.startsWith(`${p}.`)))
+    );
+  }
+
+  private renderSectionErrorSummary(sectionName: string): typeof nothing | ReturnType<typeof html> {
+    return renderSectionErrorSummary(this.sectionValidationErrors(sectionName), sectionName);
   }
 
   private scrollToFirstError(): void {
@@ -2796,13 +2981,40 @@ export class ScionPageAdminServerConfig extends LitElement {
    */
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
-    if (!overridden) return nothing;
+    return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /**
+   * The hub URL in effect on this hub and where it came from, as resolved at
+   * startup. Not shown when an operator setting pins the field (the
+   * read-only value is then the value in effect).
+   */
+  private renderPublicUrlInEffect(): typeof nothing | ReturnType<typeof html> {
+    const st = this.publicUrlStatus;
+    if (!st || st.pinned_by || !st.effective) return nothing;
+    return html`<span class="hint public-url-in-effect"
+      >In effect: <code>${st.effective}</code> (from ${st.source})</span
+    >`;
+  }
+
+  /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
+  private envBadgeTemplate(): ReturnType<typeof html> {
     return html`
       <span class="env-badge">
         <sl-icon name="exclamation-triangle"></sl-icon>
         Overridden by environment on this node
       </span>
     `;
+  }
+
+  /**
+   * Renders the env-override badge for a map-valued section (runtimes,
+   * profiles) whose env_overrides entries are leaf keys under the section
+   * (e.g. profiles.local.runtime from SCION_SERVER_PROFILES_LOCAL_RUNTIME).
+   */
+  private renderEnvBadgeUnder(prefix: string): typeof nothing | ReturnType<typeof html> {
+    const overridden = this.envOverrides.some((k) => k === prefix || k.startsWith(`${prefix}.`));
+    return overridden ? this.envBadgeTemplate() : nothing;
   }
 
   /**
@@ -2965,6 +3177,12 @@ export class ScionPageAdminServerConfig extends LitElement {
    * for managed sections in DB mode.
    */
   private renderSectionHeader(title: string, sectionName?: string): ReturnType<typeof html> {
+    return html`${this.renderSectionHeaderTitle(title, sectionName)}${sectionName
+      ? this.renderSectionErrorSummary(sectionName)
+      : nothing}`;
+  }
+
+  private renderSectionHeaderTitle(title: string, sectionName?: string): ReturnType<typeof html> {
     if (sectionName && this.canResetSection(sectionName)) {
       return html`
         <div class="section-header">
@@ -3041,24 +3259,32 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private renderValidationErrors(): typeof nothing | ReturnType<typeof html> {
-    if (!this.validationErrors) return nothing;
-    const sections = Object.entries(this.validationErrors);
-    if (sections.length === 0) return nothing;
+    if (!this.validationErrors || this.validationErrors.length === 0) return nothing;
+    // Group by the section the server named; entries without one (a nested
+    // validation_error naming no field) are listed under "General".
+    const groups = new Map<string, SettingsFieldError[]>();
+    for (const e of this.validationErrors) {
+      const name = e.section ?? 'General';
+      const list = groups.get(name) ?? [];
+      list.push(e);
+      groups.set(name, list);
+    }
     return html`
-      <div class="validation-errors">
+      <div class="validation-errors" role="alert">
         <div class="validation-errors-title">
           <sl-icon name="exclamation-circle"></sl-icon>
           Some settings could not be saved due to validation errors
         </div>
-        ${sections.map(
+        ${[...groups.entries()].map(
           ([section, errors]) => html`
             <div class="validation-errors-section">
               <div class="validation-errors-section-name">${section}</div>
               <ul class="validation-errors-list">
-                ${(errors as ValidationErrorDetail[]).map(
+                ${errors.map(
                   (err) => html`
                     <li>
-                      ${err.field ? html`<code>${err.field}</code>` : nothing} ${err.message || err}
+                      ${err.key || err.path ? html`<code>${err.key ?? err.path}</code>` : nothing}
+                      ${err.message}
                     </li>
                   `
                 )}
@@ -3078,14 +3304,24 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-icon name="exclamation-triangle"></sl-icon>
           Settings have been changed since you loaded this page
         </div>
-        <div>Please reload to see the latest values before saving again.</div>
+        <div>
+          Reload to see the latest values, then make your changes again. Unsaved edits on this page
+          are discarded.
+        </div>
+        ${this.conflictInfo.conflicted.length > 0
+          ? html`<div class="conflict-banner-sections">
+              Changed: ${this.conflictInfo.conflicted.map((c) => html` <code>${c.section}</code>`)}
+            </div>`
+          : nothing}
         <div class="conflict-banner-actions">
           <sl-button
             size="small"
             variant="warning"
             @click=${() => {
+              // Drop every save error and refetch, so the form shows only
+              // server state (populateForm resets each field).
+              this.clearSaveErrors();
               void this.loadConfig();
-              this.conflictInfo = null;
             }}
           >
             <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
@@ -3115,10 +3351,22 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderReloadInfo() {
     const r = this.reloadResult;
     if (!r) return nothing;
+    // With the key-level lists, the section-level applied list is replaced
+    // by them; only the settings.yaml changes applied live keep the line.
+    const keyLevel = r.applied_keys !== undefined || r.pending_restart !== undefined;
+    const reloaded = keyLevel ? (r.file_applied ?? []) : (r.applied ?? []);
     return html`
       <div class="reload-info">
-        ${r.applied && r.applied.length > 0
-          ? html`<div class="applied">Reloaded: ${r.applied.join(', ')}</div>`
+        ${reloaded.length > 0
+          ? html`<div class="applied">Reloaded: ${reloaded.join(', ')}</div>`
+          : nothing}
+        ${r.applied_keys && r.applied_keys.length > 0
+          ? html`<div class="applied applied-keys">Applied now: ${r.applied_keys.join(', ')}</div>`
+          : nothing}
+        ${r.pending_restart && r.pending_restart.length > 0
+          ? html`<div class="restart pending-restart">
+              Saved; applies after restart: ${r.pending_restart.join(', ')}
+            </div>`
           : nothing}
         ${r.requires_restart && r.requires_restart.length > 0
           ? html`<div class="restart">Requires restart: ${r.requires_restart.join(', ')}</div>`
@@ -3382,22 +3630,6 @@ export class ScionPageAdminServerConfig extends LitElement {
                 <sl-option value="info">Info</sl-option>
                 <sl-option value="warn">Warn</sl-option>
                 <sl-option value="error">Error</sl-option>
-              </sl-select>`
-            )}
-          </div>
-          <div class="form-field">
-            <label>Log Format</label>
-            ${this.renderFieldValue(
-              'server.log_format',
-              this.logFormat || 'text',
-              html`<sl-select
-                value=${this.logFormat || 'text'}
-                @sl-change=${(e: Event) => {
-                  this.logFormat = (e.target as HTMLSelectElement).value;
-                }}
-              >
-                <sl-option value="text">Text</sl-option>
-                <sl-option value="json">JSON</sl-option>
               </sl-select>`
             )}
           </div>
@@ -3761,9 +3993,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block, except on the Kubernetes runtime, which does not
-                    offer Block — those agents get Passthrough instead. Assign requires a verified
-                    hub-scoped service account and gcpIamCheckMode=enforce.</span
+                    on any other broker get the runtime default: Block, or Passthrough on the
+                    Kubernetes runtime. Block set here applies on every runtime, Kubernetes
+                    included. Assign requires a verified hub-scoped service account and
+                    gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
@@ -3794,7 +4027,9 @@ export class ScionPageAdminServerConfig extends LitElement {
                         <span class="hint"
                           >Hub-scoped service account assigned to new agents when no project or
                           request-level identity is set. Only verified hub-scoped accounts are
-                          shown.</span
+                          shown. This default applies to any project and runtime profile that has no
+                          default of its own, so no mapping state is shown here; the agent create
+                          and configure pickers show it for the agent's Kubernetes profile.</span
                         >
                         ${this.renderFieldValue(
                           'default_gcp_identity_service_account_id',
@@ -4134,17 +4369,43 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            <span class="hint">Endpoint URL for agents to call back to the Hub</span>
+            <span class="hint"
+              >The Hub URL for agents, invite links and integrations. Applies after a restart.</span
+            >
             ${this.renderFieldValue(
-              'server.hub.public_url',
-              this.hubPublicUrl,
-              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+              PUBLIC_URL_KEY,
+              this.publicUrlStatus?.pinned_by ? this.publicUrlStatus.effective : this.hubPublicUrl,
+              html`${this.renderEnvBadge(PUBLIC_URL_KEY)}<sl-input
                   value=${this.hubPublicUrl}
                   placeholder="https://hub.example.com"
                   @sl-input=${(e: Event) => {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
+            )}${this.renderPublicUrlInEffect()}
+          </div>
+          <div class="form-field full-width">
+            <label>Monitoring Dashboard URL</label>
+            <span class="hint"
+              >Optional. The Health page links to this dashboard; leave empty for no link</span
+            >
+            ${this.renderFieldValue(
+              'server.hub.monitoring_dashboard_url',
+              this.hubMonitoringDashboardUrl,
+              html`${this.renderEnvBadge('server.hub.monitoring_dashboard_url')}<sl-input
+                  value=${this.hubMonitoringDashboardUrl}
+                  placeholder="https://console.cloud.google.com/monitoring/dashboards/..."
+                  @sl-input=${(e: Event) => {
+                    this.hubMonitoringDashboardUrl = (e.target as HTMLInputElement).value;
+                    this.monitoringDashboardUrlTouched = true;
+                  }}
+                ></sl-input>
+                ${isHttpUrl(this.hubMonitoringDashboardUrl.trim()) ||
+                this.hubMonitoringDashboardUrl.trim() === ''
+                  ? nothing
+                  : html`<span class="hint monitoring-url-invalid"
+                      >Must be an absolute http:// or https:// URL</span
+                    >`}`
             )}
           </div>
           <div class="form-field">
@@ -4330,6 +4591,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Runtimes', 'runtimes')} ${this.renderSectionMeta('runtimes')}
         ${runtimeReadOnly ? html`${this.renderReadOnlyBadge(runtimeReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('runtimes')}
         ${runtimeNames.length === 0
           ? html`<p class="hint">No runtimes configured.</p>`
           : runtimeNames.map((name) => this.renderRuntimeEntry(name, !!runtimeReadOnly))}
@@ -4766,6 +5028,7 @@ export class ScionPageAdminServerConfig extends LitElement {
       <div class="section">
         ${this.renderSectionHeader('Profiles', 'profiles')} ${this.renderSectionMeta('profiles')}
         ${profileReadOnly ? html`${this.renderReadOnlyBadge(profileReadOnly)}` : nothing}
+        ${this.renderEnvBadgeUnder('profiles')}
         ${profileNames.length === 0
           ? html`<p class="hint">No profiles configured.</p>`
           : profileNames.map((name) =>
@@ -4846,7 +5109,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="shared-dir-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.shared_dir_storage_backend as string) || ''}
+              value=${profile.shared_dir_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4870,7 +5133,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-backend"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_backend as string) || ''}
+              value=${profile.home_storage_backend || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -4894,7 +5157,7 @@ export class ScionPageAdminServerConfig extends LitElement {
               class="home-storage-leaf"
               placeholder="Runtime or server setting"
               clearable
-              value=${(profile.home_storage_leaf as string) || ''}
+              value=${profile.home_storage_leaf || ''}
               ?disabled=${readOnly}
               @sl-change=${(e: Event) => {
                 this.updateProfileField(
@@ -5526,13 +5789,17 @@ export class ScionPageAdminServerConfig extends LitElement {
                   automatic (global) replication. Required when org policy
                   constraints/gcp.resourceLocations restricts global resources.</span
                 >
-                <sl-input
-                  value=${this.secretsGCPReplicationLocations}
-                  placeholder="e.g. northamerica-northeast1, us-east1"
-                  @sl-input=${(e: Event) => {
-                    this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>
+                ${this.renderFieldValue(
+                  'server.secrets.gcp_replication_locations',
+                  this.secretsGCPReplicationLocations,
+                  html`${this.renderEnvBadge('server.secrets.gcp_replication_locations')}<sl-input
+                      value=${this.secretsGCPReplicationLocations}
+                      placeholder="e.g. northamerica-northeast1, us-east1"
+                      @sl-input=${(e: Event) => {
+                        this.secretsGCPReplicationLocations = (e.target as HTMLInputElement).value;
+                      }}
+                    ></sl-input>`
+                )}
               </div>`
             : ''}
         </div>
@@ -5849,52 +6116,6 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
         </div>
       </div>
-
-      <div class="section">
-        <h3 class="section-title">Local Debug Output</h3>
-        <div class="form-grid">
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.enabled',
-              this.telemetryLocalEnabled ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.enabled')}<sl-switch
-                  ?checked=${this.telemetryLocalEnabled}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalEnabled = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Enable Local Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field">
-            ${this.renderFieldValue(
-              'telemetry.local.console',
-              this.telemetryLocalConsole ? 'Enabled' : 'Disabled',
-              html`${this.renderEnvBadge('telemetry.local.console')}<sl-switch
-                  ?checked=${this.telemetryLocalConsole}
-                  @sl-change=${(e: Event) => {
-                    this.telemetryLocalConsole = (e.target as HTMLInputElement).checked;
-                  }}
-                  >Console Output</sl-switch
-                >`
-            )}
-          </div>
-          <div class="form-field full-width">
-            <label>Log File</label>
-            ${this.renderFieldValue(
-              'telemetry.local.file',
-              this.telemetryLocalFile || '—',
-              html`${this.renderEnvBadge('telemetry.local.file')}<sl-input
-                  value=${this.telemetryLocalFile}
-                  placeholder="/var/log/scion/telemetry.log"
-                  @sl-input=${(e: Event) => {
-                    this.telemetryLocalFile = (e.target as HTMLInputElement).value;
-                  }}
-                ></sl-input>`
-            )}
-          </div>
-        </div>
-      </div>
     `;
   }
 
@@ -5907,15 +6128,19 @@ export class ScionPageAdminServerConfig extends LitElement {
         <div class="form-grid">
           <div class="form-field">
             <label>IAM Check Mode</label>
-            <sl-select
-              value=${this.hubGcpIamCheckMode}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="off">Off (policy-only gating)</sl-option>
-              <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_check_mode',
+              this.hubGcpIamCheckMode,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_check_mode')}<sl-select
+                  value=${this.hubGcpIamCheckMode}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamCheckMode = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="off">Off (policy-only gating)</sl-option>
+                  <sl-option value="enforce">Enforce (IAM actAs check required)</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls whether GCP IAM actAs permission is verified when assigning a service account
               to an agent. When "off", assignment is gated by Hub policy only. When "enforce", the
@@ -5924,15 +6149,19 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field">
             <label>Deny Policy Fallback</label>
-            <sl-select
-              value=${this.hubGcpIamDenyUnknownPolicy}
-              @sl-change=${(e: Event) => {
-                this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
-              }}
-            >
-              <sl-option value="fail-open">Fail Open (recommended)</sl-option>
-              <sl-option value="fail-closed">Fail Closed</sl-option>
-            </sl-select>
+            ${this.renderFieldValue(
+              'server.hub.gcp_iam_deny_unknown_policy',
+              this.hubGcpIamDenyUnknownPolicy,
+              html`${this.renderEnvBadge('server.hub.gcp_iam_deny_unknown_policy')}<sl-select
+                  value=${this.hubGcpIamDenyUnknownPolicy}
+                  @sl-change=${(e: Event) => {
+                    this.hubGcpIamDenyUnknownPolicy = (e.target as HTMLSelectElement).value;
+                  }}
+                >
+                  <sl-option value="fail-open">Fail Open (recommended)</sl-option>
+                  <sl-option value="fail-closed">Fail Closed</sl-option>
+                </sl-select>`
+            )}
             <div class="help-text">
               Controls behavior when IAM deny policies cannot be fully evaluated (e.g., the Hub
               service account lacks org-level permissions to read deny policies). "Fail open" treats
@@ -6041,7 +6270,7 @@ export class ScionPageAdminServerConfig extends LitElement {
     try {
       const res = await apiFetch('/api/v1/admin/gcp-quota');
       if (res.ok) {
-        this.gcpQuotaData = await res.json();
+        this.gcpQuotaData = (await res.json()) as GCPQuotaSummary;
       }
     } catch {
       // Non-critical
@@ -6063,7 +6292,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
       <div class="section">
         ${this.renderSectionHeader('GitHub App Configuration', 'github_app')}
-        ${this.renderSectionMeta('github_app')}
+        ${this.renderGitHubAppSaveError()} ${this.renderSectionMeta('github_app')}
         <div class="form-grid">
           <div class="form-field">
             <label>App ID</label>
@@ -6118,6 +6347,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppPrivateKey = (e.target as HTMLTextAreaElement).value;
               }}
             ></sl-textarea>
+            ${this.renderFieldErrors('server.github_app.private_key')}
             ${this.githubAppHasPrivateKey
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_PRIVATE_KEY</span
@@ -6142,6 +6372,7 @@ export class ScionPageAdminServerConfig extends LitElement {
                 this.githubAppWebhookSecret = (e.target as HTMLInputElement).value;
               }}
             ></sl-input>
+            ${this.renderFieldErrors('server.github_app.webhook_secret')}
             ${this.githubAppHasWebhookSecret
               ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
                   >Stored as hub secret: GITHUB_APP_WEBHOOK_SECRET</span
@@ -6207,18 +6438,27 @@ export class ScionPageAdminServerConfig extends LitElement {
           <sl-button
             variant="primary"
             ?loading=${this.githubAppSaving}
+            ?disabled=${!this.githubAppLoaded}
+            data-action="save-github-app"
             @click=${() => this.handleSaveGitHubApp()}
           >
             <sl-icon slot="prefix" name="check-lg"></sl-icon>
             Save GitHub App Configuration
           </sl-button>
-          ${this.githubAppConfigured
-            ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
-                >Configured</span
+          ${!this.githubAppLoaded
+            ? html`<span
+                class="hint"
+                data-github-app-not-loaded
+                style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                >Cannot save: the GitHub App configuration did not load. Reload the page.</span
               >`
-            : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
-                >Not configured</span
-              >`}
+            : this.githubAppConfigured
+              ? html`<span style="font-size: 0.75rem; color: var(--scion-success-text, #166534);"
+                  >Configured</span
+                >`
+              : html`<span style="font-size: 0.75rem; color: var(--scion-text-muted, #64748b);"
+                  >Not configured</span
+                >`}
         </div>
       </div>
 
@@ -6315,20 +6555,24 @@ export class ScionPageAdminServerConfig extends LitElement {
           if (!this.rawConfig.server) {
             this.rawConfig.server = {};
           }
-          const ghApp: V1GitHubAppConfig = { webhooks_enabled: data.webhooks_enabled };
-          if (data.app_id) ghApp.app_id = data.app_id;
-          if (data.api_base_url) ghApp.api_base_url = data.api_base_url;
-          if (data.installation_url) ghApp.installation_url = data.installation_url;
-          this.rawConfig.server.github_app = ghApp;
+          this.rawConfig.server.github_app = githubAppEcho(
+            data.app_id,
+            data.api_base_url,
+            data.installation_url,
+            data.webhooks_enabled
+          );
         }
         // Clear write-only fields after load
         this.githubAppPrivateKey = '';
         this.githubAppWebhookSecret = '';
+        this.githubAppLoaded = true;
       } else {
+        this.githubAppLoaded = false;
         this.githubAppError = await extractApiError(res, 'Failed to load GitHub App configuration');
       }
-    } catch (e) {
-      // Non-critical — tab just shows unconfigured state
+    } catch {
+      this.githubAppLoaded = false;
+      this.githubAppError = 'Failed to load GitHub App configuration';
     }
   }
 
@@ -6464,16 +6708,23 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private async handleSaveGitHubApp(): Promise<void> {
+    // The fields hold defaults, not the stored config, until the load
+    // succeeds; saving them would clear the stored App (see githubAppLoaded).
+    if (!this.githubAppLoaded) return;
     this.githubAppSaving = true;
     this.githubAppError = null;
+    this.githubAppSaveError = null;
     this.githubAppSuccess = null;
 
     try {
+      // Every non-secret field is sent, so a cleared one goes as an
+      // explicit clear (0 or ""). The endpoint reads null as "keep the
+      // stored value", so null cannot be used here.
       const payload: Record<string, unknown> = {
-        app_id: this.githubAppId || undefined,
-        api_base_url: this.githubAppApiBaseUrl || undefined,
+        app_id: this.githubAppId || 0,
+        api_base_url: this.githubAppApiBaseUrl,
         webhooks_enabled: this.githubAppWebhooksEnabled,
-        installation_url: this.githubAppInstallationUrl || undefined,
+        installation_url: this.githubAppInstallationUrl,
       };
 
       // Only send secrets if the user provided new values
@@ -6491,8 +6742,18 @@ export class ScionPageAdminServerConfig extends LitElement {
       });
 
       if (!res.ok) {
-        const err = await extractApiError(res, 'Failed to save GitHub App configuration');
-        this.githubAppError = err;
+        const err = await readSettingsSaveError(res, {
+          sectionKoanfPaths: this.sectionKoanfPaths,
+          defaultSection: 'github_app',
+        });
+        if (err.kind === 'generic') {
+          this.githubAppError = genericSaveErrorText(
+            err,
+            'Failed to save GitHub App configuration'
+          );
+        } else {
+          this.githubAppSaveError = err;
+        }
         return;
       }
 
@@ -6502,11 +6763,12 @@ export class ScionPageAdminServerConfig extends LitElement {
         if (!this.rawConfig.server) {
           this.rawConfig.server = {};
         }
-        const ghApp: V1GitHubAppConfig = { webhooks_enabled: this.githubAppWebhooksEnabled };
-        if (this.githubAppId) ghApp.app_id = this.githubAppId;
-        if (this.githubAppApiBaseUrl) ghApp.api_base_url = this.githubAppApiBaseUrl;
-        if (this.githubAppInstallationUrl) ghApp.installation_url = this.githubAppInstallationUrl;
-        this.rawConfig.server.github_app = ghApp;
+        this.rawConfig.server.github_app = githubAppEcho(
+          this.githubAppId,
+          this.githubAppApiBaseUrl,
+          this.githubAppInstallationUrl,
+          this.githubAppWebhooksEnabled
+        );
       }
       // Reload to get fresh state (has_private_key, has_webhook_secret, configured)
       await this.loadGitHubAppConfig();

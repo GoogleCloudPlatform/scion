@@ -15,6 +15,7 @@
 package hub
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -41,6 +42,13 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		Forbidden(w)
 		return
 	}
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+	if cls == inboxCredentialToken && !s.authorizeInboxToken(w, r, token, permInboxRead) {
+		return
+	}
 
 	q := r.URL.Query()
 
@@ -52,6 +60,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 	if projectID := q.Get("project"); projectID != "" {
 		filter.ProjectID = projectID
+	}
+	// A project-boundary token lists only messages of its boundary
+	// project; naming another project lists nothing.
+	if cls == inboxCredentialToken {
+		if boundaryProject := tokenBoundaryProject(token); boundaryProject != "" {
+			if filter.ProjectID != "" && filter.ProjectID != boundaryProject {
+				writeJSON(w, http.StatusOK, &store.ListResult[store.Message]{Items: []store.Message{}})
+				return
+			}
+			filter.ProjectID = boundaryProject
+		}
 	}
 	agentID := q.Get("agent")
 	if agentID != "" {
@@ -125,6 +144,17 @@ func (s *Server) handleMessages(w http.ResponseWriter, r *http.Request) {
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	if cls == inboxCredentialToken {
+		// The store filter already holds a project token to its boundary
+		// project; the row check keeps the response to rows the token may
+		// see should the store return any other.
+		check := s.newSelfScopeCheck(r.Context(), token, permInboxRead)
+		visible := filterSelfScopedRows(check, result.Items, func(m store.Message) string { return m.ProjectID })
+		if len(visible) != len(result.Items) {
+			result.TotalCount -= len(result.Items) - len(visible)
+			result.Items = visible
+		}
+	}
 
 	writeJSON(w, http.StatusOK, result)
 }
@@ -141,10 +171,31 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	cls, token, ok := requireInboxCredential(w, r)
+	if !ok {
+		return
+	}
+
 	id, action := extractAction(r, "/api/v1/messages")
 
 	// POST /api/v1/messages/read-all
-	if id == "read-all" && r.Method == http.MethodPost {
+	if id == "read-all" && action == "" && r.Method == http.MethodPost {
+		if cls == inboxCredentialToken {
+			if !s.authorizeInboxToken(w, r, token, permInboxWrite) {
+				return
+			}
+			if tokenBoundaryProject(token) != "" {
+				// A project token marks read only the unread messages it
+				// may see: those of its boundary project.
+				if err := s.markVisibleMessagesRead(r.Context(), token, user.ID()); err != nil {
+					writeErrorFromErr(w, err, "")
+					return
+				}
+				slog.Info("Visible messages marked as read", "userID", user.ID(), "projectID", tokenBoundaryProject(token))
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+				return
+			}
+		}
 		if err := s.store.MarkAllMessagesRead(r.Context(), user.ID()); err != nil {
 			writeErrorFromErr(w, err, "")
 			return
@@ -171,6 +222,9 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 			Forbidden(w)
 			return
 		}
+		if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxWrite, msg.ProjectID) {
+			return
+		}
 		if err := s.store.MarkMessageRead(r.Context(), id); err != nil {
 			writeErrorFromErr(w, err, "Message")
 			return
@@ -192,6 +246,9 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 			Forbidden(w)
 			return
 		}
+		if cls == inboxCredentialToken && !s.authorizeSelfScoped(w, r, permInboxRead, msg.ProjectID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, msg)
 		return
 	}
@@ -201,6 +258,40 @@ func (s *Server) handleMessageRoutes(w http.ResponseWriter, r *http.Request) {
 	} else {
 		MethodNotAllowed(w, http.MethodGet)
 	}
+}
+
+// markVisibleMessagesReadPageSize is the page size markVisibleMessagesRead
+// reads unread messages with.
+const markVisibleMessagesReadPageSize = 200
+
+// markVisibleMessagesRead marks read every unread message addressed to
+// userID that a project-boundary token may see: the messages of its
+// boundary project that pass the self-scope row check. It collects the IDs
+// first and then marks them, so marking does not move the pages it reads.
+func (s *Server) markVisibleMessagesRead(ctx context.Context, token *ScopedUserIdentity, userID string) error {
+	check := s.newSelfScopeCheck(ctx, token, permInboxWrite)
+	filter := store.MessageFilter{RecipientID: userID, ProjectID: tokenBoundaryProject(token), OnlyUnread: true}
+	var ids []string
+	cursor := ""
+	for {
+		page, err := s.store.ListMessages(ctx, filter, store.ListOptions{Limit: markVisibleMessagesReadPageSize, Cursor: cursor, SkipTotalCount: true})
+		if err != nil {
+			return err
+		}
+		for _, m := range filterSelfScopedRows(check, page.Items, func(m store.Message) string { return m.ProjectID }) {
+			ids = append(ids, m.ID)
+		}
+		if page.NextCursor == "" || len(page.Items) == 0 {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	for _, id := range ids {
+		if err := s.store.MarkMessageRead(ctx, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // handleAgentMessages handles GET /api/v1/agents/{id}/messages.
@@ -371,7 +462,8 @@ func (s *Server) handleAgentMessages(w http.ResponseWriter, r *http.Request, age
 // handleAgentMessagesStream handles GET /api/v1/agents/{id}/messages/stream.
 // Streams new messages involving a specific agent in real time. Callers
 // holding agent.attach on the agent see all messages; others see only their
-// own.
+// own. With the conversation setting on, both see only their own DM
+// conversation with the agent, matching the REST default path.
 // Unlike /message-logs/stream this does not depend on Cloud Logging: it
 // subscribes to the in-process event bus that handleAgentOutboundMessage
 // and handleAgentMessage already publish to, so it works on any hub
@@ -418,6 +510,33 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// With the conversation setting on, REST's default path (no thread_id,
+	// channel web or unset — the only form this stream has) limits history
+	// to the DM conversation between the agent and the caller, for attach
+	// holders too. The stream applies the same limit by conversation id.
+	// A DM that does not exist yet is looked up again when the first
+	// message the caller takes part in arrives.
+	conv := agentStreamConversation{agentID: agent.ID, userID: user.ID()}
+	if ops := s.GetOperationalSettings(); ops != nil && ops.ConversationEnvelopeSwitch() {
+		conv.enabled = true
+		conv.resolve = func() (string, error) {
+			res, err := messaging.ResolveDMConversationForRead(ctx, s.store, s.messageLog, "agent", agent.ID, "user", user.ID())
+			if err != nil || res == nil {
+				return "", err
+			}
+			return res.ConversationID, nil
+		}
+		id, err := conv.resolve()
+		if err != nil {
+			slog.Error("read-switch: DM conversation lookup failed",
+				"agent_id", agent.ID, "user_id", user.ID(), "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to look up conversation", nil)
+			return
+		}
+		conv.id = id
+	}
+
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -460,12 +579,16 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			if !ok {
 				return
 			}
-			if filterStream {
+			if filterStream || conv.enabled {
 				var payload UserMessageEvent
 				if err := json.Unmarshal(evt.Data, &payload); err != nil {
 					continue
 				}
-				if payload.SenderID != userID && payload.RecipientID != userID {
+				participant := payload.SenderID == userID || payload.RecipientID == userID
+				if filterStream && !participant {
+					continue
+				}
+				if !conv.includes(payload.ConversationID, participant) {
 					continue
 				}
 			}
@@ -482,4 +605,32 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
+}
+
+// agentStreamConversation limits the agent messages stream to the caller's
+// DM conversation with the agent when the conversation setting is on.
+type agentStreamConversation struct {
+	enabled bool
+	id      string
+	resolve func() (string, error)
+	// agentID and userID are for logging only.
+	agentID, userID string
+}
+
+// includes reports whether a message in conversation msgConvID belongs on
+// the stream. participant says whether the caller sent or received it;
+// only then can it be the first message of a DM not resolved yet.
+func (c *agentStreamConversation) includes(msgConvID string, participant bool) bool {
+	if !c.enabled {
+		return true
+	}
+	if c.id == "" && participant && msgConvID != "" {
+		id, err := c.resolve()
+		if err != nil {
+			slog.Warn("read-switch: DM conversation lookup failed on messages stream",
+				"agent_id", c.agentID, "user_id", c.userID, "error", err)
+		}
+		c.id = id
+	}
+	return c.id != "" && msgConvID == c.id
 }

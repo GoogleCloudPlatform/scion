@@ -28,6 +28,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/critic"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"golang.org/x/text/unicode/norm"
@@ -181,14 +182,8 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 		return fmt.Errorf("publish failed: the hub's reply has no version")
 	}
 	id, seq := pend.Artifact.ID, pend.Version.Seq
-	for _, p := range pend.Upload.Required {
-		f, ok := byPath[p]
-		if !ok {
-			return fmt.Errorf("the hub asked for %q, which is not in the bundle", p)
-		}
-		if err := uploadLocalFile(ctx, svc, id, seq, f); err != nil {
-			return fmt.Errorf("upload %s: %w%s", p, err, artifactErrorHint(err, true))
-		}
+	if err := uploadRequired(ctx, svc, id, seq, pend.Upload.Required, byPath); err != nil {
+		return err
 	}
 	resp, err := svc.FinalizeVersion(ctx, id, seq)
 	if err != nil {
@@ -203,6 +198,20 @@ func publishBundle(ctx context.Context, svc hubclient.ArtifactService, out, errO
 	_, _ = fmt.Fprintf(out, "%s  (v%d)\n", artifacts.FormatRef(id, 0), seq)
 	if page := artifactPageURL(hubEndpoint, resp.Artifact.ScopeRef, id); page != "" {
 		_, _ = fmt.Fprintln(out, page)
+	}
+	return nil
+}
+
+// uploadRequired uploads the files the hub asked for.
+func uploadRequired(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, required []string, byPath map[string]*localFile) error {
+	for _, p := range required {
+		f, ok := byPath[p]
+		if !ok {
+			return fmt.Errorf("the hub asked for %q, which is not in the bundle", p)
+		}
+		if err := uploadLocalFile(ctx, svc, id, seq, f); err != nil {
+			return fmt.Errorf("upload %s: %w%s", p, err, artifactErrorHint(err, true))
+		}
 	}
 	return nil
 }
@@ -252,7 +261,7 @@ func checkBundleName(rel string) error {
 //
 // Files are written under dir without following a symbolic link below it,
 // and an existing file is replaced only when replace is set.
-func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string, replace bool) error {
+func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.Writer, id string, seq int, files []hubclient.ArtifactFile, dir string, replace bool, mode critic.Mode) error {
 	if st, err := os.Stat(dir); err == nil && !st.IsDir() {
 		return fmt.Errorf("%s exists and is not a directory; a bundle is written into a directory", dir)
 	}
@@ -275,7 +284,7 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 	}
 	defer func() { _ = out.Close() }()
 	for _, f := range files {
-		if err := fetchVerified(ctx, svc, id, seq, f, out, f.Path, replace); err != nil {
+		if err := fetchVerified(ctx, svc, id, seq, f, out, f.Path, replace, mode); err != nil {
 			return err
 		}
 	}
@@ -285,14 +294,14 @@ func writeBundle(ctx context.Context, svc hubclient.ArtifactService, stderr io.W
 
 // fetchVerified fetches file f of version seq and writes it as name under
 // out, verified against its recorded size and digest before it is moved
-// into place.
-func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, out *outDir, name string, replace bool) error {
+// into place, then projected by mode if it is text.
+func fetchVerified(ctx context.Context, svc hubclient.ArtifactService, id string, seq int, f hubclient.ArtifactFile, out *outDir, name string, replace bool, mode critic.Mode) error {
 	rc, err := svc.OpenFile(ctx, id, seq, f.Path)
 	if err != nil {
 		return fmt.Errorf("fetch %s: %w%s", f.Path, err, artifactErrorHint(err, false))
 	}
 	defer func() { _ = rc.Close() }()
-	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyVerified(w, rc, f.SHA256, f.Size) }); err != nil {
+	if err := out.WriteFile(name, replace, func(w io.Writer) error { return copyArtifactFile(w, rc, f, mode) }); err != nil {
 		return fmt.Errorf("%s: %w", f.Path, err)
 	}
 	return nil
@@ -308,17 +317,29 @@ func listArtifactVersions(ctx context.Context, svc hubclient.ArtifactService, ou
 	if err != nil {
 		return fmt.Errorf("get artifact: %w%s", err, artifactErrorHint(err, false))
 	}
-	versions, err := svc.ListVersions(ctx, id)
+	versions, discarded, err := svc.ListVersionHistory(ctx, id)
 	if err != nil {
 		return fmt.Errorf("list versions: %w%s", err, artifactErrorHint(err, false))
 	}
-	if len(versions) == 0 {
+	if len(versions) == 0 && len(discarded) == 0 {
 		_, _ = fmt.Fprintf(out, "%s has no published version\n", artifacts.FormatRef(id, 0))
 		return nil
 	}
 	tw := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	_, _ = fmt.Fprintln(tw, "  REF\tKIND\tPUBLISHED\tBY\tFILES\tSIZE\tNOTE")
+	// Discarded versions are listed among the ready ones by number, so a
+	// gap in the numbering is explained (ptone/scion#4577). They show only
+	// their number, the time the number was taken and why.
+	d := 0
+	printDiscarded := func(above int) {
+		for ; d < len(discarded) && discarded[d].Seq > above; d++ {
+			x := discarded[d]
+			_, _ = fmt.Fprintf(tw, "  %s\tdiscarded\t%s\t-\t-\t-\t%s\n", artifacts.FormatRef(id, x.Seq),
+				clitime.Format(x.CreatedAt, clitime.Minute), discardReasonText(x.Reason))
+		}
+	}
 	for _, v := range versions {
+		printDiscarded(v.Seq)
 		mark := " "
 		if v.Seq == meta.Artifact.CurrentSeq {
 			mark = "*"
@@ -330,7 +351,24 @@ func listArtifactVersions(ctx context.Context, svc hubclient.ArtifactService, ou
 		_, _ = fmt.Fprintf(tw, "%s %s\t%s\t%s\t%s\t%d\t%s\t%s\n", mark, artifacts.FormatRef(id, v.Seq), v.Kind,
 			clitime.Format(v.CreatedAt, clitime.Minute), by, v.FileCount, humanBytes(v.TotalBytes), noteOneLine(v.Note))
 	}
+	printDiscarded(0)
 	return tw.Flush()
+}
+
+// discardReasonText describes a discarded version's reason code.
+func discardReasonText(reason string) string {
+	switch reason {
+	case artifacts.FailReasonUnmarkedChanges:
+		return "discarded: the review changed text outside its marks"
+	case artifacts.FailReasonStaleReview:
+		return "discarded: the review was of an older version"
+	case artifacts.FailReasonNewerPublishPending:
+		return "discarded: a newer version was being published"
+	case artifacts.FailReasonExpired:
+		return "discarded: the upload was not finished in time"
+	default:
+		return "discarded: no reason recorded"
+	}
 }
 
 func humanBytes(n int64) string {

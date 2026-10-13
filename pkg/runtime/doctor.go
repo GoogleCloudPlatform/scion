@@ -17,7 +17,7 @@ package runtime
 // CheckResult represents the outcome of a single diagnostic check.
 type CheckResult struct {
 	Name        string `json:"name"`
-	Status      string `json:"status"` // "pass", "warn", "fail", "skip"
+	Status      string `json:"status"` // "pass", "warn", "fail", "skip", "info"
 	Message     string `json:"message"`
 	Remediation string `json:"remediation,omitempty"`
 }

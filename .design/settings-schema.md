@@ -1,6 +1,8 @@
 
 ### Schema Sketch (v1)
 
+> Note: `server.log_format` is now accepted but ignored and has no environment variable; `SCION_SERVER_LOG_FORMAT` below is historical (ptone/scion#4103).
+
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",

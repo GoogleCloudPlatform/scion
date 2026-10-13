@@ -18,6 +18,9 @@ async function start(
   );
   await page.routeWebSocket('**/api/v1/agents/**/pty?*', (socket) => {
     socket.onMessage(() => {});
+    // tmux sends a redraw on attach — the client only reaches a connected
+    // state on its first inbound data frame (see client/terminal-sessions.ts).
+    socket.send(JSON.stringify({ type: 'data', data: Buffer.from('').toString('base64') }));
   });
   await page.goto(url);
   await page.waitForFunction(() => !!window.fixture);

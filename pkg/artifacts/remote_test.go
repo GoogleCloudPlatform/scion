@@ -148,6 +148,28 @@ func TestFetchFloor(t *testing.T) {
 		f.publish(agentA, "doc.md", []byte(md), "")
 		return time.Since(start)
 	}
+	// publishUnheld publishes md and fails the test if the floor wait was
+	// entered. It makes any floor wait last the whole fetch budget: a floor
+	// far longer than the budget, and the longest budget allowed. A publish
+	// that returns well inside the budget then shows the wait was not
+	// entered at all, however slow the store or the runner.
+	publishUnheld := func(t *testing.T, md string, reasons map[string]remotefetch.Reason) ArtifactResponse {
+		t.Helper()
+		f := newFixture(t, false)
+		f.svc.fetchFloor = time.Hour
+		f.useFetcher(&fakeFetcher{bodies: map[string][]byte{good: testPNG}, reasons: reasons})
+		lim := DefaultRemoteImageLimits()
+		lim.TotalBudget = MaxRemoteFetchBudget
+		f.svc.SetLimits(func(context.Context) Limits {
+			return Limits{MaxFileBytes: 1 << 20, RemoteImages: lim}
+		})
+		start := time.Now()
+		resp := f.publish(agentA, "doc.md", []byte(md), "")
+		if d := time.Since(start); d >= lim.TotalBudget/2 {
+			t.Fatalf("took %v; the floor wait was entered (it holds the publish for the %v budget)", d, lim.TotalBudget)
+		}
+		return resp
+	}
 	t.Run("refused", func(t *testing.T) {
 		u := "https://refused.example/a.png"
 		if d := publishWith(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonDeniedAddress}); d < floor {
@@ -161,20 +183,40 @@ func TestFetchFloor(t *testing.T) {
 		}
 	})
 	t.Run("many refused cost one floor", func(t *testing.T) {
+		// 100 refused images, fetched remoteFetchConcurrency at a time: a
+		// floor per image would hold the publish for at least about 25
+		// floors (7.5s), above the 20-floor (6s) bound. A slow runner only
+		// makes that case slower, and the bound leaves wide headroom for
+		// the single floor.
+		const n = 100
 		var md strings.Builder
 		reasons := map[string]remotefetch.Reason{}
-		for i := 0; i < 50; i++ {
+		for i := 0; i < n; i++ {
 			u := fmt.Sprintf("https://refused.example/%d.png", i)
 			reasons[u] = remotefetch.ReasonDeniedAddress
 			fmt.Fprintf(&md, "![a](%s)\n", u)
 		}
-		if d := publishWith(t, md.String(), reasons); d < floor || d > 3*floor {
-			t.Fatalf("took %v, want about one floor (%v)", d, floor)
+		f := newFixture(t, false)
+		f.svc.fetchFloor = floor
+		f.useFetcher(&fakeFetcher{reasons: reasons})
+		lim := DefaultRemoteImageLimits()
+		lim.MaxCount = n
+		f.svc.SetLimits(func(context.Context) Limits {
+			return Limits{MaxFileBytes: 1 << 20, RemoteImages: lim}
+		})
+		start := time.Now()
+		resp := f.publish(agentA, "doc.md", []byte(md.String()), "")
+		if d := time.Since(start); d < floor || d >= 20*floor {
+			t.Fatalf("took %v, want one floor (%v), not one per image", d, floor)
+		}
+		if len(resp.Warnings) != n {
+			t.Fatalf("%d warnings, want one per refused image (%d)", len(resp.Warnings), n)
 		}
 	})
 	t.Run("all fetched", func(t *testing.T) {
-		if d := publishWith(t, "![a]("+good+")", nil); d >= floor {
-			t.Fatalf("took %v, want well under the floor %v", d, floor)
+		resp := publishUnheld(t, "![a]("+good+")", nil)
+		if len(resp.Warnings) != 0 {
+			t.Fatalf("warnings %q, want the image fetched", resp.Warnings)
 		}
 	})
 	t.Run("floor stays within the fetch budget", func(t *testing.T) {
@@ -210,9 +252,11 @@ func TestFetchFloor(t *testing.T) {
 		}
 	})
 	t.Run("missing image is not held", func(t *testing.T) {
+		// Only refused and unresolvable fetches are held.
 		u := "https://img.example/missing.png"
-		if d := publishWith(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonStatus}); d >= floor {
-			t.Fatalf("took %v; only refused and unresolvable fetches are held", d)
+		resp := publishUnheld(t, "![a]("+u+")", map[string]remotefetch.Reason{u: remotefetch.ReasonStatus})
+		if len(resp.Warnings) != 1 {
+			t.Fatalf("warnings %q, want one for the missing image", resp.Warnings)
 		}
 	})
 }

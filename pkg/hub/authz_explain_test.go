@@ -254,6 +254,24 @@ func TestExplainAPI_JSONErrors(t *testing.T) {
 	}
 }
 
+// TestExplainAPI_MethodNotAllowedSetsAllow verifies that a non-POST request
+// gets a 405 with the Allow header RFC 9110 requires (ptone/scion#4056).
+func TestExplainAPI_MethodNotAllowedSetsAllow(t *testing.T) {
+	srv, _ := testServer(t)
+
+	for _, method := range []string{http.MethodGet, http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			req := httptest.NewRequest(method, "/api/v1/authz/explain", nil)
+			rec := httptest.NewRecorder()
+
+			srv.handleAuthzExplain(rec, req)
+
+			assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+			assert.Equal(t, "POST", rec.Header().Get("Allow"))
+		})
+	}
+}
+
 // =============================================================================
 // Explain API: inactive grants with reason
 // =============================================================================

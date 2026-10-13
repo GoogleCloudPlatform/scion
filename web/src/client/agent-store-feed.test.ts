@@ -20,8 +20,6 @@
  * down.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { agent, COMPACT_KEYS, createHarness, settle } from './__fixtures__/agent-store-harness.js';
 import {
@@ -531,7 +529,7 @@ describe('AgentStore rows shared across lists', () => {
     const h = createHarness([
       agent('a1', { _messageability: { canMessage: true } } as Partial<Agent>),
     ]);
-    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row as Agent;
+    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row;
     h.store.retain(HUB, () => {});
     h.store.retain(P1, () => {});
     const hub = h.store.ensure(HUB);
@@ -1067,6 +1065,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
       slug: 'a1-slug',
       template: 'reviewer',
       project: 'Main',
+      projectSlug: 'main',
       labels: { team: 'red' },
       phase: 'running',
       activity: 'working',
@@ -1119,7 +1118,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
     )
   )('a project walk clears `%s` when the row lacks it, and keeps messageability', async (key) => {
     const h = createHarness([filled()]);
-    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row as Agent;
+    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row;
     h.store.retain(HUB, () => {});
     h.store.retain(P1, () => {});
     const hub = h.store.ensure(HUB);
@@ -1159,7 +1158,7 @@ describe('AgentStore compact rows clear the compact keys they omit', () => {
         _messageability: { canMessage: true },
       } as Partial<Agent>),
     ]);
-    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row as Agent;
+    h.server.projectRow = ({ _messageability: _omitted, ...row }): Agent => row;
     h.store.retain(HUB, () => {});
     h.store.retain(P1, () => {});
     const hub = h.store.ensure(HUB);

@@ -274,9 +274,28 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}()
 
-	// ── Step 4: Create project row ───────────────────────────────────────
+	// The caller becomes the clone's owner: the request credential must
+	// cover the owner role before anything is written.
+	if !s.authorizeProjectOwnerGrant(w, ctx) {
+		return
+	}
 
-	if err := s.store.CreateProject(ctx, clone); err != nil {
+	// ── Steps 4 and 5: Create project row and owner role binding ─────────
+	// The clone creator becomes the project owner via a direct role binding
+	// (PM1), written with the project row and its audit record in one
+	// transaction. This is the canonical project membership source.
+
+	if err := s.createProjectWithOwner(ctx, clone, callerID); err != nil {
+		if errors.Is(err, errProjectOwnerBinding) {
+			slog.Error("project clone: failed to create owner role binding",
+				"clone_id", clone.ID, "user_id", callerID, "error", err)
+			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
+				"Failed to create owner role binding: "+err.Error(), nil)
+			return
+		}
+		if writeFixtureRootError(w, err) {
+			return
+		}
 		writeErrorFromErr(w, err, "")
 		return
 	}
@@ -292,20 +311,6 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 				"clone_id", clone.ID, "error", delErr)
 		}
 	})
-
-	// ── Step 5: Create owner role binding (PM1: atomic with project) ─────
-	// The clone creator becomes the project owner via a direct role binding.
-	// This is the canonical project membership source. The step 4 rollback
-	// already cascade-deletes all project-scoped bindings.
-	if callerID != "" {
-		if rbErr := s.createProjectOwnerRoleBinding(ctx, clone.ID, callerID); rbErr != nil {
-			slog.Error("project clone: failed to create owner role binding",
-				"clone_id", clone.ID, "user_id", callerID, "error", rbErr)
-			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-				"Failed to create owner role binding: "+rbErr.Error(), nil)
-			return
-		}
-	}
 
 	// ── Step 6: Create groups ────────────────────────────────────────────
 
@@ -333,6 +338,10 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 	if err := s.cloneProjectTemplates(ctx, src.ID, clone, &rollback); err != nil {
 		slog.Error("project clone: template copy failed",
 			"source_id", src.ID, "clone_id", clone.ID, "error", err)
+		if isTemplateCommitRefusal(err) {
+			writeTemplateCommitError(w, err)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 			"Failed to copy templates: "+err.Error(), nil)
 		return
@@ -414,11 +423,18 @@ func (s *Server) handleProjectClone(w http.ResponseWriter, r *http.Request, proj
 		}
 	}
 
-	// ── Step 14: Auto-link providers (best-effort) ───────────────────────
+	// ── Step 15: Auto-link providers (best-effort) ───────────────────────
 
-	s.autoLinkProviders(ctx, clone)
+	s.autoLinkClonedProviders(ctx, clone)
 
-	// ── Step 15: Publish event (best-effort) ─────────────────────────────
+	// ── Step 16: Ensure the #general chat topic (best-effort) ────────────
+	// Runs after every step that can fail and roll the clone back, so a
+	// rolled-back clone never leaves an orphaned topic behind. Skipped for
+	// template clones (asTemplate), which are not chat spaces.
+
+	s.ensureProjectGeneralTopic(ctx, clone)
+
+	// ── Step 17: Publish event (best-effort) ─────────────────────────────
 
 	s.events.PublishProjectCreated(ctx, clone)
 
@@ -565,52 +581,10 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 
 	stor := s.GetStorage()
 
-	for _, srcTmpl := range result.Items {
-		newTmpl := &store.Template{
-			ID:           api.NewUUID(),
-			Name:         srcTmpl.Name,
-			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
-			DisplayName:  srcTmpl.DisplayName,
-			Description:  srcTmpl.Description,
-			Harness:      srcTmpl.Harness,
-			Config:       srcTmpl.Config,
-			Scope:        store.TemplateScopeProject,
-			ScopeID:      clone.ID,
-			Status:       srcTmpl.Status,
-			Files:        srcTmpl.Files,
-			ContentHash:  srcTmpl.ContentHash,
-			BaseTemplate: srcTmpl.BaseTemplate,
-		}
-
-		storagePath := storage.TemplateStoragePath(s.HubID(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
-		newTmpl.StoragePath = storagePath
-
-		if stor != nil {
-			newTmpl.StorageBucket = stor.Bucket()
-			newTmpl.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), newTmpl.Scope, newTmpl.ScopeID, newTmpl.Slug)
-		}
-
-		// Copy storage files
-		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
-			for _, file := range srcTmpl.Files {
-				srcPath := srcTmpl.StoragePath + "/" + file.Path
-				dstPath := storagePath + "/" + file.Path
-				if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-					_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-					return err
-				}
-			}
-		}
-
-		if err := s.store.CreateTemplate(ctx, newTmpl); err != nil {
-			if stor != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-			}
-			return err
-		}
-	}
-
-	// Add rollback for all templates at once
+	// Register the rollback for all templates before creating any, so a
+	// failure part-way through the loop (e.g. a template the commit path
+	// refuses) still removes the templates already created. The rollback is
+	// scope-wide and idempotent.
 	*rollback = append(*rollback, func() {
 		rbCtx := context.WithoutCancel(ctx)
 		stor := s.GetStorage()
@@ -623,6 +597,58 @@ func (s *Server) cloneProjectTemplates(ctx context.Context, srcProjectID string,
 				"clone_id", clone.ID, "error", err)
 		}
 	})
+
+	for _, srcTmpl := range result.Items {
+		newTmpl := &store.Template{
+			ID:           api.NewUUID(),
+			Name:         srcTmpl.Name,
+			Slug:         srcTmpl.Slug, // SAME slug — critical for annotation references
+			DisplayName:  srcTmpl.DisplayName,
+			Description:  srcTmpl.Description,
+			Config:       srcTmpl.Config,
+			Scope:        store.TemplateScopeProject,
+			ScopeID:      clone.ID,
+			Status:       srcTmpl.Status,
+			BaseTemplate: srcTmpl.BaseTemplate,
+		}
+
+		// The clone is created in the blob layout with a row-unique path
+		// (ptone/scion#4221). It sits in the clone project's scope
+		// directory, so the rollback prefix above covers it.
+		newTmpl.Layout = store.TemplateLayoutBlobs
+		storagePath := s.templateBlobStoragePath(newTmpl)
+		newTmpl.StoragePath = storagePath
+
+		if stor != nil {
+			newTmpl.StorageBucket = stor.Bucket()
+			newTmpl.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
+		}
+
+		// Create the template through the commit path, which copies each
+		// file the source references into the clone's blobs and
+		// re-derives Harness, DefaultHarnessConfig and AgentConfig from
+		// them instead of copying the source's derived fields
+		// (ptone/scion#4217).
+		var createErr error
+		if stor != nil && len(srcTmpl.Files) > 0 && srcTmpl.StoragePath != "" {
+			src := srcTmpl
+			createErr = s.commitTemplateFiles(ctx, newTmpl, srcTmpl.Files, commitOpts{create: true, copyFrom: &src})
+		} else {
+			// No stored content to derive from: keep the manifest as the
+			// source had it and take the harness from the name.
+			newTmpl.Files = srcTmpl.Files
+			newTmpl.ContentHash = srcTmpl.ContentHash
+			newTmpl.Harness = deriveTemplateIndex(nil, "", newTmpl.Name).Harness
+			createErr = s.store.CreateTemplate(ctx, newTmpl)
+		}
+
+		if err := createErr; err != nil {
+			if stor != nil {
+				_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
+			}
+			return err
+		}
+	}
 
 	return nil
 }
@@ -1151,6 +1177,33 @@ func isGitSourceLabel(k string) bool {
 		return true
 	}
 	return false
+}
+
+// autoLinkClonedProviders auto-links the auto-provide brokers to a new clone
+// and settles its default runtime broker. A default runtime broker must be
+// a provider of the project: the default copied from the source is kept
+// only when the clone has that provider row after auto-linking; otherwise
+// the first auto-linked broker becomes the default, or the default is
+// cleared when there is none. The stored default is read back and written
+// whenever it differs from the settled one, so the store and the returned
+// clone agree. Best-effort: store errors are logged.
+func (s *Server) autoLinkClonedProviders(ctx context.Context, clone *store.Project) {
+	copied := clone.DefaultRuntimeBrokerID
+	clone.DefaultRuntimeBrokerID = ""
+	s.autoLinkProviders(ctx, clone)
+	if copied != "" {
+		if _, err := s.store.GetProjectProvider(ctx, clone.ID, copied); err == nil {
+			clone.DefaultRuntimeBrokerID = copied
+		}
+	}
+	if current, err := s.store.GetProject(ctx, clone.ID); err == nil &&
+		current.DefaultRuntimeBrokerID == clone.DefaultRuntimeBrokerID {
+		return
+	}
+	if err := s.store.UpdateProject(ctx, clone); err != nil {
+		slog.Warn("project clone: failed to settle default runtime broker",
+			"clone_id", clone.ID, "error", err)
+	}
 }
 
 // validateCloneURLLabelValue checks the clone-url label in labels (if any)

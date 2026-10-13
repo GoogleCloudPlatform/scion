@@ -33,13 +33,14 @@ import (
 // (pkg/wsprotocol.ClosePTYAttachUnsupported): a broker that refuses attach
 // after the WebSocket has already been upgraded (the control-channel gate's
 // StreamClose, passed through unchanged by the Hub) must surface as the
-// same explicit, actionable error attachUnsupportedErr gives pre-dial in
-// cmd/attach.go — not the raw "websocket: close 4501 (unknown): ..." a
+// same explicit, actionable error as the other attach-unsupported paths
+// (AttachUnsupportedMessage; before dialing, the Hub preflight decides) —
+// not the raw "websocket: close 4501 (unknown): ..." a
 // caller would otherwise see — and Run() must return a non-nil error so the
 // CLI exits non-zero.
 func TestReadFromWebSocket_AttachUnsupportedCloseCode_MapsToExplicitError(t *testing.T) {
 	// Give the client its own, never-closed pipe as stdin (never the shared
-	// os.Stdin package variable) so readFromStdin blocks instead of racing
+	// os.Stdin package variable) so the stdin pump blocks instead of racing
 	// the WebSocket goroutine with an EOF of its own; the websocket close
 	// below must be what decides Run()'s error. The read end is left open
 	// for the test's duration; the leaked inner reader goroutine (blocked on

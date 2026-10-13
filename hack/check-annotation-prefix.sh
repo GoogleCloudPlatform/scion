@@ -68,6 +68,12 @@ allowed_paths=(
 
   # Remote broker registration: sets scion.io/broker-role label.
   "^cmd/broker.go$"
+  # Identity default CLI (ptone/scion#4020): a read-only consumer of two
+  # hub-owned project setting annotations, scion.io/default-gcp-identity-mode
+  # and scion.io/default-gcp-identity-service-account-id. It looks them up in
+  # the GET /settings/resolved response, which is keyed by annotation key,
+  # and never writes them as annotations. No new key is introduced.
+  "^cmd/project_identity_default.go$"
 
   # --- pkg/store/ ---
   # Store interface: documents scion.io/template and scion.io/broker-role
@@ -82,7 +88,10 @@ allowed_paths=(
   # scion.io/project-members-group and the read-only legacy
   # scion.io/system-project-members-group, ptone/scion#2556) and the project
   # agents group marker scion.io/project-agents-group, so pkg/hub and
-  # pkg/store/entadapter import one definition.
+  # pkg/store/entadapter import one definition. Also the existing
+  # global-project label keys (scion.io/system, scion.io/global) used by the
+  # Hub's embedded flat registration; cmd/server_broker.go still spells them
+  # as literals.
   "^pkg/store/models.go$"
 
   # --- pkg/hub/ ---

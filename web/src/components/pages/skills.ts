@@ -218,7 +218,7 @@ export class ScionPageSkills extends LitElement {
     const storedSort = localStorage.getItem('scion-sort-skills');
     if (storedSort) {
       try {
-        const parsed = JSON.parse(storedSort);
+        const parsed = JSON.parse(storedSort) as { field?: unknown; dir?: unknown } | null;
         if (
           parsed &&
           (parsed.field === 'name' || parsed.field === 'updated' || parsed.field === 'created') &&

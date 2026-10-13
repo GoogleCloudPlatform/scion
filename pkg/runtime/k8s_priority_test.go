@@ -288,8 +288,8 @@ func TestList_ExitReason_CommittedDisruption_RunningWithDeletionTimestamp(t *tes
 	// observes a terminal phase (List() polls, it does not watch). Once the
 	// pod has a deletionTimestamp and a live DisruptionTarget condition, it
 	// is already committed to that termination, so List must report the
-	// reason ahead of the pod actually stopping — without claiming the
-	// agent has stopped.
+	// reason, and the phase it ends in (error for this emptyDir-workspace
+	// pod, see k8sDisruptionPhase), ahead of the pod actually stopping.
 	now := metav1.Now()
 	pod := newPodForDisruptionTest("agent-committed-disruption", corev1.PodRunning)
 	pod.DeletionTimestamp = &now
@@ -305,8 +305,8 @@ func TestList_ExitReason_CommittedDisruption_RunningWithDeletionTimestamp(t *tes
 	if info.ExitReason != string(state.ExitReasonPreempted) {
 		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonPreempted, info.ExitReason)
 	}
-	if info.Phase != "" {
-		t.Errorf("expected no Phase (agent has not stopped), got %q", info.Phase)
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("expected Phase %q for a committed disruption, got %q", state.PhaseError, info.Phase)
 	}
 }
 
@@ -375,8 +375,10 @@ func TestList_ExitReason_GracefulPreemption_ExitZero(t *testing.T) {
 	// so the agent container usually exits 0 — the pod reaches PodSucceeded,
 	// not PodFailed. List must still report "preempted" here: a guard that
 	// only checked for PhaseError (and not PhaseStopped) would miss this,
-	// the exact symptom in #2528.
-	pod := newPodForDisruptionTest("agent-graceful-preemption", corev1.PodSucceeded)
+	// the exact symptom in #2528. The workspace is persistent, so the phase
+	// is stopped (an emptyDir workspace gives error; see
+	// TestList_DisruptionPhase).
+	pod := withDisruptionStorage(newPodForDisruptionTest("agent-graceful-preemption", corev1.PodSucceeded), true, false)
 	pod.Status.Conditions = []corev1.PodCondition{
 		{
 			Type:   corev1.DisruptionTarget,
@@ -465,10 +467,11 @@ func TestList_ExitReason_OtherConditionType_NotMistakenForDisruption(t *testing.
 	}
 }
 
-func TestList_ExitReason_OOMKilled_IsCrashedNotEvicted(t *testing.T) {
+func TestList_ExitReason_OOMKilled(t *testing.T) {
 	// An OOM kill is a node-local kubelet action on the container, not a
 	// disruption of the pod (no DisruptionTarget condition, no pod-level
-	// Evicted reason). It must keep reading as an ordinary crash.
+	// Evicted reason). It is reported as its own reason, oom_killed, with
+	// the exit code, and the phase stays error (a crash).
 	pod := newPodForDisruptionTest("agent-oom", corev1.PodFailed)
 	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
 		{
@@ -483,7 +486,53 @@ func TestList_ExitReason_OOMKilled_IsCrashedNotEvicted(t *testing.T) {
 	}
 
 	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonOOMKilled) {
+		t.Errorf("expected ExitReason %q for an OOM kill, got %q", state.ExitReasonOOMKilled, info.ExitReason)
+	}
+	if info.Phase != string(state.PhaseError) {
+		t.Errorf("expected phase %q for an OOM kill, got %q", state.PhaseError, info.Phase)
+	}
+	if info.ExitCode == nil || *info.ExitCode != 137 {
+		t.Errorf("expected exit code 137, got %v", info.ExitCode)
+	}
+}
+
+func TestList_ExitReason_OOMKilledOnSidecarIgnored(t *testing.T) {
+	// Only the agent container's termination reason counts.
+	pod := newPodForDisruptionTest("agent-oom-sidecar", corev1.PodFailed)
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{
+		{
+			Name: "sidecar",
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"},
+			},
+		},
+		{
+			Name: agentContainerName,
+			State: corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"},
+			},
+		},
+	}
+
+	info := listSingleAgent(t, pod)
 	if info.ExitReason != string(state.ExitReasonCrashed) {
-		t.Errorf("expected ExitReason %q for an OOM kill, got %q", state.ExitReasonCrashed, info.ExitReason)
+		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonCrashed, info.ExitReason)
+	}
+}
+
+func TestList_ExitReason_OOMKilledAndPreempted_DisruptionWins(t *testing.T) {
+	pod := newPodForDisruptionTest("agent-oom-preempted", corev1.PodFailed)
+	pod.Status.Conditions = []corev1.PodCondition{{
+		Type: corev1.DisruptionTarget, Status: corev1.ConditionTrue, Reason: corev1.PodReasonPreemptionByScheduler,
+	}}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:  agentContainerName,
+		State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+	}}
+
+	info := listSingleAgent(t, pod)
+	if info.ExitReason != string(state.ExitReasonPreempted) {
+		t.Errorf("expected ExitReason %q, got %q", state.ExitReasonPreempted, info.ExitReason)
 	}
 }

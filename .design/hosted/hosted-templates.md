@@ -169,6 +169,8 @@ grove:{groveId}:custom # Template from a specific grove
 
 ### 4.1. Template Record (Hub Database)
 
+> **Superseded:** the writable `config` field (default agent configuration) below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files (`scion-agent.yaml` / `.json`); for agent config, the hub row keeps only fields derived from those files. The original text is kept for history.
+
 ```json
 {
   "id": "uuid",                    // Primary identifier
@@ -310,6 +312,8 @@ GET /api/v1/templates/{templateId}
 
 #### Create Template
 
+> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field will be removed (ptone/scion#4223), after which the API answers `400` with a pointer to `scion-agent.yaml`; until then the field remains as described below. The original text is kept for history.
+
 ```
 POST /api/v1/templates
 ```
@@ -408,6 +412,8 @@ POST /api/v1/templates/{templateId}/finalize
 Hub verifies uploaded files match manifest, computes contentHash, and marks template as active.
 
 #### Update Template
+
+> **Superseded:** the `config` request body field below is superseded by [`../template-settings-model.md`](../template-settings-model.md). The field will be removed (ptone/scion#4223), after which the API answers `400` with a pointer to `scion-agent.yaml`; until then the field remains as described below. The original text is kept for history.
 
 ```
 PUT /api/v1/templates/{templateId}
@@ -651,6 +657,8 @@ When creating an agent, the Runtime Broker hydrates the template:
 
 ### 7.4. Template Resolution in CreateAgent
 
+> **Superseded:** the `template.config` object in the payload below is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, agent config comes from the template's files, and nothing the hub supplies is written into the requester's inline config (skills excepted; see section 4 of template-settings-model.md). The original text is kept for history.
+
 The Hub resolves templates before dispatching to Runtime Brokers:
 
 ```json
@@ -840,6 +848,8 @@ This enables:
 ## 10. Template Inheritance
 
 ### 10.1. Base Template Concept
+
+> **Superseded:** the `overrides.config` block below (and the config merge in 10.2) is superseded by [`../template-settings-model.md`](../template-settings-model.md). In the target model, a template's agent config lives only in its files. The original text is kept for history.
 
 Templates can inherit from a base template, overriding specific files or configurations:
 

@@ -16,7 +16,9 @@ package hubclient
 
 import (
 	"context"
+	"errors"
 	"io"
+	"net/http"
 	"net/url"
 	"time"
 
@@ -35,20 +37,26 @@ type TemplateService interface {
 	// Create creates a new template.
 	Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error)
 
-	// Update updates a template.
-	Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error)
-
 	// Delete removes a template.
 	Delete(ctx context.Context, templateID string) error
 
 	// Clone creates a copy of a template.
 	Clone(ctx context.Context, templateID string, req *CloneTemplateRequest) (*Template, error)
 
+	// Reimport refreshes a template from its stored source URL, or from
+	// sourceURL when it is non-empty (which then becomes the stored source).
+	Reimport(ctx context.Context, templateID string, sourceURL string) (*ReimportTemplateResponse, error)
+
 	// RequestUploadURLs requests signed URLs for uploading template files.
 	RequestUploadURLs(ctx context.Context, templateID string, files []FileUploadRequest) (*UploadResponse, error)
 
 	// Finalize finalizes a template after file upload.
-	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest) (*Template, error)
+	// expectedContentHash, when non-empty, is the content hash the manifest
+	// was diffed against; the Hub answers 409 template_conflict if the
+	// template has changed since (see IsTemplateConflictError). uploadID,
+	// when non-empty, is the UploadResponse.UploadID whose staged files the
+	// finalize commits; empty when nothing was uploaded for it.
+	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash, uploadID string) (*Template, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading template files.
 	RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error)
@@ -87,18 +95,31 @@ type ListTemplatesResponse struct {
 }
 
 // CreateTemplateRequest is the request for creating a template.
+// A template's job config comes from its scion-agent.yaml; the Hub refuses
+// a create body that carries config or image (ptone/scion#4223).
 type CreateTemplateRequest struct {
-	Name      string          `json:"name"`
-	Harness   string          `json:"harness,omitempty"`
-	Scope     string          `json:"scope"`
-	ProjectID string          `json:"projectId,omitempty"`
-	Config    *TemplateConfig `json:"config,omitempty"`
+	Name      string `json:"name"`
+	Harness   string `json:"harness,omitempty"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
-// UpdateTemplateRequest is the request for updating a template.
-type UpdateTemplateRequest struct {
-	Name   string          `json:"name,omitempty"`
-	Config *TemplateConfig `json:"config,omitempty"`
+// ReimportTemplateRequest is the request body for reimporting a template.
+type ReimportTemplateRequest struct {
+	SourceURL string `json:"sourceUrl,omitempty"`
+}
+
+// ReimportTemplateFailure names a template that failed to reimport and why.
+type ReimportTemplateFailure struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+}
+
+// ReimportTemplateResponse is the response from reimporting a template.
+type ReimportTemplateResponse struct {
+	Templates []string                  `json:"templates"`
+	Count     int                       `json:"count"`
+	Failed    []ReimportTemplateFailure `json:"failed,omitempty"`
 }
 
 // CloneTemplateRequest is the request for cloning a template.
@@ -134,11 +155,23 @@ type UploadURLInfo struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory a template's upload URLs write
+	// to. The Hub accepts it back in FinalizeRequest.UploadID
+	// (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash is the template content hash the client diffed
+	// its upload against. When set, the Hub refuses the finalize with 409
+	// template_conflict if the template has changed since (ptone/scion#4221).
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
+	// UploadID, when set, is the UploadResponse.UploadID whose staged files
+	// this finalize commits. Without it the Hub matches staged files to the
+	// manifest by hash (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
@@ -153,6 +186,9 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
+	// ContentHash is the content hash of the template version the URLs
+	// were signed for. Hubs before ptone/scion#4221 do not send it.
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 // DownloadURLInfo contains info for downloading a file.
@@ -215,7 +251,7 @@ func (s *templateService) List(ctx context.Context, opts *ListTemplatesOptions) 
 		TotalCount int        `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +271,7 @@ func (s *templateService) Get(ctx context.Context, templateID string) (*Template
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // Create creates a new template.
@@ -244,16 +280,7 @@ func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateTemplateResponse](resp)
-}
-
-// Update updates a template.
-func (s *templateService) Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/templates/"+templateID, req, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[CreateTemplateResponse](resp)
 }
 
 // Delete removes a template.
@@ -271,7 +298,18 @@ func (s *templateService) Clone(ctx context.Context, templateID string, req *Clo
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
+}
+
+// Reimport refreshes a template from its stored source URL, or from sourceURL
+// when it is non-empty.
+func (s *templateService) Reimport(ctx context.Context, templateID string, sourceURL string) (*ReimportTemplateResponse, error) {
+	req := ReimportTemplateRequest{SourceURL: sourceURL}
+	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/reimport", req, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ReimportTemplateResponse](resp)
 }
 
 // RequestUploadURLs requests signed URLs for uploading template files.
@@ -285,19 +323,21 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[UploadResponse](resp)
+	return apiclient.DecodeRequired[UploadResponse](resp)
 }
 
 // Finalize finalizes a template after file upload.
-func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest) (*Template, error) {
+func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash, uploadID string) (*Template, error) {
 	req := FinalizeRequest{
-		Manifest: manifest,
+		Manifest:            manifest,
+		ExpectedContentHash: expectedContentHash,
+		UploadID:            uploadID,
 	}
 	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Template](resp)
+	return apiclient.DecodeRequired[Template](resp)
 }
 
 // RequestDownloadURLs requests signed URLs for downloading template files.
@@ -306,7 +346,7 @@ func (s *templateService) RequestDownloadURLs(ctx context.Context, templateID st
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[DownloadResponse](resp)
+	return apiclient.DecodeRequired[DownloadResponse](resp)
 }
 
 // Validate checks storage consistency for a template.
@@ -315,7 +355,7 @@ func (s *templateService) Validate(ctx context.Context, templateID string) (*Val
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ValidationReport](resp)
+	return apiclient.DecodeRequired[ValidationReport](resp)
 }
 
 // UploadFile uploads a file to the given signed URL.
@@ -342,4 +382,15 @@ func (s *templateService) getTransferClient() *transfer.Client {
 		s.transferClient = transfer.NewClient(s.c.transport.AuthenticatedHTTPClient())
 	}
 	return s.transferClient
+}
+
+// TemplateConflictErrorCode is the error code of a template finalize refused
+// because another commit changed the template first (HTTP 409).
+const TemplateConflictErrorCode = "template_conflict"
+
+// IsTemplateConflictError reports whether err is the Hub refusing a template
+// commit because the template changed since the client read it.
+func IsTemplateConflictError(err error) bool {
+	var apiErr *apiclient.APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict && apiErr.Code == TemplateConflictErrorCode
 }

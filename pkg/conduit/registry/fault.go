@@ -28,6 +28,7 @@ const (
 	OpInsertSessionWithNextEpoch       = "InsertSessionWithNextEpoch"
 	OpTouchSession                     = "TouchSession"
 	OpSetSessionDraining               = "SetSessionDraining"
+	OpSetRelaySessionsDraining         = "SetRelaySessionsDraining"
 	OpDeleteSessionCAS                 = "DeleteSessionCAS"
 	OpListPrincipalSessions            = "ListPrincipalSessions"
 	OpListPrincipalSessionsBySession   = "ListPrincipalSessionsBySession"
@@ -110,6 +111,14 @@ func (f *FaultStore) SetSessionDraining(ctx context.Context, sessionID string) e
 		return err
 	}
 	return f.Inner.SetSessionDraining(ctx, sessionID)
+}
+
+// SetRelaySessionsDraining implements Store.
+func (f *FaultStore) SetRelaySessionsDraining(ctx context.Context, instanceID string, gen int64) (int, error) {
+	if err := f.fault(ctx, OpSetRelaySessionsDraining); err != nil {
+		return 0, err
+	}
+	return f.Inner.SetRelaySessionsDraining(ctx, instanceID, gen)
 }
 
 // DeleteSessionCAS implements Store.

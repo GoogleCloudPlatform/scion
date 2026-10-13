@@ -37,6 +37,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { APIRequestContext, BrowserContext, Page } from '@playwright/test';
 import { E2E_SESSION_SECRET } from './hub.js';
 
 // ── Constants mirroring the Go hub ────────────────────────────────────────
@@ -52,10 +53,7 @@ const USER_SIGNING_KEY_NAME = 'user_signing_key';
  *   sha256("scion-hub-signing-key:" + keyName + ":" + secret)
  */
 function deriveSigningKey(secret: string, keyName: string): Buffer {
-  return crypto
-    .createHash('sha256')
-    .update(`scion-hub-signing-key:${keyName}:${secret}`)
-    .digest();
+  return crypto.createHash('sha256').update(`scion-hub-signing-key:${keyName}:${secret}`).digest();
 }
 
 // ── JWT helpers (HS256, no external dependencies) ─────────────────────────
@@ -71,18 +69,12 @@ function base64urlJSON(obj: unknown): string {
 /**
  * Mint an HS256 JWT.
  */
-function signJWT(
-  payload: Record<string, unknown>,
-  signingKey: Buffer,
-): string {
+function signJWT(payload: Record<string, unknown>, signingKey: Buffer): string {
   const header = { alg: 'HS256', typ: 'JWT' };
   const headerB64 = base64urlJSON(header);
   const payloadB64 = base64urlJSON(payload);
   const signingInput = `${headerB64}.${payloadB64}`;
-  const signature = crypto
-    .createHmac('sha256', signingKey)
-    .update(signingInput)
-    .digest();
+  const signature = crypto.createHmac('sha256', signingKey).update(signingInput).digest();
   return `${signingInput}.${base64url(signature)}`;
 }
 
@@ -134,10 +126,7 @@ export interface AuthSession {
  * Create a session for the given user via the test-login endpoint.
  * Returns the session info and the path to a storageState JSON file.
  */
-export async function createSession(
-  baseURL: string,
-  testUser: TestUser,
-): Promise<AuthSession> {
+export async function createSession(baseURL: string, testUser: TestUser): Promise<AuthSession> {
   const challengeToken = generateTestLoginToken();
 
   const res = await fetch(`${baseURL}/api/v1/auth/test-login`, {
@@ -156,12 +145,10 @@ export async function createSession(
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(
-      `test-login failed (${res.status}): ${body}`,
-    );
+    throw new Error(`test-login failed (${res.status}): ${body}`);
   }
 
-  const data = await res.json();
+  const data = (await res.json()) as Pick<AuthSession, 'user' | 'accessToken' | 'refreshToken'>;
 
   // Extract Set-Cookie headers
   const cookies = extractCookies(res, baseURL);
@@ -191,10 +178,7 @@ export async function createSession(
  * Extract cookies from the response's Set-Cookie headers and convert them
  * to Playwright's storageState cookie format.
  */
-function extractCookies(
-  res: Response,
-  baseURL: string,
-): Array<Record<string, unknown>> {
+function extractCookies(res: Response, baseURL: string): Array<Record<string, unknown>> {
   const url = new URL(baseURL);
   const cookies: Array<Record<string, unknown>> = [];
 
@@ -231,8 +215,7 @@ function extractCookies(
       if (lower === 'httponly') cookie.httpOnly = true;
       else if (lower === 'secure') cookie.secure = true;
       else if (lower.startsWith('path=')) cookie.path = attr.split('=')[1];
-      else if (lower.startsWith('samesite='))
-        cookie.sameSite = attr.split('=')[1];
+      else if (lower.startsWith('samesite=')) cookie.sameSite = attr.split('=')[1];
       else if (lower.startsWith('max-age=')) {
         const maxAge = parseInt(attr.split('=')[1], 10);
         cookie.expires = Math.floor(Date.now() / 1000) + maxAge;
@@ -248,9 +231,7 @@ function extractCookies(
 /**
  * Create a session for the default admin user.
  */
-export async function createAdminSession(
-  baseURL: string,
-): Promise<AuthSession> {
+export async function createAdminSession(baseURL: string): Promise<AuthSession> {
   return createSession(baseURL, {
     email: 'admin@e2e.test',
     role: 'admin',
@@ -268,4 +249,263 @@ export function cleanupAuthState(): void {
   } catch {
     // Best-effort cleanup
   }
+}
+
+// ── Test identity browser sessions (ptone/scion#4240, WS3) ────────────────
+//
+// A test identity is a short-lived synthetic user issued on a test hub. The
+// runner issues it and mints a single-use web-login code with the CLI:
+//
+//   scion hub test-identity issue --out <dir>/id.token --json
+//   scion hub test-identity web-code <id> --out <dir>/code.txt
+//
+// redeemTestIdentity() then trades the code for a session cookie in a
+// browser context, and assertTestIdentity() checks who the context is. The
+// code is valid for 5 minutes and can be redeemed once. See README.md
+// ("Test identity browser sessions") for the rules.
+
+/** Options of redeemTestIdentity. Give exactly one of code and codeFile. */
+export interface RedeemTestIdentityOptions {
+  /** The web-login code. Prefer codeFile so the code is never passed around. */
+  code?: string;
+  /**
+   * Path of the file written by `scion hub test-identity web-code --out`.
+   * It is read here and removed after a successful redeem.
+   */
+  codeFile?: string;
+  /** Hub origin, e.g. http://127.0.0.1:8080. Defaults to the context's baseURL. */
+  baseURL?: string;
+  /** Sent as the Proxy-Authorization header of the redeem request (IAP-fronted hubs). */
+  proxyAuthorization?: string;
+}
+
+/** What assertTestIdentity() expects. */
+export interface ExpectedTestIdentity {
+  email: string;
+  role?: string;
+}
+
+/** What assertTestIdentity() returns. */
+export interface TestIdentitySessionInfo {
+  email: string;
+  role: string;
+  /** When the test identity, and so the session, expires (RFC 3339). */
+  expiresAt: string;
+}
+
+const REDEEM_PATH = '/auth/test-identity/redeem';
+
+/** Reads the code from a code file, refusing a symlink. */
+function readCodeFile(codeFile: string): string {
+  const st = fs.lstatSync(codeFile);
+  if (st.isSymbolicLink() || !st.isFile()) {
+    throw new Error(`redeemTestIdentity: codeFile ${codeFile} is not a regular file`);
+  }
+  const code = fs.readFileSync(codeFile, 'utf-8').trim();
+  if (!code) {
+    throw new Error(`redeemTestIdentity: codeFile ${codeFile} is empty`);
+  }
+  return code;
+}
+
+/**
+ * Returns the hub error code of an error response body (`error.code`), or
+ * "unknown". Only a short identifier is ever returned, never body text.
+ */
+export function hubErrorCode(body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown } };
+    const code = parsed.error?.code;
+    if (typeof code === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(code)) {
+      return code;
+    }
+  } catch {
+    // Not JSON.
+  }
+  return 'unknown';
+}
+
+/**
+ * Runs fn with the context's trace recording paused, so the trace never
+ * holds the redeem request or its Set-Cookie answer. Requests made after
+ * it still send the session cookie, and a trace recorded then holds it.
+ * Recording is paused by ending the current trace chunk without saving it
+ * and resumed with a new chunk, so actions in this context before the call
+ * are dropped from the trace: redeem before any navigation. A context
+ * without active tracing runs fn unchanged.
+ */
+export async function withTracingPaused<T>(
+  context: BrowserContext,
+  fn: () => Promise<T>
+): Promise<T> {
+  let paused = false;
+  try {
+    await context.tracing.stopChunk();
+    paused = true;
+  } catch (err) {
+    // Playwright may refuse stopChunk when tracing was never started; any
+    // other failure is not safe to ignore.
+    if (!isTracingNotStarted(err)) {
+      throw err;
+    }
+  }
+  let result: T;
+  try {
+    result = await fn();
+  } catch (err) {
+    // Resume recording, but never let a tracing error hide fn's error.
+    if (paused) {
+      await resumeTracing(context).catch((traceErr: unknown) => {
+        console.warn(`withTracingPaused: could not resume tracing: ${errorText(traceErr)}`);
+      });
+    }
+    throw err;
+  }
+  if (paused) {
+    await resumeTracing(context);
+  }
+  return result;
+}
+
+function errorText(err: unknown): string {
+  return String((err as Error)?.message ?? err);
+}
+
+/** Playwright's answer to a chunk call on a context that is not tracing. */
+function isTracingNotStarted(err: unknown): boolean {
+  return /must start tracing/i.test(errorText(err));
+}
+
+/**
+ * Starts a new trace chunk. stopChunk() succeeds as a no-op on a context
+ * that is not tracing (the test runner with trace off), and startChunk()
+ * then refuses with "Must start tracing": nothing was paused, so that
+ * answer is not an error here.
+ */
+async function resumeTracing(context: BrowserContext): Promise<void> {
+  try {
+    await context.tracing.startChunk({ title: 'after test identity redeem' });
+  } catch (err) {
+    if (!isTracingNotStarted(err)) {
+      throw err;
+    }
+  }
+}
+
+/**
+ * Redeems a web-login code in `context`: POST /auth/test-identity/redeem
+ * with `{code}`. On 204 the context's cookie jar holds a session as the
+ * test identity, for every page of the context. Any other answer throws
+ * with the status and the hub error code only (never the request or
+ * response body). With codeFile, the file is removed after a successful
+ * redeem. Trace recording is paused around the request.
+ */
+export async function redeemTestIdentity(
+  context: BrowserContext,
+  opts: RedeemTestIdentityOptions
+): Promise<void> {
+  if ((opts.code === undefined) === (opts.codeFile === undefined)) {
+    throw new Error('redeemTestIdentity: give exactly one of code and codeFile');
+  }
+  const code = opts.codeFile !== undefined ? readCodeFile(opts.codeFile) : (opts.code ?? '').trim();
+  if (!code) {
+    throw new Error('redeemTestIdentity: the code is empty');
+  }
+  const url = opts.baseURL ? new URL(REDEEM_PATH, opts.baseURL).toString() : REDEEM_PATH;
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (opts.proxyAuthorization) {
+    headers['Proxy-Authorization'] = opts.proxyAuthorization;
+  }
+
+  const result = await withTracingPaused(context, async () => {
+    let res;
+    try {
+      res = await context.request.post(url, { data: { code }, headers, maxRedirects: 0 });
+    } catch (err) {
+      // Keep only the first line: the caught Playwright error carries a call
+      // log with request details, so it is deliberately not attached.
+      // eslint-disable-next-line preserve-caught-error -- see above
+      throw new Error(
+        `redeemTestIdentity: request to ${REDEEM_PATH} failed (set baseURL on the context or in opts): ${String((err as Error)?.message ?? err).split('\n')[0]}`
+      );
+    }
+    const status = res.status();
+    const errCode = status === 204 ? '' : hubErrorCode(await res.text().catch(() => ''));
+    await res.dispose();
+    return { status, errCode };
+  });
+
+  if (result.status !== 204) {
+    throw new Error(
+      `redeemTestIdentity: redeem answered ${result.status} (${result.errCode}), want 204`
+    );
+  }
+  if (opts.codeFile !== undefined) {
+    fs.rmSync(opts.codeFile, { force: true });
+  }
+}
+
+/** The request context of a Page (sharing its cookies), or target itself. */
+function requestOf(target: Page | APIRequestContext): APIRequestContext {
+  return typeof (target as Page).goto === 'function'
+    ? (target as Page).request
+    : (target as APIRequestContext);
+}
+
+/**
+ * Asserts that `target` (a page, whose context's cookies are used, or a
+ * request context with a baseURL) holds a test identity session for
+ * expected.email, and for expected.role when given. It reads GET /auth/me
+ * (email, role and testIdentity.expiresAt) and checks that
+ * GET /api/v1/auth/me, the API path the web app uses, answers for the same
+ * identity. Returns what it read.
+ */
+export async function assertTestIdentity(
+  target: Page | APIRequestContext,
+  expected: ExpectedTestIdentity
+): Promise<TestIdentitySessionInfo> {
+  const request = requestOf(target);
+
+  const me = await request.get('/auth/me', { maxRedirects: 0 });
+  if (me.status() !== 200) {
+    const errCode = hubErrorCode(await me.text().catch(() => ''));
+    throw new Error(`assertTestIdentity: /auth/me answered ${me.status()} (${errCode}), want 200`);
+  }
+  const body = (await me.json()) as {
+    email?: string;
+    role?: string;
+    testIdentity?: { expiresAt?: string };
+  };
+  if (body.email !== expected.email) {
+    throw new Error(
+      `assertTestIdentity: session email is ${String(body.email)}, want ${expected.email}`
+    );
+  }
+  if (expected.role !== undefined && body.role !== expected.role) {
+    throw new Error(
+      `assertTestIdentity: session role is ${String(body.role)}, want ${expected.role}`
+    );
+  }
+  const expiresAt = body.testIdentity?.expiresAt;
+  if (!expiresAt) {
+    throw new Error(
+      'assertTestIdentity: the session is not a test identity session (no testIdentity.expiresAt)'
+    );
+  }
+
+  const api = await request.get('/api/v1/auth/me', { maxRedirects: 0 });
+  if (api.status() !== 200) {
+    const errCode = hubErrorCode(await api.text().catch(() => ''));
+    throw new Error(
+      `assertTestIdentity: /api/v1/auth/me answered ${api.status()} (${errCode}), want 200`
+    );
+  }
+  const apiBody = (await api.json()) as { email?: string };
+  if (apiBody.email !== expected.email) {
+    throw new Error(
+      `assertTestIdentity: API identity is ${String(apiBody.email)}, want ${expected.email}`
+    );
+  }
+
+  return { email: body.email, role: body.role ?? '', expiresAt };
 }

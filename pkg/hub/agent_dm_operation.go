@@ -24,9 +24,11 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // ---------------------------------------------------------------------------
@@ -131,6 +133,11 @@ type AgentDMInput struct {
 	// denied requests cannot resume an agent (#1691 AC-2).
 	Wake bool
 
+	// BeforeWake, when set, runs once the admission checks have passed and
+	// right before the wake, so an HTTP adapter can extend its response
+	// write deadline over the resume and readiness wait (ptone/scion#4178).
+	BeforeWake func()
+
 	// SkipPhaseGate bypasses the target-phase admission check (Phase 1b)
 	// that otherwise rejects delivery to a non-running target when Wake is
 	// false. It has effect ONLY when Type is messages.TypeMention and Wake
@@ -150,6 +157,11 @@ type AgentDMInput struct {
 	// phase here — an agent that merely hasn't finished starting yet is
 	// exactly as unable to see the mention right now as a stopped one.
 	SkipPhaseGate bool
+
+	// RecordLogged reports that the adapter already wrote this message's
+	// record to the message log (handleAgentMessage does so before it
+	// reaches here). When set, the operation does not write another.
+	RecordLogged bool
 }
 
 // AgentDMOutcome enumerates the possible delivery result states.
@@ -206,6 +218,10 @@ type AgentDMResult struct {
 	// captures the dispatch failure reason for logging/diagnostics.
 	// Callers should NOT expose this to end users.
 	DispatchErr error
+
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (admitMessageArtifacts).
+	ArtifactWarning string
 
 	// AttachmentWarnings lists the attachments the hub could not record
 	// (ptone/scion#3667). The message was still sent; adapters return these
@@ -374,6 +390,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				LogDMAdmission(DMAuditEntryForDenial(input, denial.Code, denial.Message))
 				return nil, denial
 			}
+			if input.BeforeWake != nil {
+				input.BeforeWake()
+			}
 			wakeResult, wakeErr := s.wakeAgentForDM(ctx, input.TargetAgent)
 			if wakeErr != nil {
 				return nil, wakeErr
@@ -381,6 +400,23 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			if wakeResult != nil && wakeResult.Outcome == WakeDeferred {
 				// Another start is in progress: keep the message, deferred.
 				deferred = true
+			}
+		} else if held, holdErr := s.agentHeld(ctx, input.TargetAgent.ID); holdErr != nil || held {
+			// A held target (ptone/scion#3433) is never dispatched to: a
+			// mention is kept, undispatched, like a migrating target; any
+			// other send is refused like a suspended target. A lookup
+			// fault refuses.
+			if holdErr != nil {
+				return nil, &AgentDMError{
+					Code:       ErrCodeInternalError,
+					Message:    "could not verify the target agent's status",
+					HTTPStatus: http.StatusInternalServerError,
+				}
+			}
+			if input.SkipPhaseGate && input.Type == messages.TypeMention {
+				deferred = true
+			} else {
+				return nil, heldTargetDMError(input.TargetAgent)
 			}
 		} else if !input.SkipPhaseGate || input.Type != messages.TypeMention {
 			// SkipPhaseGate applies only to mention deliveries — a non-mention
@@ -462,7 +498,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
 	// fan-out (fanOutAgentMentions builds fresh metadata anyway, so this is
 	// a no-op on that path).
-	structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+	//
+	// admitMessageArtifacts performs that strip and then re-adds only the
+	// artifact references the sender can read under its own request
+	// credential (ptone/scion#3222).
+	var artifactRefs []artifacts.MessageRef
+	var artifactWarning string
+	structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directAgentRecipient(input.TargetAgent, input.GroupID))
+	structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 	// Stamp attachment metadata onto the structured message.
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -481,6 +525,9 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			HTTPStatus: http.StatusInternalServerError,
 		}
 	}
+
+	// 8. (cont.) Record the admitted artifact references for the web chat.
+	recordedRefs := s.recordMessageArtifacts(ctx, msgID, artifactRefs)
 
 	// 8a. Audit: body-free admission allow record (#1690).
 	// Logged after persistence so the message ID is available as correlation.
@@ -504,8 +551,15 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		)
 	}
 
+	// 8c. Message record: one per message, written once the message is
+	// persisted and before the dispatch outcome, unless the adapter already
+	// wrote it (RecordLogged).
+	if !input.RecordLogged {
+		logMessageRecord(s.recordLog(), input.TargetAgent, structuredMsg)
+	}
+
 	// 9. Publish SSE event.
-	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
+	s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs, recordedRefs)
 
 	// 10. Render delivery text envelope. IsMention marks the envelope as a
 	// mention (not a message) for Type mention deliveries, matching how chat
@@ -532,6 +586,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			Recipient:          storeMsg.Recipient,
 			RecipientID:        storeMsg.RecipientID,
 			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 
@@ -587,7 +642,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		dispatchErr = s.managedAgentMessage(ctx, input.TargetAgent, input.Msg, input.Urgent || input.Interrupt)
 	} else if dispatcher := s.GetDispatcher(); dispatcher != nil && input.TargetAgent.RuntimeBrokerID != "" {
 		retryCtx, retryCancel := context.WithTimeout(withDispatchMessageID(ctx, msgID), 30*time.Second)
-		dispatchErr = dispatchWithBrokerRetry(retryCtx, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
+		dispatchErr = dispatchWithBrokerRetry(retryCtx, nil, dispatcher, input.TargetAgent, dispatchMsg.Msg, input.Urgent || input.Interrupt, dispatchMsg)
 		retryCancel()
 	}
 
@@ -612,6 +667,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 				RecipientID:        storeMsg.RecipientID,
 				DispatchErr:        dispatchErr,
 				AttachmentWarnings: attachmentWarnings,
+				ArtifactWarning:    artifactWarning,
 			}, nil
 		}
 
@@ -652,6 +708,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 			RecipientID:        storeMsg.RecipientID,
 			DispatchErr:        fmt.Errorf("dispatch succeeded but state transition failed: %w", casErr),
 			AttachmentWarnings: attachmentWarnings,
+			ArtifactWarning:    artifactWarning,
 		}, nil
 	}
 	if !dispatched {
@@ -683,12 +740,18 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		}
 	}
 
-	// 14. Log delivery.
+	// 14. Log delivery. The message record was written at 8c (or by the
+	// adapter), so this outcome line is a lifecycle entry.
 	dmLogAttrs := []any{
 		"sender_agent_id", input.SenderAgent.ID,
 		"target_agent_id", input.TargetAgent.ID,
 		"project_id", input.ProjectID,
 		"message_id", msgID,
+		logging.AttrLogKind, logging.LogKindEvent,
+		logging.AttrSender, structuredMsg.Sender,
+		logging.AttrSenderID, structuredMsg.SenderID,
+		logging.AttrRecipient, structuredMsg.Recipient,
+		logging.AttrRecipientID, structuredMsg.RecipientID,
 	}
 	if input.ConversationID != "" {
 		dmLogAttrs = append(dmLogAttrs, "conversation_id", input.ConversationID)
@@ -702,6 +765,7 @@ func (s *Server) ExecuteAgentDM(ctx context.Context, input *AgentDMInput) (*Agen
 		Recipient:          storeMsg.Recipient,
 		RecipientID:        storeMsg.RecipientID,
 		AttachmentWarnings: attachmentWarnings,
+		ArtifactWarning:    artifactWarning,
 	}, nil
 }
 
@@ -777,6 +841,9 @@ func WriteAgentDMResult(w http.ResponseWriter, result *AgentDMResult, mentionRes
 	}
 	if len(result.AttachmentWarnings) > 0 {
 		body["attachment_warnings"] = result.AttachmentWarnings
+	}
+	if result.ArtifactWarning != "" {
+		body["artifact_warning"] = result.ArtifactWarning
 	}
 	writeJSON(w, httpStatus, body)
 }

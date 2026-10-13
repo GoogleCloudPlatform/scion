@@ -647,6 +647,16 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
   });
 
   describe('count-only mode above 2,000 agents', () => {
+    it('marks approximate counts as lower bounds (ptone/scion#3426)', async () => {
+      const fake = newFake(2003, 40);
+      fake.approximate = true;
+      vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
+      const el = await mountPage('scion-page-home');
+      expect(internals(el).memberIndex?.approximate).toBe(true);
+      expect(activeCount(el)).toBe('40+');
+      expect(text(el)).toContain('2,003+ agents, as of last refresh');
+    });
+
     it('shows the count as of last refresh; a live change shows the chip; a click is one limit=1 fit request that updates the count', async () => {
       const fake = newFake(2003, 40);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
@@ -1027,13 +1037,14 @@ describe('home agent counts and the shared completeness flag', { timeout: 30_000
       expect(statValues(el)).toEqual(['12', '0', '--', '--']);
     });
 
-    it('entry on /agents with server-rendered agents discards them and loads its own complete set; home then sends nothing', async () => {
+    it('entry on /agents with a partial set in the store ignores it and loads its own complete set; home then sends nothing', async () => {
       const fake = newFake(30, 9);
       vi.stubGlobal('fetch', vi.fn(fakeFetch(fake)));
-      // The server-rendered payload: a subset of the agents plus the scope
-      // capabilities, hydrated before the page connects.
+      // A subset of the agents plus the scope capabilities, already in the
+      // store when the page connects.
       stateManager.setScope({ type: 'dashboard' });
-      stateManager.hydrate({ agents: fake.agents.slice(0, 5) }, SCOPE_CAPS);
+      stateManager.seedAgents(fake.agents.slice(0, 5));
+      stateManager.seedScopeCapabilities('agent', SCOPE_CAPS);
       expect(stateManager.getAgents()).toHaveLength(5);
       expect(stateManager.isAgentSetComplete('full')).toBe(false);
 

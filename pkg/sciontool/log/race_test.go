@@ -5,6 +5,7 @@ Copyright 2026 The Scion Authors.
 package log
 
 import (
+	"io"
 	stdlog "log"
 	"log/slog"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
 // resetUninitializedForTest puts the package back into its pre-Init state,
@@ -33,7 +36,10 @@ func resetUninitializedForTest(t *testing.T) {
 	quiet.Store(true)
 	initRuns.Store(0)
 	mu.Unlock()
-	t.Setenv("SCION_DEBUG", "")
+	t.Setenv(loglevel.EnvDebug, "")
+	t.Setenv(loglevel.EnvLogLevel, "")
+	loglevel.SetWarningOutput(io.Discard)
+	loglevel.Reset(true)
 
 	t.Cleanup(func() {
 		mu.Lock()
@@ -45,6 +51,8 @@ func resetUninitializedForTest(t *testing.T) {
 		debug.Store(origDebug)
 		quiet.Store(origQuiet)
 		mu.Unlock()
+		loglevel.Reset(true)
+		loglevel.SetWarningOutput(os.Stderr)
 		slog.SetDefault(origDefault)
 		stdlog.SetOutput(origStdWriter)
 		stdlog.SetFlags(origStdFlags)
@@ -109,7 +117,7 @@ func TestDebug_RacesWithSetDebug(t *testing.T) {
 }
 
 // TestSetLogPathBeforeInitStillRunsLazyInit pins ptone/scion#2657: calling
-// SetLogPath before any Init must not skip the lazy init's SCION_DEBUG read
+// SetLogPath before any Init must not skip the lazy init's level read
 // and slog default handler installation, and the lazy init must keep the
 // explicitly set path.
 func TestSetLogPathBeforeInitStillRunsLazyInit(t *testing.T) {

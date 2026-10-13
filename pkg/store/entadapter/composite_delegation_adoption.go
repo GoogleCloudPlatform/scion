@@ -45,7 +45,12 @@ func (c *CompositeStore) adoptionLog() *slog.Logger {
 //     transaction per hop (delegationadoption.ApplyAdopt). A changed hop is
 //     recorded as skipped_changed; a write error stops the loop and leaves
 //     the marker unset, so the next boot resumes the same snapshot;
-//   - when no pending record remains it writes the marker.
+//   - when no pending record remains it runs the retry pass (see
+//     retrySkippedHops) and writes the marker, carrying the current
+//     delegationadoption.RetryVersion;
+//   - with a marker from an older retry version (for example one written
+//     before the pass existed) it runs only the retry pass over the
+//     marker's cohort and rewrites the marker with the current version.
 //
 // A write failure does not fail the boot: unadopted hops keep their current
 // denial, and the summary and the admin status view report them.
@@ -68,8 +73,12 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 		if jerr := json.Unmarshal(s.Value, &m); jerr != nil || m.SchemaVersion != delegationadoption.HeaderSchemaVersion {
 			log.Warn("delegation provenance adoption: marker has an unknown layout; treated as complete",
 				"section", delegationadoption.MarkerSection)
+			return nil
 		}
-		return nil
+		if m.RetryVersion >= delegationadoption.RetryVersion || m.CohortID == "" {
+			return nil
+		}
+		return c.retryAfterMarker(ctx, &m, s.Revision)
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return err
 	}
@@ -104,6 +113,10 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 		}
 	}
 
+	if !failed && !c.adoptionHasPending(ctx, cohortID) {
+		failed = c.retrySkippedHops(ctx, cohortID)
+	}
+
 	counts, err := c.adoptionCounts(ctx, cohortID)
 	if err != nil {
 		return err
@@ -130,11 +143,97 @@ func (c *CompositeStore) AdoptLegacyDelegationProvenance(ctx context.Context) er
 		CohortID:      cohortID,
 		Completed:     true,
 		Counts:        counts,
+		RetryVersion:  delegationadoption.RetryVersion,
 	})
 	if err != nil {
 		return err
 	}
 	_, err = c.UpsertHubSetting(ctx, delegationadoption.MarkerSection, value, "migration", 0, "seeded")
+	if errors.Is(err, store.ErrRevisionConflict) {
+		return nil
+	}
+	return err
+}
+
+// adoptionHasPending reports whether the cohort still has a pending record.
+// A list error counts as pending, so the retry pass and the marker wait for
+// a later start.
+func (c *CompositeStore) adoptionHasPending(ctx context.Context, cohortID string) bool {
+	_, n, err := c.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{
+		CohortID: cohortID, Status: store.DelegationAdoptionPending, Limit: 1,
+	})
+	return err != nil || n > 0
+}
+
+// retrySkippedHops re-applies the cohort's skipped_changed records whose
+// reason is retryable (delegationadoption.Retryable), top-down (by depth),
+// one transaction per hop, through the same adoptOneHop path as a pending
+// record. ApplyAdopt re-plans each hop against current state and keeps
+// every rule: the hop must still be adoptable, name the record's original
+// edge and match its before-fingerprint, and an agent delegator's hop must
+// already be recorded. Running top-down lets a retried parent's adoption
+// unblock a child recorded ancestor_not_adopted. A hop that is still not
+// adoptable keeps skipped_changed with its current reason. It reports
+// failed when a hop write fails; the loop stops there, as the pending loop
+// does, and the marker waits for the next start.
+func (c *CompositeStore) retrySkippedHops(ctx context.Context, cohortID string) (failed bool) {
+	log := c.adoptionLog()
+	skipped, _, err := c.ListDelegationAdoptions(ctx, store.DelegationAdoptionFilter{
+		CohortID: cohortID, Status: store.DelegationAdoptionSkippedChanged,
+	})
+	if err != nil {
+		log.Error("delegation provenance adoption: list skipped records for retry", "error", err)
+		return true
+	}
+	retried, adopted := 0, 0
+	for _, rec := range skipped {
+		if !delegationadoption.Retryable(rec.Reason) {
+			continue
+		}
+		retried++
+		if aerr := c.adoptOneHop(ctx, rec); aerr != nil {
+			log.Error("delegation provenance adoption: retry of a skipped hop failed; the retry runs again on the next start",
+				"delegate_id", rec.DelegateID, "error", aerr)
+			return true
+		}
+		if rec.Status == store.DelegationAdoptionAdopted {
+			adopted++
+		}
+	}
+	if retried > 0 {
+		log.Info("delegation provenance adoption: retried skipped hops",
+			"cohort_id", cohortID, "retried", retried, "adopted", adopted,
+			"retry_version", delegationadoption.RetryVersion)
+	}
+	return false
+}
+
+// retryAfterMarker runs the retry pass for a hub whose marker predates the
+// current retry version, then rewrites the marker (counts and retry
+// version) at the revision it read. A revision conflict means another
+// replica rewrote it first. A failed hop write leaves the marker as it was,
+// so the next start retries again.
+func (c *CompositeStore) retryAfterMarker(ctx context.Context, m *delegationadoption.Header, revision int64) error {
+	if c.retrySkippedHops(ctx, m.CohortID) {
+		return nil
+	}
+	counts, err := c.adoptionCounts(ctx, m.CohortID)
+	if err != nil {
+		return err
+	}
+	notInCohort, err := c.adoptionNotInCohort(ctx, m.CohortID)
+	if err != nil {
+		c.adoptionLog().Warn("delegation provenance adoption: could not count unrecorded hops outside the cohort", "error", err)
+	}
+	c.logAdoptionSummary(m.CohortID, counts, notInCohort)
+	next := *m
+	next.Counts = counts
+	next.RetryVersion = delegationadoption.RetryVersion
+	value, err := json.Marshal(next)
+	if err != nil {
+		return err
+	}
+	_, err = c.UpsertHubSetting(ctx, delegationadoption.MarkerSection, value, "migration", revision, "seeded")
 	if errors.Is(err, store.ErrRevisionConflict) {
 		return nil
 	}

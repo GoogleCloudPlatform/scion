@@ -204,10 +204,3 @@ func TestHarnessConfigFileRead_RawAndJSONRejectSamePaths(t *testing.T) {
 		t.Errorf("raw read of config.yaml: status %d body %q", rec.Code, rec.Body.String())
 	}
 }
-
-func truncateForLog(s string) string {
-	if len(s) > 512 {
-		return s[:512] + "..."
-	}
-	return s
-}

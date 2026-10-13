@@ -1,4 +1,3 @@
-// @vitest-environment happy-dom
 /**
  * Tests for TerminalWorkspaceRoot: data-effective-layout attribute
  * and focus outline suppression in single-pane mode (#1716).
@@ -14,20 +13,27 @@ import {
   type MockInstance,
 } from 'vitest';
 import type { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
-import { TerminalSessionRegistry } from './terminal-sessions.js';
+import { TerminalSessionRegistry, type TerminalSession } from './terminal-sessions.js';
 import type { Agent } from '../shared/types.js';
 import { _appFrameRefCountForTests } from '../components/shared/app-frame.js';
 import {
+  TERMINAL_DRAG_MIME,
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import type { ScionQuickPalette } from '../components/shared/palette/quick-palette.js';
 import type { ScionTerminalPane } from '../components/terminal/terminal-pane.js';
 import type { TerminalPaletteAgentsLoadOptions } from './terminal-palette-data.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate } from './palette-types.js';
 import { AgentStore } from './agent-store.js';
 import { FakeEventSource } from './__fixtures__/agent-store-harness.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
+import {
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+} from './terminal-palette-open.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 // Mock terminal-pane custom element before importing workspace root
 vi.mock('@xterm/xterm', () => ({
@@ -273,6 +279,439 @@ describe('data-effective-layout attribute (#1716)', () => {
   });
 });
 
+describe('compact pane headers in 4-up and narrow layouts (ptone/scion#4324)', () => {
+  let root: TerminalWorkspaceRoot;
+  let registry: TerminalSessionRegistry;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    stubWebSocketAndEventSource();
+    registry = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'c' });
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mount(): ScionTerminalPane {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    root.create(registry, AGENT_ID);
+    return paneFor(root, AGENT_ID);
+  }
+
+  it('compacts the header in the 4-up layout, and not in a wide single pane', async () => {
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.setLayout('two-columns');
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+
+  it('compacts the header on a narrow viewport, in any preset', async () => {
+    mockNarrowViewport();
+    const pane = mount();
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+  });
+
+  it('a pane zoomed from 4-up fills the host and gets its full header back', async () => {
+    const pane = mount();
+    root.layoutManager.setLayout('four');
+    await flush();
+    expect(pane.compactHeader).toBe(true);
+    root.layoutManager.zoom(pane.session!.state.key);
+    await flush();
+    expect(pane.compactHeader).toBe(false);
+  });
+});
+
+describe('empty multi-pane slots show drop targets (ptone/scion#3778)', () => {
+  let root: TerminalWorkspaceRoot;
+  const AGENT_ID = '11111111-1111-4111-8111-111111111111';
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_ID, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function placeholders(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-slot-placeholder'),
+    ].filter((ph) => !ph.hidden);
+  }
+
+  /** Overlays that cover the whole pane host when shown. */
+  function visibleOverlays(): HTMLElement[] {
+    return [
+      ...getPaneHost(root).querySelectorAll<HTMLElement>('.terminal-empty, .terminal-status'),
+    ].filter((el) => !el.hidden);
+  }
+
+  function dropOn(el: HTMLElement, sessionKey: string): void {
+    const data = new Map<string, string>([[TERMINAL_DRAG_MIME, sessionKey]]);
+    const event = new Event('drop', { bubbles: true, cancelable: true }) as DragEvent;
+    Object.defineProperty(event, 'dataTransfer', {
+      value: {
+        types: [...data.keys()],
+        getData: (type: string): string => data.get(type) ?? '',
+      },
+    });
+    el.dispatchEvent(event);
+  }
+
+  const presets = [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const;
+
+  it.each(presets)('shows %s placeholders with no terminals open', async (preset, count) => {
+    root.layoutManager.setLayout(preset);
+    await flush();
+    expect(placeholders()).toHaveLength(count);
+    expect(visibleOverlays()).toEqual([]);
+  });
+
+  it.each(presets)(
+    'swaps the %s empty state for placeholders when a narrow viewport widens',
+    async (preset, count) => {
+      let onChange: (() => void) | null = null;
+      const query = {
+        matches: true,
+        addEventListener: vi.fn((_type: string, cb: () => void) => {
+          onChange = cb;
+        }),
+        removeEventListener: vi.fn(),
+      };
+      const realMatchMedia = window.matchMedia.bind(window);
+      vi.spyOn(window, 'matchMedia').mockImplementation((q: string) =>
+        q === '(max-width: 760px)' ? (query as unknown as MediaQueryList) : realMatchMedia(q)
+      );
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(placeholders()).toEqual([]);
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+
+      query.matches = false;
+      expect(onChange).not.toBeNull();
+      onChange!();
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe(preset);
+      expect(placeholders()).toHaveLength(count);
+      expect(visibleOverlays()).toEqual([]);
+    }
+  );
+
+  it.each(presets)(
+    'shows the empty state for %s on a narrow viewport with no terminals open',
+    async (preset) => {
+      mockNarrowViewport();
+      root.dispose();
+      root.element.remove();
+      root = new WorkspaceRoot();
+      document.body.append(root.element);
+
+      root.layoutManager.setLayout(preset);
+      await flush();
+      expect(getPaneHost(root).dataset.effectiveLayout).toBe('single');
+      expect(placeholders()).toEqual([]);
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+    }
+  );
+
+  it('shows only the empty state in the single layout with no terminals open', async () => {
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+    expect(overlays[0].textContent).toBe('No terminals are open.');
+  });
+
+  it('shows the status message when terminals are open but none is selected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    root.withAutoSelectSuspended(() => root.create(registry, AGENT_ID, { deferConnect: true }));
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('shows the status message again after the selected terminal is closed', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'test',
+    });
+    const session = root.create(registry, AGENT_ID);
+    root.select(session);
+    await flush();
+    root.withAutoSelectSuspended(() =>
+      root.create(registry, '22222222-2222-4222-8222-222222222222', { deferConnect: true })
+    );
+    root.withAutoSelectSuspended(() => session.close());
+    await flush();
+
+    expect(root.layoutManager.getVisibleSlots()).toEqual([null]);
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+    expect(overlays[0].textContent).toBe('No terminal selected.');
+  });
+
+  it('keeps a message set through setStatus visible with no terminals open', async () => {
+    root.setStatus('Waiting for the owning tab to select this terminal.');
+    await flush();
+    const overlays = visibleOverlays();
+    expect(overlays.map((el) => el.className)).toEqual(['terminal-empty', 'terminal-status']);
+    expect(overlays[1].textContent).toBe('Waiting for the owning tab to select this terminal.');
+  });
+
+  describe('status action button (ptone/scion#3328)', () => {
+    function actionButton(): HTMLButtonElement {
+      return getPaneHost(root).querySelector<HTMLButtonElement>('.terminal-status-action')!;
+    }
+
+    it('shows the action with the status message and runs it on click', async () => {
+      const onClick = vi.fn();
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick });
+      await flush();
+      const button = actionButton();
+      expect(button.hidden).toBe(false);
+      expect(button.textContent).toBe('Move terminals to this window');
+      expect(button.disabled).toBe(false);
+      button.click();
+      expect(onClick).toHaveBeenCalledOnce();
+      // The status text itself is unchanged by the button, and it replaces
+      // the empty state (ptone/scion#4324).
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+    });
+
+    it('a fresh window with terminals open elsewhere shows that state and the move button, not the empty state (ptone/scion#4324)', async () => {
+      // No pane in this window; main.ts found the terminals held by another
+      // window and set the non-owner state.
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+      expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      expect(actionButton().hidden).toBe(false);
+      expect(actionButton().textContent).toBe('Move terminals to this window');
+    });
+
+    const help = {
+      label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+      text: TERMINALS_OPEN_ELSEWHERE_HELP,
+    };
+
+    it.each(['single', 'two-columns', 'two-rows', 'four'] as const)(
+      'shows the one state text with its labelled help trigger in the %s layout (ptone/scion#4324)',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        const status = overlays[0];
+        expect(status.querySelector('.terminal-status-text')!.textContent).toBe(
+          'Terminals open in another window'
+        );
+        // The "?" follows the text, as the trigger of a dropdown with the help.
+        const dropdown = status.querySelector('sl-dropdown.terminal-status-help')!;
+        expect(dropdown.previousElementSibling?.className).toBe('terminal-status-text');
+        const trigger = dropdown.querySelector('sl-icon-button[slot="trigger"]')!;
+        expect(trigger.getAttribute('name')).toBe('question-circle');
+        expect(trigger.getAttribute('label')).toBe('About terminals open in another window');
+        expect(dropdown.querySelector('.terminal-status-help-panel')!.textContent).toBe(
+          TERMINALS_OPEN_ELSEWHERE_HELP
+        );
+        expect(actionButton().hidden).toBe(false);
+      }
+    );
+
+    it('drops the help with the state: a later status and clearStatus show none', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.setStatus('Terminals could not be moved: no answer');
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays()[1].textContent).toBe('Terminals could not be moved: no answer');
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, help);
+      root.clearStatus();
+      await flush();
+      expect(getPaneHost(root).querySelector('.terminal-status-help')).toBeNull();
+      expect(visibleOverlays().map((el) => el.className)).toEqual(['terminal-empty']);
+    });
+
+    it('with no terminals anywhere, a fresh window still shows the empty state', async () => {
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(overlays[0].textContent).toBe('No terminals are open.');
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('disables the button while a move runs and hides it when removed', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Moving terminals…', disabled: true, onClick: () => {} });
+      await flush();
+      expect(actionButton().disabled).toBe(true);
+      expect(actionButton().textContent).toBe('Moving terminals…');
+      root.setStatusAction(null);
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it.each(['two-columns', 'four'] as const)(
+      'shows the status and its action over %s placeholders',
+      async (preset) => {
+        root.layoutManager.setLayout(preset);
+        root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+        root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+        await flush();
+        const overlays = visibleOverlays();
+        expect(overlays.map((el) => el.className)).toEqual(['terminal-status']);
+        expect(overlays[0].textContent).toBe(TERMINALS_OPEN_ELSEWHERE_STATUS);
+        expect(actionButton().hidden).toBe(false);
+        // Without an action, the placeholders show as before.
+        root.setStatusAction(null);
+        await flush();
+        expect(visibleOverlays()).toEqual([]);
+        expect(actionButton().hidden).toBe(true);
+      }
+    );
+
+    it('clearStatus returns to the normal empty viewer without an action', async () => {
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      root.clearStatus();
+      await flush();
+      const overlays = visibleOverlays();
+      expect(overlays.map((el) => el.className)).toEqual(['terminal-empty']);
+      expect(actionButton().hidden).toBe(true);
+    });
+
+    it('is hidden by default and cleared once a terminal is selected', async () => {
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      root.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS);
+      root.setStatusAction({ label: 'Move terminals to this window', onClick: () => {} });
+      await flush();
+      expect(actionButton().hidden).toBe(false);
+      root.select(root.create(registry, AGENT_ID));
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+      // Closing the selected terminal brings back the default status, without the action.
+      root.withAutoSelectSuspended(() => registry.list()[0].close());
+      await flush();
+      expect(actionButton().hidden).toBe(true);
+    });
+  });
+
+  it.each(presets)(
+    'shows %s placeholders that accept a drop when no slot is filled',
+    async (preset, count) => {
+      const registry = new TerminalSessionRegistry({
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      });
+      const session = root.create(registry, AGENT_ID);
+      root.layoutManager.setLayout(preset);
+      await flush();
+
+      expect(root.layoutManager.getVisibleSlots().every((s) => s === null)).toBe(true);
+      const slots = placeholders();
+      expect(slots).toHaveLength(count);
+      expect(slots.map((ph) => ph.dataset.slotIndex)).toEqual(
+        Array.from({ length: count }, (_, i) => String(i))
+      );
+      expect(visibleOverlays()).toEqual([]);
+
+      for (let i = 0; i < count; i++) {
+        const target = getPaneHost(root).querySelector<HTMLElement>(
+          `.terminal-slot-placeholder[data-slot-index="${i}"]`
+        );
+        expect(target).not.toBeNull();
+        dropOn(target!, session.state.key);
+        await flush();
+        const visible = root.layoutManager.getVisibleSlots();
+        expect(visible[i]).toBe(session.state.key);
+        expect(visible.filter((s) => s !== null)).toHaveLength(1);
+      }
+    }
+  );
+});
 describe('focus outline suppression in single-pane mode (#1716)', () => {
   let root: TerminalWorkspaceRoot;
 
@@ -387,6 +826,120 @@ describe('focus outline suppression in single-pane mode (#1716)', () => {
 });
 
 // ────────────────────────────────────────────────────────────────────────────
+// Pane host background behind empty slot placeholders (ptone/scion#3803)
+// ────────────────────────────────────────────────────────────────────────────
+
+describe('pane host background follows the theme only behind placeholders (#3803)', () => {
+  const AGENT_A = '11111111-1111-4111-8111-111111111111';
+  const AGENT_B = '22222222-2222-4222-8222-222222222222';
+  // --scion-bg values of the light and dark theme blocks in theme.css.
+  const THEMES = { light: 'rgb(248, 250, 252)', dark: 'rgb(15, 23, 42)' } as const;
+  const TERMINAL_HOST_BG = '#111827';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: AGENT_A, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen = null;
+        onclose = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+      }
+    );
+    vi.stubGlobal(
+      'EventSource',
+      class extends EventTarget {
+        onopen = null;
+        close = vi.fn();
+        constructor(public url: string) {
+          super();
+        }
+      }
+    );
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'test' });
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    document.documentElement.style.removeProperty('--scion-bg');
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function hostBackground(): string {
+    return getComputedStyle(getPaneHost(root)).backgroundColor;
+  }
+
+  function keyFor(agentId: string): string {
+    const key = root.findSessionKeyByAgentId(agentId);
+    if (!key) throw new Error(`No session for agent ${agentId}`);
+    return key;
+  }
+
+  for (const [theme, bg] of Object.entries(THEMES)) {
+    describe(`${theme} theme`, () => {
+      beforeEach(() => {
+        document.documentElement.style.setProperty('--scion-bg', bg);
+      });
+
+      it('empty multi-pane slots sit on the theme background', async () => {
+        root.layoutManager.setLayout('four');
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(4);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a partly filled layout keeps the theme background behind its placeholders', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(1);
+        expect(hostBackground()).toBe(bg);
+      });
+
+      it('a fully populated multi-pane layout keeps the dark terminal host', async () => {
+        root.layoutManager.setLayout('two-columns');
+        root.create(reg, AGENT_A);
+        root.create(reg, AGENT_B);
+        root.layoutManager.place(keyFor(AGENT_A), 'two-columns', 0);
+        root.layoutManager.place(keyFor(AGENT_B), 'two-columns', 1);
+        await flush();
+        expect(root.element.querySelectorAll('.terminal-slot-placeholder')).toHaveLength(0);
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+
+      it('a single populated pane keeps the dark terminal host', async () => {
+        root.create(reg, AGENT_A);
+        await flush();
+        expect(root.layoutManager.getState().active).toBe('single');
+        expect(hostBackground()).toBe(TERMINAL_HOST_BG);
+      });
+    });
+  }
+});
+
+// ────────────────────────────────────────────────────────────────────────────
 // URL layout sync (#1715)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -481,7 +1034,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('two-columns');
     // Subscriber triggers syncUrlFromLayout synchronously
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lv=1'));
     expect(layoutCall).toBeTruthy();
     expect(layoutCall).toContain('lp=two-columns');
@@ -493,7 +1048,9 @@ describe('URL layout sync (#1715)', () => {
     replaceStateSpy.mockClear();
     root.layoutManager.setLayout('single');
     // In single mode, URL should not contain layout params
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const lastUrl = urls[urls.length - 1];
     if (lastUrl) {
       expect(lastUrl).not.toContain('lv=1');
@@ -506,7 +1063,9 @@ describe('URL layout sync (#1715)', () => {
     root.setSuppressUrlSync(true);
     root.layoutManager.setLayout('four');
     // Subscriber was called but syncUrlFromLayout should have been a no-op
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     const layoutCall = urls.find((u: string) => u.includes('lp=four'));
     expect(layoutCall).toBeUndefined();
     root.setSuppressUrlSync(false);
@@ -517,7 +1076,9 @@ describe('URL layout sync (#1715)', () => {
     root.layoutManager.setLayout('two-columns');
     await flush();
     // Should have been called at least once with two-columns
-    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) => String(c[2] ?? ''));
+    const urls = replaceStateSpy.mock.calls.map((c: unknown[]) =>
+      String((c[2] as string | URL | null | undefined) ?? '')
+    );
     expect(urls.length).toBeGreaterThan(0);
     const layoutCall = urls.find((u: string) => u.includes('lp=two-columns'));
     expect(layoutCall).toBeTruthy();
@@ -588,6 +1149,10 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     vi.stubGlobal('fetch', fetcher);
     vi.stubGlobal('WebSocket', FakeSocket);
     vi.stubGlobal('EventSource', FakeEventSource);
+    // A pane attaches only once it is shown and measurable, so give the
+    // container a size (happy-dom does no layout).
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
     root = new WorkspaceRoot();
     document.body.append(root.element);
   });
@@ -611,16 +1176,44 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     return found[found.length - 1];
   }
 
-  it('an agent-phase reason (the WS drop reached the client before SSE reported it) still re-arms once SSE confirms running', async () => {
-    const registry = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'r2',
-    });
+  /**
+   * The session's own agent SSE stream. Showing the workspace also opens the
+   * palette's project-wide stream, so array position is not reliable.
+   */
+  function mySource(): FakeEventSource {
+    const found = FakeEventSource.instances.filter((s) => s.url.includes(agentId));
+    return found[found.length - 1];
+  }
+
+  /**
+   * Opens the session in a shown workspace so its pane attaches, confirms
+   * the stream live, then hides the workspace before the test's drop. A
+   * hidden pane is never frontmost on its own, so each test drives
+   * frontmost explicitly and exercises the SSE bridge rather than the
+   * visible pane's own reconnect.
+   */
+  async function attachVisibleThenHide(
+    registry: TerminalSessionRegistry
+  ): Promise<{ session: TerminalSession; socket: FakeSocket }> {
+    root.show(true);
     const session = root.create(registry, agentId);
     await vi.waitFor(() => expect(mySocket()).toBeDefined());
     const socket = mySocket();
     socket.open();
     socket.data();
+    expect(session.state.connection).toBe('connected');
+    root.show(false);
+    const pane = root.element.querySelector('scion-terminal-pane') as HTMLElement;
+    await vi.waitFor(() => expect(pane.hidden).toBe(true));
+    return { session, socket };
+  }
+
+  it('an agent-phase reason (the WS drop reached the client before SSE reported it) still re-arms once SSE confirms running', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'r2',
+    });
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     // The common ordering: the WebSocket drop reaches the client, and the
@@ -633,8 +1226,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-phase');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
 
     // The workspace root's own async layout/visibility refresh (queued via
@@ -672,11 +1265,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-offline',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     agentPhase = 'stopped';
@@ -686,8 +1275,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-phase');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
     session.setFrontmost(true);
 
@@ -712,15 +1301,11 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-error-phase',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session } = await attachVisibleThenHide(registry);
     expect(session.state.connection).toBe('connected');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
 
     // The container crashes: SSE reports phase 'error', not 'stopped'. The
@@ -752,11 +1337,7 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       hubUrl: window.location.origin,
       accountId: 'r2-stale-running-race',
     });
-    const session = root.create(registry, agentId);
-    await vi.waitFor(() => expect(mySocket()).toBeDefined());
-    const socket = mySocket();
-    socket.open();
-    socket.data();
+    const { session, socket } = await attachVisibleThenHide(registry);
     session.setFrontmost(true);
 
     // The broker's own open-time check already knows the container is down
@@ -768,8 +1349,8 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
     expect(session.state.connection).toBe('unavailable');
     expect(session.state.disconnectReason).toBe('agent-stopped');
 
-    await vi.waitFor(() => expect(FakeEventSource.instances.length).toBeGreaterThanOrEqual(1));
-    const source = FakeEventSource.instances[FakeEventSource.instances.length - 1];
+    await vi.waitFor(() => expect(mySource()).toBeDefined());
+    const source = mySource();
     source.onopen?.();
     session.setFrontmost(true);
 
@@ -807,6 +1388,215 @@ describe('the SSE bridge re-arms auto-reconnect regardless of which agent-state 
       })
     );
     expect(session.reconnecting).toBe(true);
+  });
+});
+
+describe('a pane that has never been shown (ptone/scion#4170)', () => {
+  class FakeSocket {
+    static instances: FakeSocket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number; reason?: string }) => void) | null = null;
+    onmessage: ((event: { data: unknown }) => void) | null = null;
+    send = vi.fn();
+    close = vi.fn();
+    constructor(readonly url: string) {
+      FakeSocket.instances.push(this);
+    }
+    open(): void {
+      this.readyState = 1;
+      this.onopen?.();
+    }
+    data(payload = ''): void {
+      this.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa(payload) }) });
+    }
+  }
+  class SilentEventSource extends EventTarget {
+    onopen: (() => void) | null = null;
+    close = vi.fn();
+    constructor(readonly url: string) {
+      super();
+    }
+  }
+
+  const agentId = '77777777-7777-4777-8777-777777777777';
+  let root: TerminalWorkspaceRoot;
+  let mod: typeof import('./terminal-workspace-root.js');
+
+  beforeEach(async () => {
+    mod = await import('./terminal-workspace-root.js');
+    FakeSocket.instances = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(JSON.stringify({ id: agentId, name: 'test', phase: 'running' }), {
+            status: 200,
+          })
+        )
+      )
+    );
+    vi.stubGlobal('WebSocket', FakeSocket);
+    vi.stubGlobal('EventSource', SilentEventSource);
+    // happy-dom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+  });
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function mySocket(): FakeSocket | undefined {
+    return FakeSocket.instances.filter((s) => s.url.includes(agentId)).at(-1);
+  }
+
+  function railItem(): HTMLElement {
+    return root.element.querySelector('.terminal-rail-item') as HTMLElement;
+  }
+
+  function railStatus(): string {
+    return railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!.title;
+  }
+
+  it('shows a neutral "Not opened yet" dot, not Connecting, and does not attach', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()).not.toBeNull());
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+    expect(railItem().dataset.dot).toBe('neutral');
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(railStatus()).not.toContain('Connecting');
+    expect(railStatus()).not.toContain('Pending');
+  });
+
+  it('on reveal goes through Connecting, then connected', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-reveal',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    await vi.waitFor(() => expect(session.state.connection).toBe('connecting'));
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('amber'));
+    expect(railStatus()).toContain('Amber dot: Connecting');
+
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem().dataset.dot).toBe('green'));
+    expect(railStatus()).toContain('Green dot: Connected');
+
+    // Hiding it again later does not bring the never-shown state back.
+    root.show(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(railItem().dataset.dot).toBe('green');
+  });
+
+  it('a pane shown but not yet measurable leaves Not opened yet for Connecting', async () => {
+    // Shown, but the container has no size yet: the pane keeps waiting, so
+    // the session stays loading and only the shown state moves the dot.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(0);
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-unmeasured',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+
+    root.show(true);
+    // The first show queues its own rail refresh: one microtask later the
+    // row already reads Connecting, before any other update re-renders it.
+    await Promise.resolve();
+    expect(railItem().dataset.dot).toBe('amber');
+    expect(railStatus()).toContain('Amber dot: Connecting');
+    expect(railStatus()).not.toContain('Not opened yet');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(session.state.connection).toBe('loading');
+    expect(mySocket()).toBeUndefined();
+  });
+
+  it('a session re-created for the same agent after close is never-shown again', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-recreate',
+    });
+    const first = root.create(registry, agentId);
+    root.show(true);
+    await vi.waitFor(() => expect(mySocket()).toBeDefined());
+    const socket = mySocket()!;
+    socket.open();
+    socket.data();
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('green'));
+    const key = first.state.key;
+
+    first.close();
+    await vi.waitFor(() => expect(railItem()).toBeNull());
+    root.show(false);
+
+    const second = root.create(registry, agentId);
+    expect(second).not.toBe(first);
+    expect(second.state.key).toBe(key);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    expect(railStatus()).toContain('Hollow dot: Not opened yet');
+    expect(second.state.connection).toBe('loading');
+  });
+
+  it('a revealed pane still loading reads Connecting, not Not opened yet', () => {
+    const loading = {
+      state: { connection: 'loading', disconnectReason: null },
+      metadata: { availability: 'loading', agent: null, error: null },
+    } as unknown as Parameters<typeof mod.connectionDot>[0];
+    expect(mod.connectionDot(loading, true)).toEqual({
+      colour: 'neutral',
+      meaning: 'Not opened yet',
+    });
+    expect(mod.connectionDot(loading, false)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    expect(mod.connectionDot(loading)).toEqual({ colour: 'amber', meaning: 'Connecting' });
+    // Only a pending session can be never-shown: other states keep their dot.
+    for (const connection of ['connecting', 'connected', 'idle', 'disconnected'] as const) {
+      const entry = { ...loading, state: { connection, disconnectReason: null } } as typeof loading;
+      expect(mod.connectionDot(entry, true)).toEqual(mod.connectionDot(entry, false));
+    }
+  });
+
+  it('isInactiveEntry counts a never-shown pane like a connected one, so filter and sort are unchanged', async () => {
+    const registry = new TerminalSessionRegistry({
+      hubUrl: window.location.origin,
+      accountId: 'never-shown-inactive',
+    });
+    const session = root.create(registry, agentId);
+    await vi.waitFor(() => expect(railItem()?.dataset.dot).toBe('neutral'));
+    const entry = {
+      state: session.state,
+      metadata: registry.metadata.get(agentId) ?? {
+        agent: null,
+        availability: 'loading' as const,
+        error: null,
+      },
+    };
+    expect(entry.state.connection).toBe('loading');
+    expect(mod.isInactiveEntry(entry)).toBe(false);
+    expect(
+      mod.isInactiveEntry({ ...entry, state: { ...entry.state, connection: 'connected' } })
+    ).toBe(false);
   });
 });
 
@@ -955,11 +1745,13 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-state-label')).toBeNull();
     expect(item.querySelector('.terminal-connection-dot')).not.toBeNull();
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in A rather long project name, Not connected, metadata pending'
+      'Show terminal for test in A rather long project name, Grey dot: Not connected, metadata pending'
     );
-    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(select.title);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')?.title).toBe(
+      'Grey dot: Not connected'
+    );
   });
 
   it('rail row falls back to the project id when the project name is unknown', async () => {
@@ -980,9 +1772,9 @@ describe('idle entries', () => {
     expect(project?.textContent).toBe('project-id-2');
     expect(project?.title).toBe('project-id-2');
     const select = railItem().querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    expect(select.title).toBe('Not connected · metadata pending');
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      'Show terminal for test in project-id-2, Not connected, metadata pending'
+      'Show terminal for test in project-id-2, Grey dot: Not connected, metadata pending'
     );
   });
 
@@ -998,11 +1790,12 @@ describe('idle entries', () => {
     expect(item.querySelector('.terminal-project-name')).toBeNull();
     expect(item.querySelector('.terminal-rail-text')?.children).toHaveLength(1);
     const select = item.querySelector<HTMLButtonElement>('.terminal-rail-select')!;
-    const status = item.querySelector<HTMLElement>('.terminal-connection-dot')!.title;
-    expect(status).toBe('Not connected · metadata pending');
-    expect(select.title).toBe(status);
+    expect(item.querySelector<HTMLElement>('.terminal-connection-dot')!.title).toBe(
+      'Grey dot: Not connected'
+    );
+    expect(select.title).toBe('Grey dot: Not connected · metadata pending');
     expect(select.getAttribute('aria-label')).toBe(
-      `Show terminal for ${agentId}, Not connected, metadata pending`
+      `Show terminal for ${agentId}, Grey dot: Not connected, metadata pending`
     );
   });
 
@@ -2038,8 +2831,9 @@ function agentCandidate(agentId: string, label = agentId): PaletteCandidate {
 
 /** Counts the palette's own agent-list fetches. */
 function agentListLoads(): number {
-  return vi.mocked(fetch).mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?'))
-    .length;
+  return vi
+    .mocked(fetch)
+    .mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length;
 }
 
 describe('"Jump to agent" palette: palette and focus lifecycle', () => {
@@ -2831,14 +3625,14 @@ describe('"Jump to agent" palette: keyboard shortcut', () => {
     press({ key: 'k', metaKey: true });
     const palette = await expectOpened();
     const agentLoads = fetchMock.mock.calls.filter(([url]) =>
-      String(url).startsWith('/api/v1/agents?')
+      requestUrl(url).startsWith('/api/v1/agents?')
     ).length;
 
     expect(press({ key: 'k', ctrlKey: true })).toBe(false);
 
     expect(palette.open).toBe(false);
     expect(
-      fetchMock.mock.calls.filter(([url]) => String(url).startsWith('/api/v1/agents?')).length
+      fetchMock.mock.calls.filter(([url]) => requestUrl(url).startsWith('/api/v1/agents?')).length
     ).toBe(agentLoads);
   });
 
@@ -3250,5 +4044,245 @@ describe('open terminals rail: selection focuses the terminal (ptone/scion#2900)
     expect(hasFocus(inputA)).toBe(false);
     // Not even the pane itself, as it would be before its terminal mounts.
     expect(document.activeElement).not.toBe(paneFor(root, AGENT_A));
+  });
+});
+
+describe('open terminals rail: a click fills the next free slot (ptone/scion#4324)', () => {
+  const AGENT_D = AGENT_NEW;
+  const AGENT_E = '66666666-6666-4666-8666-666666666666';
+  let root: TerminalWorkspaceRoot;
+  let reg: TerminalSessionRegistry;
+  const sessions = new Map<string, TerminalSession>();
+  const sockets: Array<{
+    url: string;
+    readyState: number;
+    onopen: (() => void) | null;
+    onmessage: ((event: { data: unknown }) => void) | null;
+  }> = [];
+
+  beforeEach(() => {
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      cb(0);
+      return 0;
+    });
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        const id =
+          [AGENT_A, AGENT_B, AGENT_C, AGENT_D, AGENT_E].find((agent) =>
+            String(url).includes(agent)
+          ) ?? AGENT_A;
+        return Promise.resolve(
+          new Response(JSON.stringify({ id, name: id, phase: 'running' }), { status: 200 })
+        );
+      })
+    );
+    stubWebSocketAndEventSource();
+    sockets.length = 0;
+    vi.stubGlobal(
+      'WebSocket',
+      class {
+        onopen: (() => void) | null = null;
+        onclose = null;
+        onmessage: ((event: { data: unknown }) => void) | null = null;
+        send = vi.fn();
+        close = vi.fn();
+        readyState = 0;
+        constructor(public url: string) {
+          sockets.push(this);
+        }
+      }
+    );
+    // jsdom does no layout: give a shown pane a measurable container.
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
+    reg = new TerminalSessionRegistry({ hubUrl: window.location.origin, accountId: 'r4324' });
+    sessions.clear();
+    navigationSelects = true;
+    mountRoot();
+  });
+
+  /** While false, the nav-click stand-in selects nothing. */
+  let navigationSelects = true;
+
+  function mountRoot(): void {
+    root = new WorkspaceRoot();
+    document.body.append(root.element);
+    root.show(true);
+    // Stands in for main.ts: a rail navigation to an open agent ends in
+    // select(), as the coordinator does once the route settles.
+    root.element.addEventListener('nav-click', (e) => {
+      const agentId = (e as CustomEvent<{ path: string }>).detail.path.split('/').pop()!;
+      const session = sessions.get(agentId);
+      if (session && navigationSelects) queueMicrotask(() => root.select(session));
+    });
+  }
+
+  afterEach(() => {
+    root.dispose();
+    root.element.remove();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  function key(agentId: string): string {
+    return sessions.get(agentId)!.state.key;
+  }
+
+  function railItem(agentId: string): HTMLElement {
+    const item = [...root.element.querySelectorAll<HTMLElement>('.terminal-rail-item')].find(
+      (el) =>
+        el.querySelector<HTMLElement>('.terminal-rail-select')?.dataset.railFocusId ===
+        `${key(agentId)}:select`
+    );
+    if (!item) throw new Error(`No rail item for ${agentId}`);
+    return item;
+  }
+
+  function clickRail(agentId: string): void {
+    railItem(agentId)
+      .querySelector<HTMLButtonElement>('.terminal-rail-select')!
+      .dispatchEvent(new MouseEvent('click', { bubbles: true, detail: 1 }));
+  }
+
+  /** Brings a session's stream live, so its rail dot turns green. */
+  async function goLive(agentId: string): Promise<void> {
+    const socket = await vi.waitFor(() => {
+      const found = sockets.filter((s) => s.url.includes(agentId)).at(-1);
+      if (!found) throw new Error('no socket yet');
+      return found;
+    });
+    socket.readyState = 1;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'data', data: btoa('screen') }) });
+    await vi.waitFor(() => expect(sessions.get(agentId)!.state.connection).toBe('connected'));
+  }
+
+  /**
+   * 4-up with A and B in slots 1 and 2. C is connected (green) and D was
+   * never opened (its hollow dot: not connected); neither is in a slot.
+   */
+  async function fourUpWithTwoFilled(): Promise<void> {
+    // C connects in the single layout, then stays open in the rail only.
+    sessions.set(AGENT_C, root.create(reg, AGENT_C));
+    await goLive(AGENT_C);
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(AGENT_B, root.create(reg, AGENT_B));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_C).dataset.dot).toBe('green');
+    expect(['grey', 'neutral']).toContain(railItem(AGENT_D).dataset.dot);
+  }
+
+  it('a not-connected entry fills slot 3, then a connected one fills slot 4', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_D);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      null,
+    ]);
+    // Shown, so the deferred entry now connects.
+    await vi.waitFor(() => expect(paneFor(root, AGENT_D).hidden).toBe(false));
+    await vi.waitFor(() => expect(sockets.some((s) => s.url.includes(AGENT_D))).toBe(true));
+
+    clickRail(AGENT_C);
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([
+      key(AGENT_A),
+      key(AGENT_B),
+      key(AGENT_D),
+      key(AGENT_C),
+    ]);
+    expect(root.layoutManager.getState().active).toBe('four');
+  });
+
+  it('a click on an entry already in a slot leaves the slots as they are, with no duplicate', async () => {
+    await fourUpWithTwoFilled();
+
+    clickRail(AGENT_B);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+    expect(railItem(AGENT_B).dataset.selected).toBe('true');
+  });
+
+  it('with no free slot, a click changes no slot', async () => {
+    await fourUpWithTwoFilled();
+    clickRail(AGENT_D);
+    clickRail(AGENT_C);
+    await flush();
+    const full = [...root.layoutManager.getVisibleSlots()];
+    sessions.set(
+      AGENT_E,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_E, { deferConnect: true }))
+    );
+    await flush();
+
+    clickRail(AGENT_E);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual(full);
+  });
+
+  it('on a narrow viewport, a click in 4-up with free slots changes no slot', async () => {
+    root.dispose();
+    root.element.remove();
+    mockNarrowViewport();
+    mountRoot();
+    root.layoutManager.setLayout('four');
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getState().active).toBe('four');
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A), null, null, null]);
+  });
+
+  it('with a pane zoomed in 4-up with free slots, a click changes no slot and keeps the zoom', async () => {
+    await fourUpWithTwoFilled();
+    root.layoutManager.zoom(key(AGENT_A));
+    await flush();
+    // Only the placement is under test here: the route's own select()
+    // (which ends any zoom, as today) is left out.
+    navigationSelects = false;
+
+    clickRail(AGENT_D);
+    await flush();
+    await flush();
+    expect(root.layoutManager.getZoomed()).toBe(key(AGENT_A));
+    expect(root.layoutManager.getState().four).toEqual([key(AGENT_A), key(AGENT_B), null, null]);
+  });
+
+  it('in the single layout, a click shows the entry in the one pane, as before', async () => {
+    sessions.set(AGENT_A, root.create(reg, AGENT_A));
+    sessions.set(
+      AGENT_D,
+      root.withAutoSelectSuspended(() => root.create(reg, AGENT_D, { deferConnect: true }))
+    );
+    await flush();
+    expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_A)]);
+
+    clickRail(AGENT_D);
+    await vi.waitFor(() => expect(root.layoutManager.getVisibleSlots()).toEqual([key(AGENT_D)]));
+    const state = root.layoutManager.getState();
+    expect(state.active).toBe('single');
+    expect(state.four).toEqual([null, null, null, null]);
   });
 });

@@ -43,11 +43,24 @@ import { guard } from 'lit/directives/guard.js';
 import { repeat } from 'lit/directives/repeat.js';
 import { apiFetch, extractApiError } from '../../../client/api.js';
 import type { Agent, Message } from '../../../shared/types.js';
-import type { ChatSendDetail } from './chat-composer.js';
+import type { ChatScheduleDetail, ChatSendDetail, ScionChatComposer } from './chat-composer.js';
+import {
+  conversationSupportsScheduledSend,
+  createScheduledMessage,
+  scheduledSendEnabled,
+} from '../../../client/chat-scheduled.js';
+import type { ScheduledRestoreDetail, ScionChatScheduledList } from './chat-scheduled-list.js';
+import './chat-scheduled-list.js';
 import { navigateTo, stateManager } from '../../../client/main.js';
 import { agentIndexOf, agentStore } from '../../../client/agent-store.js';
 import { openTerminal, agentGraphHref } from '../../../client/open-terminal.js';
 import { showToast } from '../../../utils/toast.js';
+import { isFeatureEnabled } from '../../../utils/feature-flags.js';
+import {
+  ARTIFACTS_FLAG,
+  ARTIFACTS_METADATA_KEY,
+  type MessageArtifactRef,
+} from '../../../client/artifacts.js';
 import { playChimeThrottled } from '../../../utils/audio.js';
 import type { ChatAgentMember } from './chat-members.js';
 import {
@@ -101,6 +114,7 @@ import {
 import { ComposerRoomController, type RoomComposer } from './composer-room.js';
 import { PinOnResizeController } from './pin-on-resize.js';
 import { focusElement } from '../focus-moved.js';
+import { findDefaultAgent } from './default-agent.js';
 
 /** Result from server-side mention fan-out. */
 interface MentionResult {
@@ -117,8 +131,15 @@ const MAX_BUFFER = 500;
 /** Number of messages to fetch per history request. */
 const HISTORY_PAGE_SIZE = 50;
 
+/** Delay that coalesces a burst of live messages with artifacts into one refresh. */
+const ARTIFACT_REFRESH_DEBOUNCE_MS = 150;
+
+/** The most messages one live artifact refresh asks history for. */
+const ARTIFACT_REFRESH_MAX = 20;
+
 const EMPTY_ATTACHMENTS: NonNullable<Message['attachments']> = [];
 const EMPTY_ATTACHMENT_REFS: import('./chat-message.js').AttachmentRefInfo[] = [];
+const EMPTY_ARTIFACT_REFS: MessageArtifactRef[] = [];
 
 /** Threshold in pixels from top to trigger upward scroll loading. */
 const SCROLL_TOP_THRESHOLD = 100;
@@ -375,7 +396,6 @@ function withDispatchFailure(
   reason: string | undefined,
   code: string | undefined
 ): Message {
-  /* eslint-disable-next-line @typescript-eslint/no-unused-vars -- rest-omit idiom: bind and drop these two keys so `...rest` excludes them */
   const { dispatchFailureReason: _reason, dispatchFailureCode: _code, ...rest } = msg;
   return {
     ...rest,
@@ -395,6 +415,15 @@ const PATH_LINK_NO_PROJECT_ERROR =
 // Re-exported for existing tests/consumers (#1148); the implementation now
 // lives in utils/chat-file-links.ts so the recorder can share it.
 export { parseContainerPath, buildFileApiUrl, type PathLinkTarget };
+
+/** Detail of `peer-agent-resolved`: the agent DM peer, read for the open conversation. */
+export interface PeerAgentResolvedDetail {
+  conversationKey: string;
+  agentId: string;
+  /** The agent's name, or its slug; empty when the row carries neither. */
+  name: string;
+  projectId: string;
+}
 
 @customElement('scion-chat-thread')
 export class ScionChatThread extends LitElement {
@@ -606,6 +635,25 @@ export class ScionChatThread extends LitElement {
   /** W7: Attachment refs keyed by message ID (from history endpoint + send response). */
   private v2AttachmentMap = new Map<string, import('./chat-message.js').AttachmentRefInfo[]>();
 
+  /**
+   * Artifact refs keyed by message ID, resolved by the hub for this viewer
+   * (history `messageArtifacts`, send response `artifacts`;
+   * ptone/scion#3224). Not @state(): writers call requestUpdate().
+   */
+  private v2ArtifactMap = new Map<string, MessageArtifactRef[]>();
+  /**
+   * Messages whose artifact refs the hub could not load (history
+   * `messageArtifactsUnavailable`, ptone/scion#4295). They show no chips and
+   * the thread shows a notice; this is not the same as having no refs, so a
+   * later history page that loads them clears the entry.
+   */
+  private _artifactRefsUnavailable = new Set<string>();
+  /** Live messages whose artifact chips wait for a refresh (scheduleArtifactRefresh). */
+  private _artifactRefreshIds = new Set<string>();
+  private _artifactRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Live messages merged since the oldest queued one, itself included. */
+  private _artifactRefreshWindow = 0;
+
   // ---- Phase-3 state ----
 
   /** Current user's last-read message ID (for unread divider). */
@@ -806,7 +854,14 @@ export class ScionChatThread extends LitElement {
    * (see {@link resolvePeerAgentProject}). Kept for one conversation: a read
    * for another conversation key is not used.
    */
-  private _peerAgentProject: { conversationKey: string; projectId: string } | null = null;
+  private _peerAgentProject: {
+    conversationKey: string;
+    projectId: string;
+    /** The peer's name (or slug) from the read, for reporting it again. */
+    name: string;
+    /** Whether the read has answered; until then it reports on its own. */
+    done: boolean;
+  } | null = null;
 
   /** Current user ID, cached from the stateManager scope once it exists. */
   private _currentUserId = '';
@@ -1082,6 +1137,16 @@ export class ScionChatThread extends LitElement {
       }
 
       /* Send error toast */
+      .artifact-refs-notice {
+        display: flex;
+        align-items: center;
+        gap: 0.375rem;
+        padding: 0.25rem 1rem;
+        font-size: var(--chat-fs-base);
+        color: var(--scion-text-muted, #64748b);
+        border-top: 1px solid var(--scion-border, #e2e8f0);
+      }
+
       .send-error {
         padding: 0.375rem 1rem;
         font-size: var(--chat-fs-base);
@@ -1325,6 +1390,7 @@ export class ScionChatThread extends LitElement {
       .state-msg,
       .messages-scroll,
       .typing-indicator,
+      .artifact-refs-notice,
       .send-error {
         border-left: var(--chat-inset-left, 0px) solid transparent;
         border-right: var(--chat-inset-right, 0px) solid transparent;
@@ -1421,6 +1487,8 @@ export class ScionChatThread extends LitElement {
     // the thread we're leaving, and a late correction must not fire against
     // the new one.
     this.cancelJumpScrollWatch();
+    // Queued chip refreshes belong to the thread we're leaving too.
+    this.cancelArtifactRefresh();
 
     // Clear initial watermark timer to prevent it from firing against wrong thread
     if (this._initialWatermarkTimer) {
@@ -1458,6 +1526,7 @@ export class ScionChatThread extends LitElement {
     // Clear message state
     this._pendingIdempotencyKeys.clear();
     this.messageMap.clear();
+    this._artifactRefsUnavailable.clear();
     this.messages = [];
     this.nextCursor = null;
     this.viewingAroundMessage = false;
@@ -1513,6 +1582,7 @@ export class ScionChatThread extends LitElement {
     this.cancelRestoreSettleWatch();
     // Cancel any pending jump-to-message scrollend re-check and its listeners/timers.
     this.cancelJumpScrollWatch();
+    this.cancelArtifactRefresh();
     // Clean up v2 SSE listeners
     stateManager.removeEventListener('connected', this._sseReconnectHandler);
     stateManager.removeEventListener('chat-message-received', this._v2MessageHandler);
@@ -1562,6 +1632,49 @@ export class ScionChatThread extends LitElement {
     messageId: string
   ): import('./chat-message.js').AttachmentRefInfo[] {
     return this.v2AttachmentMap.get(messageId) ?? EMPTY_ATTACHMENT_REFS;
+  }
+
+  /** Artifact refs for a message, as the hub resolved them for this viewer. */
+  private getMessageArtifactRefs(messageId: string): MessageArtifactRef[] {
+    return this.v2ArtifactMap.get(messageId) ?? EMPTY_ARTIFACT_REFS;
+  }
+
+  /**
+   * Records which of a history page's messages could not have their
+   * artifact refs loaded (`unavailable`, the page's
+   * messageArtifactsUnavailable). Those lose any chips they had and are
+   * marked; the page's other messages, `loadedIds`, are unmarked. Never
+   * records a failed load as "no artifacts".
+   */
+  private applyArtifactRefsAvailability(
+    loadedIds: Iterable<string>,
+    unavailable: string[] | undefined
+  ): void {
+    const failed = new Set(unavailable ?? []);
+    let changed = false;
+    for (const id of loadedIds) {
+      if (failed.has(id)) {
+        if (this.v2ArtifactMap.delete(id)) changed = true;
+        if (!this._artifactRefsUnavailable.has(id)) {
+          this._artifactRefsUnavailable.add(id);
+          changed = true;
+        }
+      } else if (this._artifactRefsUnavailable.delete(id)) {
+        changed = true;
+      }
+    }
+    if (changed) this.requestUpdate();
+  }
+
+  /** Merge a history page's messageArtifacts into the map; re-render when anything changed. */
+  private mergeMessageArtifacts(map: Record<string, MessageArtifactRef[]> | undefined): void {
+    if (!map) return;
+    let changed = false;
+    for (const [msgId, refs] of Object.entries(map)) {
+      this.v2ArtifactMap.set(msgId, refs);
+      changed = true;
+    }
+    if (changed) this.requestUpdate();
   }
 
   /** Check if a message sender is an agent (v2 multi-sender). */
@@ -1726,6 +1839,8 @@ export class ScionChatThread extends LitElement {
         this.messageMap.delete(msg.id);
         // Prune mention results for evicted messages (R1 fix).
         this.mentionResultsByMessageId.delete(msg.id);
+        // An evicted message no longer keeps the artifact refs notice up.
+        this._artifactRefsUnavailable.delete(msg.id);
       }
     }
 
@@ -1911,6 +2026,8 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -1924,6 +2041,12 @@ export class ScionChatThread extends LitElement {
       if (!shouldMerge()) return true;
 
       const items = data?.items ?? data?.messages ?? [];
+
+      this.mergeMessageArtifacts(data?.messageArtifacts);
+      this.applyArtifactRefsAvailability(
+        items.map((m) => m.id),
+        data?.messageArtifactsUnavailable
+      );
 
       // W7: Merge attachment refs from history response.
       if (data?.messageAttachments) {
@@ -2032,6 +2155,8 @@ export class ScionChatThread extends LitElement {
       broadcasted?: boolean;
       read?: boolean;
       attachments?: import('./chat-message.js').AttachmentRefInfo[];
+      /** metadata.artifacts: the message's artifact refs, ids and versions only. */
+      metadata?: { artifacts?: string };
     };
     const detail = (e as CustomEvent).detail as
       | ({ data?: ChatEventData } & ChatEventData)
@@ -2131,6 +2256,18 @@ export class ScionChatThread extends LitElement {
         playChimeThrottled(this.projectId || msg.projectId || '');
       }
 
+      // The event names the message's artifact refs (ids and versions
+      // only); what this viewer may see of each comes from history.
+      if (this._artifactRefreshIds.size > 0) this._artifactRefreshWindow++;
+      // The sender's own tab already has the views from its send response.
+      if (
+        isFeatureEnabled(ARTIFACTS_FLAG) &&
+        eventData.metadata?.artifacts &&
+        !this.v2ArtifactMap.has(msg.id)
+      ) {
+        this.scheduleArtifactRefresh(msg.id);
+      }
+
       this.scrollToBottomAfterRender();
       this.maybeAdvanceReadWatermark();
       return;
@@ -2138,6 +2275,104 @@ export class ScionChatThread extends LitElement {
 
     // Lightweight notification (no full message) — fall back to backfill.
     void this.backfillV2();
+  }
+
+  /**
+   * Queues a refresh of a live message's artifact chips. A burst of such
+   * messages is coalesced into one history request (see
+   * refreshLiveArtifacts).
+   */
+  private scheduleArtifactRefresh(messageId: string): void {
+    if (this._artifactRefreshIds.size === 0) this._artifactRefreshWindow = 1;
+    this._artifactRefreshIds.add(messageId);
+    if (this._artifactRefreshTimer) return;
+    this._artifactRefreshTimer = setTimeout(() => {
+      void this.refreshLiveArtifacts();
+    }, ARTIFACT_REFRESH_DEBOUNCE_MS);
+  }
+
+  /** Drops queued live artifact refreshes and their timer. */
+  private cancelArtifactRefresh(): void {
+    if (this._artifactRefreshTimer) {
+      clearTimeout(this._artifactRefreshTimer);
+      this._artifactRefreshTimer = null;
+    }
+    this._artifactRefreshIds = new Set();
+    this._artifactRefreshWindow = 0;
+  }
+
+  /**
+   * Fetches the artifact views of the queued live messages from chat
+   * history, which resolves them under this viewer's own credential: the
+   * chips show exactly what a reload would. It asks only for the newest
+   * messages back to the oldest queued one (at most ARTIFACT_REFRESH_MAX),
+   * and takes only the queued messages' views; the messages themselves are
+   * already merged from the live events. Messages stored between the event
+   * and the request can push a queued one off that page: those are asked
+   * for once more with ARTIFACT_REFRESH_MAX.
+   */
+  private async refreshLiveArtifacts(): Promise<void> {
+    this._artifactRefreshTimer = null;
+    const ids = [...this._artifactRefreshIds];
+    const limit = Math.min(ARTIFACT_REFRESH_MAX, Math.max(this._artifactRefreshWindow, ids.length));
+    this._artifactRefreshIds = new Set();
+    this._artifactRefreshWindow = 0;
+    const missing = await this.fetchLiveArtifacts(ids, limit);
+    if (missing.length > 0 && limit < ARTIFACT_REFRESH_MAX) {
+      await this.fetchLiveArtifacts(missing, ARTIFACT_REFRESH_MAX);
+    }
+  }
+
+  /**
+   * One history request for the newest `limit` messages; merges the views
+   * of `ids` found on the page and returns the ids that were not.
+   */
+  private async fetchLiveArtifacts(ids: string[], limit: number): Promise<string[]> {
+    const key = this.conversationKey;
+    if (ids.length === 0 || !key) return [];
+    const currentId = this.fetchId;
+    try {
+      const res = await apiFetch(
+        `/api/v1/chat/conversations/${encodeURIComponent(key)}/messages?limit=${limit}`
+      );
+      if (currentId !== this.fetchId || key !== this.conversationKey || !res.ok) return [];
+      const data = (await res.json()) as {
+        messages?: { id: string }[];
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
+      };
+      if (currentId !== this.fetchId || key !== this.conversationKey) return [];
+      const onPage = new Set((data?.messages ?? []).map((m) => m.id));
+      const views: Record<string, MessageArtifactRef[]> = {};
+      const missing: string[] = [];
+      for (const id of ids) {
+        const refs = data?.messageArtifacts?.[id];
+        if (refs) views[id] = refs;
+        else if (!onPage.has(id)) missing.push(id);
+      }
+      // Messages an earlier load could not load refs for are retried by
+      // any page that carries them; they are never asked for on their own
+      // (not in `missing`), so a burst still costs one request.
+      const queued = new Set(ids);
+      const retried = [...this._artifactRefsUnavailable].filter(
+        (id) => onPage.has(id) && !queued.has(id)
+      );
+      for (const id of retried) {
+        const refs = data?.messageArtifacts?.[id];
+        if (refs) views[id] = refs;
+      }
+      this.mergeMessageArtifacts(views);
+      // A message whose refs could not be loaded is marked, not taken for
+      // one with none; a later page that loads them unmarks it.
+      this.applyArtifactRefsAvailability(
+        [...ids.filter((id) => onPage.has(id)), ...retried],
+        data?.messageArtifactsUnavailable
+      );
+      return missing;
+    } catch {
+      // The chips arrive with the next history load.
+      return [];
+    }
   }
 
   /** Drop a user's typing indicator (and its expiry timer), if one is active. */
@@ -2241,6 +2476,8 @@ export class ScionChatThread extends LitElement {
       items?: Message[];
       messages?: Message[];
       messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+      messageArtifacts?: Record<string, MessageArtifactRef[]>;
+      messageArtifactsUnavailable?: string[];
       messageExtensions?: Record<
         string,
         { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -2250,6 +2487,12 @@ export class ScionChatThread extends LitElement {
     // See fetchHistoryV2: re-checked once the body has been read.
     if (currentId !== this.fetchId) return;
     const items = data?.items ?? data?.messages ?? [];
+
+    this.mergeMessageArtifacts(data?.messageArtifacts);
+    this.applyArtifactRefsAvailability(
+      items.map((m) => m.id),
+      data?.messageArtifactsUnavailable
+    );
 
     // W7: Merge attachment refs from history response.
     if (data?.messageAttachments) {
@@ -2521,8 +2764,11 @@ export class ScionChatThread extends LitElement {
 
   /** Send a message in v2 mode. */
   private async handleChatSendV2(e: CustomEvent<ChatSendDetail>): Promise<void> {
-    const { text, attachmentIds, onSuccess, onError } = e.detail;
-    const hasContent = text.length > 0 || (attachmentIds && attachmentIds.length > 0);
+    const { text, attachmentIds, artifactRefs, onSuccess, onError } = e.detail;
+    const hasContent =
+      text.length > 0 ||
+      (attachmentIds && attachmentIds.length > 0) ||
+      (artifactRefs && artifactRefs.length > 0);
     if (!hasContent) return;
     // One send at a time per conversation. The guard is per conversation,
     // not per thread element: chat.ts reuses one element across
@@ -2545,6 +2791,63 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * Whether scheduled send is offered in this conversation: the experiment
+   * is on and the conversation supports it (topics and DMs).
+   */
+  private get scheduleSendAvailable(): boolean {
+    return conversationSupportsScheduledSend(this.conversationKey) && scheduledSendEnabled();
+  }
+
+  /**
+   * Schedule the composer's message (chat-schedule). Only the sender sees
+   * the pending message, in the scheduled list at the bottom of the thread.
+   * On failure the composer gets its draft (and reply) back.
+   */
+  private readonly handleChatScheduleV2 = async (
+    e: CustomEvent<ChatScheduleDetail>
+  ): Promise<void> => {
+    const { text, fireAt, replyToId, onSuccess, onError } = e.detail;
+    const key = this.conversationKey;
+    const savedReplyTo = this.composerReplyTo;
+    this.composerReplyTo = null;
+    try {
+      const scheduled = await createScheduledMessage(key, {
+        content: text,
+        fireAt,
+        idempotencyKey: crypto.randomUUID(),
+        ...(replyToId ? { replyToId } : {}),
+      });
+      this.renderRoot
+        .querySelector<ScionChatScheduledList>('scion-chat-scheduled-list')
+        ?.add(scheduled);
+      onSuccess();
+    } catch (err) {
+      if (key === this.conversationKey) this.composerReplyTo = savedReplyTo;
+      const msg = err instanceof Error ? err.message : 'Failed to schedule message';
+      onError?.(msg);
+      showToast(msg, 'danger');
+    }
+  };
+
+  /**
+   * Put a scheduled message's text into the composer: after Cancel (only
+   * into an empty composer) or Copy to composer.
+   */
+  private readonly handleScheduledRestore = (e: CustomEvent<ScheduledRestoreDetail>): void => {
+    const composer = this.renderRoot.querySelector<ScionChatComposer>('scion-chat-composer');
+    if (!composer) return;
+    const placed = composer.restoreText(e.detail.text, { onlyIfEmpty: e.detail.onlyIfEmpty });
+    if (!placed && !e.detail.onlyIfEmpty) {
+      showToast(
+        composer.editMessage
+          ? 'Finish the message being edited first'
+          : 'The message could not be copied into the composer',
+        'warning'
+      );
+    }
+  };
+
+  /**
    * POST one v2 send. With `wake` false the request carries `offer_wake`, so
    * a suspended primary the user may wake answers with a wake offer instead
    * of a failed row; the user is then asked, and a confirmed wake resends the
@@ -2557,6 +2860,7 @@ export class ScionChatThread extends LitElement {
       interrupt,
       mentions,
       attachmentIds,
+      artifactRefs,
       replyToId,
       replyToContent,
       onSuccess,
@@ -2588,8 +2892,10 @@ export class ScionChatThread extends LitElement {
       projectId: '',
       sender: '',
       senderId: this.selfUserId(),
-      recipient: this.defaultAgent ? 'agent:' + this.defaultAgent : '',
-      recipientId: this.defaultAgent || '',
+      // Name the agent by slug, as the server copy does, even when the
+      // default is stored by ID (a promoted DM stores the UUID).
+      recipient: this.defaultAgent ? 'agent:' + this.defaultAgentSlug() : '',
+      recipientId: this.defaultAgentMember()?.id || this.defaultAgent || '',
       msg: text,
       type: replyToId ? 'reply' : 'chat',
       agentId: '',
@@ -2670,6 +2976,14 @@ export class ScionChatThread extends LitElement {
         };
         body.metadata = metadata;
       }
+      // ptone/scion#3224: artifact references picked in the composer. The
+      // hub keeps only those the sender can read.
+      if (artifactRefs && artifactRefs.length > 0) {
+        body.metadata = {
+          ...(body.metadata ?? {}),
+          [ARTIFACTS_METADATA_KEY]: JSON.stringify(artifactRefs),
+        };
+      }
 
       const res = await this.postChatSend(
         `/api/v1/chat/conversations/${encodeURIComponent(sendConversationKey)}/messages`,
@@ -2713,12 +3027,21 @@ export class ScionChatThread extends LitElement {
         const resData = (await res.json().catch(() => null)) as {
           id?: string;
           attachments?: import('./chat-message.js').AttachmentRefInfo[];
+          artifacts?: MessageArtifactRef[];
+          artifactWarning?: string;
           dispatchState?: string;
           dispatchFailureReason?: string;
           dispatchFailureCode?: string;
         } | null;
         if (resData?.id && resData?.attachments && resData.attachments.length > 0) {
           this.v2AttachmentMap.set(resData.id, resData.attachments);
+        }
+        if (resData?.id && resData?.artifacts && resData.artifacts.length > 0) {
+          this.v2ArtifactMap.set(resData.id, resData.artifacts);
+          this.requestUpdate();
+        }
+        if (resData?.artifactWarning) {
+          showToast(resData.artifactWarning, 'warning');
         }
         // nc-delivery-unreachable: the backend now reports the real dispatch
         // outcome instead of always being "dispatched" on any HTTP 2xx.
@@ -2902,7 +3225,8 @@ export class ScionChatThread extends LitElement {
         mayHaveReachedHub = true;
       }
       if (Date.now() + this.wakeRetryDelayMs > giveUpAt) {
-        throw lastError ?? new WakeOutcomeUnknownError();
+        const err: unknown = lastError ?? new WakeOutcomeUnknownError();
+        throw err;
       }
       await new Promise((resolve) => setTimeout(resolve, this.wakeRetryDelayMs));
     }
@@ -3142,6 +3466,9 @@ export class ScionChatThread extends LitElement {
     const ext = this.v2MessageExtMap.get(messageId) || {};
     if (deletedAt) ext.deletedAt = deletedAt;
     this.v2MessageExtMap.set(messageId, ext);
+    // A deleted message shows no artifact refs, so it no longer keeps the
+    // could-not-load notice up.
+    this._artifactRefsUnavailable.delete(messageId);
     // Force re-render.
     this.messages = [...this.messages];
   }
@@ -3343,11 +3670,15 @@ export class ScionChatThread extends LitElement {
 
   private async loadOlderMessagesV2(scrollEl: HTMLElement): Promise<void> {
     const loadId = this.fetchId;
+    const jumpSeq = this._jumpSeq;
+    // A jump that started after this load replaced the view with the page
+    // around its target: this older page is not contiguous with it.
+    const jumpedSince = (): boolean => jumpSeq !== this._jumpSeq;
     this.loadingOlder = true;
     const prevScrollHeight = scrollEl.scrollHeight;
 
     try {
-      await this.fetchHistoryV2(this.nextCursor || undefined);
+      await this.fetchHistoryV2(this.nextCursor || undefined, () => !jumpedSince());
     } catch {
       // Silently fail for older messages
     } finally {
@@ -3356,8 +3687,13 @@ export class ScionChatThread extends LitElement {
       if (loadId === this.fetchId) {
         this.loadingOlder = false;
         await this.updateComplete;
-        const newScrollHeight = scrollEl.scrollHeight;
-        scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        // No scroll correction after a jump took over the view, or while a
+        // jump's smooth scroll is still settling: a scrollTop write would
+        // cancel that scroll, and its settle check corrects the landing.
+        if (!jumpedSince() && this._jumpScrollCleanup === null) {
+          const newScrollHeight = scrollEl.scrollHeight;
+          scrollEl.scrollTop += newScrollHeight - prevScrollHeight;
+        }
       }
     }
   }
@@ -3573,6 +3909,8 @@ export class ScionChatThread extends LitElement {
       this.messageMap.clear();
       this.messages = [];
       this.v2AttachmentMap.clear();
+      this.v2ArtifactMap.clear();
+      this._artifactRefsUnavailable.clear();
       this.v2MessageExtMap.clear();
       this.v2ReplyPreviewMap.clear();
       this.nextCursor = null;
@@ -3929,6 +4267,8 @@ export class ScionChatThread extends LitElement {
         messages?: Message[];
         nextCursor?: string;
         messageAttachments?: Record<string, import('./chat-message.js').AttachmentRefInfo[]>;
+        messageArtifacts?: Record<string, MessageArtifactRef[]>;
+        messageArtifactsUnavailable?: string[];
         messageExtensions?: Record<
           string,
           { messageId: string; replyToId?: string; editedAt?: string; deletedAt?: string }
@@ -3946,6 +4286,13 @@ export class ScionChatThread extends LitElement {
       for (const [msgId, refs] of Object.entries(data.messageAttachments ?? {})) {
         this.v2AttachmentMap.set(msgId, refs);
       }
+      this.v2ArtifactMap.clear();
+      this._artifactRefsUnavailable.clear();
+      this.mergeMessageArtifacts(data.messageArtifacts);
+      this.applyArtifactRefsAvailability(
+        items.map((m) => m.id),
+        data.messageArtifactsUnavailable
+      );
       for (const [msgId, ext] of Object.entries(data.messageExtensions ?? {})) {
         this.v2MessageExtMap.set(msgId, ext);
       }
@@ -4112,6 +4459,31 @@ export class ScionChatThread extends LitElement {
   // Phase-5: Context menu
   // ---------------------------------------------------------------------------
 
+  /**
+   * The agent member the thread default names. The stored value may be an
+   * agent ID, a slug, or a display name (see default-agent.ts).
+   */
+  private defaultAgentMember(): ChatAgentMember | undefined {
+    return findDefaultAgent(this.defaultAgent, this.agentMembers, (m) => m.displayName);
+  }
+
+  /**
+   * The thread default as a slug, for places that name the agent the way
+   * the server does. Falls back to the stored value when the agent isn't a
+   * known member or has no slug.
+   */
+  private defaultAgentSlug(): string {
+    return this.defaultAgentMember()?.slug || this.defaultAgent;
+  }
+
+  /** Whether `msg` was sent by the thread's default agent. */
+  private isDefaultAgentSender(msg: Message): boolean {
+    if (!this.defaultAgent) return false;
+    const member = this.defaultAgentMember();
+    if (member && msg.senderId === member.id) return true;
+    return msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgentSlug();
+  }
+
   /** The actions of a message's menu, shared by the popup and the sheet. */
   private messageMenuActions(msg: Message): MenuAction[] {
     const isOwnMessage = msg.senderId === (this._currentUserId || this.currentUserId);
@@ -4145,11 +4517,7 @@ export class ScionChatThread extends LitElement {
         run: () => this.handleContextMenuCopyLink(),
       }
     );
-    if (
-      this.isSenderAgent(msg) &&
-      !this.isDM &&
-      !(msg.sender.startsWith('agent:') && msg.sender.slice(6) === this.defaultAgent)
-    ) {
+    if (this.isSenderAgent(msg) && !this.isDM && !this.isDefaultAgentSender(msg)) {
       actions.push({
         id: 'set-default-agent',
         label: 'Make this agent thread default',
@@ -4573,10 +4941,39 @@ export class ScionChatThread extends LitElement {
 
   /** The peer's project from the global agent map, then the store's hub list. */
   private knownPeerAgentProjectId(peerAgentId: string): string {
-    const fromView = stateManager.getAgent(peerAgentId)?.projectId;
-    if (fromView) return fromView;
+    return this.knownPeerAgent(peerAgentId)?.projectId || '';
+  }
+
+  /**
+   * The peer's row that carries a project: the global agent map's, then the
+   * store's hub list's. Undefined when neither has one.
+   */
+  private knownPeerAgent(peerAgentId: string): Agent | undefined {
+    const fromView = stateManager.getAgent(peerAgentId);
+    if (fromView?.projectId) return fromView;
     const hub = agentStore.peek({ scope: 'hub' });
-    return (hub && agentIndexOf(hub).get(peerAgentId)?.projectId) || '';
+    const fromHub = hub ? agentIndexOf(hub).get(peerAgentId) : undefined;
+    return fromHub?.projectId ? fromHub : undefined;
+  }
+
+  /**
+   * Tell the page who the open agent DM's peer is. The page names the peer
+   * and fills the members sidebar from it when it had no row for the agent
+   * of its own when the DM opened (a DM opened by URL).
+   */
+  private reportPeerAgent(
+    conversationKey: string,
+    agentId: string,
+    agent: Partial<Agent>,
+    projectId: string
+  ): void {
+    this.dispatchEvent(
+      new CustomEvent<PeerAgentResolvedDetail>('peer-agent-resolved', {
+        detail: { conversationKey, agentId, name: agent.name || agent.slug || '', projectId },
+        bubbles: true,
+        composed: true,
+      })
+    );
   }
 
   /**
@@ -4585,14 +4982,28 @@ export class ScionChatThread extends LitElement {
    * thread opened directly, say, with no hub list loaded. The hub list is
    * not loaded for this: on a large hub that would walk every agent for one
    * id. A failed read is not cached, so the next open of the conversation
-   * reads again.
+   * reads again. Either way the peer is reported to the page: from the row
+   * already held, with no request, or from the read.
    */
   private async resolvePeerAgentProject(): Promise<void> {
     const conversationKey = this.conversationKey;
     const peerAgentId = this.peerAgentId();
-    if (!peerAgentId || this.knownPeerAgentProjectId(peerAgentId)) return;
-    if (this._peerAgentProject?.conversationKey === conversationKey) return;
-    const read = { conversationKey, projectId: '' };
+    if (!peerAgentId) return;
+    const known = this.knownPeerAgent(peerAgentId);
+    if (known) {
+      this.reportPeerAgent(conversationKey, peerAgentId, known, known.projectId || '');
+      return;
+    }
+    const cached = this._peerAgentProject;
+    if (cached?.conversationKey === conversationKey) {
+      // Back on a conversation already read (after a switch away, say): the
+      // page that asked may be showing it again, so report it again.
+      if (cached.done) {
+        this.reportPeerAgent(conversationKey, peerAgentId, { name: cached.name }, cached.projectId);
+      }
+      return;
+    }
+    const read = { conversationKey, projectId: '', name: '', done: false };
     this._peerAgentProject = read;
     try {
       const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(peerAgentId)}`, {
@@ -4601,6 +5012,11 @@ export class ScionChatThread extends LitElement {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const agent = (await res.json()) as Partial<Agent>;
       read.projectId = agent.projectId || '';
+      read.name = agent.name || agent.slug || '';
+      read.done = true;
+      if (this._peerAgentProject === read && this.conversationKey === conversationKey) {
+        this.reportPeerAgent(conversationKey, peerAgentId, agent, read.projectId);
+      }
     } catch {
       // Non-critical: path links in this DM fall back to the message's own project.
       if (this._peerAgentProject === read) this._peerAgentProject = null;
@@ -4675,6 +5091,7 @@ export class ScionChatThread extends LitElement {
     return html`
       <scion-chat-file-preview
         .target=${this.filePreview}
+        .currentUserId=${this.currentUserId}
         @chat-file-preview-close=${() => this.closeFilePreview()}
       ></scion-chat-file-preview>
     `;
@@ -4779,6 +5196,7 @@ export class ScionChatThread extends LitElement {
   /** /clear — Clear messages locally. */
   private handleSlashClear(): void {
     this.messageMap.clear();
+    this._artifactRefsUnavailable.clear();
     this.messages = [];
     this.interagentMessages = [];
     this.insertLocalSystemMessage('Conversation cleared.');
@@ -4926,7 +5344,7 @@ export class ScionChatThread extends LitElement {
     if (composer) {
       const slTextarea = (composer as LitElement).shadowRoot?.querySelector('sl-textarea');
       if (slTextarea) {
-        focusElement(slTextarea as HTMLElement);
+        focusElement(slTextarea);
       }
     }
   }
@@ -5015,6 +5433,19 @@ export class ScionChatThread extends LitElement {
   }
 
   /**
+   * The notice that some messages' artifact refs could not be loaded
+   * (ptone/scion#4295): one line for the thread, not one per message,
+   * since a failed load covers a whole history page.
+   */
+  private renderArtifactRefsNotice(): TemplateResult | typeof nothing {
+    if (this._artifactRefsUnavailable.size === 0) return nothing;
+    return html`<div class="artifact-refs-notice" role="status">
+      <sl-icon name="info-circle"></sl-icon>
+      <span>Artifact references could not be loaded. Reload to try again.</span>
+    </div>`;
+  }
+
+  /**
    * The send error. On a desktop layout, the full text, as it always was.
    * On a phone or tablet it is one line with an ellipsis, so its height
    * never changes with the frame; when the text is actually cut it is a
@@ -5093,7 +5524,13 @@ export class ScionChatThread extends LitElement {
   private renderV2() {
     return html`
       <div class="thread-container">
-        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()} ${this.renderSendError()}
+        ${this.renderInteragentToggle()} ${this.renderContentAndTyping()}
+        <scion-chat-scheduled-list
+          .conversationKey=${this.conversationKey}
+          ?enabled=${this.scheduleSendAvailable}
+          @chat-scheduled-restore=${this.handleScheduledRestore}
+        ></scion-chat-scheduled-list>
+        ${this.renderArtifactRefsNotice()} ${this.renderSendError()}
         <scion-chat-composer
           .agents=${this.agents}
           .members=${this.members}
@@ -5101,14 +5538,17 @@ export class ScionChatThread extends LitElement {
           .conversationMode=${this.isDM ? 'dm' : 'thread'}
           .peerName=${this.peerName}
           .projectId=${this.projectId}
+          .currentUserId=${this.currentUserId}
           .conversationKey=${this.conversationKey}
           .replyTo=${this.composerReplyTo}
           .editMessage=${this.composerEditMessage}
+          ?scheduleSendEnabled=${this.scheduleSendAvailable}
           ?disabled=${this.wakingConversationKey !== '' &&
           this.wakingConversationKey === this.conversationKey}
           @chat-cancel-reply=${this.handleComposerCancelReply}
           @chat-cancel-edit=${this.handleComposerCancelEdit}
           @chat-send=${this.handleChatSendV2}
+          @chat-schedule=${this.handleChatScheduleV2}
           @chat-edit=${this.handleChatEditV2}
           @chat-typing=${() => this.sendTypingEvent()}
           @default-agent-change=${this.handleDefaultAgentChange}
@@ -5398,7 +5838,7 @@ export class ScionChatThread extends LitElement {
             <scion-chat-system-line
               message=${msg.msg}
               timestamp=${msg.createdAt}
-              category=${(msg.metadata?.['system_category'] as string) || ''}
+              category=${msg.metadata?.['system_category'] || ''}
             ></scion-chat-system-line>
           `,
         });
@@ -5466,6 +5906,8 @@ export class ScionChatThread extends LitElement {
             dispatchFailureCode=${msg.dispatchFailureCode || ''}
             .attachments=${msg.attachments || EMPTY_ATTACHMENTS}
             .attachmentRefs=${this.getMessageAttachmentRefs(msg.id)}
+            .artifactRefs=${this.getMessageArtifactRefs(msg.id)}
+            .currentUserId=${this.currentUserId}
             routedTo=${msgRoutedTo}
             .replyPreview=${replyPreview}
             editedAt=${ext?.editedAt || ''}

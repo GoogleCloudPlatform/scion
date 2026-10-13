@@ -22,7 +22,6 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -44,48 +43,6 @@ import (
 //
 // The other four agent_defaults fields are deliberately absent from both: they
 // must land BELOW the template, which nothing stamped hub-side can do.
-
-// setHubAgentDefaults sets the hub operational agent_defaults on a test server,
-// simulating what ApplySnapshot does in Postgres mode. Writes under s.mu, the
-// same lock hubAgentDefaults() reads under.
-func setHubAgentDefaults(srv *Server, d opsettings.AgentDefaultsSettings) {
-	srv.mu.Lock()
-	defer srv.mu.Unlock()
-	srv.config.AgentDefaults = d
-}
-
-// recordsContaining returns captured log records whose message contains sub.
-func (h *levelCapturingHandler) recordsContaining(sub string) []slog.Record {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	var out []slog.Record
-	for _, r := range h.records {
-		if strings.Contains(r.Message, sub) {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// hubDefaultTemplateWarnings returns the records emitted by
-// warnHubDefaultTemplateUnusable.
-func (h *levelCapturingHandler) hubDefaultTemplateWarnings() []slog.Record {
-	return h.recordsContaining("hub operational default_template is unusable")
-}
-
-// recordAttr reads a single attribute off a captured record.
-func recordAttr(r slog.Record, key string) (slog.Value, bool) {
-	var found slog.Value
-	var ok bool
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == key {
-			found, ok = a.Value, true
-			return false
-		}
-		return true
-	})
-	return found, ok
-}
 
 // ---------------------------------------------------------------------------
 // applyHubAgentDefaults — the unit-level rank contract
@@ -1352,16 +1309,4 @@ func TestDispatchAgentEventHandler_FileMode_NoHubDefaultRungFires(t *testing.T) 
 	assert.Empty(t, created.Template)
 	require.NotNil(t, created.AppliedConfig)
 	assert.Empty(t, created.AppliedConfig.HarnessConfig)
-}
-
-// findMockAgent returns the agent with the given slug from the mock store.
-func findMockAgent(ms *mockScheduledEventStore, slug string) *store.Agent {
-	ms.mu.Lock()
-	defer ms.mu.Unlock()
-	for _, a := range ms.agents {
-		if a.Slug == slug {
-			return a
-		}
-	}
-	return nil
 }

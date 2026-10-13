@@ -525,14 +525,6 @@ func TestBrokerHTTPTransport_ExecuteKeys_ClearsGetBodyOnSignedPath(t *testing.T)
 	}
 }
 
-// failingSigner always fails, for testing that a signing failure — proven to
-// occur before anything is sent — classifies as agentkeys.ErrNotDispatched.
-type failingSigner struct{}
-
-func (failingSigner) Sign(context.Context, *http.Request, string) error {
-	return errors.New("boom: no broker secret")
-}
-
 // TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched proves a
 // signing failure (e.g. a missing/expired broker secret) is reported as
 // agentkeys.ErrNotDispatched, and that the transport never attempts to send
@@ -552,39 +544,6 @@ func TestBrokerHTTPTransport_ExecuteKeys_SignerFailureIsNotDispatched(t *testing
 	if spy.calls != 0 {
 		t.Fatalf("expected zero HTTP calls when signing fails, got %d", spy.calls)
 	}
-}
-
-// pendingDialKeysClient returns an HTTPRuntimeBrokerClient whose keys
-// transport dials through a stub that never connects: each dial blocks until
-// the test ends. This reproduces a broker endpoint that is not reachable
-// (for example a broker that only connects out over the control channel)
-// without depending on the sandbox's network behaviour. The returned counter
-// reports how many dials were started.
-func pendingDialKeysClient(t *testing.T, clientTimeout time.Duration) (*HTTPRuntimeBrokerClient, *atomic.Int32) {
-	t.Helper()
-	release := make(chan struct{})
-	var dials atomic.Int32
-	rt := &http.Transport{
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			dials.Add(1)
-			select {
-			case <-release:
-			case <-ctx.Done():
-			}
-			return nil, errors.New("stub dial abandoned")
-		},
-	}
-	t.Cleanup(func() {
-		close(release)
-		rt.CloseIdleConnections()
-	})
-	client := NewHTTPRuntimeBrokerClient()
-	// Wrap the stub the same way newBrokerHTTPTransport wraps
-	// http.DefaultTransport, so the trace context goes through otelhttp
-	// exactly as it does in production.
-	client.transport.keysClient.Transport = otelhttp.NewTransport(rt)
-	client.transport.keysClient.Timeout = clientTimeout
-	return client, &dials
 }
 
 // TestHTTPRuntimeBrokerClient_ExecuteKeys_PendingDialIsNotDispatched pins

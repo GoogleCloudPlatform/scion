@@ -44,9 +44,13 @@ import (
 	"k8s.io/client-go/tools/remotecommand"
 )
 
+// tmuxSessionPollInterval is a variable rather than a constant only so tests
+// can shorten it (see useFastPTYTimings in the package tests); production
+// code never reassigns it.
+var tmuxSessionPollInterval = 500 * time.Millisecond
+
 const (
-	tmuxSessionWaitTimeout  = 30 * time.Second
-	tmuxSessionPollInterval = 500 * time.Millisecond
+	tmuxSessionWaitTimeout = 30 * time.Second
 
 	// tmuxAttachCmd is the shell cmd that attaches to the agent's
 	// tmux session for an interactive PTY stream. The TERM env
@@ -65,7 +69,10 @@ const (
 	cloudRunSandboxBin = "/usr/local/gcp/bin/sandbox"
 )
 
-const (
+// These are variables rather than constants only so tests can shorten them
+// (see useFastPTYTimings in the package tests); production code never
+// reassigns them.
+var (
 	// processExitGracePeriod is how long to wait for the runtime exec process
 	// to exit after the PTY master is closed. The PTY close triggers a terminal
 	// hangup (SIGHUP) that should cause the exec process to exit naturally.

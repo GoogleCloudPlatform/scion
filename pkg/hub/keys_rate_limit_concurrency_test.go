@@ -30,36 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 )
 
-// keysFakeClock is a goroutine-safe, manually advanced clock for
-// newKeysRateLimiterWithClock.
-type keysFakeClock struct {
-	mu  sync.Mutex
-	now time.Time
-}
-
-func newKeysFakeClock() *keysFakeClock {
-	return &keysFakeClock{now: time.Unix(1_700_000_000, 0)}
-}
-
-func (c *keysFakeClock) Now() time.Time {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.now
-}
-
-func (c *keysFakeClock) Advance(d time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.now = c.now.Add(d)
-}
-
-// keysBudget is the most a token bucket starting full may admit over a
-// closed window of the given length: burst + floor(rate * elapsed).
-// Durations used by these tests keep rate*elapsed integral.
-func keysBudget(rate, burst float64, elapsed time.Duration) int {
-	return int(burst + rate*elapsed.Seconds())
-}
-
 // runConcurrentAllowBoth releases callersPerPrincipal goroutines per
 // principal at once (a start barrier maximizes overlap), each attempting
 // attemptsPerCaller allowBoth calls against the same target, and returns

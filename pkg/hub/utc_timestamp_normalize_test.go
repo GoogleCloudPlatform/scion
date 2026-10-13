@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"sort"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -795,22 +794,4 @@ func TestUTCTimestampNormalize_StartupCheckRunsInBackground(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return strings.Contains(logs.String(), "tables_unreadable=[messages]")
 	}, 10*time.Second, 10*time.Millisecond)
-}
-
-// syncBuffer is a bytes.Buffer safe for a background writer.
-type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (b *syncBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
-}
-
-func (b *syncBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.String()
 }

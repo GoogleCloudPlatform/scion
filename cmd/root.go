@@ -6,15 +6,18 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -109,9 +112,27 @@ return an error instead of blocking.`,
 			autoConfirm = true
 		}
 
-		// Enable debug mode if --debug flag is set
-		if debugMode {
-			util.EnableDebug()
+		// Enable debug mode if --debug flag is set, and in agent mode
+		// ignore an inherited SCION_DEBUG (see configureDebugOutput).
+		// The CLI mode depends only on the environment and global
+		// settings, so it is resolved once here and reused below.
+		mode := resolveMode()
+		configureDebugOutput(mode, debugMode)
+
+		// Target-hub profiles (ptone/scion#4240): refuse commands outside
+		// the profile allow-list, and apply the agent-mode target rule.
+		if err := checkHubProfileGate(cmd, mode); err != nil {
+			return err
+		}
+		if hubProfileSelected() {
+			// A profile names its hub: no local project, settings, registry
+			// or agent-container hub checks apply, and none are read.
+			if mode == ModeAgent {
+				nonInteractive = true
+				autoConfirm = true
+			}
+			cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
+			return nil
 		}
 
 		// Detect agent container context without a reachable Hub endpoint.
@@ -119,6 +140,23 @@ return an error instead of blocking.`,
 		// If present but no non-localhost Hub endpoint is configured, the CLI
 		// cannot do anything useful — warn the agent and abort.
 		if err := checkAgentContainerContext(cmd); err != nil {
+			return err
+		}
+
+		// A config subcommand's own --global flag (config set --global,
+		// config migrate --global) shadows the root --global, so cobra never
+		// sets globalMode for it. Treat it as the root flag too, so the
+		// command runs outside a project (ptone/scion#3317).
+		if subcommandGlobalFlagSet(cmd) {
+			globalMode = true
+		}
+
+		// Fill the hub endpoint and project from the current context
+		// ('scion use') where no flag, environment variable or directory
+		// project chose them. It runs after every --global form is known
+		// and before the project requirement check, so a selected project
+		// satisfies it.
+		if err := resolveInvocationTarget(cmd, mode); err != nil {
 			return err
 		}
 
@@ -134,59 +172,7 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Determine if this command requires explicit project context
-		// Commands that don't require project context:
-		// - help, version, completion (built-in or explicit)
-		// - init, project init (creates project)
-		// - server (runs hub server, doesn't need local project)
-		cmdName := cmd.Name()
-		parentName := ""
-		if cmd.Parent() != nil {
-			parentName = cmd.Parent().Name()
-		}
-
-		requiresProject := true
-		switch cmdName {
-		case "help", "version", "completion", "doctor", "whoami", "global-flags":
-			requiresProject = false
-		case "init":
-			// Both top-level init and project init don't require existing project
-			requiresProject = false
-		case "shadow", "unshadow":
-			// hub shadow/unshadow create/remove the project marker — they must
-			// run in a directory with no existing project.
-			if parentName == "hub" {
-				requiresProject = false
-			}
-		case "migrate-names", "migrate":
-			// hub secret migrate-names (GCP SM name migration) and hub secret
-			// migrate (DB -> GCP SM value migration) operate directly against
-			// the Hub DB and GCP Secret Manager; neither reads or resolves
-			// the current directory's scion project (ptone/scion#2396).
-			if parentName == "secret" && commandInSubtree(cmd, "hub") {
-				requiresProject = false
-			}
-		case "scion":
-			// Root command itself doesn't require project
-			requiresProject = false
-		}
-		// Server subcommands run the hub server and don't need a local project
-		if commandInSubtree(cmd, "server") {
-			requiresProject = false
-		}
-		// Admin subcommands connect directly to the database and don't need a local project
-		if commandInSubtree(cmd, "admin") {
-			requiresProject = false
-		}
-		// Project subcommands operate on all projects, not just the current one
-		if parentName == "project" {
-			requiresProject = false
-		}
-		// design Amendment A26.2 O1: same reasoning as checkAgentContainerContext
-		// above — --handoff-template never touches the project or the Hub.
-		if isReincarnateHandoffTemplateInvocation(cmd) {
-			requiresProject = false
-		}
+		requiresProject := commandRequiresProject(cmd)
 
 		// For commands that require project context, use RequireProjectPath
 		// to error if no project found and --global not specified
@@ -196,23 +182,33 @@ return an error instead of blocking.`,
 			}
 		}
 
-		// Load settings to get cli.autohelp
-		settings, err := config.LoadSettings(projectPath)
-		if err == nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
-			autoHelp = *settings.CLI.AutoHelp
-		}
+		// Hub-only commands never read local project settings: for them
+		// --project names a hub project, not a directory.
+		hubOnly := hubOnlyCommands[topLevelName(cmd)]
 
-		// Check versioned settings for cli.interactive_disabled
-		if vs, _, vsErr := config.LoadEffectiveSettings(projectPath); vsErr == nil && vs != nil {
-			if vs.CLI != nil && vs.CLI.InteractiveDisabled != nil && *vs.CLI.InteractiveDisabled {
-				nonInteractive = true
-				autoConfirm = true
+		if !hubOnly {
+			// Load settings to get cli.autohelp
+			settings, err := config.LoadSettings(projectPath)
+			if err == nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
+				autoHelp = *settings.CLI.AutoHelp
+			}
+
+			// Check versioned settings for cli.interactive_disabled
+			if vs, _, vsErr := config.LoadEffectiveSettings(projectPath); vsErr == nil && vs != nil {
+				if vs.CLI != nil && vs.CLI.InteractiveDisabled != nil && *vs.CLI.InteractiveDisabled {
+					nonInteractive = true
+					autoConfirm = true
+				}
+			}
+
+			if projectPath == "" {
+				printShadowNotice(cmd)
 			}
 		}
 
 		// Agent mode implies non-interactive: prompts that require stdin
 		// will hang indefinitely inside an unattended agent container.
-		if !nonInteractive && resolveMode() == ModeAgent {
+		if !nonInteractive && mode == ModeAgent {
 			nonInteractive = true
 			autoConfirm = true
 			util.Debugf("agent mode detected, non-interactive mode auto-enabled")
@@ -220,8 +216,8 @@ return an error instead of blocking.`,
 
 		// Check image_registry is configured for commands that need it.
 		// Skip for config commands (users need those to set the registry).
-		// Skip in hub context (inside a container, the agent is already
-		// running — image_registry is not needed).
+		// Skip for hub-dispatched work: the broker that runs the agent
+		// resolves images, so the local registry setting is not needed.
 		requiresRegistry := requiresProject
 		if commandInSubtree(cmd, "config") {
 			requiresRegistry = false
@@ -229,7 +225,7 @@ return an error instead of blocking.`,
 		if commandInSubtree(cmd, "hub") || commandInSubtree(cmd, "server") {
 			requiresRegistry = false
 		}
-		if requiresRegistry && config.IsHubContext() {
+		if requiresRegistry && isHubDispatchInvocation(projectPath) {
 			requiresRegistry = false
 		}
 		// Shadow projects never launch containers locally — skip registry check.
@@ -245,7 +241,14 @@ return an error instead of blocking.`,
 		}
 
 		// Check for dev auth usage and warn if Hub is enabled
-		printDevAuthWarningIfNeeded(projectPath)
+		if !hubOnly {
+			printDevAuthWarningIfNeeded(cmd.ErrOrStderr(), projectPath)
+		}
+
+		// Hand the normalized root flag values to the command (see
+		// rootOptions). This must stay last so the snapshot reflects every
+		// adjustment above.
+		cmd.SetContext(cliutil.WithRootOptions(cmd.Context(), snapshotRootOptions()))
 
 		return nil
 	},
@@ -268,6 +271,16 @@ func Execute() {
 	target, _, _ := rootCmd.Find(cliArgs)
 	maybeWarnRemovedLegacyEnv(target)
 
+	// Decide early whether an inherited SCION_DEBUG applies. This call is
+	// load-bearing: the settings loads below and anything else that runs
+	// before PersistentPreRunE can emit debug lines, and without it they
+	// (and the SCION_DEBUG deprecation warning) would still follow the
+	// inherited SCION_DEBUG inside an agent.
+	// Resolving the mode loads settings, so it runs after the legacy-env
+	// warning above.
+	mode := resolveMode()
+	configureDebugOutput(mode, false)
+
 	// Early settings load to determine autoHelp behavior
 	// This handles cases where ExecuteC fails during flag parsing or unknown commands
 	tempProjectPath := ""
@@ -284,31 +297,73 @@ func Execute() {
 			tempProjectPath = "global"
 		}
 	}
-	settings, _ := config.LoadSettings(tempProjectPath)
-	if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
-		autoHelp = *settings.CLI.AutoHelp
+	// Hub-only commands skip it: their --project is not a directory. So do
+	// hub profile invocations, which never read local project settings.
+	if !hubOnlyCommands[topLevelName(target)] && !hubProfileRequested() {
+		settings, _ := config.LoadSettings(tempProjectPath)
+		if settings != nil && settings.CLI != nil && settings.CLI.AutoHelp != nil {
+			autoHelp = *settings.CLI.AutoHelp
+		}
 	}
 
-	applyModeRestrictions(rootCmd)
+	applyModeRestrictions(rootCmd, mode)
 
-	// Suppress ASCII banner in agent mode. This runs after early flag
-	// parsing so resolveMode() can safely load settings and the project
-	// path is available — unlike init(), where flags haven't been parsed.
-	if resolveMode() == ModeAgent {
+	// Suppress ASCII banner in agent mode. This runs in Execute rather
+	// than init(), where the mode cannot yet be resolved safely.
+	if mode == ModeAgent {
 		rootCmd.Long = ""
 	}
 
 	cmd, err := rootCmd.ExecuteC()
+	if err != nil && topLevelName(cmd) == "ssh" {
+		// scion ssh follows the ssh convention: any failure before the
+		// remote command runs, from the root hook included, exits 255.
+		os.Exit(reportSSHError(os.Stderr, err))
+	}
+	if err != nil && plainErrorCommands[topLevelName(cmd)] {
+		// One plain line, no usage block, and the command's own exit code.
+		os.Exit(reportPlainError(os.Stderr, err))
+	}
 	if err != nil {
 		// A failure already reported in the JSON output only sets the exit
 		// status; printing it again would add noise for JSON consumers.
 		if !isReportedInJSON(err) {
-			fmt.Fprintf(os.Stderr, "\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset)
+			fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
 			if showUsageForError(cmd, err, autoHelp) {
 				_ = cmd.Usage()
 			}
 		}
 		os.Exit(exitCodeFor(err))
+	}
+}
+
+// plainErrorCommands are top-level commands whose failures are reported as
+// one plain stderr line with no usage block, and whose exit codes follow
+// the tunnel exit-code table. They run under ssh and editors, where the
+// error lands in a log. One command per line.
+var plainErrorCommands = map[string]bool{
+	"tunnel":     true,
+	"ssh-config": true,
+}
+
+// formatCLIError renders a failed command's error for f. The error banner is
+// coloured only when f is a terminal and NO_COLOR is unset; otherwise every
+// ANSI escape sequence is removed, including any carried in the error text
+// itself, so piped stderr stays plain.
+func formatCLIError(f *os.File, err error) string {
+	return util.ColorFor(f, fmt.Sprintf("\n%s%s%sError: %v%s\n\n", util.BgRed, util.White, util.Bold, err, util.Reset))
+}
+
+// configureDebugOutput sets up CLI debug output for one invocation. An
+// explicit --debug always enables it. In agent mode the CLI also ignores
+// the deprecated SCION_DEBUG alias: inside an agent it is usually inherited
+// from an older broker that set it in every agent, not chosen for the
+// command, and honouring it would print debug lines and the deprecation
+// warning on every command. SCION_LOG_LEVEL still applies in every mode.
+func configureDebugOutput(mode CLIMode, explicitDebug bool) {
+	loglevel.SetIgnoreDebugAlias(mode == ModeAgent)
+	if explicitDebug {
+		util.EnableDebug()
 	}
 }
 
@@ -419,7 +474,7 @@ func commandInSubtree(cmd *cobra.Command, name string) bool {
 }
 
 func init() {
-	rootCmd.Long = util.GetBanner() + "\n" + rootCmd.Long
+	rootCmd.Long = util.ColorFor(os.Stdout, util.GetBanner()) + "\n" + rootCmd.Long
 	rootCmd.PersistentFlags().StringVarP(&projectPath, "project", "g", "", "Project identifier: path, slug (with Hub), or git URL (with Hub)")
 
 	rootCmd.PersistentFlags().BoolVar(&globalMode, "global", false, "Use the global project (equivalent to --project global)")
@@ -427,12 +482,13 @@ func init() {
 	rootCmd.PersistentFlags().StringVar(&outputFormat, "format", "", "Output format (e.g., json)")
 
 	// Hub integration flags
-	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
+	_ = rootCmd.RegisterFlagCompletionFunc("hub", completeHubNames)
 	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
 
 	// Confirmation and non-interactive flags
-	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Skip confirmation prompt")
-	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes, errors on ambiguous prompts")
+	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
+	rootCmd.PersistentFlags().BoolVar(&nonInteractive, "non-interactive", false, "Non-interactive mode: implies --yes (answers Yes to every confirmation), errors on ambiguous prompts")
 
 	// Display zone for human-readable times (JSON output is always UTC)
 	rootCmd.PersistentFlags().StringVar(&displayTZ, "tz", "", "Show times in this IANA time zone, e.g. America/New_York (default: local zone; JSON output is unchanged)")
@@ -440,7 +496,7 @@ func init() {
 	rootCmd.MarkFlagsMutuallyExclusive("tz", "utc")
 
 	// Debug mode flag
-	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output; agents started by this command also get SCION_DEBUG=1. 'scion server start' has its own --debug (see its help).")
+	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "Enable debug output from this command only; agents it starts are not affected (use --agent-log-level on start or resume for that). 'scion server start' has its own --debug (see its help).")
 
 	// Hide flags leaked from rclone via transitive import.
 	// These are registered on pflag.CommandLine (the global flag set), which
@@ -553,9 +609,11 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and prints a warning.
+// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and
+// prints a warning on stderr (the command's error writer), never on stdout,
+// so it cannot mix into JSON or other machine-read output.
 // This function is called on every command invocation via PersistentPreRunE.
-func printDevAuthWarningIfNeeded(projectPath string) {
+func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 	// Skip if --no-hub flag is set
 	if noHub {
 		return
@@ -568,7 +626,10 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override)
+	// Check if Hub is enabled (either via settings or --hub flag override).
+	// A hub selected with 'scion use' is in hubEndpoint too and counts the
+	// same way: a project from the current context is resolved on that hub
+	// without hub.enabled, so dev auth is really in use.
 	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
 	if !hubEnabled {
 		return
@@ -607,8 +668,14 @@ func printDevAuthWarningIfNeeded(projectPath string) {
 	}
 
 	// Dev auth is being used with Hub enabled - print warning to stderr
-	fmt.Fprintf(os.Stderr, "\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
+	banner := fmt.Sprintf("\n%s%s WARNING: Development authentication enabled - not for production use %s\n\n",
 		util.Bold, util.Yellow, util.Reset)
+	if f, ok := stderr.(*os.File); ok {
+		banner = util.ColorFor(f, banner)
+	} else {
+		banner = util.StripANSI(banner)
+	}
+	_, _ = fmt.Fprint(stderr, banner)
 }
 
 // checkAgentContainerContext detects when the CLI is running inside an agent

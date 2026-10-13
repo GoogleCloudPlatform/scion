@@ -196,11 +196,11 @@ func TestProcessHookData_SessionMetricsReportedAcrossHookRuns(t *testing.T) {
 // Without a configured Hub client nothing is persisted or reported.
 func TestWireSessionMetrics_NoHubClient(t *testing.T) {
 	h := handlers.NewTelemetryHandler(nil, nil, nil)
-	wireSessionMetrics(h, hub.NewClientWithConfig("", "", ""), t.TempDir())
+	wireSessionMetrics(context.Background(), h, hub.NewClientWithConfig("", "", ""), t.TempDir())
 	if h.SessionState != nil || h.OnSessionEnd != nil {
 		t.Fatal("session metrics wired without a configured Hub client")
 	}
-	wireSessionMetrics(h, hub.NewClientWithConfig("http://hub.invalid", "tok", "agent"), "")
+	wireSessionMetrics(context.Background(), h, hub.NewClientWithConfig("http://hub.invalid", "tok", "agent"), "")
 	if h.SessionState != nil || h.OnSessionEnd != nil {
 		t.Fatal("session metrics wired without a home directory")
 	}

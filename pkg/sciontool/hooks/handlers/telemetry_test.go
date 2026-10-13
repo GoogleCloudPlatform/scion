@@ -23,6 +23,7 @@ import (
 )
 
 func TestNewTelemetryHandler(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// Test with nil TracerProvider (should use noop)
 	h := NewTelemetryHandler(nil, nil, nil)
 	if h == nil {
@@ -34,6 +35,7 @@ func TestNewTelemetryHandler(t *testing.T) {
 }
 
 func TestNewTelemetryHandler_AcceptsLegacyRedactorArgument(t *testing.T) {
+	scrubTelemetryEnv(t)
 	redactor := telemetry.NewRedactor(telemetry.RedactionConfig{
 		Redact: []string{"prompt"},
 		Hash:   []string{"session_id"},
@@ -46,6 +48,7 @@ func TestNewTelemetryHandler_AcceptsLegacyRedactorArgument(t *testing.T) {
 }
 
 func TestTelemetryHandler_HandleNilEvent(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	// Should not panic on nil event
@@ -56,6 +59,7 @@ func TestTelemetryHandler_HandleNilEvent(t *testing.T) {
 }
 
 func TestTelemetryHandler_MetricAttrsPreferCanonicalProject(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_PROJECT_ID", "canonical-project")
 	h := NewTelemetryHandler(nil, nil, nil)
 	attrs := h.metricAttrs()
@@ -74,6 +78,7 @@ func TestTelemetryHandler_MetricAttrsPreferCanonicalProject(t *testing.T) {
 }
 
 func TestTelemetryHandler_HandleUnknownEvent(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	event := &hooks.Event{
@@ -88,6 +93,7 @@ func TestTelemetryHandler_HandleUnknownEvent(t *testing.T) {
 }
 
 func TestTelemetryHandler_HandleToolStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	event := &hooks.Event{
@@ -107,6 +113,7 @@ func TestTelemetryHandler_HandleToolStart(t *testing.T) {
 }
 
 func TestTelemetryHandler_HandleToolStartEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	// Start event
@@ -136,6 +143,7 @@ func TestTelemetryHandler_HandleToolStartEnd(t *testing.T) {
 }
 
 func TestTelemetryHandler_HandleSessionEvents(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	events := []struct {
@@ -161,6 +169,7 @@ func TestTelemetryHandler_HandleSessionEvents(t *testing.T) {
 }
 
 func TestTelemetryHandler_Flush(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	// Start some events without ending them
@@ -181,6 +190,7 @@ func TestTelemetryHandler_Flush(t *testing.T) {
 }
 
 func TestSpanMapping(t *testing.T) {
+	scrubTelemetryEnv(t)
 	expectedMappings := map[string]string{
 		hooks.EventSessionStart:     "agent.session.start",
 		hooks.EventSessionEnd:       "agent.session.end",
@@ -228,6 +238,7 @@ func (p *recordingProcessor) Records() []sdklog.Record {
 }
 
 func TestTelemetryHandler_NilLoggerProvider(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// Handler with nil LoggerProvider should process events without error
 	h := NewTelemetryHandler(nil, nil, nil)
 	if h.logger != nil {
@@ -247,6 +258,7 @@ func TestTelemetryHandler_NilLoggerProvider(t *testing.T) {
 }
 
 func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
+	scrubTelemetryEnv(t)
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -299,6 +311,7 @@ func TestTelemetryHandler_WithLoggerProvider(t *testing.T) {
 }
 
 func TestTelemetryHandler_LeavesPolicyTransformationToReceiver(t *testing.T) {
+	scrubTelemetryEnv(t)
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -344,6 +357,7 @@ func TestTelemetryHandler_LeavesPolicyTransformationToReceiver(t *testing.T) {
 }
 
 func TestTelemetryHandler_LogRecordIncludesFilePath(t *testing.T) {
+	scrubTelemetryEnv(t)
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -387,6 +401,7 @@ func TestTelemetryHandler_LogRecordIncludesFilePath(t *testing.T) {
 }
 
 func TestTelemetryHandler_LogRecordIncludesTokens(t *testing.T) {
+	scrubTelemetryEnv(t)
 	proc := &recordingProcessor{}
 	lp := sdklog.NewLoggerProvider(sdklog.WithProcessor(proc))
 	defer func() { _ = lp.Shutdown(context.Background()) }()
@@ -433,6 +448,7 @@ func TestTelemetryHandler_LogRecordIncludesTokens(t *testing.T) {
 }
 
 func TestNewTelemetryHandler_WithMeterProvider(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -462,6 +478,7 @@ func TestNewTelemetryHandler_WithMeterProvider(t *testing.T) {
 }
 
 func TestTelemetryHandler_NilMeterProviderNoInstruments(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 	if h.usageTokens != nil {
 		t.Error("usageTokens should be nil without MeterProvider")
@@ -472,6 +489,7 @@ func TestTelemetryHandler_NilMeterProviderNoInstruments(t *testing.T) {
 }
 
 func TestTelemetryHandler_ToolMetrics(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -522,6 +540,7 @@ func TestTelemetryHandler_ToolMetrics(t *testing.T) {
 }
 
 func TestTelemetryHandler_ModelMetrics(t *testing.T) {
+	scrubTelemetryEnv(t)
 	// Usage (gen_ai.api.calls / scion.usage.tokens) is gated by
 	// SCION_USAGE_SOURCE=hooks (design D10 vetting gate); see
 	// TestTelemetryHandler_UsageSourceGate for the unset/native states.
@@ -575,6 +594,7 @@ func TestTelemetryHandler_ModelMetrics(t *testing.T) {
 }
 
 func TestTelemetryHandler_SessionMetrics(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -609,6 +629,7 @@ func TestTelemetryHandler_SessionMetrics(t *testing.T) {
 }
 
 func TestSessionMetricScopesSeparateHookAndLifecycleSources(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for _, tc := range []struct {
 		name, scope string
 		newHandler  func(metric.MeterProvider) *TelemetryHandler
@@ -659,6 +680,7 @@ func usageTokenTotals(rm metricdata.ResourceMetrics) map[string]int64 {
 }
 
 func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -737,6 +759,7 @@ func TestTelemetryHandler_TokenMetricsOnModelEnd(t *testing.T) {
 // descriptor compatibility (design §3.2); scion.usage.tokens does not,
 // because its GCP allowlist doesn't permit them.
 func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_AGENT_ID", "agent-1")
 	t.Setenv("SCION_PROJECT_ID", "project-1")
@@ -856,6 +879,7 @@ func TestTelemetryHandler_UsageTokenLabelsMatchContract(t *testing.T) {
 // {harness, model, token_type}, gated the same way as the other three by
 // SCION_USAGE_SOURCE (none when unset or native, all five when hooks).
 func TestTelemetryHandler_RecordsCacheWriteAndReasoningTokens(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for _, tc := range []struct {
 		name            string
 		usageSource     string
@@ -961,6 +985,7 @@ func TestTelemetryHandler_RecordsCacheWriteAndReasoningTokens(t *testing.T) {
 // unset (the vetting-gate default) and when it is "native" (the deriver owns
 // usage instead). Tool and session hook metrics are unaffected in every case.
 func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
+	scrubTelemetryEnv(t)
 	for _, tc := range []struct {
 		name        string
 		usageSource string
@@ -1052,6 +1077,7 @@ func TestTelemetryHandler_UsageSourceGate(t *testing.T) {
 }
 
 func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -1096,6 +1122,7 @@ func TestTelemetryHandler_SessionTotalsDoNotDuplicateModelTokens(t *testing.T) {
 }
 
 func TestTelemetryHandler_UnpairedToolEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	defer func() { _ = mp.Shutdown(context.Background()) }()
@@ -1130,6 +1157,7 @@ func TestTelemetryHandler_UnpairedToolEnd(t *testing.T) {
 }
 
 func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -1174,6 +1202,7 @@ func TestTelemetryHandler_UnpairedModelEnd(t *testing.T) {
 }
 
 func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -1208,6 +1237,7 @@ func TestTelemetryHandler_NoTokenMetricsWhenZero(t *testing.T) {
 // payload named one (EventData.Model, ptone/scion#2242). Unlike the usage
 // metric label, they never fall back to SCION_MODEL or "unknown".
 func TestTelemetryHandler_ModelAttributeOnSpansAndLogs(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_MODEL", "configured-model")
 
 	cases := []struct {

@@ -42,12 +42,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// gcpUseResource builds the Resource Decide sees for one gcp_service_account
-// row, mirroring gcpServiceAccountResource without requiring a persisted row.
-func gcpUseResource(id string) Resource {
-	return Resource{Type: permissions.ResourceGCPServiceAccount, ID: id}
-}
-
 // seedPostBackfillAdminEdge marks the delegation-edge backfill migration as
 // complete and records a project-scoped delegation edge from a system-admin
 // user to agentID. checkUserHoldsPermission short-circuits on IsSystemAdmin,

@@ -15,6 +15,7 @@
 package runtimebroker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -221,45 +222,24 @@ func TestHandleRequest_AsyncDoesNotBlockCaller(t *testing.T) {
 }
 
 func TestDispatchRequest_SendsResponse(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_SendsResponse)
+}
+
+func testDispatchRequest_SendsResponse(t *testing.T, tr tunnelTransport) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Test", "yes")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"ok":true}`))
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "test-req-1",
 		Method:    "GET",
 		Path:      "/api/v1/agents",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-	client.wg.Wait()
-
-	// Read the response from the hub side
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err != nil {
-		t.Fatalf("failed to read response from hub side: %v", err)
-	}
+	})
+	resp := h.response(t, "test-req-1")
+	h.wait(t)
 
 	if resp.RequestID != "test-req-1" {
 		t.Errorf("expected requestID 'test-req-1', got %q", resp.RequestID)
@@ -270,47 +250,31 @@ func TestDispatchRequest_SendsResponse(t *testing.T) {
 	if string(resp.Body) != `{"ok":true}` {
 		t.Errorf("unexpected body: %s", string(resp.Body))
 	}
+	if got := resp.Headers["X-Test"]; got != "yes" {
+		t.Errorf("expected X-Test header 'yes', got %q", got)
+	}
 }
 
 func TestDispatchRequest_PanicRecovery(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_PanicRecovery)
+}
+
+func testDispatchRequest_PanicRecovery(t *testing.T, tr tunnelTransport) {
 	// Handler that panics should not crash the process
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		panic("test panic in handler")
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "panic-req",
 		Method:    "GET",
 		Path:      "/panic",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-	client.wg.Wait()
+	})
 
 	// Should receive a 400 error response, not crash
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err != nil {
-		t.Fatalf("failed to read panic error response: %v", err)
-	}
+	resp := h.response(t, "panic-req")
+	h.wait(t)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("expected status 400 for panic, got %d", resp.StatusCode)
 	}
@@ -320,10 +284,15 @@ func TestDispatchRequest_PanicRecovery(t *testing.T) {
 }
 
 func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_SemaphoreLimitsConcurrency)
+}
+
+func testDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T, tr tunnelTransport) {
 	const maxConcurrent = 3
 	var inflight atomic.Int32
 	var maxSeen atomic.Int32
 
+	entered := make(chan struct{}, 16)
 	handlerRelease := make(chan struct{})
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cur := inflight.Add(1)
@@ -333,43 +302,33 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 				break
 			}
 		}
+		entered <- struct{}{}
 		<-handlerRelease
 		inflight.Add(-1)
 		w.WriteHeader(http.StatusOK)
 	})
+	h := tr.new(t, handler, maxConcurrent)
 
-	brokerConn, _, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, maxConcurrent),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	// Launch more goroutines than the semaphore allows
+	// Send more requests than the semaphore allows
 	total := maxConcurrent + 5
 	for i := 0; i < total; i++ {
-		req := wsprotocol.RequestEnvelope{
-			Type:      "request",
+		h.send(t, wsprotocol.RequestEnvelope{
 			RequestID: fmt.Sprintf("req-%d", i),
 			Method:    "GET",
 			Path:      "/test",
-		}
-		client.wg.Add(1)
-		go client.dispatchRequest(brokerConn, req)
+		})
 	}
 
-	// Give goroutines time to all reach the semaphore
-	time.Sleep(100 * time.Millisecond)
+	// Wait until every request reached the semaphore and the
+	// first maxConcurrent are inside the handler.
+	h.awaitQueued(t, total)
+	for range maxConcurrent {
+		select {
+		case <-entered:
+		case <-time.After(5 * time.Second):
+			t.Fatal("handlers never started")
+		}
+	}
 
 	// Only maxConcurrent should be running inside the handler
 	if cur := inflight.Load(); cur != int32(maxConcurrent) {
@@ -377,7 +336,10 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 	}
 
 	close(handlerRelease)
-	client.wg.Wait()
+	for i := 0; i < total; i++ {
+		_ = h.response(t, fmt.Sprintf("req-%d", i))
+	}
+	h.wait(t)
 
 	if max := maxSeen.Load(); max > int32(maxConcurrent) {
 		t.Errorf("max concurrent dispatches exceeded semaphore limit: got %d, limit %d", max, maxConcurrent)
@@ -385,55 +347,43 @@ func TestDispatchRequest_SemaphoreLimitsConcurrency(t *testing.T) {
 }
 
 func TestDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T) {
+	runOverTunnels(t, testDispatchRequest_ContextCancelledBeforeSemaphore)
+}
+
+func testDispatchRequest_ContextCancelledBeforeSemaphore(t *testing.T, tr tunnelTransport) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called when context is cancelled")
 	})
-
-	brokerConn, _, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, 1),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
+	h := tr.new(t, handler, 1)
 
 	// Fill the semaphore so the next dispatch blocks on it
-	client.dispatchSem <- struct{}{}
+	h.occupy()
 
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "cancel-req",
 		Method:    "GET",
 		Path:      "/test",
-	}
+	})
+	h.awaitQueued(t, 1)
 
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
-
-	// Give the goroutine time to reach the select
-	time.Sleep(50 * time.Millisecond)
-
-	// Cancel context — the goroutine should exit without calling the handler
-	cancel()
-	client.wg.Wait()
+	// End the connection: the queued request must leave without
+	// calling the handler.
+	h.shutdown()
+	h.wait(t)
 }
 
 // TestHandleCancel_AbortsInFlightRequestContext covers ptone/scion#1886: the
-// Hub sends a "cancel" message when it gives up waiting for a tunneled
-// request (its own dispatch timeout elapsed, or the original caller's
-// context was cancelled). The broker must abort that specific request's
-// context so a slow handler (e.g. a container/sandbox create) can stop
-// instead of running to completion and leaking a sandbox nobody is
-// listening for.
+// Hub sends a cancel (a "cancel" message on the control channel, RpcCancel
+// on a conduit session) when it gives up waiting for a tunneled request
+// (its own dispatch timeout elapsed, or the original caller's context was
+// cancelled). The broker must abort that specific request's context so a
+// slow handler (e.g. a container/sandbox create) can stop instead of
+// running to completion and leaking a sandbox nobody is listening for.
 func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
+	runOverTunnels(t, testHandleCancel_AbortsInFlightRequestContext)
+}
+
+func testHandleCancel_AbortsInFlightRequestContext(t *testing.T, tr tunnelTransport) {
 	handlerStarted := make(chan struct{})
 	var sawCancel atomic.Bool
 
@@ -446,34 +396,13 @@ func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
 		}
 		w.WriteHeader(http.StatusOK)
 	})
+	h := tr.new(t, handler, defaultMaxConcurrentDispatches)
 
-	brokerConn, hubConn, cleanup := newWSPair(t)
-	defer cleanup()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	client := &ControlChannelClient{
-		config:      ControlChannelConfig{Debug: true},
-		conn:        brokerConn,
-		handlers:    handler,
-		log:         slog.Default(),
-		streams:     make(map[string]*StreamHandler),
-		dispatchSem: make(chan struct{}, defaultMaxConcurrentDispatches),
-		cancels:     make(map[string]*requestCancel),
-		ctx:         ctx,
-		cancel:      cancel,
-	}
-
-	req := wsprotocol.RequestEnvelope{
-		Type:      "request",
+	h.send(t, wsprotocol.RequestEnvelope{
 		RequestID: "create-req-1",
 		Method:    "POST",
 		Path:      "/api/v1/agents",
-	}
-
-	client.wg.Add(1)
-	go client.dispatchRequest(brokerConn, req)
+	})
 
 	select {
 	case <-handlerStarted:
@@ -482,32 +411,32 @@ func TestHandleCancel_AbortsInFlightRequestContext(t *testing.T) {
 	}
 
 	// Simulate the Hub giving up and sending a cancel for this request.
-	cancelMsg, err := json.Marshal(wsprotocol.NewCancelMessage("create-req-1"))
-	if err != nil {
-		t.Fatalf("failed to marshal cancel message: %v", err)
-	}
-	if err := client.handleMessage(cancelMsg); err != nil {
-		t.Fatalf("handleMessage(cancel) returned error: %v", err)
-	}
-
-	client.wg.Wait()
+	h.cancel(t, "create-req-1")
+	h.wait(t)
 
 	if !sawCancel.Load() {
-		t.Error("handler did not observe context cancellation after a cancel message")
+		t.Error("handler did not observe context cancellation after a cancel")
 	}
 
-	// The (now-irrelevant) response is still sent; drain it so the test
-	// doesn't leak a goroutine, but nobody on the hub side is listening for
-	// it in the real flow (TunnelRequest already returned).
-	var resp wsprotocol.ResponseEnvelope
-	_ = hubConn.ReadJSON(&resp)
+	if hc, ok := h.(*controlChannelHarness); ok {
+		// The (now-irrelevant) response is still sent on the
+		// control channel; drain it. Nobody on the hub side is
+		// listening for it in the real flow (TunnelRequest
+		// already returned).
+		var resp wsprotocol.ResponseEnvelope
+		_ = hc.hubConn.ReadJSON(&resp)
 
-	// The cancel bookkeeping must be cleaned up once the request completes.
-	client.cancelMu.Lock()
-	_, stillTracked := client.cancels["create-req-1"]
-	client.cancelMu.Unlock()
-	if stillTracked {
-		t.Error("expected cancel func to be removed once the request completed")
+		// The cancel bookkeeping must be cleaned up once the request completes.
+		hc.client.cancelMu.Lock()
+		_, stillTracked := hc.client.cancels["create-req-1"]
+		hc.client.cancelMu.Unlock()
+		if stillTracked {
+			t.Error("expected cancel func to be removed once the request completed")
+		}
+	} else {
+		// A conduit session sends no response for a cancelled
+		// request; the caller got its context error.
+		h.noResponse(t, "create-req-1")
 	}
 }
 
@@ -584,30 +513,39 @@ func waitWG(t *testing.T, client *ControlChannelClient) {
 // waiting for a dispatch slot removes it from the queue without running its
 // handler, and leaves no cancel registration behind.
 func TestHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T) {
+	runOverTunnels(t, testHandleRequest_CancelWhileQueued_AnyRequest)
+}
+
+func testHandleRequest_CancelWhileQueued_AnyRequest(t *testing.T, tr tunnelTransport) {
 	var ran atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ran.Add(1)
 		w.WriteHeader(http.StatusOK)
 	})
-	client, hubConn := newCancelTestClient(t, handler, 1)
-	client.dispatchSem <- struct{}{} // saturate
+	h := tr.new(t, handler, 1)
+	h.occupy() // saturate
 
-	feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: "queued-1", Method: "POST", Path: "/api/v1/agents"})
-	feed(t, client, wsprotocol.NewCancelMessage("queued-1"))
-	waitWG(t, client)
+	h.send(t, wsprotocol.RequestEnvelope{RequestID: "queued-1", Method: "POST", Path: "/api/v1/agents"})
+	if _, ok := h.(*conduitHarness); ok {
+		// The control channel registers the request on its
+		// read loop before the cancel is read; on a conduit
+		// session the request must reach the queue first for
+		// the cancel to find it there.
+		h.awaitQueued(t, 1)
+	}
+	h.cancel(t, "queued-1")
+	h.wait(t)
 
-	<-client.dispatchSem
+	h.release()
 	if got := ran.Load(); got != 0 {
 		t.Errorf("handler ran %d times, want 0", got)
 	}
-	if got := cancelCount(client); got != 0 {
-		t.Errorf("tracked cancels = %d, want 0", got)
+	if hc, ok := h.(*controlChannelHarness); ok {
+		if got := cancelCount(hc.client); got != 0 {
+			t.Errorf("tracked cancels = %d, want 0", got)
+		}
 	}
-	_ = hubConn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
-	var resp wsprotocol.ResponseEnvelope
-	if err := hubConn.ReadJSON(&resp); err == nil {
-		t.Errorf("unexpected response for a request cancelled while queued: %+v", resp)
-	}
+	h.noResponse(t, "queued-1")
 }
 
 // TestHandleRequest_UnregistersOnEveryExitPath checks the cancel map is
@@ -836,5 +774,320 @@ func TestBuildWebSocketURL_Normalization(t *testing.T) {
 				t.Errorf("Expected URL %q, got %q", tc.expectedURL, wsURL)
 			}
 		})
+	}
+}
+
+// --- Stream input backpressure (ptone/scion#3309) ---
+
+// inputTestStreamType is a stream type with no broker handler, so a test
+// can open a stream and act as its consumer through handler.dataCh.
+const inputTestStreamType = "input-test"
+
+// openInputTestStream opens streamID through handleStreamOpen, so it gets
+// the production input queue, and returns its handler.
+func openInputTestStream(t *testing.T, client *ControlChannelClient, streamID string) *StreamHandler {
+	t.Helper()
+	feed(t, client, wsprotocol.NewStreamOpenMessage(streamID, inputTestStreamType, "agent", "project", 80, 24))
+	client.streamMu.RLock()
+	handler := client.streams[streamID]
+	client.streamMu.RUnlock()
+	if handler == nil || handler.input == nil {
+		t.Fatalf("stream %s was not opened with an input queue", streamID)
+	}
+	return handler
+}
+
+// pasteFrames feeds n bytes of patterned input to streamID in 32 KiB frames
+// through the control-channel message handler, and returns what was sent.
+func pasteFrames(t *testing.T, client *ControlChannelClient, streamID string, n int) []byte {
+	t.Helper()
+	const frame = 32 << 10
+	var sent bytes.Buffer
+	for i := 0; sent.Len() < n; i++ {
+		size := frame
+		if rest := n - sent.Len(); rest < size {
+			size = rest
+		}
+		data := make([]byte, size)
+		for j := range data {
+			data[j] = byte((i*31 + j) % 251)
+		}
+		sent.Write(data)
+		feed(t, client, wsprotocol.NewStreamFrame(streamID, data))
+	}
+	return sent.Bytes()
+}
+
+// readInput reads n bytes of input from the handler's consumer channel.
+func readInput(t *testing.T, handler *StreamHandler, n int) []byte {
+	t.Helper()
+	var got bytes.Buffer
+	for got.Len() < n {
+		select {
+		case data := <-handler.dataCh:
+			got.Write(data)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("input stalled after %d of %d bytes", got.Len(), n)
+		}
+	}
+	return got.Bytes()
+}
+
+func isClosed(h *StreamHandler) bool {
+	select {
+	case <-h.closeCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// A paste of exactly StreamInputLimit bytes, sent while the consumer is not
+// reading (the worst case), is held and then delivered intact and in order.
+func TestStreamInput_PasteUpToLimitArrivesIntact(t *testing.T) {
+	client, _ := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "paste-ok")
+	t.Cleanup(func() { _ = client.CloseStream("paste-ok", "test done", 0) })
+
+	sent := pasteFrames(t, client, "paste-ok", StreamInputLimit)
+	if isClosed(handler) {
+		t.Fatal("a paste within the input limit must not close the stream")
+	}
+	got := readInput(t, handler, len(sent))
+	if !bytes.Equal(sent, got) {
+		t.Fatal("paste did not arrive intact and in order")
+	}
+}
+
+// A paste over StreamInputLimit closes the stream with 1009 input_overflow,
+// reported to the Hub; it is never dropped silently. Another stream on the
+// same control channel keeps receiving input.
+func TestStreamInput_PasteOverLimitClosesWithCode(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "paste-big")
+	other := openInputTestStream(t, client, "other")
+	t.Cleanup(func() { _ = client.CloseStream("other", "test done", 0) })
+
+	pasteFrames(t, client, "paste-big", StreamInputLimit+1)
+
+	if !isClosed(handler) {
+		t.Fatal("input over the limit must close the stream")
+	}
+	expectStreamClose(t, hubConn, "paste-big", closeCodeInputOverflow, closeReasonInputOverflow)
+
+	// Later frames for the closed stream are ignored without blocking.
+	feed(t, client, wsprotocol.NewStreamFrame("paste-big", []byte("late")))
+
+	// The Hub's answering StreamClose releases the stream.
+	feed(t, client, wsprotocol.NewStreamCloseMessage("paste-big", "session closed", 0))
+	if isRegistered(client, "paste-big") {
+		t.Fatal("the overflowed stream must be released by the Hub's close")
+	}
+
+	sent := pasteFrames(t, client, "other", 1024)
+	if got := readInput(t, other, len(sent)); !bytes.Equal(sent, got) {
+		t.Fatal("input on another stream must be unaffected")
+	}
+}
+
+// The overflow code passes through the Hub unchanged and clients treat it as
+// terminal, so the client reports it instead of reconnecting.
+func TestStreamInput_OverflowCodeIsTerminalAndPassesThrough(t *testing.T) {
+	if got := wsprotocol.MapBrokerStreamCloseCode(closeCodeInputOverflow); got != closeCodeInputOverflow {
+		t.Fatalf("Hub maps %d to %d, want pass-through", closeCodeInputOverflow, got)
+	}
+	if !wsprotocol.IsSendableCloseCode(closeCodeInputOverflow) {
+		t.Fatalf("%d must be sendable in a close frame", closeCodeInputOverflow)
+	}
+	if d := wsprotocol.ClassifyPTYClose(closeCodeInputOverflow); d != wsprotocol.DispositionTerminal {
+		t.Fatalf("ClassifyPTYClose(%d) = %v, want terminal", closeCodeInputOverflow, d)
+	}
+	if closeCodeInputOverflow != websocket.CloseMessageTooBig {
+		t.Fatalf("closeCodeInputOverflow = %d, want RFC 6455 1009", closeCodeInputOverflow)
+	}
+}
+
+// expectStreamClose reads the next control-channel message on the Hub side
+// and checks it is a StreamClose for streamID with code and reason.
+func expectStreamClose(t *testing.T, hubConn *wsprotocol.Connection, streamID string, code int, reason string) {
+	t.Helper()
+	if err := hubConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var msg wsprotocol.StreamCloseMessage
+	if err := hubConn.ReadJSON(&msg); err != nil {
+		t.Fatalf("read stream close: %v", err)
+	}
+	if msg.Type != wsprotocol.TypeStreamClose || msg.StreamID != streamID || msg.Code != code || msg.Reason != reason {
+		t.Fatalf("got %+v, want stream_close %s %d %q", msg, streamID, code, reason)
+	}
+}
+
+func isRegistered(client *ControlChannelClient, streamID string) bool {
+	client.streamMu.RLock()
+	defer client.streamMu.RUnlock()
+	_, ok := client.streams[streamID]
+	return ok
+}
+
+// Exactly one StreamClose goes to the Hub per stream when an input overflow
+// and the PTY goroutine's own CloseStream (sent after its attach ends) race.
+// Whichever closes the stream first reports its code; the other sends
+// nothing. A sentinel close for another stream, written after both, must be
+// the next message, which proves no second close was sent.
+func TestStreamInput_OverflowAndCloseStreamReportOnce(t *testing.T) {
+	const sentinel = "sentinel"
+	t.Run("overflow first", func(t *testing.T) {
+		client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+		openInputTestStream(t, client, "s") // nobody consumes: the PTY has stopped
+		pasteFrames(t, client, "s", StreamInputLimit+1)
+		// The PTY goroutine finishes classifying and reports its own code.
+		if err := client.CloseStream("s", wsprotocol.CloseReasonSessionEnded, wsprotocol.ClosePTYSessionGone); err != nil {
+			t.Fatalf("CloseStream: %v", err)
+		}
+		waitWG(t, client) // the async overflow report has been written
+		if isRegistered(client, "s") {
+			t.Fatal("CloseStream must still unregister the stream")
+		}
+		if err := client.CloseStream(sentinel, "sentinel", 0); err != nil {
+			t.Fatal(err)
+		}
+		expectStreamClose(t, hubConn, "s", closeCodeInputOverflow, closeReasonInputOverflow)
+		expectStreamClose(t, hubConn, sentinel, 0, "sentinel")
+	})
+	t.Run("CloseStream first", func(t *testing.T) {
+		client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+		openInputTestStream(t, client, "s")
+		if err := client.CloseStream("s", wsprotocol.CloseReasonSessionEnded, wsprotocol.ClosePTYSessionGone); err != nil {
+			t.Fatalf("CloseStream: %v", err)
+		}
+		pasteFrames(t, client, "s", StreamInputLimit+1) // ignored: stream gone
+		waitWG(t, client)
+		if err := client.CloseStream(sentinel, "sentinel", 0); err != nil {
+			t.Fatal(err)
+		}
+		expectStreamClose(t, hubConn, "s", wsprotocol.ClosePTYSessionGone, wsprotocol.CloseReasonSessionEnded)
+		expectStreamClose(t, hubConn, sentinel, 0, "sentinel")
+	})
+}
+
+// A handler built without an input queue (as PTY tests build them) also
+// closes with 1009 instead of dropping input when its dataCh is full.
+func TestStreamInput_NoQueueHandlerOverflowClosesWithCode(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := &StreamHandler{streamID: "literal", dataCh: make(chan []byte, 1), resizeCh: make(chan [2]int, 1), closeCh: make(chan struct{})}
+	client.streamMu.Lock()
+	client.streams["literal"] = handler
+	client.streamMu.Unlock()
+
+	feed(t, client, wsprotocol.NewStreamFrame("literal", []byte("first")))
+	if isClosed(handler) {
+		t.Fatal("a frame that fits must not close the stream")
+	}
+	feed(t, client, wsprotocol.NewStreamFrame("literal", []byte("second")))
+	if !isClosed(handler) {
+		t.Fatal("a frame that does not fit must close the stream")
+	}
+	expectStreamClose(t, hubConn, "literal", closeCodeInputOverflow, closeReasonInputOverflow)
+	if got := string(<-handler.dataCh); got != "first" {
+		t.Fatalf("delivered frame = %q, want %q", got, "first")
+	}
+}
+
+// Once Close has cancelled the client, an input overflow still closes the
+// stream locally but starts no tracked goroutine, so its c.wg.Add can never
+// run concurrently with Close's c.wg.Wait. Close is held inside Wait by a
+// tracked task, so the overflow deterministically lands mid-shutdown.
+func TestStreamInput_OverflowDuringCloseStartsNoTrackedWork(t *testing.T) {
+	client, _ := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	handler := openInputTestStream(t, client, "s")
+
+	release := make(chan struct{})
+	if !client.goTracked(func() { <-release }) {
+		t.Fatal("goTracked refused work before Close")
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- client.Close() }()
+	<-client.ctx.Done() // Close has cancelled and is (or will be) in Wait
+
+	if client.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow) {
+		t.Fatal("an overflow during Close must not start a tracked report")
+	}
+	if !isClosed(handler) {
+		t.Fatal("the stream must still be closed locally")
+	}
+	if client.goTracked(func() { t.Error("refused work ran") }) {
+		t.Fatal("goTracked must refuse work once Close has started")
+	}
+
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return")
+	}
+}
+
+// Once Close has cancelled the client, a request frame starts no handler
+// and registers no cancel. Many requests are fed with as many free dispatch
+// slots: without the guard, each one's runRequest would choose at random
+// between a free slot and the cancelled context, so ran == 0 across all of
+// them is what shows that no request goroutine was started.
+func TestHandleRequest_AfterCloseStartsNoTrackedWork(t *testing.T) {
+	const requests = 32
+	var ran atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ran.Add(1)
+		w.WriteHeader(http.StatusOK)
+	})
+	client, _ := newCancelTestClient(t, handler, requests)
+	client.cancel()
+
+	for i := 0; i < requests; i++ {
+		feed(t, client, wsprotocol.RequestEnvelope{Type: "request", RequestID: fmt.Sprintf("after-close-%d", i), Method: "GET", Path: "/healthz"})
+	}
+	waitWG(t, client)
+
+	if got := ran.Load(); got != 0 {
+		t.Errorf("handler ran %d times, want 0", got)
+	}
+	if got := cancelCount(client); got != 0 {
+		t.Errorf("tracked cancels = %d, want 0", got)
+	}
+}
+
+// Once Close has cancelled the client, runMessageLoop starts no ping loop:
+// it closes the connection and returns. This covers the refuse path's
+// behaviour (connection closed, no ping loop); the race detector on the
+// TestControlChannelPing_* tests covers the race itself.
+func TestRunMessageLoop_AfterCloseStartsNoPingLoop(t *testing.T) {
+	client, hubConn := newCancelTestClient(t, http.NotFoundHandler(), 1)
+	var pings atomic.Int32
+	client.config.PingInterval = time.Millisecond
+	client.config.PongWait = time.Minute
+	client.writePing = func(*wsprotocol.Connection) error {
+		pings.Add(1)
+		return nil
+	}
+	client.cancel()
+
+	returned := make(chan struct{})
+	go func() {
+		client.runMessageLoop()
+		close(returned)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMessageLoop did not return after Close")
+	}
+	waitWG(t, client)
+
+	if got := pings.Load(); got != 0 {
+		t.Errorf("ping loop sent %d pings after Close, want 0", got)
+	}
+	_ = hubConn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := hubConn.ReadMessage(); err == nil {
+		t.Error("the hub read a message; want the connection closed")
 	}
 }

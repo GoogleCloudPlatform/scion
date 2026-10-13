@@ -23,6 +23,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 )
 
 // pendingTeamsLink tracks an in-progress identity linking registration that is
@@ -373,20 +375,6 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 		return h.sendReply(ctx, activity, hubErrorText(err, mapping, link.ProjectSlug, "Failed to retrieve agents. Please try again."))
 	}
 
-	// Cache agent slugs in store.
-	store := h.getStore()
-	if store != nil {
-		slugs := make([]string, len(agents))
-		for i, a := range agents {
-			slugs[i] = a.Slug
-		}
-		_ = store.SetProjectAgents(ctx, &ProjectAgents{
-			ProjectID:   link.ProjectID,
-			AgentSlugs:  slugs,
-			RefreshedAt: time.Now(),
-		})
-	}
-
 	if len(agents) == 0 {
 		return h.sendReply(ctx, activity, fmt.Sprintf("No agents found in project **%s**.", link.ProjectSlug))
 	}
@@ -402,7 +390,10 @@ func (h *CommandHandler) handleAgents(ctx context.Context, activity *Activity) e
 
 	for _, agent := range agents {
 		emoji := agentPhaseEmoji(agent.Phase)
-		activityText := agent.Activity
+		if agent.Activity == string(state.ActivityInitializing) {
+			emoji = agentPhaseEmoji("starting")
+		}
+		activityText := state.Activity(agent.Activity).DisplayLabel()
 		if activityText == "" {
 			activityText = agent.Phase
 		}
@@ -514,7 +505,7 @@ func (h *CommandHandler) showAgentStatus(ctx context.Context, activity *Activity
 
 	for _, agent := range agents {
 		if strings.EqualFold(agent.Slug, agentSlug) {
-			activityText := agent.Activity
+			activityText := state.Activity(agent.Activity).DisplayLabel()
 			if activityText == "" {
 				activityText = "idle"
 			}

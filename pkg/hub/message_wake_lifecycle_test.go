@@ -31,31 +31,6 @@ import (
 // Rule pinned here: resuming a suspended agent to deliver a message requires
 // the lifecycle permission that starting the agent requires.
 
-// wakeLifecycleUser creates a hub member bound in projectID to a custom role
-// holding exactly permissions.
-func wakeLifecycleUser(t *testing.T, s store.Store, id, projectID string, permissions ...string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-	u := hubMemberUser(t, s, id)
-	rd, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{
-		Name:        "test-role-" + id,
-		Description: "Test role for message wake lifecycle tests",
-		ScopeType:   store.RoleScopeProject,
-		Permissions: permissions,
-	})
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      u.ID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-	return u
-}
-
 // storedMessagesFor returns the number of persisted messages addressed to
 // the agent recipientID.
 func storedMessagesFor(t *testing.T, s store.Store, recipientID string) int {
@@ -143,38 +118,6 @@ func TestMessageWake_MessageOnlyUserDeliversToRunningAgent(t *testing.T) {
 	msgs := disp.getMessageCalls()
 	require.Len(t, msgs, 1, "the message is delivered")
 	assert.Equal(t, "already awake", msgs[0].Message)
-}
-
-// wakeLifecycleAgentIdentity is an agent caller whose token carries exactly
-// scopes.
-type wakeLifecycleAgentIdentity struct {
-	wakeDMTestIdentity
-	scopes []AgentTokenScope
-}
-
-// wakeDMSenderIdentity returns an agent identity for sender carrying exactly
-// scopes.
-func wakeDMSenderIdentity(sender *store.Agent, scopes ...AgentTokenScope) *wakeLifecycleAgentIdentity {
-	return &wakeLifecycleAgentIdentity{
-		wakeDMTestIdentity: wakeDMTestIdentity{id: sender.ID, projectID: sender.ProjectID, ancestry: sender.Ancestry},
-		scopes:             scopes,
-	}
-}
-
-// authzClassification opts this fake into agent JWT classification, so
-// authorization decisions treat it as an agent caller with its scopes.
-func (i *wakeLifecycleAgentIdentity) authzClassification() (PrincipalKind, CredentialKind) {
-	return PrincipalKindAgent, CredentialKindAgentJWT
-}
-
-func (i *wakeLifecycleAgentIdentity) Scopes() []AgentTokenScope { return i.scopes }
-func (i *wakeLifecycleAgentIdentity) HasScope(scope AgentTokenScope) bool {
-	for _, s := range i.scopes {
-		if s == scope {
-			return true
-		}
-	}
-	return false
 }
 
 // TestMessageWake_AgentWithoutLifecycleCannotResumeSuspendedAgent: an agent

@@ -34,7 +34,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	_ "github.com/mattn/go-sqlite3"
 )
 
 // ---------------------------------------------------------------------------
@@ -544,12 +543,8 @@ func TestChatV2_CreateThread_AndList(t *testing.T) {
 	}
 
 	// Ensure WebChatStore is set up.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -608,12 +603,8 @@ func TestChatV2_CreateThread_Validation(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -649,12 +640,8 @@ func TestChatV2_CreateThread_DuplicateNameCaseInsensitive_Returns400(t *testing.
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -682,12 +669,8 @@ func TestChatV2_PatchThread(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -734,12 +717,8 @@ func TestChatV2_PatchThread_RenameToExistingName_Returns400(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -780,12 +759,8 @@ func TestChatV2_PatchThread_GeneralRenameAllowed(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -813,12 +788,8 @@ func TestChatV2_DeleteThread(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -867,12 +838,8 @@ func TestChatV2_DeleteThread_LastThreadGuard(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -895,12 +862,8 @@ func TestChatV2_ConversationRead(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -987,14 +950,14 @@ func TestChatV2_ConversationRead_RejectsUnknownMessageID(t *testing.T) {
 }
 
 // TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID:
-// the watermark guard checks existence only, not same-conversation
-// membership by ThreadID. A real, persisted message with a ConversationID
-// set but a ThreadID that doesn't match `key` (e.g. an agent API call with
-// an explicit conversation_id and an unrelated/absent thread_id) must still
-// be usable as a read watermark — rejecting it would make the guard
-// stricter than handleConversationHistory's ConversationID-based filter.
+// a real, persisted message of the topic's conversation whose ThreadID
+// doesn't match `key` (e.g. an agent API call with an explicit
+// conversation_id and an unrelated/absent thread_id) must still be usable
+// as a read watermark — rejecting it would make the guard stricter than
+// handleConversationHistory's ConversationID-based filter. A message of
+// another conversation is refused.
 func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1002,10 +965,26 @@ func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-a", proj.ID)
+	convID, err := wcs.GetTopicConversationID(ctx, "topic-a")
+	if err != nil || convID == "" {
+		t.Fatalf("GetTopicConversationID: %q %v", convID, err)
+	}
+
+	foreign := &store.Message{ID: tid("mismatched-thread-other-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
+		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
+		ThreadID: "some-other-thread", ConversationID: tid("conv-elsewhere"), CreatedAt: time.Now().UTC()}
+	if err := s.CreateMessage(ctx, foreign); err != nil {
+		t.Fatalf("CreateMessage: %v", err)
+	}
+	if rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/topic-a/read",
+		map[string]string{"messageId": foreign.ID}); rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a message of another conversation, got %d: %s", rec.Code, rec.Body.String())
+	}
 
 	msg := &store.Message{ID: tid("mismatched-thread-real-conv"), ProjectID: proj.ID, Sender: "user:dev", SenderID: DevUserID,
 		Recipient: "thread:topic-a", Msg: "hi", Type: messages.TypeChat, Channel: "web",
-		ThreadID: "some-other-thread", ConversationID: tid("conv-topic-a"), CreatedAt: time.Now().UTC()}
+		ThreadID: "some-other-thread", ConversationID: convID, CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, msg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
 	}
@@ -1027,10 +1006,10 @@ func TestChatV2_ConversationRead_AllowsMismatchedThreadIDWithRealConversationID(
 
 // TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed: native agent replies
 // can persist with ThreadID == "" and only ConversationID set (see
-// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The existence-only
-// guard must not reject such a message as a read watermark.
+// TestChatDMs_UnreadMatchesNativeHistory's "envelope" mode). The guard must
+// accept such a message of the topic's conversation as a read watermark.
 func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
-	srv, s, wcs, proj, _ := setupSendTest(t)
+	srv, s, wcs, proj, db := setupSendTest(t)
 	ctx := context.Background()
 
 	if err := wcs.CreateTopic(ctx, WebChatTopic{
@@ -1038,10 +1017,15 @@ func TestChatV2_ConversationRead_EnvelopeOnlyReplyAllowed(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateTopic: %v", err)
 	}
+	setTopicConversationID(t, db, s, "topic-envelope", proj.ID)
+	convID, err := wcs.GetTopicConversationID(ctx, "topic-envelope")
+	if err != nil || convID == "" {
+		t.Fatalf("GetTopicConversationID: %q %v", convID, err)
+	}
 
 	envelopeMsg := &store.Message{ID: tid("envelope-reply"), ProjectID: proj.ID, Sender: "agent:bot", SenderID: tid("bot"),
 		Recipient: "user:dev@localhost", RecipientID: DevUserID,
-		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: tid("conv-envelope"),
+		Msg: "reply", Type: messages.TypeChat, Channel: "web", ThreadID: "", ConversationID: convID,
 		CreatedAt: time.Now().UTC()}
 	if err := s.CreateMessage(ctx, envelopeMsg); err != nil {
 		t.Fatalf("CreateMessage: %v", err)
@@ -1277,12 +1261,8 @@ func TestChatV2_ConversationRead_NoOpSkipsLookupWhenAlreadyCurrent(t *testing.T)
 func TestChatV2_DMs_Empty(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1305,12 +1285,8 @@ func TestChatV2_DMs_Empty(t *testing.T) {
 func TestChatV2_UserPrefs_GetDefault(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1333,12 +1309,8 @@ func TestChatV2_UserPrefs_GetDefault(t *testing.T) {
 func TestChatV2_UserPrefs_PutAndGet(t *testing.T) {
 	srv, _ := testServer(t)
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1395,12 +1367,8 @@ func TestChatV2_SpaceRead(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1576,39 +1544,6 @@ func TestValidDMKey(t *testing.T) {
 // Send path tests (R4)
 // ---------------------------------------------------------------------------
 
-// setupSendTest creates a project, webchat store, and a topic for send path testing.
-func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Project, *sql.DB) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	proj := &store.Project{ID: tid("send-test"), Name: "send-test", Slug: "send-test", Created: time.Now(), Updated: time.Now()}
-	if err := s.CreateProject(ctx, proj); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	// Each pooled connection to ":memory:" is a separate, empty database.
-	// Handlers start background work (mention and DM notifications) that
-	// reads the webchat store while the request, or the next one, is still
-	// using it; a second connection opened for that overlap has none of the
-	// tables Init() created, so a later lookup can fail with "no such
-	// table" and surface as a 404. Pin the pool to one connection so every
-	// caller shares the same in-memory database.
-	db.SetMaxOpenConns(1)
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	return srv, s, wcs, proj, db
-}
-
 // The send-test webchat database must stay one database under concurrent
 // use: a caller that arrives while the only connection is busy waits for it
 // instead of opening a second, empty in-memory database.
@@ -1650,44 +1585,6 @@ func TestSetupSendTest_WebChatDBSharedUnderConcurrency(t *testing.T) {
 	}
 	if n := db.Stats().OpenConnections; n != 1 {
 		t.Fatalf("expected one open connection, got %d", n)
-	}
-}
-
-// setTopicConversationID creates a conversation for a topic and updates the topic's conversation_id.
-// This is required after the G2 refactor made conversation resolution fatal.
-func setTopicConversationID(t *testing.T, db *sql.DB, s store.Store, topicID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	pid := projectID
-	conv, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "group",
-		Surface:     "native",
-		ExternalRef: "thread:" + projectID + ":" + topicID,
-		DriftState:  "active",
-		ProjectID:   &pid,
-	})
-	if err != nil {
-		t.Fatalf("UpsertConversation: %v", err)
-	}
-	_, err = db.ExecContext(ctx, "UPDATE webchat_topic SET conversation_id = ? WHERE id = ?", conv.ID, topicID)
-	if err != nil {
-		t.Fatalf("update topic conversation_id: %v", err)
-	}
-}
-
-// setDMConversationID creates a conversation for a DM key.
-// This is required after the G2 refactor made conversation resolution fatal.
-func setDMConversationID(t *testing.T, s store.Store, dmKey, _ string) {
-	t.Helper()
-	ctx := context.Background()
-	_, err := s.UpsertConversationByExternalRef(ctx, &store.Conversation{
-		Kind:        "direct",
-		Surface:     "native",
-		ExternalRef: dmKey,
-		DriftState:  "active",
-	})
-	if err != nil {
-		t.Fatalf("UpsertConversation for DM: %v", err)
 	}
 }
 
@@ -2079,7 +1976,7 @@ func TestChatV2_Send_UserDM_HumanToHuman(t *testing.T) {
 	srv, s, _, proj, _ := setupSendTest(t)
 
 	// Build a user-to-user DM key (canonical order via DMConversationKey).
-	peerID := tid("dm-peer-user")
+	peerID := mustCreateActiveUser(t, s, "dm-peer-user")
 	dmKey, err := messages.DMConversationKey("user", DevUserID, "user", peerID)
 	if err != nil {
 		t.Fatalf("DMConversationKey: %v", err)
@@ -2156,60 +2053,6 @@ func TestParseDMKeyIDs(t *testing.T) {
 // ---------------------------------------------------------------------------
 // W8: Search tests
 // ---------------------------------------------------------------------------
-
-// newTestWebChatStoreWithMessages creates a WebChatStore backed by an in-memory
-// SQLite DB, including a minimal messages table for search testing. It uses
-// the production driver (modernc) and a DATETIME created column bound with a
-// time.Time, so created holds the same time.Time.String() text the ent
-// migrated table does. TestSearchChatMessages_PagesToExhaustionOnEntSchema
-// covers paging on the real ent schema.
-func newTestWebChatStoreWithMessages(t *testing.T) (WebChatStore, *sql.DB) {
-	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open db: %v", err)
-	}
-	db.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
-
-	store := NewWebChatStore(db, "sqlite")
-	if err := store.Init(); err != nil {
-		t.Fatalf("init store: %v", err)
-	}
-
-	// Create a minimal messages table matching the Ent schema columns
-	// used by SearchChatMessages.
-	const createMessages = `
-CREATE TABLE IF NOT EXISTS messages (
-    id TEXT PRIMARY KEY,
-    project_id TEXT NOT NULL,
-    sender TEXT NOT NULL DEFAULT '',
-    sender_id TEXT,
-    recipient TEXT NOT NULL DEFAULT '',
-    recipient_id TEXT,
-    msg TEXT NOT NULL DEFAULT '',
-    type TEXT NOT NULL DEFAULT 'instruction',
-    channel TEXT,
-    thread_id TEXT,
-    created DATETIME NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_messages_created ON messages (created);
-`
-	if _, err := db.Exec(createMessages); err != nil {
-		t.Fatalf("create messages table: %v", err)
-	}
-
-	return store, db
-}
-
-// insertTestMessage is a helper to insert a message row for search testing.
-func insertTestMessage(t *testing.T, db *sql.DB, id, projectID, threadID, sender, msg string, created time.Time) {
-	t.Helper()
-	const query = `INSERT INTO messages (id, project_id, thread_id, sender, msg, channel, created) VALUES (?, ?, ?, ?, ?, 'web', ?)`
-	_, err := db.Exec(query, id, projectID, threadID, sender, msg, created.UTC())
-	if err != nil {
-		t.Fatalf("insert test message: %v", err)
-	}
-}
 
 func TestSearchChatMessages_BasicMatch(t *testing.T) {
 	store, db := newTestWebChatStoreWithMessages(t)
@@ -2572,12 +2415,8 @@ func TestChatV2_ConversationReadState_ReportsPeerWatermark(t *testing.T) {
 	srv, _ := testServer(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2624,12 +2463,8 @@ func TestChatV2_ConversationReadState_TopicHasNoPeer(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2677,12 +2512,8 @@ func TestChatV2_ClearTopicDefaultAgent(t *testing.T) {
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2782,7 +2613,7 @@ func TestDEF96_PromoteDM_HistoryVisibleOnFirstRead(t *testing.T) {
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3057,7 +2888,7 @@ func TestPromoteDM_Handler_SetsConversationDefaultAgentID(t *testing.T) {
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3156,7 +2987,7 @@ func TestDEF96_PromoteDM_Atomicity(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -3258,7 +3089,7 @@ func TestDEF96_PromoteDM_RefusesOnLookupError(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3399,7 +3230,7 @@ func TestDEF96_PromoteDM_ProceedsOnErrNotFound(t *testing.T) {
 		t.Fatal("store does not expose DB()")
 	}
 	rawDB := dbProvider.DB()
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -3714,7 +3545,7 @@ func setupEditDeleteTest(t *testing.T) (*Server, store.Store, WebChatStore, stri
 	if rawDB == nil {
 		t.Fatal("store DB() returned nil")
 	}
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init webchat store: %v", err)
 	}
@@ -4240,12 +4071,8 @@ func setupDEF31(t *testing.T) def31Fixture {
 		}
 	}
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -4764,23 +4591,6 @@ func TestDEF31_SendPath_ValidAgent_StillRoutes(t *testing.T) {
 // AC-G2-6: ConversationWriteDenySwitch integration test
 // ---------------------------------------------------------------------------
 
-// enableWriteDenySwitch configures OperationalSettings on the server with the
-// consolidated ConversationEnvelopeSwitch ON. After this call, handlers that
-// check s.writeDenyEnabled() will deny writes when conversation resolution fails.
-func enableWriteDenySwitch(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	fakeStore.seed("messaging", json.RawMessage(`{"conversation_envelope_switch":true}`))
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("ops.Refresh failed: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-	if !srv.GetOperationalSettings().ConversationEnvelopeSwitch() {
-		t.Fatalf("enableWriteDenySwitch: ConversationEnvelopeSwitch() is still false after setup")
-	}
-}
-
 // TestG2_AC6_WriteDenySwitch_IntegrationChatV2 verifies AC-G2-6: with no
 // OperationalSettings wired (ops is nil), the write-deny gate short-circuits
 // at `ops != nil` and the message is delivered (B10 behaviour). With the
@@ -5166,52 +4976,6 @@ func TestAutoAdvanceSenderReadState(t *testing.T) {
 	// --- Nil webChatStore: should not panic.
 	s2 := &Server{}
 	s2.autoAdvanceSenderReadState(ctx, "sender-1", "topic-1", "msg-200")
-}
-
-// readStateAtPublishSpy wraps noopEventPublisher and, on PublishUserMessage,
-// snapshots both halves of the unread computation for the message's
-// conversation at the moment of the call — i.e. what a client would see if
-// it reacted to the SSE event the instant it arrives. `hasUnread` is
-// computed exactly the way the rollup endpoints do it
-// (handlers_chat_v2.go ~L155, ~L384, ~L3439: LastMessageID != LastReadMessageID),
-// so this pins the actual user-visible invariant, not just one of its two
-// inputs. Used to pin down that the sender's read watermark *and* the
-// conversation's last-message watermark are both advanced before the
-// message is published, not after, closing the self-unread flash race
-// rather than narrowing it.
-type readStateAtPublishSpy struct {
-	noopEventPublisher
-	wcs WebChatStore
-
-	called                 bool
-	messageID              string
-	readStateAtPublish     *WebChatReadState
-	lastMessageIDAtPublish string
-	hasUnreadAtPublish     bool
-}
-
-func (p *readStateAtPublishSpy) PublishUserMessage(ctx context.Context, msg *store.Message, _ []AttachmentRef) {
-	p.called = true
-	p.messageID = msg.ID
-	p.readStateAtPublish, _ = p.wcs.GetReadState(ctx, msg.SenderID, msg.ThreadID)
-
-	if strings.HasPrefix(msg.ThreadID, "dm:") {
-		dms, _ := p.wcs.ListDMs(ctx, msg.SenderID)
-		for _, dm := range dms {
-			if dm.ConversationKey == msg.ThreadID {
-				p.lastMessageIDAtPublish = dm.LastMessageID
-				break
-			}
-		}
-	} else if topic, _ := p.wcs.GetTopic(ctx, msg.ThreadID); topic != nil {
-		p.lastMessageIDAtPublish = topic.LastMessageID
-	}
-
-	lastRead := ""
-	if p.readStateAtPublish != nil {
-		lastRead = p.readStateAtPublish.LastReadMessageID
-	}
-	p.hasUnreadAtPublish = p.lastMessageIDAtPublish != "" && p.lastMessageIDAtPublish != lastRead
 }
 
 // TestChatV2_Send_HumanToHuman_ReadWatermarkAdvancedBeforePublish is a

@@ -28,10 +28,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestHubExitSequence_ClosesDecisionAuditBeforeFlushes checks the exit
-// order: the decision audit writer closes before any OTel provider
-// flushes, and the providers flush in reverse order of registration.
-func TestHubExitSequence_ClosesDecisionAuditBeforeFlushes(t *testing.T) {
+// Telemetry providers flush in reverse registration order with bounded contexts.
+func TestHubExitSequence_FlushesInReverseOrder(t *testing.T) {
 	var order []string
 	flush := func(name string) func(context.Context) error {
 		return func(ctx context.Context) error {
@@ -41,22 +39,20 @@ func TestHubExitSequence_ClosesDecisionAuditBeforeFlushes(t *testing.T) {
 			return nil
 		}
 	}
-	exit := &hubExitSequence{closeDecisionAudit: func(context.Context) {
-		order = append(order, "decision audit")
-	}}
+	exit := &hubExitSequence{}
 	exit.addFlush(flush("tracer"))
 	exit.addFlush(flush("meter"))
 
 	exit.run()
 
-	assert.Equal(t, []string{"decision audit", "meter", "tracer"}, order)
+	assert.Equal(t, []string{"meter", "tracer"}, order)
 }
 
 // TestHubExitSequence_FlushErrorDoesNotSkipLaterFlushes checks that a
 // failed flush is logged and the remaining flushes still run.
 func TestHubExitSequence_FlushErrorDoesNotSkipLaterFlushes(t *testing.T) {
 	var order []string
-	exit := &hubExitSequence{closeDecisionAudit: func(context.Context) {}}
+	exit := &hubExitSequence{}
 	exit.addFlush(func(context.Context) error {
 		order = append(order, "tracer")
 		return nil
@@ -71,13 +67,7 @@ func TestHubExitSequence_FlushErrorDoesNotSkipLaterFlushes(t *testing.T) {
 	assert.Equal(t, []string{"meter", "tracer"}, order)
 }
 
-// TestRunServerStart_DefersHubExitSequence checks that runServerStart
-// still wires the exit sequence: it defers exit.run, hands it the
-// decision audit close, and registers the tracer and meter flushes with
-// it rather than deferring them separately (a separate defer registered
-// after exit.run would flush before the writer drains). It also checks
-// that the store closer is deferred before exit.run, so the store closes
-// after the writer drains.
+// Telemetry flushes run before the deferred store close.
 func TestRunServerStart_DefersHubExitSequence(t *testing.T) {
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "server_foreground.go", nil, 0)
@@ -128,14 +118,8 @@ func TestRunServerStart_DefersHubExitSequence(t *testing.T) {
 	require.Contains(t, deferred, "exit.run()")
 	require.True(t, storeClosePos.IsValid(), "store closer defer not found")
 	assert.Less(t, storeClosePos, exitRunPos,
-		"the store closer must be deferred before exit.run, so it closes after the writer drains")
-	for _, d := range deferred {
-		assert.NotContains(t, d, "CloseDecisionAudit",
-			"runServerStart defers %q outside the exit sequence", d)
-	}
+		"the store closer must be deferred before exit.run, so it closes after telemetry flushes")
 	for _, want := range []string{
-		"hubSrv.DeferDecisionAuditClose()",
-		"closeDecisionAudit: hubSrv.CloseDecisionAudit",
 		"exit.addFlush(tp.Shutdown)",
 		"exit.addFlush(mp.Shutdown)",
 	} {

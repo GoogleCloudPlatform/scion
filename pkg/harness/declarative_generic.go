@@ -52,11 +52,15 @@ func (d *DeclarativeGenericHarness) DefaultConfigDir() string {
 	return ".scion"
 }
 
+// SkillsDir returns the entry's skills_dir, or GenericSkillsDir when it names
+// none. For the entries Resolve hands it (no provisioner block) this equals
+// SkillsDirForEntry; the New shim can also wrap an embedded entry that has a
+// provisioner block, so it keeps its own generic fallback.
 func (d *DeclarativeGenericHarness) SkillsDir() string {
 	if d.entry.SkillsDir != "" {
 		return d.entry.SkillsDir
 	}
-	return ".scion/skills"
+	return GenericSkillsDir
 }
 
 func (d *DeclarativeGenericHarness) GetInterruptKey() string {
@@ -71,6 +75,11 @@ func (d *DeclarativeGenericHarness) GetInterruptSequence() []string {
 		return d.entry.InterruptSequence
 	}
 	return nil
+}
+
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (d *DeclarativeGenericHarness) DeliverySpec() api.DeliverySpec {
+	return d.entry.ResolvedDelivery()
 }
 
 func (d *DeclarativeGenericHarness) GetHarnessEmbedsFS() (embed.FS, string) {

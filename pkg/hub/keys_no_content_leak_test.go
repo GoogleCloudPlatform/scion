@@ -19,7 +19,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,26 +28,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agentkeys"
 )
-
-// keysContentSentinel is a distinctive value used as the "keys" field across
-// every test in this file. Per .design/agent-keys-contract.md §5 ("Never
-// logged in a keys path, including debug logs and errors: the input
-// itself... request JSON") and AK-32 ("captured logs contain no key content
-// when searched for a distinctive test secret"), no error message or log
-// line produced by any BrokerClient adapter may ever contain it.
-const keysContentSentinel = "SENTINEL-KEYS-7f3a"
-
-// installSentinelLogCapture points the slog default logger at an in-memory
-// buffer, at Debug level so brokerHTTPTransport's debug-only logging is
-// captured too, and restores the previous default logger on test cleanup.
-func installSentinelLogCapture(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var buf bytes.Buffer
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return &buf
-}
 
 // assertNoSentinelLeak fails the test if err's message or the captured log
 // buffer contains keysContentSentinel. It also asserts wantOutcome, so a

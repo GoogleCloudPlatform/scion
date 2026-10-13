@@ -502,7 +502,7 @@ export class ScionProfileNav extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    this.checkGitHubApp();
+    void this.checkGitHubApp();
   }
 
   private async checkGitHubApp(): Promise<void> {

@@ -17,8 +17,10 @@ package hub
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -59,6 +61,9 @@ func (s *Server) artifactLimits(context.Context) artifacts.Limits {
 	c := s.artifactsConfig()
 	return artifacts.Limits{
 		MaxFileBytes: c.MaxFileBytes, MaxBundleBytes: c.MaxBundleBytes, MaxFiles: c.MaxFiles,
+		LinkDefaultTTL:   time.Duration(c.LinkDefaultTTLHours) * time.Hour,
+		LinkMaxTTL:       time.Duration(c.LinkMaxTTLHours) * time.Hour,
+		DefaultRetention: time.Duration(c.DefaultRetentionDays) * 24 * time.Hour,
 		RemoteImages: artifacts.RemoteImageLimits{
 			Enabled:      c.RemoteImagesEnabled,
 			MaxCount:     c.RemoteImageMaxCount,
@@ -81,7 +86,23 @@ func (s *Server) artifactsHandler() http.Handler {
 	svc := artifacts.NewService(newArtifactHost(s))
 	svc.SetLimits(s.artifactLimits)
 	svc.SetBackendProvider(s.artifactBackend)
+	svc.SetReviewNotifier(s.notifyArtifactReview)
+	// Share-link reads are rate limited per client, read through the
+	// hub's trusted proxies the same way as its other pre-auth limits.
+	trusted := parseTrustedProxies(s.config.TrustedProxies)
+	svc.SetClientKey(func(r *http.Request) string { return shareLinkClientKey(r, trusted) })
 	return svc.Handler()
+}
+
+// artifactRefResolver returns the artifact service for resolving message
+// references (resolveArtifactRefs, its only caller). Like artifactsHandler
+// it is built over this server's artifacts.Host; resolveArtifactRefs
+// admits only request-authenticated contexts, so the host still sees only
+// identities derived from request credentials.
+func (s *Server) artifactRefResolver() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
 }
 
 // artifactBackend reports the server's current artifact store, resource
@@ -99,10 +120,10 @@ const artifactReapInterval = 10 * time.Minute
 // artifactReapBatch caps the versions one reap pass handles.
 const artifactReapBatch = 500
 
-// startArtifactReaper reaps pending artifact versions older than
-// artifacts.PendingVersionTTL every artifactReapInterval until ctx ends.
-// It runs whether or not the experiment is on: reaping only retires
-// abandoned uploads.
+// startArtifactReaper runs the artifact maintenance pass
+// (reapArtifactVersions) every artifactReapInterval until ctx ends. It
+// runs whether or not the experiment is on: it only retires abandoned
+// uploads and expired artifacts and reclaims unreferenced blobs.
 func (s *Server) startArtifactReaper(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(artifactReapInterval)
@@ -118,18 +139,71 @@ func (s *Server) startArtifactReaper(ctx context.Context) {
 	}()
 }
 
+// reapArtifactVersions runs one maintenance pass, in the order the blob
+// sweep relies on: abandoned pending versions are reaped and expired
+// artifacts deleted first, so their files stop counting as references,
+// then one blob sweep pass runs. Between the reap and the expiry sweep,
+// the owner liveness reconciler marks the artifacts of deleted agents and
+// users (and clears the mark of restored ones); a failure there is logged
+// once and does not stop the rest of the pass.
 func (s *Server) reapArtifactVersions(ctx context.Context) {
 	st := s.ArtifactStore()
 	if st == nil {
 		return
 	}
-	n, err := st.ReapPending(ctx, time.Now().Add(-artifacts.PendingVersionTTL), artifactReapBatch)
+	now := time.Now()
+	n, err := st.ReapPending(ctx, now.Add(-artifacts.PendingVersionTTL), artifactReapBatch)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: reaping pending versions failed", "error", err)
 		return
 	}
 	if n > 0 {
 		slog.InfoContext(ctx, "artifacts: reaped abandoned pending versions", "count", n)
+	}
+	s.reconcileArtifactOwners(ctx, st, now)
+	n, err = st.SweepExpired(ctx, now, artifactReapBatch)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: deleting expired artifacts failed", "error", err)
+		return
+	}
+	if n > 0 {
+		slog.InfoContext(ctx, "artifacts: deleted expired artifacts", "count", n)
+	}
+	b := s.artifactBackend()
+	if b.Blobs == nil || b.HubID == "" {
+		return
+	}
+	grace := time.Duration(s.artifactsConfig().GCGraceHours) * time.Hour
+	listed, deleted, err := s.artifactBlobSweeper.Sweep(ctx, st, b.Blobs, b.HubID, grace, now)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: blob sweep failed", "error", err, "listed", listed, "deleted", deleted)
+		return
+	}
+	if deleted > 0 {
+		slog.InfoContext(ctx, "artifacts: deleted unreferenced blobs", "count", deleted)
+	}
+}
+
+// reconcileArtifactOwners runs one owner liveness pass
+// (artifacts.ReconcileOwners) with this server's artifacts.Host as the
+// principal checker. It reads the hub's agent and user tables only through
+// the host's string interface, so it works after every way an agent or
+// user stops existing, including PurgeDeletedAgents and the project
+// cascade, which run no lifecycle hooks. A checker error is logged once
+// with the number of owners left unprocessed; the next pass retries.
+func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store, now time.Time) {
+	res, err := artifacts.ReconcileOwners(ctx, st, newArtifactHost(s), now)
+	var cerr *artifacts.CheckerError
+	switch {
+	case errors.As(err, &cerr):
+		slog.WarnContext(ctx, "artifacts: owner liveness check failed; pass stopped",
+			"error", cerr.Err, "owners_checked", res.Owners, "owners_unprocessed", cerr.Unprocessed)
+	case err != nil:
+		slog.WarnContext(ctx, "artifacts: owner liveness pass failed", "error", err, "owners_checked", res.Owners)
+	}
+	if res.Orphaned > 0 || res.Unorphaned > 0 {
+		slog.InfoContext(ctx, "artifacts: owner liveness marks changed",
+			"orphaned", res.Orphaned, "unorphaned", res.Unorphaned, "owners_checked", res.Owners)
 	}
 }
 
@@ -157,9 +231,25 @@ func (s *Server) initArtifactViewKey(ctx context.Context) error {
 		if _, rerr := rand.Read(key); rerr != nil {
 			return fmt.Errorf("generate ephemeral artifact view key: %w", rerr)
 		}
+		s.recordSigningKeySource(SecretKeyArtifactViewKey, signingKeySourceEphemeral)
 	}
 	s.mu.Lock()
 	s.artifactViewKey = key
 	s.mu.Unlock()
 	return nil
+}
+
+// shareLinkClientKey is the client a share-link read is charged to: the
+// client address as geExchangeClientIP reads it through trusted proxies,
+// with an IPv6 address keyed on its /64 prefix (the usual allocation to
+// one network interface) and an IPv4 address keyed as is. A larger IPv6
+// allocation still spans many /64 prefixes; the service's limit across all
+// clients bounds those.
+func shareLinkClientKey(r *http.Request, trusted []*net.IPNet) string {
+	key := geExchangeClientIP(r, trusted)
+	ip := net.ParseIP(key)
+	if ip == nil || ip.To4() != nil {
+		return key
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }

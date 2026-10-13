@@ -119,6 +119,10 @@ func isText(mt string) bool {
 		mt == "application/yaml" || mt == "application/toml" || mt == "application/xml"
 }
 
+// IsTextMediaType reports whether files of media type mt are text: served
+// with a UTF-8 charset, and resolved by CriticMarkup projections.
+func IsTextMediaType(mt string) bool { return isText(mt) }
+
 // responseContentType is the Content-Type served for a stored media type.
 func responseContentType(mt string) string {
 	if isText(mt) {

@@ -30,42 +30,6 @@ import (
 
 // --- helpers ---------------------------------------------------------------
 
-// createFixtureAgent stores an agent in the fixture project with the given
-// ancestry and applied role.
-func createFixtureAgent(t *testing.T, f *bypassAgentsFixture, name string, ancestry []string, role AgentRole) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid(name), Slug: tid(name), Name: name, ProjectID: f.proj.ID,
-		Phase: "running", CreatedBy: ancestry[0], OwnerID: ancestry[0], Ancestry: ancestry,
-		AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(role)},
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-// createAsAgent posts a child-agent create in the fixture project with a
-// token for agentID carrying the scopes of its stored role plus
-// ScopeAgentCreate.
-func createAsAgent(t *testing.T, f *bypassAgentsFixture, agentID string, req CreateAgentRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	svc := f.srv.GetAgentTokenService()
-	require.NotNil(t, svc)
-	stored, err := f.store.GetAgent(context.Background(), agentID)
-	require.NoError(t, err)
-	role, _ := agentRoleAndScopes(stored)
-	scopes := append([]AgentTokenScope{ScopeProjectRead, ScopeAgentCreate}, ScopesForRole(role)...)
-	tok, err := svc.GenerateAgentToken(agentID, f.proj.ID, scopes, nil)
-	require.NoError(t, err)
-	return doRequestWithAgentToken(t, f.srv, http.MethodPost, "/api/v1/projects/"+f.proj.ID+"/agents", req, tok)
-}
-
-// grantFixtureRole binds userID to a seeded project role in the fixture
-// project.
-func grantFixtureRole(t *testing.T, f *bypassAgentsFixture, userID, role string) {
-	t.Helper()
-	grantProjectRole(t, f.store, userID, f.proj.ID, role)
-}
-
 // assertAgentCreateDenied asserts the neutral create 403 and whether it
 // carries the delegation-ceiling detail.
 func assertAgentCreateDenied(t *testing.T, rec *httptest.ResponseRecorder, ceiling bool) {

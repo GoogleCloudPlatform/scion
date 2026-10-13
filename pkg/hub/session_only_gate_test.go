@@ -17,9 +17,7 @@
 package hub
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,40 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// realTokenContext authenticates a minted token key the way the auth
-// middleware does and returns a request context carrying its identity,
-// credential and auth type.
-func realTokenContext(t *testing.T, srv *Server, key string) context.Context {
-	t.Helper()
-	scoped, err := srv.uatService.ValidateToken(context.Background(), key)
-	require.NoError(t, err)
-	ctx := context.WithValue(context.Background(), userContextKey{}, scoped)
-	ctx = contextWithIdentity(ctx, scoped)
-	ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(scoped))
-	return contextWithAuthType(ctx, AuthTypeUAT)
-}
-
-// requestWithContext builds a request for a direct handler call.
-func requestWithContext(ctx context.Context, method, path string, body interface{}) *http.Request {
-	var raw []byte
-	if body != nil {
-		raw, _ = json.Marshal(body)
-	}
-	req := httptest.NewRequest(method, path, bytes.NewReader(raw)).WithContext(ctx)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	return req
-}
-
-func requireSessionOnlyRefusal(t *testing.T, rec *httptest.ResponseRecorder, want authzop.SessionOnlyReason, label string) {
-	t.Helper()
-	reason, credential := sessionOnlyDetailsOf(rec)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "%s: %s", label, rec.Body.String())
-	assert.Equal(t, string(want), reason, "%s: details.reason: %s", label, rec.Body.String())
-	assert.Equal(t, sessionRequiredCredential, credential, "%s: details.credential: %s", label, rec.Body.String())
-}
 
 // TestSessionOnlyGate_ReasonIsReported pins that every session-only site
 // refuses a real user access token with 403 and the site's reason in
@@ -99,6 +63,10 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 		{"project member remove", http.MethodDelete, "/api/v1/projects/" + f.project + "/members/" + f.projectMembership, nil, authzop.ReasonGovernancePending},
 		{"port registration", http.MethodPost, "/api/v1/agents/" + f.agent + "/ports", map[string]interface{}{"port": 18081}, authzop.ReasonGovernancePending},
 		{"message mode", http.MethodPost, "/api/v1/agents/" + f.agent + "/set_message_mode", map[string]interface{}{"mode": "project"}, authzop.ReasonGovernancePending},
+		{"scheduled event create", http.MethodPost, "/api/v1/projects/" + f.project + "/scheduled-events", map[string]interface{}{"eventType": "dispatch_agent", "fireIn": "1h", "agentName": "x"}, authzop.ReasonGovernancePending},
+		{"schedule create", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules", map[string]interface{}{"name": "x", "cronExpr": "0 * * * *", "eventType": "message", "agentName": "x", "message": "x"}, authzop.ReasonGovernancePending},
+		{"schedule update", http.MethodPatch, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule, map[string]interface{}{"name": "x"}, authzop.ReasonGovernancePending},
+		{"schedule resume", http.MethodPost, "/api/v1/projects/" + f.project + "/schedules/" + f.schedule + "/resume", nil, authzop.ReasonGovernancePending},
 	}
 	for _, tc := range httpCases {
 		rec := doRequestWithUAT(t, m.srv, key, tc.method, tc.path, tc.body)
@@ -106,22 +74,17 @@ func TestSessionOnlyGate_ReasonIsReported(t *testing.T) {
 	}
 
 	// Sites a token cannot reach through the route layer, because the
-	// scheduled_event and role_binding permissions carry no selector, are
-	// called directly with the same minted token, authenticated as the
-	// middleware does. Project delete is pinned at the service by
-	// TestRS3_ProjectDeleteScopedUATDenied.
+	// role_binding permissions carry no selector, are called directly with
+	// the same minted token, authenticated as the middleware does. Project
+	// delete is pinned at the service by TestRS3_ProjectDeleteScopedUATDenied.
+	// The scheduled authoring functions are also called directly, so the
+	// refusal is pinned at each function as well as at the routes above.
 	ctx := realTokenContext(t, m.srv, key)
 
-	// Scheduled dispatch authoring is not session-only: the revision records
-	// the token's ceiling, and each fire requires the token to be live
-	// (authorizeScheduledDispatchAgentAuthoring). This checks the function
-	// alone: the schedule routes refuse a project-scoped token earlier, at
-	// the bearer gate's boundary eligibility stage.
 	rec := httptest.NewRecorder()
 	ok := m.srv.authorizeScheduledDispatchAgentAuthoring(rec, requestWithContext(ctx, http.MethodPost, "/api/v1/projects/"+f.project+"/scheduled-events", nil))
-	assert.True(t, ok, "scheduled dispatch authoring admits a scoped token: %s", rec.Body.String())
-	_, credential := sessionOnlyDetailsOf(rec)
-	assert.NotEqual(t, sessionRequiredCredential, credential, "scheduled dispatch authoring: refused as session-only: %s", rec.Body.String())
+	assert.False(t, ok)
+	requireSessionOnlyRefusal(t, rec, authzop.ReasonGovernancePending, "scheduled dispatch authoring")
 
 	rec = httptest.NewRecorder()
 	payload := `{"agentId":"` + f.agent + `","message":"x"}`

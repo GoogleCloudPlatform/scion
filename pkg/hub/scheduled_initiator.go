@@ -17,7 +17,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"reflect"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -287,48 +286,6 @@ func (s *Server) scheduledInitiator(attr store.InitiatorAttribution) ScheduledIn
 		CredentialKind:     attr.InitiatorCredentialKind,
 		CredentialID:       attr.InitiatorCredentialID,
 		CredentialSnapshot: attr.InitiatorCredentialSnapshot,
-	}
-}
-
-// isNilIdentity reports whether identity is either the nil interface or a
-// non-nil Identity value holding a nil concrete pointer (a "typed nil" — for
-// example a nil *DevUser or nil *AuthenticatedUser boxed into the Identity
-// interface). In Go, an interface value equals nil only when both its type
-// and value are nil; a typed nil has a non-nil type descriptor, so
-// identity == nil is false for it even though the concrete pointer it holds
-// is nil. Every concrete Identity implementation in this package is a
-// pointer type, and several of their ID()/Type() methods dereference the
-// receiver with no nil guard (e.g. DevUser.ID() returns u.id directly), so
-// calling one on a typed-nil identity panics (GCP#2188 review comment on
-// initiatorMatchesExecutor, ptone/scion#2342).
-//
-// Deliberately reflect-based rather than a type switch enumerating every
-// concrete Identity implementation, which is what the review comment
-// suggested: a hand-written switch must be extended every time a new
-// Identity implementation is added anywhere in the package, and silently
-// stops catching that type's typed-nil case if a future author forgets. A
-// pointer-kind nil check via reflection generalizes over any current or
-// future implementation without that maintenance burden, at the cost of one
-// reflect call in a defensive guard that is not on any hot path. This helper
-// answers only the narrow nil-safety question — it says nothing about which
-// concrete type identity is or what it means; principalContextForIdentity
-// and credentialContextForIdentity's type switches (authz.go) remain the
-// place concrete Identity types are classified by meaning, and are
-// unaffected by this helper.
-func isNilIdentity(identity Identity) bool {
-	if identity == nil {
-		return true
-	}
-	// reflect.ValueOf(identity) already unwraps the interface to its
-	// concrete dynamic value, so v.Kind() can never itself be
-	// reflect.Interface here — that case is omitted so this list names only
-	// the kinds IsNil can actually observe through this call.
-	v := reflect.ValueOf(identity)
-	switch v.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func:
-		return v.IsNil()
-	default:
-		return false
 	}
 }
 

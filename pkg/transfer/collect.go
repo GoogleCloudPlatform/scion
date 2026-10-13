@@ -24,11 +24,19 @@ import (
 )
 
 // DefaultExcludePatterns are patterns commonly excluded from file transfers.
+//
+// ".scion/**" excludes the workspace-root .scion entry (the project marker
+// file, or the directory holding project identity and settings). The matcher
+// anchors "/**" patterns to the root and also matches the bare prefix, so the
+// one pattern covers both layouts. A bare ".scion" pattern is deliberately
+// absent: simple patterns also match by basename, which would drop nested
+// .scion entries that are ordinary workspace content.
 var DefaultExcludePatterns = []string{
 	".git",
 	".git/**",
 	".DS_Store",
 	"**/.DS_Store",
+	".scion/**",
 }
 
 // ManifestBuilder builds a manifest from local files.

@@ -22,12 +22,10 @@
  * denied selector from a 403 scope_violation mint response.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { ScionTokenList } from './token-list.js';
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionTokenList: any;
 let formatEligibilityReason: (reason?: string) => string;
 let relationshipBadgeText: (scope: string) => string;
 
@@ -121,7 +119,11 @@ function eligibilityResponseIneligible(projectId: string) {
   const resp = eligibilityResponse(projectId);
   resp.scopes[0] = {
     ...resp.scopes[0],
-    eligibility: { boundary: { kind: 'project', projectId }, eligible: false, reason: 'no_relationship_candidacy' },
+    eligibility: {
+      boundary: { kind: 'project', projectId },
+      eligible: false,
+      reason: 'no_relationship_candidacy',
+    },
   };
   return resp;
 }
@@ -149,10 +151,12 @@ function baseFetch(
   }> = {}
 ) {
   return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-    const url = typeof input === 'string' ? input : input.toString();
+    const url = requestUrl(input);
     const method = init?.method ?? 'GET';
     if (url.startsWith('/api/v1/auth/scopes')) {
-      return Promise.resolve(overrides.scopes ? overrides.scopes(url) : jsonResponse(CATALOG_RESPONSE));
+      return Promise.resolve(
+        overrides.scopes ? overrides.scopes(url) : jsonResponse(CATALOG_RESPONSE)
+      );
     }
     if (url === '/api/v1/auth/tokens' && method === 'POST') {
       return Promise.resolve(
@@ -163,7 +167,9 @@ function baseFetch(
       return Promise.resolve(overrides.tokens ? overrides.tokens() : jsonResponse({ items: [] }));
     }
     if (url.startsWith('/api/v1/projects')) {
-      return Promise.resolve(overrides.projects ? overrides.projects() : jsonResponse({ projects: [] }));
+      return Promise.resolve(
+        overrides.projects ? overrides.projects() : jsonResponse({ projects: [] })
+      );
     }
     return Promise.resolve(jsonResponse({}));
   };
@@ -172,7 +178,6 @@ function baseFetch(
 describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
   beforeAll(async () => {
     const mod = await import('./token-list.js');
-    ScionTokenList = mod.ScionTokenList;
     formatEligibilityReason = mod.formatEligibilityReason;
     relationshipBadgeText = mod.relationshipBadgeText;
   });
@@ -401,7 +406,8 @@ describe('scion-token-list — project eligibility (ptone/scion#2122)', () => {
       baseFetch({
         scopes: (url) => {
           if (url.includes('projectId=proj-a')) return gateA.promise;
-          if (url.includes('projectId=proj-b')) return jsonResponse(eligibilityResponseIneligible('proj-b'));
+          if (url.includes('projectId=proj-b'))
+            return jsonResponse(eligibilityResponseIneligible('proj-b'));
           return jsonResponse(CATALOG_RESPONSE);
         },
       })

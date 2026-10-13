@@ -66,14 +66,37 @@ type StopDispatchArgs struct {
 // Claim, when non-zero, is the delete engine's deletion claim: the executing
 // node sends the delete (the current run's and each previous run's) only
 // while that claim is still the row's current, live one (ptone/scion#2906).
+//
+// Target identifies the agent on its broker, so a claimless intent can
+// still be executed after the agent row is gone, as it is after a project
+// delete (ptone/scion#3665). An intent without it (written by an older
+// hub) needs the row, as before.
+//
+// NotAfter, set only on a claimless intent, is the deadline its delete
+// must reach the broker by, fixed when the intent is written
+// (ptone/scion#3674). The executing node drops the intent once it has
+// passed, and otherwise sends it, so the broker refuses a late delete with
+// 409 stale_dispatch. An engine's intent carries its Claim instead, and the
+// executing node computes the deadline from the claim.
 type DeleteDispatchArgs struct {
-	DeleteFiles    bool      `json:"deleteFiles,omitempty"`
-	RemoveBranch   bool      `json:"removeBranch,omitempty"`
-	SoftDelete     bool      `json:"softDelete,omitempty"`
-	DeletedAt      time.Time `json:"deletedAt,omitempty"`
-	RunID          string    `json:"runId,omitempty"`
-	PreviousRunIDs []string  `json:"previousRunIds,omitempty"`
-	Claim          int64     `json:"claim,omitempty"`
+	DeleteFiles    bool                `json:"deleteFiles,omitempty"`
+	RemoveBranch   bool                `json:"removeBranch,omitempty"`
+	SoftDelete     bool                `json:"softDelete,omitempty"`
+	DeletedAt      time.Time           `json:"deletedAt,omitempty"`
+	RunID          string              `json:"runId,omitempty"`
+	PreviousRunIDs []string            `json:"previousRunIds,omitempty"`
+	Claim          int64               `json:"claim,omitempty"`
+	Target         *DeleteIntentTarget `json:"target,omitempty"`
+	NotAfter       time.Time           `json:"notAfter,omitzero"`
+}
+
+// DeleteIntentTarget is what a delete intent records about its agent so
+// it can be executed without the agent row (ptone/scion#3665).
+type DeleteIntentTarget struct {
+	BrokerID  string `json:"brokerId"`
+	ProjectID string `json:"projectId,omitempty"`
+	Slug      string `json:"slug"`
+	Runtime   string `json:"runtime,omitempty"`
 }
 
 // CheckPromptDispatchArgs is intentionally empty — the agent slug/ID in the

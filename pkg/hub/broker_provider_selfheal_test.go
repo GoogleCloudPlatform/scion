@@ -129,7 +129,7 @@ func TestBrokerProviderSelfHeal_RestoresAvailabilityAfterAffinityOwnerDisconnect
 	// A second Hub replica sharing the same store: a distinct instanceID and a
 	// distinct, in-process control-channel connections map, modelling a
 	// second instance of the same multi-instance deployment.
-	srv2, err := New(srv1.config, s)
+	srv2, err := newTestHubServer(t, srv1.config, s)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv2.Shutdown(ctx) })
 

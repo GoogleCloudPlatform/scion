@@ -22,8 +22,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -795,4 +798,175 @@ func TestRunConversationCatchUp_AgentHubContext_ForbiddenForNonParticipant(t *te
 	assert.NotContains(t, err.Error(), "requires Hub mode",
 		"a permission denial must not be misreported as the F4 hub-mode-detection bug")
 	assert.Contains(t, err.Error(), "not a participant in this conversation")
+}
+
+// TestRunConversationList_NameColumn covers ptone/scion#3499: native
+// conversations carry no display name, so the NAME column must fall back to
+// DM:<peer> for direct conversations and the linked thread name for groups,
+// and "-" when the hub supplied neither. JSON output must pass the hub's
+// dmPeer/threadName fields through unchanged.
+func TestRunConversationList_NameColumn(t *testing.T) {
+	orig := saveConversationListTestState()
+	defer orig.restore()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/conversations" || r.Method != http.MethodGet {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"conversations":[
+			{"id":"conv-dm-agent","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"11111111-1111-1111-1111-111111111111","name":"reviewer"}},
+			{"id":"conv-thread","kind":"group","surface":"native","driftState":"active","threadName":"design-chat"},
+			{"id":"conv-named","kind":"group","surface":"native","driftState":"active","displayName":"release"},
+			{"id":"conv-dm-unknown","kind":"direct","surface":"native","driftState":"active",
+			 "dmPeer":{"kind":"agent","id":"22222222-2222-2222-2222-222222222222"}},
+			{"id":"conv-both","kind":"group","surface":"native","driftState":"active",
+			 "displayName":"named-wins","threadName":"thread-loses"},
+			{"id":"conv-grp-dm","kind":"group","surface":"native","driftState":"active","threadName":"group-thread",
+			 "dmPeer":{"kind":"agent","id":"33333333-3333-3333-3333-333333333333","name":"not-a-dm"}}
+		]}`))
+	}))
+	defer server.Close()
+
+	isolateHubEnvForTest(t, server.URL, "")
+	tmpHome := t.TempDir()
+	_ = os.Setenv("HOME", tmpHome)
+	projectPath = setupConversationCreateProject(t, tmpHome, server.URL, "")
+	convProject = ""
+
+	run := func() string {
+		cmd := &cobra.Command{}
+		cmd.SetContext(context.Background())
+		return captureStdout(t, func() { require.NoError(t, runConversationList(cmd, nil)) })
+	}
+
+	convJSON = false
+	outputFormat = ""
+	names := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(run()), "\n")[1:] {
+		fields := strings.Fields(line)
+		require.GreaterOrEqual(t, len(fields), 4, "row: %q", line)
+		names[fields[0]] = fields[3]
+	}
+	assert.Equal(t, map[string]string{
+		"conv-dm-agen": "DM:reviewer",
+		"conv-thread":  "design-chat",
+		"conv-named":   "release",
+		"conv-dm-unkn": "-",
+		// The display name takes precedence over the thread name.
+		"conv-both": "named-wins",
+		// dmPeer only labels direct conversations; a group falls through.
+		"conv-grp-dm": "group-thread",
+	}, names)
+
+	convJSON = true
+	var got struct {
+		Conversations []map[string]any `json:"conversations"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(run()), &got))
+	require.Len(t, got.Conversations, 6)
+	assert.Equal(t, "reviewer", got.Conversations[0]["dmPeer"].(map[string]any)["name"])
+	assert.Equal(t, "design-chat", got.Conversations[1]["threadName"])
+	assert.NotContains(t, got.Conversations[2], "dmPeer")
+}
+
+// modeTestParticipants is a participant list with a restricted agent, an
+// open agent, an agent the hub reported no mode for, and a user.
+func modeTestParticipants() []hubclient.ConversationParticipantDetail {
+	mk := func(kind, id, mode string) hubclient.ConversationParticipantDetail {
+		return hubclient.ConversationParticipantDetail{
+			ConversationParticipant: store.ConversationParticipant{
+				PrincipalKind: kind, PrincipalID: id, Role: "member", JoinedAt: time.Now(),
+			},
+			MessageMode: mode,
+		}
+	}
+	return []hubclient.ConversationParticipantDetail{
+		mk("agent", "agent-branch", "branch"),
+		mk("agent", "agent-project", "project"),
+		mk("agent", "agent-foreign", ""),
+		mk("user", "user-1", ""),
+	}
+}
+
+// modeColumnByID maps the first ID-like field of each table row to its
+// MSG MODE cell, located by the header's column position.
+func modeColumnByID(t *testing.T, out string, idCol int) map[string]string {
+	t.Helper()
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	got := map[string]string{}
+	for _, l := range lines {
+		f := strings.Fields(l)
+		if len(f) > idCol+2 && (f[0] == "agent" || f[0] == "user") {
+			got[f[idCol]] = f[idCol+2]
+		}
+	}
+	return got
+}
+
+func TestWriteConversationGetParticipants_MessageMode(t *testing.T) {
+	var buf bytes.Buffer
+	writeConversationGetParticipants(&buf, modeTestParticipants())
+	out := buf.String()
+
+	assert.Contains(t, out, "MSG MODE")
+	got := modeColumnByID(t, out, 1)
+	assert.Equal(t, map[string]string{
+		"agent-branch": "branch",
+		"agent-projec": "project", // IDs are truncated to 12 runes
+		"agent-foreig": "-",
+		"user-1":       "-",
+	}, got)
+	assert.Contains(t, out, conversationModeHint, "a branch agent should trigger the mode hint")
+}
+
+func TestWriteConversationGetParticipants_NoHintForOpenModes(t *testing.T) {
+	var buf bytes.Buffer
+	ps := modeTestParticipants()[1:] // drop the branch agent
+	writeConversationGetParticipants(&buf, ps)
+	assert.NotContains(t, buf.String(), conversationModeHint)
+
+	buf.Reset()
+	writeConversationGetParticipants(&buf, nil)
+	assert.Empty(t, buf.String())
+}
+
+func TestWriteConversationParticipantsTable_MessageMode(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, writeConversationParticipantsTable(&buf, modeTestParticipants()))
+	out := buf.String()
+
+	assert.True(t, strings.HasPrefix(out, "KIND"), out)
+	assert.Contains(t, strings.SplitN(out, "\n", 2)[0], "MSG MODE")
+	got := modeColumnByID(t, out, 1)
+	assert.Equal(t, map[string]string{
+		"agent-branch":  "branch",
+		"agent-project": "project",
+		"agent-foreign": "-",
+		"user-1":        "-",
+	}, got)
+}
+
+// TestConversationParticipantDetail_JSON checks that the participant JSON
+// carries messageMode for agents and omits it when the hub sent none.
+func TestConversationParticipantDetail_JSON(t *testing.T) {
+	ps := modeTestParticipants()
+	b, err := json.Marshal(ps)
+	require.NoError(t, err)
+	var raw []map[string]interface{}
+	require.NoError(t, json.Unmarshal(b, &raw))
+	require.Len(t, raw, 4)
+	assert.Equal(t, "branch", raw[0]["messageMode"])
+	assert.Equal(t, "agent-branch", raw[0]["principalId"], "embedded participant fields stay flat")
+	assert.NotContains(t, raw[2], "messageMode")
+	assert.NotContains(t, raw[3], "messageMode")
+
+	// And the hub's wire shape decodes into it.
+	var back hubclient.ConversationDetail
+	require.NoError(t, json.Unmarshal([]byte(`{"id":"c1","participants":[{"principalKind":"agent","principalId":"a1","messageMode":"lineage"}]}`), &back))
+	require.Len(t, back.Participants, 1)
+	assert.Equal(t, "lineage", back.Participants[0].MessageMode)
+	assert.Equal(t, "a1", back.Participants[0].PrincipalID)
 }

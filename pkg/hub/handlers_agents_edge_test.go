@@ -42,20 +42,6 @@ func (s *edgeWriteErrStore) WithTx(ctx context.Context, fn func(tx store.Store) 
 	})
 }
 
-// activeEdgesFor returns the active project edges for an agent.
-func activeEdgesFor(t *testing.T, s store.Store, agentID string) []*store.DelegationEdge {
-	t.Helper()
-	edges, err := s.GetDelegationEdgesForDelegate(context.Background(), store.DelegationPrincipalAgent, agentID)
-	require.NoError(t, err)
-	var active []*store.DelegationEdge
-	for _, e := range edges {
-		if e.Active {
-			active = append(active, e)
-		}
-	}
-	return active
-}
-
 // An edge write failure rolls back the whole create: no agent row, no
 // identity key, no edge.
 func TestCreateEdgeFailureRollsBack(t *testing.T) {
@@ -115,13 +101,4 @@ func TestDevAuthCreateRecordsPrincipalCeiling(t *testing.T) {
 	assert.Empty(t, e.SourceCredentialID)
 	assert.Equal(t, agent.AppliedConfig.AgentRole, e.Role, "edge role equals the stored role")
 	assertEdgeDelegatorIsSourcePrincipal(t, e)
-}
-
-// assertEdgeDelegatorIsSourcePrincipal asserts that the edge's delegator is
-// the principal its recorded provenance names as the source.
-func assertEdgeDelegatorIsSourcePrincipal(t *testing.T, e *store.DelegationEdge) {
-	t.Helper()
-	require.NotEmpty(t, e.DelegatorID)
-	assert.Equal(t, e.SourcePrincipalKind, e.DelegatorType, "delegator type is the source principal kind")
-	assert.Equal(t, e.SourcePrincipalID, e.DelegatorID, "delegator ID is the source principal ID")
 }

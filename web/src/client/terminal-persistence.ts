@@ -53,7 +53,7 @@ export function restoreUrlIntent(pathname: string, search: string): boolean {
 }
 
 /** The document shape the client sends and compares against its baseline. */
-interface TerminalWorkspaceDoc {
+export interface TerminalWorkspaceDoc {
   readonly agentIds: readonly string[];
   readonly frontmostAgentId: string | null;
 }
@@ -285,6 +285,21 @@ export class TerminalWorkspacePersistence {
     // budget has elapsed (or the GET has completed), this is already
     // settled, so a later call resolves in a microtask, not a network wait.
     await this.firstAttemptGate;
+  }
+
+  /**
+   * Reads the saved list of open terminals without restoring it or taking
+   * ownership, for a move to this window (ptone/scion#3328). Resolves null
+   * when the read fails or the response is invalid. Never rejects.
+   */
+  async readSavedList(): Promise<TerminalWorkspaceDoc | null> {
+    if (this.disposed) return null;
+    try {
+      const doc = await this.fetchWorkspace();
+      return doc ? { agentIds: doc.agentIds, frontmostAgentId: doc.frontmostAgentId } : null;
+    } catch {
+      return null;
+    }
   }
 
   /** Tears down listeners and timers. Does not touch the saved server state. */

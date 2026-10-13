@@ -121,9 +121,6 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 	if err != nil {
 		return wrapHubError(fmt.Errorf("failed to list agents via Hub: %w", err))
 	}
-	if resp == nil {
-		return fmt.Errorf("failed to list agents via Hub: server returned empty response")
-	}
 
 	if len(resp.Agents) == 0 {
 		fmt.Println("No running agents found to broadcast to.")
@@ -148,7 +145,7 @@ func broadcastViaHub(hubCtx *HubContext, message string) error {
 				return
 			}
 			if !isJSONOutput() {
-				fmt.Printf("Message delivered to agent '%s' via Hub.\n", name)
+				fmt.Printf("Message accepted for agent '%s' via Hub.\n", name)
 			}
 		}, func(int) {})
 	return nil
@@ -210,7 +207,7 @@ func broadcastLocal(message string) error {
 				fmt.Printf("Warning: failed to send message to agent '%s': %s\n", name, err)
 				return
 			}
-			fmt.Printf("Message delivered to agent '%s'.\n", name)
+			fmt.Printf("Message sent to agent '%s'.\n", name)
 		}, func(int) {})
 	return nil
 }

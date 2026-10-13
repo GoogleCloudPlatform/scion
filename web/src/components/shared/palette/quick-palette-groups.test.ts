@@ -26,18 +26,12 @@
  * composedPath()/focus assertions live in e2e/chat-palette (Chromium).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 
 await import('./quick-palette.js');
 type ScionQuickPalette = import('./quick-palette.js').ScionQuickPalette;
-import type {
-  GroupState,
-  PaletteCandidate,
-  PaletteGroup,
-} from '../../../client/chat-palette-types.js';
-import { dmCandidateId, threadCandidateId } from '../../../client/chat-palette-types.js';
+import type { GroupState, PaletteCandidate, PaletteGroup } from '../../../client/palette-types.js';
+import { dmCandidateId, threadCandidateId } from '../../../client/palette-types.js';
 
 function agentCandidate(id: string, label: string, activityMs = 0): PaletteCandidate {
   return {

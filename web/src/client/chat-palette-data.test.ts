@@ -21,8 +21,6 @@
  * `_messageability`/capability-fallback viability.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {
@@ -50,12 +48,12 @@ import {
   ChatPaletteDataController,
   AGENT_DMS_CACHE_MS,
   type PaletteAgentSource,
-  type RawPaletteAgent,
   type RawPaletteDm,
   type RawPaletteUser,
   type RawPaletteSpace,
   type RawPaletteThread,
 } from './chat-palette-data.js';
+import type { RawPaletteAgent } from './palette-types.js';
 import type { RecentFile } from './chat-recent-files.js';
 import type { AgentListSnapshot } from './agent-store.js';
 import type { Agent } from '../shared/types.js';
@@ -286,6 +284,32 @@ describe('buildAgentCandidates: DM recency join, no membership dependency', () =
     expect(candidates[0].id).toBe('["dm","agent","a0"]');
   });
 
+  it("names the project by the row's slug, falling back to the lookup for a row without one", () => {
+    const candidates = buildAgentCandidates(
+      [
+        {
+          id: 'a0',
+          name: 'Twin',
+          projectId: 'p1',
+          project: 'One',
+          projectSlug: 'one',
+          _capabilities: { actions: ['attach'] },
+        },
+        {
+          id: 'a1',
+          name: 'Twin',
+          projectId: 'p2',
+          project: 'Two',
+          _capabilities: { actions: ['attach'] },
+        },
+      ],
+      [],
+      (id) => (id === 'p2' ? 'two' : 'from-lookup')
+    );
+    expect(candidates.map((c) => c.secondaryLabel)).toEqual(['one', 'two']);
+    expect(candidates[0].searchFields).toEqual(['Twin', 'one', 'One']);
+  });
+
   it('includes the slug as an additional search field when present', () => {
     const candidates = buildAgentCandidates(
       [{ id: 'a0', name: 'Coder One', slug: 'coder-one', _capabilities: { actions: ['attach'] } }],
@@ -315,6 +339,70 @@ describe('buildAgentCandidates: DM recency join, no membership dependency', () =
       []
     );
     expect(candidates[0].searchFields).toEqual(['Coder One']);
+  });
+
+  it('shows the project slug on the second line, so same-named agents in different projects differ', () => {
+    const slugs = new Map([
+      ['p-alpha', 'alpha'],
+      ['p-beta', 'beta'],
+    ]);
+    const candidates = buildAgentCandidates(
+      [
+        {
+          id: 'a0',
+          name: 'coordinator',
+          slug: 'coordinator',
+          projectId: 'p-alpha',
+          project: 'Alpha',
+          _capabilities: { actions: ['attach'] },
+        },
+        {
+          id: 'a1',
+          name: 'coordinator',
+          slug: 'coordinator',
+          projectId: 'p-beta',
+          project: 'Beta',
+          _capabilities: { actions: ['attach'] },
+        },
+      ],
+      [],
+      (projectId) => slugs.get(projectId)
+    );
+    expect(candidates.map((c) => c.secondaryLabel)).toEqual(['alpha', 'beta']);
+    expect(candidates[0].searchFields).toEqual(['coordinator', 'alpha', 'Alpha']);
+  });
+
+  it('shows the project name while the project slug is not known', () => {
+    const candidates = buildAgentCandidates(
+      [
+        {
+          id: 'a0',
+          name: 'coordinator',
+          slug: 'coordinator',
+          projectId: 'p-alpha',
+          project: 'Alpha',
+          _capabilities: { actions: ['attach'] },
+        },
+      ],
+      [],
+      () => undefined
+    );
+    expect(candidates[0].secondaryLabel).toBe('Alpha');
+  });
+
+  it('leaves the second line empty rather than repeating a slug equal to the name', () => {
+    const candidates = buildAgentCandidates(
+      [
+        {
+          id: 'a0',
+          name: 'coordinator',
+          slug: 'coordinator',
+          _capabilities: { actions: ['attach'] },
+        },
+      ],
+      []
+    );
+    expect(candidates[0].secondaryLabel).toBe('');
   });
 
   it('falls back to slug for the display name when name is absent', () => {
@@ -444,7 +532,7 @@ describe('ChatPaletteDataController: Agents group from the agent store', () => {
     expect(apiFetchMock.mock.calls.map((c) => c[0])).toEqual(['/api/v1/chat/dms']);
   });
 
-  it('asks the store for the hub entry with its own abort signal', async () => {
+  it('asks the store for the hub entry with its own abort signal', () => {
     const ensure = vi.fn<PaletteAgentSource['ensure']>(() => new Promise(() => {}));
     const controller = new ChatPaletteDataController({ ensure, peek: () => undefined });
     void controller.loadAgentsGroup();
@@ -531,7 +619,7 @@ describe('ChatPaletteDataController: Agents group from the agent store', () => {
     expect(pending[0]?.signal?.aborted).toBe(true);
   });
 
-  it("starting a new load aborts the previous load's signal", async () => {
+  it("starting a new load aborts the previous load's signal", () => {
     const { source, pending } = fakeAgentSource();
     const controller = new ChatPaletteDataController(source);
     controller.loadAgentsGroup().catch(() => {});
@@ -696,6 +784,21 @@ describe('ChatPaletteDataController.deriveAgentCandidates', () => {
     expect(derived?.map((c) => c.label)).toEqual(['Coder', 'Second']);
     expect(derived?.find((c) => c.label === 'Second')?.activityMs).toBeGreaterThan(0);
     expect(apiFetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('resolves project slugs through the lookup at each rebuild', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ dms: [] }));
+    const { source, pending } = fakeAgentSource();
+    const slugs = new Map<string, string>();
+    const controller = new ChatPaletteDataController(source, (projectId) => slugs.get(projectId));
+    const inAlpha = { ...CODER, projectId: 'p-alpha', project: 'Alpha' };
+    const load = controller.loadAgentsGroup();
+    pending[0]?.resolve(snapshot([inAlpha]));
+    expect((await load).map((c) => c.secondaryLabel)).toEqual(['Alpha']);
+
+    slugs.set('p-alpha', 'alpha');
+    const derived = controller.deriveAgentCandidates(snapshot([inAlpha]));
+    expect(derived?.map((c) => c.secondaryLabel)).toEqual(['alpha']);
   });
 
   it('returns null while an Agents load is in flight', async () => {

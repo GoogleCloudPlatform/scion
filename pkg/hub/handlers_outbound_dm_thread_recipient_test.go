@@ -21,7 +21,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -641,12 +640,4 @@ func TestGroupConvRef_RecipientSupplied_Unaffected(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code,
 		"conversation_ref for a group conversation must be unaffected by the direct-conversation checks: %s",
 		rr.Body.String())
-}
-
-// mustDMKey builds a DM key or fails the test.
-func mustDMKey(t *testing.T, kindA, idA, kindB, idB string) string {
-	t.Helper()
-	key, err := messages.DMConversationKey(kindA, idA, kindB, idB)
-	require.NoError(t, err)
-	return key
 }

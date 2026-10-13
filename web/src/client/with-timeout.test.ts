@@ -45,7 +45,7 @@ describe('withTimeout (review R3-1)', () => {
     await expect(result).resolves.toBeUndefined();
   });
 
-  it('applies the hung promise\'s side effect once it eventually lands (late-arrival path)', async () => {
+  it("applies the hung promise's side effect once it eventually lands (late-arrival path)", async () => {
     let sideEffect = '';
     const hang = new Promise<void>((resolve) => {
       setTimeout(() => {

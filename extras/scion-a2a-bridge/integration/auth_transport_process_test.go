@@ -428,7 +428,9 @@ func serveScionA2ABridgeProcess(t *testing.T, address, replica string, authCfg b
 	sdkHandler := a2asrv.NewHandler(executor,
 		a2asrv.WithLogger(logger),
 		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
-		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		// Test-only: generous inactivity headroom so slow or busy (-race) runners
+		// do not hit the SDK watcher before the bridge executor finishes.
+		a2asrv.WithAgentInactivityTimeout(10*time.Second),
 		a2asrv.WithTaskStore(scopedStore),
 	)
 	b.SetSDKRequestHandler(sdkHandler)
@@ -486,7 +488,9 @@ func serveHABridgeProcess(t *testing.T, address, replica string) {
 	sdkHandler := a2asrv.NewHandler(executor,
 		a2asrv.WithLogger(logger),
 		a2asrv.WithCapabilityChecks(&a2a.AgentCapabilities{Streaming: true}),
-		a2asrv.WithAgentInactivityTimeout(2*time.Second),
+		// Test-only: generous inactivity headroom so slow or busy (-race) runners
+		// do not hit the SDK watcher before the bridge executor finishes.
+		a2asrv.WithAgentInactivityTimeout(10*time.Second),
 		a2asrv.WithTaskStore(barrierStore),
 	)
 	b.SetSDKRequestHandler(sdkHandler)

@@ -325,6 +325,9 @@ func filterMembersByPhase(members []store.AgentMember, phase string) []store.Age
 // already run in the caller.
 func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request, projectID string, filter store.AgentFilter, p agentListParams) {
 	ctx := r.Context()
+	// ids= narrows the candidate read as one more ANDed filter; the
+	// per-row read pass below is unchanged and still decides every row.
+	narrowFilterByIDs(&filter, p.ids)
 	identity := GetIdentityFromContext(ctx)
 
 	binding := scopedCursorBinding(sortSuffix("project-agents:"+projectID, p.sort, p.dir), filter, identity)
@@ -547,7 +550,7 @@ func (s *Server) listProjectAgentsSorted(w http.ResponseWriter, r *http.Request,
 	s.enrichAgents(ctx, plainAgents)
 	for i := range agents {
 		agents[i].Agent = plainAgents[i]
-		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, capabilityAllows(agents[i].Cap, ActionAttach))
+		agents[i].AppliedConfig = redactAppliedConfigEnvForResponse(plainAgents[i].AppliedConfig, s.envViewAllowed(ctx, identity, &plainAgents[i], agents[i].Cap))
 	}
 
 	// A complete response IS the whole set: a race drop (missing row,

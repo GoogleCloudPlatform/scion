@@ -106,7 +106,8 @@ func validateReincarnatePatchRequest(w http.ResponseWriter, req ReincarnateAgent
 // and an agent requester may not grant a role above its own stored role
 // (for a self request that means a role can be lowered but never raised).
 // CanDelegate and the effect ceiling for the role run in
-// reincarnateAuthorityFor. Unlike create, which silently caps an agent
+// reincarnateAuthorityFor (except for a self request that keeps the stored
+// role, which is not a role change). Unlike create, which silently caps an agent
 // caller's request at the project maximum, a reincarnate over-request is
 // always refused: the requester named the role explicitly. On a refusal it
 // writes a 403 and returns false.
@@ -137,8 +138,11 @@ func (s *Server) checkReincarnateRoleLattice(w http.ResponseWriter, r *http.Requ
 // returns false; nothing has been written to the agent.
 func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http.Request, agent *store.Agent, serviceAccountID string) (*store.GCPIdentityConfig, bool) {
 	ctx := r.Context()
-	sa, err := s.store.GetGCPServiceAccount(ctx, serviceAccountID)
+	sa, err := s.resolveGCPServiceAccountRef(ctx, agent.ProjectID, serviceAccountID)
 	if err != nil {
+		if writeGCPSAAmbiguous(w, err) {
+			return nil, false
+		}
 		// errors.Is, not ==: see the create path.
 		if errors.Is(err, store.ErrNotFound) {
 			ValidationError(w, msgSANotAvailableInProject, nil)
@@ -152,10 +156,10 @@ func (s *Server) resolveReincarnateServiceAccount(w http.ResponseWriter, r *http
 		return nil, false
 	}
 	if !gcpServiceAccountVerified(sa) {
-		ValidationError(w, "GCP service account is not verified; verify it before assigning to agents", nil)
+		writeIdentityNotVerified(w, sa)
 		return nil, false
 	}
-	if !s.authorizeSAAssignment(w, r, sa, SurfaceAgentReincarnate) {
+	if !s.authorizeSAAssignment(w, r, sa, agent.ProjectID, SurfaceAgentReincarnate) {
 		return nil, false
 	}
 	return &store.GCPIdentityConfig{

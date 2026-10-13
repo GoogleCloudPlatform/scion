@@ -8,7 +8,7 @@ Copyright 2025 The Scion Authors.
 // It defines the OpenTelemetry metric instruments used to observe the
 // notification pipeline (publish-to-deliver latency, notification counts,
 // subscriber lag, listener reconnects, payload sizes) and the database
-// connection pool (active/idle/waiting/max).
+// connection pools (active/idle/max gauges and a cumulative wait counter).
 //
 // The package is intentionally lightweight: it registers instruments against an
 // OpenTelemetry MeterProvider and exposes a small Recorder interface so callers
@@ -22,6 +22,7 @@ package dbmetrics
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -43,7 +44,7 @@ const (
 	MetricPayloadSize             = "scion.db.notify.payload.size"
 	MetricPoolConnectionsActive   = "scion.db.pool.connections.active"
 	MetricPoolConnectionsIdle     = "scion.db.pool.connections.idle"
-	MetricPoolConnectionsWaiting  = "scion.db.pool.connections.waiting"
+	MetricPoolConnectionsWaits    = "scion.db.pool.connections.wait_count"
 	MetricPoolConnectionsMax      = "scion.db.pool.connections.max"
 )
 
@@ -51,6 +52,20 @@ const (
 // to say why a notification was dropped (for example "decode", "refetch" or
 // "full_buffer"). Dashboards group drops by it.
 const AttrDropReason = "reason"
+
+// AttrPool is the attribute key that names the connection pool a
+// scion.db.pool.* point describes. The hub runs two pools, so every pool
+// point carries it (ObservePoolStats sets it) or the two pools would write
+// the same series.
+const AttrPool = "pool"
+
+// Values of AttrPool.
+const (
+	// PoolStore is the database/sql pool behind the hub store.
+	PoolStore = "store"
+	// PoolEvents is the pgx pool behind the Postgres event publisher.
+	PoolEvents = "events"
+)
 
 // Recorder is the interface callers use to record Postgres LISTEN/NOTIFY and
 // connection-pool metrics. All methods are safe to call concurrently and are
@@ -81,8 +96,10 @@ type Recorder interface {
 	// RecordPayloadSize records the size, in bytes, of a notification payload.
 	RecordPayloadSize(ctx context.Context, bytes int64, attrs ...attribute.KeyValue)
 
-	// ObservePoolStats records a snapshot of the DB connection pool gauges.
-	ObservePoolStats(ctx context.Context, stats PoolStats, attrs ...attribute.KeyValue)
+	// ObservePoolStats records a snapshot of the DB connection pool named
+	// pool (PoolStore or PoolEvents). The name is exported as the AttrPool
+	// attribute so each pool writes its own series.
+	ObservePoolStats(ctx context.Context, pool string, stats PoolStats, attrs ...attribute.KeyValue)
 
 	// Enabled reports whether metrics are backed by a real (non-no-op)
 	// MeterProvider. Callers may use this to skip building attribute sets when
@@ -90,12 +107,16 @@ type Recorder interface {
 	Enabled() bool
 }
 
-// PoolStats is a snapshot of database connection pool gauge values.
+// PoolStats is a snapshot of database connection pool values.
 type PoolStats struct {
-	Active  int64 // connections currently in use
-	Idle    int64 // connections open but unused
-	Waiting int64 // goroutines/requests waiting for a connection
-	Max     int64 // configured maximum pool size
+	Active int64 // connections currently in use
+	Idle   int64 // connections open but unused
+	// WaitCount is the cumulative number of times a caller had to wait for a
+	// connection since the pool opened. Neither database/sql nor pgxpool
+	// exposes how many callers are waiting right now. The recorder exports
+	// the increase since the previous snapshot of the same pool as a counter.
+	WaitCount int64
+	Max       int64 // configured maximum pool size
 }
 
 // recorder is the OpenTelemetry-backed implementation of Recorder.
@@ -110,10 +131,15 @@ type recorder struct {
 	listenerReconn   metric.Int64Counter
 	payloadSize      metric.Int64Histogram
 
-	poolActive  metric.Int64Gauge
-	poolIdle    metric.Int64Gauge
-	poolWaiting metric.Int64Gauge
-	poolMax     metric.Int64Gauge
+	poolActive metric.Int64Gauge
+	poolIdle   metric.Int64Gauge
+	poolWaits  metric.Int64Counter
+	poolMax    metric.Int64Gauge
+
+	// lastWaitCount holds the previous PoolStats.WaitCount per attribute set,
+	// so ObservePoolStats can add only the increase to poolWaits.
+	waitMu        sync.Mutex
+	lastWaitCount map[attribute.Distinct]int64
 }
 
 // compile-time check that recorder satisfies Recorder.
@@ -135,7 +161,7 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 	}
 
 	meter := mp.Meter(instrumentationName)
-	r := &recorder{enabled: enabled}
+	r := &recorder{enabled: enabled, lastWaitCount: map[attribute.Distinct]int64{}}
 
 	var err error
 
@@ -211,12 +237,12 @@ func New(mp metric.MeterProvider) (Recorder, error) {
 		return nil, fmt.Errorf("registering %s: %w", MetricPoolConnectionsIdle, err)
 	}
 
-	if r.poolWaiting, err = meter.Int64Gauge(
-		MetricPoolConnectionsWaiting,
-		metric.WithUnit("{request}"),
-		metric.WithDescription("Requests waiting for a database connection"),
+	if r.poolWaits, err = meter.Int64Counter(
+		MetricPoolConnectionsWaits,
+		metric.WithUnit("{wait}"),
+		metric.WithDescription("Times a caller had to wait for a database connection"),
 	); err != nil {
-		return nil, fmt.Errorf("registering %s: %w", MetricPoolConnectionsWaiting, err)
+		return nil, fmt.Errorf("registering %s: %w", MetricPoolConnectionsWaits, err)
 	}
 
 	if r.poolMax, err = meter.Int64Gauge(
@@ -268,10 +294,34 @@ func (r *recorder) RecordPayloadSize(ctx context.Context, bytes int64, attrs ...
 	r.payloadSize.Record(ctx, bytes, metric.WithAttributes(attrs...))
 }
 
-func (r *recorder) ObservePoolStats(ctx context.Context, stats PoolStats, attrs ...attribute.KeyValue) {
-	opt := metric.WithAttributes(attrs...)
+func (r *recorder) ObservePoolStats(ctx context.Context, pool string, stats PoolStats, attrs ...attribute.KeyValue) {
+	// attribute.NewSet keeps the last value of a duplicated key, so the pool
+	// name goes last: a caller attribute named "pool" cannot override it.
+	kvs := make([]attribute.KeyValue, 0, len(attrs)+1)
+	kvs = append(kvs, attrs...)
+	kvs = append(kvs, attribute.String(AttrPool, pool))
+	set := attribute.NewSet(kvs...)
+	opt := metric.WithAttributeSet(set)
 	r.poolActive.Record(ctx, stats.Active, opt)
 	r.poolIdle.Record(ctx, stats.Idle, opt)
-	r.poolWaiting.Record(ctx, stats.Waiting, opt)
 	r.poolMax.Record(ctx, stats.Max, opt)
+	if delta := r.waitCountDelta(set.Equivalent(), stats.WaitCount); delta > 0 {
+		r.poolWaits.Add(ctx, delta, opt)
+	}
+}
+
+// waitCountDelta returns how much the cumulative wait count of the pool
+// identified by key grew since its previous snapshot, and remembers cur. The
+// first snapshot of a pool counts in full: the pool and this process start
+// together. A count that went down means the pool was replaced, so cur is
+// all new.
+func (r *recorder) waitCountDelta(key attribute.Distinct, cur int64) int64 {
+	r.waitMu.Lock()
+	defer r.waitMu.Unlock()
+	prev, seen := r.lastWaitCount[key]
+	r.lastWaitCount[key] = cur
+	if !seen || cur < prev {
+		return cur
+	}
+	return cur - prev
 }

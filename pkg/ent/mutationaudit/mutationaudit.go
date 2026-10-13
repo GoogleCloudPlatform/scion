@@ -52,6 +52,22 @@ const (
 	FieldExecutorKind = "executor_kind"
 	// FieldExecutorID holds the string denoting the executor_id field in the database.
 	FieldExecutorID = "executor_id"
+	// FieldActorAgentID holds the string denoting the actor_agent_id field in the database.
+	FieldActorAgentID = "actor_agent_id"
+	// FieldAuthorizingUserID holds the string denoting the authorizing_user_id field in the database.
+	FieldAuthorizingUserID = "authorizing_user_id"
+	// FieldSourceGrantID holds the string denoting the source_grant_id field in the database.
+	FieldSourceGrantID = "source_grant_id"
+	// FieldParentGrantID holds the string denoting the parent_grant_id field in the database.
+	FieldParentGrantID = "parent_grant_id"
+	// FieldDelegationEdgeID holds the string denoting the delegation_edge_id field in the database.
+	FieldDelegationEdgeID = "delegation_edge_id"
+	// FieldExchangeAgentCredentialID holds the string denoting the exchange_agent_credential_id field in the database.
+	FieldExchangeAgentCredentialID = "exchange_agent_credential_id"
+	// FieldActorKind holds the string denoting the actor_kind field in the database.
+	FieldActorKind = "actor_kind"
+	// FieldAgentDelegationCode holds the string denoting the agent_delegation_code field in the database.
+	FieldAgentDelegationCode = "agent_delegation_code"
 	// Table holds the table name of the mutationaudit in the database.
 	Table = "mutation_audits"
 )
@@ -78,6 +94,14 @@ var Columns = []string{
 	FieldCorrelationID,
 	FieldExecutorKind,
 	FieldExecutorID,
+	FieldActorAgentID,
+	FieldAuthorizingUserID,
+	FieldSourceGrantID,
+	FieldParentGrantID,
+	FieldDelegationEdgeID,
+	FieldExchangeAgentCredentialID,
+	FieldActorKind,
+	FieldAgentDelegationCode,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).
@@ -208,4 +232,44 @@ func ByExecutorKind(opts ...sql.OrderTermOption) OrderOption {
 // ByExecutorID orders the results by the executor_id field.
 func ByExecutorID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldExecutorID, opts...).ToFunc()
+}
+
+// ByActorAgentID orders the results by the actor_agent_id field.
+func ByActorAgentID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActorAgentID, opts...).ToFunc()
+}
+
+// ByAuthorizingUserID orders the results by the authorizing_user_id field.
+func ByAuthorizingUserID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAuthorizingUserID, opts...).ToFunc()
+}
+
+// BySourceGrantID orders the results by the source_grant_id field.
+func BySourceGrantID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSourceGrantID, opts...).ToFunc()
+}
+
+// ByParentGrantID orders the results by the parent_grant_id field.
+func ByParentGrantID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldParentGrantID, opts...).ToFunc()
+}
+
+// ByDelegationEdgeID orders the results by the delegation_edge_id field.
+func ByDelegationEdgeID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldDelegationEdgeID, opts...).ToFunc()
+}
+
+// ByExchangeAgentCredentialID orders the results by the exchange_agent_credential_id field.
+func ByExchangeAgentCredentialID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldExchangeAgentCredentialID, opts...).ToFunc()
+}
+
+// ByActorKind orders the results by the actor_kind field.
+func ByActorKind(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldActorKind, opts...).ToFunc()
+}
+
+// ByAgentDelegationCode orders the results by the agent_delegation_code field.
+func ByAgentDelegationCode(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAgentDelegationCode, opts...).ToFunc()
 }

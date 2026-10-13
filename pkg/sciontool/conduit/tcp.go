@@ -20,27 +20,36 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"slices"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 
 	core "github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/target"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
-// ReservedPorts are never a TCP stream target, whatever the grant says:
-// the hub API (9810) and the metadata server (18380).
-var ReservedPorts = []int{9810, 18380}
+// ReservedPorts are never a TCP stream target, whatever the grant says.
+// It is the deny-list shared with the SSH server's direct-tcpip channels
+// (localpolicy.ReservedPorts): the hub API (9810) and the metadata server
+// (18380).
+var ReservedPorts = localpolicy.ReservedPorts
 
-// loopbackHost is the only host a TCP stream may reach (design §3.10:
-// TCP happens only on in-container loopback, at the sciontool end).
+// loopbackHost is the logical loopback target a TCP grant names (design
+// §3.10: TCP happens only on in-container loopback, at the sciontool end).
+// It is also the first address the target dials.
 const loopbackHost = "127.0.0.1"
 
-// localDialTimeout bounds the loopback dial.
+// loopbackHostV6 is dialed once, only when loopbackHost refuses the
+// connection, so services listening only on ::1 are reachable (design
+// §3.10, v2.13). Both are literal addresses; "localhost" is never resolved.
+const loopbackHostV6 = "::1"
+
+// localDialTimeout bounds the loopback dial, both attempts together.
 const localDialTimeout = 10 * time.Second
 
 // Stream refusal reasons.
@@ -51,16 +60,32 @@ const (
 	reasonUnsupportedKind     = "unsupported_kind"
 )
 
-// handleStream implements core.StreamHandler. The order is fixed: verify
-// the grant against this session's Welcome, check the target against the
-// local policy, dial loopback, and only then accept.
+// handleStream implements core.StreamHandler: it dispatches on the
+// stream kind. A kind this agent does not serve is refused with
+// unsupported_kind before anything else is looked at.
 func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
-	if open.GetKind() != conduitv1.StreamKind_STREAM_KIND_TCP {
-		return ps.Reject(core.CloseProtocolError, reasonUnsupportedKind)
+	switch open.GetKind() {
+	case conduitv1.StreamKind_STREAM_KIND_TCP:
+		return a.handleTCP(ctx, open, ps)
+	case conduitv1.StreamKind_STREAM_KIND_PTY:
+		if a.opts.SpawnPTY != nil {
+			return a.handlePTY(ctx, open, ps)
+		}
+	case conduitv1.StreamKind_STREAM_KIND_SSH:
+		if a.opts.SSH != nil {
+			return a.handleSSH(ctx, open, ps)
+		}
 	}
+	return ps.Reject(core.CloseProtocolError, reasonUnsupportedKind)
+}
+
+// verifyGrant verifies open's grant against this session's Welcome and
+// consumes its jti. It returns the grant's claims, or a refusal reason
+// (the caller rejects with 4403) and the error to log.
+func (a *Agent) verifyGrant(ctx context.Context, open *conduitv1.StreamOpen) (*grant.Claims, string, error) {
 	w := core.WelcomeFromContext(ctx)
 	if w == nil {
-		return ps.Reject(core.CloseForbidden, reasonGrantInvalid+": no session binding")
+		return nil, reasonGrantInvalid + ": no session binding", errors.New("no session binding")
 	}
 	a.applyWelcomeKeys(w)
 	v := &target.Verifier{
@@ -69,16 +94,27 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 		Replay:   a.replay,
 		Now:      a.clk.Now,
 	}
-	if _, err := v.VerifyStreamOpen(ctx, target.BindingFromWelcome(w), open, target.Acting{}); err != nil {
+	claims, err := v.VerifyStreamOpen(ctx, target.BindingFromWelcome(w), open, target.Acting{})
+	if err != nil {
+		return nil, reasonGrantInvalid, err
+	}
+	return claims, "", nil
+}
+
+// handleTCP serves a TCP stream. The order is fixed: verify the grant
+// against this session's Welcome, check the target against the local
+// policy, dial loopback, and only then accept.
+func (a *Agent) handleTCP(ctx context.Context, open *conduitv1.StreamOpen, ps core.PendingStream) error {
+	if _, reason, err := a.verifyGrant(ctx, open); err != nil {
 		log.Warn("Conduit: refused TCP stream %d: grant: %v", ps.ID(), err)
-		return ps.Reject(core.CloseForbidden, reasonGrantInvalid)
+		return ps.Reject(core.CloseForbidden, reason)
 	}
 	port, err := TCPTarget(open.GetParams())
 	if err != nil {
 		log.Warn("Conduit: refused TCP stream %d: %v", ps.ID(), err)
 		return ps.Reject(core.CloseForbidden, reasonForbidden)
 	}
-	conn, err := a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHost, strconv.Itoa(port)))
+	conn, err := a.dialLoopback(ctx, port)
 	if err != nil {
 		log.Debug("Conduit: TCP stream %d: dial port %d: %v", ps.ID(), port, err)
 		return ps.Reject(core.CloseRelayTimeout, reasonUpstreamUnreachable)
@@ -90,6 +126,21 @@ func (a *Agent) handleStream(ctx context.Context, open *conduitv1.StreamOpen, ps
 	}
 	splice(ctx, st, conn)
 	return nil
+}
+
+// dialLoopback dials 127.0.0.1:<port> and, only if that connection is
+// refused, retries once on [::1]:<port>. A timeout or any other error is
+// returned without a retry. Both attempts share ctx (bounded by the
+// stream's open_timeout) and a single localDialTimeout.
+func (a *Agent) dialLoopback(ctx context.Context, port int) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, localDialTimeout)
+	defer cancel()
+	p := strconv.Itoa(port)
+	conn, err := a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHost, p))
+	if err == nil || !errors.Is(err, syscall.ECONNREFUSED) {
+		return conn, err
+	}
+	return a.opts.DialLocal(ctx, "tcp", net.JoinHostPort(loopbackHostV6, p))
 }
 
 // TCPTarget validates the (already grant-verified) TCP params and returns
@@ -104,7 +155,7 @@ func TCPTarget(params map[string]string) (int, error) {
 	if err != nil || port < 1 || port > 65535 || strconv.Itoa(port) != raw {
 		return 0, fmt.Errorf("invalid tcp port %q", raw)
 	}
-	if slices.Contains(ReservedPorts, port) {
+	if localpolicy.IsReservedPort(port) {
 		return 0, fmt.Errorf("tcp port %d is reserved", port)
 	}
 	return port, nil

@@ -64,13 +64,20 @@ interface Request {
 }
 interface Message {
   key: string;
-  type: 'discover' | 'owner' | 'open' | 'ack' | 'account-teardown';
+  type: 'discover' | 'owner' | 'open' | 'ack' | 'account-teardown' | 'take-over' | 'released';
   requestId: string;
   agentId: string;
   generation: string | null;
   status?: TerminalOpenResult['status'];
   focus?: TerminalFocusResult;
 }
+/**
+ * How long a window moving the terminals to itself waits for the owner to
+ * confirm it closed its streams, and then for the Web Lock to reach it.
+ */
+export const MOVE_RELEASE_TIMEOUT_MS = 5000;
+export const MOVE_OWNERSHIP_TIMEOUT_MS = 5000;
+
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const token = (value: unknown): value is string =>
   typeof value === 'string' && value.length > 0 && value.length <= 256;
@@ -97,6 +104,14 @@ export class TerminalCoordinator {
     { agentId: string; result: Promise<TerminalOpenResult> }
   >();
   private readonly _unsupportedReason: string | null;
+  /** Pending take-over requests from this window, by request ID. */
+  private readonly releaseWaiters = new Map<
+    string,
+    { agentId: string; asked: boolean; finish: (released: boolean) => void }
+  >();
+  /** Called whenever this window becomes the owner. */
+  private readonly ownershipWaiters = new Set<() => void>();
+  private relinquished: (() => void) | null = null;
 
   constructor(
     scope: TerminalScope,
@@ -223,6 +238,149 @@ export class TerminalCoordinator {
   }
 
   /**
+   * Creates entries in this window's own registry while ANOTHER window owns
+   * the terminals, for a move to this window (ptone/scion#3328). Mirrors
+   * restoreEntries, but only for a non-owner: each entry authorizes and
+   * attaches on its own, and nothing is taken from the owner. Every id
+   * except connectAgentId is created idle (deferConnect). Returns [] for an
+   * owner, a torn down coordinator, or when coordination is unsupported.
+   */
+  openForMove(
+    agentIds: readonly string[],
+    opts: { connectAgentId: string | null }
+  ): readonly TerminalSession[] {
+    if (this.isOwner || this.stopped || !this.available) return [];
+    const existing = new Map(
+      this.registry.list().map((session) => [session.state.agentId, session])
+    );
+    const result: TerminalSession[] = [];
+    for (const agentId of agentIds) {
+      if (!uuid.test(agentId)) continue;
+      const id = agentId.toLowerCase();
+      let session = existing.get(id);
+      if (!session) {
+        const deferConnect = id !== opts.connectAgentId?.toLowerCase();
+        session = this.adapter.create
+          ? this.adapter.create(this.registry, id, { deferConnect })
+          : this.registry.open(id, this.adapter.initialize, { deferConnect });
+        existing.set(id, session);
+      }
+      result.push(session);
+    }
+    return result;
+  }
+
+  /**
+   * Asks the owning window to close its streams and release ownership, for
+   * a move to this window. Call it only once this window's own streams are
+   * open. Resolves true when the owner confirms; false on timeout, when
+   * this window is already the owner, or when coordination is unavailable.
+   * The owner keeps its streams and the Web Lock until it gets this request.
+   *
+   * The take-over names the owner's generation, learned with the same
+   * discover/owner exchange open() uses, so a window that becomes the owner
+   * while the message is in flight does not act on it. Resolves false at
+   * once if this window becomes the owner meanwhile (the owner went away).
+   */
+  requestRelease(agentId: string, timeoutMs = MOVE_RELEASE_TIMEOUT_MS): Promise<boolean> {
+    if (this.isOwner || this.stopped || !this.available || !uuid.test(agentId))
+      return Promise.resolve(false);
+    const requestId = crypto.randomUUID();
+    return new Promise<boolean>((resolve) => {
+      const finish = (released: boolean): void => {
+        clearTimeout(timer);
+        this.releaseWaiters.delete(requestId);
+        resolve(released);
+      };
+      const timer = setTimeout(() => finish(false), timeoutMs);
+      this.releaseWaiters.set(requestId, { agentId: agentId.toLowerCase(), asked: false, finish });
+      this.send({
+        key: this.coordinationKey,
+        type: 'discover',
+        requestId,
+        agentId: agentId.toLowerCase(),
+        generation: null,
+      });
+    });
+  }
+
+  /**
+   * Waits for this window to hold the Web Lock, without taking it early: a
+   * held lock is only ever acquired through the queued wait, after the
+   * holder releases it. Resolves false on timeout, teardown, or when
+   * coordination is unavailable.
+   */
+  awaitOwnership(timeoutMs = MOVE_OWNERSHIP_TIMEOUT_MS): Promise<boolean> {
+    if (this.isOwner) return Promise.resolve(true);
+    if (this.stopped || !this.available) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      const done = (owned: boolean): void => {
+        clearTimeout(timer);
+        this.ownershipWaiters.delete(onOwner);
+        resolve(owned);
+      };
+      const onOwner = (): void => done(!this.stopped && this.isOwner);
+      const timer = setTimeout(() => done(this.isOwner), timeoutMs);
+      this.ownershipWaiters.add(onOwner);
+      // Queue a wait if none is queued yet (claim() tries ifAvailable, then
+      // queues); never steals a held lock.
+      if (!this.waitingAbort && !this.claiming)
+        void this.claim().catch(() => {
+          /* reported as a timeout */
+        });
+    });
+  }
+
+  /**
+   * Sets the callback run after this window gave its terminals to another
+   * window: its sessions are closed and it no longer owns them.
+   */
+  onRelinquished(cb: (() => void) | null): void {
+    this.relinquished = cb;
+  }
+
+  private notifyOwnership(): void {
+    for (const waiter of [...this.releaseWaiters.values()]) waiter.finish(false);
+    for (const cb of [...this.ownershipWaiters]) cb();
+  }
+
+  /**
+   * Owner side of a move: stop owning, close every session without sending
+   * input to the terminal, release the Web Lock, confirm to the requester,
+   * and queue to become the owner again later. Ownership is cleared before
+   * the sessions close, so owner-only subscribers (persistence) see nothing.
+   */
+  private relinquish(message: Message): void {
+    if (!this.isOwner || message.generation !== this.ownerGeneration) return;
+    const sessions = this.registry.list();
+    this.ownerGeneration = null;
+    for (const session of sessions) {
+      try {
+        session.close('navigation');
+      } catch (error) {
+        console.error('[Terminal] closing a session for a move failed:', error);
+      }
+    }
+    const release = this.release;
+    this.release = null;
+    release?.();
+    this.executed.clear();
+    this.send({
+      key: this.coordinationKey,
+      type: 'released',
+      requestId: message.requestId,
+      agentId: message.agentId,
+      generation: null,
+    });
+    try {
+      this.relinquished?.();
+    } catch (error) {
+      console.error('[Terminal] move listener failed:', error);
+    }
+    this.waitForOwnership();
+  }
+
+  /**
    * Retry with the SAME request ID after pending; a new user intent gets a new ID.
    * Timeout is not cancellation. The open intent survives requester navigation;
    * no per-request cross-tab cancellation or automatic retry is performed.
@@ -324,6 +482,7 @@ export class TerminalCoordinator {
             this.release = done;
           });
           resolve(true);
+          this.notifyOwnership();
           await held;
           // Lock released (by stop() or browser tab destruction).
           // Ensure stale owner state is cleared even if stop() was not
@@ -359,6 +518,7 @@ export class TerminalCoordinator {
           const held = new Promise<void>((done) => {
             this.release = done;
           });
+          this.notifyOwnership();
           await held;
           this.ownerGeneration = null;
           this.release = null;
@@ -398,6 +558,28 @@ export class TerminalCoordinator {
       !uuid.test(message.agentId)
     )
       return;
+    if (message.type === 'take-over') {
+      if (token(message.generation)) this.relinquish(message as Message);
+      return;
+    }
+    if (message.type === 'released') {
+      this.releaseWaiters.get(message.requestId)?.finish(true);
+      return;
+    }
+    const release = this.releaseWaiters.get(message.requestId);
+    if (release && message.type === 'owner' && token(message.generation)) {
+      // The owner answered this window's discover: ask that generation, once.
+      if (release.asked || release.agentId !== message.agentId) return;
+      release.asked = true;
+      this.send({
+        key: this.coordinationKey,
+        type: 'take-over',
+        requestId: message.requestId,
+        agentId: release.agentId,
+        generation: message.generation,
+      });
+      return;
+    }
     const request = this.requests.get(message.requestId);
     if (message.type === 'discover' && this.isOwner) {
       this.send({
@@ -554,7 +736,9 @@ export class TerminalCoordinator {
    */
   stop(): void {
     if (this.stopped) return;
-    const sessions = this.sessions;
+    // Every registry entry, not only an owner's: a non-owner can hold entries
+    // it opened for a move to this window (openForMove).
+    const sessions = this.registry.list();
     this.stopped = true;
     this.lifetime.abort();
     // Cancel any queued ownership wait before touching other state.
@@ -569,6 +753,10 @@ export class TerminalCoordinator {
     window.removeEventListener('pagehide', this.onPageHide);
     this.channel?.close();
     this.channel = null;
+    this.notifyOwnership();
+    this.releaseWaiters.clear();
+    this.ownershipWaiters.clear();
+    this.relinquished = null;
     for (const [requestId, request] of this.requests) {
       if (!request.done)
         this.finish(request, {

@@ -24,23 +24,35 @@ import themeCSS from '../styles/theme.css?inline';
 import '@shoelace-style/shoelace/dist/themes/light.css';
 import '@shoelace-style/shoelace/dist/themes/dark.css';
 
-import type { PageData, User } from '../shared/types.js';
+import type { AuthMeResponse, PageData, User } from '../shared/types.js';
 import { stateManager } from './state.js';
 import { debugLog } from './debug-log.js';
 import { setDocumentTitle } from './page-title.js';
+import { setInitialPageData, takeInitialPageData } from './ssr-page-data.js';
+import { configureReadinessMarks, readinessNavigationStarted } from './readiness-marks.js';
 import { CHAT_DM_ROUTE, CHAT_SPACE_ROUTE, CHAT_THREAD_ROUTE } from './chat-routes.js';
 import { chatNotifications } from './chat-notifications.js';
 import { chatUnread, startChatUnreadIfEligible } from './chat-unread.js';
 import { TerminalCoordinator } from './terminal-coordinator.js';
 import { TerminalWorkspaceRoot } from './terminal-workspace-root.js';
 import { TerminalWorkspacePersistence, restoreUrlIntent } from './terminal-persistence.js';
+import { openLayoutSlots } from './terminal-layout-open.js';
 import { parseLayoutUrl } from './terminal-layout.js';
 import type { TerminalResources, TerminalSession } from './terminal-sessions.js';
 import {
   TERMINAL_PALETTE_NEW_AGENT_EVENT,
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
-import { nonOwnerOpenStatus, openPalettePickedAgent } from './terminal-palette-open.js';
+import {
+  MOVE_TERMINALS_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_HELP,
+  TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+  TERMINALS_OPEN_ELSEWHERE_STATUS,
+  nonOwnerOpenStatus,
+  offersMove,
+  openPalettePickedAgent,
+} from './terminal-palette-open.js';
+import { moveTerminalsWithStatus, terminalsOpenElsewhere } from './terminal-move.js';
 import { showToast } from '../utils/toast.js';
 import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
@@ -53,8 +65,9 @@ import {
   SUPERADMIN_ROUTES,
 } from '../lib/admin-permissions.js';
 import { ACCOUNT_TEARDOWN_EVENT, type AccountTeardownDetail } from '../utils/auth.js';
+import { clearAdminStatus, loadAdminStatus } from './admin-status.js';
 import { chatRecentFiles } from './chat-recent-files.js';
-import { pushRouteEntry, type RouteShell } from './route-history.js';
+import { isInPagePop, pushRouteEntry, type RouteShell } from './route-history.js';
 import { browserPath, stripBasePath } from './navigation.js';
 import { clearChatScrollAnchor } from '../components/shared/chat/chat-scroll-anchor.js';
 import { installViewportFrame } from './viewport.js';
@@ -84,12 +97,18 @@ const TZ_LOAD_BUDGET_MS = 1500;
 import { setBasePath } from '@shoelace-style/shoelace/dist/utilities/base-path.js';
 setBasePath('/shoelace');
 
-// Explicitly import all Shoelace components used in the app.
-// The autoloader cannot detect sl-* elements inside LitElement shadow roots,
-// so each component must be registered via direct import.
+// Explicitly import all Shoelace components used in the app. This is the
+// only place Shoelace components are registered: the SPA shell loads no CDN
+// autoloader (it could not see sl-* elements inside LitElement shadow roots
+// anyway, and loaded a second Shoelace copy for light-DOM ones). Every sl-*
+// tag used in src/ must be imported here; shoelace-registration.test.ts
+// enforces it.
+import '@shoelace-style/shoelace/dist/components/badge/badge.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb/breadcrumb.js';
 import '@shoelace-style/shoelace/dist/components/breadcrumb-item/breadcrumb-item.js';
 import '@shoelace-style/shoelace/dist/components/button/button.js';
+import '@shoelace-style/shoelace/dist/components/button-group/button-group.js';
+import '@shoelace-style/shoelace/dist/components/card/card.js';
 import '@shoelace-style/shoelace/dist/components/checkbox/checkbox.js';
 import '@shoelace-style/shoelace/dist/components/drawer/drawer.js';
 import '@shoelace-style/shoelace/dist/components/icon/icon.js';
@@ -106,6 +125,7 @@ import '@shoelace-style/shoelace/dist/components/divider/divider.js';
 import '@shoelace-style/shoelace/dist/components/dropdown/dropdown.js';
 import '@shoelace-style/shoelace/dist/components/menu/menu.js';
 import '@shoelace-style/shoelace/dist/components/menu-item/menu-item.js';
+import '@shoelace-style/shoelace/dist/components/menu-label/menu-label.js';
 import '@shoelace-style/shoelace/dist/components/alert/alert.js';
 import '@shoelace-style/shoelace/dist/components/radio-group/radio-group.js';
 import '@shoelace-style/shoelace/dist/components/radio-button/radio-button.js';
@@ -116,6 +136,7 @@ import '@shoelace-style/shoelace/dist/components/details/details.js';
 import '@shoelace-style/shoelace/dist/components/tab-group/tab-group.js';
 import '@shoelace-style/shoelace/dist/components/tab/tab.js';
 import '@shoelace-style/shoelace/dist/components/tab-panel/tab-panel.js';
+import '@shoelace-style/shoelace/dist/components/tag/tag.js';
 
 // Import app shell and core shared components (always needed)
 import '../components/app-shell.js';
@@ -133,14 +154,11 @@ import '../components/shared/status-badge.js';
 /** Current authenticated user, fetched once on init */
 let currentUser: User | null = null;
 
-/** SSR-prefetched page data, consumed once on initial render */
-let ssrPageData: PageData | null = null;
-
 /**
- * Cached admin-status flags, fetched once on init from
- * GET /api/v1/auth/admin-status. Used by the route guard to allow
- * hub-admin users (not just super-admins) to access admin pages.
- * Includes the permissions array for per-route permission checks.
+ * The admin-status flags the route guard last fetched fresh on entering an
+ * admin page (see client/admin-status.ts). Used to allow hub-admin users
+ * (not just super-admins) into admin pages, with the permissions array for
+ * per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
 let terminalWorkspaceEnabled = false;
@@ -151,6 +169,10 @@ let terminalPersistence: TerminalWorkspacePersistence | null = null;
 let accountTornDown = false;
 let routeOutlet: HTMLElement | null = null;
 const terminalNavigations = new Map<string, number>();
+/** The agent in the most recent /terminals/<agentId> route, for a move to this window. */
+let terminalRouteAgentId: string | null = null;
+/** True while a move to this window is running. */
+let terminalMoveRunning = false;
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
 const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
@@ -165,6 +187,59 @@ function ensureRoots(): HTMLElement | null {
     app.replaceChildren(routeOutlet);
   }
   return routeOutlet;
+}
+
+/**
+ * The "open in another window" state (ptone/scion#4324): one status text
+ * with its "?" help, and the move button under it.
+ */
+function showTerminalsOpenElsewhere(): void {
+  terminalWorkspace?.setStatus(TERMINALS_OPEN_ELSEWHERE_STATUS, {
+    label: TERMINALS_OPEN_ELSEWHERE_HELP_LABEL,
+    text: TERMINALS_OPEN_ELSEWHERE_HELP,
+  });
+  offerTerminalMove();
+}
+
+/** Shows "Move terminals to this window" under the non-owner status message. */
+function offerTerminalMove(): void {
+  terminalWorkspace?.setStatusAction({
+    label: MOVE_TERMINALS_LABEL,
+    onClick: () => void runTerminalMove(),
+  });
+}
+
+/**
+ * Moves the terminals from the window that owns them to this one
+ * (ptone/scion#3328): this window opens its own streams first, and the
+ * owner closes its streams only after that. See moveTerminalsHere.
+ */
+async function runTerminalMove(): Promise<void> {
+  const coordinator = terminalCoordinator;
+  const persistence = terminalPersistence;
+  const workspace = terminalWorkspace;
+  if (!coordinator || !persistence || !workspace || terminalMoveRunning) return;
+  terminalMoveRunning = true;
+  try {
+    const result = await moveTerminalsWithStatus({
+      coordinator,
+      persistence,
+      workspace,
+      ui: workspace,
+      preferredAgentId: terminalRouteAgentId,
+      retry: () => void runTerminalMove(),
+    });
+    if (result.status !== 'moved' || coordinator !== terminalCoordinator || accountTornDown) return;
+    const path = result.agentId ? `/terminals/${result.agentId}` : '/terminals';
+    const current = stripBasePath(window.location.pathname);
+    if (!window.location.search && (current === '/terminals' || terminalAgentRoute.test(current))) {
+      window.history.replaceState(window.history.state, '', browserPath(path));
+      workspace.setCurrentPath(path);
+      terminalRouteAgentId = result.agentId;
+    }
+  } finally {
+    terminalMoveRunning = false;
+  }
 }
 
 function ensureTerminalCoordinator(): TerminalCoordinator | null {
@@ -206,6 +281,9 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
       terminalWorkspace!.setCurrentPath(`/terminals/${agentId}`);
     },
   });
+  // After a move to another window, this window shows the "owned elsewhere"
+  // state, with the button to move the terminals back.
+  terminalCoordinator.onRelinquished(() => showTerminalsOpenElsewhere());
   // "Jump to agent" palette, new agent in a multi-pane layout only (the
   // workspace places an already-open agent itself, and navigates like a rail
   // click when only one pane is on screen — see its selectFromPalette).
@@ -226,26 +304,6 @@ function ensureTerminalCoordinator(): TerminalCoordinator | null {
 }
 
 /**
- * Fetch the current user's admin status from the backend.
- * Returns null when the user is not authenticated or the fetch fails.
- * Includes the permissions array for per-resource permission checks.
- */
-async function fetchAdminStatus(): Promise<AdminStatus | null> {
-  try {
-    const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
-    if (!res.ok) return null;
-    const data = await res.json();
-    return {
-      isAdmin: data.isAdmin === true,
-      isSuperAdmin: data.isSuperAdmin === true,
-      permissions: Array.isArray(data.permissions) ? data.permissions : [],
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Fetch the current authenticated user from the backend session.
  * Returns null if not authenticated.
  */
@@ -253,7 +311,7 @@ async function fetchCurrentUser(): Promise<User | null> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = (await res.json()) as AuthMeResponse;
     return {
       id: data.id,
       email: data.email,
@@ -261,6 +319,9 @@ async function fetchCurrentUser(): Promise<User | null> {
       avatar: data.avatarUrl || data.avatar,
       role: data.role || undefined,
       preferences: data.preferences || undefined,
+      testIdentity: data.testIdentity?.expiresAt
+        ? { expiresAt: data.testIdentity.expiresAt }
+        : undefined,
     };
   } catch {
     return null;
@@ -299,7 +360,7 @@ async function loadPreferredTimeZone(): Promise<void> {
   try {
     const res = await fetch('/auth/me', { credentials: 'include' });
     if (!res.ok) return;
-    const data = await res.json();
+    const data = (await res.json()) as AuthMeResponse;
     setPreferredTimeZone(data.preferences?.timezone);
   } catch {
     // Non-critical — the effective zone falls back to the browser zone.
@@ -605,8 +666,14 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/harness-config-detail.js'),
   },
   {
+    // Artifacts list (experiment hub.artifacts; the page renders 404 when off).
+    pattern: /^\/artifacts$/,
+    tag: 'scion-page-artifacts',
+    load: () => import('../components/pages/artifacts.js'),
+  },
+  {
     // Artifact page (experiment hub.artifacts; the page renders 404 when off).
-    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+$/,
+    pattern: /^\/projects\/[^/]+\/artifacts\/[^/]+(?:\/v\/[1-9][0-9]*)?$/,
     tag: 'scion-page-artifact-detail',
     load: () => import('../components/pages/artifact-detail.js'),
   },
@@ -639,6 +706,12 @@ const ROUTES: RouteConfig[] = [
     pattern: /^\/agents\/[^/]+\/configure$/,
     tag: 'scion-page-agent-configure',
     load: () => import('../components/pages/agent-configure.js'),
+  },
+  {
+    // Edit agent page (experiment web.agent_edit; the page renders 404 when off).
+    pattern: /^\/agents\/[^/]+\/edit$/,
+    tag: 'scion-page-agent-edit',
+    load: () => import('../components/pages/agent-edit.js'),
   },
   {
     // Legacy terminal adapter (flag-off behavior):
@@ -774,7 +847,7 @@ window.addEventListener('error', (event) => {
     source: event.filename,
     lineno: event.lineno,
     colno: event.colno,
-    error: event.error,
+    error: event.error as unknown,
   });
 });
 window.addEventListener('unhandledrejection', (event) => {
@@ -792,23 +865,17 @@ async function init(): Promise<void> {
   // of the page, so the disposer is not kept.
   installViewportFrame();
 
-  // Get initial data from SSR and hydrate state manager
+  // Get initial data from SSR
   const initialData = getInitialData();
+  // Fixed for this document: a change of the setting applies on the next full load.
+  configureReadinessMarks(initialData?.readinessMarks === true);
   if (initialData) {
     console.info('[Scion] Initial page data:', initialData.path);
     if (initialData.user) {
       currentUser = initialData.user;
     }
-    // Preserve the full SSR payload so page components can use prefetched data.
-    ssrPageData = initialData;
-    if (initialData.data) {
-      const pageDataObj = initialData.data as {
-        agents?: import('../shared/types.js').Agent[];
-        projects?: import('../shared/types.js').Project[];
-        _capabilities?: import('../shared/types.js').Capabilities;
-      };
-      stateManager.hydrate(pageDataObj, pageDataObj._capabilities);
-    }
+    // Keep the SSR payload for the first render only (see ssr-page-data.ts).
+    setInitialPageData(initialData);
   }
 
   // Attach debug logger to state manager to capture all SSE events
@@ -842,19 +909,25 @@ async function init(): Promise<void> {
     tzReady = withTimeout(loadPreferredTimeZone(), TZ_LOAD_BUDGET_MS).then(() => undefined);
   }
 
-  // Fetch admin status early so the route guard can use the cached result
-  // instead of blocking on a network call during navigation.
-  if (currentUser) {
-    cachedAdminStatus = await fetchAdminStatus();
+  // Start the shared admin-status request now, without waiting for it: the
+  // nav joins it when it renders (see client/admin-status.ts), so a cold
+  // load sends one request instead of one here plus one per nav instance.
+  if (currentUser?.id) {
+    void loadAdminStatus(currentUser.id);
   }
 
-  // Chat notifications are published on user.<id>.notification, so the state
-  // manager must know who we are before it opens the first SSE connection.
+  // DM messages and read-state changes are published on user.<id>.chat.*, so
+  // the state manager must know who we are before it opens the first SSE
+  // connection.
   if (currentUser?.id) {
     stateManager.setCurrentUserId(currentUser.id);
-    // Mention/DM popups are driven off those events. Started here rather than
-    // from the chat page because a mention has to reach you on any page.
-    chatNotifications.start(currentUser.id);
+    // Chat message popups are driven off those events. Started here rather
+    // than from the chat page because a DM has to reach you on any page.
+    chatNotifications.start({
+      id: currentUser.id,
+      email: currentUser.email,
+      name: currentUser.name,
+    });
     // The recent-files index (native chat quick palette "Documents") is
     // scoped to this identity + hub/base path; initialize only now that the
     // user is known.
@@ -880,7 +953,7 @@ async function init(): Promise<void> {
     try {
       const statusRes = await fetch('/api/v1/system/status', { credentials: 'include' });
       if (statusRes.ok) {
-        const status = await statusRes.json();
+        const status = (await statusRes.json()) as { complete?: boolean };
         if (!status.complete) {
           sessionStorage.setItem('onboardingStatus', JSON.stringify(status));
           window.history.replaceState({}, '', '/onboarding');
@@ -902,11 +975,11 @@ async function init(): Promise<void> {
   terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
-  // The tab-title unread badge is unread state, not notification state: it
-  // runs for every signed-in user regardless of the push preference, and on
-  // every page, because an unread mention is worth seeing from the dashboard.
-  // After the flags settle — with chat disabled the endpoints it reads are
-  // not even registered.
+  // The unread conversation count (the header's chat badge and the tab-title
+  // badge) is unread state, not notification state: it runs for every
+  // signed-in user regardless of the push preference, and on every page.
+  // After the flags settle — with chat disabled the endpoint it reads is not
+  // even registered.
   // On a chat first page the first refresh goes out now and the page shares
   // it; elsewhere it waits for idle (see startChatUnreadIfEligible).
   const initialPath = stripBasePath(window.location.pathname);
@@ -914,7 +987,8 @@ async function init(): Promise<void> {
     chatUnread,
     !!currentUser,
     isFeatureEnabled('web.native_chat'),
-    CHAT_ROUTES.has(resolveRoute(initialPath).tag)
+    CHAT_ROUTES.has(resolveRoute(initialPath).tag),
+    currentUser?.id
   );
 
   // Setup client-side router for navigation
@@ -930,6 +1004,8 @@ async function init(): Promise<void> {
   window.addEventListener(ACCOUNT_TEARDOWN_EVENT, (e) => {
     // A chat scroll position belongs to this account's session.
     clearChatScrollAnchor();
+    // So does its admin status: drop it and any request still in flight.
+    clearAdminStatus();
     // Explicit logout only: suspend ingestion and clear this account's
     // persisted key and memory before the logout POST runs, so nothing async
     // can race a response into a store that is no longer this identity's. An
@@ -1029,6 +1105,12 @@ async function renderRoute(path: string): Promise<void> {
   const appContainer = ensureRoots();
   if (!appContainer) return;
   const thisNav = ++navigationId;
+  readinessNavigationStarted(thisNav);
+
+  // The SSR payload belongs to this document and is offered to the first
+  // render only, whichever route it is; it is cleared here whether or not it
+  // matches, so a later client-side navigation never receives it.
+  const initialData = takeInitialPageData(path, currentUser);
 
   // Strip query string and hash for route matching
   let pathname = path.split('?')[0].split('#')[0];
@@ -1072,31 +1154,15 @@ async function renderRoute(path: string): Promise<void> {
         try {
           // Restore the layout preset and open agents from URL slots.
           // Map agent IDs to session keys, opening new sessions as needed.
-          const sessionKeys: Array<string | null> = [];
-          for (const agentId of layoutUrl.slots) {
-            if (!agentId) {
-              sessionKeys.push(null);
-              continue;
-            }
-            // Check if a session for this agent already exists
-            let key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-            if (!key) {
-              // Open a new session — coordinator.open validates auth/existence
-              const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
-              if (requestId) terminalNavigations.set(requestId, thisNav);
-              if (thisNav !== navigationId) return;
-              try {
-                const result = await coordinator.open(agentId, requestId);
-                if (thisNav !== navigationId) return;
-                if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
-                // After coordinator.open, the session should exist
-                key = terminalWorkspace.findSessionKeyByAgentId(agentId);
-              } catch {
-                // Agent unavailable/unauthorized/deleted — slot stays empty
-              }
-            }
-            sessionKeys.push(key);
-          }
+          const sessionKeys = await openLayoutSlots({
+            coordinator,
+            workspace: terminalWorkspace,
+            slots: layoutUrl.slots,
+            navigations: terminalNavigations,
+            navigationId: thisNav,
+            currentNavigationId: () => navigationId,
+          });
+          if (!sessionKeys) return;
           // Restore the layout manager state with the resolved session keys
           terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
         } finally {
@@ -1109,13 +1175,30 @@ async function renderRoute(path: string): Promise<void> {
 
       // Default behavior: single-agent from path
       const agentId = pathname.match(terminalAgentRoute)?.[1];
+      terminalRouteAgentId = agentId?.toLowerCase() ?? null;
       if (agentId && coordinator) {
         const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
         if (requestId) terminalNavigations.set(requestId, thisNav);
         const result = await coordinator.open(agentId, requestId);
         if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
         if (thisNav === navigationId && !coordinator.isOwner) {
-          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+          if (offersMove(result.status) && !terminalMoveRunning) {
+            showTerminalsOpenElsewhere();
+          } else {
+            terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+            if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
+          }
+        }
+      } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+        // A bare /terminals in a window that does not own the terminals
+        // (for example a new window): show the same "open in another
+        // window" state as the other non-owner screens, not the empty one.
+        const elsewhere = await terminalsOpenElsewhere({
+          coordinator,
+          persistence: terminalPersistence,
+        });
+        if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
+          showTerminalsOpenElsewhere();
         }
       }
       return;
@@ -1131,19 +1214,14 @@ async function renderRoute(path: string): Promise<void> {
   const tag = route.tag;
 
   // Build page data with current user context for page components.
-  // Include SSR-prefetched data on the initial render so page components
-  // can skip redundant API fetches.
-  const hasSsrData = ssrPageData && ssrPageData.path === path && ssrPageData.data;
+  // Include SSR-prefetched data on the initial render (see
+  // takeInitialPageData) so page components can skip redundant API fetches.
   const pageData: PageData = {
     path,
     title: 'Scion',
     user: currentUser || undefined,
-    data: hasSsrData ? ssrPageData!.data : undefined,
+    data: initialData,
   };
-  // Consume SSR data so it is not reused on subsequent client-side navigations.
-  if (hasSsrData) {
-    ssrPageData = null;
-  }
 
   // Block non-admin users from admin-only routes.
   // Hub-admin users (who have admin role bindings but not super-admin role)
@@ -1151,15 +1229,16 @@ async function renderRoute(path: string): Promise<void> {
   //
   // Re-fetch admin status on every admin-route navigation so that role
   // grants or revocations made mid-session take effect immediately rather
-  // than being cached for the entire SPA lifetime. The init-time fetch
-  // remains for nav.ts's initial render; this call replaces the cache so
-  // the route guard always uses a fresh result.
+  // than being cached for the entire SPA lifetime. The fresh result also
+  // replaces the shared value (client/admin-status.ts); a nav already on
+  // screen read that value once for this user, so only later nav renders
+  // see it.
   //
   // Per-route permission checks: super-admin-only routes (Diagnostics,
   // Maintenance) require isSuperAdmin; other admin routes require at least
   // one matching permission from ROUTE_PERMISSION_MAP.
   if (ADMIN_ROUTES.has(tag)) {
-    cachedAdminStatus = await fetchAdminStatus();
+    cachedAdminStatus = await loadAdminStatus(currentUser?.id, { fresh: true });
 
     if (SUPERADMIN_ROUTES.has(tag)) {
       if (!cachedAdminStatus?.isSuperAdmin) {
@@ -1345,10 +1424,27 @@ function setupRouter(): void {
 
   // Handle browser back/forward.
   // Include query string so terminal layout state can be restored (#1715).
-  window.addEventListener('popstate', () => {
+  // A page's own in-page entry on the path already shown (a chat panel on a
+  // phone) is restored by that page; rendering would rebuild it.
+  window.addEventListener('popstate', (e: PopStateEvent) => {
     const path = stripBasePath(window.location.pathname);
     const search = window.location.search;
-    void renderRoute(search ? `${path}${search}` : path);
+    const appPath = search ? `${path}${search}` : path;
+    if (
+      isInPagePop(
+        e.state,
+        appPath,
+        activeShell?.element as RouteShell | undefined,
+        routeOutlet?.hidden ?? true
+      )
+    ) {
+      // Back/Forward supersedes a render still in flight (a route the user
+      // left this page for a moment ago), as any navigation does: it must
+      // not replace the page this entry belongs to once it finishes.
+      ++navigationId;
+      return;
+    }
+    void renderRoute(appPath);
   });
 }
 
@@ -1396,10 +1492,16 @@ function replaceRoute(path: string): Promise<void> {
  * chat page opening another thread in place). Records the path as the active
  * shell's rendered path, as a render would, so the header's mode switch
  * remembers it and returning from the terminal workspace reuses the page.
- * Resolves once the shell has re-rendered for it.
+ * `state` becomes the entry's history state. Resolves once the shell has
+ * re-rendered for it.
  */
-function pushRoute(path: string): Promise<void> {
-  return pushRouteEntry(activeShell?.element as RouteShell | undefined, path, browserPath(path));
+function pushRoute(path: string, state: Record<string, unknown> = {}): Promise<void> {
+  return pushRouteEntry(
+    activeShell?.element as RouteShell | undefined,
+    path,
+    browserPath(path),
+    state
+  );
 }
 
 // Initialize when DOM is ready

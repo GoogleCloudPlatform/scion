@@ -98,7 +98,7 @@ Standard CRUD operations with straightforward request/response patterns.
 | `hub.brokers` | `pkg/hub/handlers_brokers.go` | Broker registration and management. |
 | `hub.groups` | `pkg/hub/handlers_groups.go` | User group management. |
 | `hub.policies` | `pkg/hub/handlers_policies.go` | RBAC policy evaluation. |
-| `hub.audit` | `pkg/hub/audit.go` | Audit log recording (meta — the audit system's own operational logs). |
+| `hub.audit` | `pkg/hub/audit.go` | Log-based audit events (`LogAuditLogger`) and the audit system's own operational logs. Written through the default slog fan-out like any other log: delivery is best effort, Cloud-path losses are counted, not retried (see "Log delivery guarantees" in `docs-site/src/content/docs/reference/server-config.md`). Decision-log records (`scion.audit`) go through the separate asynchronous audit writer. |
 | `hub.events` | `pkg/hub/events.go` | Event publisher internals (fan-out, subscription management). |
 | `hub.web` | `pkg/hub/web.go` | Static file serving and SPA routing. |
 

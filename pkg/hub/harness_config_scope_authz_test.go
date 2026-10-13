@@ -19,13 +19,10 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
@@ -39,56 +36,6 @@ import (
 // filterHubWideHarnessConfigGrants (authz_harness_config_scope.go) for the
 // fix this suite regresses against.
 // ============================================================================
-
-// setupHarnessConfigScopeTest creates a test server with alice (hub member,
-// project owner) and carol (hub member, neither owner nor project member —
-// the principal the pre-fix bug affected).
-func setupHarnessConfigScopeTest(t *testing.T) (srv *Server, s store.Store, alice, carol *store.User, project *store.Project) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	alice = &store.User{
-		ID: tid("hcscope-alice"), Email: "hcscope-alice@test.com", DisplayName: "Alice",
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, alice))
-	ensureHubMembership(ctx, s, alice.ID)
-
-	carol = createNamedTestUser(t, s, "hcscope-carol", store.UserRoleMember)
-	ensureHubMembership(ctx, s, carol.ID)
-
-	project = &store.Project{
-		ID: tid("hcscope-project"), Name: "Harness Config Project", Slug: "hcscope-project",
-		OwnerID: alice.ID, CreatedBy: alice.ID, Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	return srv, s, alice, carol, project
-}
-
-// createAuthzTestHarnessConfig inserts a scope-parameterized harness config
-// directly into the store, mirroring createAuthzTestTemplate.
-func createAuthzTestHarnessConfig(t *testing.T, s store.Store, name, scope, scopeID, ownerID string) *store.HarnessConfig {
-	t.Helper()
-	hc := &store.HarnessConfig{
-		ID:          api.NewUUID(),
-		Name:        name,
-		Slug:        api.Slugify(name),
-		Harness:     "claude",
-		Scope:       scope,
-		ScopeID:     scopeID,
-		OwnerID:     ownerID,
-		Status:      store.HarnessConfigStatusActive,
-		StoragePath: fmt.Sprintf("harness-configs/%s/%s", scope, api.Slugify(name)),
-		Config:      &store.HarnessConfigData{Image: "example/claude:latest"},
-		Created:     time.Now(),
-		Updated:     time.Now(),
-	}
-	require.NoError(t, s.CreateHarnessConfig(context.Background(), hc))
-	return hc
-}
 
 // ----------------------------------------------------------------------
 // User-scoped harness configs: readable only by the owning user and hub

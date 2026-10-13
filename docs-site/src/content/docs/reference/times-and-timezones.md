@@ -77,7 +77,7 @@ Admins set it in the web dashboard under **Admin → Server Config**, in the **A
 - Empty means no Hub default.
 - In `settings.yaml` it is the top-level `default_timezone` key.
 
-See [Operational settings](/scion/reference/server-config/#layer-1--operational-postgres-hub_settings-table) and [Admin settings](/scion/reference/admin-settings/).
+See [Operational settings](/scion/reference/server-config/#layer-1--operational-hub_settings-table) and [Admin settings](/scion/reference/admin-settings/).
 
 To give every agent on one Runtime Broker a zone, set a broker-scope `TZ` variable on the Hub:
 

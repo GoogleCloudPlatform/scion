@@ -20,10 +20,12 @@ import (
 )
 
 // maxFanOutConcurrency caps how many per-recipient sends a group send or a
-// broadcast runs at once. The broker limits concurrent dispatch and each
-// message costs several runtime lookups, so an unbounded fan-out queues
-// requests past the Hub's dispatch deadline (ptone/scion#3521); a handful in
-// flight still overlaps request latency without flooding the dispatch path.
+// broadcast runs at once, and how many agents stop --all and suspend --all
+// act on at once (ptone/scion#3602). The broker limits concurrent dispatch
+// and each message costs several runtime lookups, so an unbounded fan-out
+// queues requests past the Hub's dispatch deadline (ptone/scion#3521); a
+// handful in flight still overlaps request latency without flooding the
+// dispatch path.
 const maxFanOutConcurrency = 6
 
 // boundedFanOut calls run(i) for every i in [0, n), in index order, with at
@@ -73,3 +75,7 @@ func boundedFanOut(ctx context.Context, n, limit int, onQueued func(), run, skip
 	}
 	wg.Wait()
 }
+
+// lifecycleFanOutQueuedHook, if set (tests only), is called each time a
+// stop --all or suspend --all fan-out has to wait for a free slot.
+var lifecycleFanOutQueuedHook func()

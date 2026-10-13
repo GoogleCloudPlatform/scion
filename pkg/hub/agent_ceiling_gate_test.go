@@ -27,56 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setBrokerAgentCeiling overrides the seeded max_agents_per_broker limit
-// (default 100, see seedLimitDefinitions) to a small value so tests can hit
-// it without creating dozens of agents.
-func setBrokerAgentCeiling(t *testing.T, s store.Store, value int64) {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err, "max_agents_per_broker must be seeded by New()/seedLimitDefinitions")
-	def.DefaultValue = value
-	_, err = s.UpdateLimitDefinition(context.Background(), def)
-	require.NoError(t, err)
-}
-
-// addProjectOnBroker creates a project wired to the given broker, the same
-// way setupCreateAgentServer wires project1 to its broker, so a test can put
-// a second project on the SAME broker (to prove the ceiling is shared) or on
-// a freshly created broker (to prove ceilings across brokers are independent).
-func addProjectOnBroker(t *testing.T, s store.Store, slug string, broker *store.RuntimeBroker) *store.Project {
-	t.Helper()
-	ctx := context.Background()
-	project := &store.Project{
-		ID:   tid("project-" + slug),
-		Name: "Project " + slug,
-		Slug: slug,
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}))
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-	return project
-}
-
-// newTestBroker creates and registers an additional online runtime broker,
-// independent of the one setupCreateAgentServer wires up by default.
-func newTestBroker(t *testing.T, s store.Store, slug string) *store.RuntimeBroker {
-	t.Helper()
-	broker := &store.RuntimeBroker{
-		ID:     tid("broker-" + slug),
-		Name:   "Broker " + slug,
-		Slug:   slug,
-		Status: store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(context.Background(), broker))
-	return broker
-}
-
 // TestCreateAgent_BrokerCeiling_RejectsPastLimit is the core regression test
 // for ptone/scion#1303: exceeding a runtime broker's agent ceiling must be
 // rejected up front with a 4xx, before store.CreateAgent runs and long before

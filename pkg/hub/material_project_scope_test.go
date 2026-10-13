@@ -38,58 +38,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// assertProjectDenied issues both a fetch (multi-key POST) and a get
-// (by-key GET) for key against agentID/token and asserts the full check-7
-// deny contract: not_found with no value on both endpoints, no backend
-// value read, and an audited denied_by_policy reason with a non-empty
-// Detail.
-func assertProjectDenied(t *testing.T, f *materialFixture, agentID, token, key string) {
-	t.Helper()
-
-	counting := &countingSecretBackend{SecretBackend: f.Server.secretBackend}
-	f.Server.SetSecretBackend(counting)
-
-	rec := newRecordingMaterialAuditor()
-	f.Server.SetAuditLogger(rec)
-
-	fetchRec := doRequestWithAgentToken(t, f.Server, http.MethodPost, "/api/v1/agent/secrets",
-		secretFetchRequest{Keys: []string{key}}, token)
-	if fetchRec.Code != http.StatusOK {
-		t.Fatalf("fetch: expected 200 (per-item status, not a request-level error), got %d: %s", fetchRec.Code, fetchRec.Body.String())
-	}
-	var fetchResp secretFetchResponse
-	require.NoError(t, json.NewDecoder(fetchRec.Body).Decode(&fetchResp))
-	if len(fetchResp.Secrets) != 1 || fetchResp.Secrets[0].Status != "not_found" ||
-		fetchResp.Secrets[0].Value != "" || fetchResp.Secrets[0].Error != "secret not found" {
-		t.Fatalf("fetch: expected not_found/secret not found with no value, got %+v", fetchResp.Secrets)
-	}
-
-	getRec := doRequestWithAgentToken(t, f.Server, http.MethodGet, "/api/v1/agents/"+agentID+"/secrets/"+key, nil, token)
-	if getRec.Code != http.StatusNotFound {
-		t.Fatalf("get: expected 404, got %d: %s", getRec.Code, getRec.Body.String())
-	}
-
-	if counting.getCalls != 0 {
-		t.Fatalf("expected no value read (Get) on a denied item, got %d Get calls", counting.getCalls)
-	}
-
-	if len(rec.events) != 2 {
-		t.Fatalf("expected 2 material selection events (fetch and get), got %d", len(rec.events))
-	}
-	for _, e := range rec.events {
-		if len(e.Items) != 1 {
-			t.Fatalf("expected 1 item per event, got %d", len(e.Items))
-		}
-		item := e.Items[0]
-		if item.Reason != ReasonDeniedByPolicy {
-			t.Fatalf("expected reason %s, got %s", ReasonDeniedByPolicy, item.Reason)
-		}
-		if item.Detail == "" {
-			t.Fatalf("expected a non-empty Detail carrying Decision.Reason verbatim")
-		}
-	}
-}
-
 // TestAgentSecretFetch_OtherProjectKeyNotReturned covers a project-scope key
 // that exists only in a different project: not_found, never a value.
 func TestAgentSecretFetch_OtherProjectKeyNotReturned(t *testing.T) {

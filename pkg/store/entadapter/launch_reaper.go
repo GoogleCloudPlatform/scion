@@ -108,11 +108,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 	tickCtx, cancel := context.WithTimeout(ctx, launchReaperTickTimeout)
 	defer cancel()
 
-	// Prime dialect detection BEFORE checking out the connection below (same
-	// gotcha as beginLaunchTx and AgentStore.UpdateAgentStatus): the
-	// detection probe would otherwise contend with this tick's own
-	// connection forever on single-connection SQLite.
-	dialectName := s.dialect(ctx)
+	dialectName := s.dialect()
 
 	db := s.sqlDB()
 	if db == nil {
@@ -182,7 +178,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 		_ = tx.Rollback()
 		committed = true
 		_ = conn.Close()
-		s.bestEffortDisarm(ctx)
+		s.bestEffortDisarm()
 		slog.Warn("launch reaper: tick failed", "error", err)
 		return store.ReaperTickResult{Outcome: store.ReaperTickFailed}, nil
 	}
@@ -196,7 +192,7 @@ func (s *AgentStore) RunLaunchReaperTick(ctx context.Context, p store.ReaperPara
 	if err != nil {
 		committed = true
 		_ = conn.Close()
-		s.bestEffortDisarm(ctx)
+		s.bestEffortDisarm()
 		slog.Warn("launch reaper: tick commit failed", "error", err)
 		return store.ReaperTickResult{Outcome: store.ReaperTickFailed}, nil
 	}
@@ -538,21 +534,11 @@ func isWindDownPhase(phase string) bool {
 // the next completed tick (on any replica) disarms in its own arm check
 // instead, per the design's "if no replica completes a tick within 20s"
 // argument.
-func (s *AgentStore) bestEffortDisarm(ctx context.Context) {
+func (s *AgentStore) bestEffortDisarm() {
 	disarmCtx, cancel := context.WithTimeout(context.Background(), launchReaperDisarmTimeout)
 	defer cancel()
 
-	// Prime dialect detection before checking out the connection below (same
-	// gotcha as beginLaunchTx / RunLaunchReaperTick). This is always already
-	// cached by the RunLaunchReaperTick call that led here, but priming
-	// defensively costs nothing and does not depend on call order. Using ctx
-	// here rather than disarmCtx is deliberate and safe even if ctx is
-	// already cancelled or expired: s.dialect's detection query captures the
-	// dialect via a predicate callback applied while the SQL is being built
-	// (ent's sqlQuery, before the driver's Query(ctx, ...) call), not during
-	// the actual round-trip, so a cancelled ctx cannot prevent the dialect
-	// from being cached, on the first call or any other.
-	dialectName := s.dialect(ctx)
+	dialectName := s.dialect()
 
 	db := s.sqlDB()
 	if db == nil {

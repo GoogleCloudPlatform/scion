@@ -29,26 +29,6 @@ import (
 // decorator wired into the middleware, and the per-IP rate limiter.
 // ---------------------------------------------------------------------------
 
-// validAccessTokenEndpoints returns tokeninfo/userinfo handlers describing a
-// single, otherwise-valid Google access token.
-func validAccessTokenEndpoints(azp, sub, email string, emailVerified bool) (http.HandlerFunc, http.HandlerFunc) {
-	tokenInfo := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"azp": azp, "aud": azp, "sub": sub,
-			"email": email, "email_verified": emailVerified,
-			"expires_in": 3600,
-		})
-	}
-	userInfo := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"sub": sub, "email": email, "email_verified": emailVerified, "name": "Test User",
-		})
-	}
-	return tokenInfo, userInfo
-}
-
 // ---------------------------------------------------------------------------
 // A valid user access token, azp = expected -> 200; wrong azp -> 401
 // (exact body).

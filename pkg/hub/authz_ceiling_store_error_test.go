@@ -22,25 +22,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// edgeLookupErrStore fails GetDelegationEdgesForDelegate for one delegate
-// with an error other than store.ErrNotFound.
-type edgeLookupErrStore struct {
-	store.Store
-	failID string
-}
-
-func (s *edgeLookupErrStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	if delegateID == s.failID {
-		return nil, errors.New("injected delegation edge lookup fault")
-	}
-	return s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-}
 
 // ceilingStoreErrorFixture is a project with an owner user and a
 // user-delegated agent (the parent), after the edge backfill.
@@ -181,16 +166,6 @@ func TestWalkDelegationChain_DuplicateActiveEdgesDenyRead(t *testing.T) {
 	assert.Equal(t, []string{"delegation_ceiling_duplicate_edges"}, stepNames(steps))
 }
 
-// stubSourceResolver returns a fixed source user or error.
-type stubSourceResolver struct {
-	user *store.User
-	err  error
-}
-
-func (r stubSourceResolver) ResolveExecutionSource(context.Context, *store.Agent) (*store.User, error) {
-	return r.user, r.err
-}
-
 // bindingListErrStore fails ListRoleBindingsForPrincipals, which project
 // admission uses for membership evidence.
 type bindingListErrStore struct {
@@ -244,24 +219,6 @@ func TestExecutionProjectAdmission_Direct(t *testing.T) {
 	})
 }
 
-// withTestProgenyPolicyRow adds a progeny/agent/<kind> policy row for
-// permissionID for the duration of the test. The test must not run in
-// parallel with others.
-func withTestProgenyPolicyRow(t *testing.T, kind, permissionID string) {
-	t.Helper()
-	orig := permissions.RelationshipPolicies
-	rows := append([]permissions.RelationshipPolicy(nil), orig...)
-	rows = append(rows, permissions.RelationshipPolicy{
-		Relationship:   string(RelationshipRuleProgeny),
-		PrincipalKinds: []string{"agent"},
-		ResourceType:   kind,
-		PermissionIDs:  []string{permissionID},
-		ReadOnly:       true,
-	})
-	permissions.RelationshipPolicies = rows
-	t.Cleanup(func() { permissions.RelationshipPolicies = orig })
-}
-
 // ProgenyListPredicate evaluates the source-delegation clause for the bare
 // kind, so it is narrower than a point read: when the source agent's user
 // delegator holds the read permission only through a relationship to the
@@ -276,6 +233,11 @@ func TestProgenyListPredicate_NarrowerThanPointRead(t *testing.T) {
 
 	sourceUser := tid("n3-source-user")
 	require.NoError(t, f.store.CreateUser(ctx, &store.User{ID: sourceUser, Email: "n3@golden.test", DisplayName: "n3", Role: "member", Status: "active"}))
+	// A relationship-derived execution-class permission requires the delegator's admission to the agent's project; this role admits without granting template.read.
+	n3Reader, err := f.store.CreateRoleDefinition(ctx, &store.RoleDefinition{Name: "n3-reader", ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"}})
+	require.NoError(t, err)
+	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: n3Reader.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: sourceUser, ScopeType: store.RoleScopeProject, ScopeID: f.projectAlpha.ID, CreatedBy: "test"})
+	require.NoError(t, err)
 	sourceAgent := tid("n3-source-agent")
 	seedExecutionAgent(t, f.store, sourceAgent, f.projectAlpha.ID, []string{sourceUser}, []string{sourceUser})
 

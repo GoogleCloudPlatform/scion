@@ -18,7 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 
@@ -49,13 +51,13 @@ type ReincarnateAgentRequest struct {
 	TargetBroker string `json:"targetBroker,omitempty"`
 
 	// SharedDirBackends changes the recorded shared-dir storage backend of
-	// the named shared dirs (dir name to "nfs", the only supported value).
-	// Only the agent's record on its broker changes; no data is copied,
-	// moved or deleted. Not accepted for a self-reincarnation.
+	// the named shared dirs (dir name to "nfs" or "local"). Only the
+	// agent's record on its broker changes; no data is copied, moved or
+	// deleted. Not accepted for a self-reincarnation.
 	SharedDirBackends map[string]string `json:"sharedDirBackends,omitempty"`
 	// AllowEmptySharedDir, with SharedDirBackends, skips the start check
-	// that refuses an empty nfs directory while the dir's previous local
-	// directory is not empty.
+	// that refuses an empty directory on the new backend while the dir's
+	// directory on its previous backend is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 
 	// Patch fields (ptone/scion#3302): each changes the next generation's
@@ -144,9 +146,10 @@ type ReincarnationPlan struct {
 }
 
 // validateSharedDirBackendRequest checks a reincarnate request's explicit
-// shared dir backend change. Whether each dir is one of the agent's shared
-// dirs, and whether the broker has a complete nfs block, is checked by the
-// broker, which holds the project settings and the agent's record.
+// shared dir backend change: each target must be "nfs" or "local". Whether
+// each dir is one of the agent's shared dirs, and whether the broker has a
+// complete nfs block, is checked by the broker, which holds the project
+// settings and the agent's record.
 func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
 	if len(req.SharedDirBackends) == 0 {
 		if req.AllowEmptySharedDir {
@@ -163,8 +166,8 @@ func validateSharedDirBackendRequest(req ReincarnateAgentRequest) error {
 		if err := api.ValidateSharedDirs([]api.SharedDir{{Name: name}}); err != nil {
 			return fmt.Errorf("sharedDirBackends: invalid shared dir name %q", name)
 		}
-		if backend := req.SharedDirBackends[name]; backend != "nfs" {
-			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs backend is supported (got %q)", name, backend)
+		if backend := req.SharedDirBackends[name]; backend != "nfs" && backend != "local" {
+			return fmt.Errorf("sharedDirBackends: shared dir %q: only a change to the nfs or local backend is supported (got %q)", name, backend)
 		}
 	}
 	return nil
@@ -290,10 +293,14 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	// Patch access checks (ptone/scion#3302): --role runs create's role
 	// lattice, --service-account create's assignment gate. Then the
-	// authority re-record: a requester other than the agent itself becomes
-	// the agent's recorded delegator, so it must pass CanDelegate and its
-	// ceiling must cover the role the next generation runs with (the
-	// patched role, else the stored one). All of this runs before the
+	// authority check: a requester other than the agent itself must pass
+	// CanDelegate and its ceiling must cover the role the next generation
+	// runs with (the patched role, else the stored one); it becomes the
+	// agent's recorded delegator when it changes the role
+	// (ptone/scion#3762), or when a user keeps the role of an agent whose
+	// own edge is missing or unrecorded, or whose chain has an unrecorded
+	// hop the chain walk reaches before any hop it does not accept
+	// (ptone/scion#3948). All of this runs before the
 	// broker and the agent state are examined and before anything is
 	// written, so a refused request claims nothing and a dry run reports
 	// the same refusal.
@@ -302,11 +309,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	targetRole, _ := agentRoleAndScopes(agent)
+	storedRole := targetRole
 	if req.Role != "" {
 		targetRole = AgentRole(req.Role)
 	}
-	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, req.Role != "")
+	auth, ok := s.reincarnateAuthorityFor(w, r, agent, targetRole, targetRole != storedRole)
 	if !ok {
+		return
+	}
+	if !s.resolveRepairAssignment(w, r, agent, auth, targetRole != storedRole, patch) {
 		return
 	}
 
@@ -451,6 +462,15 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 			"agent has no runtime broker assigned", nil)
 		return
 	}
+	// Flat placement pre-check for an in-place reincarnation, before the
+	// reincarnation record and the worker: a refusal stops nothing,
+	// reprovisions nothing and mints no credential.
+	if err := s.checkPinnedPlacement(agent); err != nil {
+		if !writeRuntimeTargetRefusal(w, err) {
+			writeErrorFromErr(w, err, "")
+		}
+		return
+	}
 	if !s.checkBrokerAvailability(w, r, agent) {
 		return
 	}
@@ -531,6 +551,7 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	targetGeneration := agent.Generation + 1
 
 	if req.DryRun {
@@ -546,17 +567,47 @@ func (s *Server) handleReincarnateAgent(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	s.startReincarnation(w, r, agent, auth, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, targetGeneration, req.Handoff, admittedDeletionClaim,
 		brokerIDIfSet(targetBrokerID, agent.RuntimeBrokerID), targetBrokerID, nil)
 }
 
 // startReincarnation claims the agent, records the reincarnation (with the
-// authority re-record auth, nil for a self-reincarnation) and starts the
-// detached worker, answering 202. sourceBrokerID and targetBrokerID are
+// authority re-record auth, nil when the edge is kept: a self-reincarnation
+// or one that keeps the role (except a user repair, ptone/scion#3948)) and
+// starts the detached worker, answering 202. sourceBrokerID and targetBrokerID are
 // echoed in the response (both empty unless the request named a target);
-// move is non-nil for a cross-broker move.
-func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
+// move is non-nil for a cross-broker move. patch is the validated request
+// patch (nil when none); a --service-account patch records the requester as
+// the source of the new service-account assignment, in the claim
+// transaction, and so does a same-role repair whose requester passed the
+// assignment gate (auth.Assignment).
+func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agent *store.Agent, auth *reincarnateAuthority, patch *reincarnatePatch, fresh *store.AgentAppliedConfig, plan ReincarnationPlan, targetGeneration int, handoff string, admittedDeletionClaim int64, sourceBrokerID, targetBrokerID string, move *reincarnationMove) {
 	ctx := r.Context()
+
+	// A --service-account patch sets the next generation's account; the
+	// requester (already authorized by the assignment gate) is recorded as
+	// its source under the requester's frozen ceiling. This runs before
+	// anything is written.
+	var saAssignment *store.AgentServiceAccountAssignment
+	if patch != nil && patch.GCPIdentity != nil {
+		next := *agent
+		next.AppliedConfig = fresh
+		if !agentHasAssignModeIdentity(&next) || agentAssignedServiceAccountID(&next) == "" {
+			slog.ErrorContext(ctx, "reincarnate: service-account patch did not produce an assign-mode identity", "agent_id", agent.ID)
+			InternalError(w)
+			return
+		}
+		ceiling, prov, ok := s.saAssignmentSourceCeiling(w, r,
+			Resource{Type: "agent", ID: agent.ID, ParentType: "project", ParentID: agent.ProjectID}, ActionUpdate)
+		if !ok {
+			return
+		}
+		saAssignment = newSAAssignment(&next, store.SAAssignmentOriginReincarnate, ceiling, prov)
+	} else if auth != nil && auth.Assignment != nil {
+		// A same-role repair re-records the assignment from the requester
+		// (resolveRepairAssignment).
+		saAssignment = auth.Assignment
+	}
 
 	// The claim is guarded by the agent row's own optimistic lock
 	// (state_version), and the claim and the reincarnation record commit
@@ -598,7 +649,7 @@ func (s *Server) startReincarnation(w http.ResponseWriter, r *http.Request, agen
 	// The claim also requires that no start claim is held, live or
 	// unconfirmed: a start whose outcome is unknown may still create a
 	// container this reincarnation would then compete with.
-	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, auditActorFromContext(ctx)); err != nil {
+	if err := s.reincarnateClaimTx(ctx, agent, rec, auth, saAssignment, auditActorFromContext(ctx)); err != nil {
 		var held *store.ClaimHeldError
 		if errors.Is(err, store.ErrVersionConflict) {
 			Conflict(w, "agent was concurrently modified; retry")
@@ -761,6 +812,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 
 	plan := computeReincarnationPlan(agent.AppliedConfig, fresh, warnings, imageRegistry)
 	addPatchToPlan(&plan, agent.AppliedConfig, fresh, req)
+	addAuthorityToPlan(&plan, auth)
 	in.Profile = effectiveRuntimeProfileName(fresh.Profile, project)
 	// The access probes judge the config the next generation runs with: a
 	// --service-account patch replaces a passthrough identity, so the
@@ -784,7 +836,7 @@ func (s *Server) planReincarnateMove(w http.ResponseWriter, r *http.Request, req
 		})
 		return
 	}
-	s.startReincarnation(w, r, agent, auth, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
+	s.startReincarnation(w, r, agent, auth, patch, fresh, plan, agent.Generation+1, req.Handoff, admittedDeletionClaim, src.ID, dst.ID, &reincarnationMove{
 		SourceBrokerID:    src.ID,
 		TargetBrokerID:    dst.ID,
 		ProjectID:         project.ID,
@@ -905,15 +957,35 @@ func effectiveAgentRuntime(agent *store.Agent, broker *store.RuntimeBroker) stri
 
 // reincarnateAuthorityFor decides what authority a reincarnation of agent
 // re-records. role is the role the next generation runs with: the stored
-// role, or the --role patch (roleChanged). A self-reincarnation re-records
-// nothing: it returns nil, and the existing edge with its frozen provenance
-// and ceiling stays in force; when it changes the role it must still pass
-// CanDelegate and the ceiling for the new role, as create requires of an
-// agent granting a role. Any other requester becomes the recorded
-// delegator, so it must pass CanDelegate for role, and its source ceiling
-// must cover role (childRoleWithinCeiling, role explicit). On a refusal the
-// response is written (403, 503 for a ceiling lookup fault, or 500 for a
-// nil agent) and ok is false; nothing has been written to the store.
+// role, or the --role patch. roleChanged is true only when the patch names
+// a role other than the stored one.
+//
+// Every requester other than the agent itself must be able to delegate role:
+// it must pass CanDelegate for role, and its source ceiling must cover role
+// (childRoleWithinCeiling, role explicit). A self-reincarnation that changes
+// the role must pass the same checks for the new role, as create requires
+// of an agent granting a role; one that keeps the role is not checked.
+//
+// The edge is re-recorded when another requester changes the role: the
+// requester then becomes the recorded delegator, and it is refused (403)
+// when it descends from agent, because the new edge would close a loop in
+// the delegation chain (requesterDescendsFrom). It is also re-recorded,
+// with the user as the recorded delegator, when a user keeps the role of
+// an agent whose own edge is missing or unrecorded, or whose chain has an
+// unrecorded hop further up that the chain walk reaches before any hop it
+// does not accept (reincarnateChainUnrecorded): the reincarnate then
+// repairs the chain as a recreate by that user would (ptone/scion#3948).
+// In every other case, including any self-reincarnation, an agent
+// requester's reincarnation that keeps the role, and a user's that keeps
+// the role of an agent with a recorded own edge and either a fully recorded
+// chain or a chain whose first problem is a hop that is not accepted, it
+// returns nil: the existing edge with its frozen provenance and ceiling
+// stays in force, so restarting an agent does not change whose authority
+// it runs on.
+//
+// On a refusal the response is written (403, 503 for a ceiling or chain
+// lookup fault, or 500 for a nil agent) and ok is false; nothing has been
+// written to the store.
 func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request, agent *store.Agent, role AgentRole, roleChanged bool) (auth *reincarnateAuthority, ok bool) {
 	if agent == nil {
 		s.agentLifecycleLog.Error("reincarnate: nil agent in reincarnateAuthorityFor")
@@ -977,9 +1049,48 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		// Decision D1: a self request does not re-record the edge.
 		return nil, true
 	}
+	if !roleChanged {
+		// ptone/scion#3762: another requester's reincarnate that keeps the
+		// role keeps the existing edge, so the agent keeps its delegator.
+		// ptone/scion#3948: the one exception is a user's reincarnate of an
+		// agent whose own edge is missing or unrecorded, or whose chain has
+		// an unrecorded hop further up that the chain walk reaches before
+		// any hop it does not accept, which re-records the edge below so
+		// the reincarnate repairs the chain.
+		if agentIdent != nil {
+			return nil, true
+		}
+		unrecorded, err := s.reincarnateChainUnrecorded(ctx, agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the agent's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if !unrecorded {
+			return nil, true
+		}
+	}
+	if agentIdent != nil {
+		descends, err := s.requesterDescendsFrom(ctx, agentIdent.ID(), agent)
+		if err != nil {
+			s.agentLifecycleLog.Error("handleReincarnateAgent: delegation chain lookup failed",
+				"agent_id", agent.ID, "requester_id", agentIdent.ID(), "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"Unable to evaluate the requester's delegation chain; retry later", nil)
+			return nil, false
+		}
+		if descends {
+			msg := "Cannot change the role of an agent you descend from: you would become its delegator, which closes a loop in the delegation chain"
+			logAuthzDenial(r, identity, resource, ActionLifecycle, "delegation cycle: requester descends from the agent")
+			writeForbidden(w, msg)
+			return nil, false
+		}
+	}
 
 	delegatorType := store.DelegationPrincipalUser
-	if GetAgentIdentityFromContext(ctx) != nil {
+	if agentIdent != nil {
 		delegatorType = store.DelegationPrincipalAgent
 	}
 	return &reincarnateAuthority{
@@ -989,4 +1100,92 @@ func (s *Server) reincarnateAuthorityFor(w http.ResponseWriter, r *http.Request,
 		Ceiling:       ceiling,
 		Provenance:    prov,
 	}, true
+}
+
+// reincarnateChainUnrecorded reports whether a user's same-role reincarnate
+// of agent re-records its edge. It does when the agent's own edge is missing
+// or is an unrecorded hop (hopUnrecorded: provenance version 0, an
+// uninterpretable version, the unrecorded ceiling kind, or the migration
+// sentinel), whatever lies above it: the user-rooted edge replaces the whole
+// chain, and CanDelegate and the user's ceiling, checked before this, still
+// bound it. Otherwise it does when the chain walk (chainEffectCeilingWalk)
+// counts an unrecorded hop further up: on a chain that folds, any unrecorded
+// hop; on a chain that stops with a structural error (for example a hop with
+// local development provenance on a server without dev auth), an unrecorded
+// hop below the hop where it stopped, or that hop itself when its ceiling
+// kind is unknown and its provenance version is not understood
+// (unrecordedBelow). Those are the chains whose agent a
+// permission requiring recorded provenance denies with ceiling_unrecorded,
+// as the check walks up from the agent and stops at the first unrecorded
+// hop. A fully recorded chain, and a chain whose only problem above a
+// recorded own edge is structural with no unrecorded hop below it, report
+// false, so the edge is kept; only a recreate replaces such a chain. More
+// than one active edge of its own also reports false, but that branch is
+// defensive: the agent standing gate (startGate, resolveChainRoot) runs
+// first and already refuses (409) such an agent, and one whose chain has a
+// missing ancestor edge or a loop. Only a lookup fault is an error.
+func (s *Server) reincarnateChainUnrecorded(ctx context.Context, agent *store.Agent) (bool, error) {
+	own, err := s.authzService.activeProjectEdges(ctx, agent.ID, agent.ProjectID)
+	if err != nil {
+		return false, err
+	}
+	switch {
+	case len(own) == 0:
+		return true, nil
+	case len(own) > 1:
+		// Defensive: unreachable behind the standing gate.
+		return false, nil
+	case hopUnrecorded(own[0]):
+		return true, nil
+	}
+	chain, unrecordedBelow, err := s.authzService.chainEffectCeilingWalk(ctx, agent)
+	if err != nil {
+		if isStructuralProvenanceError(err) {
+			return unrecordedBelow > 0, nil
+		}
+		return false, err
+	}
+	return chain.UnrecordedHops > 0, nil
+}
+
+// requesterDescendsFrom reports whether the requesting agent descends from
+// agent: agent is in the requester's stored ancestry (a lineage descendant,
+// refused conservatively even if its edge has since been re-pointed), or on
+// the requester's active delegation chain in agent's project, where
+// recording agent -> requester would close a loop that chainEffectCeiling
+// rejects (ErrProvenanceChain). The chain is walked as well because a
+// role-changing reincarnation re-points an edge without touching the
+// (immutable) ancestry. The walk stops at a user delegator, a migration
+// sentinel, a missing or ambiguous edge, a repeat, or maxDelegationDepth:
+// those are not loops through agent, and the requester's own ceiling check
+// has already judged its chain. Only a lookup fault is an error.
+func (s *Server) requesterDescendsFrom(ctx context.Context, requesterID string, agent *store.Agent) (bool, error) {
+	requester, err := s.store.GetAgent(ctx, requesterID)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, fmt.Errorf("requester agent lookup: %w", err)
+	}
+	if requester != nil && slices.Contains(requester.Ancestry, agent.ID) {
+		return true, nil
+	}
+	visited := make(map[string]bool, maxDelegationDepth+1)
+	delegateID := requesterID
+	for depth := 0; depth <= maxDelegationDepth; depth++ {
+		if delegateID == agent.ID {
+			return true, nil
+		}
+		if visited[delegateID] {
+			return false, nil
+		}
+		visited[delegateID] = true
+		active, err := s.authzService.activeProjectEdges(ctx, delegateID, agent.ProjectID)
+		if err != nil {
+			return false, err
+		}
+		if len(active) != 1 || isMigrationSentinel(active[0]) ||
+			active[0].DelegatorType != store.DelegationPrincipalAgent {
+			return false, nil
+		}
+		delegateID = active[0].DelegatorID
+	}
+	return false, nil
 }

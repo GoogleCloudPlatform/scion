@@ -296,25 +296,34 @@ func TestEnvVarCloudLoggingConstants(t *testing.T) {
 }
 
 func TestResolveLogLevel(t *testing.T) {
-	t.Run("debug flag", func(t *testing.T) {
-		if ResolveLogLevel(true) != slog.LevelDebug {
-			t.Error("expected LevelDebug when debug=true")
-		}
-	})
-
-	t.Run("env var debug", func(t *testing.T) {
-		t.Setenv("SCION_LOG_LEVEL", "debug")
-		if ResolveLogLevel(false) != slog.LevelDebug {
-			t.Error("expected LevelDebug when SCION_LOG_LEVEL=debug")
-		}
-	})
-
-	t.Run("default info", func(t *testing.T) {
-		t.Setenv("SCION_LOG_LEVEL", "")
-		if ResolveLogLevel(false) != slog.LevelInfo {
-			t.Error("expected LevelInfo by default")
-		}
-	})
+	tests := []struct {
+		name     string
+		debug    bool
+		logLevel string
+		debugEnv string
+		want     slog.Level
+	}{
+		{name: "debug flag", debug: true, logLevel: "error", want: slog.LevelDebug},
+		{name: "env var debug", logLevel: "debug", want: slog.LevelDebug},
+		// The floor is clamped at info: request and message logs must keep
+		// their Info entries even when the main log is raised to warn/error.
+		{name: "env var warn clamps to info", logLevel: "warn", want: slog.LevelInfo},
+		{name: "env var error clamps to info", logLevel: "error", want: slog.LevelInfo},
+		{name: "components above info clamp to info", logLevel: "error,hub.web=warn", want: slog.LevelInfo},
+		{name: "component debug lowers the floor", logLevel: "error,hub.auth=debug", want: slog.LevelDebug},
+		{name: "deprecated SCION_DEBUG", debugEnv: "1", want: slog.LevelDebug},
+		{name: "default info", want: slog.LevelInfo},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetLevelState(t)
+			t.Setenv("SCION_LOG_LEVEL", tt.logLevel)
+			t.Setenv("SCION_DEBUG", tt.debugEnv)
+			if got := ResolveLogLevel(tt.debug); got != tt.want {
+				t.Errorf("ResolveLogLevel(%v) = %v, want %v", tt.debug, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestPromoteAttrToLabels(t *testing.T) {

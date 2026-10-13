@@ -107,8 +107,9 @@ func (c *ContainerScriptHarness) Name() string { return c.entry.Harness }
 // DefaultConfigDir returns the harness-native config directory (e.g. .claude).
 func (c *ContainerScriptHarness) DefaultConfigDir() string { return c.entry.ConfigDir }
 
-// SkillsDir returns the harness skills subdirectory.
-func (c *ContainerScriptHarness) SkillsDir() string { return c.entry.SkillsDir }
+// SkillsDir returns the harness skills subdirectory (SkillsDirForEntry; the
+// constructor guarantees a provisioner block, so this is entry.SkillsDir).
+func (c *ContainerScriptHarness) SkillsDir() string { return SkillsDirForEntry(c.entry) }
 
 // GetInterruptKey returns the configured interrupt key, defaulting to C-c.
 func (c *ContainerScriptHarness) GetInterruptKey() string {
@@ -126,6 +127,11 @@ func (c *ContainerScriptHarness) GetInterruptSequence() []string {
 		return c.entry.InterruptSequence
 	}
 	return nil
+}
+
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
+	return c.entry.ResolvedDelivery()
 }
 
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
@@ -283,6 +289,14 @@ func (c *ContainerScriptHarness) InjectSystemPrompt(agentHome string, content []
 	return c.stageInputFile(agentHome, "system-prompt.md", content)
 }
 
+// adcContainerPath is where ResolveAuth maps the GCP ADC file
+// (GOOGLE_APPLICATION_CREDENTIALS / AuthConfig.GoogleAppCredentials), and
+// googleAppCredentialsField is the required_files field that names it.
+const (
+	adcContainerPath          = "~/.config/gcloud/application_default_credentials.json"
+	googleAppCredentialsField = "GoogleAppCredentials"
+)
+
 // ResolveAuth returns a container-side auth plan: env candidates flow as files
 // under .scion/harness/secrets/, and any harness-native file mappings declared
 // in config_dir-bound auth metadata are surfaced to the runtime so the
@@ -322,7 +336,7 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	if auth.GoogleAppCredentials != "" {
 		resolved.Files = append(resolved.Files, api.FileMapping{
 			SourcePath:    auth.GoogleAppCredentials,
-			ContainerPath: "~/.config/gcloud/application_default_credentials.json",
+			ContainerPath: adcContainerPath,
 		})
 	}
 
@@ -382,9 +396,14 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// runs and the translation must happen here on the Go side.
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
+		region := claudeVertexRegion(resolved.EnvVars)
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential
-			if auth.GoogleCloudProject != "" {
+			// Infer vertex-ai only when a GCP project and a region are both
+			// present and no higher-priority credential is. This matches the
+			// provisioner (provision.py): AUTH order api-key, oauth-token,
+			// auth-file, then vertex-ai (ptone/scion#2071), and vertex-ai
+			// requires the project plus a region (ptone/scion#4557).
+			if auth.GoogleCloudProject != "" && region != "" && !hasHigherPriorityClaudeAuth(auth) {
 				selectedAuth = "vertex-ai"
 			}
 		}
@@ -392,8 +411,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 			if proj := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; proj != "" {
 				resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] = proj
 			}
-			if region := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; region != "" {
+			if region != "" {
 				resolved.EnvVars["CLOUD_ML_REGION"] = region
+			} else {
+				// An explicit selection is kept; report what is missing.
+				slog.Warn("claude vertex-ai auth selected but no region is set; set GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION")
 			}
 			resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"] = "1"
 		}
@@ -403,6 +425,34 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// claudeVertexRegionKeys are the region env names provision.py's vertex-ai
+// method accepts (any_of), in its precedence order.
+var claudeVertexRegionKeys = []string{"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"}
+
+// claudeVertexRegion returns the first non-empty value among
+// claudeVertexRegionKeys in env, or "" when none is set.
+func claudeVertexRegion(env map[string]string) string {
+	for _, k := range claudeVertexRegionKeys {
+		if v := env[k]; v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// hasHigherPriorityClaudeAuth reports whether auth carries a Claude
+// credential that provision.py's AUTH order tries before vertex-ai:
+// api-key (ANTHROPIC_API_KEY), oauth-token (CLAUDE_CODE_OAUTH_TOKEN) or
+// auth-file (the ClaudeAuthFile field of the claude auth-file type).
+// Container-side credentials (an existing ~/.claude/.credentials.json in the
+// container, or a container env var) are not visible here; select the auth
+// type explicitly in that case.
+func hasHigherPriorityClaudeAuth(auth api.AuthConfig) bool {
+	return auth.EnvVars["ANTHROPIC_API_KEY"] != "" ||
+		auth.EnvVars["CLAUDE_CODE_OAUTH_TOKEN"] != "" ||
+		auth.Files["ClaudeAuthFile"] != ""
 }
 
 // ProvisionManifest is the JSON payload written to
@@ -586,10 +636,20 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	// (SetRecordedSecrets); no other file in the secrets directory is
 	// considered. Recorded file-type secrets (names matching the harness
 	// config's required_files) are merged when not overridden by the new
-	// resolution; recorded env-type secrets are merged only when the new
-	// resolution produced none, so a rotated credential is not shadowed.
+	// resolution.
+	//
+	// Recorded env-type secrets are merged unless the new resolution on its
+	// own already satisfies an auth type; then a credential rotated or
+	// switched on the control plane is not shadowed by a stale recorded one.
+	// So a restart whose resolution carries only ambient, non-credential env
+	// (e.g. a region var) still references the recorded credential.
+	//
+	// The merge is a plain assignment: a key present in both maps has the
+	// same value ("$HOME/.scion/harness/secrets/<NAME>"), and that file
+	// already holds the new resolution's value because stageEnvSecretFiles
+	// wrote it over the restored one, so the new value wins either way.
 	existingEnvSecrets, existingFileSecrets := c.recordedSecretFiles(agentHome)
-	if len(envSecretFiles) == 0 {
+	if !c.resolutionSatisfiesAuthType(selectedAuthType(c.entry.AuthSelectedType, resolved), resolved.EnvVars, envSecretFiles, fileSecretFiles, resolved.Files) {
 		for k, v := range existingEnvSecrets {
 			envSecretFiles[k] = v
 		}
@@ -632,13 +692,7 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 	//
 	// The no-auth sentinel "none" is rejected from both sources for the
 	// same reason: the provisioner does not accept it as an auth type.
-	explicitType := c.entry.AuthSelectedType
-	if IsNoAuthType(explicitType) {
-		explicitType = ""
-	}
-	if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) && !IsNoAuthType(st) {
-		explicitType = st
-	}
+	explicitType := selectedAuthType(c.entry.AuthSelectedType, resolved)
 
 	payload := map[string]interface{}{
 		"schema_version":    1,
@@ -654,6 +708,114 @@ func (c *ContainerScriptHarness) ApplyAuthSettings(agentHome string, resolved *a
 		return fmt.Errorf("marshal auth candidates: %w", err)
 	}
 	return c.stageInputFile(agentHome, "auth-candidates.json", data)
+}
+
+// selectedAuthType returns the explicitly selected auth type for
+// auth-candidates.json: SCION_HARNESS_SELECTED_AUTH from the resolution when
+// it is a real auth type, else the harness-config's AuthSelectedType, else "".
+// Harness implementation names and the no-auth sentinel are never returned.
+func selectedAuthType(configured string, resolved *api.ResolvedAuth) string {
+	explicitType := configured
+	if IsNoAuthType(explicitType) || IsHarnessImplementationName(explicitType) {
+		explicitType = ""
+	}
+	if resolved != nil {
+		if st := resolved.EnvVars["SCION_HARNESS_SELECTED_AUTH"]; st != "" && !IsHarnessImplementationName(st) && !IsNoAuthType(st) {
+			explicitType = st
+		}
+	}
+	return explicitType
+}
+
+// resolutionSatisfiesAuthType reports whether the current resolution alone
+// (its env vars, the env/file secrets staged from it and its file mappings,
+// before anything is carried from the control plane's record) satisfies an
+// auth type declared in the harness-config: the explicitly selected type
+// when there is one, else any declared type.
+//
+// A type is satisfied when it declares at least one requirement, every
+// required_env group has a non-empty key in the resolution, and every
+// required_files entry is covered by requiredFileResolved.
+//
+// skipped_when_gcp_service_account_assigned is not honoured: an attached
+// service account (project and region, no credential file) is not treated
+// as satisfying vertex-ai, so a recorded credential is still carried. This
+// matches the first start, where the same inputs (the credential, which is
+// why it was recorded, plus project and region) select the credential
+// method in the provisioners' selection order.
+func (c *ContainerScriptHarness) resolutionSatisfiesAuthType(selected string, envVars map[string]string, envSecretFiles, fileSecretFiles map[string]string, files []api.FileMapping) bool {
+	if c.entry.Auth == nil || len(c.entry.Auth.Types) == 0 {
+		return false
+	}
+	hasEnv := func(k string) bool {
+		if _, ok := envSecretFiles[k]; ok {
+			return true
+		}
+		return envVars[k] != ""
+	}
+	satisfied := func(t api.HarnessAuthTypeMetadata) bool {
+		if len(t.RequiredEnv) == 0 && len(t.RequiredFiles) == 0 {
+			return false
+		}
+		for _, group := range t.RequiredEnv {
+			ok := false
+			for _, k := range group.AnyOf {
+				if hasEnv(k) {
+					ok = true
+					break
+				}
+			}
+			if !ok {
+				return false
+			}
+		}
+		for _, rf := range t.RequiredFiles {
+			if !requiredFileResolved(rf, fileSecretFiles, files, hasEnv) {
+				return false
+			}
+		}
+		return true
+	}
+	if selected != "" {
+		t, ok := c.entry.Auth.Types[selected]
+		return ok && satisfied(t)
+	}
+	for _, t := range c.entry.Auth.Types {
+		if satisfied(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// requiredFileResolved reports whether the resolution covers required file
+// rf: it was staged as a file secret, one of the resolution's file mappings
+// targets it (its target_suffix, or for the GoogleAppCredentials field the
+// ADC path ResolveAuth maps GOOGLE_APPLICATION_CREDENTIALS to), or one of its
+// alternative_env_keys is set.
+func requiredFileResolved(rf api.HarnessAuthFileRequirement, fileSecretFiles map[string]string, files []api.FileMapping, hasEnv func(string) bool) bool {
+	if _, ok := fileSecretFiles[rf.Name]; ok {
+		return true
+	}
+	suffix := strings.TrimRight(rf.TargetSuffix, "/")
+	if suffix != "" && !strings.HasPrefix(suffix, "/") {
+		suffix = "/" + suffix
+	}
+	for _, f := range files {
+		cp := strings.TrimRight(f.ContainerPath, "/")
+		if suffix != "" && strings.HasSuffix(cp, suffix) {
+			return true
+		}
+		if rf.Field == googleAppCredentialsField && cp == adcContainerPath {
+			return true
+		}
+	}
+	for _, k := range rf.AlternativeEnvKeys {
+		if hasEnv(k) {
+			return true
+		}
+	}
+	return false
 }
 
 // IsHarnessImplementationName returns true if s is a known harness
@@ -1004,11 +1166,11 @@ func parseLibVersion(src string) string {
 
 // HarnessProvisionHookFilename is the fixed name this file always stages the
 // wrapper under. pkg/sciontool/hooks recognizes this one script by this exact
-// name (its own harnessProvisionHookFilename, kept in sync with this constant
-// by TestHarnessProvisionHookFilenameMatchesWriter) to run it under the
-// workload's own identity instead of root, even though the wrapper itself is
-// trusted, broker-delivered, root-owned content: that trust proves the
-// wrapper is genuine, not that what it execs is safe to run as root. Not
+// name (its own HarnessProvisionHookFilename, kept in sync with this constant
+// by this package's TestHarnessProvisionHookFilenameMatchesWriter) to run it
+// under the workload's own identity instead of root, even though the wrapper
+// itself is trusted, broker-delivered, root-owned content: that trust proves
+// the wrapper is genuine, not that what it execs is safe to run as root. Not
 // imported directly from that package: pkg/harness's own test package
 // already imports pkg/sciontool/hooks, so the reverse import would be a
 // cycle — see that package's own copy of this name for the full reasoning.

@@ -25,7 +25,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -47,15 +46,6 @@ func assertVersionAndTimestamp(t *testing.T, msg *messages.StructuredMessage) ti
 	assert.True(t, strings.HasSuffix(msg.Timestamp, "Z"), "Timestamp must be UTC, got %q", msg.Timestamp)
 	assert.WithinDuration(t, time.Now(), ts, time.Minute)
 	return ts
-}
-
-func newNoticeTestProxy(t *testing.T, s store.Store, dispatcher AgentDispatcher) *MessageBrokerProxy {
-	t.Helper()
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	b := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = b.Close() })
-	return NewMessageBrokerProxy(b, s, events, func() AgentDispatcher { return dispatcher }, slog.Default())
 }
 
 func TestPublishDeliveryFailed_StampsVersionAndTimestamp(t *testing.T) {
@@ -112,27 +102,6 @@ func TestPublishBroadcastDeliveryFailed_StampsVersionAndTimestamp(t *testing.T) 
 	require.Len(t, got, 1)
 	assert.Equal(t, "DELIVERY_FAILED", got[0].structured.Status)
 	assertVersionAndTimestamp(t, got[0].structured)
-}
-
-// capturingBus records every message published through it before handing it
-// to the wrapped bus.
-type capturingBus struct {
-	eventbus.EventBus
-	mu   sync.Mutex
-	msgs []*messages.StructuredMessage
-}
-
-func (b *capturingBus) Publish(ctx context.Context, topic string, msg *messages.StructuredMessage) error {
-	b.mu.Lock()
-	b.msgs = append(b.msgs, msg)
-	b.mu.Unlock()
-	return b.EventBus.Publish(ctx, topic, msg)
-}
-
-func (b *capturingBus) published() []*messages.StructuredMessage {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]*messages.StructuredMessage(nil), b.msgs...)
 }
 
 func TestAgentOutboundUserDM_StampsVersionAndTimestamp(t *testing.T) {

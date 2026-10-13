@@ -71,9 +71,10 @@ func sqliteObjectSQL(t *testing.T, db *sql.DB, name string) string {
 // the "agent_session_metrics" table's physical column is named "grove_id"
 // and its index "agentsessionmetrics_grove_id", while the ent Go field is
 // ProjectID (field.String("project_id").StorageKey("grove_id")). Running
-// AutoMigrate against the table must be a complete no-op (no ALTER TABLE,
-// no DROP/CREATE INDEX), and data in the physical "grove_id" column must
-// read back correctly through the Go ProjectID field.
+// AutoMigrate against the table must leave the table and these indexes
+// unchanged (no ALTER TABLE, no DROP/CREATE of them; it only adds the newer
+// unique (agent_id, session_id, started_at) index), and data in the physical "grove_id"
+// column must read back correctly through the Go ProjectID field.
 func TestAgentSessionMetricsAutoMigrate_ProjectIDKeepsGroveIDColumn(t *testing.T) {
 	ctx := context.Background()
 	dsn := "file:" + filepath.Join(t.TempDir(), "old-agent-session-metrics.db")
@@ -114,7 +115,7 @@ func TestAgentSessionMetricsAutoMigrate_ProjectIDKeepsGroveIDColumn(t *testing.T
 
 	// AutoMigrate is what every hub run performs on startup. The ent
 	// schema declares the field as ProjectID via StorageKey("grove_id"),
-	// so this must be a no-op against the existing physical table.
+	// so this must not alter the existing physical table or its indexes.
 	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	db, err := sql.Open("sqlite", dsn)

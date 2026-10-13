@@ -21,9 +21,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -49,19 +46,6 @@ import (
 // ("running") is overridden to "created" wherever a test needs to PATCH
 // config (applyAgentUpdate only allows config edits in 'created' or
 // 'stopped', handlers_agents_core.go).
-
-// patchAgentConfig issues a PATCH /api/v1/agents/{id} with a raw (map-typed)
-// config body, so that an explicit empty/zero value in rawConfig actually
-// reaches the wire as a present JSON key -- marshaling a *api.ScionConfig
-// directly would silently omit it (every ScionConfig field is `omitempty`),
-// which is exactly the ambiguity recordExplicitEdits' "present keys only"
-// rule exists to resolve on the read side.
-func patchAgentConfig(t *testing.T, srv *Server, agentID string, rawConfig map[string]interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	return doRequest(t, srv, http.MethodPatch, "/api/v1/agents/"+agentID, map[string]interface{}{
-		"config": rawConfig,
-	})
-}
 
 // TestApplyAgentUpdate_ExplicitEditsSurviveReincarnate is test-plan item 1:
 // a provisionOnly-shaped agent (one with CreateInputs), PATCHed with a
@@ -171,8 +155,8 @@ func TestApplyAgentUpdate_EchoPatchLeavesCreateInputsByteIdentical(t *testing.T)
 // TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch is test-plan item
 // 3: an env key the template originally supplied, echoed back unchanged by a
 // PATCH, must not freeze into CreateInputs -- so when the template's default
-// later changes, reincarnate picks up the NEW template value, not the one
-// the echo would otherwise have pinned.
+// later changes, reincarnate does not replay the old value the echo would
+// otherwise have pinned.
 func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -218,7 +202,10 @@ func TestApplyAgentUpdate_TemplateEnvRefreshesAfterEchoPatch(t *testing.T) {
 
 	fresh, _, err := srv.buildFreshAppliedConfig(ctx, updated, project, "")
 	require.NoError(t, err)
-	assert.Equal(t, "b", fresh.Env["K"], "reincarnate must pick up the template's new default, not freeze the echoed value")
+	// The echoed value is not frozen, and the template's env is not copied
+	// into the agent config either: it reaches the agent from the
+	// template's own file on the broker (ptone/scion#4222).
+	assert.NotContains(t, fresh.Env, "K", "reincarnate must not freeze the echoed value")
 }
 
 // TestApplyAgentUpdate_DeletesEnvKeyAndThinkingLevel is test-plan item 4: a
@@ -375,9 +362,9 @@ func TestApplyAgentUpdate_NilCreateInputsStaysNil(t *testing.T) {
 
 // TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs is test-plan
 // item 8: a PATCH that changes harness_config must never let that reach
-// CreateInputs -- a harness switch is not a validated PATCH operation today,
-// and reincarnate must not pick one up unvalidated against whatever harness
-// is current at that later point.
+// CreateInputs. harness_config is fixed at creation (ptone/scion#3972), so
+// such a PATCH is now refused with 400 and nothing reaches the live config
+// or CreateInputs.
 func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -385,6 +372,7 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{HarnessConfig: "original-harness-config"}
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{
 			HarnessConfig: "original-harness-config",
 			InlineConfig:  &api.ScionConfig{HarnessConfig: "original-harness-config"},
@@ -394,10 +382,13 @@ func TestApplyAgentUpdate_HarnessConfigNeverReachesCreateInputs(t *testing.T) {
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"harness_config": "new-harness-config",
 	})
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "config.harness_config")
 
 	updated, err := s.GetAgent(ctx, agent.ID)
 	require.NoError(t, err)
+	assert.Equal(t, "original-harness-config", updated.AppliedConfig.InlineConfig.HarnessConfig,
+		"a refused harness_config must not reach the live inline config")
 	ci := updated.AppliedConfig.CreateInputs
 	require.NotNil(t, ci)
 	assert.Equal(t, "original-harness-config", ci.HarnessConfig,
@@ -505,42 +496,6 @@ func TestApplyAgentUpdate_ImageChangeIsRecorded(t *testing.T) {
 // Review round 1 (gs://scion-xproject-exchange/tz-refactor/out/2493/review-1.md)
 // ============================================================================
 
-// configureUntouchedBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's "R2-2" vitest case
-// (web/src/components/pages/agent-configure-build-config.test.ts): the exact
-// JSON body the real, fixed buildConfig emits for a fully untouched form
-// loaded from a live config with model "golden-model" and nothing else set.
-// Loading the SAME file in both places means a future buildConfig change
-// that stops matching it breaks the vitest case directly, instead of
-// leaving this Go test to silently test a body nobody's buildConfig
-// actually produces anymore (ptone/scion#2493 R2-2).
-func configureUntouchedBody(t *testing.T) map[string]interface{} {
-	t.Helper()
-	return loadTestdataJSONBody(t, "configure-untouched-body.json")
-}
-
-// configureRowEditBody loads the golden fixture shared with
-// agent-configure-build-config.test.ts's row-edit vitest case: the exact body
-// the real buildConfig emits when the user adds one custom env row (FOO) on
-// an agent whose AppliedConfig.Env has an unrelated template key
-// (TEMPLATE_KEY) and whose auto-expose control is untouched, so no
-// SCION_AUTO_EXPOSE_* key is sent. Loading the SAME file in both places means
-// a future buildConfig change that stops matching it breaks the vitest case
-// directly.
-func configureRowEditBody(t *testing.T) map[string]interface{} {
-	t.Helper()
-	return loadTestdataJSONBody(t, "configure-row-edit-body.json")
-}
-
-func loadTestdataJSONBody(t *testing.T, name string) map[string]interface{} {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join("testdata", name))
-	require.NoError(t, err)
-	var body map[string]interface{}
-	require.NoError(t, json.Unmarshal(data, &body))
-	return body
-}
-
 // TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone is R1-1's
 // hub-side regression test, tightened per review round 2 (R2-2), round 3
 // (R3-1) and round 4 (R4-1): a live config with a REALISTIC hub-stamped
@@ -553,25 +508,15 @@ func loadTestdataJSONBody(t *testing.T, name string) map[string]interface{} {
 // LIVE AppliedConfig.InlineConfig.Telemetry and .Env themselves untouched
 // too.
 //
-// That last part is carryForwardAbsentPageOwnedFields' job
-// (applied_config_explicit_edits.go), not recordExplicitEdits: once
-// buildConfig stopped echoing an untouched telemetry control (R1-1) or an
-// untouched env (R2-1), the unconditional wholesale InlineConfig replace in
-// applyAgentUpdate would otherwise wipe both live fields -- including an
-// explicit telemetry opt-out, and (for a legacy agent with no CreateInputs)
-// every explicit env key `scion reincarnate` has no other record of at all
-// (R4-1) -- on a plain Start with no Save, since the request never mentions
-// either key at all. The carve-out (right before `agent.AppliedConfig.
-// InlineConfig = cfg`) copies both forward from the pre-PATCH InlineConfig
-// whenever their key was absent from the request; this runs AFTER
-// recordExplicitEdits, so CreateInputs still correctly never sees either as
-// explicit. Earlier versions of this test asserted the opposite for each
-// field in turn (`assert.Nil(...InlineConfig.Telemetry)` then
-// `assert.Nil(...InlineConfig.Env)`, both calling the loss "pre-existing
-// §7.2") -- that was wrong both times; §7.2 is the general wholesale
-// InlineConfig replace, but both fields had always survived a configure-page
-// round trip before R1-1/R2-1 made them (correctly) stop being echoed, so
-// their being wiped was this PR's own regression, not a pre-existing one.
+// That last part is mergePresentInlineFields' job
+// (applied_config_explicit_edits.go), not recordExplicitEdits: buildConfig
+// does not echo an untouched telemetry control (R1-1) or an untouched env
+// (R2-1), and applyAgentUpdate builds the new live InlineConfig from the
+// pre-PATCH one, overlaying only the keys the request names
+// (ptone/scion#3901), so both live fields are kept -- including an explicit
+// telemetry opt-out, and (for a legacy agent with no CreateInputs) every
+// explicit env key `scion reincarnate` has no other record of at all
+// (R4-1). CreateInputs still never sees either as explicit.
 //
 // Also covers R2-1 facet (a)'s two-step sequence: this fixture's live env
 // never had a SCION_AUTO_EXPOSE_* key, so after the untouched Save (step 1)
@@ -624,8 +569,8 @@ func TestApplyAgentUpdate_UntouchedSaveLeavesHubTelemetryAndEnvAlone(t *testing.
 	assert.JSONEq(t, string(beforeEnv), string(afterEnv), "an untouched Save must leave live Env alone")
 	require.NotNil(t, updated.AppliedConfig.InlineConfig)
 	// R4-1: live InlineConfig.Env must survive an untouched Save/Start --
-	// carryForwardAbsentPageOwnedFields copies it forward from the pre-PATCH
-	// InlineConfig whenever the request omits "env", specifically so a
+	// mergePresentInlineFields keeps the pre-PATCH value whenever the
+	// request omits "env", specifically so a
 	// legacy agent (no CreateInputs) doesn't lose every explicit env key the
 	// next time it's reincarnated (legacyCreateInputsFromAppliedConfig reads
 	// exactly this field).
@@ -716,6 +661,91 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 		"an explicit telemetry opt-out must survive an untouched Save, not silently fall back to broker settings/template")
 }
 
+// TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch pins
+// ptone/scion#3984: the configure page no longer sends "branch" (a
+// provisioned agent's worktree already fixes it), so a PATCH without the key
+// must keep the stored InlineConfig.Branch, and must not
+// record anything into CreateInputs.
+func TestApplyAgentUpdate_UntouchedSavePreservesInlineBranch(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	ctx := context.Background()
+
+	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+		a.Phase = string(state.PhaseCreated)
+		a.AppliedConfig.Model = "golden-model"
+		a.AppliedConfig.Branch = "feature/x"
+		a.AppliedConfig.InlineConfig = &api.ScionConfig{
+			Model:  "golden-model",
+			Branch: "feature/x",
+		}
+		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+	})
+
+	before, err := json.Marshal(agent.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+
+	body := configureUntouchedBody(t)
+	require.NotContains(t, body, "branch", "the configure page must not send branch")
+	rec := patchAgentConfig(t, srv, agent.ID, body)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	updated, err := s.GetAgent(ctx, agent.ID)
+	require.NoError(t, err)
+	after, err := json.Marshal(updated.AppliedConfig.CreateInputs)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(before), string(after), "an untouched Save must leave CreateInputs alone")
+	require.NotNil(t, updated.AppliedConfig.InlineConfig)
+	assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+		"an absent branch key must keep the stored inline branch, not blank it")
+}
+
+// TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho pins the other half of
+// mergePresentInlineFields for branch: only an ABSENT key keeps the stored
+// value silently. The branch is fixed at creation (ptone/scion#3972), so a
+// present key that would change it, to a new value or to empty, is refused
+// with 400 and stored nowhere; a present key equal to the stored branch is
+// an echo and changes nothing.
+func TestApplyAgentUpdate_PresentBranchKeyRefusedUnlessEcho(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		branch string
+		code   int
+	}{
+		{name: "set", branch: "y", code: http.StatusBadRequest},
+		{name: "cleared", branch: "", code: http.StatusBadRequest},
+		{name: "echoed", branch: "feature/x", code: http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			disp := newReincarnateTestDispatcher()
+			srv, s, project, broker := setupReincarnateTestServer(t, disp)
+			ctx := context.Background()
+
+			agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
+				a.Phase = string(state.PhaseCreated)
+				a.AppliedConfig.InlineConfig = &api.ScionConfig{Branch: "feature/x"}
+				a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{}
+			})
+
+			rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{"branch": tc.branch})
+			require.Equal(t, tc.code, rec.Code, rec.Body.String())
+			if tc.code != http.StatusOK {
+				assert.Contains(t, rec.Body.String(), "config.branch")
+			}
+
+			updated, err := s.GetAgent(ctx, agent.ID)
+			require.NoError(t, err)
+			require.NotNil(t, updated.AppliedConfig.InlineConfig)
+			assert.Equal(t, "feature/x", updated.AppliedConfig.InlineConfig.Branch,
+				"the stored inline branch never changes")
+			require.NotNil(t, updated.AppliedConfig.CreateInputs)
+			if ci := updated.AppliedConfig.CreateInputs.InlineConfig; ci != nil {
+				assert.Empty(t, ci.Branch, "no branch edit is recorded")
+			}
+		})
+	}
+}
+
 // TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv
 // is R4-1's dedicated regression, the exact scenario options.md §5's test
 // plan and the "Legacy agent (no CI): No-op" edge case both depend on: an
@@ -723,10 +753,10 @@ func TestApplyAgentUpdate_UntouchedSavePreservesExplicitTelemetryOptOut(t *testi
 // existed) relies entirely on legacyCreateInputsFromAppliedConfig
 // (reincarnate_config.go) reading its LIVE InlineConfig.Env back at
 // reincarnate time to recover its explicit env -- there is no CreateInputs
-// record to fall back on. Before the R4-1 carve-out, an untouched Save/Start
-// would wipe InlineConfig.Env via the wholesale replace, and reincarnate
-// would then silently lose every one of this agent's explicit env keys with
-// no warning.
+// record to fall back on. applyAgentUpdate keeps InlineConfig.Env when the
+// request omits "env" (mergePresentInlineFields); without that, reincarnate
+// would silently lose every one of this agent's explicit env keys with no
+// warning.
 func TestApplyAgentUpdate_UntouchedSaveThenReincarnateKeepsLegacyAgentExplicitEnv(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -783,7 +813,6 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	// Step 1: untouched Save (no env key at all).
 	rec := patchAgentConfig(t, srv, agent.ID, map[string]interface{}{
 		"thinking_level":     nil,
-		"branch":             "",
 		"user":               "",
 		"agent_instructions": "",
 		"system_prompt":      "",
@@ -795,7 +824,7 @@ func TestApplyAgentUpdate_ReloadAfterUntouchedSavePreservesLiveAutoExposeValue(t
 	assert.Equal(t, "true", mid.AppliedConfig.Env["SCION_AUTO_EXPOSE_PORTS"], "step 1 must leave live auto-expose unchanged")
 	require.NotNil(t, mid.AppliedConfig.InlineConfig)
 	// R4-1: InlineConfig.Env must now ALSO survive the untouched save,
-	// carried forward by carryForwardAbsentPageOwnedFields.
+	// kept by mergePresentInlineFields.
 	require.NotNil(t, mid.AppliedConfig.InlineConfig.Env, "InlineConfig.Env must survive the untouched save")
 	assert.Equal(t, "true", mid.AppliedConfig.InlineConfig.Env["SCION_AUTO_EXPOSE_PORTS"])
 

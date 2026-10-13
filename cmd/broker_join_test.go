@@ -45,38 +45,6 @@ import (
 
 const joinTestDevToken = "scion_dev_join_token_cli_test_0123456789abcdef"
 
-// isolateJoinEnv clears the environment the join and mint commands read, so
-// values exported by the surrounding container do not leak in.
-func isolateJoinEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{
-		envBrokerJoinToken, envBrokerID, "SCION_HUB_ENDPOINT", "SCION_HUB_URL",
-		"SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
-		"SCION_TRANSPORT_MODE", "SCION_TRANSPORT_AUDIENCE",
-	} {
-		t.Setenv(k, "")
-	}
-	savedProjectPath, savedGlobal, savedHubEndpoint := projectPath, globalMode, hubEndpoint
-	savedBrokerID, savedHubName := brokerJoinBrokerID, brokerHubName
-	savedTokenFile, savedForce := brokerJoinTokenFile, brokerJoinForce
-	savedTTL, savedJSON := hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON
-	t.Cleanup(func() {
-		projectPath, globalMode, hubEndpoint = savedProjectPath, savedGlobal, savedHubEndpoint
-		brokerJoinBrokerID, brokerHubName = savedBrokerID, savedHubName
-		brokerJoinTokenFile, brokerJoinForce = savedTokenFile, savedForce
-		brokerJoinCmd.SetIn(nil)
-		hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = savedTTL, savedJSON
-	})
-	// cobra sets a context when the command is executed; these tests call
-	// the run functions directly.
-	brokerJoinCmd.SetContext(context.Background())
-	hubBrokersJoinTokenCreateCmd.SetContext(context.Background())
-	globalMode, hubEndpoint = false, ""
-	brokerJoinBrokerID, brokerHubName = "", ""
-	brokerJoinTokenFile, brokerJoinForce = "", false
-	hubBrokersJoinTokenTTL, hubBrokersJoinTokenJSON = 0, false
-}
-
 // recordingHub is a fake hub that records each request and answers
 // POST /api/v1/brokers and POST /api/v1/brokers/join.
 type recordingHub struct {
@@ -414,7 +382,8 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	require.NoError(t, brokerClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"}))
+	_, err = brokerClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
+	require.NoError(t, err)
 
 	// A wrong key does not authenticate, so the heartbeat above passed
 	// because of the saved secret.
@@ -422,7 +391,7 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 	wrongKey[0] ^= 0xFF
 	wrongClient, err := hubclient.New(ts.URL, hubclient.WithHMACAuth(creds.BrokerID, wrongKey))
 	require.NoError(t, err)
-	err = wrongClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
+	_, err = wrongClient.RuntimeBrokers().Heartbeat(ctx, creds.BrokerID, &hubclient.BrokerHeartbeat{Status: "online"})
 	require.Error(t, err)
 	assert.True(t, apiclient.IsUnauthorizedError(err), "a wrong key gets 401; got %v", err)
 
@@ -438,12 +407,11 @@ func TestBrokerJoinToken_MintOnOneMachineJoinOnAnother(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBrokerJoinTokenCommands_ModeAvailability pins the mode availability
-// of the two join-token verbs: available in human and assistant modes, not
-// in agent mode.
+// of the two join-token verbs: available in human mode, not in agent
+// mode.
 func TestBrokerJoinTokenCommands_ModeAvailability(t *testing.T) {
 	paths := []string{"hub.brokers.join-token.create", "runtime-broker.join"}
 	for _, p := range paths {
-		assert.False(t, assistantDenied[p], "%s should be available in assistant mode", p)
 		assert.False(t, agentAllowed[p], "%s should not be available in agent mode", p)
 	}
 
@@ -458,7 +426,7 @@ func TestBrokerJoinTokenCommands_ModeAvailability(t *testing.T) {
 		apply func(*cobra.Command)
 		want  bool
 	}{
-		{applyAssistantMode, true},
+		{func(*cobra.Command) {}, true}, // human mode removes nothing
 		{applyAgentMode, false},
 	} {
 		root := &cobra.Command{Use: "scion"}

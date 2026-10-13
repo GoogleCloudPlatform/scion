@@ -85,15 +85,6 @@ func projectDirStorageCases() []projectDirStorageCase {
 	}
 }
 
-// writeProjectDirFile creates dir/keep.txt and returns its path.
-func writeProjectDirFile(t *testing.T, dir string) string {
-	t.Helper()
-	require.NoError(t, os.MkdirAll(dir, 0o755))
-	f := filepath.Join(dir, "keep.txt")
-	require.NoError(t, os.WriteFile(f, []byte("keep"), 0o644))
-	return f
-}
-
 // storeHubManagedProject inserts a hub-managed project record directly into
 // the store, so the slug is exactly the stored value.
 func storeHubManagedProject(t *testing.T, s store.Store, id, slug string) {

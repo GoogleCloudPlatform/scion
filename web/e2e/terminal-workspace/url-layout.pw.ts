@@ -7,6 +7,7 @@
  * on malformed input.
  */
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agentA = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -45,17 +46,10 @@ async function setup(
   let attaches = 0;
   let closes = 0;
   const sent: string[] = [];
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled: feat }) => {
       window.__SCION_FEATURES__ = { 'web.terminal_workspace': feat };
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled }
   );
@@ -686,3 +680,61 @@ test('four-pane reload with mixed empty and occupied slots', async ({ page }) =>
   expect(agentIdsAfter[2]).toBe(agentB);
   expect(agentIdsAfter[3]).toBeNull();
 });
+
+// =========================================================================
+// Pane host background behind empty placeholders (ptone/scion#3803)
+// =========================================================================
+
+const TERMINAL_HOST_BG = 'rgb(17, 24, 39)';
+const THEME_CASES = [
+  { theme: 'light', bg: 'rgb(248, 250, 252)' },
+  { theme: 'dark', bg: 'rgb(15, 23, 42)' },
+  // Exercises the prefers-color-scheme block of theme.css on its own.
+  { theme: 'system-dark', bg: 'rgb(15, 23, 42)' },
+] as const;
+
+async function paneHostBackground(page: Page): Promise<string> {
+  return page.evaluate(
+    () => getComputedStyle(document.querySelector('.terminal-pane-host')!).backgroundColor
+  );
+}
+
+for (const { theme, bg } of THEME_CASES) {
+  test(`pane host background follows the ${theme} theme only behind placeholders`, async ({
+    page,
+  }) => {
+    const socket = await setup(page);
+    if (theme === 'system-dark') {
+      await page.emulateMedia({ colorScheme: 'dark' });
+    } else {
+      await page.addInitScript((t) => localStorage.setItem('scion-theme', t), theme);
+    }
+    const applyTheme = async (): Promise<void> => {
+      if (theme !== 'system-dark') return;
+      // The header pins data-theme from the resolved theme; drop it so only
+      // the media query decides the tokens.
+      await page.evaluate(() => {
+        document.documentElement.removeAttribute('data-theme');
+        document.documentElement.classList.remove('sl-theme-dark');
+      });
+    };
+
+    await page.goto('/terminals?lv=1&lp=four&s0=&s1=&s2=&s3=');
+    await expect.poll(() => placeholderCount(page)).toBe(4);
+    await applyTheme();
+    expect(await paneHostBackground(page)).toBe(bg);
+
+    await page.goto(`/terminals?lv=1&lp=four&s0=${agentA}&s1=&s2=${agentB}&s3=`);
+    await expect.poll(() => visiblePaneCount(page)).toBe(2);
+    await expect.poll(() => placeholderCount(page)).toBe(2);
+    await applyTheme();
+    expect(await paneHostBackground(page)).toBe(bg);
+
+    await page.goto(`/terminals?lv=1&lp=four&s0=${agentA}&s1=${agentB}&s2=${agentC}&s3=${agentD}`);
+    await expect.poll(() => visiblePaneCount(page)).toBe(4);
+    await expect.poll(() => placeholderCount(page)).toBe(0);
+    await applyTheme();
+    expect(await paneHostBackground(page)).toBe(TERMINAL_HOST_BG);
+    expect(socket.attaches).toBeGreaterThan(0);
+  });
+}

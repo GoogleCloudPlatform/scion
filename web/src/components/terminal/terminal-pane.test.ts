@@ -1,13 +1,21 @@
-// @vitest-environment happy-dom
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScionTerminalPane } from './terminal-pane.js';
 import { TerminalSessionRegistry } from '../../client/terminal-sessions.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
+
+/**
+ * The automatic reconnect after a 4503 close waits a full-jitter delay;
+ * these pane tests expect it at once, so the registries draw a zero delay.
+ */
+const zeroJitter = { random: () => 0 };
 
 const showToast = vi.fn();
 vi.mock('../../utils/toast.js', () => ({ showToast }));
 
 const terminal = vi.hoisted(() => ({
   instances: [] as Array<Record<'dispose' | 'reset' | 'focus' | 'blur', ReturnType<typeof vi.fn>>>,
+  /** When set, fit() resizes the latest terminal to this measured size. */
+  fitSize: null as { cols: number; rows: number } | null,
 }));
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
@@ -32,7 +40,10 @@ vi.mock('@xterm/xterm', () => ({
 }));
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit = vi.fn();
+    fit = vi.fn(() => {
+      const latest = terminal.instances.at(-1);
+      if (terminal.fitSize && latest) Object.assign(latest, terminal.fitSize);
+    });
   },
 }));
 vi.mock('@xterm/addon-web-links', () => ({ WebLinksAddon: class {} }));
@@ -47,7 +58,7 @@ class FakeSocket {
   onmessage: ((event: { data: unknown }) => void) | null = null;
   send = vi.fn();
   close = vi.fn();
-  constructor() {
+  constructor(readonly url = '') {
     FakeSocket.instances.push(this);
   }
   open() {
@@ -83,6 +94,7 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   terminal.instances.length = 0;
+  terminal.fitSize = null;
   FakeSocket.instances = [];
   FakeEventSource.instances = [];
   frames = [];
@@ -105,10 +117,13 @@ beforeEach(() => {
   );
   vi.stubGlobal('fetch', fetcher);
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   page.open(registry, agentId);
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(800);
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(500);
@@ -199,10 +214,13 @@ describe('retained terminal pane', () => {
   });
 
   it('requires explicit identity and prevents rebinding a session to another pane', () => {
-    const registry = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test',
-    });
+    const registry = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test',
+      },
+      zeroJitter
+    );
     const first = document.createElement('scion-terminal-pane');
     const second = document.createElement('scion-terminal-pane');
     const session = first.open(registry, agentId);
@@ -226,7 +244,7 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   fetcher.mockImplementation((url) =>
     Promise.resolve(
       json({
-        id: String(url).includes(otherId) ? otherId : agentId,
+        id: requestUrl(url).includes(otherId) ? otherId : agentId,
         name: 'test',
         phase: 'running',
       })
@@ -275,6 +293,84 @@ it('two panes share registry SSE and preserve metadata across transport notifica
   }
 });
 
+describe('initially hidden pane waits for reveal before attaching', () => {
+  /** Runs queued animation frames (and any they queue) and settles promises. */
+  async function flushFrames(): Promise<void> {
+    for (let i = 0; i < 10; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await page.updateComplete;
+      const pending = frames.splice(0);
+      if (pending.length === 0) return;
+      for (const callback of pending) callback(0);
+    }
+  }
+  async function mountHidden(): Promise<void> {
+    terminal.fitSize = { cols: 132, rows: 41 };
+    page.setVisible(false);
+    document.body.append(page);
+    await vi.waitFor(() => expect(terminal.instances).toHaveLength(1));
+    await flushFrames();
+  }
+
+  it('a hidden mount does not attach until it is revealed', async () => {
+    await mountHidden();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it('reveal attaches exactly once, at the measured size', async () => {
+    await mountHidden();
+    expect(FakeSocket.instances).toHaveLength(0);
+    page.setVisible(true);
+    await flushFrames();
+    await vi.waitFor(() => expect(FakeSocket.instances).toHaveLength(1));
+    // A second reveal must not attach again.
+    page.setVisible(false);
+    page.setVisible(true);
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(1);
+    const url = new URL(FakeSocket.instances[0].url);
+    expect(url.searchParams.get('cols')).toBe('132');
+    expect(url.searchParams.get('rows')).toBe('41');
+  });
+
+  it('close before reveal never attaches, even if reveal or layout readiness follows', async () => {
+    const observers: Array<{
+      observe: ReturnType<typeof vi.fn>;
+      disconnect: ReturnType<typeof vi.fn>;
+    }> = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe = vi.fn();
+        unobserve = vi.fn();
+        disconnect = vi.fn();
+        constructor() {
+          observers.push(this);
+        }
+      }
+    );
+    await mountHidden();
+    expect(observers).toHaveLength(1);
+    expect(observers[0].observe).toHaveBeenCalledTimes(1);
+    expect(observers[0].disconnect).not.toHaveBeenCalled();
+    page.dispose();
+    await flushFrames();
+    expect(page.session?.state.connection).toBe('closed');
+    expect(terminal.instances[0].dispose).toHaveBeenCalledTimes(1);
+    // The wait's ResizeObserver is released, so a late resize cannot resume it.
+    expect(observers[0].disconnect).toHaveBeenCalledTimes(1);
+    // The wait's layout callback was cleared, so nothing can resume it.
+    expect((page as unknown as { layoutReady: unknown }).layoutReady).toBeNull();
+    page.setVisible(true);
+    await flushFrames();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await flushFrames();
+    expect(FakeSocket.instances).toHaveLength(0);
+  });
+});
+
 describe('hidden pane interaction isolation (P1.8)', () => {
   it('setVisible(false) blurs terminal, cancels pending resize and removes window drag prevention', async () => {
     await mountConnected();
@@ -311,10 +407,13 @@ describe('hidden pane interaction isolation (P1.8)', () => {
 
   it('window drag prevention is not installed when pane starts hidden', () => {
     const pane2 = document.createElement('scion-terminal-pane');
-    const reg2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'test-hidden',
-    });
+    const reg2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'test-hidden',
+      },
+      zeroJitter
+    );
     pane2.setVisible(false);
     const addSpy = vi.spyOn(window, 'addEventListener');
     document.body.append(pane2);
@@ -437,10 +536,13 @@ it('a failed metadata snapshot does not remove the independently authorized term
   page.dispose();
   FakeEventSource.instances = [];
   page = document.createElement('scion-terminal-pane');
-  registry = new TerminalSessionRegistry({
-    hubUrl: window.location.origin,
-    accountId: 'account-1',
-  });
+  registry = new TerminalSessionRegistry(
+    {
+      hubUrl: window.location.origin,
+      accountId: 'account-1',
+    },
+    zeroJitter
+  );
   let resolve!: (response: Response) => void;
   const gate = new Promise<Response>((r) => {
     resolve = r;
@@ -460,12 +562,63 @@ it('a failed metadata snapshot does not remove the independently authorized term
   expect(page.shadowRoot?.textContent).toContain('metadata unavailable');
 });
 
+describe('initial-load preflight refusal', () => {
+  it.each([
+    [
+      'denied (403)',
+      403,
+      { error: { code: 'forbidden', message: 'denied' } },
+      'You do not have permission to attach to this agent.',
+    ],
+    [
+      'no path (503 runtime_attach_unsupported)',
+      503,
+      { error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' } },
+      'No path to the terminal',
+    ],
+  ] as const)(
+    '%s shows the error state with an enabled Retry button',
+    async (_name, status, body, text) => {
+      page.dispose();
+      page = document.createElement('scion-terminal-pane');
+      registry = new TerminalSessionRegistry(
+        {
+          hubUrl: window.location.origin,
+          accountId: 'account-refusal',
+        },
+        zeroJitter
+      );
+      // Answer by URL, so the order of the agent, metadata and preflight
+      // requests does not matter.
+      fetcher.mockImplementation((input) => {
+        if (requestUrl(input).endsWith('/pty')) return Promise.resolve(json(body, status));
+        return Promise.resolve(json({ id: agentId, name: 'test', phase: 'running' }));
+      });
+      page.open(registry, agentId);
+      document.body.append(page);
+
+      await vi.waitFor(() => expect(page.shadowRoot?.querySelector('.error-state')).not.toBeNull());
+      await page.updateComplete;
+      const errorState = page.shadowRoot!.querySelector('.error-state')!;
+      expect(errorState.textContent).toContain(text);
+      const retry = errorState.querySelector('button')!;
+      expect(retry.disabled).toBe(false);
+      expect(retry.textContent?.trim()).toBe('Retry');
+      expect(page.session?.reconnecting).toBe(false);
+      expect(FakeSocket.instances).toHaveLength(0);
+    }
+  );
+});
+
 describe('bind-after-mount still arms frontmost', () => {
   it('a pane mounted before open() (the legacy page order) still auto-reconnects on a retriable close', async () => {
-    const registry2 = new TerminalSessionRegistry({
-      hubUrl: window.location.origin,
-      accountId: 'account-r3',
-    });
+    const registry2 = new TerminalSessionRegistry(
+      {
+        hubUrl: window.location.origin,
+        accountId: 'account-r3',
+      },
+      zeroJitter
+    );
     const page2 = document.createElement('scion-terminal-pane');
     // connectedCallback runs with no session bound yet — the exact order that
     // pages/terminal.ts uses (mount the shell, then open()).
@@ -524,11 +677,14 @@ describe('document visibilitychange feeds frontmost', () => {
 });
 
 describe('overlay strings', () => {
-  it('shows RECONNECTING... with a spinner while an attempt is in flight', async () => {
+  it('shows RECONNECTING... with a spinner from the 4503 close, before the redial', async () => {
     await mountConnected();
     FakeSocket.instances[0].readyState = 3;
     FakeSocket.instances[0].onclose?.({ code: 4503 });
     await page.updateComplete;
+    // Shown immediately after the close, before the jitter timer (a
+    // macrotask, even at zero delay) has fired: nothing is redialed yet.
+    expect(FakeSocket.instances).toHaveLength(1);
     expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
   });
@@ -553,6 +709,24 @@ describe('overlay strings', () => {
     await page.updateComplete;
     expect(page.shadowRoot?.textContent).toContain('RECONNECTING...');
     expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeTruthy();
+  });
+
+  it('a 4503 close then a no-path answer ends on ATTACH NOT SUPPORTED, with no spinner', async () => {
+    await mountConnected();
+    const noPath = {
+      error: { code: 'runtime_attach_unsupported', message: 'No path to the terminal' },
+    };
+    fetcher
+      .mockResolvedValueOnce(json({ id: agentId, name: 'test', phase: 'running' }))
+      .mockResolvedValueOnce(json(noPath, 503));
+    FakeSocket.instances[0].readyState = 3;
+    FakeSocket.instances[0].onclose?.({ code: 4503 });
+    await vi.waitFor(() => expect(page.shadowRoot?.textContent).toContain('ATTACH NOT SUPPORTED'));
+    await page.updateComplete;
+    expect(page.shadowRoot?.textContent).not.toContain('RECONNECTING...');
+    expect(page.shadowRoot?.querySelector('.disconnected-overlay sl-spinner')).toBeNull();
+    expect(page.shadowRoot?.textContent).toContain('No path to the terminal');
+    expect(FakeSocket.instances).toHaveLength(1);
   });
 
   it('shows the exact copy, pinned rather than matched as a substring, once an automatic attempt fails', async () => {
@@ -1185,5 +1359,106 @@ describe('pane navigation', () => {
       document.removeEventListener('nav-click', onNav);
     }
     expect(paths).toEqual([`/agents/graph?project=proj%201&focus=${agentId}`]);
+  });
+});
+
+describe('compact pane header (ptone/scion#4324)', () => {
+  function toolbar(): HTMLElement {
+    return page.shadowRoot!.querySelector<HTMLElement>('.toolbar')!;
+  }
+
+  function backLink(label: 'Back to Project' | 'Back to Agent'): HTMLAnchorElement | undefined {
+    return [...toolbar().querySelectorAll<HTMLAnchorElement>('a.back-link')].find(
+      (a) => (a.getAttribute('aria-label') ?? a.textContent!.replace('←', '').trim()) === label
+    );
+  }
+
+  async function withProject(compact: boolean): Promise<void> {
+    await mountConnected();
+    (page as unknown as { projectId: string }).projectId = 'proj-1';
+    page.compactHeader = compact;
+    page.requestUpdate();
+    await page.updateComplete;
+  }
+
+  /** The path main.ts's document-level link interception would navigate to. */
+  function clickedHref(anchor: HTMLAnchorElement): string | null {
+    let href: string | null = null;
+    const onClick = (e: MouseEvent): void => {
+      const a = e.composedPath().find((el) => el instanceof HTMLAnchorElement) as
+        | HTMLAnchorElement
+        | undefined;
+      href = a?.getAttribute('href') ?? null;
+      e.preventDefault();
+    };
+    document.addEventListener('click', onClick);
+    try {
+      anchor.click();
+    } finally {
+      document.removeEventListener('click', onClick);
+    }
+    return href;
+  }
+
+  it('shows a folder icon and a robot emoji, labelled, with tooltips and the same destinations', async () => {
+    await withProject(true);
+
+    const project = backLink('Back to Project')!;
+    expect(project.classList.contains('compact')).toBe(true);
+    expect(project.getAttribute('href')).toBe('/projects/proj-1');
+    expect(project.querySelector('sl-icon')!.getAttribute('name')).toBe('folder');
+    expect(project.textContent!.trim()).toBe('');
+    expect(project.closest('sl-tooltip')!.getAttribute('content')).toBe('Back to Project');
+    expect(clickedHref(project)).toBe('/projects/proj-1');
+
+    const agent = backLink('Back to Agent')!;
+    expect(agent.classList.contains('compact')).toBe(true);
+    expect(agent.getAttribute('href')).toBe(`/agents/${agentId}`);
+    expect(agent.textContent!.trim()).toBe('\u{1F916}');
+    expect(agent.querySelector('[aria-hidden="true"]')).not.toBeNull();
+    expect(agent.closest('sl-tooltip')!.getAttribute('content')).toBe('Back to Agent');
+    expect(clickedHref(agent)).toBe(`/agents/${agentId}`);
+
+    expect(toolbar().textContent).not.toContain('Back to Project');
+    expect(toolbar().textContent).not.toContain('Back to Agent');
+  });
+
+  it('keeps the full text labels when there is room', async () => {
+    await withProject(false);
+
+    const project = backLink('Back to Project')!;
+    expect(project.classList.contains('compact')).toBe(false);
+    expect(project.textContent!.trim()).toBe('← Back to Project');
+    expect(project.getAttribute('href')).toBe('/projects/proj-1');
+    const agent = backLink('Back to Agent')!;
+    expect(agent.textContent!.trim()).toBe('← Back to Agent');
+    expect(toolbar().querySelector('sl-tooltip > a.back-link')).toBeNull();
+  });
+
+  it('keeps the agent name readable and the header buttons full size', async () => {
+    await withProject(true);
+    const styles = (
+      customElements.get('scion-terminal-pane') as unknown as {
+        styles: { cssText: string };
+      }
+    ).styles.cssText.replace(/\s+/g, ' ');
+    // The name shrinks first, with an ellipsis, to a minimum width: 4rem,
+    // or the name's own length when it is shorter.
+    expect(styles).toMatch(
+      /\.agent-name \{[^}]*flex: 0 1 auto;[^}]*min-width: min\(4rem, calc\(var\(--agent-name-chars, 8\) \* 1ch\)\);[^}]*text-overflow: ellipsis;/
+    );
+    // The back links, separator, window toggle and action buttons do not shrink.
+    expect(styles).toMatch(
+      /\.back-link, \.separator, \.toggle-group, \.pane-action-btn \{ flex-shrink: 0; \}/
+    );
+    // And those are the elements the compact header renders.
+    const bar = toolbar();
+    // The agent is named 'test': its 4 characters cap the minimum width.
+    const name = bar.querySelector<HTMLElement>('.agent-name')!;
+    expect(name.textContent).toBe('test');
+    expect(name.style.getPropertyValue('--agent-name-chars')).toBe('4');
+    expect(bar.querySelector('.toggle-group')).not.toBeNull();
+    expect(bar.querySelectorAll('a.back-link.compact')).toHaveLength(2);
+    expect(bar.querySelector('.pane-action-btn')).not.toBeNull();
   });
 });

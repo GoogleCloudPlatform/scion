@@ -40,6 +40,10 @@ const (
 	FieldAuthorityCeilingBoundaryProjectID = "authority_ceiling_boundary_project_id"
 	// FieldAuthorityCeilingSourceExpiresAt holds the string denoting the authority_ceiling_source_expires_at field in the database.
 	FieldAuthorityCeilingSourceExpiresAt = "authority_ceiling_source_expires_at"
+	// FieldFixtureRootID holds the string denoting the fixture_root_id field in the database.
+	FieldFixtureRootID = "fixture_root_id"
+	// FieldFixtureIssuerID holds the string denoting the fixture_issuer_id field in the database.
+	FieldFixtureIssuerID = "fixture_issuer_id"
 	// FieldProjectID holds the string denoting the project_id field in the database.
 	FieldProjectID = "project_id"
 	// FieldName holds the string denoting the name field in the database.
@@ -90,6 +94,8 @@ var Columns = []string{
 	FieldAuthorityCeilingBoundaryKind,
 	FieldAuthorityCeilingBoundaryProjectID,
 	FieldAuthorityCeilingSourceExpiresAt,
+	FieldFixtureRootID,
+	FieldFixtureIssuerID,
 	FieldProjectID,
 	FieldName,
 	FieldCronExpr,
@@ -221,6 +227,16 @@ func ByAuthorityCeilingBoundaryProjectID(opts ...sql.OrderTermOption) OrderOptio
 // ByAuthorityCeilingSourceExpiresAt orders the results by the authority_ceiling_source_expires_at field.
 func ByAuthorityCeilingSourceExpiresAt(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldAuthorityCeilingSourceExpiresAt, opts...).ToFunc()
+}
+
+// ByFixtureRootID orders the results by the fixture_root_id field.
+func ByFixtureRootID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureRootID, opts...).ToFunc()
+}
+
+// ByFixtureIssuerID orders the results by the fixture_issuer_id field.
+func ByFixtureIssuerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureIssuerID, opts...).ToFunc()
 }
 
 // ByProjectID orders the results by the project_id field.

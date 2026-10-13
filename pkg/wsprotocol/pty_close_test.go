@@ -60,9 +60,74 @@ func TestClassifyPTYClose_Parity(t *testing.T) {
 		ClosePTYServiceRestart, ClosePTYTryAgainLater, ClosePTYAuthRequired,
 		ClosePTYForbidden, ClosePTYAgentNotFound, ClosePTYSessionGone,
 		ClosePTYUpstreamUnavailable, ClosePTYUpstreamTimeout, ClosePTYAttachUnsupported,
+		ClosePTYProtocolError, ClosePTYSuperseded, ClosePTYCancelled,
 	} {
 		if !seen[code] {
 			t.Errorf("contract constant %d has no fixture row", code)
+		}
+	}
+}
+
+// TestClassifyPTYClose_DesignCloseCodeRows pins the close codes from the
+// conduit close-code table that the PTY contract shares: each one is
+// classified explicitly, not only through the unknown-application fallback.
+func TestClassifyPTYClose_DesignCloseCodeRows(t *testing.T) {
+	cases := []struct {
+		code int
+		want CloseDisposition
+	}{
+		{ClosePTYNormal, DispositionDetached},
+		{ClosePTYProtocolError, DispositionTerminal},
+		{ClosePTYAuthRequired, DispositionTerminal},
+		{ClosePTYForbidden, DispositionTerminal},
+		{ClosePTYAgentNotFound, DispositionTerminal},
+		{ClosePTYSuperseded, DispositionTerminal},
+		{ClosePTYCancelled, DispositionTerminal},
+		{ClosePTYUpstreamUnavailable, DispositionRetry},
+		{ClosePTYUpstreamTimeout, DispositionRetry},
+		{ClosePTYInternalError, DispositionRetry},
+	}
+	for _, tc := range cases {
+		if got := ClassifyPTYClose(tc.code); got != tc.want {
+			t.Errorf("ClassifyPTYClose(%d) = %s, want %s", tc.code, got, tc.want)
+		}
+	}
+}
+
+func TestPTYReconnectTiming(t *testing.T) {
+	cases := []struct {
+		code int
+		want ReconnectTiming
+	}{
+		{ClosePTYUpstreamUnavailable, ReconnectPrompt},
+		{ClosePTYUpstreamTimeout, ReconnectBackoff},
+		{ClosePTYInternalError, ReconnectBackoff},
+		// Terminal codes never reconnect.
+		{ClosePTYProtocolError, ReconnectNever},
+		{ClosePTYAuthRequired, ReconnectNever},
+		{ClosePTYForbidden, ReconnectNever},
+		{ClosePTYAgentNotFound, ReconnectNever},
+		{ClosePTYSuperseded, ReconnectNever},
+		{ClosePTYSessionGone, ReconnectNever},
+		{ClosePTYCancelled, ReconnectNever},
+		{ClosePTYAttachUnsupported, ReconnectNever},
+		{4999, ReconnectNever},
+		// Clean detach never reconnects.
+		{ClosePTYNormal, ReconnectNever},
+		// Other retry codes are left to the user.
+		{ClosePTYGoingAway, ReconnectNever},
+		{ClosePTYAbnormal, ReconnectNever},
+		{ClosePTYTryAgainLater, ReconnectNever},
+	}
+	for _, tc := range cases {
+		if got := PTYReconnectTiming(tc.code); got != tc.want {
+			t.Errorf("PTYReconnectTiming(%d) = %d, want %d", tc.code, got, tc.want)
+		}
+	}
+	// Every code that reconnects must classify as retry.
+	for code := 1000; code <= 4999; code++ {
+		if PTYReconnectTiming(code) != ReconnectNever && ClassifyPTYClose(code) != DispositionRetry {
+			t.Errorf("code %d reconnects but does not classify as retry", code)
 		}
 	}
 }

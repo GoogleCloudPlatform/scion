@@ -32,10 +32,10 @@ import (
 const FederationTokenHeader = "X-Scion-Federation-Token"
 
 // DefaultFederationScopes is the scope set granted to federated agents when
-// no per-issuer default_scopes are configured.
+// no per-issuer default_scopes are configured. agent:log:append is not in
+// it: agent.log_append is Reserved, since no handler checks it.
 var DefaultFederationScopes = []AgentTokenScope{
 	ScopeAgentStatusUpdate,
-	ScopeAgentLogAppend,
 }
 
 // FederationAuthenticator validates OIDC identity tokens from trusted external issuers.

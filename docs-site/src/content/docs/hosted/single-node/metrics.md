@@ -60,14 +60,8 @@ telemetry:
     enabled: true
     report_interval: "30s"
 
-  local:
-    enabled: false
-    file: ""
-    console: false
-
   filter:
     enabled: true
-    respect_debug_mode: true
     events:
       include: []
       exclude:
@@ -99,12 +93,24 @@ Environment variables override any settings file value and are the most convenie
 | `SCION_TELEMETRY_CLOUD_ENABLED` | `telemetry.cloud.enabled` | `true` | Enable forwarding to cloud backend |
 | `SCION_OTEL_ENDPOINT` | `telemetry.cloud.endpoint` | (required) | Cloud OTLP endpoint URL |
 | `SCION_OTEL_PROTOCOL` | `telemetry.cloud.protocol` | `grpc` | Protocol: `grpc` or `http` |
-| `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.insecure_skip_verify` | `false` | Skip TLS verification (dev only) |
+| `SCION_OTEL_INSECURE` | `telemetry.cloud.tls.enabled` (inverted) | `false` | Use plaintext transport instead of TLS (dev only) |
+| `SCION_OTEL_SKIP_TLS_VERIFY` | `telemetry.cloud.tls.insecure_skip_verify` | `false` | Keep TLS but skip certificate verification (dev only) |
+| `SCION_OTEL_CA_FILE` | `telemetry.cloud.tls.ca_file` | — | Path to a PEM CA bundle used to verify the OTLP endpoint |
+| `SCION_OTEL_CERT_FILE` | `telemetry.cloud.tls.cert_file` | — | Path to a PEM client certificate for mTLS; set together with `SCION_OTEL_KEY_FILE` |
+| `SCION_OTEL_KEY_FILE` | `telemetry.cloud.tls.key_file` | — | Path to the PEM private key for the client certificate |
 | `SCION_TELEMETRY_HUB_ENABLED` | `telemetry.hub.enabled` | `true` | Enable Hub reporting |
-| `SCION_TELEMETRY_DEBUG` | `telemetry.local.enabled` | `false` | Enable local debug output |
 | `SCION_GCP_PROJECT_ID` | — | (auto) | GCP project ID for Google Cloud backends |
 | `SCION_OTEL_GCP_CREDENTIALS` | — | (auto) | Path to a GCP service account key JSON file; set automatically by the broker from the `scion-telemetry-gcp-credentials` secret |
 | `SCION_TELEMETRY_CLOUD_PROVIDER` | — | (auto) | Cloud backend: `gcp` for GCP-native export; auto-detected when credentials file is present |
+
+#### Client certificates (mTLS)
+
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. Where a half pair is caught depends on where it comes from:
+
+- In settings files or the host environment, a half pair (or a client certificate together with `tls.enabled: false`) fails settings load, so `scion` commands that load settings fail with that error, on the host or inside the agent.
+- A half pair that reaches the agent only through a template or the agent environment is caught by `sciontool` at startup. The same happens when a file cannot be read, or when a client certificate is combined with plaintext transport or GCP-native export. `sciontool` logs the error (naming the path for file problems) and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs. A half pair, or a client certificate with plaintext transport, is also in the agent environment, so `scion` commands inside the agent that load settings fail with the settings-load error as well.
+
+The key pair is read once, when the exporter starts, so rotated certificate files take effect after the agent restarts. When neither path is set, behavior is unchanged.
 
 ### Local Receiver Settings (For Agents)
 
@@ -154,7 +160,16 @@ Ensure the environment where the agent container runs (GKE Pod, Cloud Run, etc.)
 
 ### 4. GCP Credentials for Agent Containers (Non-ADC Environments)
 
-When agents run outside of GKE or Cloud Run — where [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials) are not automatically available — you must supply a GCP service account key file. Scion uses a **well-known secret** to provision this credential into every agent container automatically.
+GCP-native export authenticates with the key file named by `SCION_OTEL_GCP_CREDENTIALS` when one is present, and otherwise with [Application Default Credentials (ADC)](https://cloud.google.com/docs/authentication/application-default-credentials). Inside an agent container, ADC asks the metadata server for a token, and the agent's GCP identity mode decides the answer. When an agent has no GCP identity configured, the broker uses mode `block` on every runtime except Kubernetes (where the default is `passthrough`). In `block` mode the `sciontool` metadata server refuses token requests, so ADC cannot authenticate and export to GCP fails.
+
+On those runtimes, GCP export needs one of:
+
+- **A registered service account assigned to the agent.** Register it with `scion project service-accounts add <email> --gcp-project <id>` (or `mint`), check it with `scion project service-accounts verify <id>`, and start the agent with `--service-account <id>`. This sets mode `assign`, and the metadata server returns tokens for that account. The account needs the roles in [IAM Permissions](#3-iam-permissions). See [`scion project service-accounts`](/scion/reference/cli/) in the CLI reference.
+- **The telemetry credentials secret**, a GCP service account key file, described below.
+
+To check which one an agent has, run `echo $SCION_METADATA_MODE` and `echo $SCION_OTEL_GCP_CREDENTIALS` inside the agent. `assign` means a service account is assigned; `block` with an empty `SCION_OTEL_GCP_CREDENTIALS` and no key file at `~/.scion/telemetry-gcp-credentials.json` means export to GCP has no credentials. `sciontool metadata status` inside the agent also reports the mode and, in `assign` mode, the account and whether its token endpoint returns `200`.
+
+Scion uses a **well-known secret** to provision the key file into every agent container automatically.
 
 | Property | Value |
 |----------|-------|

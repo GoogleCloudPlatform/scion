@@ -19,8 +19,6 @@
  * `visualViewport` and a manually flushed animation-frame queue.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 import { APP_FRAME_CLASS } from '../components/shared/app-frame.js';

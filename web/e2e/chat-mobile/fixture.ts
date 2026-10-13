@@ -31,16 +31,12 @@ export async function openChatRail(
   await setupChatMobileMocks(page);
   if (overrideMocks) await overrideMocks(page);
   await page.goto(`/chat/space/${PROJECT_A.id}`, { waitUntil: 'domcontentloaded' });
-  // The legacy /chat/space/{id} URL triggers a client-side redirect to the
-  // readable slug URL once spaces load (parseV2Route's legacySpaceMatch ->
-  // navigateTo). That redirect is a full client-side navigation, and
-  // main.ts's renderRoute handles every navigation (other than returning
-  // from a hidden terminal view) by removing the old page element and
-  // creating a new one — so a caller that proceeds as soon as the *first*
-  // <scion-page-chat> instance renders can measure or click into a page
-  // that is about to be torn down and replaced. Waiting for the URL to
-  // settle to the redirected form first means every caller sees the one
-  // instance that is actually going to stick around.
+  // The legacy /chat/space/{id} URL is rewritten in place to the readable
+  // slug URL once spaces load (parseV2Route's legacySpaceMatch ->
+  // replaceRoute), on the same page element. On desktop the space then
+  // opens #general with a navigateTo, which does replace the page element.
+  // Waiting for the URL to settle to the readable form first keeps callers
+  // off the page before the space has opened.
   await page.waitForURL(/\/chat\/[^/]+$/, { timeout: 15_000 });
   await expect(page.locator('.space-header', { hasText: PROJECT_A.name })).toBeVisible({
     timeout: 15_000,
@@ -51,8 +47,8 @@ export async function openChatRail(
  * Wait for PROJECT_A's thread list to expand.
  *
  * Landing on the legacy `/chat/space/{projectId}` URL triggers chat.ts's own
- * redirect-and-select cascade (parseV2Route's legacySpaceMatch ->
- * navigateTo(the readable slug URL) -> singleMatch -> selectSpaceBySlug),
+ * rewrite-and-select cascade (parseV2Route's legacySpaceMatch ->
+ * replaceRoute(the readable slug URL) -> singleMatch -> selectSpaceBySlug),
  * which calls the rail's `expandSpace(projectId)` once the rail's
  * `rail-loaded` event fires — no click needed, and clicking the header
  * ourselves races that cascade: landing between "not yet expanded" and

@@ -258,6 +258,10 @@ func handleChatLinkVerification(w http.ResponseWriter, r *http.Request, opts cha
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
 		return
 	}
+	// Linking a chat account to the caller is a profile write.
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	if opts.allowVerify != nil && !opts.allowVerify(opts.clientIP) {
 		writeError(w, http.StatusTooManyRequests, ErrCodeRateLimited, "too many verify attempts, try again later", nil)

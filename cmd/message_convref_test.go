@@ -1304,7 +1304,7 @@ func TestSendMessageViaConversation_AgentRef_AgentContext_Deferred(t *testing.T)
 	require.NoError(t, sendErr, "a deferred delivery must not be reported as a send error")
 	assert.Contains(t, output, "agent builder is reincarnating; message saved to history and will be seen on catch-up")
 	assert.Contains(t, output, "msg-deferred-agent-ctx")
-	assert.NotContains(t, output, "Message delivered to agent")
+	assert.NotContains(t, output, "Message accepted for agent")
 }
 
 // TestSendMessageViaConversation_OutboundPath_Deferred covers the

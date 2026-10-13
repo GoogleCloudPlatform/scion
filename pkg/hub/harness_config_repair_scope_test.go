@@ -36,7 +36,6 @@ import (
 // on the project-scoped then global record, never on "the newest record with
 // that name in any scope".
 
-const repairStaleHash = "stale-db-hash"
 const repairStorageHash = "actual-storage-hash"
 
 type repairScopeFixture struct {
@@ -53,7 +52,6 @@ func newRepairScopeFixture(t *testing.T) *repairScopeFixture {
 	ctx := context.Background()
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(ctx))
 
 	srv := &Server{store: s, resourceLog: logging.Subsystem("hub.resources")}
 	stor := newMockStorage("test-bucket")

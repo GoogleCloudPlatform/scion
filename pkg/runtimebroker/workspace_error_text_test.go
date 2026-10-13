@@ -173,7 +173,7 @@ func TestGCSBootstrapError_FixedText(t *testing.T) {
 		{
 			name: "mkdir", op: opCreateWorkspaceDir, wantText: "Failed to create workspace directory",
 			setup: func(t *testing.T, srv *Server, name string) string {
-				installFakeWorkspaceSync(t, nil)
+				installFakeWorkspaceSync(t, srv, nil)
 				return blockWorkspaceDir(t, srv, name)
 			},
 		},
@@ -181,7 +181,7 @@ func TestGCSBootstrapError_FixedText(t *testing.T) {
 			name: "gcs-sync", op: opDownloadWorkspace, wantText: "Failed to download workspace from GCS",
 			setup: func(t *testing.T, srv *Server, name string) string {
 				srv.config.WorktreeBase = t.TempDir()
-				installFakeWorkspaceSync(t, errors.New(bootstrapDetail))
+				installFakeWorkspaceSync(t, srv, errors.New(bootstrapDetail))
 				return bootstrapDetail
 			},
 		},
@@ -280,8 +280,9 @@ func TestGCSBootstrapError_GlobalDirFixedText(t *testing.T) {
 }
 
 // TestGCSBootstrapError_ClientRefusalsUnchanged pins the two intentional
-// client texts the bootstrap keeps: the invalid-workspace-dir 400 and the
-// unconfigured-bucket 422 (ptone/scion#3422), on the sync and async paths.
+// client refusals the bootstrap keeps: the invalid-workspace-dir 400, with a
+// fixed text (ptone/scion#3855), and the unconfigured-bucket 422
+// (ptone/scion#3422), on the sync and async paths.
 func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 	for _, async := range []bool{false, true} {
 		mode := "sync"
@@ -291,8 +292,9 @@ func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 		t.Run("invalid-dir-"+mode, func(t *testing.T) {
 			name := "agent-3496-invalid-" + mode
 			srv, _ := newAsyncTestServer(t, newAsyncManager())
+			logs := captureLifecycleJSONLog(srv)
 			symlinkedWorktreeAgentDir(t, srv, name)
-			installFakeWorkspaceSync(t, nil)
+			installFakeWorkspaceSync(t, srv, nil)
 			_, verr := runtime.ValidateWorkspaceSource(filepath.Join(srv.config.WorktreeBase, name, "workspace"), srv.config.WorktreeBase)
 			if verr == nil {
 				t.Fatal("expected the symlinked workspace directory to fail validation")
@@ -305,15 +307,27 @@ func TestGCSBootstrapError_ClientRefusalsUnchanged(t *testing.T) {
 			if code != ErrCodeInvalidRequest {
 				t.Errorf("code = %q, want %q", code, ErrCodeInvalidRequest)
 			}
-			if want := "Invalid workspace directory: " + verr.Error(); msg != want {
-				t.Fatalf("message = %q, want the unchanged invalid-directory text %q", msg, want)
+			// A fixed text without the validation error, which names the
+			// broker's workspace path; that error reaches the broker log
+			// only (ptone/scion#3855).
+			if want := "Invalid workspace directory"; msg != want {
+				t.Fatalf("message = %q, want the fixed invalid-directory text %q", msg, want)
+			}
+			if strings.Contains(w.Body.String(), verr.Error()) {
+				t.Errorf("body = %s, must not carry the validation error %q", w.Body.String(), verr.Error())
+			}
+			assertBootstrapLogged(t, logs.String(), opValidateWorkspaceDir, name, verr.Error())
+			// A refused request, not a broker failure: logged at Warn.
+			rec := findLogRecord(logs.String(), "GCS workspace bootstrap failed", map[string]string{"op": opValidateWorkspaceDir})
+			if got, _ := rec["level"].(string); got != slog.LevelWarn.String() {
+				t.Errorf("log record level = %q, want %q", got, slog.LevelWarn.String())
 			}
 		})
 		t.Run("no-bucket-"+mode, func(t *testing.T) {
 			name := "agent-3496-nobucket-" + mode
 			srv, _ := newAsyncTestServer(t, newAsyncManager())
 			srv.config.WorktreeBase = t.TempDir()
-			installFakeWorkspaceSync(t, nil)
+			installFakeWorkspaceSync(t, srv, nil)
 			body := bootstrapCreate(name, async)
 			delete(body, "workspaceStorageBucket")
 			w := postCreate(t, srv, body)
@@ -629,7 +643,7 @@ func TestRunLaunch_NoBucketReportsSyncText(t *testing.T) {
 	}
 	srv.config.WorktreeBase = t.TempDir()
 	srv.config.StorageBucket = ""
-	installFakeWorkspaceSync(t, nil)
+	installFakeWorkspaceSync(t, srv, nil)
 	const name = "agent-3496-runlaunch-nobucket"
 
 	got := runLaunchTerminal(t, srv, rtb, launchCtx{

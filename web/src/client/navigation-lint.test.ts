@@ -74,7 +74,7 @@ describe('navigation lint rule matching', () => {
     const rules = await rulesFor('src/components/pages/skills.ts');
     const linter = new Linter();
     const messages = linter.verify(code, {
-      parserOptions: { ecmaVersion: 'latest', sourceType: 'module' },
+      languageOptions: { ecmaVersion: 'latest', sourceType: 'module' },
       rules: {
         'no-restricted-imports': rules['no-restricted-imports'],
         'no-restricted-syntax': rules['no-restricted-syntax'],

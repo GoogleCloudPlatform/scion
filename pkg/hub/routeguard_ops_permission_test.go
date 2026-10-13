@@ -107,7 +107,7 @@ func TestRouteGuardOpsPermissions(t *testing.T) {
 		resource   string
 		action     string
 	}{
-		{"/api/v1/admin/maintenance", "hub.admin_mode.update", "hub", "update"},
+		{"/api/v1/admin/maintenance", "hub.admin_mode.read", "hub", "read"},
 		{"/api/v1/admin/maintenance/operations", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/operations/", "hub.maintenance.execute", "hub", "execute"},
 		{"/api/v1/admin/maintenance/migrations/", "hub.maintenance.execute", "hub", "execute"},

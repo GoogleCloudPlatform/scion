@@ -45,6 +45,14 @@
       "description": "Maximum number of LLM model API calls before the agent is stopped.",
       "x-since": "1"
     },
+    "clone_depth": {
+      "oneOf": [
+        { "type": "string", "pattern": "^(|full|[1-9][0-9]{0,8})$" },
+        { "type": "integer", "minimum": 1, "maximum": 999999999 },
+        { "type": "null" }
+      ],
+      "description": "Git clone depth for a clone-per-agent workspace: \"full\" for a full (non-shallow) clone, or an integer N from 1 to 999999999 for a clone of depth N. Overrides any profiles.<name>.clone_depth. Unset (absent, null or \"\") keeps the profile value, else the default shallow (depth 1) clone."
+    },
     "max_duration": {
       "type": "string",
       "pattern": "^[0-9]+(s|m|h)$",
@@ -72,6 +80,11 @@
     "model": {
       "type": "string",
       "description": "Model size alias (small, medium, large) or concrete model name. Prefer size aliases for portability — they are resolved to harness-specific model names at provision time via the harness-config's model_aliases map. Concrete names are passed through unchanged but tie the template to a specific harness."
+    },
+    "message_mode": {
+      "type": "string",
+      "enum": ["none", "lineage", "branch", "project", "hub"],
+      "description": "Initial message mode for agents created from this template on a Hub, used when the create request names none."
     },
     "args": {
       "type": "array",
@@ -333,7 +346,9 @@
               "properties": {
                 "enabled": { "type": "boolean" },
                 "insecure_skip_verify": { "type": "boolean" },
-                "ca_file": { "type": "string" }
+                "ca_file": { "type": "string" },
+                "cert_file": { "type": "string" },
+                "key_file": { "type": "string" }
               },
               "additionalProperties": false
             },

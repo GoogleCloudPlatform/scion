@@ -73,7 +73,7 @@ export class ScionPageGitHubAppSetup extends LitElement {
     super.connectedCallback();
 
     void this.loadHubProjectCapabilities();
-    this.initPage();
+    void this.initPage();
   }
 
   private async loadHubProjectCapabilities(): Promise<void> {

@@ -28,6 +28,7 @@ import type { AccessDeniedDetail } from '../../client/api.js';
 import type { Agent, Capabilities, Project } from '../../shared/types.js';
 import { stateManager } from '../../client/state.js';
 import { resetHubProjectCapabilitiesCache } from '../../client/hub-capabilities.js';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 // We test the suppression behavior by intercepting fetch and the
 // scion:access-denied event — no need to render the full Lit component.
@@ -230,7 +231,7 @@ describe('dashboard Create Project card (hub project.create)', () => {
     element = await mountHome();
 
     const projectCalls = fetchMock.mock.calls
-      .map(([u]) => String(u))
+      .map(([u]) => requestUrl(u))
       .filter((u) => u.includes('/api/v1/projects'));
     expect(projectCalls).toHaveLength(1);
     expect(projectCalls[0]).not.toContain('limit=1');
@@ -246,7 +247,7 @@ describe('dashboard Create Project card (hub project.create)', () => {
     element = await mountHome();
 
     expect(hasCreateProjectLink(element)).toBe(true);
-    expect(fetchMock.mock.calls.map(([u]) => String(u))).not.toContainEqual(
+    expect(fetchMock.mock.calls.map(([u]) => requestUrl(u))).not.toContainEqual(
       expect.stringContaining('/api/v1/projects')
     );
   });
@@ -261,7 +262,7 @@ describe('dashboard Create Project card (hub project.create)', () => {
 
     element = await mountHome();
 
-    expect(fetchMock.mock.calls.map(([u]) => String(u))).toContainEqual(
+    expect(fetchMock.mock.calls.map(([u]) => requestUrl(u))).toContainEqual(
       expect.stringContaining('/api/v1/projects?limit=1')
     );
     expect(hasCreateProjectLink(element)).toBe(false);

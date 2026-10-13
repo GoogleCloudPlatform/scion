@@ -102,13 +102,13 @@ func TestSetupWithOTel_NilProvider(t *testing.T) {
 
 func TestCreateBaseHandler(t *testing.T) {
 	// Test JSON handler (default)
-	h := createBaseHandler("test", false, false, "")
+	h := createBaseHandler("test", false, "")
 	if h == nil {
 		t.Error("createBaseHandler should return a handler")
 	}
 
 	// Test GCP handler
-	h = createBaseHandler("test", false, true, "")
+	h = createBaseHandler("test", true, "")
 	if h == nil {
 		t.Error("createBaseHandler should return GCP handler")
 	}
@@ -164,7 +164,7 @@ func TestSetupWithOTel_CloudRunSuppressesStdout(t *testing.T) {
 
 	// Verify the handler is directly the cloudHandler (no multiHandler
 	// wrapping needed when there's only one handler).
-	h := logger.Handler()
+	h := unwrapLevelFilter(t, logger.Handler())
 	if _, ok := h.(*CloudHandler); !ok {
 		// If it's a multiHandler, verify it contains only the cloud handler.
 		mh, isMH := h.(*multiHandler)
@@ -191,7 +191,7 @@ func TestSetupWithOTel_NonCloudRunKeepsStdout(t *testing.T) {
 		t.Fatal("Default logger should be set")
 	}
 
-	h := logger.Handler()
+	h := unwrapLevelFilter(t, logger.Handler())
 	mh, ok := h.(*multiHandler)
 	if !ok {
 		t.Fatalf("expected multiHandler with 2 handlers, got single handler %T", h)
@@ -212,7 +212,7 @@ func TestSetupWithOTel_CloudRunNoCloudHandler(t *testing.T) {
 		t.Fatal("Default logger should be set")
 	}
 	// With only the base handler, the logger handler should not be a multiHandler.
-	if _, ok := logger.Handler().(*multiHandler); ok {
+	if _, ok := unwrapLevelFilter(t, logger.Handler()).(*multiHandler); ok {
 		t.Error("expected single handler (base), not multiHandler")
 	}
 }
@@ -243,4 +243,15 @@ func TestEnvVarConstants(t *testing.T) {
 	if EnvOTelLogEnable != "SCION_OTEL_LOG_ENABLED" {
 		t.Errorf("EnvOTelLogEnable = %s, want SCION_OTEL_LOG_ENABLED", EnvOTelLogEnable)
 	}
+}
+
+// unwrapLevelFilter asserts that SetupWithOTel gated the chain with the
+// shared level filter and returns the handler it wraps.
+func unwrapLevelFilter(t *testing.T, h slog.Handler) slog.Handler {
+	t.Helper()
+	lf, ok := h.(*levelFilter)
+	if !ok {
+		t.Fatalf("expected the default handler to be a *levelFilter, got %T", h)
+	}
+	return lf.inner
 }

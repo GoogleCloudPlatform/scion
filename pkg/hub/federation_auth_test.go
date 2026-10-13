@@ -34,75 +34,6 @@ import (
 
 // --- Test helpers ---
 
-// setupFederationTestServer generates an RSA key pair, starts a JWKS test server,
-// and returns the private key, server, and kid for signing tokens.
-func setupFederationTestServer(t *testing.T) (*rsa.PrivateKey, *httptest.Server, string) {
-	t.Helper()
-	kid := "test-fed-key-1"
-	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
-	if err != nil {
-		t.Fatalf("failed to generate RSA key: %v", err)
-	}
-
-	jwks := jose.JSONWebKeySet{
-		Keys: []jose.JSONWebKey{
-			{
-				Key:       &privKey.PublicKey,
-				KeyID:     kid,
-				Algorithm: string(jose.RS256),
-				Use:       "sig",
-			},
-		},
-	}
-	jwksData, err := json.Marshal(jwks)
-	if err != nil {
-		t.Fatalf("failed to marshal JWKS: %v", err)
-	}
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(jwksData)
-	}))
-	t.Cleanup(srv.Close)
-
-	return privKey, srv, kid
-}
-
-// signFederationToken creates a signed RS256 JWT for federation testing.
-func signFederationToken(t *testing.T, key *rsa.PrivateKey, kid string, claims federationClaims) string {
-	t.Helper()
-	signerKey := jose.SigningKey{Algorithm: jose.RS256, Key: key}
-	opts := (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid)
-	signer, err := jose.NewSigner(signerKey, opts)
-	if err != nil {
-		t.Fatalf("failed to create signer: %v", err)
-	}
-	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
-	if err != nil {
-		t.Fatalf("failed to sign JWT: %v", err)
-	}
-	return raw
-}
-
-// validFederationClaims returns a baseline valid claims set for testing.
-func validFederationClaims(issuer, audience string) federationClaims {
-	now := time.Now()
-	return federationClaims{
-		Claims: jwt.Claims{
-			Issuer:    issuer,
-			Subject:   "agent-123",
-			Audience:  jwt.Audience{audience},
-			IssuedAt:  jwt.NewNumericDate(now.Add(-1 * time.Minute)),
-			Expiry:    jwt.NewNumericDate(now.Add(5 * time.Minute)),
-			NotBefore: jwt.NewNumericDate(now.Add(-1 * time.Minute)),
-		},
-		ProjectID: "project-alpha",
-		AgentName: "worker-1",
-		Ancestry:  []string{"user:alice", "agent:root"},
-		RootUser:  "user:alice",
-	}
-}
-
 // newTestAuthenticator creates a FederationAuthenticator with a single trusted issuer
 // pointing at the given JWKS test server.
 func newTestAuthenticator(t *testing.T, issuerURL, jwksURL, expectedAudience string) *FederationAuthenticator {
@@ -124,36 +55,11 @@ func newTestAuthenticator(t *testing.T, issuerURL, jwksURL, expectedAudience str
 	return auth
 }
 
-// signGenericToken creates a signed RS256 JWT with arbitrary claims for non-hub token testing.
-func signGenericToken(t *testing.T, key *rsa.PrivateKey, kid string, claims interface{}) string {
-	t.Helper()
-	signerKey := jose.SigningKey{Algorithm: jose.RS256, Key: key}
-	opts := (&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid)
-	signer, err := jose.NewSigner(signerKey, opts)
-	if err != nil {
-		t.Fatalf("failed to create signer: %v", err)
-	}
-	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
-	if err != nil {
-		t.Fatalf("failed to sign JWT: %v", err)
-	}
-	return raw
-}
-
-// newTestAuthenticatorWithConfig creates a FederationAuthenticator from a full config.
-func newTestAuthenticatorWithConfig(t *testing.T, cfg config.FederationConfig, expectedAudience string) *FederationAuthenticator {
-	t.Helper()
-	auth, err := NewFederationAuthenticator(cfg, expectedAudience, &http.Client{Timeout: 5 * time.Second}, "dev", slog.Default())
-	if err != nil {
-		t.Fatalf("NewFederationAuthenticator failed: %v", err)
-	}
-	return auth
-}
-
 // --- Test cases ---
 
 // Test 1: Valid RS256 token from trusted issuer -> success
 func TestFederationAuth_ValidToken(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -196,6 +102,7 @@ func TestFederationAuth_ValidToken(t *testing.T) {
 
 // Test 2: Token from untrusted issuer -> reject
 func TestFederationAuth_UntrustedIssuer(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	trustedIssuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -217,6 +124,7 @@ func TestFederationAuth_UntrustedIssuer(t *testing.T) {
 
 // Test 3: Expired token -> reject
 func TestFederationAuth_ExpiredToken(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -241,6 +149,7 @@ func TestFederationAuth_ExpiredToken(t *testing.T) {
 
 // Test 4: Token with wrong audience -> reject
 func TestFederationAuth_WrongAudience(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -261,6 +170,7 @@ func TestFederationAuth_WrongAudience(t *testing.T) {
 
 // Test 5: Token with project not in allowed_projects -> reject
 func TestFederationAuth_ProjectNotAllowed(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -296,6 +206,7 @@ func TestFederationAuth_ProjectNotAllowed(t *testing.T) {
 
 // Test 6: Token with root_user not in allowed_root_users -> reject
 func TestFederationAuth_RootUserNotAllowed(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -331,6 +242,7 @@ func TestFederationAuth_RootUserNotAllowed(t *testing.T) {
 
 // Test 7: Token with alg: HS256 -> reject (algorithm pinning)
 func TestFederationAuth_HS256Rejected(t *testing.T) {
+	t.Parallel()
 	_, jwksSrv, _ := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -363,6 +275,7 @@ func TestFederationAuth_HS256Rejected(t *testing.T) {
 
 // Test 8: Unknown kid triggers JWKS refresh -> success after refresh
 func TestFederationAuth_UnknownKidTriggersRefresh(t *testing.T) {
+	t.Parallel()
 	kid1 := "key-1"
 	kid2 := "key-2"
 
@@ -438,6 +351,7 @@ func TestFederationAuth_UnknownKidTriggersRefresh(t *testing.T) {
 
 // Test 9: JWKS endpoint down, cached keys -> serve from cache
 func TestFederationAuth_JWKSDownCachedKeys(t *testing.T) {
+	t.Parallel()
 	kid := "cached-key"
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -499,6 +413,7 @@ func TestFederationAuth_JWKSDownCachedKeys(t *testing.T) {
 
 // Test 9b: JWKS endpoint down with no cached keys -> reject with clear error
 func TestFederationAuth_JWKSDownNoCachedKeys(t *testing.T) {
+	t.Parallel()
 	kid := "no-cache-key"
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -529,6 +444,7 @@ func TestFederationAuth_JWKSDownNoCachedKeys(t *testing.T) {
 
 // Test 10: Empty sub claim -> reject
 func TestFederationAuth_EmptySubject(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -550,6 +466,7 @@ func TestFederationAuth_EmptySubject(t *testing.T) {
 
 // Test 11: Valid token with default scopes (no per-issuer config) -> gets DefaultFederationScopes
 func TestFederationAuth_DefaultScopes(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -581,6 +498,7 @@ func TestFederationAuth_DefaultScopes(t *testing.T) {
 
 // Test 12: Valid token with per-issuer scopes -> gets configured scopes
 func TestFederationAuth_PerIssuerScopes(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -624,6 +542,7 @@ func TestFederationAuth_PerIssuerScopes(t *testing.T) {
 
 // Test 13: Multiple issuers -> each validates independently
 func TestFederationAuth_MultipleIssuers(t *testing.T) {
+	t.Parallel()
 	issuerA := "https://hub-a.example.com"
 	issuerB := "https://hub-b.example.com"
 	audience := "https://hub-c.example.com"
@@ -719,6 +638,7 @@ func TestFederationAuth_MultipleIssuers(t *testing.T) {
 
 // Test 14: NewFederationAuthenticator with HTTP issuer in hosted mode -> error
 func TestFederationAuth_HTTPIssuerHostedMode(t *testing.T) {
+	t.Parallel()
 	cfg := config.FederationConfig{
 		Enabled: true,
 		TrustedIssuers: []config.TrustedIssuerConfig{
@@ -758,6 +678,7 @@ func TestFederationAuth_HTTPIssuerHostedMode(t *testing.T) {
 
 // Test: JWKS URL is derived from issuer URL when not explicitly set
 func TestFederationAuth_DerivedJWKSURL(t *testing.T) {
+	t.Parallel()
 	kid := "derived-key"
 	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -811,6 +732,7 @@ func TestFederationAuth_DerivedJWKSURL(t *testing.T) {
 
 // Test: NewFederationAuthenticator fails when audience cannot be resolved
 func TestFederationAuth_NoAudienceError(t *testing.T) {
+	t.Parallel()
 	cfg := config.FederationConfig{
 		Enabled: true,
 		TrustedIssuers: []config.TrustedIssuerConfig{
@@ -833,6 +755,7 @@ func TestFederationAuth_NoAudienceError(t *testing.T) {
 
 // Test: Token with project in allowed_projects -> success
 func TestFederationAuth_ProjectAllowed(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -874,6 +797,7 @@ func TestFederationAuth_ProjectAllowed(t *testing.T) {
 
 // SA Test 1: Valid SA token (iss=accounts.google.com, has email+sub) -> FederatedServiceIdentity
 func TestFederationAuth_ServiceAccount_ValidToken(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -929,6 +853,7 @@ func TestFederationAuth_ServiceAccount_ValidToken(t *testing.T) {
 
 // SA Test 2: SA token missing email -> reject
 func TestFederationAuth_ServiceAccount_MissingEmail(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -969,6 +894,7 @@ func TestFederationAuth_ServiceAccount_MissingEmail(t *testing.T) {
 
 // SA Test 3: SA token with email not in allowed_emails -> reject
 func TestFederationAuth_ServiceAccount_EmailNotAllowed(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -1010,6 +936,7 @@ func TestFederationAuth_ServiceAccount_EmailNotAllowed(t *testing.T) {
 
 // SA Test 4: SA token with email matching wildcard pattern -> success
 func TestFederationAuth_ServiceAccount_WildcardEmailMatch(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -1056,6 +983,7 @@ func TestFederationAuth_ServiceAccount_WildcardEmailMatch(t *testing.T) {
 
 // SA Test 5: SA token default scopes are empty (zero-trust)
 func TestFederationAuth_ServiceAccount_DefaultScopesEmpty(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://accounts.google.com"
 	audience := "https://hub-b.example.com"
@@ -1104,6 +1032,7 @@ func TestFederationAuth_ServiceAccount_DefaultScopesEmpty(t *testing.T) {
 
 // User Test 6: Valid user token (Firebase-shaped, has email+sub+name) -> FederatedUserIdentity
 func TestFederationAuth_User_ValidToken(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1163,6 +1092,7 @@ func TestFederationAuth_User_ValidToken(t *testing.T) {
 
 // User Test 7: User token with default role -> role is "viewer"
 func TestFederationAuth_User_DefaultRole(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1209,6 +1139,7 @@ func TestFederationAuth_User_DefaultRole(t *testing.T) {
 
 // User Test 8: User token with configured default_role -> role matches config
 func TestFederationAuth_User_ConfiguredRole(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1254,6 +1185,7 @@ func TestFederationAuth_User_ConfiguredRole(t *testing.T) {
 }
 
 func TestFederationAuth_UserAdminDefaultRoleRejected(t *testing.T) {
+	t.Parallel()
 	_, jwksSrv, _ := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1280,6 +1212,7 @@ func TestFederationAuth_UserAdminDefaultRoleRejected(t *testing.T) {
 
 // User Test 9: User token with email not in allowed_emails -> reject
 func TestFederationAuth_User_EmailNotAllowed(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1321,6 +1254,7 @@ func TestFederationAuth_User_EmailNotAllowed(t *testing.T) {
 
 // User Test 10: User token default scopes are empty (zero-trust)
 func TestFederationAuth_User_DefaultScopesEmpty(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://securetoken.google.com/my-firebase-project"
 	audience := "my-firebase-project"
@@ -1369,6 +1303,7 @@ func TestFederationAuth_User_DefaultScopesEmpty(t *testing.T) {
 
 // Test: Issuer URL trailing slash normalization — config has no slash, token has slash
 func TestFederationAuth_IssuerTrailingSlashNormalization(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	// Config issuer has no trailing slash
 	configIssuer := "https://hub-a.example.com"
@@ -1399,6 +1334,7 @@ func TestFederationAuth_IssuerTrailingSlashNormalization(t *testing.T) {
 
 // Test: Issuer URL trailing slash normalization — config has slash, token has no slash
 func TestFederationAuth_IssuerTrailingSlashNormalization_Reverse(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	// Config issuer has trailing slash
 	configIssuer := "https://hub-a.example.com/"
@@ -1424,6 +1360,7 @@ func TestFederationAuth_IssuerTrailingSlashNormalization_Reverse(t *testing.T) {
 
 // Email Test 11: Exact match works
 func TestMatchesAllowedEmails_ExactMatch(t *testing.T) {
+	t.Parallel()
 	patterns := []string{"user@example.com", "admin@corp.com"}
 	if !matchesAllowedEmails(patterns, "user@example.com") {
 		t.Error("expected exact match for user@example.com")
@@ -1438,6 +1375,7 @@ func TestMatchesAllowedEmails_ExactMatch(t *testing.T) {
 
 // Email Test 12: Wildcard *@example.com matches user@example.com
 func TestMatchesAllowedEmails_WildcardMatch(t *testing.T) {
+	t.Parallel()
 	patterns := []string{"*@example.com"}
 	if !matchesAllowedEmails(patterns, "user@example.com") {
 		t.Error("expected wildcard match for user@example.com")
@@ -1449,6 +1387,7 @@ func TestMatchesAllowedEmails_WildcardMatch(t *testing.T) {
 
 // Email Test 13: Wildcard *@example.com does NOT match user@other.com
 func TestMatchesAllowedEmails_WildcardNoMatch(t *testing.T) {
+	t.Parallel()
 	patterns := []string{"*@example.com"}
 	if matchesAllowedEmails(patterns, "user@other.com") {
 		t.Error("expected no match for user@other.com with pattern *@example.com")
@@ -1460,6 +1399,7 @@ func TestMatchesAllowedEmails_WildcardNoMatch(t *testing.T) {
 
 // Email Test 14: Empty allowed_emails list -> all accepted
 func TestMatchesAllowedEmails_EmptyListAcceptsAll(t *testing.T) {
+	t.Parallel()
 	// When AllowedEmails is empty, the caller (Authenticate) skips the check entirely.
 	// But matchesAllowedEmails with empty list should return false (defense-in-depth).
 	patterns := []string{}
@@ -1470,6 +1410,7 @@ func TestMatchesAllowedEmails_EmptyListAcceptsAll(t *testing.T) {
 
 // Email Test 15: Case-insensitive exact match
 func TestMatchesAllowedEmails_CaseInsensitiveExact(t *testing.T) {
+	t.Parallel()
 	patterns := []string{"User@Example.COM"}
 	if !matchesAllowedEmails(patterns, "user@example.com") {
 		t.Error("expected case-insensitive match for user@example.com against User@Example.COM")
@@ -1478,6 +1419,7 @@ func TestMatchesAllowedEmails_CaseInsensitiveExact(t *testing.T) {
 
 // Email Test 16: Case-insensitive wildcard match
 func TestMatchesAllowedEmails_CaseInsensitiveWildcard(t *testing.T) {
+	t.Parallel()
 	patterns := []string{"*@Example.COM"}
 	if !matchesAllowedEmails(patterns, "user@example.com") {
 		t.Error("expected case-insensitive wildcard match for user@example.com against *@Example.COM")
@@ -1488,6 +1430,7 @@ func TestMatchesAllowedEmails_CaseInsensitiveWildcard(t *testing.T) {
 
 // Hub Test 15: Existing hub issuer with no issuer_type field -> works as before (defaults to "hub")
 func TestFederationAuth_HubBackwardCompat_NoIssuerType(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := "https://hub-a.example.com"
 	audience := "https://hub-b.example.com"
@@ -1527,6 +1470,7 @@ func TestFederationAuth_HubBackwardCompat_NoIssuerType(t *testing.T) {
 
 // Discovery Test 1: OIDC discovery resolves JWKS URL for non-hub issuer
 func TestFederationAuth_OIDCDiscovery_ResolvesJWKSURL(t *testing.T) {
+	t.Parallel()
 	kid := "discovery-key"
 	audience := "https://hub-b.example.com"
 
@@ -1607,6 +1551,7 @@ func TestFederationAuth_OIDCDiscovery_ResolvesJWKSURL(t *testing.T) {
 
 // Discovery Test 2: OIDC discovery failure when no jwks_url configured and no discovery endpoint
 func TestFederationAuth_OIDCDiscovery_FailureNoEndpoint(t *testing.T) {
+	t.Parallel()
 	audience := "https://hub-b.example.com"
 
 	// Issuer server with NO discovery endpoint
@@ -1644,6 +1589,7 @@ func TestFederationAuth_OIDCDiscovery_FailureNoEndpoint(t *testing.T) {
 
 // Federation Fix 1: ancestry[0] disagrees with root_user → rejection
 func TestExtractHubClaims_AncestryDisagreesWithRootUser(t *testing.T) {
+	t.Parallel()
 	claims := &federationClaims{
 		Claims: jwt.Claims{
 			Subject: "agent-1",
@@ -1666,6 +1612,7 @@ func TestExtractHubClaims_AncestryDisagreesWithRootUser(t *testing.T) {
 
 // Federation Fix 2: per-element ancestry validation against allowed_root_users
 func TestFederationAuth_AncestryPerElementRejection(t *testing.T) {
+	t.Parallel()
 	privKey, jwksSrv, kid := setupFederationTestServer(t)
 	issuer := jwksSrv.URL // Use the test server URL as issuer
 	audience := "https://hub.example.com"

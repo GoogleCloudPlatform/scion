@@ -17,6 +17,8 @@ package hubclient
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
 
 // Agent represents an agent from the Hub API.
@@ -79,6 +81,10 @@ type Agent struct {
 	// as false). No omitempty: re-encoding keeps an explicit false so a
 	// merging consumer clears a previously seen true.
 	ProvisionedOnly bool `json:"provisionedOnly"`
+
+	// PinnedRuntimeTarget is the agent's pinned placement on a flat Runtime
+	// Broker (read-only; nil for an unpinned agent).
+	PinnedRuntimeTarget *api.PinnedRuntimeTarget `json:"pinnedRuntimeTarget,omitempty"`
 }
 
 // AgentLaunch is the Hub's view of an agent's current or most recent launch.
@@ -105,6 +111,23 @@ type AgentConfig struct {
 	Model         string            `json:"model,omitempty"`
 	Profile       string            `json:"profile,omitempty"`
 	Task          string            `json:"task,omitempty"`
+	// GCPIdentity is the GCP identity the Hub applied to the agent. Nil when
+	// the Hub recorded none or predates the field.
+	GCPIdentity *GCPIdentity `json:"gcpIdentity,omitempty"`
+}
+
+// GCPIdentity is the GCP identity applied to an agent, as recorded in its
+// applied config (appliedConfig.gcpIdentity).
+type GCPIdentity struct {
+	// MetadataMode is "block", "passthrough" or "assign".
+	MetadataMode string `json:"metadataMode"`
+	// ServiceAccountID is the registered service account, set for "assign".
+	ServiceAccountID string `json:"serviceAccountId,omitempty"`
+	// ServiceAccountEmail is the service account email, set for "assign".
+	ServiceAccountEmail string `json:"serviceAccountEmail,omitempty"`
+	// ProjectID is the GCP project the service account lives in. It is not
+	// a Scion project ID.
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // DirectConnect contains direct connection info.
@@ -233,6 +256,18 @@ type ProjectSettings struct {
 	DefaultAgentRole string `json:"defaultAgentRole,omitempty"`
 }
 
+// ProjectGCPIdentityDefaultsUpdate is a partial project settings PUT body
+// that carries only the default GCP identity fields. A nil field is left out
+// of the body and keeps its stored value; a pointer to "" (or to an empty
+// map) is sent and clears the field. ProjectSettings cannot express this,
+// because its string fields drop "" (omitempty) and a full ProjectSettings
+// round trip would resend every other setting.
+type ProjectGCPIdentityDefaultsUpdate struct {
+	Mode                      *string            `json:"defaultGCPIdentityMode,omitempty"`
+	ServiceAccountID          *string            `json:"defaultGCPIdentityServiceAccountID,omitempty"`
+	ServiceAccountIDByProfile *map[string]string `json:"defaultGCPIdentityServiceAccountIDByProfile,omitempty"`
+}
+
 // ResolvedHubDefault reports whether a hub-level default exists for a project
 // setting, in the GET /api/v1/projects/{id}/settings/resolved response.
 //
@@ -331,6 +366,9 @@ type RuntimeBroker struct {
 	Created         time.Time           `json:"created"`
 	Updated         time.Time           `json:"updated"`
 	CreatedBy       string              `json:"createdBy,omitempty"` // User ID who registered this broker
+	// RuntimeTarget is the stored descriptor of a flat Runtime Broker's
+	// single runtime target; nil for a profile-based Runtime Broker.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // BrokerCapabilities describes runtime broker capabilities.
@@ -362,6 +400,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the agent's own config telemetry (requester inline telemetry
+	// from older hubs, and the stored config), and TelemetryPolicy on
+	// create/start/restart as policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -381,11 +426,19 @@ type BrokerProfile struct {
 	// Kubernetes ServiceAccount, and whether the list was reported at all.
 	ServiceAccountMappings []BrokerProfileSAMapping `json:"serviceAccountMappings,omitempty"`
 	MappingsReported       bool                     `json:"mappingsReported,omitempty"`
+	// The remaining report fields mirror store.BrokerProfile.
+	MappingsComplete         bool       `json:"mappingsComplete,omitempty"`
+	MappingsIncompleteReason string     `json:"mappingsIncompleteReason,omitempty"`
+	AmbiguousGSAs            []string   `json:"ambiguousGSAs,omitempty"`
+	MappingsReportedAt       *time.Time `json:"mappingsReportedAt,omitempty"`
 }
 
 // BrokerProfileSAMapping mirrors store.BrokerProfileSAMapping.
 type BrokerProfileSAMapping struct {
-	GSA string `json:"gsa"`
+	GSA       string `json:"gsa"`
+	KSA       string `json:"ksa,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	Source    string `json:"source,omitempty"`
 }
 
 // BrokerProjectInfo describes a project from a broker's perspective.
@@ -399,30 +452,33 @@ type BrokerProjectInfo struct {
 
 // Template represents a template from the Hub API.
 type Template struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	Slug          string          `json:"slug"`
-	DisplayName   string          `json:"displayName,omitempty"`
-	Description   string          `json:"description,omitempty"`
-	Harness       string          `json:"harness"`
-	ContentHash   string          `json:"contentHash,omitempty"`
-	Image         string          `json:"image,omitempty"`
-	Config        *TemplateConfig `json:"config,omitempty"`
-	Scope         string          `json:"scope"`
-	ScopeID       string          `json:"scopeId,omitempty"`
-	ProjectID     string          `json:"projectId,omitempty"` // Deprecated: use ScopeID
-	StorageURI    string          `json:"storageUri,omitempty"`
-	StorageBucket string          `json:"storageBucket,omitempty"`
-	StoragePath   string          `json:"storagePath,omitempty"`
-	Files         []TemplateFile  `json:"files,omitempty"`
-	BaseTemplate  string          `json:"baseTemplate,omitempty"`
-	Locked        bool            `json:"locked,omitempty"`
-	Status        string          `json:"status"`
-	OwnerID       string          `json:"ownerId,omitempty"`
-	CreatedBy     string          `json:"createdBy,omitempty"`
-	UpdatedBy     string          `json:"updatedBy,omitempty"`
-	Created       time.Time       `json:"created"`
-	Updated       time.Time       `json:"updated"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+	Harness     string `json:"harness"`
+	ContentHash string `json:"contentHash,omitempty"`
+	Image       string `json:"image,omitempty"`
+	// AgentConfig is the read-only snapshot of the template's own
+	// scion-agent.yaml that the Hub derives on commit (ptone/scion#4217).
+	AgentConfig   *api.ScionConfig `json:"agentConfig,omitempty"`
+	Scope         string           `json:"scope"`
+	ScopeID       string           `json:"scopeId,omitempty"`
+	ProjectID     string           `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	StorageURI    string           `json:"storageUri,omitempty"`
+	StorageBucket string           `json:"storageBucket,omitempty"`
+	StoragePath   string           `json:"storagePath,omitempty"`
+	Files         []TemplateFile   `json:"files,omitempty"`
+	BaseTemplate  string           `json:"baseTemplate,omitempty"`
+	SourceURL     string           `json:"sourceUrl,omitempty"`
+	Locked        bool             `json:"locked,omitempty"`
+	Status        string           `json:"status"`
+	OwnerID       string           `json:"ownerId,omitempty"`
+	CreatedBy     string           `json:"createdBy,omitempty"`
+	UpdatedBy     string           `json:"updatedBy,omitempty"`
+	Created       time.Time        `json:"created"`
+	Updated       time.Time        `json:"updated"`
 }
 
 // TemplateFile represents a file within a template.
@@ -431,30 +487,6 @@ type TemplateFile struct {
 	Size int64  `json:"size"`
 	Hash string `json:"hash"`
 	Mode string `json:"mode,omitempty"`
-}
-
-// TemplateConfig holds template configuration.
-type TemplateConfig struct {
-	Harness     string            `json:"harness,omitempty"`
-	Image       string            `json:"image,omitempty"`
-	ConfigDir   string            `json:"configDir,omitempty"`
-	Env         map[string]string `json:"env,omitempty"`
-	Detached    bool              `json:"detached,omitempty"`
-	CommandArgs []string          `json:"commandArgs,omitempty"`
-	Model       string            `json:"model,omitempty"`
-	Kubernetes  *KubernetesConfig `json:"kubernetes,omitempty"`
-}
-
-// KubernetesConfig holds Kubernetes-specific configuration.
-type KubernetesConfig struct {
-	Resources    *ResourceRequirements `json:"resources,omitempty"`
-	NodeSelector map[string]string     `json:"nodeSelector,omitempty"`
-}
-
-// ResourceRequirements defines compute resource requirements.
-type ResourceRequirements struct {
-	Limits   map[string]string `json:"limits,omitempty"`
-	Requests map[string]string `json:"requests,omitempty"`
 }
 
 // User represents a user from the Hub API.

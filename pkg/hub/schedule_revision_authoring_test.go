@@ -17,7 +17,6 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -29,92 +28,10 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// authzHelperAgentSlug is the slug of the agent seedScheduleAuthorAgent
-// stores; message schedules in these tests target it, so the
-// scheduled-message rule resolves a real target.
-const authzHelperAgentSlug = "schedule-author-agent"
-
-// authoredRequest builds a request carrying identity and the credential
-// context the auth middleware derives from it, so the authoring handlers
-// record the request's attribution as they do in production.
-func authoredRequest(t *testing.T, identity Identity, method, path string, body interface{}) *http.Request {
-	t.Helper()
-	var reader *bytes.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
-		require.NoError(t, err)
-		reader = bytes.NewReader(b)
-	} else {
-		reader = bytes.NewReader(nil)
-	}
-	req := httptest.NewRequest(method, path, reader)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	ctx := contextWithIdentity(req.Context(), identity)
-	ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
-	return req.WithContext(ctx)
-}
-
-// doAuthoredScheduleRequest sends an authored request to the schedules
-// route.
-func doAuthoredScheduleRequest(t *testing.T, srv *Server, identity Identity, projectID, schedulePath, method string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	req := authoredRequest(t, identity, method, "/api/v1/projects/"+projectID+"/schedules/"+schedulePath, body)
-	rec := httptest.NewRecorder()
-	srv.handleSchedules(rec, req, projectID, schedulePath)
-	return rec
-}
-
-// doAuthoredEventRequest sends an authored create to the scheduled-events
-// route.
-func doAuthoredEventRequest(t *testing.T, srv *Server, identity Identity, projectID string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	req := authoredRequest(t, identity, http.MethodPost, "/api/v1/projects/"+projectID+"/scheduled-events", body)
-	rec := httptest.NewRecorder()
-	srv.handleScheduledEvents(rec, req, projectID, "")
-	return rec
-}
-
-// scheduleRevision is the authority part of a stored schedule: attribution,
-// revision and ceiling.
-type scheduleRevision struct {
-	Attribution store.InitiatorAttribution
-	Ceiling     store.EffectCeiling
-}
-
-func loadScheduleRevision(t *testing.T, s store.Store, id string) scheduleRevision {
-	t.Helper()
-	sc, err := s.GetSchedule(context.Background(), id)
-	require.NoError(t, err)
-	return scheduleRevision{Attribution: sc.InitiatorAttribution, Ceiling: sc.AuthorityCeiling}
-}
-
-// createOwnerSchedule creates a schedule of eventType as owner through the
-// handler and returns its ID.
-func createOwnerSchedule(t *testing.T, srv *Server, owner Identity, projectID, name, eventType string) string {
-	t.Helper()
-	req := CreateScheduleRequest{Name: name, CronExpr: "0 * * * *", EventType: eventType, AgentName: "worker"}
-	if eventType == "message" {
-		req.AgentName = authzHelperAgentSlug
-		req.Message = "ping"
-	}
-	rec := doAuthoredScheduleRequest(t, srv, owner, projectID, "", http.MethodPost, req)
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var created store.Schedule
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
-	return created.ID
-}
-
-func pauseSchedule(t *testing.T, srv *Server, owner Identity, projectID, id string) {
-	t.Helper()
-	rec := doAuthoredScheduleRequest(t, srv, owner, projectID, id+"/pause", http.MethodPost, nil)
-	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-}
 
 // A session-authored schedule records the principal ceiling together with
 // its attribution, on create and on a one-shot event.
@@ -201,16 +118,6 @@ func TestPatchEnableReauthorizes(t *testing.T) {
 	assert.Equal(t, store.EffectCeilingBounded, after.Ceiling.Kind)
 }
 
-// fireRevisionCeiling calls revisionAuthorityCeiling for identity and
-// returns its result and the response it wrote.
-func fireRevisionCeiling(srv *Server, identity Identity, projectID, eventType string) (store.EffectCeiling, bool, *httptest.ResponseRecorder) {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(), identity))
-	rec := httptest.NewRecorder()
-	c, ok := srv.revisionAuthorityCeiling(rec, req, projectID, eventType, ActionCreate)
-	return c, ok, rec
-}
-
 // uatLookupFailingStore fails GetUserAccessToken.
 type uatLookupFailingStore struct {
 	store.Store
@@ -221,9 +128,8 @@ func (f *uatLookupFailingStore) GetUserAccessToken(context.Context, string) (*st
 }
 
 // The revision ceiling is computed before any write: a lookup fault answers
-// 500, and a credential that cannot be recorded answers 403 for a
-// dispatch_agent revision. A message revision records the unrecorded
-// ceiling instead (scheduled-message authority is decided by its own rule).
+// 500, and a credential that cannot be recorded answers 403, for every event
+// type.
 func TestSchedCreateCeilingErrorDeniesWrite(t *testing.T) {
 	srv, s, projectID := setupScheduleTest(t)
 	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-ceil-err-owner"))
@@ -233,41 +139,30 @@ func TestSchedCreateCeilingErrorDeniesWrite(t *testing.T) {
 			permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.create"}})
 		srv.authzService.store = &uatLookupFailingStore{Store: s}
 		defer func() { srv.authzService.store = s }()
-		for _, eventType := range []string{"dispatch_agent", "message"} {
-			_, ok, rec := fireRevisionCeiling(srv, uat, projectID, eventType)
-			assert.False(t, ok, eventType)
-			assert.Equal(t, http.StatusInternalServerError, rec.Code, eventType)
-		}
+		_, ok, rec := fireRevisionCeiling(srv, uat, projectID)
+		assert.False(t, ok)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	})
 
 	t.Run("unknown ceiling version", func(t *testing.T) {
 		uat := NewScopedUserIdentityWithCeiling(owner, projectID, []string{"agent:create"}, "",
 			permissions.FrozenPermissionCeiling{Version: 99, PermissionIDs: []string{"agent.create"}})
-		_, ok, rec := fireRevisionCeiling(srv, uat, projectID, "dispatch_agent")
+		_, ok, rec := fireRevisionCeiling(srv, uat, projectID)
 		assert.False(t, ok)
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
-
-		c, ok, rec := fireRevisionCeiling(srv, uat, projectID, "message")
-		assert.True(t, ok)
-		assert.Equal(t, store.EffectCeiling{}, c)
-		assert.Equal(t, http.StatusOK, rec.Code, "nothing written to the response")
 	})
 
 	t.Run("identity kind not accepted", func(t *testing.T) {
 		fed := &federatedTestIdentity{id: tid("sched-ceil-fed"), email: "fed@example.com", role: "member"}
-		_, ok, rec := fireRevisionCeiling(srv, fed, projectID, "dispatch_agent")
+		_, ok, rec := fireRevisionCeiling(srv, fed, projectID)
 		assert.False(t, ok)
 		assert.Equal(t, http.StatusForbidden, rec.Code)
 		assert.Contains(t, rec.Body.String(), "cannot authorize scheduled work")
-
-		c, ok, _ := fireRevisionCeiling(srv, fed, projectID, "message")
-		assert.True(t, ok)
-		assert.Equal(t, store.EffectCeiling{}, c)
 	})
 
 	t.Run("session", func(t *testing.T) {
-		c, ok, _ := fireRevisionCeiling(srv, owner, projectID, "dispatch_agent")
+		c, ok, _ := fireRevisionCeiling(srv, owner, projectID)
 		assert.True(t, ok)
 		assert.Equal(t, store.EffectCeiling{Kind: store.EffectCeilingPrincipal}, c)
 	})
@@ -290,7 +185,7 @@ func TestSchedCeilingDenialLogsAuthoringAction(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+projectID+"/schedules", nil)
 		req = req.WithContext(contextWithIdentity(req.Context(), fed))
 		rec := httptest.NewRecorder()
-		_, ok := srv.revisionAuthorityCeiling(rec, req, projectID, "dispatch_agent", action)
+		_, ok := srv.revisionAuthorityCeiling(rec, req, projectID, action)
 		require.False(t, ok)
 		require.Equal(t, http.StatusForbidden, rec.Code)
 		logRec, found := findRecord(capture.all(), "authorization denied")
@@ -299,35 +194,139 @@ func TestSchedCeilingDenialLogsAuthoringAction(t *testing.T) {
 	}
 }
 
-// A federated user's message schedule and one-shot message event store the
-// unrecorded ceiling marker.
-func TestFederatedMessageScheduleRecordsUnrecordedCeiling(t *testing.T) {
-	srv, s, projectID := setupScheduledEventTest(t)
+// messageWriteCredential is a credential whose authority cannot be recorded
+// on a schedule revision, and the response text that names why.
+type messageWriteCredential struct {
+	name     string
+	identity Identity
+	cause    string
+}
+
+// unrecordableMessageWriteCredentials returns, for the setupScheduleTest
+// project, every credential fixture whose ceiling cannot be recorded, each
+// admitted far enough to reach the revision ceiling on a message write:
+//   - a federated user holding the project owner role;
+//   - an agent whose row is not stored (an orphaned chain);
+//   - the seeded author agent with no active delegation edge after the edge
+//     backfill completed (the chain has no recorded provenance);
+//   - a local development user other than the recognized one.
+func unrecordableMessageWriteCredentials(t *testing.T, srv *Server, s store.Store, projectID string) []messageWriteCredential {
+	t.Helper()
 	ctx := context.Background()
-	fedUserID := tid("sched-fed-unrecorded")
+	fedUserID := tid("sched-msg-unrec-fed")
 	fed := &federatedTestIdentity{id: fedUserID, email: "fedunrec@example.com", displayName: "Fed", role: "member"}
 	require.NoError(t, s.CreateUser(ctx, &store.User{ID: fedUserID, Email: fed.Email(), DisplayName: fed.DisplayName(), Role: "member", Status: "active"}))
-	project, err := s.GetProject(ctx, projectID)
-	require.NoError(t, err)
-	srv.seedProjectCreatorMembership(ctx, project)
 	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, fedUserID))
 
-	rec := doAuthoredEventRequest(t, srv, fed, projectID,
-		CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentName: "test-agent", Message: "hi"})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var evt store.ScheduledEvent
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&evt))
-	stored, err := s.GetScheduledEvent(ctx, evt.ID)
-	require.NoError(t, err)
-	assert.Equal(t, store.EffectCeilingUnrecorded, stored.AuthorityCeiling.Kind)
-	assert.Equal(t, store.EffectCeiling{}, stored.AuthorityCeiling)
+	orphan := &agentIdentityWrapper{&AgentTokenClaims{
+		Claims:    jwt.Claims{Subject: tid("sched-msg-unrec-unstored-agent")},
+		ProjectID: projectID,
+		Scopes:    []AgentTokenScope{ScopeProjectRead, ScopeAgentCreate},
+	}}
 
-	rec = doAuthoredScheduleRequest(t, srv, fed, projectID, "", http.MethodPost,
-		CreateScheduleRequest{Name: "fed-msg", CronExpr: "0 * * * *", EventType: "message", AgentName: "test-agent", Message: "hi"})
-	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	var sc store.Schedule
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&sc))
-	assert.Equal(t, store.EffectCeiling{}, loadScheduleRevision(t, s, sc.ID).Ceiling)
+	markEdgeBackfillComplete(t, s)
+	agent := authzHelperAgent(projectID, ScopeProjectRead, ScopeAgentCreate)
+
+	devID := tid("sched-msg-unrec-dev")
+	require.NoError(t, s.CreateUser(ctx, &store.User{ID: devID, Email: "devunrec@example.com", DisplayName: "Dev", Role: "member", Status: "active"}))
+	require.NoError(t, srv.createProjectOwnerRoleBinding(ctx, projectID, devID))
+	dev := &DevUser{id: devID, email: "devunrec@example.com", displayName: "Dev"}
+
+	return []messageWriteCredential{
+		{name: "federated user", identity: fed, cause: "cannot authorize scheduled work"},
+		{name: "agent whose row is not stored", identity: orphan, cause: "delegation record is missing or inconsistent"},
+		{name: "agent without recorded provenance", identity: agent, cause: "delegation record is missing or inconsistent"},
+		{name: "unrecognized local development user", identity: dev, cause: "cannot authorize scheduled work"},
+	}
+}
+
+// A message event or schedule write by a credential whose authority cannot
+// be recorded is refused with the same 403 as a dispatch_agent write, and
+// writes nothing: no event or schedule row on create, and no attribution,
+// ceiling, revision or status change on PATCH or resume.
+func TestMessageScheduleWriteDeniedWhenCeilingUnrecordable(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	ctx := context.Background()
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("sched-msg-unrec-owner"))
+	creds := unrecordableMessageWriteCredentials(t, srv, s, projectID)
+
+	assertCeilingDenial := func(t *testing.T, c messageWriteCredential, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Contains(t, rec.Body.String(), string(DeniedByDelegationCeiling))
+		assert.Contains(t, rec.Body.String(), c.cause)
+	}
+	// The target is not stored, so scheduled-message authoring admits each
+	// credential and the refusal comes from the revision ceiling alone.
+	const unrecTarget = "unrec-ghost-target"
+	createUnrecTargetSchedule := func(t *testing.T, name string) string {
+		t.Helper()
+		rec := doAuthoredScheduleRequest(t, srv, owner, projectID, "", http.MethodPost,
+			CreateScheduleRequest{Name: name, CronExpr: "0 * * * *", EventType: "message", AgentName: unrecTarget, Message: "ping"})
+		require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+		var created store.Schedule
+		require.NoError(t, json.NewDecoder(rec.Body).Decode(&created))
+		return created.ID
+	}
+	countEvents := func(t *testing.T) int {
+		t.Helper()
+		res, err := s.ListScheduledEvents(ctx, store.ScheduledEventFilter{ProjectID: projectID}, store.ListOptions{})
+		require.NoError(t, err)
+		return len(res.Items)
+	}
+	countSchedules := func(t *testing.T) int {
+		t.Helper()
+		res, err := s.ListSchedules(ctx, store.ScheduleFilter{ProjectID: projectID}, store.ListOptions{})
+		require.NoError(t, err)
+		return len(res.Items)
+	}
+
+	for i, c := range creds {
+		suffix := fmt.Sprintf("-%d", i)
+		t.Run(c.name, func(t *testing.T) {
+			t.Run("create event", func(t *testing.T) {
+				before := countEvents(t)
+				rec := doAuthoredEventRequest(t, srv, c.identity, projectID,
+					CreateScheduledEventRequest{EventType: "message", FireIn: "30m", AgentName: unrecTarget, Message: "hi"})
+				assertCeilingDenial(t, c, rec)
+				assert.Equal(t, before, countEvents(t), "no event is stored")
+			})
+
+			t.Run("create schedule", func(t *testing.T) {
+				before := countSchedules(t)
+				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, "", http.MethodPost,
+					CreateScheduleRequest{Name: "unrec-msg" + suffix, CronExpr: "0 * * * *", EventType: "message", AgentName: unrecTarget, Message: "hi"})
+				assertCeilingDenial(t, c, rec)
+				assert.Equal(t, before, countSchedules(t), "no schedule is stored")
+			})
+
+			t.Run("PATCH", func(t *testing.T) {
+				id := createUnrecTargetSchedule(t, "unrec-msg-patch"+suffix)
+				before, err := s.GetSchedule(ctx, id)
+				require.NoError(t, err)
+				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id, http.MethodPatch,
+					UpdateScheduleRequest{CronExpr: "30 * * * *"})
+				assertCeilingDenial(t, c, rec)
+				after, err := s.GetSchedule(ctx, id)
+				require.NoError(t, err)
+				assert.Equal(t, before.CronExpr, after.CronExpr)
+				assert.Equal(t, before.InitiatorAttribution, after.InitiatorAttribution)
+				assert.Equal(t, before.AuthorityCeiling, after.AuthorityCeiling)
+			})
+
+			t.Run("resume", func(t *testing.T) {
+				id := createUnrecTargetSchedule(t, "unrec-msg-resume"+suffix)
+				pauseSchedule(t, srv, owner, projectID, id)
+				before := loadScheduleRevision(t, s, id)
+				rec := doAuthoredScheduleRequest(t, srv, c.identity, projectID, id+"/resume", http.MethodPost, nil)
+				assertCeilingDenial(t, c, rec)
+				assert.Equal(t, before, loadScheduleRevision(t, s, id))
+				sc, err := s.GetSchedule(ctx, id)
+				require.NoError(t, err)
+				assert.Equal(t, store.ScheduleStatusPaused, sc.Status)
+			})
+		})
+	}
 }
 
 // --- resume re-authorizes every schedule type ------------------------------
@@ -339,11 +338,11 @@ func TestResumeScopedUATDenied_DispatchAgent(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// The bearer boundary stage (3b) refuses a project-scoped UAT on the
-	// resume route before the handler runs, so the revision is unchanged.
+	// The authoring credential gate refuses a UAT on the resume route
+	// before the schedule is read, so the revision stays as it was.
 	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertScheduleAuthoringRefused(t, rec)
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 }
 
@@ -354,10 +353,10 @@ func TestResumeScopedUATDenied_Message(t *testing.T) {
 	pauseSchedule(t, srv, owner, projectID, id)
 	before := loadScheduleRevision(t, s, id)
 
-	// Refused at the bearer boundary stage (3b), as above.
+	// Refused by the authoring credential gate, as above.
 	scoped := NewScopedUserIdentity(owner, projectID, []string{"scheduled_event:update", "agent:message"})
 	rec := doAuthoredScheduleRequest(t, srv, scoped, projectID, id+"/resume", http.MethodPost, nil)
-	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertScheduleAuthoringRefused(t, rec)
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
 	sc, err := s.GetSchedule(context.Background(), id)
 	require.NoError(t, err)
@@ -426,6 +425,70 @@ func TestResumeNonAdmittedDenied_Message(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the resume's scheduled-message re-authorization")
 	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
+// Updating a message schedule re-checks the caller against the existing
+// schedule's target, as resume does: a caller who may manage schedules but
+// may not message the target is refused and the stored revision is
+// unchanged.
+func TestUpdateNonAdmittedDenied_Message(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-na-msg-owner"))
+	id := createOwnerSchedule(t, srv, owner, projectID, "update-na-msg", "message")
+	before := loadScheduleRevision(t, s, id)
+
+	outsider := scheduleOnlyUser(t, s, projectID, tid("update-na-msg-outsider"))
+	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Name: "update-na-msg-renamed"})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
+// An update whose replacement payload keeps the stored target (only the
+// message text changes) is re-checked against that target, like a name-only
+// update: a caller who may not message it is refused and the stored revision
+// is unchanged.
+func TestUpdateNonAdmittedDenied_MessageReplacementKeepsTarget(t *testing.T) {
+	srv, s, projectID := setupScheduleTest(t)
+	owner := setupScopedDispatchAgentOwner(t, srv, s, projectID, tid("update-keep-msg-owner"))
+	id := createOwnerSchedule(t, srv, owner, projectID, "update-keep-msg", "message")
+	before := loadScheduleRevision(t, s, id)
+
+	stored, err := s.GetSchedule(context.Background(), id)
+	require.NoError(t, err)
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stored.Payload), &payload))
+	payload["message"] = "new text, same target"
+	replacement, err := json.Marshal(payload)
+	require.NoError(t, err)
+	require.False(t, scheduledPayloadTargetChanged(stored.Payload, string(replacement)), "precondition: the target is kept")
+
+	outsider := scheduleOnlyUser(t, s, projectID, tid("update-keep-msg-outsider"))
+	rec := doAuthoredScheduleRequest(t, srv, outsider, projectID, id, http.MethodPatch, UpdateScheduleRequest{Payload: string(replacement)})
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "not authorized to message this agent", "the denial is the update's scheduled-message re-authorization")
+	assert.Equal(t, before, loadScheduleRevision(t, s, id))
+}
+
+// scheduledPayloadTargetChanged compares only the target of two message
+// payloads.
+func TestScheduledPayloadTargetChanged(t *testing.T) {
+	cases := []struct {
+		name                string
+		stored, replacement string
+		want                bool
+	}{
+		{"same target, new text", `{"agentName":"worker","message":"a"}`, `{"agentName":"worker","message":"b"}`, false},
+		{"agentName to agentId", `{"agentName":"worker","message":"a"}`, `{"agentId":"` + tid("payload-target") + `","message":"a"}`, true},
+		{"other agentId", `{"agentId":"` + tid("payload-a") + `"}`, `{"agentId":"` + tid("payload-b") + `"}`, true},
+		{"both undecodable", `not json`, `{also not json`, false},
+		{"both empty", "", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, scheduledPayloadTargetChanged(tc.stored, tc.replacement))
+		})
+	}
 }
 
 // Resuming a dispatch_agent schedule requires agent creation in the project:

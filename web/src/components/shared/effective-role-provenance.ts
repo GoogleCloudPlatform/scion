@@ -62,7 +62,7 @@ interface EffectiveRoleBinding {
   notBefore?: string;
   expiresAt?: string;
   /** How the binding was obtained: 'direct' or the group that grants it. */
-  source: 'direct' | string;
+  source: string;
   /** When source is not 'direct', this holds the group display name. */
   sourceGroupName?: string;
 }
@@ -628,7 +628,7 @@ export class ScionEffectiveRoleProvenance extends LitElement {
     await this.updateComplete;
     const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
     if (form) {
-      (form as import('./role-binding-assignment-form.js').ScionRoleBindingAssignmentForm).reset();
+      form.reset();
     }
   }
 

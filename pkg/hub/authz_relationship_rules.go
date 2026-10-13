@@ -28,8 +28,9 @@ package hub
 //     user's live admission to the agent's project;
 //     2c. project_access — a local user's owner or ancestor relationship on
 //     a project-scoped target requires the user's active access to that
-//     project (Decide only, for interactive and UAT requests; not the
-//     delegation-ceiling walk; see relationshipProjectAccessStage);
+//     project (Decide, for interactive and UAT requests, and the
+//     delegation-ceiling walk for a user delegator; see
+//     relationshipProjectAccess and relationshipProjectAccessStage);
 //  3. relationship_fact    — the rule's store fact holds (hub membership, a
 //     progeny sharing source); a lookup failure rejects the candidate;
 //  4. source_inactive      — the sharing source's owner is still active;
@@ -153,11 +154,13 @@ type relationshipOutcome struct {
 }
 
 // relationshipProjectAccess enables the project-access stage (2c) for one
-// evaluation and carries the request-scoped admission memo. A nil
-// *relationshipProjectAccess disables the stage: only Decide's step 9
-// (interactive and UAT requests) enables it. The delegation-ceiling walk
-// (userRelationshipAuthority) evaluates a delegator's relationships with the
-// stage disabled; that path is not covered by this decision.
+// evaluation and carries the admission memo. A nil
+// *relationshipProjectAccess disables the stage. Decide's step 9
+// (interactive and UAT requests) enables it with the request-scoped memo.
+// The delegation-ceiling walk (userRelationshipAuthority) enables it for a
+// user delegator with a fresh memo and no requestCtx (the delegator is not
+// the requester): a delegator's relationship grants are honoured only while
+// the delegator is admitted to the target's project (ptone/scion#3433).
 type relationshipProjectAccess struct {
 	memo *ProjectAdmissionCache
 	// requestCtx, when set, is the request's own context, used for the

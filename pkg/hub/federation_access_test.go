@@ -35,6 +35,7 @@ func okHandler() http.Handler {
 // TestRequireFederationAccess_LocalAgentWithScope verifies that a local agent
 // identity with the required scope passes through the middleware.
 func TestRequireFederationAccess_LocalAgentWithScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	claims := &AgentTokenClaims{
@@ -60,6 +61,7 @@ func TestRequireFederationAccess_LocalAgentWithScope(t *testing.T) {
 // TestRequireFederationAccess_LocalAgentWithoutScope verifies that a local agent
 // identity without the required scope is rejected with 403.
 func TestRequireFederationAccess_LocalAgentWithoutScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeProjectSecretRead)
 
 	claims := &AgentTokenClaims{
@@ -88,6 +90,7 @@ func TestRequireFederationAccess_LocalAgentWithoutScope(t *testing.T) {
 // TestRequireFederationAccess_FederatedAgentWithScope verifies that a federated
 // agent identity with the required scope passes through the middleware.
 func TestRequireFederationAccess_FederatedAgentWithScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	identity := NewFederatedAgentIdentity(
@@ -116,6 +119,7 @@ func TestRequireFederationAccess_FederatedAgentWithScope(t *testing.T) {
 // TestRequireFederationAccess_FederatedAgentWithoutScope verifies that a federated
 // agent identity without the required scope is rejected with 403.
 func TestRequireFederationAccess_FederatedAgentWithoutScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeProjectSecretRead)
 
 	identity := NewFederatedAgentIdentity(
@@ -147,6 +151,7 @@ func TestRequireFederationAccess_FederatedAgentWithoutScope(t *testing.T) {
 // TestRequireFederationAccess_NoIdentity verifies that a request with no
 // identity on the context is rejected with 401.
 func TestRequireFederationAccess_NoIdentity(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	handler := middleware(okHandler())
@@ -169,6 +174,7 @@ func TestRequireFederationAccess_NoIdentity(t *testing.T) {
 // (not an agent) on the context is rejected with 403, since
 // UserIdentity does not implement scopeChecker.
 func TestRequireFederationAccess_UserIdentity(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	user := NewAuthenticatedUser("user-1", "alice@example.com", "Alice", "admin", "web")
@@ -192,6 +198,7 @@ func TestRequireFederationAccess_UserIdentity(t *testing.T) {
 // TestRequireFederationAccess_FederatedServiceWithScope verifies that a federated
 // service identity with the required scope passes through the middleware.
 func TestRequireFederationAccess_FederatedServiceWithScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	identity := NewFederatedServiceIdentity(
@@ -217,6 +224,7 @@ func TestRequireFederationAccess_FederatedServiceWithScope(t *testing.T) {
 // TestRequireFederationAccess_FederatedServiceWithoutScope verifies that a federated
 // service identity without the required scope is rejected with 403.
 func TestRequireFederationAccess_FederatedServiceWithoutScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeProjectSecretRead)
 
 	identity := NewFederatedServiceIdentity(
@@ -245,6 +253,7 @@ func TestRequireFederationAccess_FederatedServiceWithoutScope(t *testing.T) {
 // TestRequireFederationAccess_FederatedUserWithScope verifies that a federated
 // user identity with the required scope passes through the middleware.
 func TestRequireFederationAccess_FederatedUserWithScope(t *testing.T) {
+	t.Parallel()
 	middleware := RequireFederationAccess(ScopeAgentStatusUpdate)
 
 	identity := NewFederatedUserIdentity(
@@ -271,8 +280,9 @@ func TestRequireFederationAccess_FederatedUserWithScope(t *testing.T) {
 
 // TestRequireFederationAccess_DefaultFederationScopes verifies that a federated
 // agent with DefaultFederationScopes has ScopeAgentStatusUpdate but not
-// ScopeProjectSecretRead.
+// ScopeProjectSecretRead or ScopeAgentLogAppend.
 func TestRequireFederationAccess_DefaultFederationScopes(t *testing.T) {
+	t.Parallel()
 	identity := NewFederatedAgentIdentity(
 		"https://hub-a.example.com",
 		"agent-123",
@@ -291,6 +301,11 @@ func TestRequireFederationAccess_DefaultFederationScopes(t *testing.T) {
 	// HasScope(ScopeProjectSecretRead) should return false
 	if identity.HasScope(ScopeProjectSecretRead) {
 		t.Error("expected HasScope(ScopeProjectSecretRead) to return false with DefaultFederationScopes")
+	}
+
+	// agent.log_append is Reserved, so its scope is not a default.
+	if identity.HasScope(ScopeAgentLogAppend) {
+		t.Error("expected HasScope(ScopeAgentLogAppend) to return false with DefaultFederationScopes")
 	}
 
 	// Verify via middleware: ScopeAgentStatusUpdate -> 200

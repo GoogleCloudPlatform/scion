@@ -33,16 +33,7 @@ type Frame = { type: string; data?: string };
 /** Real xterm/PTY wiring: a routed WebSocket standing in for the Hub's PTY endpoint. */
 async function setupTerminal(page: Page) {
   const frames: Frame[] = [];
-  await page.addInitScript(() => {
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
-  });
+  // setupApiMocks, always called first, installs the shared EventSource stub.
   await page.routeWebSocket('**/pty?*', (socket) => {
     socket.onMessage((message) => frames.push(JSON.parse(String(message)) as Frame));
     socket.send(JSON.stringify({ type: 'data', data: Buffer.from('').toString('base64') }));

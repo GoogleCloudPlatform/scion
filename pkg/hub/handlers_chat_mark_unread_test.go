@@ -454,7 +454,7 @@ func TestChatV2_MarkUnread_RejectsBadRequests(t *testing.T) {
 		{
 			"DM the caller is not part of", http.MethodPost,
 			"dm:user:" + tid("unread-stranger-a") + ":user:" + tid("unread-stranger-b"),
-			http.StatusForbidden,
+			http.StatusNotFound,
 		},
 	}
 
@@ -480,10 +480,11 @@ func TestChatV2_MarkUnread_Unauthenticated(t *testing.T) {
 	}
 }
 
-// TestChatV2_MarkUnread_ForbiddenForNonMember: a user with no read access to
-// the topic's project must not be able to mark it unread — same rationale as
-// TestChatV2_MutePin_ForbiddenForNonMember, and the same authorization call.
-func TestChatV2_MarkUnread_ForbiddenForNonMember(t *testing.T) {
+// TestChatV2_MarkUnread_NonMemberMatchesMissing: a user with no read access
+// to the topic's project must not be able to mark it unread, and gets the
+// same answer as for a missing topic — same as
+// TestChatV2_MutePin_NonMemberMatchesMissing, and the same authorization call.
+func TestChatV2_MarkUnread_NonMemberMatchesMissing(t *testing.T) {
 	srv, s, wcs, project := setupChatAuthzTest(t)
 	ctx := context.Background()
 
@@ -512,8 +513,11 @@ func TestChatV2_MarkUnread_ForbiddenForNonMember(t *testing.T) {
 
 	rec := doRequestAsUser(t, srv, outsider, http.MethodPost,
 		"/api/v1/chat/conversations/"+topicID+"/unread", nil)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403 for non-member, got %d: %s", rec.Code, rec.Body.String())
+	missing := doRequestAsUser(t, srv, outsider, http.MethodPost,
+		"/api/v1/chat/conversations/"+tid("unread-authz-missing")+"/unread", nil)
+	if rec.Code != http.StatusNotFound || rec.Code != missing.Code || rec.Body.String() != missing.Body.String() {
+		t.Fatalf("non-member must get the missing-topic answer: got %d %s, missing %d %s",
+			rec.Code, rec.Body.String(), missing.Code, missing.Body.String())
 	}
 }
 

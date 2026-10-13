@@ -837,3 +837,69 @@ func shutdownTestDeriver(d *UsageDeriver) {
 	defer cancel()
 	_ = d.Shutdown(ctx)
 }
+
+// codexWebsocketRequestEventName is the event codex emits once per request
+// sent over the Responses websocket transport (record_websocket_request).
+// The usage rule deliberately ignores it (ptone/scion#2995).
+const codexWebsocketRequestEventName = "codex.websocket_request"
+
+// TestCodexUsageRuleCountsFailedWebsocketRequestOnce pins ptone/scion#2995:
+// a failed websocket send produces a codex.websocket_request record with
+// success=false and error.message, and the same error then reaches the
+// response stream, so codex also emits see_event_completed_failed for it
+// (codex rust-v0.161.0). The pair must count exactly one error call, so the
+// websocket_request record itself never matches, whether it failed or not.
+func TestCodexUsageRuleCountsFailedWebsocketRequestOnce(t *testing.T) {
+	str := func(k, v string) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: k, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_StringValue{StringValue: v}}}
+	}
+	boolean := func(k string, v bool) *commonpb.KeyValue {
+		return &commonpb.KeyValue{Key: k, Value: &commonpb.AnyValue{Value: &commonpb.AnyValue_BoolValue{BoolValue: v}}}
+	}
+	const sendErr = "websocket closed by server"
+	failedRequest := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		str("event.name", codexWebsocketRequestEventName),
+		str("duration_ms", "3"),
+		str("success", "false"),
+		str("error.message", sendErr),
+		boolean("auth.connection_reused", true),
+		str("model", "gpt-5.1-codex"),
+	}}
+	succeededRequest := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		str("event.name", codexWebsocketRequestEventName),
+		str("duration_ms", "2"),
+		str("success", "true"),
+		boolean("auth.connection_reused", false),
+		str("model", "gpt-5.1-codex"),
+	}}
+	failedStream := &logspb.LogRecord{Attributes: []*commonpb.KeyValue{
+		str("event.name", codexUsageEventName),
+		str("event.kind", codexUsageEventKind),
+		str("error.message", sendErr),
+		str("model", "gpt-5.1-codex"),
+	}}
+
+	for name, record := range map[string]*logspb.LogRecord{"failed": failedRequest, "succeeded": succeededRequest} {
+		if _, matched, err := (codexUsageRule{}).MatchLog("", mustEventName(t, record, ""), record); matched || err != nil {
+			t.Errorf("%s websocket_request: matched=%v err=%v, want matched=false err=nil", name, matched, err)
+		}
+	}
+
+	var calls int64
+	for _, record := range []*logspb.LogRecord{failedRequest, failedStream} {
+		increment, matched, err := codexUsageRule{}.MatchLog("", mustEventName(t, record, ""), record)
+		if err != nil {
+			t.Fatalf("MatchLog error: %v", err)
+		}
+		if !matched {
+			continue
+		}
+		if increment.Status != telemetrycontract.StatusError || len(increment.Tokens) != 0 {
+			t.Fatalf("increment = %+v, want a tokenless error call", increment)
+		}
+		calls += increment.Calls
+	}
+	if calls != 1 {
+		t.Fatalf("failed websocket request counted %d error calls, want 1", calls)
+	}
+}

@@ -61,7 +61,7 @@
         "type": {
           "type": "string",
           "enum": ["", "Recreate", "RollingUpdate"],
-          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. It is not free of data consequences, though: with no server.database.url the hub defaults its SQLite file to /home/scion/.scion/hub.db (pkg/config/hub_config.go:691), which lands in the scion-home emptyDir this chart mounts, so RollingUpdate's two-pod window has each pod writing its own copy and the loser's writes are discarded. Recreate cannot produce that overlap. Nothing is shared, so nothing is corrupted - writes are lost, bounded by the rollout window. When the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
+          "description": "Empty resolves to Recreate at one replica and RollingUpdate above it. That default is a preference and not a safety measure: every value is accepted at every replica count. It is not free of data consequences, though: with no server.database.url the hub defaults its SQLite file to /home/scion/.scion/hub.db (loadGlobalConfigFromSettings, pkg/config/hub_config.go), which lands in the scion-home emptyDir this chart mounts, so RollingUpdate's two-pod window has each pod writing its own copy and the loser's writes are discarded. Recreate cannot produce that overlap. Nothing is shared, so nothing is corrupted - writes are lost, bounded by the rollout window. When the Cloud SQL and Filestore values add shared state, concurrent instances are coordinated by the hub's Postgres advisory locks rather than by this field. At one replica the trade is an outage that loses PTY sessions and port tunnels (Recreate) against a window with two pods in which the web terminal and exec reach the wrong one about half the time (RollingUpdate, which renders maxUnavailable: 0)."
         }
       }
     },
@@ -142,7 +142,7 @@
           "items": {
             "type": "object"
           },
-          "description": "Extra container environment variables as Kubernetes EnvVar objects. Whether a SCION_SERVER_* name binds depends on a lookup table (camelCaseFields, pkg/config/hub_config.go:919): SCION_SERVER_DATABASE_URL binds, SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error, and nothing in the name says which. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected by the render because both outcomes are wrong here - a name that binds is applied after settings.yaml and wins, so the hub runs a configuration this chart never rendered and its guards never saw, and a name that is discarded is still reported to the admin server-config view as an active override. Configure those through config.extra."
+          "description": "Extra container environment variables as Kubernetes EnvVar objects. Whether a SCION_SERVER_* name binds depends on a lookup table (camelCaseFields, pkg/config/hub_config.go): SCION_SERVER_DATABASE_URL binds, SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error, and nothing in the name says which. SCION_SERVER_DATABASE_* and SCION_SERVER_OIDC_* are rejected by the render because both outcomes are wrong here - a name that binds is applied after settings.yaml and wins, so the hub runs a configuration this chart never rendered and its guards never saw, and a name that is discarded is still reported to the admin server-config view as an active override. Configure those through config.extra."
         },
         "hubId": {
           "type": "string",
@@ -154,6 +154,23 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 65535
+        },
+        "hubClass": {
+          "type": "string",
+          "enum": ["", "test"],
+          "default": "",
+          "description": "Deploy-time class of this hub, rendered as server.hub.class. Empty (the default) means not a test hub. Required, as \"test\", by testIdentities.enabled."
+        },
+        "testIdentities": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Hub-issued test identities, for test hubs only. enabled=true renders --test-mode=member:<hub.hubId> and nothing else, and requires hubClass: test. No chart value renders an admin level. The hub refuses to start unless its database also carries a test infrastructure marker for this hub id, written offline by an operator with `scion server test-infra mark`.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false
+            }
+          }
         },
         "args": {
           "type": "array",
@@ -336,7 +353,7 @@
     "runtime": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["listAllNamespaces"],
+      "required": ["listAllNamespaces", "gke"],
       "properties": {
         "namespace": {
           "type": "string",
@@ -344,6 +361,10 @@
         },
         "listAllNamespaces": {
           "type": "boolean"
+        },
+        "gke": {
+          "type": "boolean",
+          "description": "Rendered as runtimes.kubernetes.gke. Default true. config.extra may not override it; false is refused alongside config.existingSecret."
         }
       }
     },
@@ -360,7 +381,7 @@
     "config": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The hub's own configuration, delivered as a rendered settings.yaml rather than as environment variables: whether a SCION_SERVER_* name binds is decided by a lookup table (camelCaseFields, pkg/config/hub_config.go:919), the ones that miss it are discarded with no error, and the ones that hit it override the rendered file and win.",
+      "description": "The hub's own configuration, delivered as a rendered settings.yaml rather than as environment variables: whether a SCION_SERVER_* name binds is decided by a lookup table (camelCaseFields, pkg/config/hub_config.go), the ones that miss it are discarded with no error, and the ones that hit it override the rendered file and win.",
       "properties": {
         "existingSecret": {
           "type": "string",
@@ -455,7 +476,7 @@
         "maxOpenConns": {
           "type": "integer",
           "minimum": 2,
-          "description": "The ent pool's per-replica ceiling. The floor of 2 is the hub's, not a style preference: applyDatabasePoolDefaults (pkg/config/hub_config.go:573) treats a postgres value of 1 or less as UNSET and substitutes its own default, because a single-connection pool self-deadlocks as soon as one query waits on another. So 1 does not get you 1 and does not get you an error - it gets you the default, while the settings.yaml you can read still says 1. Refusing it here turns a silent substitution into a message. This is not the whole connection budget: each replica also holds connections outside this pool, and NOTES.txt gives the formula and says plainly that the overhead term is unmeasured."
+          "description": "The ent pool's per-replica ceiling. The floor of 2 is the hub's, not a style preference: applyDatabasePoolDefaults (pkg/config/hub_config.go) treats a postgres value of 1 or less as UNSET and substitutes its own default, because a single-connection pool self-deadlocks as soon as one query waits on another. So 1 does not get you 1 and does not get you an error - it gets you the default, while the settings.yaml you can read still says 1. Refusing it here turns a silent substitution into a message. This is not the whole connection budget: each replica also holds connections outside this pool, and NOTES.txt gives the formula and says plainly that the overhead term is unmeasured."
         },
         "maxIdleConns": {
           "type": "integer",
@@ -552,6 +573,49 @@
         "bucket": {
           "type": "string",
           "description": "GCS bucket name, no gs:// prefix. Required when database.driver is postgres."
+        }
+      }
+    },
+    "workspaceStorage": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The shared workspace share agent pods mount, rendered as server.workspace_storage. Not the hub's blob store (storage).",
+      "properties": {
+        "nfs": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled"],
+          "description": "One value for both the settings block and the hub pod's mount, so the two cannot drift. The hub mounts the export at <mountRoot>/<shareId>, the path its /readyz checks.",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Renders server.workspace_storage (backend nfs) and the hub pod's inline nfs volume. Refused with config.existingSecret and with config.extra.server.workspace_storage."
+            },
+            "server": {
+              "type": "string",
+              "description": "NFS server address. Required when enabled. Rendered as shares[0].server and the volume's server."
+            },
+            "export": {
+              "type": "string",
+              "description": "Export path on the server. Required when enabled. Rendered as shares[0].export and the volume's path."
+            },
+            "mountRoot": {
+              "type": "string",
+              "description": "Absolute mount root. Rendered as mount_root."
+            },
+            "shareId": {
+              "type": "string",
+              "description": "Share ID, one path segment. Required when enabled. Rendered as shares[0].id and the last segment of the hub's mount path."
+            },
+            "pvName": {
+              "type": "string",
+              "description": "PersistentVolumeClaim agent pods mount the share through. Required when enabled. Rendered as shares[0].pv_name."
+            },
+            "subpathRoot": {
+              "type": "string",
+              "description": "Relative directory for project trees on the share. Rendered as subpath_root."
+            }
+          }
         }
       }
     },

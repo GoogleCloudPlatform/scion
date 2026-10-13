@@ -19,33 +19,15 @@ package hub
 import (
 	"context"
 	"errors"
-	"log/slog"
+	"net/url"
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func newMoveDispatchFixture(t *testing.T, caps *store.BrokerCapabilities) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-	s := createTestStore(t)
-	broker := &store.RuntimeBroker{
-		ID: tid("move-dispatch-broker"), Name: "move-dispatch", Slug: "move-dispatch",
-		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline, Capabilities: caps,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	client := &mockRuntimeBrokerClient{}
-	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
-	agent := &store.Agent{
-		ID: tid("move-dispatch-agent"), Name: "mover", Slug: "mover", ProjectID: tid("project-1"),
-		RuntimeBrokerID: broker.ID, RunID: "run-1",
-		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude"},
-	}
-	return d, client, agent
-}
 
 // A localOnly delete goes to a broker advertising AgentMove as delete
 // files, never the branch, localOnly.
@@ -57,6 +39,9 @@ func TestDispatchAgentDeleteLocalOnly_SendsLocalOnly(t *testing.T) {
 	assert.True(t, client.lastDeleteOpts.deleteFiles)
 	assert.False(t, client.lastDeleteOpts.removeBranch)
 	assert.Equal(t, "run-1", client.lastDeleteOpts.runID)
+	// The hub's agent ID rides along (ptone/scion#2632), so the broker's
+	// launch cancel leaves a different agent's start of the name alone.
+	assert.Equal(t, api.AgentIDQueryParam+"="+url.QueryEscape(agent.ID), client.lastDeleteAgentIDQuery)
 }
 
 // A broker without AgentMove would ignore localOnly and delete the shared

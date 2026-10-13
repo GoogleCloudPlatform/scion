@@ -28,83 +28,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupHeartbeatExitCodeTest creates a server with a broker, project, and
-// running agent so that heartbeat processing can be tested end-to-end.
-func setupHeartbeatExitCodeTest(t *testing.T) (srv *Server, s store.Store, brokerID, projectID, agentSlug string) {
-	t.Helper()
-
-	srv, s = testServer(t)
-	grantDevUserRuntimeBrokerAccess(t, s)
-	ctx := context.Background()
-
-	broker := &store.RuntimeBroker{
-		ID:      tid("hb-broker"),
-		Name:    "HB Broker",
-		Slug:    "hb-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	project := &store.Project{
-		ID:      tid("hb-project"),
-		Slug:    "hb-project",
-		Name:    "HB Project",
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     broker.Status,
-	}))
-
-	agent := &store.Agent{
-		ID:              tid("hb-agent"),
-		Slug:            "hb-agent",
-		Name:            "HB Agent",
-		Template:        "default",
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           "running",
-		Activity:        "working",
-		Labels:          map[string]string{},
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return srv, s, broker.ID, project.ID, agent.Slug
-}
-
-// sendHeartbeat sends a broker heartbeat with the given agent heartbeat data
-// and returns the HTTP status code.
-func sendHeartbeat(t *testing.T, srv *Server, brokerID, projectID string, agentHB brokerAgentHeartbeat) int {
-	t.Helper()
-	hb := brokerHeartbeatRequest{
-		Status: "online",
-		Projects: []brokerProjectHeartbeat{
-			{
-				ProjectID: projectID,
-				Agents:    []brokerAgentHeartbeat{agentHB},
-			},
-		},
-	}
-	rec := doRequest(t, srv, http.MethodPost,
-		"/api/v1/runtime-brokers/"+brokerID+"/heartbeat", hb)
-	return rec.Code
-}
-
-// getAgentState retrieves the current agent state from the store.
-func getAgentState(t *testing.T, s store.Store, slug, projectID string) *store.Agent {
-	t.Helper()
-	agent, err := s.GetAgentBySlug(context.Background(), projectID, slug)
-	require.NoError(t, err)
-	return agent
-}
-
 // TestHeartbeatExitCode_StructuredCrash verifies that a heartbeat with a
 // non-zero ExitCode (structured path) promotes stopped → error and records
 // the exit code and reason.
@@ -241,9 +164,12 @@ func TestHeartbeatExitCode_StructuredCleanExit(t *testing.T) {
 // a generic crash, in both the non-zero-exit-code path (promotes stopped to
 // error) and the zero-exit-code path (stays stopped).
 func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
-	t.Run("preempted with a non-zero exit code promotes to error", func(t *testing.T) {
+	t.Run("preempted with a non-zero exit code keeps the broker's stopped phase", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
+		// The broker reports stopped for a disruption whose workspace
+		// survives the pod (k8sDisruptionPhase); the SIGTERM/SIGKILL exit
+		// code does not make it a crash (ptone/scion#2669).
 		ec := 137
 		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
 			Slug:       agentSlug,
@@ -254,7 +180,7 @@ func TestHeartbeatExitCode_PreemptedEvictedMessage(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 
 		got := getAgentState(t, s, agentSlug, projectID)
-		assert.Equal(t, "error", got.Phase, "non-zero ExitCode should still promote stopped to error")
+		assert.Equal(t, "stopped", got.Phase, "a disruption reported as stopped is not promoted to error")
 		assert.Equal(t, "preempted", got.ExitReason)
 		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
 	})
@@ -465,7 +391,7 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, 0, *got.ExitCode)
 	})
 
-	t.Run("a heartbeat phase differing from the stored phase does not move it", func(t *testing.T) {
+	t.Run("a non-recoverable disruption moves a plain stop to error", func(t *testing.T) {
 		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
 
 		agent := getAgentState(t, s, agentSlug, projectID)
@@ -473,6 +399,8 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		agent.Message = "Agent stopped"
 		require.NoError(t, s.UpdateAgent(context.Background(), agent))
 
+		// The broker reports error for a disruption whose workspace did not
+		// survive the pod (ptone/scion#2669).
 		ec := 137
 		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
 			Slug:       agentSlug,
@@ -483,10 +411,30 @@ func TestHeartbeatExitCode_GracefulPreemptionAfterPlainStop(t *testing.T) {
 		assert.Equal(t, http.StatusOK, code)
 
 		got := getAgentState(t, s, agentSlug, projectID)
-		assert.Equal(t, "stopped", got.Phase, "the stored phase must win even though the heartbeat reports a different one")
+		assert.Equal(t, "error", got.Phase, "the agent's own clean stop must not hide a non-recoverable disruption")
 		assert.Equal(t, "preempted", got.ExitReason)
+		assert.Equal(t, "Agent pod was preempted, exit code 137", got.Message)
 		require.NotNil(t, got.ExitCode)
 		assert.Equal(t, 137, *got.ExitCode)
+	})
+
+	t.Run("a non-disruption error does not move a plain stop", func(t *testing.T) {
+		srv, s, brokerID, projectID, agentSlug := setupHeartbeatExitCodeTest(t)
+
+		agent := getAgentState(t, s, agentSlug, projectID)
+		agent.Phase = "stopped"
+		agent.Message = "Agent stopped"
+		require.NoError(t, s.UpdateAgent(context.Background(), agent))
+
+		ec := 1
+		code := sendHeartbeat(t, srv, brokerID, projectID, brokerAgentHeartbeat{
+			Slug:       agentSlug,
+			Phase:      "error",
+			ExitCode:   &ec,
+			ExitReason: "crashed",
+		})
+		assert.Equal(t, http.StatusOK, code)
+		assert.Equal(t, "stopped", getAgentState(t, s, agentSlug, projectID).Phase)
 	})
 
 	t.Run("a non-disruption reason is not backfilled", func(t *testing.T) {

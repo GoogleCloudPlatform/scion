@@ -140,6 +140,7 @@ func TestPokeReadDeadlineUntilDone_WinsRaceAgainstLatePongHandler(t *testing.T) 
 // practical from a test. Overriding the seam directly sidesteps that: it
 // proves the wiring without needing to win the race itself.
 func TestLocalPTYSessionRun_TeardownCallsPokeReadDeadlineFn(t *testing.T) {
+	useFastPTYTimings(t)
 	dial, tmuxCmd := newDirectAttachFixture(t)
 
 	orig := pokeReadDeadlineFn

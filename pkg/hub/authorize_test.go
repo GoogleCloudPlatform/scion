@@ -17,62 +17,17 @@
 package hub
 
 import (
-	"bytes"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
 )
 
 // Helpers in this file are prefixed authzHelper to avoid colliding with the
 // fixtures other tests in package hub define.
-
-const (
-	authzHelperProjectA = "authz-project-a"
-	authzHelperProjectB = "authz-project-b"
-)
-
-var authzHelperAgentID = tid("authz-caller-agent")
-
-// authzHelperAdminID is the stable UUID for the admin user in authorize_test.go.
-// Must be a valid UUID because the store requires UUID primary keys.
-var authzHelperAdminID = tid("authz-admin")
-
-// authzHelperCaptureLogs redirects the default slog logger into a buffer for the
-// duration of the test and returns the buffer. The denial log line is a
-// deliverable of #591, not decoration, so it is asserted on directly.
-func authzHelperCaptureLogs(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return buf
-}
-
-// authzHelperDenialRecord returns the first "authorization denied" record in the
-// captured log output, or nil if there is none.
-func authzHelperDenialRecord(t *testing.T, buf *bytes.Buffer) map[string]any {
-	t.Helper()
-	for _, line := range strings.Split(buf.String(), "\n") {
-		if line == "" {
-			continue
-		}
-		var rec map[string]any
-		if err := json.Unmarshal([]byte(line), &rec); err != nil {
-			continue
-		}
-		if rec["msg"] == "authorization denied" {
-			return rec
-		}
-	}
-	return nil
-}
 
 // authzHelperRequest builds a request carrying the given identity. A nil
 // identity produces an unauthenticated request.
@@ -82,41 +37,6 @@ func authzHelperRequest(identity Identity) *http.Request {
 		req = req.WithContext(contextWithIdentity(req.Context(), identity))
 	}
 	return req
-}
-
-// authzHelperAgent builds an agent identity in the given project with the given scopes.
-func authzHelperAgent(projectID string, scopes ...AgentTokenScope) AgentIdentity {
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: authzHelperAgentID},
-		ProjectID: projectID,
-		Scopes:    scopes,
-	}}
-}
-
-func authzHelperAdmin() UserIdentity {
-	return NewAuthenticatedUser(authzHelperAdminID, "admin@test.com", "Admin", store.UserRoleAdmin, "api")
-}
-
-// authzHelperSeedAdmin creates the admin user in the store with a super-admin
-// role binding so that the AK1 kernel grants access. Call once per testServer.
-func authzHelperSeedAdmin(t *testing.T, s store.Store) {
-	t.Helper()
-	createTestUserWithRole(t, s, authzHelperAdminID, "admin@test.com", "admin", store.SystemRoleSuperAdmin)
-}
-
-func authzHelperMember() UserIdentity {
-	return NewAuthenticatedUser("authz-member", "member@test.com", "Member", "member", "api")
-}
-
-// authzHelperTargetAgent is the agent acted upon in lifecycle tests.
-func authzHelperTargetAgent() *store.Agent {
-	return &store.Agent{
-		ID:        "authz-target-agent",
-		Name:      "target",
-		Slug:      "target",
-		ProjectID: authzHelperProjectA,
-		OwnerID:   "some-other-user",
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -524,9 +444,13 @@ func TestAuthorizeAgentCreate_IdentityKinds(t *testing.T) {
 			wantStatus: http.StatusForbidden,
 		},
 		{
-			name:      "agent with create scope in its own project",
-			identity:  authzHelperAgent(authzHelperProjectA, ScopeAgentCreate),
-			wantAllow: true,
+			// The identity names no stored agent, so it has no good
+			// standing (ptone/scion#3433) and the create is refused like
+			// any other chain refusal.
+			name:       "agent with create scope in its own project but no stored row",
+			identity:   authzHelperAgent(authzHelperProjectA, ScopeAgentCreate),
+			wantAllow:  false,
+			wantStatus: http.StatusForbidden,
 		},
 		{
 			name:       "agent with create scope in a different project",
@@ -579,6 +503,26 @@ func TestAuthorizeAgentCreate_IdentityKinds(t *testing.T) {
 			}
 		})
 	}
+
+	// The allow case for an agent identity: a stored agent whose root user
+	// is a member of its project (good standing, ptone/scion#3433), with
+	// create scope in its own project.
+	t.Run("agent with a stored row and standing, create scope in its own project", func(t *testing.T) {
+		f := newMSFixture(t, "authz-create-allow")
+		identity := &agentIdentityWrapper{&AgentTokenClaims{
+			Claims:    jwt.Claims{Subject: f.agentA.ID},
+			ProjectID: f.projectID,
+			Scopes:    []AgentTokenScope{ScopeAgentCreate},
+			Ancestry:  f.agentA.Ancestry,
+		}}
+		rec := httptest.NewRecorder()
+		if !f.srv.authorizeAgentCreate(rec, authzHelperRequest(identity), f.projectID) {
+			t.Fatalf("authorizeAgentCreate() = false, want true (body: %s)", rec.Body.String())
+		}
+		if rec.Body.Len() != 0 {
+			t.Errorf("expected no response body on allow, got %q", rec.Body.String())
+		}
+	})
 }
 
 func TestAuthorizeAgentCreate_DenialIsLogged(t *testing.T) {

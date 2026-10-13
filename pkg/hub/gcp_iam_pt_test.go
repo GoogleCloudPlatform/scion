@@ -21,50 +21,10 @@ import (
 	"testing"
 
 	policytroubleshooterpb "cloud.google.com/go/policytroubleshooter/iam/apiv3/iampb"
-	gax "github.com/googleapis/gax-go/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-)
-
-// fakePTClient is a scriptable PTClient for tests.
-type fakePTClient struct {
-	resp *policytroubleshooterpb.TroubleshootIamPolicyResponse
-	err  error
-	// captured records the last request for assertions.
-	captured *policytroubleshooterpb.TroubleshootIamPolicyRequest
-}
-
-func (f *fakePTClient) TroubleshootIamPolicy(
-	_ context.Context,
-	req *policytroubleshooterpb.TroubleshootIamPolicyRequest,
-	_ ...gax.CallOption,
-) (*policytroubleshooterpb.TroubleshootIamPolicyResponse, error) {
-	f.captured = req
-	return f.resp, f.err
-}
-
-var (
-	testCaller = store.Principal{
-		Kind:                store.PrincipalAgent,
-		ID:                  "agent-1",
-		ServiceAccountEmail: "agent@my-project.iam.gserviceaccount.com",
-	}
-
-	testHumanCaller = store.Principal{
-		Kind:  store.PrincipalUser,
-		ID:    "user-1",
-		Email: "alice@example.com",
-	}
-
-	testTargetSA = &store.GCPServiceAccount{
-		ID:        "sa-1",
-		Email:     "target@target-project.iam.gserviceaccount.com",
-		ProjectID: "target-project",
-	}
-
-	testHubSAEmail = "hub-sa@hub-project.iam.gserviceaccount.com"
 )
 
 func TestPolicyTroubleshooterChecker_CallerHasActAsDirectly(t *testing.T) {

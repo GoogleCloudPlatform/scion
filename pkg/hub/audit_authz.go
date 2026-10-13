@@ -101,6 +101,12 @@ func BuildDecisionAuditRecord(ctx context.Context, request AuthzRequest, decisio
 		PolicyID:       decision.BindingID,
 		CorrelationID:  logging.RequestIDFromContext(ctx),
 		DeniedBy:       string(decision.DeniedBy),
+
+		ResourceParentType:     request.Resource.ParentType,
+		ResourceParentID:       request.Resource.ParentID,
+		ResourceAncestryLen:    len(request.Resource.Ancestry),
+		ResourceScopeKind:      request.Resource.ScopeKind,
+		ResourceScopeUserIDSet: request.Resource.ScopeUserID != "",
 	}
 
 	if route := routeFromContext(ctx); route != "" {
@@ -318,7 +324,7 @@ func canonicalizeExplainPermission(resourceType string, action string) string {
 // handleAuthzExplain handles POST /api/v1/authz/explain.
 func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
-		writeError(w, http.StatusMethodNotAllowed, ErrCodeInvalidRequest, "Method not allowed", nil)
+		MethodNotAllowed(w, http.MethodPost)
 		return
 	}
 
@@ -806,18 +812,12 @@ func newAgentIdentityFromStore(agent *store.Agent) AgentIdentity {
 func (s *Server) CleanupAuditRecords(ctx context.Context, retentionDays int) error {
 	cutoff := time.Now().AddDate(0, 0, -retentionDays)
 
-	decisionCount, err := s.store.DeleteDecisionAuditsBefore(ctx, cutoff)
-	if err != nil {
-		return fmt.Errorf("failed to cleanup decision audit records: %w", err)
-	}
-
 	mutationCount, err := s.store.DeleteMutationAuditsBefore(ctx, cutoff)
 	if err != nil {
 		return fmt.Errorf("failed to cleanup mutation audit records: %w", err)
 	}
 
 	slog.Info("audit records cleaned up",
-		"decision_records_deleted", decisionCount,
 		"mutation_records_deleted", mutationCount,
 		"retention_days", retentionDays,
 		"cutoff", cutoff)

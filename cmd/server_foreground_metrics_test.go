@@ -61,6 +61,7 @@ func TestWireHubCoreMetrics_LaunchReaperTicksExported(t *testing.T) {
 			t.Fatalf("collecting metrics: %v", err)
 		}
 		if metricExported(&rm, "scion.launch_reaper.ticks") {
+			assertNoDecisionWriterInstruments(t, &rm)
 			return
 		}
 		if time.Now().After(deadline) {
@@ -81,50 +82,12 @@ func metricExported(rm *metricdata.ResourceMetrics, name string) bool {
 	return false
 }
 
-// TestWireHubCoreMetrics_DecisionAuditInstrumentsExported verifies that
-// wireHubCoreMetrics registers the decision audit writer's instruments and
-// wires them to the server: the queue depth gauge is observable at once,
-// a decision produces a write duration sample, and a decision after
-// shutdown produces a drop.
-func TestWireHubCoreMetrics_DecisionAuditInstrumentsExported(t *testing.T) {
-	ctx := context.Background()
-	srv, err := hub.New(hub.ServerConfig{}, newTestStore(t))
-	if err != nil {
-		t.Fatalf("hub.New: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
-
-	reader := sdkmetric.NewManualReader()
-	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
-	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
-
-	wireHubCoreMetrics(srv, mp)
-
-	collect := func() *metricdata.ResourceMetrics {
-		var rm metricdata.ResourceMetrics
-		if err := reader.Collect(ctx, &rm); err != nil {
-			t.Fatalf("collecting metrics: %v", err)
+// The retained reaper metric proves collection is active while retired instruments stay absent.
+func assertNoDecisionWriterInstruments(t *testing.T, rm *metricdata.ResourceMetrics) {
+	t.Helper()
+	for _, name := range []string{"scion.hub.decision_audit.queue_depth", "scion.hub.decision_audit.write.duration", "scion.hub.decision_audit.dropped"} {
+		if metricExported(rm, name) {
+			t.Fatalf("retired writer instrument exported: %s", name)
 		}
-		return &rm
-	}
-	if !metricExported(collect(), "scion.hub.decision_audit.queue_depth") {
-		t.Fatal("scion.hub.decision_audit.queue_depth not exported after wireHubCoreMetrics")
-	}
-
-	srv.GetAuthzService().Decide(ctx, hub.AuthzRequest{})
-	deadline := time.Now().Add(5 * time.Second)
-	for !metricExported(collect(), "scion.hub.decision_audit.write.duration") {
-		if time.Now().After(deadline) {
-			t.Fatal("scion.hub.decision_audit.write.duration not exported after a decision; is SetDecisionAuditMetrics still wired in wireHubCoreMetrics?")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	if err := srv.Shutdown(ctx); err != nil {
-		t.Fatalf("Shutdown: %v", err)
-	}
-	srv.GetAuthzService().Decide(ctx, hub.AuthzRequest{})
-	if !metricExported(collect(), "scion.hub.decision_audit.dropped") {
-		t.Fatal("scion.hub.decision_audit.dropped not exported after a decision past shutdown")
 	}
 }

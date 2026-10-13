@@ -15,7 +15,9 @@
 package hub
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -47,17 +49,84 @@ func isValidTemplateScope(scope string) bool {
 
 // CreateTemplateRequest is the request body for creating a template.
 type CreateTemplateRequest struct {
-	Name         string                `json:"name"`
-	Slug         string                `json:"slug,omitempty"`
-	DisplayName  string                `json:"displayName,omitempty"`
-	Description  string                `json:"description,omitempty"`
-	Harness      string                `json:"harness,omitempty"`
-	Scope        string                `json:"scope"`
-	ScopeID      string                `json:"scopeId,omitempty"`
-	ProjectID    string                `json:"projectId,omitempty"` // Deprecated: use ScopeID
-	Config       *store.TemplateConfig `json:"config,omitempty"`
-	BaseTemplate string                `json:"baseTemplate,omitempty"`
-	Files        []FileUploadRequest   `json:"files,omitempty"`
+	Name         string              `json:"name"`
+	Slug         string              `json:"slug,omitempty"`
+	DisplayName  string              `json:"displayName,omitempty"`
+	Description  string              `json:"description,omitempty"`
+	Harness      string              `json:"harness,omitempty"`
+	Scope        string              `json:"scope"`
+	ScopeID      string              `json:"scopeId,omitempty"`
+	ProjectID    string              `json:"projectId,omitempty"` // Deprecated: use ScopeID
+	BaseTemplate string              `json:"baseTemplate,omitempty"`
+	Files        []FileUploadRequest `json:"files,omitempty"`
+
+	// Config and Image are not settable (ptone/scion#4223); they are
+	// decoded only so a body that carries them is refused
+	// (refuseTemplateConfigFields).
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// UpdateTemplateRequest is the request body of a template PUT. A PUT
+// replaces only the template's metadata; every other field keeps its stored
+// value (ptone/scion#4223). Content and what is derived from it change only
+// through the upload/finalize and file APIs.
+type UpdateTemplateRequest struct {
+	Name        string `json:"name"`
+	Slug        string `json:"slug,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
+
+	// Config and Image are refused, as on create.
+	Config json.RawMessage `json:"config,omitempty"`
+	Image  json.RawMessage `json:"image,omitempty"`
+}
+
+// Error codes for template fields the API no longer writes
+// (ptone/scion#4223).
+const (
+	ErrCodeTemplateConfigInFile      = "template_config_in_file"
+	ErrCodeTemplateImageNotSupported = "template_image_not_supported"
+	templateConfigInFileMessage      = "template config is not settable through the API; set it in scion-agent.yaml"
+	templateImageNotSupportedMessage = "template image is not settable through the API; image comes from the harness-config or settings"
+)
+
+// carriesJSONValue reports whether a decoded body field holds a value: it is
+// present and not null. An empty string counts as absent, so a client that
+// round-trips a template's empty "image" is not refused.
+func carriesJSONValue(raw json.RawMessage) bool {
+	v := bytes.TrimSpace(raw)
+	return len(v) > 0 && !bytes.Equal(v, []byte("null")) && !bytes.Equal(v, []byte(`""`))
+}
+
+// refuseTemplateConfigFields writes a 400 and returns true when a template
+// create or PUT body carries config or image (ptone/scion#4223). A
+// template's job config comes from its scion-agent.yaml; its image from the
+// harness-config or settings.
+func refuseTemplateConfigFields(w http.ResponseWriter, config, image json.RawMessage) bool {
+	if carriesJSONValue(config) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateConfigInFile, templateConfigInFileMessage, nil)
+		return true
+	}
+	if carriesJSONValue(image) {
+		writeError(w, http.StatusBadRequest, ErrCodeTemplateImageNotSupported, templateImageNotSupportedMessage, nil)
+		return true
+	}
+	return false
+}
+
+// applyTemplateMetadataUpdate returns a copy of existing with req's metadata
+// (name, slug, display name, description) applied and UpdatedBy set. Every
+// other field, including the derived, content, storage, scope, ownership,
+// inheritance and provenance fields, keeps its stored value.
+func applyTemplateMetadataUpdate(existing *store.Template, req *UpdateTemplateRequest, updatedBy string) store.Template {
+	updated := *existing
+	updated.Name = req.Name
+	updated.Slug = req.Slug
+	updated.DisplayName = req.DisplayName
+	updated.Description = req.Description
+	updated.UpdatedBy = updatedBy
+	return updated
 }
 
 // FileUploadRequest describes a file to upload.
@@ -71,6 +140,9 @@ type CreateTemplateResponse struct {
 	Template    *store.Template `json:"template"`
 	UploadURLs  []UploadURLInfo `json:"uploadUrls,omitempty"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory the upload URLs write to. A
+	// client may send it back in the finalize request (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 type ListTemplatesResponse struct {
@@ -104,17 +176,38 @@ type UploadRequest struct {
 type UploadResponse struct {
 	UploadURLs  []UploadURLInfo `json:"uploadUrls"`
 	ManifestURL string          `json:"manifestUrl,omitempty"`
+	// UploadID names the staging directory a template's upload URLs write
+	// to; a client may send it back in the finalize request
+	// (ptone/scion#4221). Empty for resources that do not stage uploads.
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // FinalizeRequest is the request body for finalizing a template upload.
 type FinalizeRequest struct {
 	Manifest *TemplateManifest `json:"manifest"`
+	// ExpectedContentHash, when set, is the template content hash the
+	// client diffed its upload against. Finalize commits only if the
+	// template still has that hash and otherwise answers 409
+	// template_conflict (ptone/scion#4221). Clients that omit it get the
+	// same check against the hash the hub read when the finalize request
+	// arrived.
+	ExpectedContentHash string `json:"expectedContentHash,omitempty"`
+	// UploadID, when set, is the uploadId of the upload response whose
+	// staged files this finalize commits. Clients that omit it are served
+	// by matching staged files to the manifest by hash (ptone/scion#4221).
+	UploadID string `json:"uploadId,omitempty"`
 }
 
 // TemplateManifest is the manifest of uploaded template files.
+//
+// Files is the complete file list (mirror semantics): finalize deletes the
+// storage objects of files the template listed before but Files does not.
+// Harness is ignored: the hub derives the template's harness from its
+// scion-agent.yaml (ptone/scion#4217). It stays in the wire format for
+// compatibility with existing clients.
 type TemplateManifest struct {
 	Version string               `json:"version"`
-	Harness string               `json:"harness,omitempty"`
+	Harness string               `json:"harness,omitempty"` // ignored; see above
 	Files   []store.TemplateFile `json:"files"`
 }
 
@@ -123,6 +216,10 @@ type DownloadResponse struct {
 	ManifestURL string            `json:"manifestUrl,omitempty"`
 	Files       []DownloadURLInfo `json:"files"`
 	Expires     time.Time         `json:"expires"`
+	// ContentHash is the content hash of the template row the URLs were
+	// signed from, so a client can cache the files under the hash they
+	// really have (ptone/scion#4221). Set for templates only.
+	ContentHash string `json:"contentHash,omitempty"`
 }
 
 // DownloadURLInfo contains info for downloading a file.
@@ -254,6 +351,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
@@ -292,6 +392,9 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 			Unauthorized(w)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		scopeID = userIdent.ID()
 		if !s.authorize(w, r, templateUserScopeResource(userIdent), ActionCreate) {
 			return
@@ -314,14 +417,6 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate MessageMode in template config if specified.
-	if req.Config != nil && req.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(req.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+req.Config.MessageMode, nil)
-			return
-		}
-	}
-
 	if err := validateUploadFilePaths(req.Files); err != nil {
 		if !writeInvalidFilePathError(w, err) {
 			ValidationError(w, "files are invalid", nil)
@@ -337,7 +432,6 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        req.Scope,
 		ScopeID:      scopeID,
 		ProjectID:    scopeID, // Keep for backwards compat
@@ -370,15 +464,17 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 	// Templates with files are also created as 'pending' and promoted to
 	// 'active' during finalize (handleTemplateFinalize).
 
-	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(s.HubID(), template.Scope, template.ScopeID, template.Slug)
+	// New templates start in the blob layout, with a row-unique storage
+	// path (ptone/scion#4221).
+	storagePath := s.templateBlobStoragePath(template)
 	template.StoragePath = storagePath
+	template.Layout = store.TemplateLayoutBlobs
 
 	// Get storage client if available
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	// Create the template record
@@ -391,17 +487,14 @@ func (s *Server) createTemplateV2(w http.ResponseWriter, r *http.Request) {
 		Template: template,
 	}
 
-	// Generate upload URLs if files were specified and storage is available
+	// Generate staging upload URLs if files were specified and storage is
+	// available. Finalize commits them.
 	if len(req.Files) > 0 && stor != nil {
-		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
-		if err == nil || len(uploadURLs) > 0 {
-			// For local storage, rewrite file:// URLs to HTTP proxy URLs
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID)
-			}
+		uploadID := api.NewUUID()
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		if err == nil {
 			response.UploadURLs = uploadURLs
-			response.ManifestURL = manifestURL
+			response.UploadID = uploadID
 		}
 	}
 
@@ -438,6 +531,8 @@ func (s *Server) handleTemplateByIDV2(w http.ResponseWriter, r *http.Request) {
 		s.handleTemplateClone(w, r, templateID)
 	case "validate":
 		s.handleTemplateValidate(w, r, templateID)
+	case "reimport":
+		s.handleTemplateReimport(w, r, templateID)
 	case "files":
 		s.handleTemplateFiles(w, r, templateID, "")
 	default:
@@ -507,57 +602,32 @@ func (s *Server) updateTemplateV2(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
-
-	// Validate MessageMode in template config if specified.
-	if template.Config != nil && template.Config.MessageMode != "" {
-		if !store.IsValidMessageMode(template.Config.MessageMode) {
-			ValidationError(w, "invalid template message mode: "+template.Config.MessageMode, nil)
-			return
-		}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
 	}
 
-	// Preserve immutable fields from the existing record. The store's
-	// UpdateTemplate unconditionally Set()s every column, so any field not
-	// pinned here is overwritten with the request body's value — or its
-	// zero value if the body omits it.
-	//
-	// Group 1 — identity and authz state: without these a caller could
-	// reparent a template to a different scope or claim ownership.
-	// Scope reparenting requires its own endpoint with dual-scope
-	// authorization; it is not supported through the update body.
-	template.ID = existing.ID
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
-	template.Scope = existing.Scope
-	template.ScopeID = existing.ScopeID
-	template.OwnerID = existing.OwnerID
-	// Group 2 — content and storage state: these are managed by the
-	// upload/finalize workflow and must not be writable through the
-	// update body.
-	template.ProjectID = existing.ProjectID
-	template.StoragePath = existing.StoragePath
-	template.StorageBucket = existing.StorageBucket
-	template.StorageURI = existing.StorageURI
-	template.Files = existing.Files
-	template.ContentHash = existing.ContentHash
-	template.Status = existing.Status
-	template.BaseTemplate = existing.BaseTemplate
-	template.SourceURL = existing.SourceURL
-	// Group 3 — audit trail: derived from the authenticated caller,
-	// not trusted from the request body. The deref is safe: authorize
-	// (line 497) returns false on nil identity, so reaching here
-	// guarantees GetIdentityFromContext(ctx) != nil.
-	template.UpdatedBy = GetIdentityFromContext(ctx).ID()
+	// A PUT replaces only the metadata. Everything else keeps its stored
+	// value (applyTemplateMetadataUpdate): identity, scope and ownership
+	// (scope reparenting needs its own endpoint with dual-scope
+	// authorization), the files and what is derived from them (managed by
+	// the upload/finalize workflow), storage, inheritance, provenance and
+	// the creation audit fields. UpdatedBy comes from the authenticated
+	// caller; the deref is safe because authorize above returns false on a
+	// nil identity.
+	template := applyTemplateMetadataUpdate(existing, &req, GetIdentityFromContext(ctx).ID())
 	if template.Slug == "" {
 		template.Slug = api.Slugify(template.Name)
 	}
@@ -580,6 +650,9 @@ func (s *Server) patchTemplateV2(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	if !requireTemplateProfileWriter(w, r, existing) {
+		return
+	}
 	// SECURITY-GATE: authorize update access to this specific template.
 	if !s.authorize(w, r, templateResource(existing), ActionUpdate) {
 		return
@@ -612,6 +685,10 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, existing) {
 		return
 	}
 
@@ -664,7 +741,7 @@ func (s *Server) deleteTemplateV2(w http.ResponseWriter, r *http.Request, id str
 	// If deleteFiles is true and we have storage, delete the files
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			if err := stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath)); err != nil {
+			if err := s.deleteTemplateStorage(ctx, stor, existing); err != nil {
 				slog.Warn("failed to delete template files", "template_id", id, "storage_path", existing.StoragePath, "error", err)
 			}
 		}
@@ -691,6 +768,10 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, template) {
 		return
 	}
 
@@ -722,8 +803,11 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Generate upload URLs using shared helper
-	uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, template.StoragePath, req.Files)
+	// Upload URLs stage the files under a fresh upload ID; finalize hashes
+	// them and commits (ptone/scion#4221). Local-storage URLs point at the
+	// hub's raw file endpoint with ?uploadId=, which stages only.
+	uploadID := api.NewUUID()
+	uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
 	if err != nil {
 		if writeInvalidFilePathError(w, err) {
 			return
@@ -736,15 +820,9 @@ func (s *Server) handleTemplateUpload(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// For local storage, rewrite file:// URLs to HTTP proxy URLs
-	if stor.Provider() == storage.ProviderLocal {
-		hubURL := requestBaseURL(r)
-		uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", id)
-	}
-
 	response := UploadResponse{
-		UploadURLs:  uploadURLs,
-		ManifestURL: manifestURL,
+		UploadURLs: uploadURLs,
+		UploadID:   uploadID,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -762,6 +840,10 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
 		writeStoreErr(w, err, "Template")
+		return
+	}
+
+	if !requireTemplateProfileWriter(w, r, template) {
 		return
 	}
 
@@ -787,23 +869,25 @@ func (s *Server) handleTemplateFinalize(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Verify files exist in storage and compute content hash using shared helper
-	contentHash, err := verifyAndFinalizeFiles(ctx, stor, template.StoragePath, req.Manifest.Files)
-	if err != nil {
-		if writeInvalidFilePathError(w, err) {
-			return
-		}
-		ValidationError(w, err.Error(), nil)
+	if req.UploadID != "" && !validTemplateUploadID(req.UploadID) {
+		ValidationError(w, "uploadId is invalid", map[string]interface{}{"field": "uploadId"})
 		return
 	}
 
-	// Update template with manifest and mark as active
-	template.Files = req.Manifest.Files
-	template.ContentHash = contentHash
+	// Commit the manifest and mark the template active. The commit hashes
+	// the staged uploads and moves them into blobs (400 on a hash mismatch,
+	// "file not found" when a file was neither staged nor already stored),
+	// re-derives the index from the new scion-agent.yaml and refuses an
+	// unusable bundled harness-config (422) before the row is updated.
+	// Every finalize client (`scion templates sync/push`, its retry, and the
+	// agent-start updateHubTemplate path) sends the full manifest.
 	template.Status = store.TemplateStatusActive
-
-	if err := s.store.UpdateTemplate(ctx, template); err != nil {
-		writeErrorFromErr(w, err, "")
+	if err := s.commitTemplateFiles(ctx, template, req.Manifest.Files, commitOpts{
+		expectedContentHash: req.ExpectedContentHash,
+		fromStaging:         true,
+		uploadID:            req.UploadID,
+	}); err != nil {
+		writeTemplateCommitError(w, err)
 		return
 	}
 
@@ -846,8 +930,10 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// Generate download URLs using shared helper
-	downloadURLs, manifestURL, expires, err := generateDownloadURLs(ctx, stor, template.StoragePath, s.legacyFallbackPath(template.StoragePath), template.Files)
+	// Every URL comes from this one row read: a blob row's URLs name
+	// immutable blobs, so they keep returning this version even if a commit
+	// lands while the client downloads.
+	downloadURLs, manifestURL, expires, err := s.generateTemplateDownloadURLs(ctx, stor, template)
 	if err != nil {
 		RuntimeError(w, fmt.Sprintf("template %q: %s — run 'scion template validate %s' to diagnose", template.Name, err, template.Name))
 		return
@@ -856,13 +942,14 @@ func (s *Server) handleTemplateDownload(w http.ResponseWriter, r *http.Request, 
 	// For local storage, rewrite file:// URLs to HTTP proxy URLs
 	if stor.Provider() == storage.ProviderLocal {
 		hubURL := requestBaseURL(r)
-		downloadURLs = rewriteLocalDownloadURLs(downloadURLs, hubURL, "templates", id)
+		downloadURLs = rewriteLocalTemplateDownloadURLs(downloadURLs, hubURL, id, isBlobLayout(template))
 	}
 
 	response := DownloadResponse{
 		Files:       downloadURLs,
 		ManifestURL: manifestURL,
 		Expires:     expires,
+		ContentHash: template.ContentHash,
 	}
 
 	writeJSON(w, http.StatusOK, response)
@@ -1001,6 +1088,9 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		// User scope: scopeID must match the authenticated user
 		if scopeID == "" {
 			scopeID = userIdent.ID()
@@ -1020,7 +1110,6 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		Slug:         api.Slugify(req.Name),
 		DisplayName:  source.DisplayName,
 		Description:  source.Description,
-		Harness:      source.Harness,
 		Image:        source.Image,
 		Config:       source.Config,
 		Scope:        destScope,
@@ -1062,7 +1151,12 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 	// DeletePrefix, it would delete the files the other just copied. A
 	// request-unique path means the failure cleanup below can only ever
 	// remove a subtree this request itself created.
-	storagePath := storage.TemplateStoragePath(s.HubID(), clone.Scope, clone.ScopeID, clone.Slug) + "/" + clone.ID
+	//
+	// The clone is always created in the blob layout (ptone/scion#4221):
+	// its path is the row-unique <slug>.<id>, and the commit copies each
+	// file the source references into the clone's own blobs.
+	clone.Layout = store.TemplateLayoutBlobs
+	storagePath := s.templateBlobStoragePath(clone)
 	clone.StoragePath = storagePath
 
 	stor := s.GetStorage()
@@ -1071,31 +1165,27 @@ func (s *Server) handleTemplateClone(w http.ResponseWriter, r *http.Request, id 
 		clone.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
-	// Copy files from source to clone location
+	// Create the clone through the commit path, which copies the files and
+	// re-derives Harness, DefaultHarnessConfig and AgentConfig from them
+	// instead of copying the source's derived fields (ptone/scion#4217).
+	var createErr error
 	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
-		for _, file := range source.Files {
-			srcPath := source.StoragePath + "/" + file.Path
-			dstPath := storagePath + "/" + file.Path
-			if _, err := stor.Copy(ctx, srcPath, dstPath); err != nil {
-				_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
-				RuntimeError(w, "Failed to copy files: "+err.Error())
-				return
-			}
-		}
-		clone.Files = source.Files
-		clone.ContentHash = source.ContentHash
 		clone.Status = store.TemplateStatusActive
+		createErr = s.commitTemplateFiles(ctx, clone, source.Files, commitOpts{create: true, copyFrom: source})
+	} else {
+		clone.Harness = deriveTemplateIndex(nil, "", clone.Name).Harness
+		createErr = s.store.CreateTemplate(ctx, clone)
 	}
 
-	if err := s.store.CreateTemplate(ctx, clone); err != nil {
+	if err := createErr; err != nil {
 		if stor != nil {
-			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
+			_ = stor.DeletePrefix(ctx, templateBlobPrefix(storagePath))
 		}
 		if errors.Is(err, store.ErrAlreadyExists) {
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		writeTemplateCommitError(w, err)
 		return
 	}
 

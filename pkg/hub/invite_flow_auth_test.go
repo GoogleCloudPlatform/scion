@@ -25,58 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// inviteFlowStore is a minimal in-memory store for testing the auth gate
-// changes related to the invite flow. It implements only the methods
-// used by checkUserAuthorized and provisionUser.
-type inviteFlowStore struct {
-	store.Store
-	users map[string]*store.User
-}
-
-func newInviteFlowStore() *inviteFlowStore {
-	return &inviteFlowStore{users: make(map[string]*store.User)}
-}
-
-func (s *inviteFlowStore) GetUserByEmail(_ context.Context, email string) (*store.User, error) {
-	for _, u := range s.users {
-		if u.Email == email {
-			return u, nil
-		}
-	}
-	return nil, store.ErrNotFound
-}
-
-func (s *inviteFlowStore) CreateUser(_ context.Context, user *store.User) error {
-	s.users[user.ID] = user
-	return nil
-}
-
-func (s *inviteFlowStore) UpdateUser(_ context.Context, user *store.User) error {
-	s.users[user.ID] = user
-	return nil
-}
-
-func (s *inviteFlowStore) IsUserInvitedOrActive(_ context.Context, email string) (bool, error) {
-	for _, u := range s.users {
-		if u.Email == email && (u.Status == store.UserStatusInvited || u.Status == store.UserStatusActive) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
-func (s *inviteFlowStore) IsEmailAllowListed(_ context.Context, _ string) (bool, error) {
-	return false, nil // should not be called in new code path
-}
-
-func (s *inviteFlowStore) GetGroupBySlug(_ context.Context, _ string) (*store.Group, error) {
-	return nil, store.ErrNotFound
-}
-
-func (s *inviteFlowStore) AddGroupMember(_ context.Context, _ *store.GroupMember) error {
-	return nil
-}
-
 // ============================================================================
 // checkUserAuthorized tests
 // ============================================================================

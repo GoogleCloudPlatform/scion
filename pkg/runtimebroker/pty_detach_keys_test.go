@@ -64,6 +64,7 @@ func waitForArgLog(t *testing.T, argLog string) []string {
 // --detach-keys for docker and podman, so the runtime's default Ctrl-p Ctrl-q
 // detach sequence does not hold back Ctrl-p inside the session.
 func TestStartDockerExec_DetachKeys(t *testing.T) {
+	useFastPTYTimings(t)
 	tests := []struct {
 		runtime string
 		want    string
@@ -124,6 +125,7 @@ func TestStartDockerExec_DetachKeys(t *testing.T) {
 // TestStartDockerExec_OtherRuntimesGetNoDetachKeys checks that runtimes other
 // than docker and podman (here a test adapter) get no extra flag.
 func TestStartDockerExec_OtherRuntimesGetNoDetachKeys(t *testing.T) {
+	useFastPTYTimings(t)
 	runtimeCmd, argLog := fakeExecRuntime(t, "runtime-exec")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

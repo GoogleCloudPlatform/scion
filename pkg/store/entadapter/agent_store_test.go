@@ -545,9 +545,19 @@ func TestAgentStore_MarkStalledAgents(t *testing.T) {
 	assert.Equal(t, "executing", gotActive.Activity)
 }
 
-func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
+// TestCompositeStore_PurgeDeletedAgents_Cutoff pins the purge's eligibility
+// rule: only agents soft-deleted before cutoff go; recently soft-deleted and
+// live agents stay. PurgeDeletedAgents lives only on CompositeStore, so the
+// group-membership and identity-key cascade cannot be bypassed through a
+// bare AgentStore (ptone/scion#3105).
+func TestCompositeStore_PurgeDeletedAgents_Cutoff(t *testing.T) {
 	ctx := context.Background()
-	s, projectID := newTestAgentStore(t)
+	s := newTestCompositeStore(t)
+	projectID := uuid.NewString()
+	require.NoError(t, s.CreateProject(ctx, &store.Project{
+		ID: projectID, Name: "Purge Cutoff", Slug: "purge-cutoff",
+		Created: time.Now(), Updated: time.Now(),
+	}))
 
 	// Old soft-deleted agent -> purged.
 	oldDeleted := makeAgent(projectID, "old-deleted")
@@ -572,6 +582,8 @@ func TestAgentStore_PurgeDeletedAgents(t *testing.T) {
 	_, err = s.GetAgent(ctx, oldDeleted.ID)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 	_, err = s.GetAgent(ctx, recentDeleted.ID)
+	assert.NoError(t, err)
+	_, err = s.GetAgent(ctx, live.ID)
 	assert.NoError(t, err)
 }
 
@@ -1931,4 +1943,36 @@ func TestAgentStore_SetAgentWorkspacePlacementSkipsSoftDeleted(t *testing.T) {
 	assert.NotNil(t, row.DeletedAt)
 
 	assert.ErrorIs(t, s.SetAgentWorkspacePlacement(ctx, uuid.NewString(), "export"), store.ErrNotFound)
+}
+
+// SetAgentAnnotation sets and removes one key, keeps the others, does not
+// bump state_version, and leaves a soft-deleted row untouched.
+func TestAgentStore_SetAgentAnnotation(t *testing.T) {
+	ctx := context.Background()
+	s, projectID := newTestAgentStore(t)
+
+	a := makeAgent(projectID, "annotation-narrow")
+	a.Annotations = map[string]string{"keep": "me"}
+	require.NoError(t, s.CreateAgent(ctx, a))
+	before, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", `{"commits":2}`))
+	got, err := s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me", "scion.dev/test": `{"commits":2}`}, got.Annotations)
+	assert.Equal(t, before.StateVersion, got.StateVersion, "a narrow write does not bump state_version")
+
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", ""))
+	got, err = s.GetAgent(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"keep": "me"}, got.Annotations)
+
+	// Removing an absent key is a no-op.
+	require.NoError(t, s.SetAgentAnnotation(ctx, a.ID, "absent", ""))
+
+	got.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, got))
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, a.ID, "scion.dev/test", "x"), store.ErrNotFound)
+	assert.ErrorIs(t, s.SetAgentAnnotation(ctx, uuid.NewString(), "k", "v"), store.ErrNotFound)
 }

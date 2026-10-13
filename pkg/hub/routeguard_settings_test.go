@@ -493,6 +493,16 @@ func TestHubPermissionSelectors_MatchApprovedSet(t *testing.T) {
 		"hub.lifecycle_hooks.read":    "hub_lifecycle_hooks:read",
 		"hub.lifecycle_hooks.update":  "hub_lifecycle_hooks:update",
 		"hub.settings.update":         "hub_settings:update",
+		"hub.scheduler.read":          "hub_scheduler:read",
+		"hub.health.read":             "hub_health:read",
+		"hub.validate.execute":        "hub_validate:execute",
+		"hub.integrations.read":       "hub_integrations:read",
+		"hub.integrations.update":     "hub_integrations:update",
+		"hub.teams_manifest.read":     "hub_teams_manifest:read",
+		"hub.diagnostics.read":        "hub_diagnostics:read",
+		"hub.metrics.read":            "hub_metrics:read",
+		"hub.github_app.read":         "hub_github_app:read",
+		"hub.github_app.update":       "hub_github_app:update",
 	}
 	got := map[string]string{}
 	for _, perm := range permissions.Registry {

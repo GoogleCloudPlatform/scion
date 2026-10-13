@@ -53,8 +53,20 @@ import {
   TEXT_PREVIEW_MAX_BYTES,
   type PathLinkTarget,
 } from '../../../utils/chat-file-links.js';
+import {
+  artifactFileUrl,
+  artifactPagePath,
+  formatArtifactRef,
+  rendererFor,
+  type ArtifactFile,
+  type ArtifactResponse,
+  type ViewResponse,
+} from '../../../client/artifacts.js';
+import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
+import '../artifact-markdown-frame.js';
+import { renderUntrustedViewFrame, untrustedViewFrameStyles } from '../untrusted-view-frame.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -87,8 +99,59 @@ export interface GcsPreviewTarget {
   name: string;
 }
 
-/** What `<scion-chat-file-preview>` renders: an attachment, a resolved path, or a gs:// object. */
-export type PreviewTarget = AttachmentPreviewTarget | PathPreviewTarget | GcsPreviewTarget;
+/**
+ * An artifact reference (ptone/scion#3224, D23), addressed by id and, when
+ * the reference pins one, version. The dialog loads it under the viewer's
+ * own access; name is a placeholder title until the metadata arrives.
+ */
+export interface ArtifactPreviewTarget {
+  kind: 'artifact';
+  id: string;
+  /** Pinned version, or 0 for the current one. */
+  seq: number;
+  name: string;
+}
+
+/** What `<scion-chat-file-preview>` renders: an attachment, a resolved path, a gs:// object or an artifact. */
+export type PreviewTarget =
+  | AttachmentPreviewTarget
+  | PathPreviewTarget
+  | GcsPreviewTarget
+  | ArtifactPreviewTarget;
+
+/** Shown for an artifact the viewer cannot read, the same as for one that does not exist. */
+export const ARTIFACT_UNAVAILABLE_MESSAGE =
+  "This artifact doesn't exist or you don't have access to it.";
+
+/** Shown for an artifact whose entry file the dialog does not render. */
+const ARTIFACT_NOT_PREVIEWABLE_MESSAGE =
+  "This artifact can't be shown here. Open it in the artifact viewer.";
+
+/** What the dialog learned about an artifact target once its metadata loaded. */
+interface ArtifactInfo {
+  title: string;
+  version: number;
+  entry: string;
+  pageUrl: string;
+  /** Whether version is the artifact's current version. */
+  current: boolean;
+  /** The artifact's owner and home project, named in the footer. */
+  ownerKind: string;
+  ownerRef: string;
+  homeProject: string;
+  /**
+   * Set for a Markdown entry. Artifact Markdown is rendered only through
+   * the artifact viewer's sandboxed frame (`<scion-artifact-markdown-frame>`),
+   * which keeps every image on the hub; these are the frame's inputs.
+   */
+  markdown?: { id: string; seq: number; files: ArtifactFile[] };
+  /**
+   * Set for an HTML entry. Artifact HTML is rendered only through a view
+   * minted for the version, in the artifact page's own untrusted view frame
+   * (shared/untrusted-view-frame.ts); its bytes are never fetched here.
+   */
+  htmlView?: { url: string; remoteImages: boolean };
+}
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
 const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/gif', 'image/webp']);
@@ -112,6 +175,10 @@ interface LoadState {
    * every one of its `isBinary` states uses the shared generic text).
    */
   binaryMessage?: string;
+  /** Artifact target only: resolved metadata, once loaded. */
+  artifact?: ArtifactInfo;
+  /** Artifact target only: the viewer cannot read it (or it is gone); no Retry. */
+  unavailable?: boolean;
 }
 
 /** A gcs target whose response is application/octet-stream, or an image/* type that does not take the image path. */
@@ -142,6 +209,8 @@ const IDLE_STATE: LoadState = {
  * try/catch.
  */
 function downloadUrlFor(target: PreviewTarget): string {
+  if (target.kind === 'artifact')
+    throw new Error('downloadUrlFor: artifact targets load their own URLs');
   if (target.kind === 'attachment') return buildAttachmentApiUrl(target.id);
   if (target.kind === 'gcs')
     return buildGcsObjectApiUrl(target.messageId, target.bucket, target.object);
@@ -220,6 +289,13 @@ export class ScionChatFilePreview extends LitElement {
   @state() private showSource = false;
 
   @state() private copied = false;
+
+  /** The signed-in user's id; an artifact they own shows "You" as owner. */
+  @property()
+  currentUserId = '';
+
+  /** Display names of the open artifact's owner and home project, once looked up. */
+  @state() private artifactNames = { owner: '', project: '' };
 
   /** Bumped on every target change; a response is applied only if it still matches. */
   private generation = 0;
@@ -306,6 +382,17 @@ export class ScionChatFilePreview extends LitElement {
 
     if (!target) {
       this.loadState = IDLE_STATE;
+      return;
+    }
+    if (target.kind === 'artifact') {
+      this.artifactNames = { owner: '', project: '' };
+      await this.loadArtifact(target, gen);
+      // Names are looked up only for an artifact the dialog shows; an
+      // unavailable one reads the same as a missing one.
+      const shown = this.loadState;
+      if (gen === this.generation && shown.artifact && !shown.unavailable) {
+        this.loadArtifactNames(shown.artifact, gen);
+      }
       return;
     }
 
@@ -544,6 +631,258 @@ export class ScionChatFilePreview extends LitElement {
     }
   }
 
+  /**
+   * Loads an artifact target: its metadata (the pinned version's, or the
+   * current one's), then the entry file through the hub's streaming route.
+   * Every request is made under the viewer's own session, so what shows is
+   * exactly what the artifact page would show them; a 403 or 404 is the
+   * same "unavailable" state either way.
+   */
+  private async loadArtifact(target: ArtifactPreviewTarget, gen: number): Promise<void> {
+    const base: LoadState = {
+      status: 'loading',
+      isImage: false,
+      isMarkdown: false,
+      isBinary: false,
+    };
+    this.loadState = base;
+    const controller = new AbortController();
+    this.controller = controller;
+    const id = encodeURIComponent(target.id);
+    const metaUrl =
+      target.seq > 0 ? `/api/v1/artifacts/${id}/versions/${target.seq}` : `/api/v1/artifacts/${id}`;
+    try {
+      const res = await apiFetch(metaUrl, { signal: controller.signal });
+      if (gen !== this.generation) return;
+      if (res.status === 403 || res.status === 404) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: ARTIFACT_UNAVAILABLE_MESSAGE,
+          unavailable: true,
+        };
+        return;
+      }
+      if (!res.ok) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: await extractApiError(res, `Failed to load artifact (HTTP ${res.status})`),
+        };
+        return;
+      }
+      const data = (await res.json()) as ArtifactResponse;
+      if (gen !== this.generation) return;
+      const version = data.version;
+      const entry = version?.files.find((f) => f.path === version.entryPath);
+      if (!version || !entry) {
+        this.loadState = {
+          ...base,
+          status: 'error',
+          error: ARTIFACT_UNAVAILABLE_MESSAGE,
+          unavailable: true,
+        };
+        return;
+      }
+      const artifact: ArtifactInfo = {
+        title: data.artifact.title,
+        version: version.seq,
+        entry: version.entryPath,
+        pageUrl: artifactPagePath(data.artifact),
+        current: version.seq === data.artifact.currentSeq,
+        ownerKind: data.artifact.ownerKind,
+        ownerRef: data.artifact.ownerRef,
+        homeProject: data.artifact.scopeRef,
+      };
+      const renderer = rendererFor(entry.mediaType);
+      if (renderer === 'html') {
+        await this.loadArtifactView(data, version.seq, artifact, base, gen, controller);
+        return;
+      }
+      if (
+        renderer === 'download' ||
+        (renderer !== 'image' && entry.size > TEXT_PREVIEW_MAX_BYTES)
+      ) {
+        this.loadState = {
+          ...base,
+          status: 'ready',
+          isBinary: true,
+          binaryMessage: ARTIFACT_NOT_PREVIEWABLE_MESSAGE,
+          artifact,
+        };
+        return;
+      }
+      const fileUrl = artifactFileUrl(data.artifact.id, version.seq, entry.path, true);
+      const fileRes = await apiFetch(fileUrl, { signal: controller.signal });
+      if (gen !== this.generation) return;
+      if (!fileRes.ok) {
+        // Unavailable looks the same on every path: no title, version or entry.
+        const unavailable = fileRes.status === 403 || fileRes.status === 404;
+        this.loadState = unavailable
+          ? { ...base, status: 'error', error: ARTIFACT_UNAVAILABLE_MESSAGE, unavailable: true }
+          : {
+              ...base,
+              status: 'error',
+              error: await extractApiError(
+                fileRes,
+                `Failed to load artifact (HTTP ${fileRes.status})`
+              ),
+              artifact,
+            };
+        return;
+      }
+      if (renderer === 'image') {
+        const blob = await fileRes.blob();
+        if (gen !== this.generation) return;
+        this.loadState = {
+          ...base,
+          status: 'ready',
+          isImage: true,
+          objectUrl: URL.createObjectURL(blob),
+          artifact,
+        };
+        return;
+      }
+      const content = await fileRes.text();
+      if (gen !== this.generation) return;
+      // Markdown renders only in the artifact viewer's sandboxed frame: see markdown.
+      this.loadState = {
+        ...base,
+        status: 'ready',
+        content,
+        artifact:
+          renderer === 'markdown'
+            ? {
+                ...artifact,
+                markdown: { id: data.artifact.id, seq: version.seq, files: version.files },
+              }
+            : artifact,
+      };
+    } catch {
+      if (gen !== this.generation || controller.signal.aborted) return;
+      this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
+    }
+  }
+
+  /**
+   * Loads an HTML entry the way the artifact page does: mints a view for
+   * the version under the viewer's own session and shows its URL in the
+   * sandboxed frame. The entry's bytes are not fetched, and the text size
+   * cap does not apply (the page renders any size). A refused or missing
+   * version is the same "unavailable" state as every other path.
+   */
+  private async loadArtifactView(
+    data: ArtifactResponse,
+    seq: number,
+    artifact: ArtifactInfo,
+    base: LoadState,
+    gen: number,
+    controller: AbortController
+  ): Promise<void> {
+    const viewUrl = `/api/v1/artifacts/${encodeURIComponent(data.artifact.id)}/versions/${seq}/view`;
+    const res = await apiFetch(viewUrl, { method: 'POST', signal: controller.signal });
+    if (gen !== this.generation) return;
+    if (res.status === 403 || res.status === 404) {
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: ARTIFACT_UNAVAILABLE_MESSAGE,
+        unavailable: true,
+      };
+      return;
+    }
+    if (!res.ok) {
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: await extractApiError(res, `Could not open the view (HTTP ${res.status})`),
+        artifact,
+      };
+      return;
+    }
+    const view = (await res.json()) as ViewResponse;
+    if (gen !== this.generation) return;
+    this.loadState = {
+      ...base,
+      status: 'ready',
+      artifact: {
+        ...artifact,
+        htmlView: { url: view.url, remoteImages: view.remoteImages === true },
+      },
+    };
+  }
+
+  /**
+   * An HTML entry: the untrusted view frame the artifact page renders
+   * (renderUntrustedViewFrame), under the same remote-images notice.
+   */
+  private renderArtifactHtml(info: ArtifactInfo, view: NonNullable<ArtifactInfo['htmlView']>) {
+    const owner = principalLabel(
+      info.ownerKind,
+      info.ownerRef,
+      this.artifactNames.owner,
+      this.currentUserId
+    );
+    return html`
+      ${view.remoteImages
+        ? html`<sl-alert class="notice" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Remote images are not loaded in HTML artifacts; include them in the bundle.
+          </sl-alert>`
+        : nothing}
+      ${renderUntrustedViewFrame({ url: view.url, title: info.title, owner })}
+    `;
+  }
+
+  /**
+   * Looks up the owner's and home project's display names the way the
+   * artifact page does (client/principal-names.ts): each is the viewer's
+   * own read of that principal or project, so a name the viewer may not
+   * see stays unknown (the owner shows as a short id, the project not at
+   * all).
+   */
+  private loadArtifactNames(info: ArtifactInfo, gen: number): void {
+    this.artifactNames = { owner: '', project: '' };
+    // The signed-in user is shown as "You"; no lookup is needed.
+    if (!(info.ownerKind === 'user' && info.ownerRef === this.currentUserId)) {
+      void principalName(info.ownerKind, info.ownerRef).then((owner) => {
+        if (gen === this.generation && owner) this.artifactNames = { ...this.artifactNames, owner };
+      });
+    }
+    void projectName(info.homeProject).then((project) => {
+      if (gen === this.generation && project) {
+        this.artifactNames = { ...this.artifactNames, project };
+      }
+    });
+  }
+
+  /** Footer text: entry path, owner and home project, as far as known. */
+  private artifactFooterText(info: ArtifactInfo): string {
+    const parts = [info.entry];
+    if (info.ownerRef) {
+      parts.push(
+        `owner ${principalLabel(info.ownerKind, info.ownerRef, this.artifactNames.owner, this.currentUserId)}`
+      );
+    }
+    if (this.artifactNames.project) parts.push(this.artifactNames.project);
+    return parts.join(' · ');
+  }
+
+  /** Copies the artifact's reference (scion://artifact/<id>[@<seq>]). */
+  private async copyArtifactRef(target: ArtifactPreviewTarget): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(formatArtifactRef(target.id, target.seq));
+      this.copied = true;
+      this.clearCopyTimer();
+      this.copyTimer = setTimeout(() => {
+        this.copied = false;
+        this.copyTimer = null;
+      }, 1500);
+    } catch {
+      // Clipboard write may fail in insecure contexts; silently ignore.
+    }
+  }
+
   private retry(): void {
     void this.load();
   }
@@ -629,10 +968,12 @@ export class ScionChatFilePreview extends LitElement {
                 Open in Cloud Console
               </a>`
             : nothing}
-          <sl-button size="small" @click=${() => this.retry()}>
-            <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
-            Retry
-          </sl-button>
+          ${state.unavailable
+            ? nothing
+            : html`<sl-button size="small" @click=${() => this.retry()}>
+                <sl-icon slot="prefix" name="arrow-clockwise"></sl-icon>
+                Retry
+              </sl-button>`}
         </div>
       `;
     }
@@ -656,10 +997,23 @@ export class ScionChatFilePreview extends LitElement {
         .content=${state.content ?? ''}
       ></scion-markdown-preview>`;
     }
+    if (state.artifact?.htmlView) {
+      return this.renderArtifactHtml(state.artifact, state.artifact.htmlView);
+    }
+    const md = state.artifact?.markdown;
+    if (md) {
+      return html`<scion-artifact-markdown-frame
+        .content=${state.content ?? ''}
+        .artifactId=${md.id}
+        .seq=${md.seq}
+        .entryPath=${state.artifact?.entry ?? ''}
+        .files=${md.files}
+      ></scion-artifact-markdown-frame>`;
+    }
     return html`
       <scion-code-editor
         .content=${state.content ?? ''}
-        language=${getLanguageFromPath(target.name)}
+        language=${getLanguageFromPath(state.artifact?.entry ?? target.name)}
         readonly
       ></scion-code-editor>
     `;
@@ -677,6 +1031,7 @@ export class ScionChatFilePreview extends LitElement {
     // here is not also crashing the *rest* of this render over the Download
     // button's href — sl-dialog's own header close button and the error
     // placeholder's Retry stay available either way.
+    if (target.kind === 'artifact') return this.renderArtifactDialog(target);
     let downloadUrl: string | null;
     try {
       downloadUrl = downloadUrlFor(target);
@@ -734,61 +1089,134 @@ export class ScionChatFilePreview extends LitElement {
     `;
   }
 
-  static override styles = css`
-    :host {
-      display: contents;
-    }
-    /* One dialog serves both a path preview (code/markdown panel) and an
+  /**
+   * The artifact dialog: same body renderers, titled with the artifact's own
+   * title and version once loaded, and a footer of the entry path, Copy
+   * link and Open in artifact viewer (Close instead when unavailable).
+   */
+  private renderArtifactDialog(target: ArtifactPreviewTarget) {
+    const state = this.loadState;
+    const info = state.artifact;
+    const label = state.unavailable ? 'Artifact unavailable' : (info?.title ?? target.name);
+    const secondary = info && !state.unavailable ? this.artifactFooterText(info) : '';
+    return html`
+      <sl-dialog
+        class="file-preview-dialog"
+        open
+        label=${label}
+        @sl-after-hide=${(e: Event) => {
+          if (e.target === e.currentTarget) this.close();
+        }}
+      >
+        <span slot="label" class="artifact-label">
+          ${label}
+          ${info && !state.unavailable
+            ? html`<span class="version-badge"
+                >v${info.version}${info.current ? ' · current' : ''}</span
+              >`
+            : nothing}
+        </span>
+        ${this.renderBody()}
+        <div slot="footer" class="footer">
+          <span class="path" title=${secondary}>${secondary}</span>
+          <sl-button size="small" @click=${() => this.copyArtifactRef(target)}>
+            <sl-icon slot="prefix" name=${this.copied ? 'check2' : 'clipboard'}></sl-icon>
+            ${this.copied ? 'Copied!' : 'Copy link'}
+          </sl-button>
+          ${state.unavailable
+            ? html`<sl-button size="small" @click=${() => this.close()}>Close</sl-button>`
+            : nothing}
+          ${info && !state.unavailable
+            ? html`
+                <sl-button size="small" variant="primary" href=${info.pageUrl}>
+                  <sl-icon slot="prefix" name="box-arrow-up-right"></sl-icon>
+                  Open in artifact viewer
+                </sl-button>
+              `
+            : nothing}
+        </div>
+      </sl-dialog>
+    `;
+  }
+
+  static override styles = [
+    untrustedViewFrameStyles,
+    css`
+      :host {
+        display: contents;
+      }
+      /* One dialog serves both a path preview (code/markdown panel) and an
      * attachment preview (full-height image), so its width policy must be
      * generous enough for either content type. */
-    .file-preview-dialog::part(panel) {
-      width: min(90vw, 900px);
-      /* The app frame's height, not the viewport's: it shrinks with the
+      .file-preview-dialog::part(panel) {
+        width: min(90vw, 900px);
+        /* The app frame's height, not the viewport's: it shrinks with the
          iOS keyboard and the browser toolbar (see client/viewport.ts). */
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
-    }
-    .file-preview-dialog::part(body) {
-      padding: 0;
-      overflow: auto;
-    }
-    .file-preview-placeholder {
-      padding: 2rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .file-preview-placeholder.error {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-    .console-fallback-link {
-      color: var(--sl-color-primary-600, #2563eb);
-      font-size: var(--chat-fs-base, 0.875rem);
-    }
-    .file-preview-image {
-      display: block;
-      margin: 0 auto;
-      max-width: 100%;
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
-      object-fit: contain;
-    }
-    .footer {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      width: 100%;
-    }
-    .footer .path {
-      flex: 1;
-      font-size: var(--chat-fs-base, 0.875rem);
-      color: var(--scion-text-muted, #64748b);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  `;
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
+      }
+      .file-preview-dialog::part(body) {
+        padding: 0;
+        overflow: auto;
+      }
+      .file-preview-placeholder {
+        padding: 2rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .file-preview-placeholder.error {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+      .console-fallback-link {
+        color: var(--sl-color-primary-600, #2563eb);
+        font-size: var(--chat-fs-base, 0.875rem);
+      }
+      .file-preview-image {
+        display: block;
+        margin: 0 auto;
+        max-width: 100%;
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
+        object-fit: contain;
+      }
+      .notice {
+        margin: 0.5rem;
+      }
+      .untrusted {
+        --untrusted-frame-height: calc(var(--scion-app-height, 100dvh) * 0.65);
+      }
+      .artifact-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .version-badge {
+        font-size: 0.6875rem;
+        font-weight: 500;
+        padding: 0.0625rem 0.5rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #475569);
+      }
+      .footer {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        width: 100%;
+      }
+      .footer .path {
+        flex: 1;
+        font-size: var(--chat-fs-base, 0.875rem);
+        color: var(--scion-text-muted, #64748b);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    `,
+  ];
 }
 
 declare global {

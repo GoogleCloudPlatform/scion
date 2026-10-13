@@ -29,8 +29,6 @@
  * the other account's entries (F2).
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
 import { html, render } from 'lit';
 import { apiFetch } from '../../../client/api.js';

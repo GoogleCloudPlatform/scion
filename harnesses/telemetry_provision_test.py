@@ -30,6 +30,8 @@ class TelemetryProvisionTest(unittest.TestCase):
                 ctx = module.scion_harness.ProvisionContext(harness, {
                     'harness_bundle_dir': str(bundle),
                     'harness_config': {'no_auth': {'behavior': 'allow'}},
+                    # Never fall back to the real /workspace (ptone/scion#2993).
+                    'agent_workspace': str(home / 'workspace'),
                 })
                 telemetry = {'enabled': enabled}
                 if provider is not None or cloud_endpoint is not None or cloud_headers is not None or cloud_ca_file is not None:

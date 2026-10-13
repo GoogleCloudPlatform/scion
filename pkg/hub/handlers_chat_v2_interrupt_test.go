@@ -252,11 +252,16 @@ func TestChatV2Interrupt_LeadingMentionPrimary(t *testing.T) {
 
 // Human-to-human DM: interrupt is accepted and ignored — nothing is dispatched.
 func TestChatV2Interrupt_HumanDMIgnored(t *testing.T) {
-	srv, _, _, _, _ := setupSendTest(t)
+	srv, s, _, _, _ := setupSendTest(t)
 	dispatcher := &brokerMockDispatcher{}
 	srv.SetDispatcher(dispatcher)
 
-	key := "dm:user:" + DevUserID + ":user:" + tid("interrupt-peer")
+	peer := &store.User{ID: tid("interrupt-peer"), Email: "interrupt-peer@example.com", DisplayName: "Peer",
+		Role: store.UserRoleMember, Status: store.UserStatusActive, Created: time.Now()}
+	if err := s.CreateUser(t.Context(), peer); err != nil {
+		t.Fatal(err)
+	}
+	key := userDMKey(t, DevUserID, peer.ID)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+key+"/messages",
 		map[string]interface{}{"content": "hi there", "interrupt": true})
 	if rec.Code != http.StatusCreated {
@@ -492,5 +497,44 @@ func TestChatV2Interrupt_StartingPrimaryBuffered(t *testing.T) {
 	}
 	if stored.DispatchState != store.MessageDispatchDispatched {
 		t.Errorf("stored dispatchState = %q, want %q", stored.DispatchState, store.MessageDispatchDispatched)
+	}
+}
+
+// An agent that is running but still initializing receives the message as an
+// ordinary buffered dispatch (the broker waits for harness readiness); an old
+// image reporting working at once keeps the interrupt.
+func TestChatV2Interrupt_InitializingPrimaryBuffered(t *testing.T) {
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			srv, s, _, proj, _ := setupSendTest(t)
+			dispatcher := &brokerMockDispatcher{}
+			srv.SetDispatcher(dispatcher)
+
+			agent := interruptTestAgent(t, s, proj.ID, "int-init-"+tc.activity, "running")
+			if err := s.UpdateAgentStatus(t.Context(), agent.ID, store.AgentStatusUpdate{Activity: tc.activity}); err != nil {
+				t.Fatal(err)
+			}
+			dmKey := "dm:agent:" + agent.ID + ":user:" + DevUserID
+			setDMConversationID(t, s, dmKey, proj.ID)
+
+			rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages",
+				map[string]interface{}{"content": "stop", "interrupt": true})
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("expected 201, got %d: %s", rec.Code, rec.Body.String())
+			}
+			dispatched := dispatcher.getMessages()
+			if len(dispatched) != 1 {
+				t.Fatalf("expected 1 dispatch (message delivered), got %d", len(dispatched))
+			}
+			if dispatched[0].interrupt != tc.wantInterrupt {
+				t.Errorf("interrupt = %v, want %v", dispatched[0].interrupt, tc.wantInterrupt)
+			}
+		})
 	}
 }

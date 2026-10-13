@@ -36,24 +36,6 @@ import (
 // rows, with a strict cross-project denial for agents and an unchanged
 // participant-based fallback for legacy projectless groups.
 
-// grantUserProjectAccess grants a human user project-member access,
-// mirroring grantAgentProjectAccess for the "user" principal kind.
-func grantUserProjectAccess(t *testing.T, s store.Store, userID, projectID string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err, "project-member role definition not found")
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    "user",
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-}
-
 // enableCrossProjectMessagingForTest turns the Hub cross-project messaging
 // switch on, the same way TestCrossProjectConversationReadGate does.
 func enableCrossProjectMessagingForTest(t *testing.T, srv *Server) {

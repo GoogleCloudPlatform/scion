@@ -35,25 +35,6 @@ import (
 // the two and hid the "Create Project" button from every user who did not
 // already have a project — the one state in which they most need it.
 
-// seedHubMemberNoProjects creates an active member user and puts them in the
-// hub-members group, exactly as a newly signed-in user would be. It
-// deliberately creates no project.
-func seedHubMemberNoProjects(t *testing.T, s store.Store, name string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          tid(name + "-user"),
-		Email:       name + "@test.com",
-		DisplayName: name,
-		Role:        store.UserRoleMember,
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-	return user
-}
-
 func TestListProjects_ScopeCapabilitiesPresentWhenCallerHasNoProjects(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

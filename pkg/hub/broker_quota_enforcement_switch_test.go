@@ -33,17 +33,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setProjectAgentCeiling overrides the seeded max_agents_per_project limit
-// (default 0 = unlimited, see seed.go) to a small value so tests can hit it.
-func setProjectAgentCeiling(t *testing.T, s store.Store, value int64) {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerProject)
-	require.NoError(t, err, "max_agents_per_project must be seeded by New()/seedLimitDefinitions")
-	def.DefaultValue = value
-	_, err = s.UpdateLimitDefinition(context.Background(), def)
-	require.NoError(t, err)
-}
-
 // Regression test for review finding F1 (ptone/scion#2270 round 1):
 // brokerQuotasEnforced() must read s.config.EnforceBrokerQuotas under
 // s.mu.RLock(), matching the s.mu.Lock() ApplySnapshot writes it under. Run

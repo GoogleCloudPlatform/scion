@@ -39,6 +39,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/auth/refresh":                           "public:auth",
 	"/api/v1/auth/validate":                          "public:auth",
 	"/api/v1/experiments":                            "authenticated:experiments",
+	"/api/v1/profiling":                              "authenticated:profiling",
 	"/api/v1/auth/admin-status":                      "authenticated:user",
 	"/api/v1/auth/logout":                            "authenticated:user",
 	"/api/v1/auth/me":                                "authenticated:user",
@@ -55,6 +56,8 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/conversations":                          "authenticated:conversation",
 	"/api/v1/conversations/":                         "authenticated:conversation",
 	"/api/v1/conversations/resolve":                  "authenticated:conversation",
+	"/api/v1/thread-groups":                          "authenticated:thread-group",
+	"/api/v1/thread-groups/":                         "authenticated:thread-group",
 	"/api/v1/agents":                                 "policy:agent",
 	"/api/v1/agents/":                                "policy:agent",
 	"/api/v1/projects":                               "policy:project",
@@ -101,6 +104,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/users/me/templates":                     "authenticated:user-templates",
 	"/api/v1/users/me/templates/":                    "authenticated:user-templates",
 	"/api/v1/users/me/terminal-workspace":            "authenticated:user-terminal-workspace",
+	"/api/v1/users/me/delegations":                   "authenticated:agent-delegations",
 	"/api/v1/hub/settings/injected-skills":           "authenticated:injected-skills",
 	"/api/v1/brokers":                                "broker-hmac:registration",
 	"/api/v1/brokers/join":                           "broker-hmac:registration",
@@ -144,6 +148,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/admin/health/summary":                   "hub-admin:health",
 	"/api/v1/admin/messaging":                        "hub-admin:messaging",
 	"/api/v1/admin/experiments":                      "hub-admin:experiments",
+	"/api/v1/admin/profiling":                        "hub-admin:profiling",
 	"/api/v1/admin/messaging/divergence":             "hub-admin:diagnostics",
 	"/api/v1/metrics/":                               "hub-admin:metrics-dashboard",
 	"/api/v1/admin/metrics-dashboard":                "hub-admin:metrics-dashboard",
@@ -158,6 +163,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/chat/conversations/":                    "policy:chat",
 	"/api/v1/chat/topics/":                           "policy:chat",
 	"/api/v1/chat/dms":                               "policy:chat",
+	"/api/v1/chat/unread-count":                      "policy:chat",
 	"/api/v1/chat/user-prefs":                        "authenticated:chat-prefs",
 	"/api/v1/chat/presence":                          "authenticated:chat-presence",
 	"/api/v1/chat/search":                            "policy:chat",
@@ -167,6 +173,7 @@ var routePermissionClassifications = map[string]string{
 	"/api/v1/agent/gcp-token":                        "agent-token:gcp-token",
 	"/api/v1/agent/gcp-identity-token":               "agent-token:gcp-token",
 	"/api/v1/settings/public":                        "public:settings",
+	"GET /api/v1/test-infra/status":                  "public:test-infra",
 	"GET /api/v1/github-app":                         "hub-admin:github-app",
 	"PUT /api/v1/github-app":                         "hub-admin:github-app",
 	"GET /api/v1/github-app/installations":           "hub-admin:github-app",
@@ -176,6 +183,15 @@ var routePermissionClassifications = map[string]string{
 	"DELETE /api/v1/github-app/installations/":       "hub-admin:github-app",
 	"POST /api/v1/github-app/installations/discover": "hub-admin:github-app",
 	"POST /api/v1/github-app/sync-permissions":       "hub-admin:github-app",
+	"POST /api/v1/test-identities":                   "hub-admin:test-identity",
+	"GET /api/v1/test-identities":                    "hub-admin:test-identity",
+	"POST /api/v1/test-identities/{id}/token":        "hub-admin:test-identity",
+	"DELETE /api/v1/test-identities/{id}":            "hub-admin:test-identity",
+	"POST /api/v1/test-identities/admin":             "hub-admin:test-identity",
+	"POST /api/v1/test-identities/admin/revoke-all":  "hub-admin:test-identity",
+	"POST /api/v1/test-identity-delegations":         "hub-admin:test-identity",
+	"GET /api/v1/test-identity-delegations":          "hub-admin:test-identity",
+	"DELETE /api/v1/test-identity-delegations/{id}":  "hub-admin:test-identity",
 	"/api/v1/telegram/link":                          "authenticated:account-link",
 	"/api/v1/telegram/link/verify":                   "authenticated:account-link",
 	"/api/v1/telegram/link/status":                   "authenticated:account-link",
@@ -237,6 +253,9 @@ var routePermissionClassifications = map[string]string{
 	// Role import/export
 	"/api/v1/admin/roles/export": "hub-admin:role",
 	"/api/v1/admin/roles/import": "hub-admin:role",
+
+	// Test identity web-login codes (ptone/scion#4240, WS1)
+	"POST /api/v1/test-identities/{id}/web-login-code": "hub-admin:test-identity",
 }
 
 func TestConstraintAuditRoutePermissionClassification(t *testing.T) {
@@ -396,24 +415,31 @@ func TestRouteGuardsDenyUnauthorized(t *testing.T) {
 			identity:       nil,
 			wantStatus:     http.StatusUnauthorized,
 		},
-		// RouteHubAdmin: non-admin user → 403
-		// Uses a route without Permission (requireAdmin fallback) so this test
-		// works without an authzService. Permission-based routes are tested in
-		// TestRouteGuardOpsPermissions with a full server.
+		// RouteHubAdmin: every hub-admin route declares a Permission, and this
+		// server has no authorization service, so the guard refuses with 500
+		// for every caller. Non-admin (403) and unauthenticated (401) denials
+		// through Decide are tested with a full server in
+		// TestRouteGuardPermissionBasedPath and TestRouteGuardOpsPermissions.
 		{
-			name:           "hub-admin route denies non-admin",
+			name:           "hub-admin route refuses non-admin without authz service",
 			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       NewAuthenticatedUser("user-1", "user@example.com", "User", "member", "api"),
-			wantStatus:     http.StatusForbidden,
+			wantStatus:     http.StatusInternalServerError,
 		},
-		// RouteHubAdmin: no identity → 401
 		{
-			name:           "hub-admin route denies unauthenticated",
+			name:           "hub-admin route refuses admin without authz service",
+			route:          "/api/v1/admin/allow-list",
+			classification: RouteHubAdmin,
+			identity:       NewAuthenticatedUser("admin-1", "admin@example.com", "Admin", "admin", "api"),
+			wantStatus:     http.StatusInternalServerError,
+		},
+		{
+			name:           "hub-admin route refuses unauthenticated without authz service",
 			route:          "/api/v1/admin/allow-list",
 			classification: RouteHubAdmin,
 			identity:       nil,
-			wantStatus:     http.StatusUnauthorized,
+			wantStatus:     http.StatusInternalServerError,
 		},
 		// RouteAgentToken: no identity → 401
 		{
@@ -461,6 +487,11 @@ func allHubAdminRoutes() []string {
 
 func TestHubAdminRoutesRejectScopedAdminUAT(t *testing.T) {
 	srv := &Server{config: DefaultServerConfig(), mux: http.NewServeMux(), authzService: NewAuthzService(nil, nil)}
+	// The test identity routes answer 404 before their guard while the
+	// feature is off; turn it on so this checks the guard itself.
+	srv.testIdentities.enabled = true
+	// Likewise the admin-kind test identity routes and the test admin gate.
+	srv.testAdminGate = testAdminGate{hubAdmin: true}
 	srv.registerRoutes()
 
 	admin := NewAuthenticatedUser("admin-uat", "admin-uat@example.com", "Admin UAT", "admin", "api")

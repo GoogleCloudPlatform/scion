@@ -23,7 +23,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import AxeBuilder from '@axe-core/playwright';
+import { AxeBuilder } from '@axe-core/playwright';
 import { getE2EEnv } from './harness/env.js';
 
 test.describe('Smoke test', () => {
@@ -68,25 +68,16 @@ test.describe('Smoke test', () => {
 
     // Fail on serious or critical violations
     const serious = results.violations.filter(
-      (v) => v.impact === 'serious' || v.impact === 'critical',
+      (v) => v.impact === 'serious' || v.impact === 'critical'
     );
 
     if (serious.length > 0) {
       const summary = serious
-        .map(
-          (v) =>
-            `[${v.impact}] ${v.id}: ${v.description} (${v.nodes.length} instance(s))`,
-        )
+        .map((v) => `[${v.impact}] ${v.id}: ${v.description} (${v.nodes.length} instance(s))`)
         .join('\n');
       // Log all violations for debugging
-      console.log(
-        'All axe violations:',
-        JSON.stringify(results.violations, null, 2),
-      );
-      expect(
-        serious,
-        `Accessibility violations found:\n${summary}`,
-      ).toHaveLength(0);
+      console.log('All axe violations:', JSON.stringify(results.violations, null, 2));
+      expect(serious, `Accessibility violations found:\n${summary}`).toHaveLength(0);
     }
   });
 });

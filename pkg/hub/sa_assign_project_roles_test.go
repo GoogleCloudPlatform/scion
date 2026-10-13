@@ -371,18 +371,6 @@ func TestSAAssign2147_SeedReconciliation_ExistingHubGetsAssignPermission(t *test
 	}
 }
 
-// builtInRoleRevision returns the declared revision of a built-in project role.
-func builtInRoleRevision(t *testing.T, name string) int {
-	t.Helper()
-	for _, role := range BuiltInRoles() {
-		if role.Name == name && role.ScopeType == store.RoleScopeProject {
-			return role.Revision
-		}
-	}
-	t.Fatalf("no built-in project role %q", name)
-	return 0
-}
-
 // ---------------------------------------------------------------------------
 // Project-default HTTP path, end to end, for a service account the caller
 // did not register. Companion to TestProjectDefaultGate_CreatorWith(out)ActAsSucceeds

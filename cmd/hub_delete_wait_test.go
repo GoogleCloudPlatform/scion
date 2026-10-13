@@ -537,6 +537,9 @@ func TestDeleteAgentsViaHub_202GenericFailedView(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "delete failed on the Hub; local worktree kept")
 	assert.Contains(t, err.Error(), "scion delete bad-agent")
+	// ptone/scion#3556: same force hint as the coded failures.
+	assert.Contains(t, err.Error(), "or force it with 'scion delete --force bad-agent'")
+	assert.NotContains(t, err.Error(), "web UI")
 	assert.Contains(t, err.Error(), "Starting the agent may stay blocked until a retry succeeds or force is used")
 	assert.NotContains(t, err.Error(), "unknown")
 	assert.NotContains(t, err.Error(), "()")

@@ -34,6 +34,8 @@ type Template struct {
 	Image string `json:"image,omitempty"`
 	// Config holds the value of the "config" field.
 	Config string `json:"config,omitempty"`
+	// AgentConfig holds the value of the "agent_config" field.
+	AgentConfig string `json:"agent_config,omitempty"`
 	// ContentHash holds the value of the "content_hash" field.
 	ContentHash string `json:"content_hash,omitempty"`
 	// Scope holds the value of the "scope" field.
@@ -48,6 +50,8 @@ type Template struct {
 	StorageBucket string `json:"storage_bucket,omitempty"`
 	// StoragePath holds the value of the "storage_path" field.
 	StoragePath string `json:"storage_path,omitempty"`
+	// Layout holds the value of the "layout" field.
+	Layout string `json:"layout,omitempty"`
 	// Files holds the value of the "files" field.
 	Files string `json:"files,omitempty"`
 	// BaseTemplate holds the value of the "base_template" field.
@@ -74,7 +78,7 @@ func (*Template) scanValues(columns []string) ([]any, error) {
 	values := make([]any, len(columns))
 	for i := range columns {
 		switch columns[i] {
-		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL:
+		case template.FieldName, template.FieldSlug, template.FieldDisplayName, template.FieldDescription, template.FieldHarness, template.FieldDefaultHarnessConfig, template.FieldImage, template.FieldConfig, template.FieldAgentConfig, template.FieldContentHash, template.FieldScope, template.FieldScopeID, template.FieldProjectID, template.FieldStorageURI, template.FieldStorageBucket, template.FieldStoragePath, template.FieldLayout, template.FieldFiles, template.FieldBaseTemplate, template.FieldStatus, template.FieldOwnerID, template.FieldCreatedBy, template.FieldUpdatedBy, template.FieldSourceURL:
 			values[i] = new(sql.NullString)
 		case template.FieldCreated, template.FieldUpdated:
 			values[i] = new(sql.NullTime)
@@ -149,6 +153,12 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 			} else if value.Valid {
 				_m.Config = value.String
 			}
+		case template.FieldAgentConfig:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field agent_config", values[i])
+			} else if value.Valid {
+				_m.AgentConfig = value.String
+			}
 		case template.FieldContentHash:
 			if value, ok := values[i].(*sql.NullString); !ok {
 				return fmt.Errorf("unexpected type %T for field content_hash", values[i])
@@ -190,6 +200,12 @@ func (_m *Template) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field storage_path", values[i])
 			} else if value.Valid {
 				_m.StoragePath = value.String
+			}
+		case template.FieldLayout:
+			if value, ok := values[i].(*sql.NullString); !ok {
+				return fmt.Errorf("unexpected type %T for field layout", values[i])
+			} else if value.Valid {
+				_m.Layout = value.String
 			}
 		case template.FieldFiles:
 			if value, ok := values[i].(*sql.NullString); !ok {
@@ -305,6 +321,9 @@ func (_m *Template) String() string {
 	builder.WriteString("config=")
 	builder.WriteString(_m.Config)
 	builder.WriteString(", ")
+	builder.WriteString("agent_config=")
+	builder.WriteString(_m.AgentConfig)
+	builder.WriteString(", ")
 	builder.WriteString("content_hash=")
 	builder.WriteString(_m.ContentHash)
 	builder.WriteString(", ")
@@ -325,6 +344,9 @@ func (_m *Template) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("storage_path=")
 	builder.WriteString(_m.StoragePath)
+	builder.WriteString(", ")
+	builder.WriteString("layout=")
+	builder.WriteString(_m.Layout)
 	builder.WriteString(", ")
 	builder.WriteString("files=")
 	builder.WriteString(_m.Files)

@@ -71,6 +71,9 @@ const (
 	// provisionReasonDevAuthNotSupported refuses provisioning on a hub in
 	// dev-auth mode, and for the dev credential and dev user (row 4a).
 	provisionReasonDevAuthNotSupported = "dev_auth_not_supported"
+	// provisionReasonReservedTestIdentity refuses an email in the reserved
+	// test-identity domain.
+	provisionReasonReservedTestIdentity = "reserved_test_identity_domain"
 )
 
 // Advisory warnings (design §5.3). They never fail the request.
@@ -247,6 +250,14 @@ func decodeProvisionRequest(r *http.Request) (PendingUserSpec, *provisionRequest
 	note, notePresent, rerr := decodeProvisionString(fields, "note")
 	if rerr != nil {
 		return PendingUserSpec{}, rerr
+	}
+
+	// The reserved test-identity domain is created only by the issuance
+	// endpoint.
+	if isReservedTestIdentityEmail(rawEmail) {
+		return PendingUserSpec{}, &provisionRequestError{status: http.StatusUnprocessableEntity, code: ErrCodeUnprocessable,
+			message: "the email domain is reserved for hub-issued test identities",
+			details: map[string]interface{}{"field": "email", "reason": provisionReasonReservedTestIdentity}}
 	}
 
 	// Row 10: the shared invite email rule; same code and message as

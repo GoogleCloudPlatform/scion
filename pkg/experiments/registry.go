@@ -121,15 +121,93 @@ func (e Experiment) ReviewOverdue(now time.Time) bool {
 // which uses an NFS home only when it is on.
 const K8sNFSHome = "hub.k8s_nfs_home"
 
+// FlatRuntimeBrokers gates flat (single-target) Runtime Brokers: the hub
+// accepts single-target Runtime Broker registrations, pins new agents to
+// that target and refuses mismatched dispatches
+// (.design/flat-runtime-brokers-contract.md). It is enforced in hub server
+// code; Runtime Brokers do not need it (their flat behaviour comes from
+// their own configuration).
+const FlatRuntimeBrokers = "hub.flat_runtime_brokers"
+
 // Artifacts gates the artifact service (pkg/artifacts): the hub's
 // /api/v1/artifacts routes answer 404 while it is off, and the web UI hides
 // every artifact surface.
 const Artifacts = "hub.artifacts"
 
+// ChatScheduledSend gates scheduled send in native web chat: the Schedule
+// send menu item and pending-message banners in the web UI, the hub's
+// /api/v1/chat/conversations/{key}/scheduled routes (404 while off), and
+// the delivery sweeper, which holds pending messages while it is off.
+const ChatScheduledSend = "web.chat_scheduled_send"
+
+// AuthorizationDecisionAuditV2 gates decision logging (remaining-audit P1).
+// It is the only activation control and stays default-off; turning it on
+// needs explicit owner approval.
+const AuthorizationDecisionAuditV2 = "hub.authorization_decision_audit_v2"
+
+// AgentEdit gates the web Edit agent page (/agents/{id}/edit) and the Edit
+// button on the agent page. It is web-only for now: the hub's config PATCH
+// accepts edits of agents with no container whether or not it is on.
+const AgentEdit = "web.agent_edit"
+
+// AgentDelegation gates agent delegation (.design/agent-delegation.md §10):
+// the grant issuance and credential exchange routes, the delegated
+// credential middleware arm, and the delegated decision procedure. While it
+// is off, issuance and exchange answer 404 and every delegated credential is
+// refused. Turning it off suspends stored grants; it does not revoke them.
+const AgentDelegation = "hub.agent_delegation"
+
+// FederationProjectVisitors gates project access for users of trusted
+// external issuers (ptone/scion#4603). While it is off, a verified
+// federated user token always yields the same federated user identity as
+// before; while it is on, a token whose (issuer, subject) is linked to an
+// active federated account yields that account's visitor identity.
+const FederationProjectVisitors = "federation.project_visitors"
+
+// ChatThreadGroups gates project-scoped chat thread groups
+// (ptone/scion#4424): the hub's /api/v1/thread-groups routes (404 while
+// off), the threadGroupId field on conversation create, the migration of
+// personal groups into project groups, and the web rail's project groups.
+// Turning it off hides the feature but keeps every stored group.
+const ChatThreadGroups = "hub.chat_thread_groups"
+
 // compiled is the production experiment list. It is reachable only through
 // Default(); there is no package-level Lookup/All, so hub code cannot bypass
 // the Registry instance it was given (ptone/scion#2217).
 var compiled = []Experiment{
+	{
+		Name:        FederationProjectVisitors,
+		Title:       "Project visitors from trusted issuers",
+		Description: "Lets a user of a trusted external issuer who is linked to a local federated account act as that account (a project visitor). While off, federated user tokens behave exactly as before; stored accounts are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4603",
+		Owner:       "federation",
+		ReviewBy:    "2027-01-12",
+	},
+	{
+		Name:        AgentDelegation,
+		Title:       "Agent delegation",
+		Description: "Lets a user issue an agent delegation grant and lets the bound agent exchange it for a short-lived delegated credential. While off, issuance and exchange answer 404 and delegated credentials are refused; stored grants are kept.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2131",
+		Owner:       "authz",
+		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        AuthorizationDecisionAuditV2,
+		Title:       "Authorization decision audit v2",
+		Description: "Records authorization decisions in the existing project/agent audit domain to the configured structured logger, asynchronously; losses are counted, not retried.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2379",
+		Owner:       "audit-update",
+		ReviewBy:    "2026-11-30",
+	},
 	{
 		Name:        "web.terminal_workspace",
 		Title:       "Persistent terminal workspace",
@@ -164,6 +242,17 @@ var compiled = []Experiment{
 		ReviewBy:    "2027-01-04",
 	},
 	{
+		Name:        FlatRuntimeBrokers,
+		Title:       "Flat Runtime Brokers",
+		Description: "Lets a Runtime Broker serve exactly one runtime target with a stable identity: the hub accepts single-target Runtime Broker registrations, pins new agents to that target and rejects mismatched dispatches. Existing profile-based Runtime Brokers are unchanged.",
+		Default:     false,
+		Layers:      []Layer{LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#2926",
+		Owner:       "runtime-broker",
+		ReviewBy:    "2027-03-31",
+	},
+	{
 		Name:        Artifacts,
 		Title:       "Artifacts",
 		Description: "Lets agents and users publish files and bundles with stable, versioned references, and view them in the web UI. Gates the artifact page and other web surfaces (LayerWeb) and the hub's /api/v1/artifacts routes (LayerServer), which answer 404 while it is off.",
@@ -184,6 +273,39 @@ var compiled = []Experiment{
 		Issue:       "ptone/scion#2774",
 		Owner:       "conduit",
 		ReviewBy:    "2027-03-31",
+	},
+	{
+		Name:        ChatScheduledSend,
+		Title:       "Scheduled send in chat",
+		Description: "Adds Schedule send to the chat Send button menu: the message is held by the hub and sent as the user at the chosen time; until then only the sender sees it, with a Cancel button. Gates the menu item and banners (LayerWeb), the hub's scheduled-message routes, which answer 404 while it is off, and delivery (LayerServer): while it is off, pending messages are held, neither sent nor failed. A message found due more than 60 minutes late (for example after the experiment was off) is not sent; it fails as missed and the sender can send it now.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3666",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-31",
+	},
+	{
+		Name:        AgentEdit,
+		Title:       "Edit agent",
+		Description: "Adds an Edit button on the agent page and the Edit page at /agents/{id}/edit, which edits a created, stopped, failed or suspended agent's model and limits, and shows for every field whether it applies at the next start or resume, needs a reincarnation, or is fixed.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#3952",
+		Owner:       "web",
+		ReviewBy:    "2027-01-07",
+	},
+	{
+		Name:        ChatThreadGroups,
+		Title:       "Project thread groups in chat",
+		Description: "Makes chat thread groups belong to the project, so every project member (user or agent) sees the same groups and can file threads into them; each user keeps their own sidebar order. Gates the web rail (LayerWeb) and the hub's /api/v1/thread-groups routes, which answer 404 while it is off, plus the copy of personal groups into project groups (LayerServer). Turning it off hides project groups and restores personal groups; no data is deleted.",
+		Default:     false,
+		Layers:      []Layer{LayerWeb, LayerServer},
+		Stage:       StageAlpha,
+		Issue:       "ptone/scion#4424",
+		Owner:       "native-chat",
+		ReviewBy:    "2027-01-11",
 	},
 }
 

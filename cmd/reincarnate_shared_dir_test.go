@@ -33,6 +33,10 @@ func TestParseSharedDirBackendFlags(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"notes": "nfs", "build-cache": "nfs"}, got)
 
+	got, err = parseSharedDirBackendFlags([]string{"notes=local", "build-cache=nfs"}, true)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"notes": "local", "build-cache": "nfs"}, got)
+
 	got, err = parseSharedDirBackendFlags(nil, false)
 	require.NoError(t, err)
 	assert.Nil(t, got)
@@ -43,9 +47,11 @@ func TestParseSharedDirBackendFlags(t *testing.T) {
 		want       string
 	}{
 		{nil, true, "--allow-empty-shared-dir needs --shared-dir-backend"},
-		{[]string{"notes"}, false, "want NAME=nfs"},
-		{[]string{"=nfs"}, false, "want NAME=nfs"},
-		{[]string{"notes=local"}, false, "only nfs is supported"},
+		{[]string{"notes"}, false, "want NAME=nfs or NAME=local"},
+		{[]string{"=nfs"}, false, "want NAME=nfs or NAME=local"},
+		{[]string{"notes=gcs"}, false, "the backend must be nfs or local"},
+		{[]string{"notes=NFS"}, false, "the backend must be nfs or local"},
+		{[]string{"notes=nfs", "notes=local"}, false, "more than once"},
 		{[]string{"Notes=nfs"}, false, "invalid shared dir name"},
 		{[]string{"notes=nfs", "notes=nfs"}, false, "more than once"},
 	} {
@@ -153,10 +159,15 @@ func TestReincarnateAgentViaHub_SharedDirRefusalsBeforeHub(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot change its own shared dir backend")
 
-	setSharedDirFlags(t, []string{"notes=local"}, false, true)
+	setSharedDirFlags(t, []string{"notes=local"}, false, false)
+	err = reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot change its own shared dir backend")
+
+	setSharedDirFlags(t, []string{"notes=gcs"}, false, true)
 	err = reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "only nfs is supported")
+	assert.Contains(t, err.Error(), "the backend must be nfs or local")
 
 	setSharedDirFlags(t, nil, true, true)
 	err = reincarnateAgentViaHub(hubCtx, "agent-1", "", false)
@@ -183,6 +194,31 @@ func TestReincarnateAgentViaHub_SharedDirProbeEchoed(t *testing.T) {
 	_, dry := (*bodies)[1]["dryRun"]
 	assert.False(t, dry, "the second request is the real one")
 	assert.Equal(t, map[string]interface{}{"notes": "nfs"}, (*bodies)[1]["sharedDirBackends"])
+}
+
+// A change back to local goes through the same probe and real request.
+func TestReincarnateAgentViaHub_SharedDirToLocalProbeEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, nil)
+	setSharedDirFlags(t, []string{"notes=local"}, true, false)
+	require.NoError(t, reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false))
+	require.Len(t, *bodies, 2, "probe, then the real request")
+	assert.Equal(t, true, (*bodies)[0]["dryRun"])
+	for _, body := range *bodies {
+		assert.Equal(t, map[string]interface{}{"notes": "local"}, body["sharedDirBackends"])
+		assert.Equal(t, true, body["allowEmptySharedDir"])
+	}
+}
+
+// A hub that does not echo a change back to local (one that only knows
+// nfs answers 400; one that predates the field omits it) stops the CLI
+// after the probe.
+func TestReincarnateAgentViaHub_SharedDirToLocalProbeNotEchoed(t *testing.T) {
+	hubCtx, bodies := sharedDirTestHub(t, oldHubPlan)
+	setSharedDirFlags(t, []string{"notes=local"}, false, false)
+	err := reincarnateAgentViaHub(hubCtx, "agent-1", "handoff", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "does not support --shared-dir-backend")
+	require.Len(t, *bodies, 1, "only the dry-run probe reaches the hub")
 }
 
 // A hub that does not echo the change stops the CLI after the probe, so no

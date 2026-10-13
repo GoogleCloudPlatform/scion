@@ -246,14 +246,16 @@ CLOUD SQL
 
   per replica, when database.driver is postgres. Its terms:
 
-    - The Postgres event publisher's pool (pkg/hub/events_postgres.go:169) and
-      the Postgres command bus's pool (pkg/hub/command_bus.go:113). Both call
+    - The Postgres event publisher's pool (NewPostgresEventPublisher,
+      pkg/hub/events_postgres.go) and the Postgres command bus's pool
+      (NewPostgresCommandBus, pkg/hub/command_bus.go). Both call
       pgxpool.ParseConfig on this same DSN and neither overrides MaxConns -
       applyEventPoolKeepalives sets only idle time and lifetime - and the DSN
       the chart renders carries no pool_max_conns. So each defaults to
-      max(4, runtime.NumCPU()) (pgx v5.9.2, pgxpool/pool.go:383).
+      max(4, runtime.NumCPU()) (pgx v5.9.2, defaultMaxConns, pgxpool/pool.go).
     - One dedicated LISTEN connection each, outside those pools, held open for
-      the process lifetime (events_postgres.go:486, command_bus.go:259). These
+      the process lifetime (PostgresEventPublisher.runListener and
+      PostgresCommandBus.runListener). These
       two are not a maximum; they are always open.
 
   NumCPU IS THE NODE'S CPU COUNT, NOT YOUR CPU LIMIT. The hub does not set
@@ -267,7 +269,7 @@ CLOUD SQL
   precisely the thing we did not measure.
 
   database.maxOpenConns must be at least 2. The hub treats a value of 1 or less
-  as unset (pkg/config/hub_config.go:573) because a single-connection pool
+  as unset (applyDatabasePoolDefaults, pkg/config/hub_config.go) because a single-connection pool
   self-deadlocks the moment one query waits on another, so a 1 you set to save
   connections would silently become the hub's own default instead of failing.
   The schema rejects it up front rather than letting that substitution happen.
@@ -326,9 +328,9 @@ THE IMAGE
 
   The chart sets runAsNonRoot on the pod and on the hub container and offers no
   way to turn it off, so a root image fails admission with a clear message
-  instead of running. That refusal applies now; the consequence it spares you -
-  root-owned files in a workspace share that agents cannot write - arrives with
-  the Filestore phase, which this release does not include.
+  instead of running. The consequence it spares you - root-owned files in a
+  workspace share that agents cannot write - applies once workspaceStorage.nfs
+  mounts the share{{ if (include "scion-hub.nfsWorkspace" .) }}, which this release does{{ else }}, which this release does not{{ end }}.
 {{ if not .Values.image.digest }}
   Pin the image by digest (image.digest) rather than by tag. A tag can be
   repointed underneath a running cluster; a digest cannot. This release uses a
@@ -386,7 +388,7 @@ CONFIGURATION
   Configuration is a file and not environment variables, and that is not a style
   choice. A SCION_SERVER_ name binds only if every underscore-separated segment
   is a plain lowercase word or is listed in camelCaseFields
-  (pkg/config/hub_config.go:919), so SCION_SERVER_DATABASE_URL binds and
+  (pkg/config/hub_config.go), so SCION_SERVER_DATABASE_URL binds and
   SCION_SERVER_DATABASE_MAX_OPEN_CONNS is discarded with no error - and the
   discarded one is still listed to the admin server-config view as an active
   override, so it is reported as applied. The ones that DO bind are worse: they
@@ -503,9 +505,18 @@ WHAT THIS RELEASE DOES NOT YET DO
 
   The chart is being built incrementally. It renders the hub's settings.yaml and
   it wires Cloud SQL and the database URL, but it does not yet configure GCS
-  credentials beyond the bucket name, Filestore, Ingress or the IAP-enforcing
-  load balancer. The hub's own IAP and transport settings are rendered. Do not
+  credentials beyond the bucket name, Ingress or the IAP-enforcing load
+  balancer. The hub's own IAP and transport settings are rendered. Do not
   treat this as a production install.
+{{- if (include "scion-hub.nfsWorkspace" .) }}
+
+  workspaceStorage.nfs is enabled. The hub pod mounts the NFS export at
+    {{ (include "scion-hub.nfsWorkspace" . | fromYaml).mountPath }}
+  and settings.yaml carries server.workspace_storage. The chart does not create
+  the Filestore instance, set the export's ownership, or create the
+  PersistentVolumeClaim agent pods mount the share through:
+    {{ (include "scion-hub.nfsWorkspace" . | fromYaml).pvName }}
+{{- end }}
 
   The Cloud SQL wiring is RENDERED BUT UNRUN. No part of it has been applied to
   a cluster or dialled at a real instance: the deploying principal is refused by

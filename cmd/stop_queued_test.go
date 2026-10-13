@@ -113,13 +113,13 @@ func TestStopAllViaHub_StopWithRmCleansUpLocalFiles(t *testing.T) {
 
 func TestStopRmCleanupWarning(t *testing.T) {
 	w := stopRmCleanupWarning("alpha", errors.New("boom"))
-	assert.Equal(t, "removed via Hub but local cleanup failed: boom; run 'scion --no-hub delete --preserve-branch alpha' to retry", w,
+	assert.Equal(t, "removed via Hub but local cleanup failed: boom; run 'scion delete --cleanup-only --preserve-branch alpha' to retry", w,
 		"stop --rm keeps the branch, so the retry hint must too")
 }
 
-func TestNoHubDeleteCommand(t *testing.T) {
-	assert.Equal(t, "scion --no-hub delete --preserve-branch alpha", noHubDeleteCommand("alpha", true))
-	assert.Equal(t, "scion --no-hub delete alpha", noHubDeleteCommand("alpha", false))
+func TestCleanupOnlyCommand(t *testing.T) {
+	assert.Equal(t, "scion delete --cleanup-only --preserve-branch alpha", cleanupOnlyCommand("alpha", true))
+	assert.Equal(t, "scion delete --cleanup-only alpha", cleanupOnlyCommand("alpha", false))
 }
 
 // ptone/scion#2896: when the Hub confirms a stop --rm removal but local
@@ -130,7 +130,7 @@ func TestStopViaHub_RmLocalCleanupFailureWarns(t *testing.T) {
 		t.Skip("root ignores directory permissions")
 	}
 	const wantHint = "local cleanup failed"
-	const wantRetry = "scion --no-hub delete --preserve-branch alpha"
+	const wantRetry = "scion delete --cleanup-only --preserve-branch alpha"
 	for _, tc := range []struct {
 		name string
 		all  bool
@@ -180,7 +180,7 @@ func TestStopViaHub_RmLocalCleanupFailureWarns(t *testing.T) {
 			var warnings []interface{}
 			if tc.all {
 				var out jsonResultBody
-				require.NoError(t, json.Unmarshal([]byte(jsonBodyOf(stdout)), &out), stdout)
+				require.NoError(t, json.Unmarshal([]byte(stdout), &out), stdout)
 				assert.Equal(t, "success", out.Status)
 				require.Len(t, out.Results, 1)
 				assert.Equal(t, true, out.Results[0]["removed"])

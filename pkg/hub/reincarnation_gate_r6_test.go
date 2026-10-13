@@ -48,44 +48,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// assertBothParticipants asserts that conversationID has exactly the two
-// named principals as active participants (order-independent), and that
-// GetConversationsForPrincipal for the recipient agent returns it — the
-// concrete regression report-7-gteam-2a F1 observed: `conversation list`
-// returning [] for a conversation the recipient was a genuine party to.
-func assertBothParticipants(t *testing.T, s store.Store, conversationID string, aKind, aID, bKind, bID string) {
-	t.Helper()
-	ctx := context.Background()
-
-	parts, err := s.ListParticipants(ctx, conversationID)
-	require.NoError(t, err)
-	got := map[string]bool{}
-	for _, p := range parts {
-		got[p.PrincipalKind+":"+p.PrincipalID] = true
-	}
-	assert.True(t, got[aKind+":"+aID], "expected participant %s:%s, got %v", aKind, aID, got)
-	assert.True(t, got[bKind+":"+bID], "expected participant %s:%s, got %v", bKind, bID, got)
-
-	// Discoverability: whichever side is an agent must be able to find the
-	// conversation via the principal-keyed listing query (F1's root cause
-	// citation of GetConversationsForPrincipal).
-	for _, side := range []struct{ kind, id string }{{aKind, aID}, {bKind, bID}} {
-		if side.kind != "agent" {
-			continue
-		}
-		convs, err := s.GetConversationsForPrincipal(ctx, "agent", side.id)
-		require.NoError(t, err)
-		found := false
-		for _, c := range convs {
-			if c.ID == conversationID {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "GetConversationsForPrincipal(agent, %s) must list conversation %s", side.id, conversationID)
-	}
-}
-
 // ---------------------------------------------------------------------------
 // F1: user -> agent, no-thread DM
 // ---------------------------------------------------------------------------

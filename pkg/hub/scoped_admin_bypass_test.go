@@ -41,35 +41,6 @@ func federatedAdminIdentity() *FederatedUserIdentity {
 	return NewFederatedUserIdentity("https://issuer.example", "admin", "admin@example.com", "Admin", "admin", nil)
 }
 
-// bindableFederatedAdmin is a federated identity whose ID is a local UUID so a
-// test can grant an ordinary policy and reach a direct bypass branch. Production
-// federation IDs intentionally include the issuer and are not bindable locally.
-type bindableFederatedAdmin struct {
-	UserIdentity
-	issuerURL string
-}
-
-func (f *bindableFederatedAdmin) Type() string      { return "federated_user" }
-func (f *bindableFederatedAdmin) IssuerURL() string { return f.issuerURL }
-
-// authzClassification opts this fake into principalContextForIdentity /
-// credentialContextForIdentity classification as a federated user: those
-// functions key on concrete type, and this fake is a distinct Go type from
-// the production FederatedUserIdentity. This keeps these tests exercising
-// IsUnscopedLocalPlatformAdmin's FederatedIdentity-specific denial rather
-// than an unrelated "unrecognized identity" denial that would happen to
-// carry the same HTTP status.
-func (f *bindableFederatedAdmin) authzClassification() (PrincipalKind, CredentialKind) {
-	return PrincipalKindFederatedUser, CredentialKindFederation
-}
-
-func newBindableFederatedAdmin(id string) *bindableFederatedAdmin {
-	return &bindableFederatedAdmin{
-		UserIdentity: NewAuthenticatedUser(id, "admin@example.com", "Admin", "admin", "api"),
-		issuerURL:    "https://issuer.example",
-	}
-}
-
 func TestAdminModeMiddlewareRejectsScopedAdmin(t *testing.T) {
 	middleware := adminModeMiddleware(NewMaintenanceState(true, ""))(passthrough)
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)

@@ -20,8 +20,6 @@
  * second browser can force-complete a failed delete it did not start".
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DeletionInfo } from '../shared/types.js';
 
@@ -54,6 +52,7 @@ import { StateManager } from './state.js';
 import { extractApiError } from './api.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import { effectiveDeletion, START_BLOCKED_BY_DELETE_MESSAGE } from '../shared/agent-deletion.js';
+import { requestUrl } from './__fixtures__/request-url.js';
 
 const T0 = Date.parse('2026-10-04T12:00:00Z');
 const iso = (ms: number): string => new Date(ms).toISOString();
@@ -86,7 +85,7 @@ function stubFetch(...answers: Array<Response | Error>): Array<{ url: string; me
   vi.stubGlobal(
     'fetch',
     vi.fn((input: string | URL | Request, init?: RequestInit) => {
-      calls.push({ url: String(input), method: init?.method ?? 'GET' });
+      calls.push({ url: requestUrl(input), method: init?.method ?? 'GET' });
       const next = answers.shift();
       if (!next) throw new Error('unexpected fetch');
       return next instanceof Error ? Promise.reject(next) : Promise.resolve(next);

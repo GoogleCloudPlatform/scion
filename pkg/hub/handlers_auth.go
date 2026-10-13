@@ -227,6 +227,58 @@ type ExternalUserInfo struct {
 // authorized to log in (domain restriction, invite-only, etc.).
 var ErrAccessDenied = errors.New("access denied")
 
+// ErrInviteRequired is returned by provisionUser when the hub is
+// invite-only and the email has no invite or active account. It wraps
+// ErrAccessDenied, so errors.Is(err, ErrAccessDenied) still matches.
+var ErrInviteRequired = fmt.Errorf("%w: invite required", ErrAccessDenied)
+
+// Error codes for a denied sign-in, used in API error responses and in
+// the web login redirect (/login?error=<code>).
+const (
+	signInDeniedDomain     = "unauthorized_domain"
+	signInDeniedInviteOnly = "invite_only"
+)
+
+// Audit reasons recorded for a denied sign-in (InviteAuditLoginDenied).
+const (
+	signInAuditReasonDomain     = "domain_not_authorized"
+	signInAuditReasonInviteOnly = "not_on_allow_list"
+)
+
+// signInDenialAuditReason returns the audit reason for a denied sign-in,
+// derived from the checkSignInDenial code so the record says why the
+// sign-in was denied. A code without a mapped reason is recorded as
+// itself. accessMode is used only when the code is empty (the decision
+// came from a bool-only authorize check that returns no code).
+func signInDenialAuditReason(denial, accessMode string) string {
+	switch denial {
+	case signInDeniedDomain:
+		return signInAuditReasonDomain
+	case signInDeniedInviteOnly:
+		return signInAuditReasonInviteOnly
+	case "":
+		// No code: fall back to the access mode below.
+	default:
+		return denial
+	}
+	if accessMode == "invite_only" {
+		return signInAuditReasonInviteOnly
+	}
+	return signInAuditReasonDomain
+}
+
+// writeSignInDenied writes the 403 response for a provisionUser access
+// denial, using the invite-only code when that is the reason.
+func writeSignInDenied(w http.ResponseWriter, err error) {
+	if errors.Is(err, ErrInviteRequired) {
+		writeError(w, http.StatusForbidden, signInDeniedInviteOnly,
+			"this hub is invite-only; ask an administrator for an invite", nil)
+		return
+	}
+	writeError(w, http.StatusForbidden, signInDeniedDomain,
+		"your email domain is not authorized", nil)
+}
+
 // handleAuthLogin handles POST /api/v1/auth/login.
 // This endpoint exchanges an OAuth provider token for Hub-issued tokens.
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
@@ -275,8 +327,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -391,8 +442,7 @@ func (s *Server) handleAuthToken(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -462,6 +512,13 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// mints/re-mints a hub token checks this, including an already-issued
 	// refresh token for the configured service account.
 	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
+			"invalid refresh token", nil)
+		return
+	}
+	// Test identities are never issued refresh tokens; refuse any refresh
+	// token for the reserved test-identity domain.
+	if isReservedTestIdentityEmail(claims.Email) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
@@ -537,6 +594,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("failed to sync hub role grants on token refresh",
 						"email", claims.Email, "user_id", user.ID, "role", role, "error", err)
 				}
+				s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID})
 			}
 		}
 	}
@@ -618,7 +676,30 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 		case u.Status == store.UserStatusSuspended:
 			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 			return
+		case testFixtureRejection(u, s.testIdentities.enabled, s.testIdentities.clock()) != "":
+			// Same test-identity rule as the middleware's row block.
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
 		}
+		// Same admin-kind rule as the middleware's row block.
+		_, reason, kErr := testAdminRowRejection(r.Context(), s.kindForPrincipal,
+			func(kind string) bool { return s.testAdminTierEnabled(testAdminKind(kind)) },
+			u, claims.Role, s.testIdentities.clock())
+		if kErr != nil {
+			slog.Error("Auth validate: user kind lookup failed",
+				"user_id", claims.UserID, "error", kErr)
+			writeError(w, http.StatusServiceUnavailable, "store_error",
+				"unable to verify user status", nil)
+			return
+		}
+		if reason != "" {
+			writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+			return
+		}
+	} else if isReservedTestIdentityEmail(claims.Email) {
+		// No row to check: a reserved-domain token is not reported valid.
+		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
+		return
 	}
 
 	var expiresAt *time.Time
@@ -695,10 +776,11 @@ type AdminStatusResponse struct {
 }
 
 // handleAuthAdminStatus handles GET /api/v1/auth/admin-status.
-// Returns whether the current user has hub-admin or super-admin capabilities,
-// along with their effective system-scoped permission IDs.
-// This is used by the frontend to decide whether to show admin navigation,
-// which admin sections are visible, and to allow access to admin routes.
+// Returns whether the current user is a hub admin or super admin, along with
+// their effective system-scoped permission IDs. isAdmin is true only for hub
+// admins and super admins; a member holding system-scoped permissions through
+// another role gets isAdmin=false with those permissions listed. The frontend
+// decides which admin sections and routes to show from the permissions list.
 func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		MethodNotAllowed(w, http.MethodGet)
@@ -712,6 +794,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isSuperAdmin := IsUnscopedLocalPlatformAdmin(user)
+	isAdmin := isSuperAdmin
 
 	var perms []string
 	if isSuperAdmin {
@@ -734,6 +817,8 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		perms = effective
+		isAdmin = s.authzService.IsSystemAdmin(r.Context(), user.ID()) ||
+			s.authzService.IsHubAdmin(r.Context(), user.ID())
 	}
 
 	// Ensure JSON serializes as [] rather than null when there are no permissions.
@@ -744,7 +829,7 @@ func (s *Server) handleAuthAdminStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, AdminStatusResponse{
-		IsAdmin:      isSuperAdmin || len(perms) > 0,
+		IsAdmin:      isAdmin,
 		IsSuperAdmin: isSuperAdmin,
 		Permissions:  perms,
 	})
@@ -908,6 +993,9 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusForbidden, "scope_violation", err.Error(), details)
 		case errors.Is(err, ErrUATProjectForbidden):
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "forbidden", nil)
+		case errors.Is(err, ErrUATTestIdentityDenied):
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(),
+				map[string]interface{}{"reason": "test_identity_cannot_create_tokens"})
 		case errors.As(err, &metadataErr):
 			// E.1: bounded metadata validation failure. The error message
 			// names the field/rule only; it never echoes the offending
@@ -967,6 +1055,7 @@ func (s *Server) handleRevokeToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -990,6 +1079,7 @@ func (s *Server) handleDeleteToken(w http.ResponseWriter, r *http.Request, id st
 		NotFound(w, "access token")
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatch{UserID: user.ID()})
 
 	// Audit is now atomic inside the service (B3/G4).
 	w.WriteHeader(http.StatusNoContent)
@@ -1214,8 +1304,7 @@ func (s *Server) handleCLIAuthToken(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -1442,8 +1531,7 @@ func (s *Server) completeOAuthLogin(w http.ResponseWriter, r *http.Request, user
 	})
 	if err != nil {
 		if errors.Is(err, ErrAccessDenied) {
-			writeError(w, http.StatusForbidden, "unauthorized_domain",
-				"your email domain is not authorized", nil)
+			writeSignInDenied(w, err)
 			return
 		}
 		if errors.Is(err, ErrUserSuspended) {
@@ -1498,14 +1586,21 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
 		return nil, ErrAccessDenied
 	}
+	// The reserved test-identity domain is created only by the issuance
+	// endpoint and authenticates only through its own hub-issued token.
+	// Checked before find-or-create, like the check above, so it refuses
+	// both a new identity and an existing test-fixture row.
+	if isReservedTestIdentityEmail(info.Email) {
+		return nil, ErrAccessDenied
+	}
 
 	// Authorization check
-	if !s.isUserAuthorized(ctx, info.Email) {
-		reason := "not_on_allow_list"
-		if s.UserAccessMode() != "invite_only" {
-			reason = "domain_not_authorized"
+	if denial := s.signInDenial(ctx, info.Email); denial != "" {
+		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email,
+			signInDenialAuditReason(denial, s.UserAccessMode()))
+		if denial == signInDeniedInviteOnly {
+			return nil, ErrInviteRequired
 		}
-		LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, info.Email, reason)
 		return nil, ErrAccessDenied
 	}
 
@@ -1562,7 +1657,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 // inline logic field for field.
 func (s *Server) signInPolicyDeps() signInPolicyDeps {
 	return signInPolicyDeps{
-		authorize: s.isUserAuthorized,
+		authorize:    s.isUserAuthorized,
+		signInDenial: s.signInDenial,
 		activationRole: func(ctx context.Context, email, currentRole, userID string) string {
 			// The stored role on an invited row is a placeholder (invites
 			// carry no role), so evaluate as a brand-new user: admin if in
@@ -1594,7 +1690,8 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
 		},
-		// auditDenied mirrors provisionUser's own denial-reason logic above.
+		// auditDenied records the denial code the decision returned (see
+		// signInDenial above), mapped the same way provisionUser maps it.
 		// provisionUser calls the helper with preAuthorized=true, so this
 		// only fires from a caller (the resolver) that passes
 		// preAuthorized=false and fails the authorize check — provisionUser
@@ -1609,12 +1706,9 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		// capture, an unauthorized caller retrying is expected to stop or be
 		// blocked at a layer above this one, and de-duplicating here would
 		// mean dropping legitimate repeat-denial records.
-		auditDenied: func(ctx context.Context, email string) {
-			reason := "not_on_allow_list"
-			if s.UserAccessMode() != "invite_only" {
-				reason = "domain_not_authorized"
-			}
-			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email, reason)
+		auditDenied: func(ctx context.Context, email, denial string) {
+			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email,
+				signInDenialAuditReason(denial, s.UserAccessMode()))
 		},
 	}
 }
@@ -1627,25 +1721,40 @@ func generateID() string {
 // isUserAuthorized checks whether a user is permitted to log in based on
 // admin_emails, authorized_domains, and user_access_mode (allow list).
 func (s *Server) isUserAuthorized(ctx context.Context, email string) bool {
-	return checkUserAuthorized(ctx, email, s.AuthorizedDomains(), s.AdminEmails(), s.UserAccessMode(), s.store)
+	return s.signInDenial(ctx, email) == ""
+}
+
+// signInDenial returns "" when the user may sign in, otherwise the
+// sign-in denial error code (see checkSignInDenial).
+func (s *Server) signInDenial(ctx context.Context, email string) string {
+	return checkSignInDenial(ctx, email, s.AuthorizedDomains(), s.AdminEmails(), s.UserAccessMode(), s.store)
 }
 
 // checkUserAuthorized is a package-level authorization check used by both
 // Server and WebServer to enforce admin bypass, domain, and access mode rules.
 func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) bool {
+	return checkSignInDenial(ctx, email, authorizedDomains, adminEmails, accessMode, st) == ""
+}
+
+// checkSignInDenial applies the same rules as checkUserAuthorized and
+// returns "" when the user is allowed, or the denial error code:
+// signInDeniedDomain when the email domain is not allowed, or
+// signInDeniedInviteOnly when the hub is invite-only and the email has
+// no invite or active account.
+func checkSignInDenial(ctx context.Context, email string, authorizedDomains, adminEmails []string, accessMode string, st store.Store) string {
 	emailLower := strings.ToLower(email)
 
 	// Admin emails always bypass all checks
 	for _, admin := range adminEmails {
 		if strings.ToLower(admin) == emailLower {
-			return true
+			return ""
 		}
 	}
 
 	// Domain check (applies when authorized_domains is configured)
 	if len(authorizedDomains) > 0 {
 		if !isEmailInDomains(emailLower, authorizedDomains) {
-			return false
+			return signInDeniedDomain
 		}
 	}
 
@@ -1654,22 +1763,26 @@ func checkUserAuthorized(ctx context.Context, email string, authorizedDomains, a
 	case "invite_only":
 		if st == nil {
 			slog.Error("user authorization check failed: store is nil", "email", emailLower)
-			return false
+			return signInDeniedInviteOnly
 		}
 		found, err := st.IsUserInvitedOrActive(ctx, emailLower)
 		if err != nil {
 			slog.Error("user authorization check failed", "email", emailLower, "error", err)
-			return false
+			return signInDeniedInviteOnly
 		}
-		return found
+		if !found {
+			return signInDeniedInviteOnly
+		}
+		return ""
 	case "domain_restricted":
 		if len(authorizedDomains) == 0 {
 			slog.Warn("user_access_mode is domain_restricted but no authorized_domains configured; all users will be blocked",
 				"email", emailLower)
+			return signInDeniedDomain
 		}
-		return len(authorizedDomains) > 0
+		return ""
 	default: // "open" or empty
-		return true
+		return ""
 	}
 }
 
@@ -1822,6 +1935,10 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 	user := GetUserIdentityFromContext(r.Context())
 	if user == nil {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required", nil)
+		return
+	}
+	// Redeeming an invite joins the hub, which a federated caller does not.
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -2287,6 +2404,12 @@ func deleteSuperAdminRoleBinding(ctx context.Context, st store.Store, userID str
 			} else {
 				slog.Info("deleted super-admin binding at login-time demotion",
 					"user_id", userID, "binding_id", b.ID)
+				// The user's system authority ended: re-evaluate the user's
+				// project standing (ptone/scion#3433). Best-effort like the
+				// delete; the full sweep covers a failure.
+				if err := enqueueMembershipLossTx(ctx, st, userID, "", store.MembershipLossTriggerSystemScopeChange, auditActorFromContext(ctx)); err != nil {
+					slog.Warn("deleteSuperAdminBinding: membership standing re-evaluation not enqueued", "user_id", userID, "error", err)
+				}
 			}
 		}
 	}

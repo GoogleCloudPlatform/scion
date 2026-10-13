@@ -19,11 +19,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -37,11 +39,17 @@ type GCSStorage struct {
 
 // NewGCS creates a new GCS storage client.
 func NewGCS(ctx context.Context, cfg Config) (*GCSStorage, error) {
+	return newGCS(ctx, cfg)
+}
+
+// newGCS is NewGCS with extra client options (tests point it at a fake
+// endpoint).
+func newGCS(ctx context.Context, cfg Config, extra ...option.ClientOption) (*GCSStorage, error) {
 	if cfg.Bucket == "" {
 		return nil, errors.New("bucket name is required for GCS storage")
 	}
 
-	var opts []option.ClientOption
+	opts := append([]option.ClientOption{}, extra...)
 
 	// Use service account credentials if provided
 	if cfg.Credentials != nil && cfg.Credentials.ServiceAccountJSON != "" {
@@ -142,7 +150,25 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 
 	objectPath = strings.TrimPrefix(objectPath, "/")
 	obj := s.bucket.Object(objectPath)
+	// Cancelling ctx aborts the upload (and stops a pending retry); see
+	// the copy-error path for why a failed copy also uses CloseWithError.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if opts.Idempotent {
+		// The caller retries an idempotent write itself, with a bounded
+		// number of attempts (the client's writer does not honour an
+		// attempt cap), so each call must be exactly one request: no
+		// client retries, and (below) no resumable session, whose chunk
+		// uploads retry on their own whatever the retry policy.
+		obj = obj.Retryer(storage.WithPolicy(storage.RetryNever))
+	}
 	writer := obj.NewWriter(ctx)
+	if opts.Idempotent {
+		// ChunkSize 0 sends the object in one non-resumable request at any
+		// size, instead of a resumable session for bodies over the
+		// default 16 MiB chunk.
+		writer.ChunkSize = 0
+	}
 
 	// Set content type
 	if opts.ContentType != "" {
@@ -167,6 +193,15 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	// Copy data
 	size, err := io.Copy(writer, reader)
 	if err != nil {
+		// Abort with CloseWithError before anything else, despite its
+		// deprecation note: it is the only synchronous abort. Cancelling
+		// ctx takes effect asynchronously, so a Close that ran first
+		// would end the request body cleanly and finalize the partial
+		// object. Close then waits for the upload to finish. cancel()
+		// without Close would also avoid the race, but Upload would
+		// return before the upload goroutine finishes.
+		_ = writer.CloseWithError(err) //nolint:staticcheck // see above
+		cancel()
 		_ = writer.Close()
 		return nil, fmt.Errorf("failed to upload data: %w", err)
 	}
@@ -193,7 +228,24 @@ func (s *GCSStorage) Upload(ctx context.Context, objectPath string, reader io.Re
 	}, nil
 }
 
-// Download downloads data from the specified path.
+// downloadSize returns the number of bytes a reader will yield, or -1 when
+// that is unknown. It uses the reader's own response rather than the
+// object attributes: when GCS decompresses a gzip-encoded object on read
+// (decompressive transcoding), the stored size is the compressed size and
+// says nothing about the decompressed bytes streamed.
+func downloadSize(ra storage.ReaderObjectAttrs) int64 {
+	if ra.Decompressed || ra.Size < 0 {
+		return -1
+	}
+	return ra.Size
+}
+
+// Download downloads data from the specified path. The read is pinned to
+// the generation the object attributes describe, and the returned Object's
+// Size is the number of bytes the reader yields (-1 when unknown). On a
+// bucket without versioning, an overwrite between reading the attributes and
+// starting the read returns ErrNotFound rather than mixing one generation's
+// size with another's bytes.
 func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCloser, *Object, error) {
 	if objectPath == "" {
 		return nil, nil, ErrInvalidPath
@@ -211,8 +263,9 @@ func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCl
 		return nil, nil, fmt.Errorf("failed to get object attributes: %w", err)
 	}
 
-	// Create reader
-	reader, err := obj.NewReader(ctx)
+	// Read the generation the attributes describe, so a concurrent
+	// overwrite cannot pair this metadata with another generation's bytes.
+	reader, err := obj.Generation(attrs.Generation).NewReader(ctx)
 	if err != nil {
 		if errors.Is(err, storage.ErrObjectNotExist) {
 			return nil, nil, ErrNotFound
@@ -222,7 +275,7 @@ func (s *GCSStorage) Download(ctx context.Context, objectPath string) (io.ReadCl
 
 	return reader, &Object{
 		Name:        objectPath,
-		Size:        attrs.Size,
+		Size:        downloadSize(reader.Attrs),
 		ContentType: attrs.ContentType,
 		ETag:        attrs.Etag,
 		Created:     attrs.Created,
@@ -247,6 +300,25 @@ func (s *GCSStorage) Delete(ctx context.Context, objectPath string) error {
 		return fmt.Errorf("failed to delete object: %w", err)
 	}
 
+	return nil
+}
+
+// DeleteIfGeneration implements GenerationDeleter.
+func (s *GCSStorage) DeleteIfGeneration(ctx context.Context, objectPath string, generation int64) error {
+	if objectPath == "" || generation == 0 {
+		return ErrInvalidPath
+	}
+	obj := s.bucket.Object(strings.TrimPrefix(objectPath, "/")).If(storage.Conditions{GenerationMatch: generation})
+	if err := obj.Delete(ctx); err != nil {
+		if errors.Is(err, storage.ErrObjectNotExist) {
+			return ErrNotFound
+		}
+		var apiErr *googleapi.Error
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusPreconditionFailed {
+			return ErrPreconditionFailed
+		}
+		return fmt.Errorf("failed to delete object: %w", err)
+	}
 	return nil
 }
 
@@ -337,6 +409,7 @@ func (s *GCSStorage) List(ctx context.Context, opts ListOptions) (*ListResult, e
 			Created:     attrs.Created,
 			Updated:     attrs.Updated,
 			Metadata:    attrs.Metadata,
+			Generation:  attrs.Generation,
 		})
 		count++
 	}

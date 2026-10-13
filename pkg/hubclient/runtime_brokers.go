@@ -15,9 +15,11 @@
 package hubclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
@@ -52,7 +54,9 @@ type RuntimeBrokerService interface {
 	ListProjects(ctx context.Context, brokerID string) (*ListBrokerProjectsResponse, error)
 
 	// Heartbeat sends a heartbeat for a broker.
-	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error
+	// The response is nil when the Hub replies with an empty body (a Hub
+	// that predates BrokerHeartbeatResponse).
+	Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error)
 
 	// ReportMessageFailures reports hub messages that the broker accepted
 	// into its delivery buffer but failed to deliver, so the hub can mark
@@ -244,8 +248,13 @@ type BrokerHeartbeat struct {
 	// An older broker omits the field and the hub keeps every stored
 	// value.
 	ProfileAttach []ProfileAttachState `json:"profileAttach,omitempty"`
-	// ProfileSAMappings: see ProfileSAMappingsState.
+	// ProfileSAMappings: see ProfileSAMappingsState. Sent only when a
+	// profile's report changed, or when the Hub asked for it.
 	ProfileSAMappings []ProfileSAMappingsState `json:"profileSAMappings,omitempty"`
+	// ProfileSAMappingsHashes carries the hash of every Kubernetes
+	// profile's report on every heartbeat, so the Hub can confirm its
+	// stored report is current. An older broker omits it.
+	ProfileSAMappingsHashes []ProfileSAMappingsHash `json:"profileSAMappingsHashes,omitempty"`
 	// StartsInFlight lists the agent starts still running on the broker
 	// when this heartbeat was built, read before the agents were listed, so
 	// a start that finishes between the two reads is either listed here or
@@ -256,6 +265,11 @@ type BrokerHeartbeat struct {
 	// on every heartbeat. Nil (an older broker) keeps the stored value; a
 	// non-nil empty string reports that the broker has no active profile.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// Health is the broker's report of its own health (default runtime,
+	// NFS mounts), refreshed on every heartbeat. It never changes the
+	// broker's online/offline status. An older broker omits it and the
+	// hub keeps the stored value; an older hub ignores it.
+	Health *api.BrokerHealthReport `json:"health,omitempty"`
 }
 
 // StartInFlight identifies one agent start running on a broker.
@@ -280,6 +294,12 @@ type BrokerInventory struct {
 	// default runtime and each auxiliary runtime). It is empty when the
 	// heartbeat is filtered (multi-hub mode) and so claims no target.
 	Targets []InventoryTarget `json:"targets,omitempty"`
+	// RunLabels is true when every listed runtime entry is reported with
+	// its scion.run_id label (AgentHeartbeat.RunID), including the entries
+	// of an agent listed on more than one target (AgentHeartbeat.OtherEntries).
+	// An older broker omits it, and the Hub then never adopts a run from
+	// this heartbeat (ptone/scion#3661).
+	RunLabels bool `json:"runLabels,omitempty"`
 }
 
 // InventoryTarget is one runtime target in a heartbeat inventory.
@@ -314,10 +334,26 @@ type AgentHeartbeat struct {
 	HarnessAuth     string `json:"harnessAuth,omitempty"` // Resolved auth method from container labels
 	Profile         string `json:"profile,omitempty"`     // Settings profile used
 	ExitCode        *int   `json:"exitCode,omitempty"`    // Structured exit code from runtime (nil = unknown)
-	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason: "crashed" or "limits_exceeded"
+	ExitReason      string `json:"exitReason,omitempty"`  // Terminal reason (see state.ExitReason), e.g. "crashed", "preempted", "oom_killed"
 	// RuntimeTarget is the ID of the inventory target whose listing reported
 	// this agent (see InventoryTarget.ID).
 	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	// RunID is the listed runtime entry's scion.run_id label
+	// (api.AgentInfo.RunID); empty for an unlabelled entry. An older broker
+	// omits it.
+	RunID string `json:"runId,omitempty"`
+	// OtherEntries are the agent's entries listed by other targets of this
+	// broker, which the heartbeat does not report as agents of their own
+	// (one agent per project and name), each with its target and label.
+	OtherEntries []AgentRuntimeEntry `json:"otherEntries,omitempty"`
+}
+
+// AgentRuntimeEntry is one further runtime entry of an agent in a heartbeat.
+type AgentRuntimeEntry struct {
+	// RuntimeTarget is the ID of the inventory target that listed it.
+	RuntimeTarget string `json:"runtimeTarget,omitempty"`
+	// RunID is its scion.run_id label; empty when unlabelled.
+	RunID string `json:"runId,omitempty"`
 }
 
 // CreateBrokerRequest is the request to create a new broker registration.
@@ -327,6 +363,9 @@ type CreateBrokerRequest struct {
 	Capabilities []string          `json:"capabilities,omitempty"`
 	Labels       map[string]string `json:"labels,omitempty"`
 	AutoProvide  bool              `json:"autoProvide,omitempty"` // Automatically add as provider for new projects
+	// RuntimeTarget is the flat Runtime Broker registration descriptor
+	// (.design/flat-runtime-brokers-contract.md section 6); nil is legacy.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 	// JoinTokenTTLSeconds is the join token lifetime in seconds. Zero uses
 	// the hub default; otherwise the hub accepts 300 to 86400.
 	JoinTokenTTLSeconds int `json:"joinTokenTtlSeconds,omitempty"`
@@ -341,6 +380,9 @@ type CreateBrokerResponse struct {
 	JoinToken    string `json:"joinToken"`
 	ExpiresAt    string `json:"expiresAt"`
 	Reregistered bool   `json:"reregistered,omitempty"`
+	// RuntimeTarget is the Hub's acknowledgement of the stored flat target
+	// binding; nil from a legacy row or a Hub that predates the contract.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 	// Reissued is true when an earlier, unused join token for this broker
 	// was replaced and no longer works.
 	Reissued bool `json:"reissued,omitempty"`
@@ -360,6 +402,8 @@ type JoinBrokerRequest struct {
 	// DefaultProfile is the broker's default (active) profile name. Nil
 	// (an older broker) keeps the stored value.
 	DefaultProfile *string `json:"defaultProfile,omitempty"`
+	// RuntimeTarget is the flat Runtime Broker descriptor; nil is legacy.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // JoinBrokerResponse is returned after completing broker registration.
@@ -367,6 +411,9 @@ type JoinBrokerResponse struct {
 	SecretKey   string `json:"secretKey"` // Base64-encoded HMAC secret
 	HubEndpoint string `json:"hubEndpoint"`
 	BrokerID    string `json:"brokerId"`
+	// RuntimeTarget is the Hub's acknowledgement of the stored flat target
+	// binding; nil from a legacy row or a Hub that predates the contract.
+	RuntimeTarget *api.RuntimeTargetDescriptor `json:"runtimeTarget,omitempty"`
 }
 
 // Create creates a new broker registration and returns a join token.
@@ -375,7 +422,7 @@ func (s *runtimeBrokerService) Create(ctx context.Context, req *CreateBrokerRequ
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateBrokerResponse](resp)
+	return apiclient.DecodeRequired[CreateBrokerResponse](resp)
 }
 
 // Join completes broker registration using a join token.
@@ -384,7 +431,7 @@ func (s *runtimeBrokerService) Join(ctx context.Context, req *JoinBrokerRequest)
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[JoinBrokerResponse](resp)
+	return apiclient.DecodeRequired[JoinBrokerResponse](resp)
 }
 
 // List returns runtime brokers matching the filter criteria.
@@ -414,7 +461,7 @@ func (s *runtimeBrokerService) List(ctx context.Context, opts *ListBrokersOption
 		TotalCount int             `json:"totalCount,omitempty"`
 	}
 
-	result, err := apiclient.DecodeResponse[listResponse](resp)
+	result, err := apiclient.DecodeRequired[listResponse](resp)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +481,7 @@ func (s *runtimeBrokerService) Get(ctx context.Context, brokerID string) (*Runti
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Update updates broker metadata.
@@ -443,7 +490,7 @@ func (s *runtimeBrokerService) Update(ctx context.Context, brokerID string, req 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[RuntimeBroker](resp)
+	return apiclient.DecodeRequired[RuntimeBroker](resp)
 }
 
 // Delete removes a broker from all projects.
@@ -461,16 +508,30 @@ func (s *runtimeBrokerService) ListProjects(ctx context.Context, brokerID string
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListBrokerProjectsResponse](resp)
+	return apiclient.DecodeRequired[ListBrokerProjectsResponse](resp)
 }
 
 // Heartbeat sends a heartbeat for a broker.
-func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) error {
+func (s *runtimeBrokerService) Heartbeat(ctx context.Context, brokerID string, status *BrokerHeartbeat) (*BrokerHeartbeatResponse, error) {
 	resp, err := s.c.post(ctx, "/api/v1/runtime-brokers/"+brokerID+"/heartbeat", status, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return apiclient.CheckResponse(resp)
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return nil, apiclient.ParseErrorResponse(resp)
+	}
+	// An older Hub replies 200 with an empty body. A body that does not
+	// decode is treated the same way: the heartbeat itself was accepted.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if err != nil || len(bytes.TrimSpace(body)) == 0 {
+		return nil, nil
+	}
+	var out BrokerHeartbeatResponse
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, nil
+	}
+	return &out, nil
 }
 
 // ReportMessageFailures reports buffered deliveries that failed on the broker.

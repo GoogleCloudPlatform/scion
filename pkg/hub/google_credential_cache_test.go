@@ -23,60 +23,6 @@ import (
 	"time"
 )
 
-// countingBaseValidator is a GoogleCredentialValidator whose ID/access token
-// results are scripted per-call, counting how many times each method is
-// actually invoked. Proves the caching decorator's cache-hit and
-// singleflight behaviour: a mutation that skips the cache lookup, or that
-// lets concurrent callers each dial upstream, must move this counter.
-type countingBaseValidator struct {
-	mu sync.Mutex
-
-	idTokenCalls     int
-	accessTokenCalls int
-
-	idTokenResult *ValidatedGoogleIdentity
-	idTokenErr    error
-
-	accessTokenResult *ValidatedGoogleIdentity
-	accessTokenErr    error
-
-	// delay, if set, is slept before returning — widens the window
-	// for concurrent callers to race into the same singleflight key.
-	delay time.Duration
-}
-
-func (v *countingBaseValidator) ValidateIDToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
-	v.mu.Lock()
-	v.idTokenCalls++
-	v.mu.Unlock()
-	if v.delay > 0 {
-		time.Sleep(v.delay)
-	}
-	return v.idTokenResult, v.idTokenErr
-}
-
-func (v *countingBaseValidator) ValidateAccessToken(_ context.Context, _ string, _ []string) (*ValidatedGoogleIdentity, error) {
-	v.mu.Lock()
-	v.accessTokenCalls++
-	v.mu.Unlock()
-	if v.delay > 0 {
-		time.Sleep(v.delay)
-	}
-	return v.accessTokenResult, v.accessTokenErr
-}
-
-func (v *countingBaseValidator) totalIDTokenCalls() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.idTokenCalls
-}
-
-func (v *countingBaseValidator) totalAccessTokenCalls() int {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	return v.accessTokenCalls
-}
-
 // ---------------------------------------------------------------------------
 // Cache key.
 // ---------------------------------------------------------------------------
@@ -622,37 +568,6 @@ func TestGoogleCredentialCache_LeaderCancellationDoesNotPoisonFollowers(t *testi
 // ValidateIDToken/ValidateAccessToken methods, not by calling
 // RecordGoogleValidatorCache directly.
 // ---------------------------------------------------------------------------
-
-// fakeCacheMetrics records every RecordGoogleValidatorCache call. Safe for
-// concurrent use (needed for the singleflight/concurrent scenarios above).
-type fakeCacheMetrics struct {
-	mu      sync.Mutex
-	results []GoogleValidatorCacheResult
-}
-
-func (f *fakeCacheMetrics) RecordGoogleValidatorCache(result GoogleValidatorCacheResult) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.results = append(f.results, result)
-}
-
-func (f *fakeCacheMetrics) all() []GoogleValidatorCacheResult {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make([]GoogleValidatorCacheResult, len(f.results))
-	copy(out, f.results)
-	return out
-}
-
-func (f *fakeCacheMetrics) count(result GoogleValidatorCacheResult) int {
-	n := 0
-	for _, r := range f.all() {
-		if r == result {
-			n++
-		}
-	}
-	return n
-}
 
 func TestGoogleCredentialCache_MetricsRecordsMissThenHit(t *testing.T) {
 	base := &countingBaseValidator{

@@ -14,7 +14,7 @@
 
 // Package testutil holds small helpers shared by test binaries across
 // packages. It is intended to be imported only from _test.go files (its
-// helpers call os.Exit).
+// helpers either exit the process or fail the test).
 package testutil
 
 import (

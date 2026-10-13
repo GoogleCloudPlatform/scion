@@ -127,6 +127,7 @@ func setupBrokerAuthzTest(t *testing.T) (srv *Server, s store.Store, alice, bob,
 // ============================================================================
 
 func TestBrokerAuthz_Registration_MemberCanRegister(t *testing.T) {
+	t.Parallel()
 	srv, _, alice, _, _, _, _ := setupBrokerAuthzTest(t)
 
 	// Non-admin member should be able to register a broker
@@ -143,6 +144,7 @@ func TestBrokerAuthz_Registration_MemberCanRegister(t *testing.T) {
 }
 
 func TestBrokerAuthz_Registration_UnauthenticatedDenied(t *testing.T) {
+	t.Parallel()
 	srv, _ := testServer(t)
 
 	rec := doRequestNoAuth(t, srv, http.MethodPost, "/api/v1/brokers",
@@ -157,6 +159,7 @@ func TestBrokerAuthz_Registration_UnauthenticatedDenied(t *testing.T) {
 // ============================================================================
 
 func TestBrokerAuthz_Dispatch_OwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, _, alice, _, _, project, _ := setupBrokerAuthzTest(t)
 
 	// Alice (broker owner) should pass dispatch authorization.
@@ -170,6 +173,7 @@ func TestBrokerAuthz_Dispatch_OwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
+	t.Parallel()
 	srv, _, _, bob, _, project, _ := setupBrokerAuthzTest(t)
 
 	// Bob (not the broker owner) should be denied dispatch.
@@ -185,6 +189,7 @@ func TestBrokerAuthz_Dispatch_NonOwnerDenied(t *testing.T) {
 }
 
 func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, s, _, bob, _, project, broker := setupBrokerAuthzTest(t)
 	ctx := context.Background()
 
@@ -206,6 +211,7 @@ func TestBrokerAuthz_Dispatch_AutoProvide_NonOwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerAuthz_Dispatch_AdminBypass(t *testing.T) {
+	t.Parallel()
 	srv, _, _, _, admin, project, _ := setupBrokerAuthzTest(t)
 
 	// Admin should bypass broker dispatch authorization.
@@ -223,6 +229,7 @@ func TestBrokerAuthz_Dispatch_AdminBypass(t *testing.T) {
 // ============================================================================
 
 func TestBrokerAuthz_Update_OwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, _, alice, _, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodPatch,
@@ -234,6 +241,7 @@ func TestBrokerAuthz_Update_OwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerAuthz_Update_NonOwnerDenied(t *testing.T) {
+	t.Parallel()
 	srv, _, _, bob, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodPatch,
@@ -245,6 +253,7 @@ func TestBrokerAuthz_Update_NonOwnerDenied(t *testing.T) {
 }
 
 func TestBrokerAuthz_Update_AdminBypass(t *testing.T) {
+	t.Parallel()
 	srv, _, _, _, admin, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodPatch,
@@ -260,6 +269,7 @@ func TestBrokerAuthz_Update_AdminBypass(t *testing.T) {
 // ============================================================================
 
 func TestBrokerAuthz_Delete_NonOwnerDenied(t *testing.T) {
+	t.Parallel()
 	srv, _, _, bob, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodDelete,
@@ -269,6 +279,7 @@ func TestBrokerAuthz_Delete_NonOwnerDenied(t *testing.T) {
 }
 
 func TestBrokerAuthz_Delete_OwnerAllowed(t *testing.T) {
+	t.Parallel()
 	srv, _, alice, _, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodDelete,
@@ -278,6 +289,7 @@ func TestBrokerAuthz_Delete_OwnerAllowed(t *testing.T) {
 }
 
 func TestBrokerAuthz_Delete_AdminBypass(t *testing.T) {
+	t.Parallel()
 	srv, _, _, _, admin, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, admin, http.MethodDelete,
@@ -291,6 +303,7 @@ func TestBrokerAuthz_Delete_AdminBypass(t *testing.T) {
 // ============================================================================
 
 func TestBrokerAuthz_Capabilities_OwnerSeesDispatch(t *testing.T) {
+	t.Parallel()
 	srv, _, alice, _, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, alice, http.MethodGet,
@@ -309,6 +322,7 @@ func TestBrokerAuthz_Capabilities_OwnerSeesDispatch(t *testing.T) {
 }
 
 func TestBrokerAuthz_Capabilities_AutoProvide_NonOwnerSeesDispatch(t *testing.T) {
+	t.Parallel()
 	srv, s, _, bob, _, _, broker := setupBrokerAuthzTest(t)
 	ctx := context.Background()
 
@@ -333,6 +347,7 @@ func TestBrokerAuthz_Capabilities_AutoProvide_NonOwnerSeesDispatch(t *testing.T)
 }
 
 func TestBrokerAuthz_Capabilities_NonOwnerNoDispatch(t *testing.T) {
+	t.Parallel()
 	srv, _, _, bob, _, _, broker := setupBrokerAuthzTest(t)
 
 	rec := doRequestAsUser(t, srv, bob, http.MethodGet,
@@ -355,6 +370,7 @@ func TestBrokerAuthz_Capabilities_NonOwnerNoDispatch(t *testing.T) {
 // ============================================================================
 
 func TestAgentCreate_BrokerResolution(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -448,6 +464,7 @@ func TestAgentCreate_BrokerResolution(t *testing.T) {
 // input must store the value lowercased, because GCP SA emails are
 // case-insensitive and downstream actAs checks compare by exact string match.
 func TestBrokerUpdate_HostSAEmail_NormalizedToLowercase(t *testing.T) {
+	t.Parallel()
 	srv, s, alice, _, _, _, broker := setupBrokerAuthzTest(t)
 	ctx := context.Background()
 

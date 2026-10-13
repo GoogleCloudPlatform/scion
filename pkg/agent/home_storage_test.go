@@ -493,16 +493,7 @@ func TestValidHomeAgentID(t *testing.T) {
 // ProvisionAgent marks a new agent pending, and provisioning an existing
 // agent again keeps its record.
 func TestProvisionAgent_HomeStorageRecord(t *testing.T) {
-	mockRuntimeForTest(t)
-	tmpDir := t.TempDir()
-	oldWd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	t.Setenv("HOME", tmpDir)
-	require.NoError(t, config.InitMachine(getTestHarnesses()))
-	projectDir := filepath.Join(tmpDir, "project")
-	projectScionDir := filepath.Join(projectDir, ".scion")
-	require.NoError(t, config.InitProject(projectScionDir, getTestHarnesses()))
-	require.NoError(t, os.Chdir(projectDir))
+	projectScionDir := newHermeticProject(t).scion
 
 	_, _, _, err := ProvisionAgent(context.Background(), "hs-agent", "default", "", "claude", projectScionDir, "", "", "", "")
 	require.NoError(t, err)

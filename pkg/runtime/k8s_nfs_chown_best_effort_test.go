@@ -33,28 +33,24 @@ func envValue(envs []corev1.EnvVar, name string) (string, bool) {
 	return "", false
 }
 
-// The best-effort chown variable appears only on the provisioning
-// (lock-winner) init container, and only when the broker created the
-// workspace directory. It never reaches the agent container.
-func TestBuildPod_ChownBestEffortEnv_OnlyWhenPreCreatedOnWinner(t *testing.T) {
+// The best-effort chown variable appears only on the provisioning init
+// container, and only when the broker created the workspace directory. It
+// never reaches the agent container.
+func TestBuildPod_ChownBestEffortEnv_OnlyWhenPreCreated(t *testing.T) {
 	cases := []struct {
 		name       string
 		preCreated bool
-		lockLost   bool
 		nonGit     bool
 		want       bool
 	}{
-		{name: "pre-created winner", preCreated: true, want: true},
-		{name: "pre-created winner, non-git", preCreated: true, nonGit: true, want: true},
-		{name: "not pre-created winner", preCreated: false, want: false},
-		{name: "pre-created loser", preCreated: true, lockLost: true, want: false},
-		{name: "not pre-created loser", lockLost: true, want: false},
+		{name: "pre-created", preCreated: true, want: true},
+		{name: "pre-created, non-git", preCreated: true, nonGit: true, want: true},
+		{name: "not pre-created", preCreated: false, want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := nfsBaseConfig("chown-best-effort")
 			cfg.NFSWorkspacePreCreated = tc.preCreated
-			cfg.nfsProvisionLockLost = tc.lockLost
 			if tc.nonGit {
 				cfg.GitCloneForInit = nil
 			}

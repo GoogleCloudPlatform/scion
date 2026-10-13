@@ -9,6 +9,7 @@
  */
 
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
+import type { ScionMessageabilityIndicator } from './messageability-indicator.js';
 
 // ── Message mode display tests (pure functions, no DOM) ──
 
@@ -107,15 +108,12 @@ describe('cross-project messaging — shared utilities', () => {
 // ── Messageability indicator tests ──
 
 describe('scion-messageability-indicator — cross-project', () => {
-  let ScionMessageabilityIndicator: unknown;
-
   beforeAll(async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
     );
-    const mod = await import('./messageability-indicator.js');
-    ScionMessageabilityIndicator = mod.ScionMessageabilityIndicator;
+    await import('./messageability-indicator.js');
   });
 
   afterEach(() => {
@@ -202,15 +200,12 @@ describe('scion-messageability-indicator — cross-project', () => {
 // ── Message mode badge tests ──
 
 describe('scion-message-mode-badge — hub mode', () => {
-  let ScionMessageModeBadge: unknown;
-
   beforeAll(async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
     );
-    const mod = await import('./message-mode-badge.js');
-    ScionMessageModeBadge = mod.ScionMessageModeBadge;
+    await import('./message-mode-badge.js');
   });
 
   afterEach(() => {
@@ -260,15 +255,12 @@ describe('scion-message-mode-badge — hub mode', () => {
 // ── Agent tree view edge styling tests ──
 
 describe('agent-tree-view — hub mode edge styles', () => {
-  let AgentTreeView: unknown;
-
   beforeAll(async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(() => Promise.resolve(new Response('{}', { status: 200 })))
     );
-    const mod = await import('./agent-tree-view.js');
-    AgentTreeView = mod.ScionAgentTreeView;
+    await import('./agent-tree-view.js');
   });
 
   afterEach(() => {

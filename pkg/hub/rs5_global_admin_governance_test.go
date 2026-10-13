@@ -47,37 +47,6 @@ import (
 // Helper: create a hub-admin user with no project membership
 // ---------------------------------------------------------------------------
 
-// createHubAdminUser creates a user with hub-admin system binding but no
-// project membership. Returns the user and its hub-admin binding.
-func createHubAdminUser(t *testing.T, s store.Store, userID, email string) *store.User {
-	t.Helper()
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          userID,
-		Email:       email,
-		DisplayName: "Hub Admin",
-		Role:        "member",
-		Status:      "active",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, userID)
-
-	// Get hub-admin role definition and create binding.
-	hubAdminRD, err := s.GetRoleDefinitionByName(ctx, store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: hubAdminRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test-setup",
-	})
-	require.NoError(t, err)
-
-	return user
-}
-
 // createOrdinaryHubMember creates a hub member with no system admin roles and
 // no project membership. Returns the user.
 func createOrdinaryHubMember(t *testing.T, s store.Store, userID, email string) *store.User {

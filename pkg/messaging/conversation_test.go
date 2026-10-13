@@ -701,13 +701,20 @@ type mockTopicLookup struct {
 	// GetTopicConversationIDIncludingDeleted returns the conversation_id.
 	deleted map[string]bool
 
+	// projects maps topicID -> projectID. A topic with no entry belongs
+	// to every project.
+	projects map[string]string
+
 	// calledMethod records which method was last called, so tests can
 	// verify the sink calls the correct accessor.
 	calledMethod string
 }
 
-func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID string) (string, error) {
-	m.calledMethod = "GetTopicConversationID"
+func (m *mockTopicLookup) GetTopicConversationIDInProject(_ context.Context, projectID, topicID string) (string, error) {
+	m.calledMethod = "GetTopicConversationIDInProject"
+	if !m.inProject(projectID, topicID) {
+		return "", fmt.Errorf("topic not found in project %s: %w", topicID, store.ErrNotFound)
+	}
 	// User-facing: hides soft-deleted topics.
 	if m.deleted[topicID] {
 		return "", fmt.Errorf("topic not found (deleted) %s: %w", topicID, store.ErrNotFound)
@@ -719,8 +726,18 @@ func (m *mockTopicLookup) GetTopicConversationID(_ context.Context, topicID stri
 	return convID, nil
 }
 
-func (m *mockTopicLookup) GetTopicConversationIDIncludingDeleted(_ context.Context, topicID string) (string, error) {
-	m.calledMethod = "GetTopicConversationIDIncludingDeleted"
+// inProject reports whether topicID belongs to projectID; topics without a
+// recorded project belong to every project.
+func (m *mockTopicLookup) inProject(projectID, topicID string) bool {
+	p, ok := m.projects[topicID]
+	return !ok || p == projectID
+}
+
+func (m *mockTopicLookup) GetTopicConversationIDIncludingDeletedInProject(_ context.Context, projectID, topicID string) (string, error) {
+	m.calledMethod = "GetTopicConversationIDIncludingDeletedInProject"
+	if !m.inProject(projectID, topicID) {
+		return "", fmt.Errorf("topic not found in project %s: %w", topicID, store.ErrNotFound)
+	}
 	// Mint guard: sees soft-deleted topics.
 	convID, ok := m.topics[topicID]
 	if !ok {
@@ -734,11 +751,11 @@ type mockTopicLookupWithError struct {
 	err error
 }
 
-func (m *mockTopicLookupWithError) GetTopicConversationID(_ context.Context, _ string) (string, error) {
+func (m *mockTopicLookupWithError) GetTopicConversationIDInProject(_ context.Context, _, _ string) (string, error) {
 	return "", m.err
 }
 
-func (m *mockTopicLookupWithError) GetTopicConversationIDIncludingDeleted(_ context.Context, _ string) (string, error) {
+func (m *mockTopicLookupWithError) GetTopicConversationIDIncludingDeletedInProject(_ context.Context, _, _ string) (string, error) {
 	return "", m.err
 }
 
@@ -975,8 +992,8 @@ func TestDEF100_ReadResolveViaTopicLookup(t *testing.T) {
 	if got.ConversationID != "conv-linked-abc" {
 		t.Errorf("DEF-100: expected conversation_id conv-linked-abc, got %q", got.ConversationID)
 	}
-	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
-		t.Errorf("DEF-100: expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeletedInProject" {
+		t.Errorf("DEF-100: expected GetTopicConversationIDIncludingDeletedInProject, got %q", lookup.calledMethod)
 	}
 }
 
@@ -1146,8 +1163,8 @@ func TestDEF100_ReadResolveSoftDeletedTopic(t *testing.T) {
 	if got.ConversationID != "conv-deleted-123" {
 		t.Errorf("expected conversation_id conv-deleted-123, got %q", got.ConversationID)
 	}
-	if lookup.calledMethod != "GetTopicConversationIDIncludingDeleted" {
-		t.Errorf("expected GetTopicConversationIDIncludingDeleted, got %q", lookup.calledMethod)
+	if lookup.calledMethod != "GetTopicConversationIDIncludingDeletedInProject" {
+		t.Errorf("expected GetTopicConversationIDIncludingDeletedInProject, got %q", lookup.calledMethod)
 	}
 }
 

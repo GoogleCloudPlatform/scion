@@ -61,7 +61,7 @@ func skillsListTags(cmd *cobra.Command) []string {
 }
 
 func runSkillsList(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -129,7 +129,7 @@ var skillsShowCmd = &cobra.Command{
 }
 
 func runSkillsShow(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -299,7 +299,7 @@ func runSkillsPublish(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("total size exceeds 50MB limit (%d bytes)", totalSize)
 	}
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -455,7 +455,7 @@ var skillsDeleteCmd = &cobra.Command{
 }
 
 func runSkillsDelete(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -498,7 +498,7 @@ var skillsDeprecateCmd = &cobra.Command{
 }
 
 func runSkillsDeprecate(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -574,7 +574,7 @@ var skillsVersionsCmd = &cobra.Command{
 }
 
 func runSkillsVersions(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
@@ -630,7 +630,7 @@ var skillsResolveCmd = &cobra.Command{
 }
 
 func runSkillsResolve(cmd *cobra.Command, args []string) error {
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}

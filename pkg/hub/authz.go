@@ -23,7 +23,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/credentialmeta"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -67,12 +66,19 @@ const (
 	ActionClone          Action = "clone"
 	ActionExecute        Action = "execute"
 	ActionSetMessageMode Action = "set_message_mode"
+	// ActionSetMessagingPolicy covers changing a project's cross-project
+	// inbound messaging policy (project.set_messaging_policy).
+	ActionSetMessagingPolicy Action = "set_messaging_policy"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
 	// so a system-scoped binding carrying only these IDs does not
 	// silently grant project-level authority.
 	ActionCreateGlobal Action = "create_global"
+
+	// ActionAutoProvide gates turning on a broker's auto-provide setting
+	// (broker.auto_provide).
+	ActionAutoProvide Action = "auto_provide"
 
 	// ActionDeliver and ActionUse distinguish launch-time material delivery
 	// from an agent's own runtime retrieval or token-mint request. Neither
@@ -84,6 +90,10 @@ const (
 	// ActionWrite covers changes to the holder's own self-scoped records
 	// (permissions.ActionWrite).
 	ActionWrite Action = "write"
+
+	// ActionIssue covers issuing hub test identities
+	// (permissions.ActionIssue, test_identity.issue).
+	ActionIssue Action = "issue"
 )
 
 // Resource represents the target of an authorization check.
@@ -143,26 +153,16 @@ const (
 	PrincipalKindFederatedService PrincipalKind = "federated_service"
 	PrincipalKindBroker           PrincipalKind = "broker"
 	PrincipalKindDev              PrincipalKind = "dev"
-)
-
-// CredentialKind describes the authentication material that established a principal.
-// Credential constraints are caveats: they may narrow authority but never grant it.
-type CredentialKind = credentialmeta.Kind
-
-const (
-	CredentialKindInteractive = credentialmeta.KindInteractive
-	CredentialKindUAT         = credentialmeta.KindUAT
-	CredentialKindAgentJWT    = credentialmeta.KindAgentJWT
-	CredentialKindFederation  = credentialmeta.KindFederation
-	CredentialKindBroker      = credentialmeta.KindBroker
-	CredentialKindDev         = credentialmeta.KindDev
-
-	// CredentialKindHubDelivery is the internal credential a hub-side
-	// material delivery caller presents (ptone/scion#2228 part 2). It is
-	// produced only by the unexported newHubDeliveryIdentity constructor
-	// (authz_delivery_credential.go); no request context, token or header
-	// can carry it.
-	CredentialKindHubDelivery CredentialKind = "hub_delivery"
+	// PrincipalKindAgentDelegated classifies a request made with an agent
+	// delegated credential (.design/agent-delegation.md §12.1): the actor is
+	// the agent the grant is bound to, and the grant issuer is the
+	// authorizing user. Only *DelegatedAgentIdentity classifies to it.
+	PrincipalKindAgentDelegated PrincipalKind = "agent_delegated"
+	// PrincipalKindVisitor classifies a *VisitorIdentity: a user of a
+	// trusted external issuer linked to an active local federated account.
+	// Its ID is that account's local user ID, and NormalizePrincipalType
+	// maps it to the store principal type "user" for binding lookups.
+	PrincipalKindVisitor PrincipalKind = "visitor"
 )
 
 // PrincipalContext identifies the authenticated actor for an authorization request.
@@ -172,34 +172,6 @@ type PrincipalContext struct {
 	Kind     PrincipalKind
 	ID       string
 	Identity Identity
-}
-
-// CredentialContext records the credential used for an authorization request.
-// ProjectID and Scopes are caveats for scoped bearer credentials. Ceiling is
-// the UAT's normalized permission ceiling — the single source every
-// credential-scope restriction evaluates through, for every ceiling
-// version.
-type CredentialContext struct {
-	Kind      CredentialKind
-	ID        string
-	Type      string
-	ProjectID string
-	// Boundary carries the credential-side boundary (project or hub) for a
-	// UAT credential; nil for every other credential kind. ProjectID is
-	// filled from the same boundary for a project-scoped UAT, so a caller
-	// that reads only ProjectID sees a value consistent with Boundary. A
-	// boundary-aware caller should read Boundary directly, never infer
-	// hub-vs-project from an empty ProjectID, which is never a positive
-	// claim of hub scope by itself.
-	Boundary *TokenBoundary
-	Scopes   []string
-	Ceiling  permissions.FrozenPermissionCeiling
-
-	// Descriptive credential metadata. Decoration is additive,
-	// server-derived attribution (token name/boundary/purpose/labels) for
-	// logs and audit. It is never read by authorization decisions — see
-	// TestCredentialDecorationNotReadByAuthzCode.
-	Decoration *CredentialDecoration
 }
 
 // AuthzRequest carries both the acting principal and the credential caveats.
@@ -383,6 +355,11 @@ type Decision struct {
 	// only selects the additive response details; see adoptionDetailsCause.
 	adoptionRemediable bool
 
+	// AgentDelegation is the attribution block of a decision made for an
+	// agent delegated credential (decideAgentDelegation); nil for every
+	// other decision. Audit-only: it never contributes to Allowed.
+	AgentDelegation *AgentDelegationAttribution `json:"-"`
+
 	// Provenance contains the full decision provenance when Explain=true.
 	// For non-explain requests, this is populated with minimal data
 	// (matched grant and deny reason).
@@ -409,6 +386,12 @@ const (
 	// not hold the permission, a missing or ambiguous edge, or a failed
 	// lookup).
 	DeniedByDelegationCeiling DeniedBy = "delegation_ceiling"
+
+	// DeniedByAgentDelegation: the agent delegation decision procedure
+	// (decideAgentDelegation) denied a request made with an agent
+	// delegated credential. The fine-grained code is in
+	// Decision.AgentDelegation.
+	DeniedByAgentDelegation DeniedBy = "agent_delegation"
 )
 
 // DenyCause is a structural tag for a subset of deny reasons that callers
@@ -443,7 +426,10 @@ const (
 	// failure (Step 7c, detected after Step 9 because the failure there
 	// is folded into a deny-all restriction rather than an early return).
 	// The bearer gate (evaluateBearerGate) also sets it when the live
-	// project access lookup for a user access token fails on a store fault.
+	// project access lookup for a user access token fails on a store fault,
+	// and the delegation-ceiling walk sets it when the project-access stage
+	// on a user delegator's relationship authority (the ceiling hop) cannot
+	// evaluate the delegator's admission.
 	DenyCauseResolutionError DenyCause = "resolution_error"
 
 	// DenyCauseCeilingUnrecorded marks a deny where the source credential's
@@ -458,10 +444,27 @@ const (
 	DenyCauseCeilingEffectExceeded DenyCause = "ceiling_effect_exceeded"
 
 	// DenyCauseCeilingResourceMissing marks a deny where a resource a
-	// frozen ceiling refers to does not resolve. Reserved for the
-	// service-account parent-ceiling evaluator: no code path in this
-	// package emits it.
+	// frozen ceiling refers to does not resolve, or does not pass the
+	// resource's own usability rules. The service-account parent-ceiling
+	// evaluator emits it for an account that does not load, is not
+	// reachable from the agent's project, is not verified, or is hub-scoped
+	// while the IAM check is not enforced.
 	DenyCauseCeilingResourceMissing DenyCause = "ceiling_resource_missing"
+
+	// DenyCauseCeilingProvenanceMissing marks a deny where the record that
+	// carries the authorizing source is absent, or is unrecorded or of a
+	// provenance version this binary does not understand.
+	DenyCauseCeilingProvenanceMissing DenyCause = "ceiling_provenance_missing"
+
+	// DenyCauseCeilingProvenanceAmbiguous marks a deny where more than one
+	// active record could carry the authorizing source.
+	DenyCauseCeilingProvenanceAmbiguous DenyCause = "ceiling_provenance_ambiguous"
+
+	// DenyCauseCeilingProvenanceStale marks a deny where the recorded
+	// authority does not refer to the resource in use: the recorded
+	// service account, the agent's applied service account and the
+	// requested one are not all the same.
+	DenyCauseCeilingProvenanceStale DenyCause = "ceiling_provenance_stale"
 
 	// DenyCauseCeilingSourceNotAllowed marks a deny where the source
 	// credential is not accepted as an authority source on this server.
@@ -472,8 +475,9 @@ const (
 // resolution fault on the tagged paths, rather than a policy fact — the
 // access check could not be decided. Tagged: principal, role-binding,
 // role-definition and access-constraint resolution in decide(), the
-// user-access-token live project access lookup (evaluateBearerGate), and
-// the delegation-ceiling error. Not yet tagged: relationship-fact and
+// user-access-token live project access lookup (evaluateBearerGate), the
+// project-access lookup on the delegation-ceiling user hop, and the
+// delegation-ceiling error. Not yet tagged: relationship-fact and
 // source-active lookup failures (isCurrentHubMember, relationshipSourceActive,
 // progenySourceFor). A false result for those candidates does not prove a
 // policy deny.
@@ -535,12 +539,27 @@ type AuthzService struct {
 	// construction from ServerConfig.DevAuthToken != "". It is separate
 	// from devLocalEnabled and is read only by mintCandidateScopes.
 	mintDevAuthOverride bool
+
+	// saIAMCheckMode returns the server's current gcpIamCheckMode for
+	// service-account assignment, read by the service-account parent
+	// ceiling's shared rules (saAssignPolicyPreconditions). Set once at
+	// server construction. Nil reads as "", which is not enforce, so an
+	// AuthzService built without that wiring refuses hub-scoped accounts.
+	saIAMCheckMode func() string
+
+	// agentDelegation holds the server facts decideAgentDelegation needs
+	// (experiment state, audience, reserved identities, agent standing).
+	// Set once at server construction by Server.wireAgentDelegation. The
+	// zero value denies every delegated request.
+	agentDelegation agentDelegationHooks
 }
 
 // NewAuthzService creates a new AuthzService.
 func NewAuthzService(s store.Store, logger *slog.Logger) *AuthzService {
 	svc := &AuthzService{
-		store:                   s,
+		// Every role-binding read of the authorization service goes
+		// through the test-identity grant clamp (authz_test_fixture_clamp.go).
+		store:                   wrapAuthzStoreWithTestFixtureClamp(s),
 		logger:                  logger,
 		DecisionAuditSampleRate: 1.0,
 		relationshipResolver:    NewRelationshipGrantResolver(s),
@@ -683,6 +702,21 @@ func (a *AuthzService) decide(ctx context.Context, request AuthzRequest) Decisio
 	}
 	if denyReason != "" {
 		return decorateDecision(Decision{Allowed: false, Reason: denyReason}, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+	}
+
+	// ── Agent delegated credentials (.design/agent-delegation.md §11.1) ──
+	// A request made with an agent delegated credential is decided only by
+	// decideAgentDelegation; no other step below runs for it. A delegated
+	// principal without the delegated credential kind, or the reverse,
+	// denies.
+	if derivedPrincipal.Kind == PrincipalKindAgentDelegated || derivedCredential.Kind == CredentialKindDelegatedAgent ||
+		request.Credential.Kind == CredentialKindDelegatedAgent {
+		if derivedPrincipal.Kind != PrincipalKindAgentDelegated || derivedCredential.Kind != CredentialKindDelegatedAgent ||
+			(request.Credential.Kind != "" && request.Credential.Kind != CredentialKindDelegatedAgent) {
+			d := Decision{Allowed: false, Reason: "agent delegation: principal and credential kinds do not match", DeniedBy: DeniedByAgentDelegation, AlwaysAudit: true}
+			return decorateDecision(d, request, derivedPrincipal, derivedCredential, auditPermissionID(request))
+		}
+		return a.decideAgentDelegation(ctx, request, admissionMemo)
 	}
 
 	principal := request.Principal
@@ -2129,7 +2163,8 @@ func isUserPrincipal(kind PrincipalKind) bool {
 func isRecognizedPrincipalKind(kind PrincipalKind) bool {
 	switch kind {
 	case PrincipalKindUser, PrincipalKindAgent, PrincipalKindFederatedUser,
-		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev:
+		PrincipalKindFederatedAgent, PrincipalKindFederatedService, PrincipalKindBroker, PrincipalKindDev,
+		PrincipalKindAgentDelegated, PrincipalKindVisitor:
 		return true
 	default:
 		return false
@@ -2144,7 +2179,7 @@ func isRecognizedCredentialKind(kind CredentialKind) bool {
 	switch kind {
 	case CredentialKindInteractive, CredentialKindUAT, CredentialKindAgentJWT,
 		CredentialKindFederation, CredentialKindBroker, CredentialKindDev,
-		CredentialKindHubDelivery:
+		CredentialKindHubDelivery, CredentialKindDelegatedAgent:
 		return true
 	default:
 		return false
@@ -2239,6 +2274,30 @@ func brokerOnBehalfOfAuthorizes(ctx context.Context, principal PrincipalContext,
 	return supplied.ID == broker.ID()
 }
 
+// explicitIdentityClassification is an opt-in marker for identity types that
+// need a PrincipalKind/CredentialKind from principalContextForIdentity and
+// credentialContextForIdentity without being one of the explicitly classified
+// concrete production types those functions switch on directly
+// (AuthenticatedUser, ScopedUserIdentity, DevUser, agentIdentityWrapper,
+// storedAgentIdentity, peerAgentIdentity, explainAgentIdentity,
+// brokerIdentityImpl, FederatedUserIdentity, FederatedAgentIdentity,
+// FederatedServiceIdentity, hubDeliveryIdentity — the last classifies to
+// PrincipalKindAgent / CredentialKindHubDelivery and is never hub-attested,
+// see AncestryIsHubAttested). Its only current implementers are package-hub
+// test fakes that stand in for one of those types (ptone/scion#2123). The
+// method is unexported for the same reason localAncestryProvenance is: no
+// type outside package hub can implement it, so classification can never be
+// forged by an external caller, and a package-hub test fake must opt in with
+// an explicit, classified method rather than acquiring a kind by accident —
+// in particular, never by returning a Type() string that happens to match a
+// recognized one. A type that does not implement this interface, and is not
+// one of the concrete types above, is classified with an empty
+// PrincipalKind/CredentialKind, which Decide's fail-closed entry check
+// denies.
+type explicitIdentityClassification interface {
+	authzClassification() (PrincipalKind, CredentialKind)
+}
+
 // principalContextForIdentity classifies identity into its PrincipalKind by
 // concrete type — a type assertion switch, never identity.Type(). Type() is
 // informational only (see its doc comment): any concrete type, including one
@@ -2271,8 +2330,14 @@ func principalContextForIdentity(identity Identity) PrincipalContext {
 		principal.Kind = PrincipalKindFederatedAgent
 	case *FederatedServiceIdentity:
 		principal.Kind = PrincipalKindFederatedService
+	case *VisitorIdentity:
+		principal.Kind = PrincipalKindVisitor
 	case *brokerIdentityImpl:
 		principal.Kind = PrincipalKindBroker
+	case *DelegatedAgentIdentity:
+		// By concrete type only: a Type() of "agent_delegated" on any other
+		// type classifies to nothing.
+		principal.Kind = PrincipalKindAgentDelegated
 	default:
 		if c, ok := identity.(explicitIdentityClassification); ok {
 			principal.Kind, _ = c.authzClassification()
@@ -2339,10 +2404,15 @@ func credentialContextForIdentity(identity Identity) CredentialContext {
 	case *hubDeliveryIdentity:
 		// No ID: a delivery credential carries no JTI.
 		return CredentialContext{Kind: CredentialKindHubDelivery}
-	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity:
+	case *FederatedUserIdentity, *FederatedAgentIdentity, *FederatedServiceIdentity, *VisitorIdentity:
 		return CredentialContext{Kind: CredentialKindFederation, Type: identity.Type()}
 	case *brokerIdentityImpl:
 		return CredentialContext{Kind: CredentialKindBroker}
+	case *DelegatedAgentIdentity:
+		// Never interactive, UAT or agent JWT. Boundary and Ceiling come
+		// from the grant and the credential row.
+		boundary := v.Boundary()
+		return CredentialContext{Kind: CredentialKindDelegatedAgent, ID: v.CredentialID(), ProjectID: boundary.ProjectID, Boundary: &boundary, Ceiling: v.Ceiling()}
 	default:
 		if c, ok := identity.(explicitIdentityClassification); ok {
 			_, kind := c.authzClassification()
@@ -2480,16 +2550,14 @@ func (a *AuthzService) hasActiveSystemRole(ctx context.Context, userID, roleName
 	return false
 }
 
-// isBindingActive checks whether a store RoleBinding is currently active
-// based on its notBefore/expiresAt fields. R-2 fix.
+// isBindingActive checks whether a store RoleBinding is active at now
+// based on its notBefore/expiresAt fields. It delegates to
+// bindingActivationOK so it applies exactly the kernel's rule
+// (evaluateActivation): an unset bound is unbounded, notBefore is
+// inclusive, expiresAt is exclusive, and a zero now with any bound set is
+// inactive.
 func isBindingActive(b *store.RoleBinding, now time.Time) bool {
-	if b.NotBefore != nil && now.Before(*b.NotBefore) {
-		return false
-	}
-	if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
-		return false
-	}
-	return true
+	return bindingActivationOK(b, now)
 }
 
 // hubMembersSlug is the slug of the seeded hub-members group.
@@ -2501,12 +2569,39 @@ func (a *AuthzService) isCurrentHubMember(ctx context.Context, userID string) bo
 	if userID == "" {
 		return false
 	}
+	// An admin-kind test identity counts only while its kind is enabled
+	// and it has not expired (the same decide-time rule as the admin
+	// clamp); a kind read error denies.
+	if live, err := a.testAdminPrincipalLive(ctx, userID); err != nil || !live {
+		return false
+	}
 	group, err := a.store.GetGroupBySlug(ctx, hubMembersSlug)
 	if err != nil {
 		return false
 	}
 	_, err = a.store.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	return err == nil
+}
+
+// testAdminPrincipalLive reports whether userID may hold authority under
+// the admin-kind decide-time rule: true for any principal that is not an
+// admin-kind test identity; for an admin kind, only while its kind is
+// enabled on this hub and its expiry is in the future (clampTestAdmin's
+// rule, for decisions that do not read role bindings). The kind is read
+// through kindForPrincipal; an error is returned and callers deny.
+func (a *AuthzService) testAdminPrincipalLive(ctx context.Context, userID string) (bool, error) {
+	k, err := a.kindForPrincipal(ctx, userID)
+	if err != nil {
+		return false, err
+	}
+	if !k.isTestAdmin() {
+		return true, nil
+	}
+	c := a.kindCache()
+	if c == nil {
+		return false, nil
+	}
+	return c.adminTierEnabled(k.Kind) && k.ExpiresAt != nil && c.clock().Before(*k.ExpiresAt), nil
 }
 
 // storeToHubAccessConstraint converts a store AccessConstraint to a hub
@@ -2610,15 +2705,54 @@ func (a *AuthzService) isProjectOwner(ctx context.Context, userID, projectID str
 			continue
 		}
 		// Activation lifecycle: binding must be currently active.
-		if rb.NotBefore != nil && now.Before(*rb.NotBefore) {
-			continue
-		}
-		if rb.ExpiresAt != nil && now.After(*rb.ExpiresAt) {
+		if !isBindingActive(rb, now) {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// activeDirectProjectRoles returns the role names of userID's active
+// (isBindingActive), direct user-principal bindings on projectID of roles
+// that confer membership (ConfersProjectMembership), read
+// through st. With clamp set the bindings are passed through the test
+// identity clamps with authz's wiring (clampBindingsForUser), for a store
+// handle outside the authorization service; without it st must be the
+// authorization service's own clamped store. It replaces the unclamped,
+// unfiltered GetProjectMembership on decision paths. A read or kind error,
+// or a nil store, is returned; callers deny.
+func activeDirectProjectRoles(ctx context.Context, st store.Store, authz *AuthzService, clamp bool, userID, projectID string) (map[string]bool, error) {
+	if st == nil {
+		return nil, errors.New("active direct project roles: no store")
+	}
+	bindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	if clamp {
+		if bindings, err = clampBindingsForUser(ctx, st, authz, userID, bindings); err != nil {
+			return nil, err
+		}
+	}
+	now := time.Now()
+	roles := map[string]bool{}
+	for _, b := range bindings {
+		if b == nil || b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID || !isBindingActive(b, now) {
+			continue
+		}
+		rd, err := st.GetRoleDefinition(ctx, b.RoleDefinitionID)
+		if err != nil {
+			return nil, err
+		}
+		// Callers decide membership and ownership from these names, so a
+		// role that does not confer membership (project-visitor) is left
+		// out.
+		if rd.ConfersProjectMembership() {
+			roles[rd.Name] = true
+		}
+	}
+	return roles, nil
 }
 
 // isProjectOwnerOrAdmin reports whether the user has project-owner or
@@ -2628,12 +2762,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// 1. Direct user membership (existing behavior).
-	membership, err := a.store.GetProjectMembership(ctx, projectID, userID)
-	if err == nil && membership != nil {
-		if membership.Role == store.ProjectRoleOwner || membership.Role == store.ProjectRoleAdmin {
-			return true
-		}
+	// 1. Direct user membership: the user's active project bindings, read
+	// through the clamped store (so the test identity clamps apply).
+	roles, err := activeDirectProjectRoles(ctx, a.store, nil, false, userID, projectID)
+	if err == nil && (roles[store.ProjectRoleOwner] || roles[store.ProjectRoleAdmin]) {
+		return true
 	}
 
 	// 2. Group-expanded: check if any of the user's groups have owner/admin
@@ -2643,8 +2776,11 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 		return false
 	}
 
-	// Build principals for batched query.
-	var principals []store.PrincipalRef
+	// Build principals for batched query. The user principal is listed
+	// with its groups, so the test identity clamps see the user (they key
+	// on a user principal in the list); only group-held bindings count
+	// below.
+	principals := []store.PrincipalRef{{Type: store.RoleBindingPrincipalUser, ID: userID}}
 	for _, gid := range groupIDs {
 		principals = append(principals, store.PrincipalRef{Type: "group", ID: gid})
 	}
@@ -2652,8 +2788,15 @@ func (a *AuthzService) isProjectOwnerOrAdmin(ctx context.Context, userID, projec
 	if err != nil {
 		return false
 	}
+	now := time.Now()
 	for _, b := range bindings {
+		if b.PrincipalType != store.RoleBindingPrincipalGroup {
+			continue
+		}
 		if b.ScopeType != store.RoleScopeProject || b.ScopeID != projectID {
+			continue
+		}
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, err := a.store.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -2720,12 +2863,7 @@ func (a *AuthzService) getEffectivePermissions(ctx context.Context, principalTyp
 		cb := &CandidateBinding{
 			BindingID: b.ID,
 		}
-		if b.NotBefore != nil {
-			cb.NotBefore = *b.NotBefore
-		}
-		if b.ExpiresAt != nil {
-			cb.ExpiresAt = *b.ExpiresAt
-		}
+		cb.NotBefore, cb.ExpiresAt = candidateActivationBounds(b)
 		activation := evaluateActivation(cb, now)
 		if !activation.Active {
 			continue

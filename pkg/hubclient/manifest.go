@@ -33,12 +33,9 @@ type ManifestBuilder struct {
 func NewManifestBuilder(basePath string) *ManifestBuilder {
 	return &ManifestBuilder{
 		BasePath: basePath,
-		IgnorePatterns: []string{
-			".git",
-			".git/**",
-			".DS_Store",
-			"**/.DS_Store",
-		},
+		// Copy the shared defaults so callers appending to IgnorePatterns
+		// cannot modify the shared slice.
+		IgnorePatterns: append([]string{}, transfer.DefaultExcludePatterns...),
 	}
 }
 

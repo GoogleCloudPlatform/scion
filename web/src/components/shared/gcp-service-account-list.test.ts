@@ -35,12 +35,9 @@
  * one condition that should produce it.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionGCPServiceAccountList: any;
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
+import type { ScionGCPServiceAccountList } from './gcp-service-account-list.js';
 
 interface FetchCall {
   url: string;
@@ -57,7 +54,7 @@ function makeFetch(
   listBody: Record<string, unknown>
 ): (url: string | URL | Request, init?: RequestInit) => Promise<Response> {
   return (url, init) => {
-    calls.push({ url: String(url), method: init?.method ?? 'GET' });
+    calls.push({ url: requestUrl(url), method: init?.method ?? 'GET' });
     return Promise.resolve(
       new Response(JSON.stringify(listBody), {
         status: 200,
@@ -131,8 +128,7 @@ function iconButtons(el: HTMLElement, name: string): Element[] {
 
 describe('scion-gcp-service-account-list', () => {
   beforeAll(async () => {
-    const mod = await import('./gcp-service-account-list.js');
-    ScionGCPServiceAccountList = mod.ScionGCPServiceAccountList;
+    await import('./gcp-service-account-list.js');
   });
 
   afterEach(() => {
@@ -438,9 +434,7 @@ describe('scion-gcp-service-account-list', () => {
 
       // The component exposes isMintDisabled as a private method — call it
       // through the element to exercise scope-aware branching.
-      const disabled = (
-        el as unknown as { isMintDisabled: () => boolean }
-      ).isMintDisabled();
+      const disabled = (el as unknown as { isMintDisabled: () => boolean }).isMintDisabled();
       expect(disabled).toBe(true);
     });
 
@@ -468,7 +462,7 @@ describe('scion-gcp-service-account-list', () => {
   });
 
   describe('links out', () => {
-    it('links parentless accounts to a detail page and project ones nowhere', async () => {
+    it('links parentless accounts to the detail page and project ones with their project', async () => {
       const hubEl = await createComponent(
         { scope: 'hub' },
         makeFetch([], { items: [account({ id: 'sa-1' })] })
@@ -482,11 +476,16 @@ describe('scion-gcp-service-account-list', () => {
       expect(hubLink).not.toBeNull();
       expect(hubLink!.getAttribute('href')).toBe('/settings/service-accounts/sa-1');
 
-      // The project row still renders its email — it just is not a link.
-      expect(projectEl.shadowRoot!.textContent).toContain('one@gcp-project-xyz');
-      expect(
-        projectEl.shadowRoot!.querySelector('a[href^="/settings/service-accounts/"]')
-      ).toBeNull();
+      // A project row links to the project-relative status view (no actions
+      // there; verify and delete stay in this list).
+      const projectLink = projectEl.shadowRoot!.querySelector(
+        'a[href^="/settings/service-accounts/"]'
+      );
+      expect(projectLink).not.toBeNull();
+      expect(projectLink!.getAttribute('href')).toBe(
+        '/settings/service-accounts/sa-p?project=proj-1'
+      );
+      expect(projectLink!.textContent).toContain('one@gcp-project-xyz');
     });
   });
 });

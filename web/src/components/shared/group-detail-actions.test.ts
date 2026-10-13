@@ -26,9 +26,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
-import { canGroup } from '../../shared/groups';
-import type { AdminGroup, Capabilities } from '../../shared/groups';
-import type { UpdateGroupRequest } from '../../shared/groups';
+import { canGroup } from '../../shared/groups.js';
+import type { AdminGroup, Capabilities } from '../../shared/groups.js';
+import type { UpdateGroupRequest } from '../../shared/groups.js';
 
 /* -------------------------------------------------------------------------- */
 /* Helpers                                                                    */
@@ -42,10 +42,13 @@ function loadFixture<T = unknown>(name: string): T {
 
 /** Create a test group with specified capabilities. */
 function makeGroup(
-  overrides: Partial<AdminGroup> & { _capabilities?: Capabilities } = {}
+  overrides: Omit<Partial<AdminGroup>, '_capabilities'> & {
+    _capabilities?: Capabilities | undefined;
+  } = {}
 ): AdminGroup {
   const base = loadFixture<AdminGroup>('group-with-capabilities.json');
-  return { ...base, ...overrides };
+  // `_capabilities: undefined` is how a test clears the fixture's capabilities.
+  return { ...base, ...overrides } as AdminGroup;
 }
 
 /**

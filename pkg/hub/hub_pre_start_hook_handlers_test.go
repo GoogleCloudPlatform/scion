@@ -29,8 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const hubPSHPath = "/api/v1/pre-start-hooks"
-
 // createNonAdminUserForHubPSH creates an authenticated hub member (non-admin)
 // used to assert that mutating hub-hook endpoints are admin-only.
 func createNonAdminUserForHubPSH(t *testing.T, s store.Store) *store.User {
@@ -89,27 +87,6 @@ func uatTokenForUser(t *testing.T, srv *Server, s store.Store, user *store.User)
 	)
 	require.NoError(t, err)
 	return token
-}
-
-// doRequestWithToken performs an HTTP request using an arbitrary bearer token.
-func doRequestWithToken(t *testing.T, srv *Server, token, method, path string, body interface{}) *httptest.ResponseRecorder {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-
-	req := httptest.NewRequest(method, path, bytes.NewReader(bodyBytes))
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
 }
 
 // doHubPSHRequestAsIdentity invokes the hub pre-start-hook handlers with an

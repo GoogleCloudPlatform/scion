@@ -275,9 +275,9 @@ func TestHubUAT_FormerMemberRetainedAncestryDenied(t *testing.T) {
 //
 // The project.create authorization at the top of the register handler
 // denies this request first: a hub token cannot resolve the target of a
-// project resource without an ID. authorizeBrokerCreate also denies UAT
-// credentials on the embedded broker path, as a second gate. The test
-// asserts that the project.create deny is the one recorded.
+// project resource without an ID, so the embedded broker path and its
+// authorizeBrokerCreate gate are never reached. The test asserts that the
+// project.create deny is the one recorded.
 func TestProjectRegisterEmbeddedBroker_HubUATDenied(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()

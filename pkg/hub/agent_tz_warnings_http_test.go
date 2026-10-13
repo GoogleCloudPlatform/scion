@@ -64,6 +64,9 @@ func newTZWarningsServer(t *testing.T) (*Server, store.Store, *store.Agent, *moc
 		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name, Status: broker.Status,
 	}))
 
+	// The owner is a project member, so the agent is in good standing
+	// (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, tid("tz-warn-user"))
 	agent := &store.Agent{
 		ID:              tid("tz-warn-agent-" + t.Name()),
 		Name:            "tz-warn-agent",

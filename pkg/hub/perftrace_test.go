@@ -192,25 +192,6 @@ func TestPerfAuthzStore_ForwardsUnchangedAndCounts(t *testing.T) {
 	assert.Equal(t, int64(5), snap.AuthzStoreCalls)
 }
 
-type perfRecordingEmitter struct {
-	mu      sync.Mutex
-	records []*store.DecisionAuditRecord
-}
-
-func (e *perfRecordingEmitter) EmitDecisionAudit(_ context.Context, r *store.DecisionAuditRecord) {
-	e.mu.Lock()
-	e.records = append(e.records, r)
-	e.mu.Unlock()
-}
-
-func (e *perfRecordingEmitter) take() []*store.DecisionAuditRecord {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := e.records
-	e.records = nil
-	return out
-}
-
 func TestPerfAuditEmitter_ForwardsEachRecordOnceAndCountsByOutcome(t *testing.T) {
 	inner := &perfRecordingEmitter{}
 	assert.Same(t, inner, wrapAuditEmitterForPerfTrace(inner, false), "off must return the original emitter")
@@ -300,13 +281,6 @@ func TestPerfTraceMiddleware_HeadersOnlyForAdminOptInAndNoRequestDataLogged(t *t
 			assert.NotContains(t, line, "u-admin")
 			assert.NotContains(t, line, "admin@example.com")
 		})
-	}
-}
-
-func assertNoPerfHeaders(t *testing.T, h http.Header) {
-	t.Helper()
-	for k := range h {
-		assert.False(t, strings.HasPrefix(strings.ToLower(k), "x-scion-perf"), "unexpected perf header %s", k)
 	}
 }
 
@@ -659,4 +633,27 @@ func TestPerfTrace_HeaderValuesExactBytes(t *testing.T) {
 	assert.Equal(t, "wait_count=325,wait_us=2174935,in_use=1,open=2", h[headerPerfTraceDB])
 	assert.Equal(t, "", kv())
 	assert.Equal(t, "a=-1", kv(perfKV{"a", -1}))
+}
+
+// clockAdvancingEmitter returns only once the monotonic clock has visibly
+// advanced, so the decorator's measured emit time is necessarily positive
+// without any sleep or timing bound.
+type clockAdvancingEmitter struct{}
+
+func (clockAdvancingEmitter) EmitDecisionAudit(context.Context, *store.DecisionAuditRecord) {
+	start := time.Now()
+	for time.Since(start) <= 0 {
+	}
+}
+
+// The perf decorator records the time spent in the emitter into
+// AuditEmitTime (remaining-audit P1 conservation check F5).
+func TestPerfAuditEmitter_RecordsEmitTime(t *testing.T) {
+	wrapped := wrapAuditEmitterForPerfTrace(clockAdvancingEmitter{}, true)
+	tr := newPerfTrace(nil)
+	ctx := contextWithPerfTrace(context.Background(), tr)
+	wrapped.EmitDecisionAudit(ctx, &store.DecisionAuditRecord{Result: "allow"})
+	snap := tr.Snapshot()
+	assert.Equal(t, int64(1), snap.AuditRecords)
+	assert.Greater(t, snap.AuditEmitTime, time.Duration(0), "emit time recorded")
 }

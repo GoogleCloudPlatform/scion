@@ -851,3 +851,53 @@ func TestMappingDialect_FullHarnessEvents(t *testing.T) {
 		})
 	}
 }
+
+// TestMappingDialect_Parse_SuccessField pins how a mapped success path is
+// read: a bool as is, a string only as the status word "success" (any case),
+// and a missing value leaves success false.
+func TestMappingDialect_Parse_SuccessField(t *testing.T) {
+	md := NewMappingDialect(MappingDialectSpec{
+		Dialect:        "test",
+		EventNameField: "hook_event_name",
+		Mappings: map[string]MappingEntrySpec{
+			"ToolResult": {
+				Event:  hooks.EventToolEnd,
+				Fields: map[string]string{"success": "result.status"},
+			},
+		},
+	})
+	cases := []struct {
+		name   string
+		result map[string]interface{}
+		want   bool
+	}{
+		{"bool true", map[string]interface{}{"status": true}, true},
+		{"bool false", map[string]interface{}{"status": false}, false},
+		{"string success", map[string]interface{}{"status": "success"}, true},
+		{"string success any case", map[string]interface{}{"status": "SUCCESS"}, true},
+		{"other string", map[string]interface{}{"status": "failure"}, false},
+		{"string true is not success", map[string]interface{}{"status": "true"}, false},
+		{"empty string", map[string]interface{}{"status": ""}, false},
+		{"number", map[string]interface{}{"status": float64(1)}, false},
+		{"missing", map[string]interface{}{}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			event, err := md.Parse(map[string]interface{}{
+				"hook_event_name": "ToolResult",
+				"result":          tc.result,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, event.Data.Success)
+		})
+	}
+
+	t.Run("missing path keeps a top-level bool", func(t *testing.T) {
+		event, err := md.Parse(map[string]interface{}{
+			"hook_event_name": "ToolResult",
+			"success":         true,
+		})
+		require.NoError(t, err)
+		assert.True(t, event.Data.Success)
+	})
+}

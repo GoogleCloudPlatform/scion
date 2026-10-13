@@ -224,14 +224,14 @@ describe('stripQueryAndFragment', () => {
   ])('strips %s', (raw, want) => {
     expect(stripQueryAndFragment(raw)).toBe(want);
   });
-  it.each(['https://user:PSECRET?W@github.com/org/repo', 'https://user:PSECRET#W@github.com/org/repo'])(
-    'never returns a password prefix for %s',
-    (raw) => {
-      expect(stripQueryAndFragment(raw)).toBe('');
-      expect(sanitizeGitRemote(raw)).not.toContain('PSECRET');
-      expect(displayGitRemote(raw)).not.toContain('PSECRET');
-    },
-  );
+  it.each([
+    'https://user:PSECRET?W@github.com/org/repo',
+    'https://user:PSECRET#W@github.com/org/repo',
+  ])('never returns a password prefix for %s', (raw) => {
+    expect(stripQueryAndFragment(raw)).toBe('');
+    expect(sanitizeGitRemote(raw)).not.toContain('PSECRET');
+    expect(displayGitRemote(raw)).not.toContain('PSECRET');
+  });
 });
 
 describe('stripGitURLCredentials / sanitizeGitRemote', () => {

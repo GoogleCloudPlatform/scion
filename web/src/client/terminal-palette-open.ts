@@ -61,9 +61,34 @@ export interface PaletteOpenOptions {
  * open: the owning tab shows the terminal, so this tab can only report on it.
  */
 export function nonOwnerOpenStatus(status: TerminalOpenResult['status']): string {
-  if (status === 'selected') return 'Terminal selected in its owning tab.';
+  if (status === 'selected') return TERMINALS_OPEN_ELSEWHERE_STATUS;
   if (status === 'pending') return 'Waiting for the owning tab to select this terminal.';
   return 'Terminal workspace is unavailable in this tab.';
+}
+
+/** The button on the non-owner screen that moves the terminals to this window. */
+export const MOVE_TERMINALS_LABEL = 'Move terminals to this window';
+/** The same button while a move is in progress. */
+export const MOVING_TERMINALS_LABEL = 'Moving terminals…';
+/**
+ * The one state text for a window whose terminals are open in another
+ * window (ptone/scion#4324): after a move away, in a new window, and after
+ * an open the owning window selected. Shown above the move button.
+ */
+export const TERMINALS_OPEN_ELSEWHERE_STATUS = 'Terminals open in another window';
+/** The accessible label of the "?" help trigger after that state text. */
+export const TERMINALS_OPEN_ELSEWHERE_HELP_LABEL = 'About terminals open in another window';
+/** The help text the "?" trigger opens. */
+export const TERMINALS_OPEN_ELSEWHERE_HELP =
+  'A terminal connection can be open in only one place at a time. ' +
+  'Move terminals to this window closes them in the other window and opens them here.';
+
+/**
+ * Whether the non-owner screen offers the move button for an open's
+ * result: only once the owning tab has the terminal selected.
+ */
+export function offersMove(status: TerminalOpenResult['status']): boolean {
+  return status === 'selected';
 }
 
 /**

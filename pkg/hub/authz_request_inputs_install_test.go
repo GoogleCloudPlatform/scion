@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,23 +37,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// callerFuncNames returns the fully qualified function names on the
-// calling goroutine's stack, innermost first.
-func callerFuncNames() []string {
-	pcs := make([]uintptr, 512)
-	n := runtime.Callers(2, pcs)
-	frames := runtime.CallersFrames(pcs[:n])
-	var out []string
-	for {
-		f, more := frames.Next()
-		out = append(out, f.Function)
-		if !more {
-			break
-		}
-	}
-	return out
-}
 
 // frameMatches reports whether a fully qualified function name is the
 // named function or one of its closures.
@@ -377,7 +359,11 @@ func TestMemoInstall_RelationshipCandidatesNeverObserveMemo(t *testing.T) {
 		ceiling := stackHas(rec.stack, "checkDelegationCeiling")
 		// The project-access stage is the one relationship stage that reads
 		// the requester's memo: it evaluates the requester's own access.
-		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage")
+		// The delegation ceiling's user hop (userRelationshipAuthority)
+		// also runs the stage, for the delegator rather than the requester
+		// (ptone/scion#3433): it reads no memo, like every other stage.
+		ceilingHopStage := stackHas(rec.stack, "userRelationshipAuthority")
+		projectAccessStage := candidate && stackHas(rec.stack, "relationshipProjectAccessStage") && !ceilingHopStage
 		if projectAccessStage {
 			// The request context carries both keys; the stage must never
 			// reach the edges memo's only consumer, the delegation-edge

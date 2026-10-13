@@ -199,7 +199,7 @@ type RequestLoggerConfig struct {
 	HubID       string         // Stable unique hub instance ID for log labels
 	UseGCP      bool           // Format output as GCP-compatible JSON
 	Foreground  bool           // If true, suppress stdout output
-	Level       slog.Level
+	Level       slog.Leveler   // Floor, consulted per record (nil = info)
 }
 
 // NewRequestLogger creates a dedicated request logger with the configured outputs.
@@ -232,7 +232,11 @@ func NewRequestLogger(cfg RequestLoggerConfig) (*slog.Logger, func(), error) {
 		}
 		handlers = append(handlers, cloudHandler)
 		cleanups = append(cleanups, func() {
-			_ = ch.logger.Flush()
+			// Shutdown flush failure: counted (writer=cloud,
+			// reason=flush_error); still no stderr line here.
+			if err := ch.logger.Flush(); err != nil {
+				CloudWriter().RecordFailure(CloudReasonFlushError)
+			}
 		})
 	}
 
@@ -399,7 +403,7 @@ func RequestLogMiddleware(logger *slog.Logger, component string, patterns []Path
 			if !isStreaming && !isUpgrade && duration > slowThreshold {
 				slog.Info("Slow request",
 					slog.String("method", r.Method),
-					slog.String("path", r.URL.Path),
+					slog.String("path", RequestPath(r)),
 					slog.Duration("elapsed", duration),
 					slog.Int("status", wrapped.statusCode),
 				)

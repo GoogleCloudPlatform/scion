@@ -53,6 +53,19 @@ type ProjectMembershipService struct {
 	authz   *AuthzService
 	logger  *slog.Logger
 	nowFunc func() time.Time
+
+	// onMembershipLoss, when set, is called after a transaction that wrote
+	// a membership loss check commits, so the check is processed right away
+	// (ptone/scion#3433). The hub server sets it; the reconciler processes
+	// the check regardless.
+	onMembershipLoss func()
+}
+
+// notifyMembershipLoss runs the post-commit membership loss callback.
+func (svc *ProjectMembershipService) notifyMembershipLoss() {
+	if svc != nil && svc.onMembershipLoss != nil {
+		svc.onMembershipLoss()
+	}
 }
 
 // NewProjectMembershipService creates a new ProjectMembershipService.
@@ -126,6 +139,10 @@ type MembershipRequest struct {
 
 	// Transfer fields — the target user who will become the new owner.
 	NewOwnerID string
+
+	// LossTrigger names the event recorded on the membership loss check a
+	// remove writes (ptone/scion#3433). Empty means member_remove.
+	LossTrigger store.MembershipLossTrigger
 }
 
 // MembershipDecision captures the governance outcome.
@@ -169,6 +186,11 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 	if err != nil {
 		return ""
 	}
+	// Unclamped reads: apply the test identity clamps (fail closed: no
+	// role on a kind-read error).
+	if directBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, directBindings); err != nil {
+		return ""
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) *store.RoleDefinition {
@@ -206,6 +228,9 @@ func (svc *ProjectMembershipService) projectEffectiveRole(ctx context.Context, u
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
 		groupBindings, err := svc.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		if err == nil {
+			groupBindings, err = clampBindingsForUser(ctx, svc.store, svc.authz, userID, groupBindings)
+		}
 		if err == nil {
 			for _, rb := range groupBindings {
 				if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
@@ -257,6 +282,10 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 	if err != nil {
 		return "", fmt.Errorf("list direct bindings for actor %s: %w", userID, err)
 	}
+	// Unclamped reads (the tx store): apply the test identity clamps.
+	if directBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, directBindings); err != nil {
+		return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+	}
 
 	rdCache := make(map[string]*store.RoleDefinition)
 	getRoleDef := func(rdID string) (*store.RoleDefinition, error) {
@@ -300,6 +329,9 @@ func (svc *ProjectMembershipService) projectEffectiveRoleFromStore(ctx context.C
 		if err != nil {
 			return "", fmt.Errorf("list group bindings: %w", err)
 		}
+		if groupBindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, groupBindings); err != nil {
+			return "", fmt.Errorf("test identity clamp for actor %s: %w", userID, err)
+		}
 		for _, rb := range groupBindings {
 			if rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID {
 				continue
@@ -341,6 +373,9 @@ func (svc *ProjectMembershipService) isActorDirectOwnerFromStore(ctx context.Con
 	bindings, err := s.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return false, fmt.Errorf("list bindings for owner check %s: %w", userID, err)
+	}
+	if bindings, err = clampBindingsForUser(ctx, s, svc.authz, userID, bindings); err != nil {
+		return false, fmt.Errorf("test identity clamp for owner check %s: %w", userID, err)
 	}
 	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
 	if err != nil {
@@ -455,6 +490,14 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 	if err != nil {
 		return false, fmt.Errorf("list bindings for hub authority: %w", err)
 	}
+	// This read is unclamped (the tx store, not the authorization
+	// service's), so apply the test-identity grant clamp: a test identity
+	// never holds hub-level role-binding authority beyond member. A
+	// kind-read error fails closed.
+	bindings, err = clampTestIdentityBindings(ctx, tx, svc.authz, principals, bindings)
+	if err != nil {
+		return false, fmt.Errorf("test identity clamp for hub authority: %w", err)
+	}
 
 	// 3. Filter to system-scoped, active bindings and check permissions.
 	for _, b := range bindings {
@@ -462,10 +505,7 @@ func (svc *ProjectMembershipService) actorHasHubRoleBindingAuthorityTx(ctx conte
 			continue
 		}
 		// Activation window check.
-		if b.NotBefore != nil && now.Before(*b.NotBefore) {
-			continue
-		}
-		if b.ExpiresAt != nil && now.After(*b.ExpiresAt) {
+		if !isBindingActive(b, now) {
 			continue
 		}
 		rd, rdErr := tx.GetRoleDefinition(ctx, b.RoleDefinitionID)
@@ -806,6 +846,8 @@ func (svc *ProjectMembershipService) AddMember(ctx context.Context, req Membersh
 			RoleDefinitionID: req.RoleDefID,
 			ScopeType:        store.RoleScopeProject,
 			ScopeID:          req.ProjectID,
+			GranteeType:      req.PrincipalType,
+			GranteeID:        req.PrincipalID,
 		})
 		if !delDecision.Allowed {
 			return nil, canDelegateRefusal(roleDef, delDecision.Reason)
@@ -1122,6 +1164,8 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				RoleDefinitionID: req.NewRoleDefID,
 				ScopeType:        store.RoleScopeProject,
 				ScopeID:          req.ProjectID,
+				GranteeType:      req.PrincipalType,
+				GranteeID:        req.PrincipalID,
 			})
 			if !delDecision.Allowed {
 				return nil, canDelegateRefusalFor(newRoleDef, "the new role", delDecision.Reason)
@@ -1137,6 +1181,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// A change that drops access_constraint.admin takes the
+		// admin-guard lock before the project lock, the order user
+		// delete uses.
+		if roleHasConstraintAdmin(oldRoleDef) && !roleHasConstraintAdmin(newRoleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1213,6 +1265,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if !roleHasConstraintAdmin(newRoleDef) {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, existing); err != nil {
+				return err
+			}
+		}
+
 		// Delete old binding before creating replacement to satisfy the D4
 		// partial unique index (one binding per principal per project).
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
@@ -1236,6 +1296,12 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 				return err
 			}
 		}
+		// A role change can end access (for example a role without agent
+		// read): re-evaluate the principal (ptone/scion#3433). A no-op
+		// when access continues.
+		if err := enqueueMembershipLossForPrincipalTx(ctx, tx, existing.PrincipalType, existing.PrincipalID, req.ProjectID, store.MembershipLossTriggerMemberRoleChange, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_role_change",
 			TargetType:   "project_membership",
@@ -1258,11 +1324,16 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
 		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
+		}
 		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
 			return nil, d
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "role change failed: " + txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project member role changed via service",
 		"project_id", req.ProjectID, "old_role", oldRoleDef.Name,
@@ -1315,6 +1386,13 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Removing a constraint-admin binding takes the admin-guard lock
+		// before the project lock, the order user delete uses.
+		if roleHasConstraintAdmin(roleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1384,6 +1462,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, binding); err != nil {
+			return err
+		}
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
 			return err
 		}
@@ -1391,6 +1474,16 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			if err := enforceOwnerRemovalTx(ctx, tx, req.ProjectID, now, removedUsable); err != nil {
 				return err
 			}
+		}
+		// Ask for the removed principal's standing to be re-evaluated
+		// (ptone/scion#3433): a user, or every transitive member user of a
+		// group principal.
+		lossTrigger := req.LossTrigger
+		if lossTrigger == "" {
+			lossTrigger = store.MembershipLossTriggerMemberRemove
+		}
+		if err := enqueueMembershipLossForPrincipalTx(ctx, tx, binding.PrincipalType, binding.PrincipalID, req.ProjectID, lossTrigger, auditActorFromContext(ctx)); err != nil {
+			return err
 		}
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_member_remove",
@@ -1410,11 +1503,16 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
 		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
+		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project member removed via service",
 		"project_id", req.ProjectID, "binding_id", req.BindingID,
@@ -1470,6 +1568,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 	}
 	if newOwner.Status != "active" {
 		return nil, &MembershipDecision{Allowed: false, DenialCode: ErrCodePrincipalIneligible, Reason: "target user is not active", HTTPStatus: 400}
+	}
+	// An admin-kind test identity holds only its issuance binding: it is
+	// never made a project owner. The kind is read through
+	// kindForPrincipal; a read error or unrecognized kind refuses.
+	if denied := svc.refuseTestAdminNewOwner(ctx, newOwner); denied != nil {
+		return nil, denied
 	}
 
 	// Resolve role definitions.
@@ -1578,6 +1682,12 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 			return &lastOwnerError{projectID: req.ProjectID}
 		}
 
+		// Re-evaluate the previous owner (ptone/scion#3433); normally a
+		// no-op, since the previous owner stays a member.
+		if err := enqueueMembershipLossTx(ctx, tx, req.Actor.ID(), req.ProjectID, store.MembershipLossTriggerOwnershipTransfer, auditActorFromContext(ctx)); err != nil {
+			return err
+		}
+
 		// Audit record inside the same transaction.
 		return svc.createAuditRecord(ctx, tx, &store.MutationAuditRecord{
 			MutationType: "project_ownership_transfer",
@@ -1603,6 +1713,8 @@ func (svc *ProjectMembershipService) TransferOwnership(ctx context.Context, req 
 		}
 		return nil, &MembershipDecision{Allowed: false, DenialCode: "internal_error", Reason: "ownership transfer failed: " + txErr.Error(), HTTPStatus: 500}
 	}
+
+	svc.notifyMembershipLoss()
 
 	svc.logger.Info("project ownership transferred via service",
 		"project_id", req.ProjectID,
@@ -1879,6 +1991,23 @@ func lastOwnerDenial() *MembershipDecision {
 	}
 }
 
+// constraintAdminLockoutDecision converts a constraint-admin lockout
+// refusal into a MembershipDecision with the code and status the user
+// suspend and delete paths return. It returns nil for any other error.
+func constraintAdminLockoutDecision(err error) *MembershipDecision {
+	var ge *GovernanceError
+	if !errors.As(err, &ge) || ge.Code != ErrCodeConstraintAdminLockout {
+		return nil
+	}
+	return &MembershipDecision{
+		Allowed:    false,
+		DenialCode: ge.Code,
+		Reason:     ge.Message,
+		HTTPStatus: governanceErrorStatus(ge.Code),
+		Details:    ge.Details,
+	}
+}
+
 // higherProjectRole returns the higher-authority project role of the two.
 func higherProjectRole(a, b string) string {
 	if projectRoleLevel(a) >= projectRoleLevel(b) {
@@ -2088,4 +2217,25 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 	}
 
 	return results, nil
+}
+
+// refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
+// test identity or a federated account (403), reading the kind through kindForPrincipal (the row's
+// own classification when no authorization service is wired). A read
+// error or an unrecognized kind refuses too.
+func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
+	var k principalKind
+	var err error
+	if svc.authz != nil {
+		k, err = svc.authz.kindForPrincipal(ctx, newOwner.ID)
+	} else {
+		k, err = classifyUserKind(newOwner)
+	}
+	if err != nil || k.isTestAdmin() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
+	}
+	if k.isFederated() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: federatedGranteeReasonRefused, HTTPStatus: 403}
+	}
+	return nil
 }

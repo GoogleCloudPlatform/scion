@@ -36,7 +36,9 @@ scion hub auth login
 scion hub auth login --hub-url https://scion.yourcompany.com
 ```
 
-This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then `SCION_HUB_ENDPOINT`, then `hub.endpoint` in settings. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
+This will open your browser to complete the OAuth flow. The hub URL comes from `--hub-url`, then the root `--hub` flag, then the `SCION_HUB_ENDPOINT` environment variable (which overrides `hub.endpoint` in settings), then `hub.endpoint` in settings, then the `SCION_HUB_URL` environment variable — the same order as the other Hub commands, with `--hub-url` first. If no `hub.endpoint` is configured yet, a successful login saves the URL to your global settings (or to the project's settings, when that project already has hub settings) so `scion hub status` and other Hub commands use it. If Hub mode is off, an interactive login offers to enable it; otherwise run `scion hub enable`.
+
+To let a coding agent on your machine (for example Claude Code or Gemini CLI) drive the CLI under a scoped token, see [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).
 
 Commands that take a Hub project reference, such as `scion start -g <hub-project>`, need Hub mode. When you are logged in, an interactive run offers to enable it; otherwise the error tells you to run `scion hub enable`.
 
@@ -49,7 +51,11 @@ In a team environment, a **Project** represents a shared project. You link your 
 scion hub link
 ```
 
-If the project is already registered (matched by Git remote), Scion will link it automatically. If not, it will prompt you to register a new Project.
+If this directory is already linked (its Hub project ID names a Hub project of the same name), Scion reports that it is already linked. Otherwise it looks for Hub projects with the same name (the repository name from the Git remote, or the directory name). If it finds any, it asks whether to link to one of them or register a new project; with `--yes` it links to the first match, and `--non-interactive` refuses when more than one matches. If none match, it registers a new project. On the local workstation Hub the link confirmation is skipped (a prompt to pick among matching projects, and the offer to sync agents, still appear). With no Hub endpoint configured, `scion hub link` fails with one line telling you to start the local Hub with `scion server start` or to set a remote one with `scion config set hub.endpoint <url>`.
+
+When a project with existing local agents is linked and you accept the offer to sync them, they are imported to the Hub. An agent whose container is running is adopted as it is. Other agents are imported without being started (as stopped, or as created when they have no container), so the import never restarts dormant agents or re-sends their task.
+
+`scion hub unlink` only clears the link for this directory (it sets `hub.linked: false` and removes the Hub project ID). It does not turn Hub mode off and does not remove the project or its agents from the Hub. Agent commands in an unlinked project refuse and point you to `scion hub link`.
 
 ### Project Configuration
 
@@ -179,19 +185,22 @@ scion list --project acme-backend
 
 **A terminal is required.** Attach needs an interactive terminal on both stdin and stdout. From a script or a coding harness it fails at once with a non-zero exit. Use `scion look <agent>` to see the screen and `scion message <agent>` to send input instead.
 
-**No reconnect.** The CLI does not reconnect today. If the Hub restarts, the network drops, the Runtime Broker disconnects, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal does reconnect on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
+**Preflight.** Before it first connects, and again before each automatic reconnect, `scion attach` asks the Hub whether it can reach the agent's terminal, through the Runtime Broker or, when the broker's runtime has no attach, through the agent's own session. If the Hub refuses (for example `503`), the command exits with the Hub's reason and does not retry. If the Hub cannot be reached before a reconnect, the reconnect is retried after the usual backoff, up to the same limit of 3 short attempts in a row. When there is no path at all, the message says the agent's runtime has no attach and the agent has no session that serves a terminal.
+
+**Reconnect.** When the Hub closes the session with `4503` (a planned restart, or the Runtime Broker connection dropped), `4504` (a transient failure) or `1011` (an internal error), `scion attach` reconnects by itself, once per close, and the screen redraws. It stops after 3 reconnects in a row whose sessions each ended within a minute; press Ctrl-C during the wait to stop it. For `4503` it waits a random delay of up to 5 seconds first, so many clients closed at once do not all reconnect at the same moment. If that reconnect fails, or the network drops, the Hub restarts without a close message, or the agent's session ends, `scion attach` exits with a message that names the cause and the next command to run. (The web terminal also reconnects on its own.) The messages follow the [PTY close codes](/scion/reference/api/#pty-close-codes):
 
 | Close code | What the CLI tells you | What to do |
 | :--- | :--- | :--- |
 | `1000` | Nothing; this is a normal detach. | |
 | `4410` | The agent's terminal session has ended (the agent exited, or its container stopped or was removed). | Check with `scion list`, then `scion resume <agent> --attach`. |
 | `4404` | The Runtime Broker cannot find the agent or its container. | Check with `scion list`. |
-| `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet. | Run `scion attach <agent>` again. |
+| `4503` | The Hub lost its connection to the Runtime Broker, or the session is not ready yet, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
+| `4504` | A transient failure (for example the agent's session was lost), and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
 | `1006` | The connection to the Hub dropped without a close message. | Run `scion attach <agent>` again. |
-| `1011` | The Hub or the Runtime Broker hit an internal error. | Run `scion attach <agent>` again. |
+| `1011` | The Hub or the Runtime Broker hit an internal error, and the automatic reconnect also failed. | Run `scion attach <agent>` again. |
 
 Other codes get a generic message that includes the code and its reason, so you can look it up.
 
 **Known limit.** On a Hub that runs several replicas behind a load balancer, attach may fail with `503` if the request reaches a replica that does not hold the broker's control channel. Retrying may reach the right replica.
 
-**Coming change.** Attach is moving to a new transport layer, the conduit relay. That change is planned to add automatic reconnect to `scion attach` and to remove the multi-replica limit above. You won't need to do anything: `scion attach` and the web terminal keep working the same way.
+**Attach through Conduit.** With the `hub.conduit` [experiment](/scion/reference/experiments/) on (alpha, off by default), the Hub can also attach through the agent's own Conduit session, which works from any Hub replica. It takes that path only when the agent's runtime does not support attach and the agent's session offers a terminal. When the agent's runtime supports attach, attach goes through the Runtime Broker's control channel as before, and the multi-replica limit above still applies. When the runtime has no attach and the session offers no terminal, attach is refused. `scion attach` and the web terminal ask the Hub which path to use, so you run them the same way either way. See [`GET /:id/pty`](/scion/reference/api/#agents-apiv1agents) for the path rules and refusal reasons.

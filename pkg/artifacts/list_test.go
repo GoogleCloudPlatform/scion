@@ -197,6 +197,9 @@ func TestListBadRequests(t *testing.T) {
 		listPath + "&owner=bob",
 		listPath + "&q=%00",
 		listPath + "&q=" + url.QueryEscape(string(slices.Repeat([]rune("é"), maxSearchLength+1))),
+		listPath + "&scope=%00",
+		listPath + "&scope=%ff",
+		listPath + "&scope=" + strings.Repeat("p", maxScopeLength+1),
 	} {
 		rec := f.do(&userU, http.MethodGet, target, nil, nil)
 		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "bad_request" {
@@ -585,5 +588,306 @@ func TestListHidesPendingArtifactFromNonOwners(t *testing.T) {
 	}
 	if got := listIDs(f.list(&userU, listPath)); !slices.Equal(got, []string{id}) {
 		t.Errorf("member list after finalize: %v, want [%s]", got, id)
+	}
+}
+
+// TestListScopeNarrows: scope= keeps only the rows whose home scope is that
+// project, out of what the same caller's list shows without it. It never
+// adds a row the caller could not list (and so could not read) otherwise.
+func TestListScopeNarrows(t *testing.T) {
+	f := newFixture(t, false)
+	a1 := f.publish(agentA, "a1.md", []byte("1"), "").Artifact.ID
+	x1 := f.publish(agentX, "x1.md", []byte("2"), "").Artifact.ID
+	f.grantPrincipal(x1, userU)
+
+	if got := listIDs(f.list(&userU, listPath)); len(got) != 2 {
+		t.Fatalf("without scope: %v, want both", got)
+	}
+	for scope, want := range map[string][]string{
+		"project-1": {a1},
+		"project-2": {x1},
+		"project-3": {},
+	} {
+		if got := listIDs(f.list(&userU, listPath+"&scope="+scope)); !slices.Equal(got, want) {
+			t.Errorf("user, scope=%s: %v, want %v", scope, got, want)
+		}
+	}
+	// Narrowing cannot widen: callers who cannot read a project's rows
+	// still get none of them when they name that project.
+	for name, p := range map[string]principal{"outsider": outside, "other project agent": agentX} {
+		if got := listIDs(f.list(&p, listPath+"&scope=project-1")); len(got) != 0 {
+			t.Errorf("%s, scope=project-1: %v, want none", name, got)
+		}
+	}
+	if got := listIDs(f.list(nil, listPath+"&scope=project-1")); len(got) != 0 {
+		t.Errorf("unauthenticated, scope=project-1: %v, want none", got)
+	}
+	// Every row listed under a scope is readable by GET for the same caller.
+	for _, p := range []principal{agentA, agentB, agentX, userU, outside} {
+		for _, scope := range []string{"project-1", "project-2"} {
+			for _, id := range listIDs(f.list(&p, listPath+"&scope="+scope)) {
+				if rec := f.do(&p, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+					t.Errorf("%s lists %s under %s but GET answers %d", p.ref, id, scope, rec.Code)
+				}
+			}
+		}
+	}
+}
+
+// TestListScopeBoundIntoCursor: a cursor from a scoped walk resumes only
+// that walk.
+func TestListScopeBoundIntoCursor(t *testing.T) {
+	f := newFixture(t, false)
+	for i := range 3 {
+		f.publish(agentA, "f"+strconv.Itoa(i)+".md", []byte{byte(i)}, "")
+	}
+	first := f.list(&userU, listPath+"&scope=project-1&limit=1")
+	if first.NextCursor == "" {
+		t.Fatal("no cursor on a short page")
+	}
+	cursor := url.QueryEscape(first.NextCursor)
+	if rec := f.do(&userU, http.MethodGet, listPath+"&scope=project-1&limit=1&cursor="+cursor, nil, nil); rec.Code != http.StatusOK {
+		t.Fatalf("same scope: %d, want 200", rec.Code)
+	}
+	for name, target := range map[string]string{
+		"another scope": listPath + "&scope=project-2&cursor=" + cursor,
+		"no scope":      listPath + "&cursor=" + cursor,
+	} {
+		rec := f.do(&userU, http.MethodGet, target, nil, nil)
+		if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
+			t.Errorf("%s: %d %s, want 400 invalid_cursor", name, rec.Code, rec.Body.String())
+		}
+	}
+	unscoped := url.QueryEscape(f.list(&userU, listPath+"&limit=1").NextCursor)
+	rec := f.do(&userU, http.MethodGet, listPath+"&scope=project-1&cursor="+unscoped, nil, nil)
+	if rec.Code != http.StatusBadRequest || errCode(t, rec) != "invalid_cursor" {
+		t.Errorf("unscoped cursor on a scoped walk: %d, want 400 invalid_cursor", rec.Code)
+	}
+}
+
+// TestListScopeHidesPendingFromNonOwners: the pending owner-only rule holds
+// under scope= as well.
+func TestListScopeHidesPendingFromNonOwners(t *testing.T) {
+	f := newFixture(t, false)
+	f.createPending(agentA, "/api/v1/artifacts", CreateVersionRequest{
+		Title: "pending", Entry: "a.md", Files: []ManifestFile{{Path: "a.md", Size: 1, SHA256: sha([]byte("x"))}},
+	})
+	if got := listIDs(f.list(&agentB, listPath+"&scope=project-1")); len(got) != 0 {
+		t.Errorf("non-owner sees a pending artifact under scope: %v", got)
+	}
+	if got := listIDs(f.list(&agentA, listPath+"&scope=project-1")); len(got) != 1 {
+		t.Errorf("owner, scope=project-1: %v, want its pending artifact", got)
+	}
+}
+
+// scopeCheckHost is a fakeHost that also reports which projects exist.
+type scopeCheckHost struct {
+	*fakeHost
+	gone  map[string]bool
+	err   error
+	calls int
+}
+
+func (h *scopeCheckHost) ScopesExist(_ context.Context, refs []string) (map[string]bool, error) {
+	h.calls++
+	if h.err != nil {
+		return nil, h.err
+	}
+	out := map[string]bool{}
+	for _, r := range refs {
+		out[r] = !h.gone[r]
+	}
+	return out, nil
+}
+
+func listItem(t *testing.T, r ArtifactListResponse, id string) ArtifactListItem {
+	t.Helper()
+	for _, a := range r.Artifacts {
+		if a.ID == id {
+			return a
+		}
+	}
+	t.Fatalf("artifact %s not listed in %v", id, listIDs(r))
+	return ArtifactListItem{}
+}
+
+// TestListAccessAndSharedWithMe: each row says why the caller sees it, and
+// shared=1 without a scope keeps only the rows a grant shows it.
+func TestListAccessAndSharedWithMe(t *testing.T) {
+	f := newFixture(t, false)
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	project := f.publish(agentA, "project.md", []byte("p"), "").Artifact.ID
+	shared := f.publish(agentX, "shared.md", []byte("s"), "").Artifact.ID
+	f.grantPrincipal(shared, userU)
+
+	all := f.list(&userU, listPath)
+	for id, want := range map[string]string{own: AccessOwned, project: AccessProject, shared: AccessShared} {
+		if got := listItem(t, all, id).Access; got != want {
+			t.Errorf("%s: access %q, want %q", id, got, want)
+		}
+	}
+	got := f.list(&userU, listPath+"&shared=1")
+	if ids := listIDs(got); len(ids) != 1 || ids[0] != shared {
+		t.Errorf("shared=1: %v, want only %s", ids, shared)
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath+"&shared=maybe", nil, nil); rec.Code != http.StatusBadRequest {
+		t.Errorf("shared=maybe: %d", rec.Code)
+	}
+}
+
+// TestListMarksDeletedProjects: rows homed in a deleted project say so,
+// and only on those rows the list says whether the caller may move the
+// artifact. A failed existence check fails the request; a host that cannot
+// tell marks nothing.
+func TestListMarksDeletedProjects(t *testing.T) {
+	f := newFixture(t, false)
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	project := f.publish(agentA, "project.md", []byte("p"), "").Artifact.ID
+	adminOf := f.publish(agentA, "admin.md", []byte("a"), "").Artifact.ID
+	shared := f.publish(agentX, "shared.md", []byte("s"), "").Artifact.ID
+	f.grantPrincipal(shared, userU)
+	if rec, _ := f.putGrant(userU, own, SubjectPrincipal, PrincipalRef(PrincipalKindUser, outside.ref), GrantRead); rec.Code != http.StatusCreated {
+		t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+		VALUES ('g-admin', ?, 'principal', ?, 'admin', ?)`, adminOf, PrincipalRef(PrincipalKindUser, userU.ref),
+		time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+		t.Fatal(err)
+	}
+
+	// No ScopeChecker: nothing is marked.
+	for _, a := range f.list(&userU, listPath).Artifacts {
+		if a.ScopeDeleted || a.CanManage {
+			t.Errorf("%s marked without a checker: %+v", a.ID, a)
+		}
+	}
+
+	h := &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
+	f.svc.host = h
+	// While cross-project sharing is off no move can succeed: rows are
+	// marked but no move is offered.
+	for _, a := range f.list(&userU, listPath).Artifacts {
+		if a.CanManage {
+			t.Errorf("%s: canManage while moves are off", a.ID)
+		}
+	}
+	f.host.mu.Lock()
+	f.host.crossScope = true
+	f.host.mu.Unlock()
+	got := f.list(&userU, listPath)
+	if h.calls != 2 {
+		t.Errorf("ScopesExist called %d times for two pages", h.calls)
+	}
+	for id, want := range map[string][2]bool{
+		own:     {true, true},
+		project: {true, false},
+		adminOf: {true, true},
+		shared:  {false, false},
+	} {
+		a := listItem(t, got, id)
+		if a.ScopeDeleted != want[0] || a.CanManage != want[1] {
+			t.Errorf("%s: scopeDeleted=%v canManage=%v, want %v", id, a.ScopeDeleted, a.CanManage, want)
+		}
+	}
+	// A reader through a grant sees the deleted project but may not move it.
+	if a := listItem(t, f.list(&outside, listPath), own); !a.ScopeDeleted || a.CanManage {
+		t.Errorf("grantee: %+v", a)
+	}
+
+	h.err = errors.New("store down")
+	if rec := f.do(&userU, http.MethodGet, listPath, nil, nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed check: %d, want 500", rec.Code)
+	}
+}
+
+// grantReadsStore counts per-artifact grant reads and records batched ones.
+type grantReadsStore struct {
+	Store
+	mu      sync.Mutex
+	single  int
+	batches [][]string
+	// failIDs, when set, makes a batched read of exactly these ids fail.
+	failIDs map[string]bool
+}
+
+func (s *grantReadsStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
+	s.mu.Lock()
+	s.single++
+	s.mu.Unlock()
+	return s.Store.ListGrants(ctx, id)
+}
+
+func (s *grantReadsStore) ListGrantsFor(ctx context.Context, ids []string) (map[string][]Grant, error) {
+	s.mu.Lock()
+	s.batches = append(s.batches, slices.Clone(ids))
+	fail := s.failIDs != nil && len(ids) == len(s.failIDs)
+	for _, id := range ids {
+		fail = fail && s.failIDs[id]
+	}
+	s.mu.Unlock()
+	if fail {
+		return nil, errors.New("grants unavailable")
+	}
+	return s.Store.ListGrantsFor(ctx, ids)
+}
+
+// TestListDeletedProjectGrantsReadOnce: the grants that decide whether the
+// caller may move the page's deleted-project rows are read with one store
+// query for the whole page, not one per row; the decisions stay per row,
+// and a failed read fails the request.
+func TestListDeletedProjectGrantsReadOnce(t *testing.T) {
+	f := newFixture(t, false)
+	var admin, read []string
+	for i := 0; i < 3; i++ {
+		id := f.publish(agentA, "a"+strconv.Itoa(i)+".md", []byte{byte(i)}, "").Artifact.ID // homed in project-1
+		admin = append(admin, id)
+		if _, err := f.db.Exec(`INSERT INTO artifact_grant (id, artifact_id, subject_kind, subject_ref, permission, created_at)
+			VALUES (?, ?, 'principal', ?, 'admin', ?)`, "g-admin-"+id, id, PrincipalRef(PrincipalKindUser, userU.ref),
+			time.Now().UTC().Format(sqliteTimeLayout)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read = append(read, f.publish(agentA, "r.md", []byte("r"), "").Artifact.ID) // userU reads it through project-1 only
+	own := f.publish(userU, "own.md", []byte("o"), "scope=project-1").Artifact.ID
+	f.host.mu.Lock()
+	f.host.crossScope = true
+	f.host.mu.Unlock()
+	f.svc.host = &scopeCheckHost{fakeHost: f.host, gone: map[string]bool{"project-1": true}}
+	rs := &grantReadsStore{Store: f.store}
+	f.svc.SetStore(rs)
+
+	before := len(rs.batches)
+	got := f.list(&userU, listPath)
+	for _, id := range admin {
+		if a := listItem(t, got, id); !a.ScopeDeleted || !a.CanManage {
+			t.Errorf("%s (admin grant): %+v", id, a)
+		}
+	}
+	if a := listItem(t, got, read[0]); !a.ScopeDeleted || a.CanManage {
+		t.Errorf("%s (reader): %+v", read[0], a)
+	}
+	if a := listItem(t, got, own); !a.ScopeDeleted || !a.CanManage {
+		t.Errorf("%s (owned): %+v", own, a)
+	}
+	if rs.single != 0 {
+		t.Errorf("%d per-artifact grant reads, want 0", rs.single)
+	}
+	var deletedBatches [][]string
+	for _, b := range rs.batches[before:] {
+		if slices.Contains(b, own) {
+			deletedBatches = append(deletedBatches, b)
+		}
+	}
+	if len(deletedBatches) != 1 || len(deletedBatches[0]) != 5 {
+		t.Errorf("batched reads of the deleted rows: %v, want one covering all 5", deletedBatches)
+	}
+
+	// The batched read failing fails the request.
+	rs.failIDs = map[string]bool{own: true, read[0]: true}
+	for _, id := range admin {
+		rs.failIDs[id] = true
+	}
+	if rec := f.do(&userU, http.MethodGet, listPath, nil, nil); rec.Code != http.StatusInternalServerError {
+		t.Errorf("failed grants read: %d, want 500", rec.Code)
 	}
 }

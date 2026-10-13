@@ -231,6 +231,33 @@ func TestDeletionPredicate_Matches(t *testing.T) {
 	if (DeletionPredicate{DeletedAtNull: true}).Matches(&Agent{DeletedAt: now}) {
 		t.Error("soft-deleted row must not match DeletedAtNull")
 	}
+	inDoubt := &Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeInDoubt}
+	if !(DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(inDoubt) {
+		t.Error("code match must match")
+	}
+	if (DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(&Agent{DeletionState: DeletionStateFailed, DeletionCode: DeletionCodeRuntimeError}) {
+		t.Error("code mismatch must not match")
+	}
+	if (DeletionPredicate{Codes: []string{DeletionCodeInDoubt}}).Matches(&Agent{}) {
+		t.Error("a row with no code must not match a non-empty code")
+	}
+	if !(DeletionPredicate{Codes: []string{""}}).Matches(&Agent{}) {
+		t.Error(`"" must match a row with no code`)
+	}
+	// DeletedAtNotNull (the test identity purge's removal of a soft-deleted
+	// row): only a soft-deleted row matches; with DeletedAtNull as well,
+	// nothing does.
+	if (DeletionPredicate{DeletedAtNotNull: true}).Matches(&Agent{}) {
+		t.Error("a live row must not match DeletedAtNotNull")
+	}
+	if !(DeletionPredicate{DeletedAtNotNull: true}).Matches(&Agent{DeletedAt: now}) {
+		t.Error("a soft-deleted row must match DeletedAtNotNull")
+	}
+	for _, row := range []*Agent{{}, {DeletedAt: now}} {
+		if (DeletionPredicate{DeletedAtNull: true, DeletedAtNotNull: true}).Matches(row) {
+			t.Errorf("DeletedAtNull with DeletedAtNotNull must match nothing (deleted_at %v)", row.DeletedAt)
+		}
+	}
 }
 
 func TestAgent_JSON_DeletionPopulated(t *testing.T) {

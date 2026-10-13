@@ -43,12 +43,12 @@ import {
   type PaletteDismissReason,
   type PaletteGroup,
   type PaletteTarget,
-} from '../../../client/chat-palette-types.js';
+} from '../../../client/palette-types.js';
 import {
   rankCandidates,
   type HighlightRange,
   type RankedCandidate,
-} from '../../../utils/chat-palette-match.js';
+} from '../../../utils/palette-match.js';
 import { TouchPrimaryController } from '../../../utils/input-modality.js';
 import { PaletteTypeahead } from './palette-typeahead.js';
 

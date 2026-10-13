@@ -22,60 +22,9 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// seedExecutionAgent stores an agent row in projectID with the given
-// ancestry and records the typed delegation edges of its chain in that
-// project: chain[0] is the source user, chain[1:] are intermediate agents
-// (stored if absent), and each link delegates to the next, the last to the
-// agent.
-func seedExecutionAgent(t *testing.T, s store.Store, agentID, projectID string, ancestry, chain []string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NotEmpty(t, chain, "chain names the source user")
-	storeAgentIfAbsent := func(id string, anc []string) {
-		if _, err := s.GetAgent(ctx, id); err == nil {
-			return
-		}
-		require.NoError(t, s.CreateAgent(ctx, &store.Agent{
-			ID: id, Slug: "exec-" + id[:8], Name: "exec-" + id[:8],
-			ProjectID: projectID, Phase: "running",
-			OwnerID: chain[0], CreatedBy: chain[0], Ancestry: anc,
-			AppliedConfig: &store.AgentAppliedConfig{AgentRole: string(AgentRoleFull)},
-		}))
-	}
-	for i := 1; i < len(chain); i++ {
-		storeAgentIfAbsent(chain[i], append([]string(nil), chain[:i]...))
-	}
-	storeAgentIfAbsent(agentID, ancestry)
-
-	for i := 0; i < len(chain); i++ {
-		delegatorType := store.DelegationPrincipalAgent
-		if i == 0 {
-			delegatorType = store.DelegationPrincipalUser
-		}
-		delegate := agentID
-		if i+1 < len(chain) {
-			delegate = chain[i+1]
-		}
-		seedRecordedDelegationEdge(t, s, delegatorType, chain[i], store.DelegationPrincipalAgent, delegate,
-			store.RoleScopeProject, projectID, string(AgentRoleFull))
-	}
-}
-
-// execAgent is a local agent identity in projectID whose ancestry is
-// rooted at the golden fixture's secret owner.
-func execAgent(id, projectID string, ancestry []string) AgentIdentity {
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: id},
-		ProjectID: projectID,
-		Ancestry:  ancestry,
-		Scopes:    allRegisteredAgentScopes(),
-	}}
-}
 
 // agentGetErrStore fails GetAgent for one ID with an error other than
 // store.ErrNotFound.
@@ -228,21 +177,6 @@ func TestExecutionProject_CatalogSkillReadUnaffected(t *testing.T) {
 	owned := decidePerm(f.authz, agent, skillScopeResource(store.SkillScopeUser, f.projectOwnerID), ActionRead, "skill.read", true)
 	assert.False(t, owned.Allowed, "personal-skill progeny read: reason %q", owned.Reason)
 	assert.Equal(t, RelationshipRejectExecutionProject, relationshipResult(t, owned, RelationshipRuleProgeny).RejectedBy)
-}
-
-// extraEdgeStore adds one more delegation edge for delegateID.
-type extraEdgeStore struct {
-	store.Store
-	delegateID string
-	extra      *store.DelegationEdge
-}
-
-func (s *extraEdgeStore) GetDelegationEdgesForDelegate(ctx context.Context, delegateType, delegateID string) ([]*store.DelegationEdge, error) {
-	edges, err := s.Store.GetDelegationEdgesForDelegate(ctx, delegateType, delegateID)
-	if err != nil || delegateID != s.delegateID {
-		return edges, err
-	}
-	return append(edges, s.extra), nil
 }
 
 // A sharing source owned by an agent requires that agent's delegation chain

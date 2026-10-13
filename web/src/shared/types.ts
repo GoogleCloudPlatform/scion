@@ -47,6 +47,31 @@ export interface User {
   avatar?: string | undefined;
   role?: UserRole | undefined;
   preferences?: UserPreferences | undefined;
+  /** Set only for a test identity web session (GET /auth/me). */
+  testIdentity?: TestIdentitySessionInfo | undefined;
+}
+
+/** The testIdentity member of GET /auth/me for a test identity web session. */
+export interface TestIdentitySessionInfo {
+  /** The identity's expiry, ISO 8601. The session ends then. */
+  expiresAt: string;
+}
+
+/**
+ * The current user as returned by GET /auth/me. The client maps it to
+ * {@link User}. name and avatar are legacy fallbacks that the client still
+ * reads when displayName or avatarUrl is empty.
+ */
+export interface AuthMeResponse {
+  id: string;
+  email: string;
+  displayName: string;
+  name?: string;
+  avatarUrl?: string;
+  avatar?: string;
+  role?: UserRole;
+  preferences?: UserPreferences;
+  testIdentity?: TestIdentitySessionInfo;
 }
 
 /**
@@ -117,6 +142,8 @@ export interface PageData {
   user?: User | undefined;
   /** Additional page-specific data */
   data?: Record<string, unknown> | undefined;
+  /** Hub profiling readiness_marks setting; present (true) only when on, for a signed-in user */
+  readinessMarks?: boolean | undefined;
 }
 
 /**
@@ -216,6 +243,46 @@ export function isWorktreeWorkspace(project: Project): boolean {
   return (
     !!project.gitRemote && project.labels?.['scion.dev/workspace-mode'] === 'worktree-per-agent'
   );
+}
+
+/**
+ * Check whether a git project gives each agent its own clone. Matches the
+ * hub's ResolveProjectSharingMode: every git project that is neither shared
+ * nor worktree per agent, including an unlabelled or unknown one, gets a
+ * clone per agent.
+ */
+export function isClonePerAgentWorkspace(project: Project): boolean {
+  return !!project.gitRemote && !isSharedWorkspace(project) && !isWorktreeWorkspace(project);
+}
+
+/**
+ * Icon and accessible label for a project's workspace mode, as shown in the
+ * project list (#2917). Derived from the git remote, the project type and
+ * the hub-owned scion.dev/workspace-mode label; no extra API data needed.
+ */
+export interface ProjectWorkspaceModeIcon {
+  icon: string;
+  label: string;
+}
+
+export function projectWorkspaceModeIcon(project: Project): ProjectWorkspaceModeIcon {
+  if (project.gitRemote) {
+    if (isSharedWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, shared workspace' };
+    }
+    if (isWorktreeWorkspace(project)) {
+      return { icon: 'git', label: 'Git repository, worktree per agent' };
+    }
+    // Unlabelled or unknown git modes get a clone per agent, as on the hub.
+    return { icon: 'git', label: 'Git repository, clone per agent' };
+  }
+  if (isEmptyPerAgentWorkspace(project)) {
+    return { icon: 'folder-plus', label: 'Empty directory per agent' };
+  }
+  if (project.projectType === 'linked') {
+    return { icon: 'folder-symlink', label: 'Linked project directory' };
+  }
+  return { icon: 'folder-fill', label: 'Shared directory' };
 }
 
 /**
@@ -344,6 +411,7 @@ export interface AgentMessageabilityDetail extends AgentMessageability {
  * Agent runtime activity (only meaningful when phase=running)
  */
 export type AgentActivity =
+  | 'initializing'
   | 'working'
   | 'thinking'
   | 'executing'
@@ -396,6 +464,76 @@ export function getAgentDisplayStatus(agent: Agent): string {
  */
 export function isAgentRunning(agent: Agent): boolean {
   return agent.phase === 'running';
+}
+
+/**
+ * The client-facing view of an agent's current or most recent async launch
+ * (store.AgentLaunch, pkg/store/launch_view.go). The hub sends it on agent
+ * reads and on SSE `created` and `status` events. It is absent when the
+ * agent has never had an async launch, as after a synchronous create.
+ */
+export interface AgentLaunch {
+  id: string;
+  /**
+   * The launch's own state. It stays `active` while a failed or stopped
+   * create winds down, after the agent has left the in-flight phases.
+   */
+  state: 'active' | 'ended';
+  /**
+   * The hub's in-flight predicate (store.Agent.IsInFlight): the launch is
+   * active and the agent is still in a pre-running phase. It is not the same
+   * as `state === 'active'`; it is false in every phase an incomplete create
+   * can be in.
+   */
+  active: boolean;
+  /** create | start | restart. Only `create` launches are async today. */
+  kind: string;
+  /** The last step the broker reported, e.g. `claim` or `launching`. */
+  step?: string;
+  /** Failure code, e.g. `runtime_error`, `launch_timeout`, `broker_lost`. */
+  error?: string;
+  /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
+  endReason?: string;
+  /** Present only while the launch is active. */
+  deadline?: string;
+  remainingSeconds?: number;
+}
+
+/** The agent fields the launch predicates read. */
+export interface AgentLaunchFields {
+  phase?: AgentPhase;
+  launch?: AgentLaunch;
+}
+
+/**
+ * Whether the hub is still launching the agent asynchronously. The hub
+ * computes this as `launch.active` from its in-flight predicate
+ * (store.Agent.IsInFlight), which already includes the phase check.
+ */
+export function isAgentLaunching(agent: AgentLaunchFields): boolean {
+  return agent.launch?.active === true;
+}
+
+/**
+ * Whether the agent is an async create that did not complete, mirroring the
+ * hub's incomplete-create predicate (store.Agent.IsIncompleteCreate). The
+ * hub refuses a start or resume of such an agent with 409
+ * `agent_create_incomplete`; the way out is to delete it and create it again.
+ */
+export function isIncompleteCreate(agent: AgentLaunchFields): boolean {
+  const launch = agent.launch;
+  if (!launch || launch.kind !== 'create') return false;
+  switch (agent.phase) {
+    case 'suspended':
+    case 'stopping':
+    case 'stopped':
+    case 'error':
+      // The hub's wind-down arm is LaunchState == "active", which reaches
+      // the web as `state`; `active` is always false in these phases.
+      return launch.state === 'active' || !!launch.error;
+    default:
+      return false;
+  }
 }
 
 /**
@@ -493,7 +631,8 @@ export interface TelemetryHubConfig {
 }
 
 /**
- * Local debug telemetry output configuration.
+ * Local debug telemetry output configuration. Accepted but ignored: no
+ * component reads these keys today (ptone/scion#4103).
  */
 export interface TelemetryLocalConfig {
   enabled?: boolean;
@@ -508,23 +647,96 @@ export interface TelemetryConfig {
   enabled?: boolean;
   cloud?: TelemetryCloudConfig;
   hub?: TelemetryHubConfig;
+  /** Accepted but ignored: no component reads telemetry.local (ptone/scion#4103). */
   local?: TelemetryLocalConfig;
   filter?: TelemetryFilterConfig;
 }
 
 /**
- * Inline configuration values set at agent creation time.
+ * The agent's inline config: every key of api.ScionConfig
+ * (pkg/api/types.go), as the hub returns it in appliedConfig.inlineConfig
+ * and accepts it in the agent PATCH body's `config` object.
  */
 export interface AgentInlineConfig {
+  harness?: string;
+  harness_config?: string;
+  default_harness_config?: string;
+  config_dir?: string;
+  env?: Record<string, string>;
+  volumes?: AgentVolumeMount[];
+  detached?: boolean | null;
+  command_args?: string[];
+  task_flag?: string;
+  model?: string;
+  thinking_level?: number | null;
+  kubernetes?: Record<string, unknown>;
+  auth_selectedType?: string;
+  resources?: AgentResourceSpec;
+  image?: string;
+  services?: AgentServiceSpec[];
+  mcp_servers?: Record<string, AgentMCPServerConfig>;
   max_turns?: number;
   max_model_calls?: number;
   max_duration?: string;
-  model?: string;
-  thinking_level?: number;
-  branch?: string;
-  task?: string;
-  image?: string;
+  hub?: { endpoint?: string };
   telemetry?: TelemetryConfig;
+  clone_depth?: string;
+  secrets?: AgentRequiredSecret[];
+  skills?: AgentSkillReference[];
+  agent_instructions?: string;
+  system_prompt?: string;
+  user?: string;
+  task?: string;
+  branch?: string;
+  explicit_workspace?: boolean;
+  empty_per_agent_workspace?: boolean;
+}
+
+export interface AgentVolumeMount {
+  source?: string;
+  target: string;
+  read_only?: boolean;
+  type?: string;
+  [key: string]: unknown;
+}
+
+export interface AgentResourceSpec {
+  requests?: { cpu?: string; memory?: string };
+  limits?: { cpu?: string; memory?: string };
+  disk?: string;
+}
+
+export interface AgentServiceSpec {
+  name: string;
+  command: string[];
+  restart?: string;
+  env?: Record<string, string>;
+  ready_check?: { type: string; target: string; timeout: string };
+}
+
+export interface AgentMCPServerConfig {
+  transport: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  scope?: string;
+}
+
+export interface AgentRequiredSecret {
+  key: string;
+  description?: string;
+  type?: string;
+  target?: string;
+  alternative_env_keys?: string[];
+}
+
+export interface AgentSkillReference {
+  uri: string;
+  as?: string;
+  optional?: boolean;
+  scope?: string;
 }
 
 export type SupportLevel = 'no' | 'partial' | 'yes';
@@ -559,25 +771,96 @@ export interface HarnessAdvancedCapabilities {
 }
 
 /**
- * Applied configuration snapshot captured at agent creation time.
+ * The agent's applied configuration (store.AgentAppliedConfig,
+ * pkg/store/models.go): what the hub dispatches at the agent's next start.
  */
 export interface AgentAppliedConfig {
   image?: string;
   harnessConfig?: string;
   harnessAuth?: string;
-  noAuth?: boolean;
+  env?: Record<string, string>;
   model?: string;
-  thinkingLevel?: number;
+  thinkingLevel?: number | null;
   profile?: string;
+  runtimeTarget?: string;
   task?: string;
   attach?: boolean;
+  branch?: string;
   workspace?: string;
-  creatorName?: string;
+  gitClone?: Record<string, unknown>;
   templateId?: string;
   templateHash?: string;
-  inlineConfig?: AgentInlineConfig;
-  gcpIdentity?: GCPIdentityConfig;
+  harnessConfigId?: string;
+  harnessConfigHash?: string;
+  harnessConfigSource?: string;
+  creatorName?: string;
+  hubAccessScopes?: string[];
   agentRole?: string;
+  inlineConfig?: AgentInlineConfig;
+  noAuth?: boolean;
+  gcpIdentity?: GCPIdentityConfig;
+  /** The agent's pinned container timezone (IANA name), if any. */
+  explicitTimezone?: string;
+  /** True when explicitTimezone was adopted from a TZ an older hub saved in env. */
+  explicitTimezoneLegacy?: boolean;
+  explicitTimezoneUnpinned?: boolean;
+  /** The requester's explicit inputs, which reincarnate re-derives from. */
+  createInputs?: {
+    inlineConfig?: AgentInlineConfig;
+    harnessConfig?: string;
+    harnessAuth?: string;
+    profile?: string;
+    thinkingLevel?: number | null;
+    noAuth?: boolean;
+    branch?: string;
+    workspace?: string;
+  };
+}
+
+/** Edit tier of an agent field (pkg/hub/agent_config_mutability.go). */
+export type AgentEditTier = 'T0' | 'T1' | 'T2' | 'T3' | 'TX';
+
+/** What happens to an edit of a field in the agent's current phase. */
+export type AgentEditDisposition = 'immediate' | 'now' | 'held' | 'reincarnate' | 'locked';
+
+/** One field's entry in AgentEditability. */
+export interface AgentFieldEditState {
+  tier: AgentEditTier;
+  disposition: AgentEditDisposition;
+  sessionSensitive?: boolean;
+  /** "session" for a session-sensitive field of a suspended agent. */
+  note?: string;
+  /** Clearing or zeroing the field takes effect only at the next reincarnation. */
+  clearNeedsReincarnate?: boolean;
+  /** Why a locked field is locked. */
+  reason?: string;
+}
+
+/** Per-field editability of an agent for the caller (GET /api/v1/agents/{id}). */
+export interface AgentEditability {
+  phase: string;
+  /** Keyed by wire key: "config.<json key>" or the top-level PATCH key. */
+  fields: Record<string, AgentFieldEditState>;
+}
+
+/**
+ * The agent PATCH response's disposition: the wire keys whose value the
+ * request changed, grouped by when each edit takes effect. An unchanged
+ * echo is in no list, except gcp_identity, which is listed under applied
+ * whenever the request records a service-account assignment, the current
+ * account included.
+ */
+export interface AgentUpdateDisposition {
+  /** Keys that take effect at the next container creation (or at once, for metadata). */
+  applied: string[];
+  /**
+   * Reserved for config edits held while a container is live and applied at
+   * the next container creation after the current run. Always empty until
+   * ptone/scion#3976.
+   */
+  held: string[];
+  /** Keys stored now that take effect only at the next reincarnation. */
+  heldForReincarnate: string[];
 }
 
 /**
@@ -588,12 +871,16 @@ export interface Agent {
   name: string;
   projectId: string;
   project?: string;
+  /** The project's slug, resolved by the hub like `project`. */
+  projectSlug?: string;
   template: string;
   phase: AgentPhase;
   activity?: AgentActivity;
   detail?: AgentDetail;
   taskSummary?: string;
   message?: string;
+  /** The async launch view; absent when the agent never had one. */
+  launch?: AgentLaunch;
   lastSeen?: string;
   lastActivityEvent?: string;
   // Backend sends "created"/"updated"; legacy frontend code uses "createdAt"/"updatedAt".
@@ -608,6 +895,12 @@ export interface Agent {
   harnessCapabilities?: HarnessAdvancedCapabilities;
   runtimeBrokerId?: string;
   runtimeBrokerName?: string;
+  /**
+   * Read-only pinned placement of an agent on a flat Runtime Broker (the
+   * runtime target it was pinned to and the Runtime Broker serving it).
+   * Absent for an unpinned (profile-based) agent.
+   */
+  pinnedRuntimeTarget?: PinnedRuntimeTarget;
   _capabilities?: Capabilities;
 
   // Labels and annotations
@@ -655,6 +948,11 @@ export interface Agent {
   // Computed by the hub: provisioned but never asked to run
   // (ptone/scion#2929). Absent means false.
   provisionedOnly?: boolean;
+
+  // Per-field editability for the caller; set on the single-agent GET only.
+  editability?: AgentEditability;
+  // Optimistic-concurrency version; send it back with a PATCH.
+  stateVersion?: number;
 }
 
 /** `DeletionInfo.state` values the hub publishes (`finalizing` reads as `deleting`). */
@@ -707,18 +1005,14 @@ export interface DeletionInfo {
 export type DeletionStage = 'finalizing' | (string & Record<never, never>);
 
 /**
- * Template configuration embedded in template detail responses.
- * Partial subset of the Go `store.TemplateConfig` struct, covering fields used by the frontend.
+ * The job keys the frontend reads from a template's agentConfig: the hub's
+ * read-only snapshot of the template's own scion-agent.yaml (keys in
+ * scion-agent.yaml spelling). The hub reads a template's job keys from it
+ * (ptone/scion#4222). Partial subset of the Go `api.ScionConfig`.
  */
-export interface TemplateConfig {
-  harness?: string;
-  image?: string;
-  configDir?: string;
-  env?: Record<string, string>;
-  detached?: boolean;
-  commandArgs?: string[];
+export interface TemplateAgentConfig {
   model?: string;
-  messageMode?: MessageMode;
+  message_mode?: MessageMode;
 }
 
 /**
@@ -732,12 +1026,16 @@ export interface Template {
   description?: string;
   harness: string;
   defaultHarnessConfig?: string;
+  image?: string;
   status: string;
   scope: string;
   scopeId?: string;
   contentHash?: string;
+  /** URL the template was imported from, when it was imported. */
+  sourceUrl?: string;
   files?: TemplateFileInfo[];
-  config?: TemplateConfig;
+  /** Read-only snapshot of the template's own scion-agent.yaml; see TemplateAgentConfig. */
+  agentConfig?: TemplateAgentConfig;
   /** Creation and last-update times, as the hub sends them. */
   created?: string;
   updated?: string;
@@ -872,6 +1170,20 @@ export interface BrokerProfile {
   available: boolean;
 }
 
+/** Stored descriptor of a flat Runtime Broker's single runtime target. */
+export interface RuntimeTargetDescriptor {
+  id: string;
+  type: string;
+  displayName?: string;
+}
+
+/** Read-only view of an agent's pinned placement (Hub `pinnedRuntimeTarget`). */
+export interface PinnedRuntimeTarget {
+  id: string;
+  type: string;
+  runtimeBrokerId: string;
+}
+
 /**
  * Runtime Broker information from the Hub API
  */
@@ -885,6 +1197,8 @@ export interface RuntimeBroker {
   lastHeartbeat: string;
   capabilities?: BrokerCapabilities;
   profiles?: BrokerProfile[];
+  /** Present only for a flat Runtime Broker (single runtime target). */
+  runtimeTarget?: RuntimeTargetDescriptor;
   autoProvide: boolean;
   endpoint?: string;
   labels?: Record<string, string>;
@@ -1273,6 +1587,85 @@ export interface GCPServiceAccount {
   managed?: boolean;
   managedBy?: string;
   _capabilities?: Capabilities;
+  /**
+   * The account's mapping state on the broker profile the list was asked
+   * about (assignStatus, profile and broker query parameters). Absent when
+   * not asked for, and from hubs that predate it.
+   */
+  assignStatus?: GCPServiceAccountAssignStatus;
+}
+
+/** Mapping state of a GCP service account on one broker profile (mirrors hub GCPServiceAccountAssignStatus). */
+export type GCPServiceAccountAssignState = 'mapped' | 'not_mapped' | 'not_required' | 'unknown';
+
+export interface GCPServiceAccountAssignStatus {
+  /** One of GCPServiceAccountAssignState; a newer hub may send others. */
+  state: string;
+  /** Set only when state is unknown. */
+  reason?: string;
+  /** Human-readable; names no account or project. */
+  message: string;
+  brokerId?: string;
+  brokerName?: string;
+  profile?: string;
+  namespace?: string;
+}
+
+/**
+ * Mapping state of one Kubernetes broker profile for an account: the hub's
+ * shared mapping decision, the one the dispatch refusal uses. 'mapped' and
+ * 'not_mapped' need a complete, current report; otherwise the state is
+ * 'unknown' with `unknownReason`. 'not_reported' means no report at all.
+ */
+export type GCPSAMappingState = 'mapped' | 'not_mapped' | 'unknown' | 'not_reported';
+
+/**
+ * One Kubernetes broker profile's mapping for an account, from the status
+ * view. Every field after `state` is absent in a report from an older broker.
+ */
+export interface GCPServiceAccountProfileMapping {
+  brokerId: string;
+  brokerName: string;
+  profile: string;
+  state: GCPSAMappingState;
+  kubernetesServiceAccount?: string;
+  namespace?: string;
+  /** 'mapped' (explicit mapping) or 'discovered' (annotation discovery). */
+  source?: string;
+  /** When the hub last stored or confirmed the profile's report. */
+  reportedAt?: string;
+  incomplete?: boolean;
+  incompleteReason?: string;
+  ambiguous?: boolean;
+  /**
+   * Why the state is 'unknown': 'report_missing', 'report_incomplete',
+   * 'report_old_version', 'report_stale', 'runtime_unrecognized' or
+   * 'ambiguous_mapping' (with `ambiguous` set).
+   */
+  unknownReason?: string;
+}
+
+/**
+ * Per-account status view, as seen from one project:
+ * GET /api/v1/projects/{pid}/gcp-service-accounts/{ref}/status.
+ */
+export interface GCPServiceAccountStatus {
+  account: { id: string; displayName?: string; scope: string; email: string };
+  verification: {
+    status: GCPVerificationStatus;
+    verified: boolean;
+    verifiedAt?: string;
+    error?: string;
+  };
+  mappings: GCPServiceAccountProfileMapping[];
+  /** 'bound' | 'not_bound' | 'unknown'; only 'unknown' is produced today. */
+  workloadIdentityBinding: { state: string; reason?: string };
+  /** kind is 'project', 'profile' (with profile set) or 'hub'. */
+  defaultFor: Array<{ kind: string; profile?: string }>;
+  /** Already limited to agents the caller may see; names may be truncated. */
+  agents: { count: number; names: string[] };
+  /** code is 'not_verified', 'not_mapped' or 'none'. */
+  nextStep: { code: string; brokerName?: string; profile?: string; message: string };
 }
 
 export interface GCPMintQuotaInfo {

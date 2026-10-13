@@ -16,7 +16,6 @@ package hubclient
 
 import (
 	"context"
-	"fmt"
 	"net/url"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
@@ -143,7 +142,7 @@ func (s *secretService) List(ctx context.Context, opts *ListSecretOptions) (*Lis
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListSecretResponse](resp)
+	return apiclient.DecodeRequired[ListSecretResponse](resp)
 }
 
 // Get returns metadata for a specific secret by key.
@@ -168,7 +167,7 @@ func (s *secretService) Get(ctx context.Context, key string, opts *SecretScopeOp
 	}
 	if secret == nil {
 		// A 204 No Content response decodes to nil, nil.
-		return nil, fmt.Errorf("hub returned no content for %q", key)
+		return nil, &noContentError{key: key}
 	}
 	return secret, nil
 }
@@ -179,7 +178,7 @@ func (s *secretService) Set(ctx context.Context, key string, req *SetSecretReque
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[SetSecretResponse](resp)
+	return apiclient.DecodeRequired[SetSecretResponse](resp)
 }
 
 // AgentSet creates or updates a secret using the agent-scoped endpoint.
@@ -225,7 +224,7 @@ func (s *secretService) UpdateMeta(ctx context.Context, key string, req *UpdateS
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[Secret](resp)
+	return apiclient.DecodeRequired[Secret](resp)
 }
 
 // Delete removes a secret.

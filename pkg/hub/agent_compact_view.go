@@ -49,6 +49,7 @@ type AgentCompactItem struct {
 	Template        string            `json:"template,omitempty"`
 	ProjectID       string            `json:"projectId"`
 	Project         string            `json:"project,omitempty"`
+	ProjectSlug     string            `json:"projectSlug,omitempty"`
 	Labels          map[string]string `json:"labels,omitempty"`
 	Phase           string            `json:"phase,omitempty"`
 	Activity        string            `json:"activity,omitempty"`
@@ -102,6 +103,7 @@ func toCompact(a AgentWithCapabilities) AgentCompactItem {
 		Template:          a.Template,
 		ProjectID:         a.ProjectID,
 		Project:           a.Project,
+		ProjectSlug:       a.ProjectSlug,
 		Labels:            a.Labels,
 		Phase:             a.Phase,
 		Activity:          a.Activity,

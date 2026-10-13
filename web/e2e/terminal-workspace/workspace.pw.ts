@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 const agent = '11111111-1111-4111-8111-111111111111';
 const agentB = '22222222-2222-4222-8222-222222222222';
@@ -43,6 +44,7 @@ async function setup(
     close: (options?: { code?: number; reason?: string }) => void;
     send: (data: string | Buffer) => void;
   }> = [];
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled, locks }) => {
       window.__SCION_FEATURES__ = { 'web.terminal_workspace': enabled };
@@ -58,14 +60,6 @@ async function setup(
           return initialize.apply(this, args);
         };
       });
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled, locks }
   );
@@ -296,24 +290,24 @@ test('rail list preserves valid semantics and real browser arrow key navigation'
   await page.getByRole('button', { name: /alpha in project-a/ }).focus();
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
 
   await page.keyboard.press('ArrowDown');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('ArrowUp');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
   await page.keyboard.press('End');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for beta in project-b');
+    .toMatch(/^Show terminal for beta in project-b(,|$)/);
   await page.keyboard.press('Home');
   await expect
     .poll(() => focusedRailControlLabel(page))
-    .toBe('Show terminal for alpha in project-a');
+    .toMatch(/^Show terminal for alpha in project-a(,|$)/);
 });
 
 test('Enter and Space on a rail item focus its terminal without typing the key into it (ptone/scion#2900)', async ({
@@ -513,7 +507,9 @@ test('a second tab selects through the owner without attaching locally', async (
   await owner.goto(`/terminals/${agent}`);
   await expect.poll(() => ownerSocket.attaches).toBe(1);
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
   expect(otherSocket.attaches).toBe(0);
   expect(await other.locator('#terminal-workspace scion-terminal-pane').count()).toBe(0);
   await expect
@@ -692,6 +688,82 @@ test('preset rendering shows correct number of pane slots for each preset', asyn
   const singleVisible = await visiblePaneCount(page);
   const singlePH = await placeholderCount(page);
   expect(singleVisible + singlePH).toBe(1);
+});
+
+/**
+ * Drop a session on whatever element is topmost at the centre of a slot's
+ * placeholder, the way a real drag would hit it. Returns false without
+ * dropping when the placeholder is missing or something else covers it.
+ */
+async function dropAtPlaceholderCentre(
+  page: Page,
+  sessionKey: string,
+  slotIndex: number
+): Promise<boolean> {
+  return page.evaluate(
+    ({ key, slot }) => {
+      const ph = document.querySelector<HTMLElement>(
+        `#terminal-workspace .terminal-slot-placeholder[data-slot-index="${slot}"]`
+      );
+      if (!ph || ph.hidden) return false;
+      const rect = ph.getBoundingClientRect();
+      const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      if (!(hit instanceof HTMLElement) || !ph.contains(hit)) return false;
+      const dt = new DataTransfer();
+      dt.setData('application/x-scion-terminal', key);
+      const drop = new DragEvent('drop', { bubbles: true, cancelable: true, dataTransfer: dt });
+      Object.defineProperty(drop, 'dataTransfer', { value: dt });
+      hit.dispatchEvent(drop);
+      return true;
+    },
+    { key: sessionKey, slot: slotIndex }
+  );
+}
+
+/** The slot index of a session's pane when it is shown, else null. */
+async function paneSlotIndex(page: Page, sessionKey: string): Promise<string | null> {
+  return page.evaluate((key) => {
+    const panes = document.querySelectorAll<
+      HTMLElement & { session: { state: { key: string } } | null }
+    >('#terminal-workspace scion-terminal-pane');
+    for (const p of panes) {
+      if (p.session?.state.key === key && p.style.display !== 'none') {
+        return p.dataset.slotIndex ?? null;
+      }
+    }
+    return null;
+  }, sessionKey);
+}
+
+test('multi-pane placeholders are visible drop targets before any slot is filled', async ({
+  page,
+}) => {
+  const socket = await setup(page);
+  await page.goto(`/terminals/${agent}`);
+  await expect.poll(() => socket.attaches).toBe(1);
+  const [sessionKey] = await getPaneSessionKeys(page);
+  expect(sessionKey).toBeTruthy();
+
+  for (const [preset, count] of [
+    ['two-columns', 2],
+    ['two-rows', 2],
+    ['four', 4],
+  ] as const) {
+    await clickPreset(page, preset);
+    await expect.poll(() => activePreset(page)).toBe(preset);
+    await expect.poll(() => visiblePaneCount(page)).toBe(0);
+    await expect.poll(() => placeholderCount(page)).toBe(count);
+    await expect(page.locator('#terminal-workspace .terminal-status')).toBeHidden();
+    await expect(page.locator('#terminal-workspace .terminal-empty')).toBeHidden();
+
+    // Moving the one session through the slots leaves every other slot
+    // empty, so each slot is tested as a placeholder in turn.
+    for (let slot = 0; slot < count; slot++) {
+      expect(await dropAtPlaceholderCentre(page, sessionKey, slot)).toBe(true);
+      await expect.poll(() => paneSlotIndex(page, sessionKey)).toBe(String(slot));
+      await expect.poll(() => placeholderCount(page)).toBe(count - 1);
+    }
+  }
 });
 
 test('fifth-agent open overflows to single when four-pane at capacity; four restores grid', async ({
@@ -1419,7 +1491,7 @@ async function simulateDragDrop(
         if (el.dataset.railFocusId === `${key}:select`) {
           const item = el.closest('.terminal-rail-item');
           if (item) {
-            dragHandle = item.querySelector('.terminal-drag-handle') as HTMLElement;
+            dragHandle = item.querySelector<HTMLElement>('.terminal-drag-handle');
             break;
           }
         }
@@ -1768,20 +1840,21 @@ test('keyboard "Place in pane" action places session without drag gesture', asyn
   expect(pos!.visible).toBe(true);
   expect(pos!.col).toBe('1');
 
-  // Aria-live should announce the placement
-  const announcement = await page.evaluate(() => {
-    return document.querySelector('.terminal-aria-live')?.textContent ?? '';
-  });
-  expect(announcement).toContain('Placed');
-  expect(announcement).toContain('alpha');
-  expect(announcement).toContain('slot 1');
+  // Aria-live should announce the placement. Scope to the polite status
+  // region: the bulk-action reason spans reuse the visually-hidden
+  // .terminal-aria-live class and come first in DOM order.
+  await expect(page.locator('#terminal-workspace .terminal-aria-live[role="status"]')).toHaveText(
+    'Placed alpha in slot 1'
+  );
 
   // No new sockets
   expect(socket.attaches).toBe(2);
   expect(socket.closes).toBe(0);
 });
 
-test('ordinary rail click preserves active preset, does not place (#1701)', async ({ page }) => {
+test('rail click keeps the active preset and fills the next free slot (#1701, ptone/scion#4324)', async ({
+  page,
+}) => {
   const socket = await setup(page);
 
   await page.goto(`/terminals/${agent}`);
@@ -1798,18 +1871,24 @@ test('ordinary rail click preserves active preset, does not place (#1701)', asyn
   // open() no longer clobbers the preset — stays in two-columns (#1701)
   await expect.poll(() => activePreset(page)).toBe('two-columns');
 
-  // Two-columns should still have empty slots (not affected by rail click)
-  const twoColSlots = await page.evaluate(() => {
+  // The rail click puts the terminal in the first free slot (ptone/scion#4324)
+  const slots = await page.evaluate((agentId) => {
     type WorkspaceEl = HTMLElement & {
       workspaceRoot?: {
         layoutManager: { getState: () => { twoColumns: (string | null)[] } };
+        findSessionKeyByAgentId: (id: string) => string | null;
       };
     };
     const host = document.querySelector('#terminal-workspace') as WorkspaceEl;
-    return host.workspaceRoot!.layoutManager.getState().twoColumns;
-  });
-  expect(twoColSlots).toEqual([null, null]);
+    return {
+      twoColumns: host.workspaceRoot!.layoutManager.getState().twoColumns,
+      key: host.workspaceRoot!.findSessionKeyByAgentId(agentId),
+    };
+  }, agent);
+  expect(slots.key).not.toBeNull();
+  expect(slots.twoColumns).toEqual([slots.key, null]);
 
+  // The same session: no new connection
   expect(socket.attaches).toBe(1);
 });
 
@@ -2115,7 +2194,9 @@ test('non-owner logout broadcasts teardown, owner disposes', async ({ context })
 
   // Other tab navigates to terminals (becomes non-owner)
   await other.goto(`/terminals/${agent}`);
-  await expect(other.locator('#terminal-workspace')).toContainText('owning tab');
+  await expect(other.locator('#terminal-workspace')).toContainText(
+    'Terminals open in another window'
+  );
 
   // Non-owner fires teardown
   await other.evaluate(() => {
@@ -2283,29 +2364,10 @@ test('SSE auth-expiry check triggers teardown before login redirect', async ({ p
   //   checkAuthAndReconnect → fetch('/auth/me') → 401 →
   //   dispatchTeardown('auth-expired')
   await page.evaluate(async () => {
-    // Replace EventSource with one that fires onerror without opening,
-    // simulating a rejected SSE handshake after session invalidation.
-    window.EventSource = class extends EventTarget {
-      static CONNECTING = 0;
-      static OPEN = 1;
-      static CLOSED = 2;
-      readyState = 0;
-      onerror: (() => void) | null = null;
-      onopen: (() => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      constructor() {
-        super();
-        // Fire error on next microtask without opening first — the SSE
-        // client sees wasOpen=false and calls checkAuthAndReconnect().
-        queueMicrotask(() => {
-          this.readyState = 2;
-          this.onerror?.();
-        });
-      }
-      close(): void {
-        this.readyState = 2;
-      }
-    } as unknown as typeof EventSource;
+    // New streams from the shared stub now fire error without opening,
+    // simulating a rejected SSE handshake after session invalidation: the
+    // SSE client sees wasOpen=false and calls checkAuthAndReconnect().
+    window.__eventSourceStub.handshake = 'error';
 
     // Import the actual SSE client module and trigger the auth-check path.
     // This goes through the real SSEClient code: openConnection creates the

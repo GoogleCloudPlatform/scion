@@ -21,8 +21,6 @@
  * retain over the shared agent store's hub entry.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, afterEach } from 'vitest';
 
 vi.mock('./api.js', async (importOriginal) => {
@@ -41,8 +39,8 @@ import {
   retainTerminalPaletteAgents,
   selectTerminalPaletteCandidates,
 } from './terminal-palette-data.js';
-import { ChatPaletteDataController, type RawPaletteAgent } from './chat-palette-data.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import { ChatPaletteDataController } from './chat-palette-data.js';
+import type { PaletteCandidate, RawPaletteAgent } from './palette-types.js';
 import type { Agent, AgentActivity } from '../shared/types.js';
 import { createHarness, settle, type Harness } from './__fixtures__/agent-store-harness.js';
 import { AGENT_PROBE_INTERVAL_MS } from './agent-store.js';
@@ -149,6 +147,14 @@ describe('buildTerminalAgentCandidates', () => {
 
     const [byId] = buildTerminalAgentCandidates([agent({}, ['name', 'slug'])]);
     expect(byId.label).toBe('a1');
+  });
+
+  it("names the project by the row's slug, keeping slug and name searchable", () => {
+    const [candidate] = buildTerminalAgentCandidates([
+      agent({ project: 'My Project', projectSlug: 'my-project' }),
+    ]);
+    expect(candidate.secondaryLabel).toBe('my-project');
+    expect(candidate.searchFields).toEqual(['Agent One', 'my-project', 'My Project']);
   });
 
   it('uses the project name as the secondary label, falling back to slug', () => {

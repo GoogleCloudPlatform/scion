@@ -68,6 +68,14 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 		t.Fatalf("failed to write settings: %v", err)
 	}
 
+	// A project that set hub.enabled=false on this host (for example
+	// through an old 'scion hub unlink'): the broker still resolves its
+	// endpoint, because the broker is authoritative about connectivity.
+	disabledProjectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(disabledProjectDir, "settings.yaml"), []byte("hub:\n  enabled: false\n  endpoint: https://disabled-settings.example.com\n"), 0644); err != nil {
+		t.Fatalf("failed to write settings: %v", err)
+	}
+
 	tests := []struct {
 		name                 string
 		req                  string
@@ -118,6 +126,19 @@ func TestResolveHubEndpointForCreatePrecedence(t *testing.T) {
 			name:        "settings fallback when others absent",
 			projectPath: projectDir,
 			want:        "https://settings.example.com",
+			wantTrusted: false,
+		},
+		{
+			name:        "broker endpoint used for a project with hub.enabled=false",
+			broker:      "https://broker.example.com",
+			projectPath: disabledProjectDir,
+			want:        "https://broker.example.com",
+			wantTrusted: true,
+		},
+		{
+			name:        "settings fallback ignores hub.enabled=false",
+			projectPath: disabledProjectDir,
+			want:        "https://disabled-settings.example.com",
 			wantTrusted: false,
 		},
 		{

@@ -39,18 +39,13 @@ func TestServer_PersistentSigningKeys(t *testing.T) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
 	cfg := DefaultServerConfig()
 
 	// Create first server
-	srv1, err := New(cfg, s)
+	srv1, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 	if srv1.agentTokenService == nil {
 		t.Fatal("agentTokenService not initialized in srv1")
 	}
@@ -62,11 +57,10 @@ func TestServer_PersistentSigningKeys(t *testing.T) {
 	userKey1 := srv1.userTokenService.config.SigningKey
 
 	// Create second server with the same store
-	srv2, err := New(cfg, s)
+	srv2, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 	if srv2.agentTokenService == nil {
 		t.Fatal("agentTokenService not initialized in srv2")
 	}
@@ -91,18 +85,14 @@ func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = "test-hub-123"
 
-	srv1, err := New(cfg, s)
+	srv1, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 	if srv1.agentTokenService == nil {
 		t.Fatal("agentTokenService not initialized")
 	}
@@ -111,11 +101,10 @@ func TestServer_PersistentSigningKeys_WithHubID(t *testing.T) {
 	userKey1 := srv1.userTokenService.config.SigningKey
 
 	// Second server with same hubID should get the same keys
-	srv2, err := New(cfg, s)
+	srv2, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 
 	if string(key1) != string(srv2.agentTokenService.config.SigningKey) {
 		t.Error("agent signing keys should match with same hubID")
@@ -157,18 +146,14 @@ func TestServer_SigningKeysExcludedFromResolve(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = "test-hub-resolve"
 
-	srv, err := New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Resolve secrets as if dispatching an agent — signing keys must not appear.
 	backend := secret.NewLocalBackend(s, "test-hub-resolve", "test-secret")
@@ -191,19 +176,15 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.HubID = "test-hub-456"
 
 	// Run 1: create server, generate a user token
-	srv1, err := New(cfg, s)
+	srv1, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 	if srv1.userTokenService == nil {
 		t.Fatal("userTokenService not initialized")
 	}
@@ -228,16 +209,12 @@ func TestServer_UserTokenSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to reopen test store: %v", err)
 	}
-	if err := s2.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate reopened store: %v", err)
-	}
 
 	// Run 2: create a NEW server with the reopened store
-	srv2, err := New(cfg, s2)
+	srv2, err := newTestHubServer(t, cfg, s2)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 	if srv2.userTokenService == nil {
 		t.Fatal("userTokenService not initialized on srv2")
 	}
@@ -266,9 +243,6 @@ func TestServer_SigningKeyMigration_LegacyHubScopeID(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
 	}
 
 	ctx := context.Background()
@@ -299,11 +273,10 @@ func TestServer_SigningKeyMigration_LegacyHubScopeID(t *testing.T) {
 	// Now create a server with an actual hubID — it should migrate from "hub"
 	cfg := DefaultServerConfig()
 	cfg.HubID = "my-new-hub-id"
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if string(legacyAgentKey) != string(srv.agentTokenService.config.SigningKey) {
 		t.Error("agent signing key should be migrated from legacy 'hub' scope")
@@ -349,9 +322,6 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	ctx := context.Background()
 	newHubID := "new-hub-id-abc123"
@@ -393,11 +363,10 @@ func TestServer_SigningKeyMigration_DeletesLegacyFromBackend(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.HubID = newHubID
 	cfg.SecretBackend = backend
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// The migrated key should match the original.
 	if string(srv.userTokenService.config.SigningKey) != string(legacyKey) {
@@ -428,9 +397,6 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-backend-hub"
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
@@ -440,11 +406,10 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	cfg.SecretBackend = backend
 
 	// Run 1: keys generated and stored
-	srv1, err := New(cfg, s)
+	srv1, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 	if srv1.userTokenService == nil {
 		t.Fatal("userTokenService not initialized")
 	}
@@ -470,11 +435,10 @@ func TestServer_SigningKeyBootstrapWithSecretBackend(t *testing.T) {
 	}
 
 	// Run 2: create new server — key should be loaded from backend
-	srv2, err := New(cfg, s)
+	srv2, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 
 	key2 := srv2.userTokenService.config.SigningKey
 	if string(key1) != string(key2) {
@@ -498,30 +462,25 @@ func TestServer_SigningKeySyncFromStoreToBackend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-sync-hub"
 
 	// Run 1: No secret backend — keys go to SQLite only
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID
-	srv1, err := New(cfg, s)
+	srv1, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 	key1 := srv1.userTokenService.config.SigningKey
 
 	// Run 2: Secret backend configured — keys should sync from SQLite to backend
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
 	cfg.SecretBackend = backend
-	srv2, err := New(cfg, s)
+	srv2, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 	key2 := srv2.userTokenService.config.SigningKey
 
 	if string(key1) != string(key2) {
@@ -552,9 +511,6 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-empty-value-hub"
 
@@ -576,11 +532,10 @@ func TestServer_SigningKeyEmptyValueFromStore(t *testing.T) {
 	// Create server WITHOUT a secret backend (simulates backend unavailable)
 	cfg := DefaultServerConfig()
 	cfg.HubID = hubID
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	if srv.userTokenService == nil {
 		t.Fatal("userTokenService should be initialized even when store has empty key value")
@@ -617,9 +572,6 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-backup-hub"
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
@@ -629,11 +581,10 @@ func TestServer_SigningKeyBackupAfterBackendSet(t *testing.T) {
 	cfg.SecretBackend = backend
 
 	// Create server — generates new keys via backend
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	key := srv.userTokenService.config.SigningKey
 
@@ -661,9 +612,6 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = "test-dev-token"
@@ -672,11 +620,10 @@ func TestServer_GenerateAgentToken_DevAuthAutoGrantsScopes(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Generate token without any additional scopes — role=baseline, dev-auth upgrades to full
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
@@ -709,9 +656,6 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = "test-dev-token"
@@ -720,11 +664,10 @@ func TestServer_GenerateAgentToken_DevAuthDeduplicatesScopes(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Generate token with explicit scopes that overlap with auto-granted ones
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline,
@@ -760,9 +703,6 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	// DevAuthToken is empty - not dev-auth mode
@@ -771,11 +711,10 @@ func TestServer_GenerateAgentToken_NoDevAuthDoesNotAutoGrant(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
@@ -806,9 +745,6 @@ func TestServer_GenerateAgentToken_RoleBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -816,11 +752,10 @@ func TestServer_GenerateAgentToken_RoleBaseline(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleBaseline, nil)
 	if err != nil {
@@ -854,9 +789,6 @@ func TestServer_GenerateAgentToken_RoleFull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -864,11 +796,10 @@ func TestServer_GenerateAgentToken_RoleFull(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleFull, nil)
 	if err != nil {
@@ -899,9 +830,6 @@ func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -909,11 +837,10 @@ func TestServer_GenerateAgentToken_RoleReadOnly(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
 	if err != nil {
@@ -941,9 +868,6 @@ func TestServer_GenerateAgentToken_DevAuthUpgradesRole(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = "test-dev-token"
@@ -952,11 +876,10 @@ func TestServer_GenerateAgentToken_DevAuthUpgradesRole(t *testing.T) {
 		TokenDuration: time.Hour,
 	}
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	// Even with readonly role, dev-auth mode should upgrade to full
 	token, err := srv.GenerateAgentToken(tid("agent-1"), tid("project-1"), nil, AgentRoleReadOnly, nil)
@@ -1012,9 +935,6 @@ func TestServer_GCPBackendFailureIsFatal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-gcpfail-hub"
 	backend := secret.NewGCPBackendWithClient(s, &failingSMClient{}, "test-project", hubID)
@@ -1023,7 +943,7 @@ func TestServer_GCPBackendFailureIsFatal(t *testing.T) {
 	cfg.HubID = hubID
 	cfg.SecretBackend = backend
 
-	_, err = New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err == nil {
 		t.Fatal("expected New() to return error when GCPBackend fails to store signing key")
 	}
@@ -1040,9 +960,6 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-ref-hub"
 	backend := secret.NewLocalBackend(s, hubID, "test-secret")
@@ -1052,18 +969,16 @@ func TestServer_SigningKeyBackupPreservesSecretRef(t *testing.T) {
 	cfg.SecretBackend = backend
 
 	// Run 1: generate keys (stores via backend)
-	srv1, err := New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv1.Shutdown(context.Background()) })
 
 	// Run 2: load keys from backend (triggers backupSigningKeyToStore)
-	srv2, err := New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 
 	// Check that the SQLite record still has the key value (backup)
 	ctx := context.Background()
@@ -1084,9 +999,6 @@ func TestServer_SigningKeyBackupIsEncrypted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-encrypt-hub"
 	sharedSecret := "test-signing-secret"
@@ -1098,11 +1010,10 @@ func TestServer_SigningKeyBackupIsEncrypted(t *testing.T) {
 	cfg.SharedSigningSecret = sharedSecret
 
 	// Create server — this generates signing keys and backs them up to store.
-	srv, err := New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	ctx := context.Background()
 
@@ -1126,11 +1037,10 @@ func TestServer_SigningKeyBackupIsEncrypted(t *testing.T) {
 	// Verify that creating a second server instance (which loads from
 	// backend and re-backups) still produces encrypted values and the
 	// server starts without error.
-	srv2, err := New(cfg, s)
+	_, err = newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() [second instance] failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 
 	for _, keyName := range []string{SecretKeyAgentSigningKey, SecretKeyUserSigningKey} {
 		raw, err := s.GetSecretValue(ctx, keyName, store.ScopeHub, hubID)
@@ -1151,9 +1061,6 @@ func TestServer_SigningKeyBackupLegacyPlaintextMigration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
 
 	hubID := "test-legacy-hub"
 	sharedSecret := "test-signing-secret"
@@ -1163,7 +1070,7 @@ func TestServer_SigningKeyBackupLegacyPlaintextMigration(t *testing.T) {
 	cfg1 := DefaultServerConfig()
 	cfg1.HubID = hubID
 
-	srv1, err := New(cfg1, s)
+	srv1, err := newTestHubServer(t, cfg1, s)
 	if err != nil {
 		t.Fatalf("New() [legacy] failed: %v", err)
 	}
@@ -1190,9 +1097,8 @@ func TestServer_SigningKeyBackupLegacyPlaintextMigration(t *testing.T) {
 	cfg2.HubID = hubID
 	cfg2.SharedSigningSecret = sharedSecret
 
-	srv2, err := New(cfg2, s)
+	_, err = newTestHubServer(t, cfg2, s)
 	if err != nil {
 		t.Fatalf("New() [with encryption] failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv2.Shutdown(context.Background()) })
 }

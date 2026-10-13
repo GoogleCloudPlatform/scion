@@ -52,6 +52,10 @@ func TestGetDefaultSettingsData_OSSpecific(t *testing.T) {
 }
 
 func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
+	// Make every candidate available so the result does not depend on the
+	// host's installed runtimes. On macOS detection then picks podman first.
+	mockRuntimeDetectionMulti(t, map[string]bool{"podman": true, "docker": true, "container": true})
+
 	data, err := GetDefaultSettingsDataYAML()
 	if err != nil {
 		t.Fatalf("GetDefaultSettingsDataYAML failed: %v", err)
@@ -69,7 +73,7 @@ func TestGetDefaultSettingsDataYAML_OSSpecific(t *testing.T) {
 
 	expectedRuntime := "docker"
 	if runtime.GOOS == "darwin" {
-		expectedRuntime = "container"
+		expectedRuntime = "podman"
 	}
 
 	if localProfile.Runtime != expectedRuntime {
@@ -1213,7 +1217,7 @@ func TestInitMachine_CloudRunSandbox_EffectiveSettings_Task92(t *testing.T) {
 
 // TestDefaultSandboxBin_MatchesLiteral pins config's unexported
 // defaultSandboxBin against the same literal that
-// TestSandboxBinConstantSync_Task92 (in the external config_test package)
+// TestSandboxBinConstantSync_Task92 (in pkg/runtime)
 // pins runtime.DefaultSandboxBin against. Together these two tests catch
 // drift in either direction. (O5)
 func TestDefaultSandboxBin_MatchesLiteral(t *testing.T) {

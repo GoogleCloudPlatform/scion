@@ -61,12 +61,37 @@ HUB_ENV_FILE="${HUB_ENV_FILE:-.scratch/hub-${HUB_NAME}.env}"
 REPO_DIR="${REPO_DIR:-/home/scion/scion}"
 SCION_BIN="${SCION_BIN:-/usr/local/bin/scion}"
 
+# DNS_ZONE_DESCRIPTION is the description gce-certs.sh sets on a new zone.
+DNS_ZONE_DESCRIPTION="${DNS_ZONE_DESCRIPTION:-Scion Hub zone for ${CERT_DOMAIN}}"
+
+# --- Feature Flags: TLS ---
+# Set to "true" for an internal deployment with no certificates: gce-demo-deploy.sh
+# skips gce-certs.sh, and gce-start-hub.sh skips the Caddy/TLS step (same as
+# gce-start-hub.sh --no-tls). See gce-start-hub.sh for details.
+SKIP_TLS="${SKIP_TLS:-false}"
+
 # --- Shared Defaults ---
 GITHUB_REPO="${GITHUB_REPO:-GoogleCloudPlatform/scion}"
-CERT_EMAIL="${CERT_EMAIL:-ptone@google.com}"
+# CERT_EMAIL is the contact address Let's Encrypt uses for certificate notices.
+# There is no default: set it to your own address before running gce-certs.sh
+# or gce-demo-deploy.sh (for example, export CERT_EMAIL=admin@example.com).
+CERT_EMAIL="${CERT_EMAIL:-}"
 CLOUD_INIT_FILE="${CLOUD_INIT_FILE:-scripts/starter-hub/gce-demo-cloud-init.yaml}"
 
 # --- Shared Helpers ---
+
+# Exit with a clear message when CERT_EMAIL is not set. Call this before any
+# step that requests certificates, so the script fails before changing anything.
+require_cert_email() {
+    if [[ -z "${CERT_EMAIL}" ]]; then
+        echo "Error: CERT_EMAIL is not set." >&2
+        echo "  Let's Encrypt needs a contact address for certificate notices." >&2
+        echo "  Set it to your own address and rerun, for example:" >&2
+        echo "    export CERT_EMAIL=admin@example.com" >&2
+        echo "  To deploy without certificates, set SKIP_TLS=true instead." >&2
+        exit 1
+    fi
+}
 
 # Wait for the instance to be reachable via SSH and for cloud-init to finish.
 # Call this before the first SSH-dependent step after provisioning.

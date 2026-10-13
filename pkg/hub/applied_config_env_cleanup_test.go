@@ -29,55 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// cleanupTestSecretBackend is a minimal secret.SecretBackend fake whose List
-// method returns caller-supplied metadata per scope, for testing
-// AppliedConfigEnvCleanupExecutor's reachableSecretNames matching without
-// pulling in a full secret store.
-type cleanupTestSecretBackend struct {
-	byScope map[string][]secret.SecretMeta // key: scope+"/"+scopeID
-
-	// listCalls counts List invocations per scope key, for tests asserting
-	// the cleanup's per-scope caching (each scope should be listed at most
-	// once per sweep, not once per agent). nil is fine: a nil map is never
-	// written to by tests that don't care about this.
-	listCalls map[string]int
-}
-
-func (b *cleanupTestSecretBackend) key(scope, scopeID string) string { return scope + "/" + scopeID }
-
-func (b *cleanupTestSecretBackend) Get(ctx context.Context, name, scope, scopeID string) (*secret.SecretWithValue, error) {
-	return nil, nil
-}
-func (b *cleanupTestSecretBackend) Set(ctx context.Context, input *secret.SetSecretInput) (bool, *secret.SecretMeta, error) {
-	return false, nil, nil
-}
-func (b *cleanupTestSecretBackend) Delete(ctx context.Context, name, scope, scopeID string) error {
-	return nil
-}
-func (b *cleanupTestSecretBackend) List(ctx context.Context, filter secret.Filter) ([]secret.SecretMeta, error) {
-	if b.listCalls != nil {
-		b.listCalls[b.key(filter.Scope, filter.ScopeID)]++
-	}
-	return b.byScope[b.key(filter.Scope, filter.ScopeID)], nil
-}
-func (b *cleanupTestSecretBackend) GetMeta(ctx context.Context, name, scope, scopeID string) (*secret.SecretMeta, error) {
-	return nil, nil
-}
-func (b *cleanupTestSecretBackend) UpdateMeta(ctx context.Context, input *secret.UpdateMetaInput) (*secret.SecretMeta, error) {
-	return nil, nil
-}
-func (b *cleanupTestSecretBackend) Resolve(ctx context.Context, userID, projectID, brokerID string, opts *secret.ResolveOpts) ([]secret.SecretWithValue, error) {
-	return nil, nil
-}
-func (b *cleanupTestSecretBackend) HubID() string { return "test-hub" }
-func (b *cleanupTestSecretBackend) FetchValues(ctx context.Context, metas []secret.SecretMeta) (map[string]secret.FetchResult, error) {
-	results := make(map[string]secret.FetchResult, len(metas))
-	for _, meta := range metas {
-		results[meta.ID] = secret.FetchResult{Err: store.ErrNotFound}
-	}
-	return results, nil
-}
-
 // TestAppliedConfigEnvCleanupStripsGitHubTokenAndKnownSecrets is a
 // mutation-resistant check of the cleanup's per-key decision: GITHUB_TOKEN is
 // always removed; a key matching a secret-flagged EnvVar or a secret-store

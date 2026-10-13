@@ -80,23 +80,6 @@ func TestStopRunStillCurrent(t *testing.T) {
 	}
 }
 
-// runSwapStopClient answers a stop with success after a newer run has been
-// minted and reported running, as when the row moves on while the stop for
-// the older run is in flight.
-type runSwapStopClient struct {
-	mockRuntimeBrokerClient
-	s       store.Store
-	agentID string
-}
-
-func (c *runSwapStopClient) StopAgent(ctx context.Context, brokerID, brokerEndpoint, agentID, projectID, runID string) error {
-	c.lastStopRunID = runID
-	if _, err := c.s.SetAgentRunID(ctx, c.agentID, "run-new", nil); err != nil {
-		return err
-	}
-	return c.s.UpdateAgentStatus(ctx, c.agentID, store.AgentStatusUpdate{Phase: string(state.PhaseRunning), ContainerStatus: "running"})
-}
-
 // The review probe, through the HTTP stop and suspend handlers: the stop for
 // run-old succeeds while the row moves to run-new; the row stays running.
 func TestStop202ForOldRunDoesNotStopNewerRun(t *testing.T) {

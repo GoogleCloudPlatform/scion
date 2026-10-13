@@ -189,50 +189,6 @@ func TestDEF141_AC2_ExplicitRouting_IncrementsExplicitRoutes(t *testing.T) {
 // above verify the broker's three-way switch in isolation.
 // ---------------------------------------------------------------------------
 
-// def141BrokerSetup creates a server with a broker, project, agent, and user.
-// The broker is wired so that handler → PublishUserMessage → deliverToUser.
-func def141BrokerSetup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, user *store.User) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   tid("d141-broker-project"),
-		Name: "d141-broker-project",
-		Slug: "d141-broker-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	user = &store.User{
-		ID:          tid("d141-broker-user"),
-		Email:       "d141-broker@example.com",
-		DisplayName: "D141 Broker User",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	agent = &store.Agent{
-		ID:        tid("d141-broker-agent"),
-		Name:      "d141-broker-agent",
-		Slug:      "d141-broker-agent",
-		ProjectID: project.ID,
-		Phase:     "running",
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	bus := eventbus.NewInProcessEventBus(slog.Default())
-	t.Cleanup(func() { _ = bus.Close() })
-
-	proxy := NewMessageBrokerProxy(bus, s, events,
-		func() AgentDispatcher { return &brokerMockDispatcher{} }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-
-	return srv, s, project, agent, user
-}
-
 func TestDEF141_AC1_FullPath_DerivedRouting(t *testing.T) {
 	srv, _, project, agent, user := def141BrokerSetup(t)
 

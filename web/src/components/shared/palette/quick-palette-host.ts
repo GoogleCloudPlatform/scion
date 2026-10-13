@@ -62,7 +62,7 @@ import type {
   PaletteCandidate,
   PaletteGroup,
   PaletteTarget,
-} from '../../../client/chat-palette-types.js';
+} from '../../../client/palette-types.js';
 import type { ScionQuickPalette } from './quick-palette.js';
 import { hasOpenModalDescendant } from '../open-modal.js';
 import { deepActiveElement } from '../deep-active-element.js';
@@ -245,8 +245,10 @@ export class QuickPaletteHost {
    * Closes the palette, if it is open, and moves focus nowhere when the
    * close settles: neither to the invoker nor through `onSelectionSettled`,
    * even for a close already animating or one that has settled but not yet
-   * run `onSelectionSettled`. For a surface going off screen,
-   * whose invoker goes with it. Closing also releases Shoelace's focus trap
+   * run `onSelectionSettled`, nor at once from the hidden field that holds
+   * the on-screen keyboard while an open is pending (see
+   * {@link PaletteTypeahead}). For a surface going off screen, whose
+   * invoker goes with it. Closing also releases Shoelace's focus trap
    * and scroll lock, which would otherwise stay active on whatever is shown
    * next.
    */
@@ -254,6 +256,7 @@ export class QuickPaletteHost {
     clearTimeout(this.settleTimer);
     this.invoker = null;
     this.closedBySelection = false;
+    this.typeahead.stop({ restoreFocus: false });
     this.close();
   }
 

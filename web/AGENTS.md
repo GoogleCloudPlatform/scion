@@ -119,6 +119,10 @@ web/
 - **Terminal:** xterm.js for terminal sessions
 - **Server:** Go (`scion` binary with `--enable-web`)
 
+### Shoelace component registration
+
+Shoelace components, themes and icons ship in the client bundle; the SPA shell loads nothing from a CDN. Every `sl-*` component the app renders must be registered by an import in `src/client/main.ts` (`import '@shoelace-style/shoelace/dist/components/<name>/<name>.js';`). An unregistered tag renders as an unknown, unstyled element, in dev and production alike. `src/client/shoelace-registration.test.ts` fails when a tag used in `src/` has no such import.
+
 ## Icon Reference
 
 All icons use the Shoelace `<sl-icon>` component, which provides [Bootstrap Icons](https://icons.getbootstrap.com/). Use these consistently when building new UI features.
@@ -333,9 +337,9 @@ When using the Chrome DevTools MCP tools (`take_screenshot`, `take_snapshot`, `c
    ss -tlnp | grep 8080  # verify it's listening
    ```
 
-3. **Capture the dev token** from the server startup output. It appears as:
-   ```
-   Dev token: scion_dev_<hex>
+3. **Load the dev token from its file.** Startup output shows the dev token file path instead of its value, as a command you can run:
+   ```bash
+   export SCION_DEV_TOKEN=$(cat '/home/user/.scion/dev-token')
    ```
 
 4. **Build assets before starting the server**: Run `npm install && npm run build` in `web/` first. The server serves from `web/dist/client`.

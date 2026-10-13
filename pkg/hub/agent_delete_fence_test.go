@@ -39,30 +39,6 @@ import (
 // notAfter, the handling of a broker's 409 stale_dispatch, and the claim
 // re-check on deferred delete intents.
 
-// setDeleteClock pins the engine's clock to now for the test.
-func setDeleteClock(t *testing.T, now func() time.Time) {
-	t.Helper()
-	old := deleteClock
-	deleteClock = now
-	t.Cleanup(func() { deleteClock = old })
-}
-
-// fenceNow is a fixed engine time at second precision (notAfter goes on
-// the wire as RFC3339), close to the real time so the store's own
-// time-based views agree with the engine's.
-func fenceNow(t *testing.T) time.Time {
-	t.Helper()
-	t0 := time.Now().UTC().Truncate(time.Second)
-	setDeleteClock(t, func() time.Time { return t0 })
-	return t0
-}
-
-const staleDispatchBody = `{"error":{"code":"stale_dispatch","message":"delete dispatch arrived after its deadline; nothing was done"}}`
-
-func staleDispatchErr() error {
-	return &brokerStatusError{StatusCode: http.StatusConflict, Body: staleDispatchBody}
-}
-
 // The engine sends notAfter = min(lease expiry, now + dispatch budget).
 func TestDeleteFence_EngineSendsNotAfter(t *testing.T) {
 	for _, tc := range []struct {

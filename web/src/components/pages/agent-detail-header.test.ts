@@ -20,7 +20,7 @@
  * destructive Stop and Delete buttons. The other actions keep their order.
  */
 
-import { describe, it, expect, beforeAll, vi } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach, vi } from 'vitest';
 import { render, type TemplateResult } from 'lit';
 
 import type { Agent } from '../../shared/types.js';
@@ -30,10 +30,7 @@ import type { ScionPageAgentDetail } from './agent-detail.js';
 // chat-thread (imported by agent-detail) pulls in the app entry point,
 // which bootstraps the SPA on load; stub it as the chat tests do.
 // Remove once chat-thread stops importing client/main (chat lane, ptone/scion#3118).
-vi.mock('../../client/main.js', () => ({
-  navigateTo: vi.fn(),
-  stateManager: new EventTarget(),
-}));
+vi.mock('../../client/main.js', () => import('../../client/__fixtures__/main-stub.js'));
 
 const GRAPH = 'graph';
 
@@ -207,6 +204,36 @@ describe('agent detail header actions order', () => {
     expect(actions.querySelector('a[href="/agents/a-1/configure"]')).not.toBeNull();
   });
 
+  // The Edit page (experiment web.agent_edit) sits next to Configure for a
+  // caller who may update the agent.
+  describe('Edit button', () => {
+    afterEach(() => {
+      window.__SCION_FEATURES__ = {};
+    });
+
+    it('shows Edit next to Configure while the experiment is on', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+      const agent = makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } });
+      const labels = headerActionLabels(agent);
+      expect(labels.indexOf('Edit')).toBe(labels.indexOf('Configure') + 1);
+      expect(renderHeaderActions(agent).querySelector('a[href="/agents/a-1/edit"]')).not.toBeNull();
+    });
+
+    it('hides Edit while the experiment is off', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': false };
+      const labels = headerActionLabels(
+        makeAgent({ phase: 'stopped', _capabilities: { actions: ['read', 'update'] } })
+      );
+      expect(labels).toContain('Configure');
+      expect(labels).not.toContain('Edit');
+    });
+
+    it('hides Edit without update capability', () => {
+      window.__SCION_FEATURES__ = { 'web.agent_edit': true };
+      expect(headerActionLabels(makeAgent({ phase: 'stopped' }))).not.toContain('Edit');
+    });
+  });
+
   it('puts the graph link first even with no other actions permitted', () => {
     expect(
       headerActionLabels(makeAgent({ phase: 'running', _capabilities: { actions: ['read'] } }))
@@ -241,7 +268,9 @@ describe('agent detail status badges', () => {
   function headerBadge(agent: Agent): Element {
     const page = makePage(agent);
     const tpl = (page as unknown as { renderHeader(): TemplateResult }).renderHeader();
-    const badge = renderTo(tpl).querySelector('.header-title-text > scion-status-badge');
+    const badge = renderTo(tpl).querySelector(
+      'scion-detail-header > scion-status-badge:not([slot])'
+    );
     expect(badge).not.toBeNull();
     return badge!;
   }

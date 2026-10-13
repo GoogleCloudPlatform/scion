@@ -40,6 +40,8 @@ export class ScionEnvVarList extends LitElement {
   @property() scopeId = '';
   @property() apiBasePath = '/api/v1';
   @property({ type: Boolean }) compact = false;
+  /** Hides the add, edit and delete controls for viewers without write access. */
+  @property({ type: Boolean }) readonly = false;
 
   @state() private loading = true;
   @state() private envVars: EnvVar[] = [];
@@ -249,13 +251,16 @@ export class ScionEnvVarList extends LitElement {
     }
 
     return html`
-      <div class="list-header">
-        <sl-button variant="primary" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Variable
-        </sl-button>
-      </div>
-      ${this.envVars.length === 0 ? this.renderEmpty() : this.renderTable()} ${this.renderDialog()}
+      ${this.readonly
+        ? nothing
+        : html`<div class="list-header">
+            <sl-button variant="primary" @click=${this.openCreateDialog}>
+              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+              Add Variable
+            </sl-button>
+          </div>`}
+      ${this.envVars.length === 0 ? this.renderEmpty() : this.renderTable()}
+      ${this.readonly ? nothing : this.renderDialog()}
     `;
   }
 
@@ -266,15 +271,17 @@ export class ScionEnvVarList extends LitElement {
           <div class="section-header-info">
             <h2>Environment Variables</h2>
             <p>
-              Manage environment variables injected into
-              ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at
+              ${this.readonly ? 'Environment variables' : 'Manage environment variables'} injected
+              into ${this.scope === 'hub' ? 'all agents on this hub' : 'agents in this project'} at
               runtime.
             </p>
           </div>
-          <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-            <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-            Add Variable
-          </sl-button>
+          ${this.readonly
+            ? nothing
+            : html`<sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+                <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+                Add Variable
+              </sl-button>`}
         </div>
 
         ${this.loading
@@ -293,7 +300,7 @@ export class ScionEnvVarList extends LitElement {
               ? this.renderEmpty()
               : this.renderTable()}
       </div>
-      ${this.renderDialog()}
+      ${this.readonly ? nothing : this.renderDialog()}
     `;
   }
 
@@ -310,7 +317,7 @@ export class ScionEnvVarList extends LitElement {
               ${this.scope === 'user' ? html`<th>Progeny</th>` : nothing}
               <th>Flags</th>
               <th class="hide-mobile">Updated</th>
-              <th class="actions-cell"></th>
+              ${this.readonly ? nothing : html`<th class="actions-cell"></th>`}
             </tr>
           </thead>
           <tbody>
@@ -364,20 +371,22 @@ export class ScionEnvVarList extends LitElement {
         <td class="hide-mobile">
           <span class="meta-text">${formatRelative(envVar.updated)}</span>
         </td>
-        <td class="actions-cell">
-          <sl-icon-button
-            name="pencil"
-            label="Edit"
-            ?disabled=${isDeleting}
-            @click=${() => this.openEditDialog(envVar)}
-          ></sl-icon-button>
-          <sl-icon-button
-            name="trash"
-            label="Delete"
-            ?disabled=${isDeleting}
-            @click=${(e: MouseEvent) => this.handleDelete(envVar, e)}
-          ></sl-icon-button>
-        </td>
+        ${this.readonly
+          ? nothing
+          : html`<td class="actions-cell">
+              <sl-icon-button
+                name="pencil"
+                label="Edit"
+                ?disabled=${isDeleting}
+                @click=${() => this.openEditDialog(envVar)}
+              ></sl-icon-button>
+              <sl-icon-button
+                name="trash"
+                label="Delete"
+                ?disabled=${isDeleting}
+                @click=${(e: MouseEvent) => this.handleDelete(envVar, e)}
+              ></sl-icon-button>
+            </td>`}
       </tr>
     `;
   }
@@ -387,19 +396,27 @@ export class ScionEnvVarList extends LitElement {
       <div class="empty-state">
         <sl-icon name="terminal"></sl-icon>
         <h3>No Environment Variables</h3>
-        <p>
-          Add environment variables that will be injected into
-          ${this.compact
-            ? this.scope === 'hub'
-              ? 'all agents on this hub'
-              : 'agents in this project'
-            : 'your agents'}.
-        </p>
-        <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
-          <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-          Add Variable
-        </sl-button>
+        ${this.readonly
+          ? html`<p>No environment variables are set.</p>`
+          : this.renderEmptyAddPrompt()}
       </div>
+    `;
+  }
+
+  private renderEmptyAddPrompt() {
+    return html`
+      <p>
+        Add environment variables that will be injected into
+        ${this.compact
+          ? this.scope === 'hub'
+            ? 'all agents on this hub'
+            : 'agents in this project'
+          : 'your agents'}.
+      </p>
+      <sl-button variant="primary" size="small" @click=${this.openCreateDialog}>
+        <sl-icon slot="prefix" name="plus-lg"></sl-icon>
+        Add Variable
+      </sl-button>
     `;
   }
 

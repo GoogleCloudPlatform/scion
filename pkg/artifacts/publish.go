@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -181,7 +182,7 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 	a := &Artifact{
 		ID: uuid.NewString(), ScopeKind: ScopeKindProject, ScopeRef: scope,
 		OwnerKind: kind, OwnerRef: ref, Title: title, CurrentSeq: 1,
-		CreatedAt: now, UpdatedAt: now,
+		CreatedAt: now, UpdatedAt: now, ExpiresAt: retentionExpiry(b.currentLimits(ctx), now),
 	}
 	v := &Version{
 		ID: versionID, ArtifactID: a.ID, Seq: 1, Kind: VersionKindPublish, EntryPath: name,
@@ -203,50 +204,125 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 }
 
 // CodeMissingScope is the error code of a 403 answered to a publish whose
-// credential lacks a scope publishing needs. The error's details carry the
-// scope's name under "scope".
+// credential lacks a scope publishing needs. The error's details carry
+// every missing scope under "scopes" and the first of them under "scope"
+// (the only key older hubs send).
 const CodeMissingScope = "missing_scope"
 
+// ScopesExplainer is an optional extension of Host, preferred over
+// ScopeExplainer when the host implements both: it names every scope the
+// caller lacks rather than only the first (ptone/scion#4571). The same
+// rules apply: consulted only on the publish path, and a pure description
+// that never grants anything.
+type ScopesExplainer interface {
+	// MissingScopes reports the names of the credential scopes the caller
+	// of ctx lacks for permission (one of the Permission constants), or
+	// none under the conditions where ScopeExplainer.MissingScope reports
+	// "".
+	MissingScopes(ctx context.Context, permission string) []string
+}
+
+// missingScopes asks the host which scopes the caller lacks for
+// permission, through ScopesExplainer when the host implements it and
+// ScopeExplainer otherwise.
+func (s *Service) missingScopes(ctx context.Context, permission string) []string {
+	if ex, ok := s.host.(ScopesExplainer); ok {
+		var out []string
+		for _, scope := range ex.MissingScopes(ctx, permission) {
+			if scope != "" && !slices.Contains(out, scope) {
+				out = append(out, scope)
+			}
+		}
+		return out
+	}
+	if ex, ok := s.host.(ScopeExplainer); ok {
+		if scope := ex.MissingScope(ctx, permission); scope != "" {
+			return []string{scope}
+		}
+	}
+	return nil
+}
+
 // writeMissingScope answers 403 missing_scope when the host reports that
-// the caller's credential lacks a scope for publishing. It reports whether
+// the caller's credential lacks scopes for publishing. It reports whether
 // it wrote the response. Only the publish path calls it: publishing names
 // no existing artifact, so the answer describes the caller's own
 // credential and nothing else.
 func (s *Service) writeMissingScope(w http.ResponseWriter, r *http.Request) bool {
-	ex, ok := s.host.(ScopeExplainer)
-	if !ok {
+	scopes := s.missingScopes(r.Context(), PermissionCreate)
+	if len(scopes) == 0 {
 		return false
 	}
-	scope := ex.MissingScope(r.Context(), PermissionCreate)
-	if scope == "" {
-		return false
+	noun := "scope"
+	if len(scopes) > 1 {
+		noun = "scopes"
 	}
 	writeJSON(w, http.StatusForbidden, errorResponse{Error: errorBody{
 		Code:    CodeMissingScope,
-		Message: "the credential does not carry the " + scope + " scope needed to publish artifacts",
-		Details: map[string]any{"scope": scope},
+		Message: "the credential does not carry the " + strings.Join(scopes, " and ") + " " + noun + " needed to publish artifacts",
+		Details: map[string]any{"scope": scopes[0], "scopes": scopes},
 	}})
 	return true
 }
 
-// putBlob stores the spooled body at its content address unless a blob
-// with that digest already exists.
+// putBlob stores the spooled body at its content address (see storeBlob).
 func (s *Service) putBlob(ctx context.Context, b backend, sp *spooled, mediaType string) error {
-	p := BlobPath(b.hubID, sp.digest)
-	exists, err := b.blobs.Exists(ctx, p)
-	if err != nil {
-		return fmt.Errorf("check blob: %w", err)
+	return storeBlob(ctx, b, sp.digest, mediaType, func() (io.Reader, error) {
+		if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
+			return nil, fmt.Errorf("rewind spool: %w", err)
+		}
+		return sp.file, nil
+	})
+}
+
+// blobClock is the time blob touches are recorded at. A variable so tests
+// can run publishes and sweeps on one simulated clock.
+var blobClock = time.Now
+
+// Blob write retries: a blob write is idempotent (the object always gets
+// the same bytes), so a failed write is retried, at most blobWriteAttempts
+// times in all and within blobWriteDeadline, with a growing pause; the
+// last error is returned. Variables so tests can shorten them.
+var (
+	blobWriteAttempts = 5
+	blobWriteDeadline = 60 * time.Second
+	blobWriteBackoff  = 200 * time.Millisecond
+)
+
+// storeBlob stores the bytes open yields at digest's content address. It
+// is the only way bytes are written. It touches the blob first (waiting
+// for a sweep that holds the blob's state, and keeping the sweep off the
+// blob for the grace period), then always uploads, overwriting any object
+// already there: the write never relies on an object that is already
+// there, so a delete the sweep issued earlier (which names the generation
+// it saw) can never remove the bytes this write stores. There is still
+// one object per digest. open is called again for each attempt.
+func storeBlob(ctx context.Context, b backend, digest, mediaType string, open func() (io.Reader, error)) error {
+	if err := b.store.TouchBlob(ctx, digest, blobClock()); err != nil {
+		return err
 	}
-	if exists {
-		return nil
+	ctx, cancel := context.WithTimeout(ctx, blobWriteDeadline)
+	defer cancel()
+	pause := blobWriteBackoff
+	var err error
+	for attempt := 1; attempt <= blobWriteAttempts; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("upload blob: %w (after %d attempts)", err, attempt-1)
+			case <-time.After(pause):
+			}
+			pause *= 2
+		}
+		var body io.Reader
+		if body, err = open(); err != nil {
+			return err
+		}
+		if _, err = b.blobs.Upload(ctx, BlobPath(b.hubID, digest), body, storage.UploadOptions{ContentType: mediaType, Idempotent: true}); err == nil {
+			return nil
+		}
 	}
-	if _, err := sp.file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("rewind spool: %w", err)
-	}
-	if _, err := b.blobs.Upload(ctx, p, sp.file, storage.UploadOptions{ContentType: mediaType}); err != nil {
-		return fmt.Errorf("upload blob: %w", err)
-	}
-	return nil
+	return fmt.Errorf("upload blob: %w (after %d attempts)", err, blobWriteAttempts)
 }
 
 func writeTooLarge(w http.ResponseWriter, limit int64) {

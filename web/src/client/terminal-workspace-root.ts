@@ -25,7 +25,7 @@ import {
   type TerminalPaletteNewAgentDetail,
 } from './terminal-workspace-events.js';
 import { enterAppFrame, exitAppFrame } from '../components/shared/app-frame.js';
-import type { PaletteCandidate } from './chat-palette-types.js';
+import type { PaletteCandidate } from './palette-types.js';
 import {
   QuickPaletteHost,
   isQuickPaletteShortcut,
@@ -36,6 +36,14 @@ import { isMacPlatform } from '../utils/platform.js';
 import { TOUCH_PRIMARY_QUERY } from '../utils/input-modality.js';
 import { showConfirm } from '../components/shared/confirm-dialog.js';
 import '../components/terminal/terminal-pane.js';
+import { render as litRender } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
+import { renderTestHubBanner } from '../components/shared/test-hub-banner.js';
+import {
+  TEST_INFRA_STATUS_EVENT,
+  getTestInfraStatus,
+  loadTestInfraStatus,
+} from './test-infra-status.js';
 
 interface RailEntry {
   session: TerminalSession;
@@ -49,6 +57,9 @@ interface RailEntry {
 
 /** The parts of a rail entry the bulk-action eligibility rules read. */
 type RailEntryStatus = Pick<RailEntry, 'state' | 'metadata'>;
+
+/** The pane status message shown while no terminal is selected. */
+const NO_TERMINAL_SELECTED = 'No terminal selected.';
 
 /**
  * Whether the per-row Reconnect action applies: the session has dropped
@@ -65,28 +76,98 @@ export function canReconnectEntry(entry: RailEntryStatus): boolean {
 }
 
 /**
- * Whether "Reconnect all" acts on an entry: the per-row Reconnect applies
- * and the agent still exists.
+ * Whether "Reconnect all" acts on an entry: the agent still exists and the
+ * entry is not connected. That is every entry the per-row Reconnect
+ * applies to, plus idle entries restored from the saved list, which the
+ * rail shows as "Not connected" (one at a time they connect through
+ * selection, but "Reconnect all" is how a user connects them in bulk).
  */
 export function isBulkReconnectEligible(entry: RailEntryStatus): boolean {
-  return canReconnectEntry(entry) && entry.metadata.availability !== 'deleted';
+  if (entry.metadata.availability === 'deleted') return false;
+  return canReconnectEntry(entry) || entry.state.connection === 'idle';
 }
 
 /**
- * Whether "Remove all inactive" removes an entry: its agent was deleted,
- * or its session has dropped (disconnected or unavailable). Connected
- * entries stay, as do entries still connecting and idle entries restored
- * from a saved list, which have not tried to connect yet.
+ * Whether "Remove all inactive" removes an entry: it is not connected. That
+ * covers every row the rail shows as "Not connected" (idle: restored from
+ * the saved list, or never opened in this tab), whatever its agent's phase
+ * or metadata state, plus every row whose session dropped (disconnected or
+ * unavailable) or whose agent was deleted. Removing a row only takes it out
+ * of the list; the agent and its tmux session keep running, and the user can
+ * open it again. Connected, connecting and pending (loading) entries always
+ * stay. Closed entries are already leaving the list (the registry drops a
+ * session as it closes), so they are never shown and never counted.
  */
 export function isInactiveEntry(entry: RailEntryStatus): boolean {
+  switch (entry.state.connection) {
+    case 'idle':
+    case 'disconnected':
+    case 'unavailable':
+      return true;
+    case 'loading':
+    case 'connecting':
+    case 'connected':
+    case 'closed':
+      return false;
+  }
+}
+
+/** The colour of a rail row's status dot. */
+export type ConnectionDotColour = 'green' | 'amber' | 'red' | 'grey' | 'neutral';
+
+/** A status dot's colour and its short meaning, shown as tooltip and spoken text. */
+export interface ConnectionDot {
+  colour: ConnectionDotColour;
+  meaning: string;
+}
+
+/**
+ * The status dot for a rail row. The rail styles the dot from the colour
+ * returned here (data-dot), so the colour and its meaning cannot drift.
+ * Precedence: a pending session whose pane has never been shown is
+ * neutral, "Not opened yet" (it attaches only once shown); otherwise pending
+ * or connecting is amber; a dropped session or a deleted agent, or metadata
+ * that could not be loaded, is red; connected is green; anything else (idle,
+ * or a session that is unavailable because its agent is stopped or offline)
+ * is grey, "Not connected".
+ *
+ * The neutral row is not grey on purpose: every grey row is inactive, while
+ * a never-shown pane is not (see {@link isInactiveEntry}).
+ */
+export function connectionDot(entry: RailEntryStatus, neverShown = false): ConnectionDot {
   const { connection, disconnectReason } = entry.state;
-  if (connection === 'closed') return false;
-  return (
-    entry.metadata.availability === 'deleted' ||
-    disconnectReason === 'agent-deleted' ||
-    connection === 'disconnected' ||
-    connection === 'unavailable'
-  );
+  const { availability } = entry.metadata;
+  if (neverShown && connection === 'loading')
+    return { colour: 'neutral', meaning: 'Not opened yet' };
+  if (connection === 'loading' || connection === 'connecting')
+    return { colour: 'amber', meaning: 'Connecting' };
+  if (availability === 'deleted' || disconnectReason === 'agent-deleted')
+    return { colour: 'red', meaning: 'Agent deleted' };
+  if (connection === 'disconnected') return { colour: 'red', meaning: 'Disconnected' };
+  if (availability === 'unavailable') return { colour: 'red', meaning: 'Agent status unknown' };
+  if (connection === 'connected') return { colour: 'green', meaning: 'Connected' };
+  return { colour: 'grey', meaning: 'Not connected' };
+}
+
+/** The dot text used as tooltip and in the row's accessible label. */
+export function connectionDotLabel(dot: ConnectionDot): string {
+  // The neutral dot is drawn as a hollow ring, so it is named by its shape.
+  const colour =
+    dot.colour === 'neutral' ? 'Hollow' : dot.colour.charAt(0).toUpperCase() + dot.colour.slice(1);
+  return `${colour} dot: ${dot.meaning}`;
+}
+
+/** Tooltip and described-by text for a bulk button with nothing to act on. */
+export const BULK_RECONNECT_DISABLED_REASON = 'No disconnected terminals to reconnect';
+export const BULK_REMOVE_DISABLED_REASON =
+  'No inactive terminals to remove: every terminal is connected or connecting';
+
+/** Gives each workspace root unique ids for its described-by targets. */
+let nextInstanceId = 0;
+
+/** Whether a bulk button is in its disabled (nothing to act on) state. */
+function isBulkActionDisabled(button: HTMLButtonElement): boolean {
+  return button.getAttribute('aria-disabled') === 'true';
 }
 
 // TERMINAL_DRAG_MIME imported from ./terminal-workspace-events.js
@@ -136,6 +217,8 @@ const SLOT_PLACEMENTS: Record<TerminalLayout, ReadonlyArray<[string, string]>> =
 export class TerminalWorkspaceRoot {
   readonly element = document.createElement('div');
   private readonly header: ScionHeader = document.createElement('scion-header');
+  /** Holds the test-hub banner, above the header (shared/test-hub-banner.ts). */
+  private readonly testHubBannerHost = document.createElement('div');
   private readonly shell = document.createElement('div');
   private readonly rail = document.createElement('aside');
   private readonly railList = document.createElement('div');
@@ -144,11 +227,25 @@ export class TerminalWorkspaceRoot {
   private readonly railBulk = document.createElement('div');
   private readonly bulkReconnect = document.createElement('button');
   private readonly bulkRemove = document.createElement('button');
+  /** Disabled-reason tooltips around each bulk button (see buildRailBulkActions). */
+  private readonly bulkReconnectTip = document.createElement('sl-tooltip');
+  private readonly bulkRemoveTip = document.createElement('sl-tooltip');
+  private readonly instanceId = nextInstanceId++;
   private readonly empty = document.createElement('div');
   private readonly layoutBar = document.createElement('div');
   private readonly paneHost = document.createElement('section');
   private readonly status = document.createElement('p');
+  /** The status message text, without the optional help (see setStatus). */
+  private statusMessage = NO_TERMINAL_SELECTED;
+  /** Optional action shown with the status message (see setStatusAction). */
+  private readonly statusAction = document.createElement('button');
   private readonly panes = new Map<string, ScionTerminalPane>();
+  /**
+   * Session keys whose pane this root has shown at least once. A pane
+   * attaches only once shown, so a pending entry not in this set is "Not
+   * opened yet" rather than "Connecting" (see connectionDot).
+   */
+  private readonly shownKeys = new Set<string>();
   private readonly entries = new Map<string, RailEntry>();
   private readonly placeholders = new Map<number, HTMLElement>();
   private readonly ariaLive = document.createElement('div');
@@ -313,8 +410,12 @@ export class TerminalWorkspaceRoot {
     // Pane host: CSS Grid container
     this.paneHost.className = 'terminal-pane-host';
     this.status.className = 'terminal-status';
-    this.status.textContent = 'No terminal selected.';
-    this.paneHost.append(this.empty, this.status);
+    this.setStatusContent(NO_TERMINAL_SELECTED);
+    this.statusAction.type = 'button';
+    this.statusAction.className = 'terminal-status-action';
+    this.statusAction.hidden = true;
+    this.statusAction.addEventListener('click', () => this.statusActionHandler?.());
+    this.paneHost.append(this.empty, this.status, this.statusAction);
     // Aria-live region for placement announcements
     this.ariaLive.className = 'terminal-aria-live';
     this.ariaLive.setAttribute('aria-live', 'polite');
@@ -340,7 +441,17 @@ export class TerminalWorkspaceRoot {
     document.addEventListener('focusin', this.handleGlobalFocusIn);
 
     this.shell.append(this.rail, this.createPaneArea());
-    this.element.append(this.header, this.shell, this.ariaLive, this.placeMenu);
+    this.testHubBannerHost.className = 'terminal-test-hub-banner';
+    this.element.append(
+      this.testHubBannerHost,
+      this.header,
+      this.shell,
+      this.ariaLive,
+      this.placeMenu
+    );
+    window.addEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
 
     // Subscribe to layout state (lives as long as the workspace root).
     // Also sync URL on layout changes (#1715).
@@ -532,6 +643,27 @@ export class TerminalWorkspaceRoot {
   setCurrentPath(path: string): void {
     this.currentPath = path;
     this.header.currentPath = path;
+    // A fresh banner for each path, as in the app shell; and a retry of a
+    // status fetch that failed earlier (a no-op once it is known).
+    this.renderTestHubBanner();
+    if (!getTestInfraStatus()) void loadTestInfraStatus();
+  }
+
+  private readonly handleTestInfraStatus = (): void => this.renderTestHubBanner();
+
+  /**
+   * Renders the test-hub banner above the header, keyed on the current path
+   * so a navigation renders a fresh element even if the previous one was
+   * removed. Puts the banner's container back first if it was removed.
+   */
+  private renderTestHubBanner(): void {
+    if (this.testHubBannerHost.parentNode !== this.element) {
+      this.element.insertBefore(this.testHubBannerHost, this.header);
+    }
+    litRender(
+      keyed(this.currentPath, renderTestHubBanner(getTestInfraStatus())),
+      this.testHubBannerHost
+    );
   }
 
   /**
@@ -620,7 +752,8 @@ export class TerminalWorkspaceRoot {
     // Sets single[0] without changing the active preset (#1701).
     // Navigation of an already-open agent must not trigger overflow.
     this.layoutManager.select(session.state.key);
-    this.status.textContent = '';
+    this.setStatusContent(NO_TERMINAL_SELECTED);
+    this.setStatusAction(null);
     this.show(true);
     this.refresh();
   }
@@ -647,6 +780,7 @@ export class TerminalWorkspaceRoot {
    * for the whole tab in production; tests call this between instances.
    */
   dispose(): void {
+    window.removeEventListener(TEST_INFRA_STATUS_EVENT, this.handleTestInfraStatus);
     document.removeEventListener('keydown', this.handleGlobalKeydown);
     document.removeEventListener('focusin', this.handleGlobalFocusIn);
     this.releasePaletteAgents();
@@ -900,12 +1034,67 @@ export class TerminalWorkspaceRoot {
       .some((node) => node instanceof Element && node.tagName === 'SCION-TERMINAL-PANE');
   }
 
-  setStatus(message: string): void {
+  private statusActionHandler: (() => void) | null = null;
+
+  /**
+   * Sets (or, with null, removes) the button shown under the status message,
+   * such as "Move terminals to this window" in a window that does not own
+   * the terminals. Shown only while the status message is. Cleared when a
+   * terminal is selected.
+   */
+  setStatusAction(action: { label: string; disabled?: boolean; onClick: () => void } | null): void {
+    this.statusActionHandler = action?.onClick ?? null;
+    this.statusAction.textContent = action?.label ?? '';
+    this.statusAction.disabled = action?.disabled ?? false;
+    this.statusAction.dataset.active = String(action !== null);
+    this.statusAction.hidden = action === null || this.status.hidden;
+    this.queueRefresh();
+  }
+
+  /** Replaces the status message, and its help when given. */
+  private setStatusContent(message: string, help?: { label: string; text: string }): void {
+    this.statusMessage = message;
+    if (!help) {
+      this.status.textContent = message;
+      return;
+    }
+    const text = document.createElement('span');
+    text.className = 'terminal-status-text';
+    text.textContent = message;
+    const dropdown = document.createElement('sl-dropdown');
+    dropdown.className = 'terminal-status-help';
+    dropdown.setAttribute('placement', 'bottom');
+    dropdown.setAttribute('distance', '4');
+    dropdown.toggleAttribute('hoist', true);
+    const trigger = document.createElement('sl-icon-button');
+    trigger.setAttribute('slot', 'trigger');
+    trigger.setAttribute('name', 'question-circle');
+    trigger.setAttribute('label', help.label);
+    const panel = document.createElement('div');
+    panel.className = 'terminal-status-help-panel';
+    panel.setAttribute('role', 'note');
+    panel.textContent = help.text;
+    dropdown.append(trigger, panel);
+    this.status.replaceChildren(text, dropdown);
+  }
+
+  /** Back to the default status, without an action: the normal empty viewer. */
+  clearStatus(): void {
+    this.setStatusContent(NO_TERMINAL_SELECTED);
+    this.setStatusAction(null);
+  }
+
+  /**
+   * Shows a status message while no terminal is selected. With help, a
+   * small "?" button follows the text and opens the help text in a
+   * dropdown (Enter or Space on the focused button, or a click).
+   */
+  setStatus(message: string, help?: { label: string; text: string }): void {
     const state = this.layoutManager.getState();
     const slots = this.layoutManager.getVisibleSlots();
     const hasSelected = slots.some((s) => s !== null);
     if (hasSelected) return;
-    this.status.textContent = message;
+    this.setStatusContent(message, help);
     if (state.active === 'single' && state.single[0] === null) {
       this.refresh();
     }
@@ -948,6 +1137,7 @@ export class TerminalWorkspaceRoot {
       const pane = this.panes.get(key);
       pane?.remove();
       this.panes.delete(key);
+      this.shownKeys.delete(key);
       // Close in layout manager to clear all preset references
       this.layoutManager.close(key);
       if (this.lastFocusedPaneSessionKey === key) this.lastFocusedPaneSessionKey = null;
@@ -1111,12 +1301,31 @@ export class TerminalWorkspaceRoot {
     const visibleSlots = this.layoutManager.getVisibleSlots();
     const hasSelected = visibleSlots.some((s) => s !== null);
 
-    // In multi-pane layouts with zero agents, show dotted placeholders instead
-    // of the "No terminals are open." message. This gives the user clear drop
-    // targets even before any session has been created.
+    // Multi-pane layouts show a dotted placeholder in every empty slot, so
+    // neither full-size overlay is shown there: both would cover the
+    // placeholders and hide the drop targets, whether or not any terminal
+    // is open yet. Narrow and zoomed views render a single slot with no
+    // placeholder, so they keep the empty state when no terminal is open
+    // and the status message otherwise. With no terminal open, the default
+    // status message would repeat the empty state, so only a message set
+    // through setStatus is shown alongside it.
     const isMultiPane = layoutState.active !== 'single';
-    this.empty.hidden = total > 0 || isMultiPane;
-    this.status.hidden = (total > 0 && hasSelected) || (total === 0 && isMultiPane);
+    const showsPlaceholders =
+      isMultiPane &&
+      !(this.narrowQuery?.matches ?? false) &&
+      this.layoutManager.getZoomed() === null;
+    const hasStatusMessage = this.statusMessage !== NO_TERMINAL_SELECTED;
+    // A status with an action (the non-owner and moved-away screens) is
+    // shown over the multi-pane placeholders too, whenever no terminal is
+    // selected: there is nothing in this window to drop. It replaces the
+    // empty state: the terminals are open, only in another window.
+    const hasStatusAction = this.statusAction.dataset.active === 'true';
+    this.empty.hidden = total > 0 || showsPlaceholders || (hasStatusAction && !hasSelected);
+    this.status.hidden =
+      hasStatusAction && !hasSelected
+        ? false
+        : showsPlaceholders || (total > 0 ? hasSelected : isMultiPane || !hasStatusMessage);
+    this.statusAction.hidden = this.status.hidden || !hasStatusAction;
 
     // Rail rendering
     this.railList.replaceChildren(...entries.map((entry) => this.renderRailEntry(entry)));
@@ -1168,6 +1377,11 @@ export class TerminalWorkspaceRoot {
 
     // Expose effective layout so CSS can scope focus-outline to multi-pane modes.
     this.paneHost.dataset.effectiveLayout = effectivePreset;
+
+    // Pane headers are crowded on a narrow viewport and in the 4-up layout:
+    // there, the back links show as icons (ptone/scion#4324).
+    const compactHeader = isNarrow || effectivePreset === 'four';
+    for (const pane of this.panes.values()) pane.compactHeader = compactHeader;
   }
 
   /** Position each pane in the grid and manage empty slot placeholders. */
@@ -1308,9 +1522,18 @@ export class TerminalWorkspaceRoot {
       }
     }
 
+    let newlyShown = false;
     for (const [key, pane] of this.panes) {
-      pane.setVisible(visibleKeys.has(key));
+      const visible = visibleKeys.has(key);
+      pane.setVisible(visible);
+      if (visible && !this.shownKeys.has(key)) {
+        this.shownKeys.add(key);
+        newlyShown = true;
+      }
     }
+    // The rail renders before pane visibility in refresh(), so re-render it
+    // once a pane is first shown: its row leaves "Not opened yet".
+    if (newlyShown) this.queueRefresh();
   }
 
   private restoreRailFocus(focusedId: string): void {
@@ -1347,6 +1570,12 @@ export class TerminalWorkspaceRoot {
   /**
    * Builds the bulk-action bar between the rail header and the list. Each
    * button sits above the row column it acts on (Reconnect, then Close).
+   *
+   * A button with nothing to act on is marked aria-disabled rather than
+   * disabled, so it stays focusable and keyboard users can reach the
+   * reason; its click handler checks the same flag. The reason shows in a
+   * tooltip on a wrapper span (disabled controls do not get pointer events
+   * in every browser) and is linked to the button with aria-describedby.
    */
   private buildRailBulkActions(): void {
     this.railBulk.className = 'terminal-rail-bulk';
@@ -1360,14 +1589,85 @@ export class TerminalWorkspaceRoot {
     this.bulkReconnect.type = 'button';
     this.bulkReconnect.className = 'terminal-bulk-action terminal-bulk-reconnect';
     this.bulkReconnect.innerHTML = '<sl-icon name="arrow-repeat"></sl-icon>';
-    this.bulkReconnect.addEventListener('click', () => this.reconnectAll());
+    this.bulkReconnect.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkReconnect)) this.reconnectAll();
+    });
 
     this.bulkRemove.type = 'button';
     this.bulkRemove.className = 'terminal-bulk-action terminal-bulk-remove';
     this.bulkRemove.innerHTML = '<sl-icon name="trash"></sl-icon>';
-    this.bulkRemove.addEventListener('click', () => void this.removeAllInactive());
+    this.bulkRemove.addEventListener('click', () => {
+      if (!isBulkActionDisabled(this.bulkRemove)) void this.removeAllInactive();
+    });
 
-    this.railBulk.append(label, this.bulkReconnect, this.bulkRemove);
+    this.railBulk.append(
+      label,
+      this.wrapBulkAction(
+        this.bulkReconnect,
+        this.bulkReconnectTip,
+        'terminal-bulk-reconnect-reason'
+      ),
+      this.wrapBulkAction(this.bulkRemove, this.bulkRemoveTip, 'terminal-bulk-remove-reason')
+    );
+  }
+
+  /**
+   * Wraps a bulk button as sl-tooltip > span > button, plus a visually
+   * hidden reason element the button's aria-describedby points at.
+   */
+  private wrapBulkAction(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    reasonId: string
+  ): HTMLElement {
+    tip.className = 'terminal-bulk-tooltip';
+    tip.setAttribute('placement', 'bottom');
+    tip.setAttribute('hoist', '');
+    tip.setAttribute('disabled', '');
+    const wrap = document.createElement('span');
+    wrap.className = 'terminal-bulk-action-wrap';
+    const reason = document.createElement('span');
+    reason.className = 'terminal-bulk-reason terminal-visually-hidden';
+    reason.id = `${reasonId}-${this.instanceId}`;
+    reason.hidden = true;
+    button.setAttribute('aria-describedby', reason.id);
+    wrap.append(button, reason);
+    tip.append(wrap);
+    return tip;
+  }
+
+  /**
+   * Sets a bulk button's enabled state. Disabled: aria-disabled, the
+   * reason in the tooltip and the described-by text, no native title (it
+   * would show a second tooltip). Enabled: the tooltip is off and the
+   * native title carries the usual hover help.
+   */
+  private setBulkActionState(
+    button: HTMLButtonElement,
+    tip: HTMLElement,
+    disabledReason: string | null,
+    enabledHelp: string
+  ): void {
+    const reason = button.parentElement?.querySelector<HTMLElement>('.terminal-bulk-reason');
+    if (disabledReason) {
+      button.setAttribute('aria-disabled', 'true');
+      button.removeAttribute('title');
+      tip.setAttribute('content', disabledReason);
+      tip.removeAttribute('disabled');
+      if (reason) {
+        reason.textContent = disabledReason;
+        reason.hidden = false;
+      }
+    } else {
+      button.removeAttribute('aria-disabled');
+      button.title = enabledHelp;
+      tip.removeAttribute('content');
+      tip.setAttribute('disabled', '');
+      if (reason) {
+        reason.textContent = '';
+        reason.hidden = true;
+      }
+    }
   }
 
   /** Syncs the bulk buttons' enabled state and hover help with the entries. */
@@ -1376,22 +1676,24 @@ export class TerminalWorkspaceRoot {
     const reconnectable = entries.filter(isBulkReconnectEligible).length;
     const inactive = entries.filter(isInactiveEntry).length;
 
-    this.bulkReconnect.disabled = reconnectable === 0;
-    this.bulkReconnect.title =
-      reconnectable === 0
-        ? 'Reconnect all: no disconnected terminals for existing agents'
-        : `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
-            reconnectable === 1 ? 'is' : 'are'
-          } disconnected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`;
+    this.setBulkActionState(
+      this.bulkReconnect,
+      this.bulkReconnectTip,
+      reconnectable === 0 ? BULK_RECONNECT_DISABLED_REASON : null,
+      `Reconnect all: reconnect ${countLabel(reconnectable)} that ${
+        reconnectable === 1 ? 'is' : 'are'
+      } not connected and whose agent still exists. Connected terminals and terminals for deleted agents are left alone.`
+    );
     this.bulkReconnect.setAttribute('aria-label', `Reconnect all (${reconnectable} eligible)`);
 
-    this.bulkRemove.disabled = inactive === 0;
-    this.bulkRemove.title =
-      inactive === 0
-        ? 'Remove all inactive: no deleted or disconnected terminals'
-        : `Remove all inactive: remove ${countLabel(inactive)} whose agent was deleted or that ${
-            inactive === 1 ? 'is' : 'are'
-          } disconnected. Connected terminals stay open.`;
+    this.setBulkActionState(
+      this.bulkRemove,
+      this.bulkRemoveTip,
+      inactive === 0 ? BULK_REMOVE_DISABLED_REASON : null,
+      `Remove all inactive: remove ${countLabel(inactive)} that ${
+        inactive === 1 ? 'is' : 'are'
+      } not connected, including grey rows and red rows that are not connected. Connected and connecting terminals stay.`
+    );
     this.bulkRemove.setAttribute('aria-label', `Remove all inactive (${inactive} eligible)`);
   }
 
@@ -1417,7 +1719,7 @@ export class TerminalWorkspaceRoot {
     const count = confirmedKeys.size;
     if (count === 0) return 0;
     const confirmed = await showConfirm(
-      `Remove ${countLabel(count)} from the list? This removes terminals whose agent was deleted and terminals that are disconnected. Connected terminals stay open.`,
+      `Remove ${countLabel(count)} from the list? This removes every terminal that is not connected, including grey rows and red rows that are not connected. Agents keep running. Connected and connecting terminals stay.`,
       { title: 'Remove inactive terminals', confirmText: `Remove ${count}` }
     );
     if (!confirmed) return 0;
@@ -1434,15 +1736,15 @@ export class TerminalWorkspaceRoot {
   }
 
   /**
-   * The dialog returns focus to "Remove all inactive", which is now
-   * disabled, so focus would drop to the page. Move it to "Reconnect all"
+   * The dialog returns focus to "Remove all inactive", which now has
+   * nothing to act on. Move it to "Reconnect all"
    * when that is still enabled, else the first remaining row, else the
    * rail itself. Focus the user moved elsewhere is left alone.
    */
   private focusAfterBulkRemove(): void {
     const active = document.activeElement;
     if (active && active !== document.body && active !== this.bulkRemove) return;
-    if (!this.railBulk.hidden && !this.bulkReconnect.disabled) {
+    if (!this.railBulk.hidden && !isBulkActionDisabled(this.bulkReconnect)) {
       this.bulkReconnect.focus();
       return;
     }
@@ -1472,11 +1774,19 @@ export class TerminalWorkspaceRoot {
     item.dataset.availability = metadata.availability;
     if (entry.state.disconnectReason) item.dataset.disconnectReason = entry.state.disconnectReason;
 
+    const dot = connectionDot(entry, !this.shownKeys.has(entry.state.key));
+    item.dataset.dot = dot.colour;
+    const dotLabel = connectionDotLabel(dot);
+
     // One list of status parts feeds both forms: the visible titles join them
     // with a middle dot, the accessible label with a comma so screen readers
-    // pause between them instead of announcing or skipping the dot.
+    // pause between them instead of announcing or skipping the dot. The dot's
+    // meaning leads, and a connection label that only repeats it is dropped.
+    const connectionText = disconnectLabel(entry.state.connection, entry.state.disconnectReason);
     const statusParts = [
-      disconnectLabel(entry.state.connection, entry.state.disconnectReason),
+      dotLabel,
+      // "Pending" would only restate a neutral "Not opened yet".
+      ...(connectionText === dot.meaning || dot.colour === 'neutral' ? [] : [connectionText]),
       availabilityLabel(metadata.availability),
     ];
     const statusLabel = statusParts.join(' · ');
@@ -1500,7 +1810,7 @@ export class TerminalWorkspaceRoot {
 
     const connection = document.createElement('span');
     connection.className = 'terminal-connection-dot';
-    connection.title = statusLabel;
+    connection.title = dotLabel;
     connection.setAttribute('aria-hidden', 'true');
     const text = document.createElement('span');
     text.className = 'terminal-rail-text';
@@ -1579,13 +1889,33 @@ export class TerminalWorkspaceRoot {
 
   /**
    * Rail selection (a click, or Enter or Space on the rail button, which
-   * the browser turns into a click): navigates to the agent and moves
-   * keyboard focus into its terminal — see {@link focusRailTarget}.
+   * the browser turns into a click): in a multi-pane layout, first puts
+   * the terminal in the next free slot (see {@link placeInNextFreeSlot}),
+   * then navigates to the agent and moves keyboard focus into its
+   * terminal — see {@link focusRailTarget}.
    */
   private openSessionRoute(entry: RailEntry): void {
+    this.placeInNextFreeSlot(entry.state.key);
     this.railFocusAgentId = entry.state.agentId;
     this.dispatchNavigation(`/terminals/${entry.state.agentId}`);
     this.focusRailTarget();
+  }
+
+  /**
+   * With several panes on screen (a multi-pane preset, not narrow or
+   * zoomed), puts a rail terminal that is in none of the preset's slots
+   * into its lowest-index empty slot (ptone/scion#4324), where it connects
+   * once shown, like any placed pane. A terminal already in a slot is left
+   * where it is (the rail selection then focuses it), and with no empty
+   * slot nothing changes. The session is already open in this window, so,
+   * as for "Place in pane", there is nothing for the coordinator to decide.
+   */
+  private placeInNextFreeSlot(sessionKey: string): void {
+    if (this.isSinglePaneView() || this.layoutManager.getZoomed() !== null) return;
+    // The preset's own slots, whatever is zoomed: the guards above decide.
+    const slots = this.getActivePresetSlots(this.layoutManager.getState().active);
+    if (slots.includes(sessionKey) || !slots.includes(null)) return;
+    this.layoutManager.open(sessionKey);
   }
 
   private dispatchNavigation(path: string): void {
@@ -1848,6 +2178,15 @@ export class TerminalWorkspaceRoot {
       #terminal-workspace > scion-header {
         padding-inline: 1.5rem;
       }
+      .terminal-test-hub-banner {
+        flex-shrink: 0;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner {
+        display: block;
+      }
+      .terminal-test-hub-banner sl-alert.test-hub-banner::part(base) {
+        border-radius: 0;
+      }
       .terminal-workspace-shell {
         flex: 1;
         min-height: 0;
@@ -1926,15 +2265,28 @@ export class TerminalWorkspaceRoot {
       .terminal-bulk-remove {
         color: var(--scion-status-danger, #ef4444);
       }
-      .terminal-bulk-action:hover:not(:disabled),
+      .terminal-bulk-action:hover:not([aria-disabled='true']),
       .terminal-bulk-action:focus-visible {
         border-color: currentColor;
         outline: none;
       }
-      .terminal-bulk-action:disabled {
-        cursor: default;
+      /* Nothing to act on: dimmed, dashed and flat, so it does not read as
+         a live control in either theme. Still focusable (see
+         buildRailBulkActions), so focus keeps a visible ring. */
+      .terminal-bulk-action[aria-disabled='true'] {
+        cursor: not-allowed;
         color: var(--scion-text-muted, #64748b);
-        opacity: 0.45;
+        background: transparent;
+        border-style: dashed;
+        border-color: var(--scion-text-muted, #64748b);
+        opacity: 0.5;
+      }
+      .terminal-bulk-action[aria-disabled='true']:focus-visible {
+        outline: 2px solid var(--scion-text-muted, #64748b);
+        outline-offset: 1px;
+      }
+      .terminal-bulk-action-wrap {
+        display: inline-flex;
       }
       .terminal-rail-list {
         flex: 1;
@@ -2055,17 +2407,19 @@ export class TerminalWorkspaceRoot {
         background: #94a3b8;
         flex: 0 0 auto;
       }
-      .terminal-rail-item[data-connection='connected'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='green'] .terminal-connection-dot {
         background: #22c55e;
       }
-      .terminal-rail-item[data-connection='disconnected'] .terminal-connection-dot,
-      .terminal-rail-item[data-availability='deleted'] .terminal-connection-dot,
-      .terminal-rail-item[data-availability='unavailable'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='red'] .terminal-connection-dot {
         background: #ef4444;
       }
-      .terminal-rail-item[data-connection='loading'] .terminal-connection-dot,
-      .terminal-rail-item[data-connection='connecting'] .terminal-connection-dot {
+      .terminal-rail-item[data-dot='amber'] .terminal-connection-dot {
         background: #f59e0b;
+      }
+      /* Not opened yet: a hollow neutral ring, distinct from solid grey. */
+      .terminal-rail-item[data-dot='neutral'] .terminal-connection-dot {
+        background: transparent;
+        box-shadow: inset 0 0 0 2px var(--scion-text-muted, #64748b);
       }
       .terminal-rail-text {
         min-width: 0;
@@ -2184,6 +2538,12 @@ export class TerminalWorkspaceRoot {
         grid-template-rows: 1fr;
         background: #111827;
       }
+      /* Empty slot placeholders are translucent, so the host behind them
+         follows the app theme (#3803). Layouts with no placeholder keep the
+         dark host, so fully populated panes render exactly as before. */
+      .terminal-pane-host:has(> .terminal-slot-placeholder) {
+        background: var(--scion-bg, #f8fafc);
+      }
       .terminal-pane {
         min-height: 0;
         min-width: 0;
@@ -2222,6 +2582,14 @@ export class TerminalWorkspaceRoot {
         outline-offset: -2px;
       }
       .terminal-aria-live {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+      }
+      .terminal-visually-hidden {
         position: absolute;
         width: 1px;
         height: 1px;
@@ -2269,6 +2637,48 @@ export class TerminalWorkspaceRoot {
         background: var(--scion-bg, #f8fafc);
         text-align: center;
         z-index: 1;
+      }
+      .terminal-status {
+        gap: 0.25rem;
+      }
+      .terminal-status-help::part(trigger) {
+        display: inline-flex;
+      }
+      .terminal-status-help sl-icon-button {
+        font-size: 1rem;
+      }
+      .terminal-status-help-panel {
+        max-width: 18rem;
+        padding: 0.6rem 0.75rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-radius: 0.375rem;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #0f172a);
+        font-size: 0.875rem;
+        text-align: left;
+        box-shadow: 0 4px 12px rgb(15 23 42 / 0.12);
+      }
+      .terminal-status-action {
+        position: absolute;
+        top: calc(50% + 1.75rem);
+        left: 50%;
+        transform: translateX(-50%);
+        z-index: 2;
+        padding: 0.4rem 0.9rem;
+        border: 1px solid var(--scion-border, #cbd5e1);
+        border-radius: 0.375rem;
+        background: var(--scion-surface, #ffffff);
+        color: var(--scion-text, #0f172a);
+        font: inherit;
+        cursor: pointer;
+      }
+      .terminal-status-action:hover:not(:disabled),
+      .terminal-status-action:focus-visible {
+        background: var(--scion-bg-subtle, #f1f5f9);
+      }
+      .terminal-status-action:disabled {
+        cursor: progress;
+        opacity: 0.7;
       }
       #terminal-workspace [hidden] {
         display: none !important;
@@ -2340,6 +2750,8 @@ function disconnectLabel(state: TerminalConnectionState, reason: TerminalDisconn
       return 'Unavailable';
     case 'agent-deleted':
       return 'Deleted';
+    case 'attach-unsupported':
+      return 'Not supported';
     case 'network':
     case 'connect-error':
     case 'server-error':

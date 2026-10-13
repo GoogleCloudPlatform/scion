@@ -20,8 +20,6 @@
  * "Deleting…", and the flip happens at the server-time lease.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { ReactiveController, ReactiveControllerHost } from 'lit';
 import {

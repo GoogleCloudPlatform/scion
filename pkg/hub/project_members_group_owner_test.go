@@ -25,7 +25,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -38,15 +37,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// membersGroupFor returns the project's members group.
-func membersGroupFor(t *testing.T, s store.Store, project *store.Project) *store.Group {
-	t.Helper()
-	g, err := s.GetGroupBySlug(context.Background(), projectMembersGroupSlug(project.Slug))
-	require.NoError(t, err)
-	require.True(t, isSystemProjectMembersGroup(g, project.ID), "must be the system members group")
-	return g
-}
 
 // setupStaleOwnerMembersGroup builds the stale-owner fixture (the creator
 // was removed by the co-owner without an ownership transfer, so
@@ -778,27 +768,6 @@ func runClearProjectMembersGroupOwners(t *testing.T, s store.Store) {
 	groups, err := listProjectMembersGroups(ctx, s)
 	require.NoError(t, err)
 	clearProjectMembersGroupOwners(ctx, s, groups)
-}
-
-// backfillFailingStore makes selected BackfillRoleBindings steps fail.
-type backfillFailingStore struct {
-	store.Store
-	failListUsers  bool
-	failListGroups bool
-}
-
-func (b *backfillFailingStore) ListUsers(ctx context.Context, f store.UserFilter, o store.ListOptions) (*store.ListResult[store.User], error) {
-	if b.failListUsers {
-		return nil, errors.New("injected ListUsers failure")
-	}
-	return b.Store.ListUsers(ctx, f, o)
-}
-
-func (b *backfillFailingStore) ListGroups(ctx context.Context, f store.GroupFilter, o store.ListOptions) (*store.ListResult[store.Group], error) {
-	if b.failListGroups {
-		return nil, errors.New("injected ListGroups failure")
-	}
-	return b.Store.ListGroups(ctx, f, o)
 }
 
 // TestBackfillRoleBindings_ClearRunsWhenEarlierStepFails pins that the

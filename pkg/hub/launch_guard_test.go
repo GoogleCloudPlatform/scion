@@ -32,44 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// launchSeed puts an agent created in phase "created" into one of the
-// launch states the start guard distinguishes.
-type launchSeed int
-
-const (
-	seedInFlight launchSeed = iota
-	seedIncompleteActive
-	seedIncompleteEnded
-)
-
-func seedLaunch(t *testing.T, s store.Store, agent *store.Agent, seed launchSeed) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
-	require.NoError(t, err)
-	switch seed {
-	case seedIncompleteActive:
-		require.NoError(t, s.UpdateAgentStatus(ctx, agent.ID, store.AgentStatusUpdate{Phase: string(state.PhaseStopped)}))
-	case seedIncompleteEnded:
-		require.NotEmpty(t, agent.RuntimeBrokerID, "an ended seed needs the agent's broker")
-		ans, _, err := s.ApplyLaunchReport(ctx, agent.ID, agent.RuntimeBrokerID, store.LaunchReport{
-			LaunchID: launchID, InstanceID: "i1", State: "failed",
-			Step: "pull", Message: "image not found", ErrorCode: "image_pull_failed",
-		})
-		require.NoError(t, err)
-		require.Equal(t, 0, ans.HTTPStatus, "report must apply")
-	}
-	got, err := s.GetAgent(ctx, agent.ID)
-	require.NoError(t, err)
-	switch seed {
-	case seedInFlight:
-		require.True(t, got.IsInFlight())
-	default:
-		require.True(t, got.IsIncompleteCreate())
-	}
-	return got
-}
-
 func TestLaunchStartRefusal(t *testing.T) {
 	now := time.Now()
 	base := func() *store.Agent {
@@ -176,13 +138,6 @@ func TestDispatchAgentStart_LaunchPastDeadlineProceeds(t *testing.T) {
 	d := NewHTTPAgentDispatcherWithClient(s, client, false, slog.Default())
 	require.NoError(t, d.DispatchAgentStart(context.Background(), agent, "", false))
 	assert.True(t, client.startCalled)
-}
-
-func decodeLaunchGuardError(t *testing.T, rec *httptest.ResponseRecorder) APIError {
-	t.Helper()
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-	return resp.Error
 }
 
 func TestAgentLifecycle_LaunchGuard(t *testing.T) {
@@ -331,13 +286,6 @@ func TestHandleExistingAgent_LaunchGuard(t *testing.T) {
 		assert.Contains(t, apiErr.Message, "still stopping")
 		assert.False(t, disp.startCalled)
 	})
-}
-
-func mustAgent(t *testing.T, s store.Store, id string) *store.Agent {
-	t.Helper()
-	a, err := s.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	return a
 }
 
 func TestReincarnateAgent_LaunchGuard(t *testing.T) {

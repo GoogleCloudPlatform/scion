@@ -17,8 +17,6 @@
 package hub
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -29,11 +27,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -59,16 +55,106 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the collection list filters each row by harness_config.read instead of refusing the request, so a token without the selector gets 200 with no rows rather than 403; the list gets its own harness_config.list disposition in a later batch",
 		Pin:    "TestScopedAdminListEndpointsFilterCrossProjectRowsAndCountAuthorizedMatches",
 	},
+	{OperationID: "inbox.message.read", Method: "GET", Pattern: "/api/v1/messages"}: {
+		Reason: "the message list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestInboxToken_ProjectBoundaryFiltersMessages",
+	},
+	{OperationID: "inbox.message.write", Method: "POST", Pattern: "/api/v1/messages/read-all"}: {
+		Reason: "mark-all-read touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200 and marks nothing of the fixture project",
+		Pin:    "TestInboxToken_MarkAllReadTouchesOnlyVisibleRows",
+	},
+	{OperationID: "inbox.conversation.list", Method: "GET", Pattern: "/api/v1/conversations"}: {
+		Reason: "the conversation list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestConversationListToken_FilteredToBoundary",
+	},
+	{OperationID: "agent.message.target.resolve", Method: "GET", Pattern: "/api/v1/messaging/targets/resolve"}: {
+		Reason: "target resolution answers 404 for every caller while cross-project messaging is off, which it is in the matrix server; the pin enables it",
+		Pin:    "TestMessagingTargetsResolve_TokenNeedsAgentMessage",
+	},
+	{OperationID: "inbox.notification.read", Method: "GET", Pattern: "/api/v1/notifications"}: {
+		Reason: "the notification list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.ack", Method: "POST", Pattern: "/api/v1/notifications/ack-all"}: {
+		Reason: "ack-all touches only rows inside the token boundary instead of refusing the request, so a project token for another project gets 200",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.subscription.create", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk"}: {
+		Reason: "bulk create takes a JSON array, which the matrix body overrides cannot express; with an object body every token gets 400 after the selector check",
+		Pin:    "TestNotificationSubscription_RequiresProjectAndAgentRead",
+	},
+	{OperationID: "inbox.notification.subscription.read", Method: "GET", Pattern: "/api/v1/notifications/subscriptions"}: {
+		Reason: "the subscription list filters rows to the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.subscription.write", Method: "POST", Pattern: "/api/v1/notifications/subscriptions/bulk-delete"}: {
+		Reason: "bulk delete skips rows outside the token boundary instead of refusing the request, so a project token for another project gets 200 with nothing deleted",
+		Pin:    "TestNotificationToken_RowsFilteredToBoundary",
+	},
+	{OperationID: "inbox.notification.template.read", Method: "GET", Pattern: "/api/v1/notifications/templates"}: {
+		Reason: "the template list filters rows to readable projects inside the token boundary instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestNotificationTemplates_ListedOnlyForReadableProjects",
+	},
+	{OperationID: "project.messagingpolicy.update", Method: "PUT", Pattern: "/api/v1/projects/{id}/messaging-policy"}: {
+		Reason: "the owner rule admits only an active direct project owner, and the matrix's super-admin is not one on the fixture project, so the admitting token is refused by the owner rule after the selector check",
+		Pin:    "TestProjectMessagingPolicyPut_RequiresSetMessagingPolicySelector",
+	},
+	{OperationID: "project.template.set", Method: "POST", Pattern: "/api/v1/projects/{id}/set-template"}: {
+		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
+		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
+	},
+	{OperationID: "artifact.update", Method: "PATCH", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.put", Method: "POST", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403 (the review-grant path refuses it with the same 403)",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/grants/{grantId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.revoke", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/links/{linkId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 and nothing is deleted; with artifact:read added, the super-admin is not the owner or an admin grantee, and the custodian clause also needs project.manage within the token's own limits, so it would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.finalize", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/finalize"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.view", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
 	},
-}
-
-// bearerMatrixEntry is one catalog entry point with a request surface.
-type bearerMatrixEntry struct {
-	Spec       authzop.OperationSpec
-	EntryPoint authzop.EntryPoint
 }
 
 // bearerMatrixKinds are the entry point kinds a request can reach.
@@ -92,10 +178,6 @@ func bearerMatrixEntries() []bearerMatrixEntry {
 	return out
 }
 
-func (e bearerMatrixEntry) key() liveInventoryKey {
-	return liveInventoryKey{OperationID: string(e.Spec.ID), Method: e.EntryPoint.Method, Pattern: e.EntryPoint.Pattern}
-}
-
 // bearerMatrixSelector returns the token selector of the operation's base
 // permission, from the permission registry.
 func bearerMatrixSelector(permissionID string) string {
@@ -114,159 +196,6 @@ func bearerMatrixUnrelatedSelector(sel string) string {
 		return "agent:read"
 	}
 	return "project:read"
-}
-
-// bearerMatrixFixture is a live server seeded with the live-inventory
-// fixtures, a super-admin who holds live authority on every fixture, and a
-// second project the super-admin's project tokens can be bound to.
-type bearerMatrixFixture struct {
-	srv          *Server
-	store        store.Store
-	ids          idFixtures
-	adminID      string
-	otherProject string
-	tokens       map[string]string
-}
-
-func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-	ids := seedLiveInventoryFixtures(t, ctx, srv, s)
-
-	adminID := tid("bdm-super-admin")
-	createTestUserWithRole(t, s, adminID, adminID+"@test.com", "admin", store.SystemRoleSuperAdmin)
-	ensureHubMembership(ctx, s, adminID)
-
-	other := tid("bdm-other-project")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: other, Name: "BDM Other", Slug: "bdm-other"}))
-	// Membership in the other project lets the super-admin mint tokens
-	// bound to it.
-	createTestUserWithProjectRole(t, s, adminID, adminID+"@test.com", other, store.ProjectRoleOwner)
-
-	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
-}
-
-// mint returns a real token for the super-admin, minted through
-// UserAccessTokenService over a session, for the boundary and selectors.
-// Tokens are cached per boundary and selector set.
-func (m *bearerMatrixFixture) mint(t *testing.T, boundary TokenBoundary, scopes []string) string {
-	t.Helper()
-	cacheKey := string(boundary.Kind) + "|" + boundary.ProjectID + "|" + strings.Join(scopes, ",")
-	if key, ok := m.tokens[cacheKey]; ok {
-		return key
-	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
-		UserID: m.adminID, Name: "bdm-" + tid("tok"), Boundary: boundary, Scopes: scopes,
-	})
-	require.NoError(t, err, "mint %s token with %v", boundary.Kind, scopes)
-	m.tokens[cacheKey] = key
-	return key
-}
-
-// tryMint is mint for a selector set that may not be mintable; it returns
-// "" when minting fails. Results are cached like mint's.
-func (m *bearerMatrixFixture) tryMint(boundary TokenBoundary, scopes []string) string {
-	cacheKey := "try|" + string(boundary.Kind) + "|" + boundary.ProjectID + "|" + strings.Join(scopes, ",")
-	if key, ok := m.tokens[cacheKey]; ok {
-		return key
-	}
-	key, _, err := m.srv.uatService.CreateTokenWithParams(rs4MintContext(m.adminID), CreateTokenParams{
-		UserID: m.adminID, Name: "bdm-" + tid("try"), Boundary: boundary, Scopes: scopes,
-	})
-	if err != nil {
-		key = ""
-	}
-	m.tokens[cacheKey] = key
-	return key
-}
-
-// canMint reports whether the super-admin can mint a token for the
-// boundary and selectors. The trial token is deleted, so probing does not
-// count against the per-user token limit.
-func (m *bearerMatrixFixture) canMint(t *testing.T, boundary TokenBoundary, scopes []string) bool {
-	t.Helper()
-	ctx := rs4MintContext(m.adminID)
-	_, tok, err := m.srv.uatService.CreateTokenWithParams(ctx, CreateTokenParams{
-		UserID: m.adminID, Name: "bdm-" + tid("probe"), Boundary: boundary, Scopes: scopes,
-	})
-	if err != nil {
-		require.NotErrorIs(t, err, ErrUATLimitExceeded, "probing must not exhaust the token limit")
-		return false
-	}
-	require.NoError(t, m.srv.uatService.DeleteToken(ctx, m.adminID, tok.ID))
-	return true
-}
-
-// everySelectorHubToken mints a hub token for the super-admin that carries
-// every selector the super-admin can mint on the hub boundary.
-func (m *bearerMatrixFixture) everySelectorHubToken(t *testing.T) (string, []string) {
-	t.Helper()
-	var selectors []string
-	seen := map[string]bool{}
-	for _, p := range permissions.Registry {
-		if p.UATScope == "" || seen[p.UATScope] {
-			continue
-		}
-		seen[p.UATScope] = true
-		if m.canMint(t, hubBoundary(), []string{p.UATScope}) {
-			selectors = append(selectors, p.UATScope)
-		}
-	}
-	sort.Strings(selectors)
-	require.NotEmpty(t, selectors, "the super-admin can mint at least one hub selector")
-	return m.mint(t, hubBoundary(), selectors), selectors
-}
-
-// request sends method to the entry point's live path with a real token.
-// A stream is ended by the request deadline.
-func (m *bearerMatrixFixture) request(t *testing.T, e bearerMatrixEntry, key string) *httptest.ResponseRecorder {
-	t.Helper()
-	ep := e.EntryPoint
-	id := string(e.Spec.ID)
-	params := opPatternOverrides(m.ids)[overrideKey{id, ep.Pattern}]
-	if params == nil {
-		params = bearerMatrixPatternOverrides(m.ids)[ep.Pattern]
-	}
-	if params == nil {
-		params = patternOverrides(m.ids)[ep.Pattern]
-	}
-	path := substituteLiveInventoryParams(ep.Pattern, params)
-	if q, ok := queryOverrides(m.ids)[ep.Pattern]; ok {
-		path += "?" + q
-	}
-	var body []byte
-	switch ep.Method {
-	case http.MethodPost, http.MethodPut, http.MethodPatch:
-		var payload interface{} = map[string]interface{}{}
-		if override, ok := bearerMatrixBodyOverrides(m.ids)[overrideKey{id, ep.Pattern}]; ok {
-			payload = override
-		} else if override, ok := bodyOverrides(m.ids)[overrideKey{id, ep.Pattern}]; ok {
-			payload = override
-		}
-		var err error
-		body, err = json.Marshal(payload)
-		require.NoError(t, err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	req := httptest.NewRequest(ep.Method, path, bytes.NewReader(body)).WithContext(ctx)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	req.Header.Set("Authorization", "Bearer "+key)
-	rec := httptest.NewRecorder()
-	m.srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// bearerMatrixPatternOverrides holds path parameters for entry points the
-// live method inventory does not probe (it covers HTTP routes only), so
-// that the matrix addresses a seeded record.
-func bearerMatrixPatternOverrides(f idFixtures) map[string]map[string]string {
-	return map[string]map[string]string{
-		"/api/v1/agents/{id}/pty": {"id": f.agent},
-	}
 }
 
 // bearerMatrixGuardSelector returns the selector of the permission the
@@ -290,40 +219,28 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 	return bearerMatrixSelector(guard.Permission)
 }
 
-// bearerMatrixBodyOverrides holds request bodies the matrix sends in place
-// of the live-inventory bodies, for handlers that validate the body before
-// they reach the credential check the matrix observes.
-func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
-	return map[overrideKey]map[string]interface{}{
-		{"project.membership.add", "/api/v1/projects/{id}/members"}: {
-			"roleDefinitionId": f.projectMemberRoleID, "principalType": "user", "principalId": f.user,
-		},
-		{"project.membership.transfer", "/api/v1/projects/{id}/transfer-ownership"}: {"newOwnerId": f.member},
-		// The delegation ceiling applies to the role an agent is granted:
-		// a token carrying only agent:create covers no usable role, so the
-		// probe asks for agentRole "none", which every creator may grant.
-		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
-	}
-}
-
-// sessionOnlyDetailsOf returns details.reason and details.credential of an
-// error response, or "" for each when absent.
-func sessionOnlyDetailsOf(rec *httptest.ResponseRecorder) (reason, credential string) {
-	var resp ErrorResponse
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		return "", ""
-	}
-	reason, _ = resp.Error.Details["reason"].(string)
-	credential, _ = resp.Error.Details["credential"].(string)
-	return reason, credential
+// bearerMatrixCompanionSelectors lists, per operation, the selectors an
+// admitting token carries besides the operation's own: the operation also
+// checks project:read or agent:read on a target the record names.
+var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
+	"inbox.conversation.create":              {"project:read"},
+	"inbox.conversation.direct.read":         {"agent:read"},
+	"inbox.conversation.defaultagent.set":    {"project:read"},
+	"inbox.conversation.participant.add":     {"project:read"},
+	"inbox.conversation.resolve":             {"project:read"},
+	"inbox.notification.subscription.create": {"project:read"},
+	"inbox.notification.template.create":     {"project:read"},
+	"inbox.threadgroup.create":               {"project:read"},
+	"inbox.threadgroup.update":               {"project:read"},
+	"inbox.threadgroup.delete":               {"project:read"},
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
 // every catalogued HTTP, SSE and WebSocket entry point and checks the
 // result against the operation's recorded bearer disposition:
 //   - admit: a hub token with the selector (plus the route guard's
-//     selector when the hub-admin guard checks a different permission) and
-//     live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
+//     selector when the hub-admin guard checks a different permission, and
+//     the operation's bearerMatrixCompanionSelectors) and live authority is not refused and reaches the seeded target (no 401, 403 or 404; a 5xx
 //     only on a row listed in bearerMatrixPositiveServerErrors); a token
 //     of the same user with an unrelated selector, and a project token for
 //     another project, are refused (403, or 404 on a GET, where read
@@ -379,6 +296,7 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			counts["session_only"]++
 
 		case authzop.BearerAdmit:
+			m.releaseTokens(t)
 			sel := bearerMatrixSelector(e.Spec.BasePermission)
 			if sel == "" {
 				t.Errorf("%s: admit needs a selector for %s", label, e.Spec.BasePermission)
@@ -429,8 +347,9 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			positive := []string{sel}
 			if guardSel := bearerMatrixGuardSelector(ep); guardSel != "" && guardSel != sel {
 				positive = append(positive, guardSel)
-				sort.Strings(positive)
 			}
+			positive = append(positive, bearerMatrixCompanionSelectors[e.Spec.ID]...)
+			sort.Strings(positive)
 			rec := m.request(t, e, m.mint(t, boundary, positive))
 			t.Logf("admit row %s: ceiling=%d boundary=%s positive=%d with %v", label, ceilingRec.Code, boundaryStatus, rec.Code, positive)
 			if rec.Code == http.StatusUnauthorized || rec.Code == http.StatusForbidden {
@@ -521,12 +440,10 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"harnessconfig.update", http.MethodPut, "/api/v1/harness-configs/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
-	{"hub.config.update", http.MethodPut, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPatch, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
-	{"hub.config.update", http.MethodPost, "/api/v1/admin/server-config"}: {
-		http.StatusInternalServerError, "the test server has no writable settings file"},
+	{"project.messagelogs.read", http.MethodGet, "/api/v1/projects/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"project.metrics.read", http.MethodGet, "/api/v1/projects/{id}/metrics"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project for the metrics dashboard"},
 	{"hub.messaging.update", http.MethodPut, "/api/v1/admin/messaging"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.experiments.update", http.MethodGet, "/api/v1/admin/experiments"}: {
@@ -541,6 +458,20 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusNotImplemented, "the test server configures no operational settings"},
 	{"hub.projectdefaults.update", http.MethodPost, "/api/v1/admin/project-defaults"}: {
 		http.StatusNotImplemented, "the test server configures no operational settings"},
+	{"hub.diagnostics.read", http.MethodGet, "/api/v1/admin/diagnostics/logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"hub.diagnostics.read", http.MethodGet, "/api/v1/admin/diagnostics/logs/stream"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"hub.metrics.read", http.MethodGet, "/api/v1/metrics/{name}"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
+	{"hub.metrics.read", http.MethodGet, "/api/v1/admin/metrics-dashboard"}: {
+		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
+	{"hub.githubapp.update", http.MethodPut, "/api/v1/github-app/installations/{id}"}: {
+		http.StatusInternalServerError, "the empty update body fails at the store write"},
+	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/installations/discover"}: {
+		http.StatusServiceUnavailable, "the test server configures no GitHub App"},
+	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/sync-permissions"}: {
+		http.StatusBadGateway, "the test server configures no GitHub App"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

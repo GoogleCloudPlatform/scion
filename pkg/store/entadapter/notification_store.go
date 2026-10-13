@@ -622,6 +622,69 @@ func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id
 	return mapError(err)
 }
 
+// orphanPurgeBatchSize caps how many rows one purge statement deletes so a
+// large backlog is removed in short statements instead of one long one.
+var orphanPurgeBatchSize = 1000
+
+// PurgeOrphanedNotifications deletes acknowledged notifications whose agent
+// and subscription rows are both gone (for example DELETED notifications
+// persisted after an agent's hard delete), and returns how many it deleted.
+// Unacknowledged notifications are kept until acknowledged. Rows are deleted
+// in batches of orphanPurgeBatchSize until a batch comes back short.
+func (s *NotificationStore) PurgeOrphanedNotifications(ctx context.Context) (int, error) {
+	total := 0
+	for {
+		ids, err := s.client.Notification.Query().
+			Where(
+				notification.AcknowledgedEQ(true),
+				func(sel *entsql.Selector) {
+					sel.Where(entsql.And(
+						noRowWithID(sel, agent.Table, agent.FieldID, notification.FieldAgentID),
+						noRowWithID(sel, notificationsubscription.Table, notificationsubscription.FieldID, notification.FieldSubscriptionID),
+					))
+				},
+			).
+			Order(ent.Asc(notification.FieldID)).
+			Limit(orphanPurgeBatchSize).
+			IDs(ctx)
+		if err != nil {
+			return total, mapError(err)
+		}
+		if len(ids) == 0 {
+			return total, nil
+		}
+		n, err := s.client.Notification.Delete().
+			Where(notification.IDIn(ids...)).
+			Exec(ctx)
+		total += n
+		if err != nil {
+			return total, mapError(err)
+		}
+		if n == 0 || len(ids) < orphanPurgeBatchSize {
+			// A short batch is the last one. A batch that removed nothing
+			// would select the same rows again, so stop there as well.
+			return total, nil
+		}
+	}
+}
+
+// noRowWithID builds "NOT EXISTS (SELECT 1 FROM table WHERE table.idCol =
+// <sel>.refCol)".
+func noRowWithID(sel *entsql.Selector, table, idCol, refCol string) *entsql.Predicate {
+	ref := sel.C(refCol)
+	return entsql.P(func(b *entsql.Builder) {
+		b.WriteString("NOT EXISTS (SELECT 1 FROM ")
+		b.Ident(table)
+		b.WriteString(" WHERE ")
+		b.Ident(table)
+		b.WriteString(".")
+		b.Ident(idCol)
+		b.WriteString(" = ")
+		b.WriteString(ref)
+		b.WriteString(")")
+	})
+}
+
 // undispatchedGracePeriod is the minimum age of an undispatched notification
 // before the sweep picks it up. This prevents racing with an in-flight primary
 // dispatch (whose 30s retry + margin is well within this window).

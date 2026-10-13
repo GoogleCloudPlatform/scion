@@ -37,24 +37,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupTestBrokerAuthService(t *testing.T) (*BrokerAuthService, store.Store) {
-	t.Helper()
-
-	s, err := newTestStore(t, ":memory:")
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
-	}
-
-	config := DefaultBrokerAuthConfig()
-	svc := NewBrokerAuthService(config, s)
-	t.Cleanup(svc.Close)
-
-	return svc, s
-}
-
 func TestBrokerRegistrationAndJoin(t *testing.T) {
 	svc, _ := setupTestBrokerAuthService(t)
 	ctx := context.Background()
@@ -360,9 +342,6 @@ func TestJoinWithExpiredToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
-	}
 
 	config := DefaultBrokerAuthConfig()
 	config.JoinTokenExpiry = -1 * time.Hour // Already expired
@@ -539,9 +518,6 @@ func TestValidateBrokerSignature_ClockSkew(t *testing.T) {
 	s, err := newTestStore(t, ":memory:")
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
-	}
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate store: %v", err)
 	}
 
 	config := DefaultBrokerAuthConfig()
@@ -1269,63 +1245,6 @@ func TestBrokerReregistration_MergesLabels(t *testing.T) {
 // X-Scion-On-Behalf-Of tests
 // =============================================================================
 
-// setupSignedBrokerRequest creates a broker with a secret and returns a helper
-// function that produces signed requests with the given method, path, and body.
-func setupSignedBrokerRequest(t *testing.T, svc *BrokerAuthService, s store.Store) (brokerID string, signReq func(method, path string, headers map[string]string) *http.Request) {
-	t.Helper()
-	ctx := context.Background()
-
-	brokerID = uuid.New().String()
-	broker := &store.RuntimeBroker{
-		ID:      brokerID,
-		Name:    "obo-test-broker",
-		Slug:    "obo-test-broker",
-		Status:  store.BrokerStatusOnline,
-		Created: time.Now(),
-		Updated: time.Now(),
-	}
-	if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
-		t.Fatalf("failed to create runtime broker: %v", err)
-	}
-
-	secretKey := []byte("obo-test-secret-key-32-bytes!!!!")
-	secret := &store.BrokerSecret{
-		BrokerID:  brokerID,
-		SecretKey: secretKey,
-		Algorithm: store.BrokerSecretAlgorithmHMACSHA256,
-		Status:    store.BrokerSecretStatusActive,
-	}
-	if err := s.CreateBrokerSecret(ctx, secret); err != nil {
-		t.Fatalf("failed to create broker secret: %v", err)
-	}
-
-	nonceCounter := 0
-	signReq = func(method, path string, extraHeaders map[string]string) *http.Request {
-		nonceCounter++
-		timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-		nonce := "obo-nonce-" + strconv.Itoa(nonceCounter)
-
-		req := httptest.NewRequest(method, path, nil)
-		req.Header.Set(HeaderBrokerID, brokerID)
-		req.Header.Set(HeaderTimestamp, timestamp)
-		req.Header.Set(HeaderNonce, nonce)
-
-		for k, v := range extraHeaders {
-			req.Header.Set(k, v)
-		}
-
-		canonicalString := svc.buildCanonicalString(req, timestamp, nonce)
-		h := hmac.New(sha256.New, secretKey)
-		h.Write(canonicalString)
-		signature := base64.StdEncoding.EncodeToString(h.Sum(nil))
-		req.Header.Set(HeaderSignature, signature)
-
-		return req
-	}
-
-	return brokerID, signReq
-}
-
 func TestBrokerAuthMiddleware_OnBehalfOf_NoHeader(t *testing.T) {
 	svc, s := setupTestBrokerAuthService(t)
 	_, signReq := setupSignedBrokerRequest(t, svc, s)
@@ -1673,7 +1592,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-mismatch-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "a-different-broker-id-than-was-matched")
+	}, "someone-else", "a-different-broker-id-than-was-matched", true)
 	if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
 		t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
 	}
@@ -1684,6 +1603,63 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_IDMismatchRefused(t *testing
 	}
 	if after.AutoProvide != beforeAutoProvide {
 		t.Errorf("broker must not be mutated when the authorized ID does not match the lookup")
+	}
+}
+
+// TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin covers the
+// auto-provide pin: a caller admitted only to keep auto-provide on
+// (autoProvideAuthorized=false) is refused when the re-read broker has
+// auto-provide off, and proceeds when it is still on.
+func TestCreateBrokerRegistrationForAuthorizedMatch_AutoProvidePin(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		stored      bool
+		authorized  bool
+		wantStale   bool
+		wantStored  bool
+		requestedOn bool
+	}{
+		{name: "keep on, stored off", stored: false, authorized: false, requestedOn: true, wantStale: true, wantStored: false},
+		{name: "keep on, stored on", stored: true, authorized: false, requestedOn: true, wantStale: false, wantStored: true},
+		{name: "turn on with broker.auto_provide, stored off", stored: false, authorized: true, requestedOn: true, wantStale: false, wantStored: true},
+		{name: "turn off, stored on", stored: true, authorized: false, requestedOn: false, wantStale: false, wantStored: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, s := setupTestBrokerAuthService(t)
+			ctx := context.Background()
+
+			broker := &store.RuntimeBroker{
+				ID:          tid("pin-autoprovide-broker"),
+				Name:        "pin-autoprovide-host",
+				Slug:        "pin-autoprovide-host",
+				Status:      store.BrokerStatusOffline,
+				AutoProvide: tc.stored,
+				CreatedBy:   "owner",
+			}
+			if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
+				t.Fatalf("CreateRuntimeBroker failed: %v", err)
+			}
+
+			_, err := svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
+				Name:        "pin-autoprovide-host",
+				AutoProvide: tc.requestedOn,
+			}, "owner", broker.ID, tc.authorized)
+			if tc.wantStale {
+				if !errors.Is(err, ErrBrokerRegistrationAuthorizationStale) {
+					t.Fatalf("expected ErrBrokerRegistrationAuthorizationStale, got: %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+
+			after, err := s.GetRuntimeBroker(ctx, broker.ID)
+			if err != nil {
+				t.Fatalf("GetRuntimeBroker failed: %v", err)
+			}
+			if after.AutoProvide != tc.wantStored {
+				t.Errorf("AutoProvide = %v, want %v", after.AutoProvide, tc.wantStored)
+			}
+		})
 	}
 }
 
@@ -1707,7 +1683,7 @@ func TestCreateBrokerRegistrationForAuthorizedMatch_EmptyIDRefused(t *testing.T)
 	_, err = svc.CreateBrokerRegistrationForAuthorizedMatch(ctx, CreateBrokerRegistrationRequest{
 		Name:        "pin-empty-host",
 		AutoProvide: !beforeAutoProvide,
-	}, "someone-else", "")
+	}, "someone-else", "", true)
 	if err == nil {
 		t.Fatal("expected an error for an empty expectedExistingBrokerID, got nil")
 	}

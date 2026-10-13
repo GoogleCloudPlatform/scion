@@ -245,23 +245,31 @@ func TestRecordHubProjectIdentity_IdentityOutsideExpectedFormSkips(t *testing.T)
 }
 
 func TestOtherProjectAgentsInUse(t *testing.T) {
+	k8s := &api.AgentK8sMetadata{Namespace: "ns"}
 	for _, tc := range []struct {
-		name   string
-		agents []api.AgentInfo
-		err    error
-		want   bool
+		name    string
+		agentID string
+		agents  []api.AgentInfo
+		err     error
+		want    bool
 	}{
-		{"none", nil, nil, false},
-		{"only the starting agent", []api.AgentInfo{{ID: "self", Phase: "running"}}, nil, false},
-		{"stopped", []api.AgentInfo{{ID: "other", Phase: "stopped"}}, nil, false},
-		{"running", []api.AgentInfo{{ID: "other", Phase: "running"}}, nil, true},
-		{"created", []api.AgentInfo{{ID: "other", Phase: "created"}}, nil, true},
-		{"other project", []api.AgentInfo{{ID: "other", Phase: "running", Labels: map[string]string{"scion.project_id": "different"}}}, nil, false},
-		{"listing failed", nil, errors.New("boom"), true},
+		{"none", "self", nil, nil, false},
+		{"only the starting agent", "self", []api.AgentInfo{{ID: "self", Phase: "running"}}, nil, false},
+		{"stopped", "self", []api.AgentInfo{{ID: "other", Phase: "stopped"}}, nil, false},
+		{"running", "self", []api.AgentInfo{{ID: "other", Phase: "running"}}, nil, true},
+		{"created", "self", []api.AgentInfo{{ID: "other", Phase: "created"}}, nil, true},
+		{"other project", "self", []api.AgentInfo{{ID: "other", Phase: "running", Labels: map[string]string{"scion.project_id": "different"}}}, nil, false},
+		{"listing failed", "self", nil, errors.New("boom"), true},
+		// On Kubernetes AgentInfo.ID can be empty or a pod name, so the
+		// starting agent is matched by agentKey.
+		{"starting agent by agent_id label", "self", []api.AgentInfo{{ID: "scion-self-pod", Phase: "running", Labels: map[string]string{"agent_id": "self"}}}, nil, false},
+		{"starting agent by operation ID", "ns/self-pod", []api.AgentInfo{{ContainerID: "self-pod", Kubernetes: k8s, Phase: "running"}}, nil, false},
+		{"other agent by agent_id label", "self", []api.AgentInfo{{ID: "self", Phase: "running", Labels: map[string]string{"agent_id": "other"}}}, nil, true},
+		{"agent with empty ID", "self", []api.AgentInfo{{Phase: "running"}}, nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := New(DefaultServerConfig(), &mockManager{agents: tc.agents, listErr: tc.err}, &runtime.MockRuntime{NameFunc: func() string { return "docker" }})
-			got, _ := srv.otherProjectAgentsInUse(context.Background(), brokerTestHubID, "self")
+			got, _ := srv.otherProjectAgentsInUse(context.Background(), brokerTestHubID, tc.agentID)
 			assert.Equal(t, tc.want, got)
 		})
 	}

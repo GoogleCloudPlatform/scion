@@ -74,6 +74,12 @@ type GoogleIdentityResolver struct {
 	roleFor   func(ctx context.Context, email string) string
 	log       *slog.Logger
 
+	// signInDenial, when set via SetSignInDenial, is the code-returning
+	// form of authorize (authorize is derived from it). It lets the
+	// existing-record branches record the decision's denial code in the
+	// audit entry without evaluating the policy again. Nil by default.
+	signInDenial func(ctx context.Context, email string) string
+
 	// platformAuthSA is the configured platform/transport auth service
 	// account email, if any. Set via SetPlatformAuthSA after construction
 	// (server.go wires it from the same Server field used by
@@ -108,15 +114,30 @@ func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
 	r.policyDeps = deps
 }
 
+// SetSignInDenial replaces the resolver's sign-in policy check with deny,
+// which returns "" when email may sign in, otherwise the denial code (see
+// checkSignInDenial). authorize is derived from deny, so both forms of the
+// check always agree. Typically (*Server).signInDenial.
+func (r *GoogleIdentityResolver) SetSignInDenial(deny func(ctx context.Context, email string) string) {
+	if deny == nil {
+		return
+	}
+	r.signInDenial = deny
+	r.authorize = func(ctx context.Context, email string) bool {
+		return deny(ctx, email) == ""
+	}
+}
+
 // liveSignInPolicyDeps returns r.policyDeps with the fields that must never
-// silently depend on SetSignInPolicyDeps having been called: authorize
-// (always r.authorize, the resolver's own configured authorize check) and
+// silently depend on SetSignInPolicyDeps having been called: authorize and
+// signInDenial (always the resolver's own configured check) and
 // UpdateUser (defaults to r.users.UpdateUser, since persisting a state
 // transition like invited -> active must not depend on optional wiring).
 // Used by every existing-record branch of Resolve.
 func (r *GoogleIdentityResolver) liveSignInPolicyDeps() signInPolicyDeps {
 	deps := r.policyDeps
 	deps.authorize = r.authorize
+	deps.signInDenial = r.signInDenial
 	if deps.UpdateUser == nil {
 		deps.UpdateUser = r.users.UpdateUser
 	}
@@ -201,6 +222,11 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
 		return nil, ErrAccessDenied
 	}
+	// The reserved test-identity domain is never provisioned or resolved
+	// here: test identities authenticate only with their own hub token.
+	if isReservedTestIdentityEmail(identity.Email) {
+		return nil, ErrAccessDenied
+	}
 
 	canonicalIssuer := canonicalizeGoogleIssuer(identity.Issuer)
 
@@ -223,6 +249,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 
 		if user.Status == store.UserStatusSuspended {
 			return nil, ErrUserSuspended
+		}
+		if !user.IsHumanKind() || isReservedTestIdentityEmail(user.Email) {
+			return nil, ErrAccessDenied
 		}
 
 		// Email drift: the presented email no longer matches the binding's

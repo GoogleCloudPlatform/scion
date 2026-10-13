@@ -444,12 +444,12 @@ func (_q *GroupQuery) WithPolicyBindings(opts ...func(*PolicyBindingQuery)) *Gro
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //		Count int `json:"count,omitempty"`
 //	}
 //
 //	client.Group.Query().
-//		GroupBy(group.FieldName).
+//		GroupBy(group.FieldFixtureRootID).
 //		Aggregate(ent.Count()).
 //		Scan(ctx, &v)
 func (_q *GroupQuery) GroupBy(field string, fields ...string) *GroupGroupBy {
@@ -467,11 +467,11 @@ func (_q *GroupQuery) GroupBy(field string, fields ...string) *GroupGroupBy {
 // Example:
 //
 //	var v []struct {
-//		Name string `json:"name,omitempty"`
+//		FixtureRootID uuid.UUID `json:"fixture_root_id,omitempty"`
 //	}
 //
 //	client.Group.Query().
-//		Select(group.FieldName).
+//		Select(group.FieldFixtureRootID).
 //		Scan(ctx, &v)
 func (_q *GroupQuery) Select(fields ...string) *GroupSelect {
 	_q.ctx.Fields = append(_q.ctx.Fields, fields...)

@@ -297,19 +297,27 @@ func revertFingerprint(h *RevertHop) string {
 }
 
 // ApplyRevert reverts hop inside tx: deactivate the adopted edge only if it
-// is active and unchanged (cause adoption_reverted), then reactivate
+// is still active and recorded (cause adoption_reverted), then reactivate
 // the original row only if it is inactive with the planned cause and
 // no other active edge exists for the delegate and scope. A changed state
 // returns a skipped_changed Result; the caller must then roll the
 // transaction back, because the first step may already have been written.
 // ApplyRevert does not write the record.
+//
+// The deactivation guard does not compare the updated time, for the reason
+// writeAdoption gives: on SQLite that column is stored as text, and an exact
+// match fails for a row whose stored text names the same instant in another
+// form, which would refuse every revert of that edge. The caller must plan
+// hop inside tx and check the plan fingerprint, which covers the adopted
+// edge's updated time as an instant together with its active flag,
+// provenance version, ceiling kind and permission IDs, before calling
+// ApplyRevert. The admin commit does so.
 func ApplyRevert(ctx context.Context, tx store.Store, hop *RevertHop, opID string) (Result, error) {
 	if hop == nil || hop.Outcome != RevertOutcomeRevert {
 		return skipped(ReasonNotRevertible), nil
 	}
-	updated := hop.adopted.UpdatedAt
 	ok, err := tx.DeactivateDelegationEdgeGuarded(ctx, hop.adopted.ID,
-		store.DelegationEdgeDeactivateGuard{Recorded: true, UpdatedAt: &updated},
+		store.DelegationEdgeDeactivateGuard{Recorded: true},
 		store.EdgeDeactivationAdoptionReverted, opID)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {

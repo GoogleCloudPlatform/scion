@@ -26,7 +26,6 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -44,21 +43,6 @@ func (signErrStorage) GenerateSignedURL(context.Context, string, storage.SignedU
 	return nil, errors.New("injected signed URL fault")
 }
 
-// runIntentErrStore fails every run-intent write, including a start claim.
-type runIntentErrStore struct {
-	store.Store
-}
-
-func (runIntentErrStore) SwapRunIntent(context.Context, string, store.RunIntent) (store.RunIntent, time.Time, error) {
-	return "", time.Time{}, errors.New("injected run intent fault")
-}
-
-// ClaimAgentStart fails too: a create-and-start records its run intent with
-// its start claim.
-func (runIntentErrStore) ClaimAgentStart(context.Context, string, string, store.StartClaimKind, string, time.Duration) (store.StartClaim, error) {
-	return store.StartClaim{}, errors.New("injected run intent fault")
-}
-
 // useFailingManagedBackend swaps in a managed-agent backend whose create
 // fails, for the rest of the test.
 func useFailingManagedBackend(t *testing.T) {
@@ -72,16 +56,6 @@ func useFailingManagedBackend(t *testing.T) {
 		managedBackendInst = prev
 		managedBackendMu.Unlock()
 	})
-}
-
-// createRollbackSite is one create failure site: the dispatcher and server
-// setup that make the create fail there, and the stage its rollback records.
-type createRollbackSite struct {
-	name      string
-	disp      AgentDispatcher
-	setup     func(t *testing.T, srv *Server)
-	req       CreateAgentRequest
-	wantStage string
 }
 
 // createRollbackSites returns one case per create failure site, each with a

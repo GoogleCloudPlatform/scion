@@ -88,6 +88,15 @@ type Host interface {
 	OpenCursor(ctx context.Context, cursor, binding string) (string, error)
 }
 
+// ScopeChecker is an optional extension of Host. The artifact list asks it
+// which home projects still exist, so it can mark the rows of artifacts
+// whose project was deleted. A host without it reports none deleted.
+type ScopeChecker interface {
+	// ScopesExist reports, for each project id in refs, whether the
+	// project exists. An id missing from the answer counts as existing.
+	ScopesExist(ctx context.Context, refs []string) (map[string]bool, error)
+}
+
 // ScopeExplainer is an optional extension of Host. When a credential
 // lacks a scope that publishing needs, the service asks it which one, so
 // the caller gets a 403 naming the scope instead of an answer that looks
@@ -102,4 +111,48 @@ type ScopeExplainer interface {
 	// needs, or is refused for another reason. It is a pure description:
 	// a non-empty answer never grants anything.
 	MissingScope(ctx context.Context, permission string) string
+}
+
+// ReviewGrantAuthority is an optional extension of Host (design D24,
+// ptone/scion#4014). For an artifact owned by an agent, the agent cannot
+// administer it (sharing is user-only), so without this extension no one
+// but an admin grantee can give a human review access. With it, the
+// service lets two more users give a user a review grant, and nothing else:
+// the owning agent's delegating user and an admin of the artifact's home
+// project. A host without it allows neither (fail closed).
+type ReviewGrantAuthority interface {
+	// MayGrantReview reports whether the caller of ctx, a user, may give a
+	// user a review grant on an artifact owned by agent ownerAgentID and
+	// homed in project homeScope: the caller is the user at the root of the
+	// agent's live, recorded delegation chain, or holds project
+	// administration in homeScope. Any lookup failure answers false.
+	MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool
+}
+
+// PrincipalChecker is an optional extension of Host (ptone/scion#4529).
+// The owner liveness reconciler asks it which artifact owners still exist,
+// so it can mark the artifacts of a deleted agent or user. A host without
+// it reports every owner live, and nothing is ever marked.
+//
+// It is asked outside any request, so it must not depend on a caller.
+type PrincipalChecker interface {
+	// PrincipalsExist reports, for each "kind:id" in refs (PrincipalRef),
+	// whether the principal is live: an agent row that exists and is not
+	// soft-deleted, or an active user. A ref missing from the answer
+	// counts as live. An error means nothing about any ref.
+	PrincipalsExist(ctx context.Context, refs []string) (map[string]bool, error)
+}
+
+// ScopeAdministrator is an optional extension of Host (ptone/scion#4529).
+// The delete route asks it whether the caller administers an artifact's
+// home project, the first custodian clause: the project owners and admins
+// of the artifact's home project, and super-admins, may delete artifacts
+// homed there. A host without it allows
+// no one by this clause (fail closed).
+type ScopeAdministrator interface {
+	// AdministersScope reports whether the caller of ctx, a user, holds
+	// project administration (project.manage) in the project scopeRef,
+	// with the caller's credential limits applied. Any lookup failure
+	// answers false.
+	AdministersScope(ctx context.Context, scopeRef string) bool
 }

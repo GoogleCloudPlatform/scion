@@ -1673,10 +1673,10 @@ test_settings_shared_dir_storage_splice_tier_off_is_byte_identical() {
   auth:
     mode: dev
 ${hybrid_block:+${hybrid_block}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 EOF
 )"
-  assert_eq "$(printf '  auth:\n    mode: dev\n  listen_port: 8080')" "$rendered" \
+  assert_eq "$(printf '  auth:\n    mode: dev\n  # Listen port: set by --web-port in scion-hub.service, not here.')" "$rendered" \
     "tier off must produce exactly the pre-existing text, with no blank line or other artifact"
 }
 
@@ -1688,11 +1688,11 @@ test_settings_shared_dir_storage_splice_tier_on_includes_block() {
   auth:
     mode: dev
 ${hybrid_block:+${hybrid_block}
-}  listen_port: 8080
+}  # Listen port: set by --web-port in scion-hub.service, not here.
 EOF
 )"
   assert_contains "$rendered" "shared_dir_storage:" "tier on must splice the block in"
-  assert_contains "$rendered" "  listen_port: 8080" "the rest of the block must still follow, unchanged"
+  assert_contains "$rendered" "  # Listen port: set by --web-port in scion-hub.service, not here." "the rest of the block must still follow, unchanged"
 }
 
 test_cloud_run_label_args_new_service_gets_label() {

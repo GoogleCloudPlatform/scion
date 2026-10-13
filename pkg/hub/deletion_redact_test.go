@@ -26,7 +26,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -43,75 +42,6 @@ import (
 // Tests for the deletion detail visibility rule (ptone/scion#3122): code,
 // error and claim of the deletion view reach unscoped local platform admins
 // only; every other caller gets the same view without them.
-
-// deletionDetailKeys are the DeletionInfo JSON keys only admins see.
-var deletionDetailKeys = []string{"code", "error", "claim"}
-
-// deletionJSON returns the JSON object of a deletion view, or nil for a nil
-// view.
-func deletionJSON(t *testing.T, info *store.DeletionInfo) map[string]json.RawMessage {
-	t.Helper()
-	if info == nil {
-		return nil
-	}
-	raw, err := json.Marshal(info)
-	require.NoError(t, err)
-	var m map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw, &m))
-	return m
-}
-
-// rawDeletionObject decodes a deletion value taken from a response body:
-// nil for an explicit null.
-func rawDeletionObject(t *testing.T, raw json.RawMessage) map[string]json.RawMessage {
-	t.Helper()
-	if string(raw) == "null" {
-		return nil
-	}
-	var m map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(raw, &m), string(raw))
-	return m
-}
-
-// assertGenericDeletionOf asserts that generic is exactly the admin view
-// without the detail keys: same presence (both null or both objects), no
-// code, error or claim, and every other key byte-identical.
-func assertGenericDeletionOf(t *testing.T, admin, generic map[string]json.RawMessage, label string) {
-	t.Helper()
-	if admin == nil {
-		assert.Nil(t, generic, "%s: deletion is null for admin, so it must be null for this caller", label)
-		return
-	}
-	require.NotNil(t, generic, "%s: deletion is an object for admin, so it must be an object for this caller", label)
-	for _, k := range deletionDetailKeys {
-		_, present := generic[k]
-		assert.False(t, present, "%s: %q must be absent from the generic view", label, k)
-	}
-	want := map[string]string{}
-	for k, v := range admin {
-		want[k] = string(v)
-	}
-	for _, k := range deletionDetailKeys {
-		delete(want, k)
-	}
-	got := map[string]string{}
-	for k, v := range generic {
-		got[k] = string(v)
-	}
-	assert.Equal(t, want, got, "%s: state, stage, soft and timestamps match the admin view", label)
-}
-
-// seedDeletionWithError seeds a delete marker and then sets its error text.
-func seedDeletionWithError(t *testing.T, s store.Store, agentID string, d deleteSeed, errText string) {
-	t.Helper()
-	seedAgentDeletion(t, s, agentID, d)
-	if errText == "" {
-		return
-	}
-	n, err := s.UpdateAgentDeletion(context.Background(), agentID, store.DeletionPredicate{}, store.DeletionFields{Error: &errText})
-	require.NoError(t, err)
-	require.Equal(t, 1, n)
-}
 
 // adminPublishCtx is a context carrying an unscoped local platform admin, the
 // one caller class that sees the detail on REST. Status events are published
@@ -456,7 +386,7 @@ func TestLifecycleStopNotRecorded_DeletionAdminVsNonAdmin(t *testing.T) {
 	}
 }
 
-// claimAfterStatusStore seeds a live delete claim right after the first
+// claimAfterStatusStore seeds a delete claim right after the first
 // successful UpdateAgentStatus, so a managed lifecycle action answers from
 // the claimed row.
 type claimAfterStatusStore struct {
@@ -473,32 +403,54 @@ func (c *claimAfterStatusStore) UpdateAgentStatus(ctx context.Context, id string
 	return nil
 }
 
+// A managed lifecycle action that answers 200 from a row a delete claimed
+// after its status write carries the deletion view, with the detail for
+// the admin only. A stop answers from a live deleting claim. A start or
+// restart whose row a delete holds by its final read answers 409 instead
+// (ptone/scion#3705), so the start case seeds a failed claim, which leaves
+// the agent live. The failed claim keeps an outstanding broker delete
+// intent: without one, the start's settle step clears a failed marker
+// (clearFailedDeletion) and the answer carries no view.
 func TestManagedLifecycle_DeletionAdminVsNonAdmin(t *testing.T) {
-	views := map[string]map[string]json.RawMessage{}
-	for _, c := range []struct {
-		name     string
-		identity Identity
+	useManagedBackend(t, stubManagedAgentBackend{})
+	for _, tc := range []struct {
+		action    string
+		phase     state.Phase
+		seed      deleteSeed
+		wantState string
 	}{
-		{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
-		{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+		{"stop", state.PhaseRunning, seedLiveDeleting, store.DeletionStateDeleting},
+		{"start", state.PhaseStopped, seedFailedIntent, store.DeletionStateFailed},
 	} {
-		srv, s := testServer(t)
-		agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+c.name, state.PhaseStopped)
-		agent.Runtime = ManagedRuntimePrefix + "test"
-		require.NoError(t, s.UpdateAgent(context.Background(), agent))
-		srv.store = &claimAfterStatusStore{Store: s, claim: func() {
-			seedDeletionWithError(t, s, agent.ID, seedLiveDeleting, "managed claim detail")
-		}}
-		views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, "start")
+		t.Run(tc.action, func(t *testing.T) {
+			views := map[string]map[string]json.RawMessage{}
+			for _, c := range []struct {
+				name     string
+				identity Identity
+			}{
+				{"admin", NewAuthenticatedUser("u-admin", "admin@test.com", "Admin", "admin", "web")},
+				{"member", NewAuthenticatedUser("u-m", "m@test.com", "M", "member", "web")},
+			} {
+				srv, s := testServer(t)
+				agent := setupBrokerAgentInPhase(t, s, "redact-managed-"+tc.action+"-"+c.name, tc.phase)
+				agent.Runtime = ManagedRuntimePrefix + "test"
+				require.NoError(t, s.UpdateAgent(context.Background(), agent))
+				srv.store = &claimAfterStatusStore{Store: s, claim: func() {
+					seedDeletionWithError(t, s, agent.ID, tc.seed, "managed claim detail")
+				}}
+				views[c.name] = lifecycleAs(t, srv, c.identity, agent.ID, tc.action)
+			}
+			require.NotNil(t, views["admin"])
+			assert.JSONEq(t, `"`+tc.wantState+`"`, string(views["admin"]["state"]))
+			assert.JSONEq(t, `"managed claim detail"`, string(views["admin"]["error"]))
+			assert.Contains(t, views["admin"], "claim")
+			require.NotNil(t, views["member"])
+			for _, k := range deletionDetailKeys {
+				assert.NotContains(t, views["member"], k)
+			}
+			assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
+		})
 	}
-	require.NotNil(t, views["admin"])
-	assert.JSONEq(t, `"managed claim detail"`, string(views["admin"]["error"]))
-	assert.Contains(t, views["admin"], "claim")
-	require.NotNil(t, views["member"])
-	for _, k := range deletionDetailKeys {
-		assert.NotContains(t, views["member"], k)
-	}
-	assert.JSONEq(t, string(views["admin"]["state"]), string(views["member"]["state"]))
 }
 
 // --- delete 202 and failure bodies ---
@@ -875,7 +827,13 @@ func TestSSEHandler_AgentStatusDeletionGenericForAdminSession(t *testing.T) {
 // caller with callerSeesDeletionDetail or a variable, never with the
 // literal true.
 func TestDeletionViewOnlyBuiltThroughRedaction(t *testing.T) {
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards ComputeAgentDeletion and deletionViewForCaller sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards ComputeAgentDeletion and deletionViewForCaller sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards ComputeAgentDeletion and deletionViewForCaller sites.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	fset := token.NewFileSet()
 	var computeSites, viewSites []string

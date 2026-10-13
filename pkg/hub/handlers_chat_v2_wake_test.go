@@ -100,10 +100,6 @@ func (f *chatWakeFixture) memberWithoutLifecycle(t *testing.T) *store.User {
 	return u
 }
 
-func userIdentityFor(u *store.User) UserIdentity {
-	return NewAuthenticatedUser(u.ID, u.Email, u.DisplayName, u.Role, string(ClientTypeWeb))
-}
-
 func (f *chatWakeFixture) path() string {
 	return "/api/v1/chat/conversations/" + f.topic + "/messages"
 }
@@ -269,21 +265,6 @@ func TestChatV2Wake_OfferWake_NoMessagePermission_Denied(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "canWake")
 	assert.Empty(t, f.disp.getStartCalls())
 	assert.Equal(t, 0, f.countThreadMessages(t))
-}
-
-// deadlineRecorder is a ResponseRecorder that supports SetWriteDeadline,
-// as a real connection does, and records every deadline set.
-type deadlineRecorder struct {
-	*httptest.ResponseRecorder
-	mu        sync.Mutex
-	deadlines []time.Time
-}
-
-func (r *deadlineRecorder) SetWriteDeadline(t time.Time) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.deadlines = append(r.deadlines, t)
-	return nil
 }
 
 // ctxDeadlineDispatcher records the deadline of the resume dispatch ctx.
@@ -641,18 +622,27 @@ func TestChatV2Wake_PanicAfterPersist_KeepsGateState(t *testing.T) {
 			f.srv.mu.RUnlock()
 			f.srv.SetWebChatStore(panickingReplyStore{WebChatStore: wcs})
 
+			// A human-sent message of this topic: a reply to it keeps the
+			// default agent as primary but still stores the reply link,
+			// which panics.
+			replyTarget := tid("chat-wake-reply-target-" + tc.name)
+			require.NoError(t, f.s.CreateMessage(t.Context(), &store.Message{
+				ID: replyTarget, ProjectID: f.proj.ID, Sender: "user:dev", SenderID: DevUserID, Recipient: "thread:" + f.topic,
+				Msg: "earlier", Type: "instruction", Channel: "web", ThreadID: f.topic,
+				CreatedAt: time.Now().Add(-time.Minute).UTC(),
+			}))
+
 			func() {
 				defer func() { _ = recover() }()
-				// An unknown reply_to_id keeps the default agent as primary
-				// but still stores the reply link, which panics.
 				_ = doRequest(t, f.srv, http.MethodPost, f.path(),
-					map[string]any{"content": "hello", "reply_to_id": "no-such-message"})
+					map[string]any{"content": "hello", "reply_to_id": replyTarget})
 			}()
 
 			res, err := f.s.ListMessages(t.Context(), store.MessageFilter{ThreadID: f.topic}, store.ListOptions{Limit: 10})
 			require.NoError(t, err)
-			require.Len(t, res.Items, 1, "the row was stored before the panic")
+			require.Len(t, res.Items, 2, "the row was stored before the panic")
 			m := res.Items[0]
+			require.NotEqual(t, replyTarget, m.ID, "newest row first")
 			assert.Equal(t, tc.wantState, m.DispatchState, "the gate's state must survive the panic")
 			if tc.wantReason != "" {
 				require.NotNil(t, m.DispatchFailureReason)
@@ -741,4 +731,80 @@ func TestChatV2Wake_ClientCancelDuringWake_ReplayGetsOutcome(t *testing.T) {
 	assert.Equal(t, store.MessageDispatchDispatched, res.Items[0].DispatchState)
 	assert.Len(t, f.disp.getStartCalls(), 1, "one wake")
 	assert.Len(t, f.disp.getMessageCalls(), 1, "one dispatch")
+}
+
+// stallCreateMessageStore blocks CreateMessage until its context ends, or
+// for at most stallFor, simulating a store call that hangs.
+type stallCreateMessageStore struct {
+	store.Store
+	stallFor time.Duration
+}
+
+func (s *stallCreateMessageStore) CreateMessage(ctx context.Context, m *store.Message) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(s.stallFor):
+		return context.DeadlineExceeded
+	}
+}
+
+// A store call that stalls after the wake ends the send at the overall
+// deadline with a failure, and releases the idempotency key.
+func TestChatV2Wake_StalledStoreAfterWake_EndsAtDeadline(t *testing.T) {
+	budget := 3 * time.Second
+	orig := chatWakeSendBudget
+	chatWakeSendBudget = func(int) time.Duration { return budget }
+	t.Cleanup(func() { chatWakeSendBudget = orig })
+
+	f := chatWakeSetup(t, string(state.PhaseSuspended))
+	f.markReadySoon()
+	f.srv.store = &stallCreateMessageStore{Store: f.s, stallFor: 20 * time.Second}
+
+	start := time.Now()
+	rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+		map[string]any{"content": "hello", "wake": true, "idempotency_key": "key-stall"})
+	elapsed := time.Since(start)
+
+	require.Equal(t, http.StatusInternalServerError, rec.Code, "body=%s", rec.Body.String())
+	assert.Less(t, elapsed, budget+5*time.Second, "send must end at the overall deadline")
+	assert.Len(t, f.disp.getStartCalls(), 1, "the wake ran before the stall")
+	assert.Empty(t, f.disp.getMessageCalls())
+
+	_, begin := f.srv.chatIdempotency.Begin(DevUserID, "key-stall")
+	assert.Equal(t, IdempotencyNew, begin, "the key must be released after the failed send")
+}
+
+// A chat send with wake and interrupt to a suspended agent that is still
+// initializing when the wake wait ends is delivered as an ordinary
+// (buffered) message; an agent that reports working keeps the interrupt.
+func TestChatV2Interrupt_WakeInitializingIsBuffered(t *testing.T) {
+	orig := wakeReadyTimeout
+	wakeReadyTimeout = 1500 * time.Millisecond
+	t.Cleanup(func() { wakeReadyTimeout = orig })
+
+	for _, tc := range []struct {
+		activity      string
+		wantInterrupt bool
+	}{
+		{"initializing", false},
+		{"working", true},
+	} {
+		t.Run(tc.activity, func(t *testing.T) {
+			f := chatWakeSetup(t, string(state.PhaseSuspended))
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = f.s.UpdateAgentStatus(context.Background(), f.agent.ID, store.AgentStatusUpdate{
+					Phase: string(state.PhaseRunning), Activity: tc.activity,
+				})
+			}()
+			rec := doRequest(t, f.srv, http.MethodPost, f.path(),
+				map[string]any{"content": "stop and look", "wake": true, "interrupt": true})
+			require.Equal(t, http.StatusCreated, rec.Code, "body=%s", rec.Body.String())
+
+			msgs := f.disp.getMessageCalls()
+			require.Len(t, msgs, 1, "the message is delivered")
+			assert.Equal(t, tc.wantInterrupt, msgs[0].Interrupt)
+		})
+	}
 }

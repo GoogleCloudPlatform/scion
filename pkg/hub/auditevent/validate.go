@@ -141,7 +141,7 @@ func validateSnapshot(event EnvelopeV1, payload map[string]any, hasPayload bool)
 	if event.Resource == nil {
 		return invalid("resource", "is required by the catalog")
 	}
-	if event.Resource.Kind != entry.ResourceKind {
+	if event.Resource.Kind != entry.ResourceKind && !slices.Contains(entry.AdditionalResourceKinds, event.Resource.Kind) {
 		return invalid("resource.kind", "must match the catalog entry")
 	}
 	if err := validateBoundedString("resource.id", event.Resource.ID, 128); err != nil {

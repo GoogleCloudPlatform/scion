@@ -708,19 +708,21 @@ func (s *Server) getUsageSummary(w http.ResponseWriter, r *http.Request) {
 		// row showed 0 active agents regardless of real usage. Sum across
 		// every broker instead, the same way getUsageByLimit and
 		// ReconcileStaleBrokerQuotaReservations do (ptone/scion#2061 P2.2).
-		var reservations []*store.UsageReservation
+		var count int
 		var listErr error
 		if def.Name == store.LimitMaxAgentsPerBroker {
-			reservations, listErr = s.listBrokerScopedActiveReservations(ctx, def.ID)
+			count, listErr = s.countBrokerScopedActiveReservations(ctx, def.ID)
 		} else {
+			var reservations []*store.UsageReservation
 			reservations, listErr = s.store.ListActiveReservations(ctx, def.ID, store.QuotaScopeSystem, "")
+			count = len(reservations)
 		}
 		activeCount := 0
 		if listErr != nil {
 			slog.Error("failed to list active reservations for usage summary",
 				"limit_id", def.ID, "error", listErr)
 		} else {
-			activeCount = len(reservations)
+			activeCount = count
 		}
 		entries = append(entries, usageSummaryEntry{
 			LimitDefinition: def,
@@ -789,32 +791,68 @@ func (s *Server) getUsageByLimit(w http.ResponseWriter, r *http.Request, limitID
 // listBrokerScopedActiveReservations aggregates active reservations for
 // limitDefinitionID across every runtime broker (ptone/scion#2061 P2.2).
 // max_agents_per_broker reservations are always scoped to a specific broker
-// (store.QuotaScopeBroker, scope_id=broker ID), so listing them requires
-// enumerating brokers first — store.Store.ListActiveReservations takes one
-// exact scope, not a wildcard. This mirrors
-// ReconcileStaleBrokerQuotaReservations's own broker loop (broker_quota.go),
-// including its bounds: 1+B queries (one ListRuntimeBrokers, one
-// ListActiveReservations per broker) and the same 10,000-broker cap, below
-// which a hub with more brokers than that would silently undercount here
-// exactly as reconcile already does. Reviewed and accepted for this PR
-// (round 1, F3); a single-query store method (e.g.
-// ListActiveReservationsByScopeType) usable by both call sites is a
-// follow-up, not required here.
+// (store.QuotaScopeBroker, scope_id=broker ID). The rows come from one
+// ListActiveReservationsByScopeType query (ptone/scion#2314) and are then
+// filtered and ordered by the broker list, so the result is the same as the
+// former one-query-per-broker loop: only brokers returned by
+// ListRuntimeBrokers (capped at 10,000, the same cap
+// ReconcileStaleBrokerQuotaReservations uses) contribute, rows of a scope ID
+// that is not a listed broker (for example a deleted broker) are left out,
+// and rows appear in broker-list order, created_at ascending within a broker.
 func (s *Server) listBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) ([]*store.UsageReservation, error) {
-	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 10000})
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: brokerScopedListLimit})
 	if err != nil {
 		return nil, fmt.Errorf("list runtime brokers: %w", err)
 	}
 
+	all, err := s.store.ListActiveReservationsByScopeType(ctx, limitDefinitionID, store.QuotaScopeBroker)
+	if err != nil {
+		return nil, fmt.Errorf("list active broker-scoped reservations: %w", err)
+	}
+	byBroker := groupReservationsByScopeID(all)
+
 	var reservations []*store.UsageReservation
 	for _, broker := range brokers.Items {
-		brokerReservations, err := s.store.ListActiveReservations(ctx, limitDefinitionID, store.QuotaScopeBroker, broker.ID)
-		if err != nil {
-			return nil, fmt.Errorf("list active reservations for broker %q: %w", broker.ID, err)
-		}
-		reservations = append(reservations, brokerReservations...)
+		reservations = append(reservations, byBroker[broker.ID]...)
 	}
 	return reservations, nil
+}
+
+// countBrokerScopedActiveReservations returns the number of rows
+// listBrokerScopedActiveReservations would return, using one grouped count
+// query instead of loading the rows (ptone/scion#2314). The same broker-list
+// filter applies: counts for scope IDs that are not listed brokers are not
+// included.
+func (s *Server) countBrokerScopedActiveReservations(ctx context.Context, limitDefinitionID string) (int, error) {
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: brokerScopedListLimit})
+	if err != nil {
+		return 0, fmt.Errorf("list runtime brokers: %w", err)
+	}
+
+	counts, err := s.store.CountActiveReservationsByScope(ctx, limitDefinitionID, store.QuotaScopeBroker)
+	if err != nil {
+		return 0, fmt.Errorf("count active broker-scoped reservations: %w", err)
+	}
+
+	total := 0
+	for _, broker := range brokers.Items {
+		total += int(counts[broker.ID])
+	}
+	return total, nil
+}
+
+// brokerScopedListLimit caps the runtime brokers enumerated by the
+// broker-scoped reservation views and ReconcileStaleBrokerQuotaReservations.
+const brokerScopedListLimit = 10000
+
+// groupReservationsByScopeID groups reservations by ScopeID, keeping their
+// input order within each group.
+func groupReservationsByScopeID(reservations []*store.UsageReservation) map[string][]*store.UsageReservation {
+	grouped := make(map[string][]*store.UsageReservation)
+	for _, res := range reservations {
+		grouped[res.ScopeID] = append(grouped[res.ScopeID], res)
+	}
+	return grouped
 }
 
 func (s *Server) getMyUsage(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,275 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+)
+
+// Flat Runtime Broker profile resolution (.design/flat-runtime-brokers-contract.md
+// section 10; .design/flat-runtime-brokers/contract-appendix-p3.md FC5): a
+// flat instance skips the Runtime Broker Profile tier, including the
+// active_profile fallback, and its own instance policy takes that tier's
+// rung, while non-profile defaults (the settings harness config, top-level
+// image registry) still apply. Legacy resolution is unchanged.
+
+// The active profile carries distinctive resources and harness overrides;
+// the settings-level harness config carries a non-profile default.
+const flatProfileResolutionSettings = `schema_version: "1"
+image_registry: registry.example/global
+active_profile: batch
+harness_configs:
+  test-harness:
+    harness: gemini
+    env:
+      GLOBAL_HC_ENV: from-settings-harness-config
+runtimes:
+  docker:
+    type: docker
+profiles:
+  batch:
+    runtime: docker
+    shared_dir_storage_class: profile-rwx
+    shared_dir_size: 77Gi
+    resources:
+      requests:
+        memory: 7777Mi
+    harness_overrides:
+      test-harness:
+        image: profile-only-image:batch
+        env:
+          PROFILE_ONLY_ENV: from-active-profile
+        resources:
+          limits:
+            cpu: "7"
+`
+
+type flatResolutionRun struct {
+	fixture sharedDirStorageRunFixture
+	runs    []runtime.RunConfig
+	mgr     Manager
+}
+
+func newFlatResolutionRun(t *testing.T) *flatResolutionRun {
+	t.Helper()
+	r := &flatResolutionRun{fixture: newSharedDirStorageRunFixture(t)}
+	require.NoError(t, os.WriteFile(filepath.Join(r.fixture.globalScionDir, "settings.yaml"),
+		[]byte(flatProfileResolutionSettings), 0o644))
+	r.mgr = NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "docker" },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			r.runs = append(r.runs, cfg)
+			return "mock-id", nil
+		},
+	})
+	return r
+}
+
+func (r *flatResolutionRun) start(t *testing.T, ctx context.Context, name string) runtime.RunConfig {
+	t.Helper()
+	_, err := r.mgr.Start(ctx, api.StartOptions{
+		Name:        name,
+		ProjectPath: r.fixture.projectScionDir,
+		NoAuth:      true,
+		Env:         map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, r.runs)
+	return r.runs[len(r.runs)-1]
+}
+
+func runEnv(cfg runtime.RunConfig) map[string]string {
+	out := map[string]string{}
+	for _, kv := range cfg.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// flatTestPolicy is the policy of a flat Kubernetes instance whose
+// shared-dir defaults differ from the active profile's.
+func flatTestPolicy() *config.FlatInstancePolicy {
+	return config.NewFlatInstancePolicy(config.V1RuntimeBrokerInstanceConfig{Key: "k8s-1", Name: "k8s-1",
+		RuntimeTarget: &config.V1RuntimeTargetConfig{Type: "kubernetes", SharedDirStorageClass: "instance-rwx", SharedDirSize: "40Gi"}})
+}
+
+func flatCtx() context.Context {
+	return config.WithFlatInstancePolicy(context.Background(), flatTestPolicy())
+}
+
+func assertNoProfileTier(t *testing.T, cfg runtime.RunConfig) {
+	t.Helper()
+	env := runEnv(cfg)
+	assert.NotContains(t, env, "PROFILE_ONLY_ENV", "active-profile harness override env must not reach a flat agent")
+	assert.NotContains(t, cfg.Image, "profile-only-image", "active-profile harness override image must not reach a flat agent")
+	if cfg.Resources != nil {
+		assert.NotEqual(t, "7777Mi", cfg.Resources.Requests.Memory, "active-profile resources must not reach a flat agent")
+		assert.NotEqual(t, "7", cfg.Resources.Limits.CPU, "active-profile harness override resources must not reach a flat agent")
+	}
+	assert.Equal(t, "from-settings-harness-config", env["GLOBAL_HC_ENV"], "the non-profile settings harness config still applies")
+}
+
+func TestFlatProfileResolution_StartAndRestartSkipProfileTier(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	cfg := r.start(t, flatCtx(), "flat-agent")
+	assertNoProfileTier(t, cfg)
+	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir), "no profile is recorded for a flat agent")
+
+	// A later start (and the start leg of a restart) re-reads settings and
+	// still skips the profile tier.
+	cfg = r.start(t, flatCtx(), "flat-agent")
+	assertNoProfileTier(t, cfg)
+	assert.Empty(t, GetSavedProfile("flat-agent", r.fixture.projectScionDir))
+}
+
+func TestFlatProfileResolution_LegacyStartStillAppliesActiveProfile(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	cfg := r.start(t, context.Background(), "legacy-agent")
+	env := runEnv(cfg)
+	assert.Equal(t, "from-active-profile", env["PROFILE_ONLY_ENV"], "legacy resolution applies the active profile's harness overrides")
+	assert.Contains(t, cfg.Image, "profile-only-image", "legacy resolution applies the active profile's image override")
+	require.NotNil(t, cfg.Resources, "legacy resolution applies the active profile's resources")
+	assert.Equal(t, "7777Mi", cfg.Resources.Requests.Memory)
+	assert.Equal(t, "from-settings-harness-config", env["GLOBAL_HC_ENV"])
+	assert.Equal(t, "batch", GetSavedProfile("legacy-agent", r.fixture.projectScionDir))
+}
+
+func TestFlatProfileResolution_ProvisionSkipsProfileTier(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	_, _, flatCfg, err := ProvisionAgent(flatCtx(), "flat-prov", "", "", "", r.fixture.projectScionDir, "", "created", "", "")
+	require.NoError(t, err)
+	require.NotNil(t, flatCfg)
+	if flatCfg.Resources != nil {
+		assert.NotEqual(t, "7777Mi", flatCfg.Resources.Requests.Memory, "active-profile resources are not provisioned for a flat agent")
+		assert.NotEqual(t, "7", flatCfg.Resources.Limits.CPU, "active-profile harness override resources are not provisioned for a flat agent")
+	}
+	assert.NotContains(t, flatCfg.Env, "PROFILE_ONLY_ENV", "active-profile harness override env is not provisioned for a flat agent")
+	assert.NotContains(t, flatCfg.Image, "profile-only-image", "active-profile harness override image is not provisioned for a flat agent")
+	// Non-profile defaults still apply: the settings harness config's env
+	// and the harness config's own image.
+	assert.Equal(t, "from-settings-harness-config", flatCfg.Env["GLOBAL_HC_ENV"], "the non-profile settings harness config still applies")
+	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image still applies")
+	assert.Empty(t, GetSavedProfile("flat-prov", r.fixture.projectScionDir))
+
+	// Legacy provisioning is unchanged.
+	_, _, legacyCfg, err := ProvisionAgent(context.Background(), "legacy-prov", "", "", "", r.fixture.projectScionDir, "", "created", "", "")
+	require.NoError(t, err)
+	require.NotNil(t, legacyCfg)
+	require.NotNil(t, legacyCfg.Resources)
+	assert.Equal(t, "7777Mi", legacyCfg.Resources.Requests.Memory)
+	assert.Equal(t, "from-active-profile", legacyCfg.Env["PROFILE_ONLY_ENV"])
+	assert.Equal(t, "profile-only-image:batch", legacyCfg.Image)
+	assert.Equal(t, "from-settings-harness-config", legacyCfg.Env["GLOBAL_HC_ENV"])
+}
+
+// TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults: on a flat
+// instance the shared-dir PVC defaults are the instance's runtime_target
+// values, not dropped and not the active profile's; legacy resolution still
+// applies the active profile's. The instance value is a default at the
+// profile's rung: an agent's own kubernetes.shared_dir_* still wins over it.
+func TestFlatProfileResolution_StartUsesInstanceSharedDirDefaults(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	r.mgr = NewManager(&runtime.MockRuntime{
+		NameFunc: func() string { return "kubernetes" },
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			r.runs = append(r.runs, cfg)
+			return "mock-id", nil
+		},
+	})
+	start := func(ctx context.Context, name string, inline *api.ScionConfig) runtime.RunConfig {
+		t.Helper()
+		_, err := r.mgr.Start(ctx, api.StartOptions{
+			Name:         name,
+			ProjectPath:  r.fixture.projectScionDir,
+			NoAuth:       true,
+			Env:          map[string]string{"SCION_AGENT_ID": "agent-" + name, "SCION_PROJECT_ID": "pid-flat"},
+			SharedDirs:   []api.SharedDir{{Name: "scratchpad"}},
+			InlineConfig: inline,
+		})
+		require.NoError(t, err)
+		return r.runs[len(r.runs)-1]
+	}
+
+	flat := start(flatCtx(), "flat-sd", nil)
+	require.NotNil(t, flat.Kubernetes, "the instance's shared-dir defaults reach the run config")
+	assert.Equal(t, "instance-rwx", flat.Kubernetes.SharedDirStorageClass)
+	assert.Equal(t, "40Gi", flat.Kubernetes.SharedDirSize)
+
+	legacy := start(context.Background(), "legacy-sd", nil)
+	require.NotNil(t, legacy.Kubernetes)
+	assert.Equal(t, "profile-rwx", legacy.Kubernetes.SharedDirStorageClass, "legacy resolution applies the active profile")
+	assert.Equal(t, "77Gi", legacy.Kubernetes.SharedDirSize)
+
+	// The agent's own value wins over the instance default; the field it
+	// leaves unset still takes the instance value.
+	own := start(flatCtx(), "flat-sd-own", &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SharedDirSize: "60Gi"}})
+	require.NotNil(t, own.Kubernetes)
+	assert.Equal(t, "60Gi", own.Kubernetes.SharedDirSize, "the agent's kubernetes.shared_dir_size outranks the instance default")
+	assert.Equal(t, "instance-rwx", own.Kubernetes.SharedDirStorageClass, "an unset agent class takes the instance default")
+}
+
+func TestForProfileResolution_DoesNotMutateSettings(t *testing.T) {
+	vs := &config.VersionedSettings{ActiveProfile: "batch", ImageRegistry: "registry.example/global",
+		Profiles: map[string]config.V1ProfileConfig{"batch": {Runtime: "docker", ImageRegistry: "registry.example/profile"}}}
+	view := vs.ForProfileResolution(config.ProfileResolutionFlatInstance)
+	assert.Equal(t, "batch", vs.ActiveProfile, "the loaded settings are not modified")
+	assert.Len(t, vs.Profiles, 1)
+	assert.Equal(t, "registry.example/global", view.ResolveImageRegistry(""), "the non-profile default still applies")
+	assert.Equal(t, "registry.example/profile", vs.ResolveImageRegistry(""), "legacy resolution still uses the active profile")
+	assert.Same(t, vs, vs.ForProfileResolution(config.ProfileResolutionLegacy))
+
+	flatView := vs.ForFlatInstance(flatTestPolicy())
+	assert.Equal(t, "batch", vs.ActiveProfile, "the loaded settings are not modified")
+	assert.Empty(t, flatView.ActiveProfile)
+	assert.Empty(t, flatView.Profiles)
+	assert.Equal(t, "registry.example/global", flatView.ResolveImageRegistry(""), "the non-profile default still applies")
+	_, size := flatView.ResolveSharedDirDefaults("")
+	assert.Equal(t, "40Gi", size, "the instance policy takes the profile tier's rung")
+	assert.Same(t, vs, vs.ForFlatInstance(nil))
+}
+
+// TestFlatProfileResolution_ProvisionedImageSkipsProfileTier: the image the
+// manager reports for a freshly provisioned agent (withProvisionedImage)
+// reads settings in the request's profile-resolution mode: a flat instance
+// takes no active-profile harness override image; legacy still does.
+func TestFlatProfileResolution_ProvisionedImageSkipsProfileTier(t *testing.T) {
+	r := newFlatResolutionRun(t)
+	opts := func(name string) api.StartOptions {
+		return api.StartOptions{Name: name, ProjectPath: r.fixture.projectScionDir, NoAuth: true, HarnessConfig: "test-harness"}
+	}
+	flatCfg, err := r.mgr.Provision(flatCtx(), opts("flat-provimg"))
+	require.NoError(t, err)
+	require.NotNil(t, flatCfg)
+	assert.NotContains(t, flatCfg.Image, "profile-only-image", "a flat agent's provisioned image takes no active-profile override")
+	assert.Equal(t, "test-image:latest", flatCfg.Image, "the harness config's own image applies")
+
+	legacyCfg, err := r.mgr.Provision(context.Background(), opts("legacy-provimg"))
+	require.NoError(t, err)
+	require.NotNil(t, legacyCfg)
+	assert.Equal(t, "profile-only-image:batch", legacyCfg.Image, "control: legacy provisioning applies the active profile's override image")
+}

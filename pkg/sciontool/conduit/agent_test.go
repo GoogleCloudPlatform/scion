@@ -97,9 +97,10 @@ func TestAgentDecideDelays(t *testing.T) {
 }
 
 // TestAgentHelloCarriesLaunchID: the Hello presents SCION_LAUNCH_ID as
-// the endpoint incarnation, offers only tcp streams, and the upgrade
-// carries the agent token.
+// the endpoint incarnation, offers only tcp streams (no tmux on PATH),
+// and the upgrade carries the agent token.
 func TestAgentHelloCarriesLaunchID(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // no tmux: no pty kind
 	h := newFakeHub(t)
 	startAgent(t, h, func(o *Options) { o.LaunchID = "launch-42" })
 	hello := h.nextHello(t)
@@ -550,8 +551,9 @@ func TestAgentTCPLoopbackOnly(t *testing.T) {
 	}
 }
 
-// TestAgentTCPDialsOnlyLoopback: the only address the target dials is
-// 127.0.0.1:<granted port>.
+// TestAgentTCPDialsOnlyLoopback: the target dials 127.0.0.1:<granted
+// port>; an error other than connection refused is not retried on ::1
+// (see TestAgentTCPFallbackRule).
 func TestAgentTCPDialsOnlyLoopback(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)

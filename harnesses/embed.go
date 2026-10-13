@@ -14,7 +14,7 @@
 
 package harnesses
 
-//go:generate go run ./gen
+//go:generate go run ./gen -dir .
 
 import (
 	"embed"

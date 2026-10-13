@@ -49,6 +49,8 @@ func ConvertV1TelemetryToAPI(v1 *V1TelemetryConfig) *api.TelemetryConfig {
 				Enabled:            v1.Cloud.TLS.Enabled,
 				InsecureSkipVerify: v1.Cloud.TLS.InsecureSkipVerify,
 				CAFile:             v1.Cloud.TLS.CAFile,
+				CertFile:           v1.Cloud.TLS.CertFile,
+				KeyFile:            v1.Cloud.TLS.KeyFile,
 			}
 		}
 		if v1.Cloud.Batch != nil {
@@ -142,6 +144,12 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.CAFile != "" {
 			env["SCION_OTEL_CA_FILE"] = cfg.Cloud.TLS.CAFile
 		}
+		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.CertFile != "" {
+			env["SCION_OTEL_CERT_FILE"] = cfg.Cloud.TLS.CertFile
+		}
+		if cfg.Cloud.TLS != nil && cfg.Cloud.TLS.KeyFile != "" {
+			env["SCION_OTEL_KEY_FILE"] = cfg.Cloud.TLS.KeyFile
+		}
 		if cfg.Cloud.Batch != nil {
 			if cfg.Cloud.Batch.MaxSize > 0 {
 				env["SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE"] = strconv.Itoa(cfg.Cloud.Batch.MaxSize)
@@ -168,27 +176,13 @@ func TelemetryConfigToEnv(cfg *api.TelemetryConfig) map[string]string {
 		}
 	}
 
-	// Local config
-	if cfg.Local != nil {
-		if cfg.Local.Enabled != nil {
-			env["SCION_TELEMETRY_LOCAL_ENABLED"] = strconv.FormatBool(*cfg.Local.Enabled)
-			env["SCION_TELEMETRY_DEBUG"] = strconv.FormatBool(*cfg.Local.Enabled)
-		}
-		if cfg.Local.File != "" {
-			env["SCION_TELEMETRY_LOCAL_FILE"] = cfg.Local.File
-		}
-		if cfg.Local.Console != nil {
-			env["SCION_TELEMETRY_LOCAL_CONSOLE"] = strconv.FormatBool(*cfg.Local.Console)
-		}
-	}
+	// telemetry.local is accepted but not emitted: nothing reads the
+	// SCION_TELEMETRY_LOCAL_* variables (ptone/scion#4103).
 
 	// Filter config
 	if cfg.Filter != nil {
 		if cfg.Filter.Enabled != nil {
 			env["SCION_TELEMETRY_FILTER_ENABLED"] = strconv.FormatBool(*cfg.Filter.Enabled)
-		}
-		if cfg.Filter.RespectDebugMode != nil {
-			env["SCION_TELEMETRY_FILTER_RESPECT_DEBUG_MODE"] = strconv.FormatBool(*cfg.Filter.RespectDebugMode)
 		}
 		if cfg.Filter.Events != nil {
 			if len(cfg.Filter.Events.Include) > 0 {

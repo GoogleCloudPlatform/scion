@@ -25,7 +25,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -66,22 +65,6 @@ func setupCredentialTestServerWithCredFault(t *testing.T, err error) (*Server, s
 	})
 	srv, s, user, project := setupCredentialTestServerOn(t, srv, s)
 	return srv, s, user, project, fault
-}
-
-// apiErrorBody mirrors the JSON shape written by writeError, for assertions
-// on the error code and message returned to the client.
-type apiErrorBody struct {
-	Error struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
-
-func decodeAPIError(t *testing.T, body []byte) apiErrorBody {
-	t.Helper()
-	var resp apiErrorBody
-	require.NoError(t, json.Unmarshal(body, &resp))
-	return resp
 }
 
 // --- evaluateAgentCredentialStatus (unit-level) ---------------------------
@@ -200,25 +183,6 @@ func TestAgentAuthActiveCredentialAllowsRequest(t *testing.T) {
 }
 
 // --- Refresh handler: credential-ID marker present ------------------------
-
-// buildAgentRefreshRequest constructs a POST .../token/refresh request whose
-// context carries the given agent identity and optional credential markers,
-// without routing it through UnifiedAuthMiddleware, so the refresh handler's
-// own status evaluation (including the "marker absent" fallback) can be
-// exercised directly and deterministically.
-func buildAgentRefreshRequest(agentID string, claims *AgentTokenClaims, credentialID string, legacy bool) *http.Request {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/token/refresh", nil)
-	ctx := req.Context()
-	identity := &agentIdentityWrapper{claims}
-	ctx = contextWithIdentity(ctx, identity)
-	if credentialID != "" {
-		ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, credentialID)
-	}
-	if legacy {
-		ctx = context.WithValue(ctx, legacyTokenContextKey{}, true)
-	}
-	return req.WithContext(ctx)
-}
 
 func TestAgentRefresh_MarkerPresent_StoreErrorReturns503(t *testing.T) {
 	srv, s, _, project, credFault := setupCredentialTestServerWithCredFault(t, errors.New("boom"))

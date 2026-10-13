@@ -20,7 +20,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -31,71 +30,6 @@ import (
 // ---------------------------------------------------------------------------
 // Test helpers for UAT enforcement tests
 // ---------------------------------------------------------------------------
-
-// uatTestSetup creates a test server with seeded role definitions, a non-admin
-// user, a project, and an authz service. The user has NO role bindings by
-// default — callers add only what each test needs.
-func uatTestSetup(t *testing.T) (authz *AuthzService, s store.Store, userID, projectID string) {
-	t.Helper()
-	_, s = testServer(t)
-	ctx := context.Background()
-
-	seedRoleDefinitions(ctx, s)
-
-	projectID = tid("uat-project-1")
-	project := &store.Project{
-		ID:      projectID,
-		Name:    "UAT Test Project",
-		Slug:    "uat-test-project",
-		OwnerID: tid("project-owner"),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	userID = tid("uat-test-user")
-	user := &store.User{
-		ID:          userID,
-		Email:       "uat-user@test.com",
-		DisplayName: "UAT User",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	authz = NewAuthzService(s, nil)
-	return authz, s, userID, projectID
-}
-
-// grantPermissionViaRoleBinding creates a custom role definition with a single
-// permission and binds it to the user at the given scope. Returns the role
-// binding ID for cleanup if needed.
-func grantPermissionViaRoleBinding(t *testing.T, s store.Store, userID, permissionID, scopeType, scopeID string) string {
-	t.Helper()
-	ctx := context.Background()
-
-	rdName := "test-role-" + permissionID + "-" + userID
-	rd := &store.RoleDefinition{
-		Name:        rdName,
-		Description: "Test role granting " + permissionID,
-		ScopeType:   scopeType,
-		Permissions: []string{permissionID},
-		System:      false,
-	}
-	created, err := s.CreateRoleDefinition(ctx, rd)
-	require.NoError(t, err, "creating role definition for %s", permissionID)
-
-	rb := &store.RoleBinding{
-		RoleDefinitionID: created.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        scopeType,
-		ScopeID:          scopeID,
-		CreatedBy:        "test",
-	}
-	binding, err := s.CreateRoleBinding(ctx, rb)
-	require.NoError(t, err, "creating role binding for %s", permissionID)
-	return binding.ID
-}
 
 // makeScopedIdentity creates a ScopedUserIdentity wrapping a non-admin member user.
 // projectBoundaryEligible reports whether permissionID's allowed boundary
@@ -120,27 +54,9 @@ func makeHubScopedIdentity(t *testing.T, userID string, scopes []string) *Scoped
 	return NewScopedUserIdentityWithBoundaryAndDecoration(base, TokenBoundary{Kind: BoundaryKindHub}, scopes, "", ceiling, nil)
 }
 
-func makeScopedIdentity(userID, projectID string, scopes []string) *ScopedUserIdentity {
-	base := NewAuthenticatedUser(userID, "uat-user@test.com", "UAT User", store.UserRoleMember, "api")
-	return NewScopedUserIdentity(base, projectID, scopes)
-}
-
 // ---------------------------------------------------------------------------
 // Group 1: Scope Match + Role Binding -> Allowed
 // ---------------------------------------------------------------------------
-
-// decideAsUAT builds an AuthzRequest that mirrors how real handlers invoke
-// authz: a ScopedUserIdentity (UAT) with the Permission field set so the
-// role-binding evaluation path fires.
-func decideAsUAT(ctx context.Context, authz *AuthzService, userID, projectID string, scopes []string, resource Resource, action Action, permissionID string) Decision {
-	scoped := makeScopedIdentity(userID, projectID, scopes)
-	return authz.Decide(ctx, AuthzRequest{
-		Principal:  principalContextForIdentity(scoped),
-		Resource:   resource,
-		Action:     action,
-		Permission: permissionID,
-	})
-}
 
 func TestUATEnforcement_ScopeAndBinding_Allowed(t *testing.T) {
 	authz, s, userID, projectID := uatTestSetup(t)

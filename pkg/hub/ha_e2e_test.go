@@ -55,13 +55,6 @@ type haTestEnv struct {
 	pubB   *PostgresEventPublisher
 }
 
-func requirePG(t *testing.T) {
-	t.Helper()
-	if !enttest.Active() {
-		t.Skip("integration: set SCION_TEST_POSTGRES_URL to a live Postgres to run the HA e2e suite")
-	}
-}
-
 // newHATestEnv creates two hub Server instances sharing one Postgres schema.
 // Both have event publishers and propagation started with a short poll interval.
 func newHATestEnv(t *testing.T) *haTestEnv {

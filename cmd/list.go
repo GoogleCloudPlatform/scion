@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -96,13 +97,24 @@ var listCmd = &cobra.Command{
 		if err := validateListFlags(); err != nil {
 			return err
 		}
+		// A target-hub profile refuses the flags that need local state
+		// or this agent's own identity (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
 
 		// Check if Hub should be used
 		hubCtx, err := CheckHubAvailability(projectPath)
+		if err != nil && hubProfileSelected() {
+			// A target-hub profile never offers to link a local project.
+			return err
+		}
 		if err != nil {
-			// Check if this is because Hub is enabled but project not linked
-			if handleUnlinkedProjectPrompt(cmd, args) {
-				// User chose to link or disable - retry
+			// Check if this is because Hub is enabled but project not
+			// linked. A project the user unlinked is not offered the link
+			// prompt: it refuses with the pointer to 'scion hub link'.
+			if !errors.Is(err, hubsync.ErrProjectUnlinked) && handleUnlinkedProjectPrompt(cmd, args) {
+				// User chose to link - retry
 				hubCtx, err = CheckHubAvailability(projectPath)
 				if err != nil {
 					return err
@@ -358,11 +370,20 @@ func listAgentsViaHub(hubCtx *HubContext) error {
 		agents[i] = hubAgentToAgentInfo(a)
 	}
 
-	// Update agent name cache for completion
-	updateAgentNameCache(resp.Agents)
+	// Update agent name cache for completion. A target-hub profile writes
+	// no local state, so its listing does not update the cache.
+	if !hubCtx.profileLocalOnly() {
+		updateAgentNameCache(resp.Agents)
+	}
 
 	// Client-side enrichment: fetch broker/project names if not provided by Hub
 	enrichAgentsClientSide(ctx, hubCtx.Client, agents)
+
+	// The table has no identity column, so only JSON output pays for the
+	// service account lookups that supply display names.
+	if outputFormat == "json" {
+		fillGCPIdentityDisplayNames(ctx, hubCtx.Client, agents)
+	}
 
 	return displayAgents(agents, listAll, true)
 }
@@ -439,7 +460,7 @@ func resolveOwnerID(ctx context.Context, client hubclient.Client, ownerRef strin
 // A bare flag infers the reference (ptone/scion#2146 Q2):
 //   - Agent mode: the calling agent, via SCION_AGENT_ID (the same env var
 //     `scion whoami` treats as canonical) — returned as agentRef.
-//   - Human or assistant mode: the calling user, resolved via the Hub's
+//   - Human mode: the calling user, resolved via the Hub's
 //     current-session identity (`client.Auth().Me()`) — returned as userID.
 //     There is no error case for "no calling principal" here: outside an
 //     agent container the CLI is always driven by some authenticated user.
@@ -764,6 +785,8 @@ func hubAgentToAgentInfo(a hubclient.Agent) api.AgentInfo {
 		info.HarnessAuth = a.AppliedConfig.HarnessAuth
 	}
 
+	info.GCPIdentity = agentGCPIdentity(a)
+
 	// Convert Kubernetes info if present
 	if a.Kubernetes != nil {
 		info.Kubernetes = &api.AgentK8sMetadata{
@@ -979,7 +1002,58 @@ func displayAgents(agents []api.AgentInfo, all bool, hubMode bool) error {
 		}
 	}
 	_ = w.Flush()
+	if hint := provisionedOnlyListHint(agents, all); hint != "" {
+		// stderr, so scripts that parse the table on stdout are unaffected.
+		fmt.Fprintln(os.Stderr)
+		fmt.Fprintln(os.Stderr, hint)
+	}
 	return nil
+}
+
+// provisionedOnlyHintMaxNames caps the agent names the scion list hint shows.
+const provisionedOnlyHintMaxNames = 5
+
+// provisionedOnlyListHint returns the line scion list prints after the table
+// when agents are provisioned but not started (ptone/scion#2875), or "".
+// With all (agents from several projects) names carry their project.
+func provisionedOnlyListHint(agents []api.AgentInfo, all bool) string {
+	var pending []api.AgentInfo
+	for _, a := range agents {
+		if a.ProvisionedOnly && a.Phase == string(state.PhaseCreated) {
+			pending = append(pending, a)
+		}
+	}
+	label := func(a api.AgentInfo) string {
+		if all && a.Project != "" {
+			return a.Project + "/" + a.Name
+		}
+		return a.Name
+	}
+	switch len(pending) {
+	case 0:
+		return ""
+	case 1:
+		a := pending[0]
+		if all && a.Project != "" {
+			return fmt.Sprintf("Agent '%s' is provisioned but not started. Run '%s' in project %s to start it.",
+				label(a), createStartCommand(a.Name), a.Project)
+		}
+		return createNotStartedHint(a.Name)
+	default:
+		var names []string
+		for _, a := range pending {
+			if len(names) == provisionedOnlyHintMaxNames {
+				break
+			}
+			names = append(names, label(a))
+		}
+		more := ""
+		if extra := len(pending) - len(names); extra > 0 {
+			more = fmt.Sprintf(" and %d more", extra)
+		}
+		return fmt.Sprintf("%d agents are provisioned but not started (%s%s). Run '%s' to start one.",
+			len(pending), strings.Join(names, ", "), more, createStartCommand("NAME"))
+	}
 }
 
 // formatLastActivity formats a status and timestamp as a combined "activity, time ago" string.
@@ -991,6 +1065,8 @@ func formatLastActivity(status string, t time.Time) string {
 	if status == "" || status == "WORKING" || status == "working" {
 		return timePart
 	}
+	// The initializing activity is shown as "starting".
+	status = state.Activity(status).DisplayLabel()
 	if timePart == "-" {
 		return status
 	}
@@ -998,7 +1074,8 @@ func formatLastActivity(status string, t time.Time) string {
 }
 
 // handleUnlinkedProjectPrompt checks if the error is due to an unlinked project and prompts the user.
-// Returns true if the user made a choice that might resolve the issue (link or disable).
+// Returns true if the user chose to link and the link succeeded. On cancel it
+// returns false, so the caller returns the original error.
 func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 	// Resolve project path to check settings
 	resolvedPath, isGlobal, err := config.ResolveProjectPath(projectPath)
@@ -1067,14 +1144,6 @@ func handleUnlinkedProjectPrompt(cmd *cobra.Command, args []string) bool {
 			fmt.Fprintf(os.Stderr, "Failed to link project: %v\n", err)
 			return false
 		}
-		return true
-	case hubsync.LinkOrDisableDisable:
-		// Disable Hub for this project
-		if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
-			fmt.Fprintf(os.Stderr, "Failed to disable Hub: %v\n", err)
-			return false
-		}
-		statusln("Hub integration disabled for this project.")
 		return true
 	default:
 		return false

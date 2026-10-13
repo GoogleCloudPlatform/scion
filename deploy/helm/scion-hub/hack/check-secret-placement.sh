@@ -6,7 +6,7 @@
 # WHY THIS EXISTS AS A SEPARATE MECHANICAL SCAN.
 #
 # The session secret derives BOTH the cookie encryption key and the shared JWT
-# signing key (resolveSessionSecret, cmd/server_foreground.go:1452-1463), so it
+# signing key (resolveSessionSecret, cmd/server_foreground.go), so it
 # is the most sensitive value this chart handles, and the three places it must
 # never appear all LOOK FINE in a rendered manifest:
 #
@@ -93,6 +93,7 @@ declare -A EXPECTED_NEEDLES=(
   [cluster-rbac]=1       # session secret
   [existing-secret]=0    # bring-your-own session Secret; nothing rendered
   [minimal]=1            # the chart-rendered session secret
+  [nfs-workspace]=1      # session secret
   [session-existing]=0   # bring-your-own session Secret; nothing rendered
   [settings]=1           # session secret; settings.yaml carries no credential
   [settings-oauth]=2     # session secret + the OAuth web client_secret

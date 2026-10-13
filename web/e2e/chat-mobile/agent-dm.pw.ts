@@ -415,7 +415,10 @@ test.describe('agent DM header in touch landscape (844x390)', () => {
       await menu.getByRole('menuitem', { name: label }).click(click);
       const tab = await popup;
       await tab.waitForURL(path);
-      expect(await tab.evaluate(() => window.opener), 'opened without an opener').toBeNull();
+      expect(
+        await tab.evaluate((): unknown => window.opener),
+        'opened without an opener'
+      ).toBeNull();
       await tab.close();
       expect(page.url(), 'this tab stays on the conversation').toBe(before);
       await expect(menu).toBeHidden();

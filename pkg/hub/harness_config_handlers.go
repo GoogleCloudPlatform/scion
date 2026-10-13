@@ -24,9 +24,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -278,6 +280,9 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	if createScope == "" {
 		createScope = store.HarnessConfigScopeGlobal
 	}
+	if createScope == store.HarnessConfigScopeUser && !requireProfileWriter(w, r) {
+		return
+	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
 		return
 	}
@@ -379,6 +384,9 @@ func (s *Server) handleHarnessConfigByID(w http.ResponseWriter, r *http.Request)
 	if !s.authorizeHarnessConfigRoute(w, r, hc, harnessConfigRouteAction(action, r.Method)) {
 		return
 	}
+	if harnessConfigProfileWrite(hc, action, r.Method) && !requireProfileWriter(w, r) {
+		return
+	}
 
 	switch action {
 	case "":
@@ -440,6 +448,27 @@ func harnessConfigRouteAction(action, method string) Action {
 	default:
 		return ActionUpdate
 	}
+}
+
+// harnessConfigProfileWrite reports whether a request on
+// /api/v1/harness-configs/{id}[/action] writes a user-scope harness config,
+// a profile resource: PUT, PATCH or DELETE on the config, upload, finalize,
+// reimport, or a file write. Clone writes its destination, which its handler
+// checks; the image actions act on brokers, not on the config.
+func harnessConfigProfileWrite(hc *store.HarnessConfig, action, method string) bool {
+	if hc.Scope != store.HarnessConfigScopeUser {
+		return false
+	}
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	switch {
+	case action == "", action == "upload", action == "finalize", action == "reimport",
+		action == "files", strings.HasPrefix(action, "files/"):
+		return true
+	}
+	return false
 }
 
 // authorizeHarnessConfigRoute applies the dispatcher gate. Runtime brokers
@@ -740,6 +769,50 @@ func (s *Server) handleHarnessConfigUpload(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// maxRecordedSourceURLBytes caps the length of a recorded harness config
+// source URL.
+const maxRecordedSourceURLBytes = 2048
+
+// isDisallowedSourceURLRune reports whether r may not appear in a recorded
+// source URL: control characters and invisible formatting or line/paragraph
+// separator characters (Unicode categories Cc, Cf, Zl, Zp).
+func isDisallowedSourceURLRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r)
+}
+
+// invalidSourceURLMessage is the validation error for a sourceUrl that fails
+// validRecordedSourceURL (finalize) or validReimportSourceURL (reimport).
+var invalidSourceURLMessage = fmt.Sprintf(
+	"sourceUrl must be a single-line remote URI (http://, https://, or rclone) of at most %d bytes",
+	maxRecordedSourceURLBytes)
+
+// validRecordedSourceURL reports whether s may be recorded as a harness
+// config's source URL: a single-line remote URI (http://, https://, or an
+// rclone URI) of at most maxRecordedSourceURLBytes, with no control or
+// invisible formatting characters. Finalize and the reimport override share
+// it.
+func validRecordedSourceURL(s string) bool {
+	return len(s) <= maxRecordedSourceURLBytes && config.IsRemoteURI(s) &&
+		!strings.ContainsFunc(s, isDisallowedSourceURLRune)
+}
+
+// validReimportSourceURL reports whether a reimport sourceUrl override is
+// acceptable. It applies validRecordedSourceURL, and additionally accepts the
+// documented scheme-less "github.com/..." shorthand when its https:// form
+// passes the same check (NormalizeTemplateSourceURL adds the scheme).
+func validReimportSourceURL(s string) bool {
+	if len(s) > maxRecordedSourceURLBytes {
+		return false
+	}
+	if validRecordedSourceURL(s) {
+		return true
+	}
+	if len(s) >= len("github.com/") && strings.EqualFold(s[:len("github.com/")], "github.com/") {
+		return validRecordedSourceURL("https://" + s)
+	}
+	return false
+}
+
 // handleHarnessConfigFinalize finalizes a harness config after file upload.
 func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Request, hc *store.HarnessConfig) {
 	if r.Method != http.MethodPost {
@@ -757,6 +830,10 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	var req struct {
 		Manifest *HarnessConfigManifest `json:"manifest"`
+		// SourceURL optionally records where the uploaded files came from
+		// (for example the URL given to 'scion harness-config install').
+		// When empty, the stored source URL is left unchanged.
+		SourceURL string `json:"sourceUrl,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
@@ -765,6 +842,12 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 
 	if req.Manifest == nil || len(req.Manifest.Files) == 0 {
 		ValidationError(w, "manifest with files is required", nil)
+		return
+	}
+
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if sourceURL != "" && !validRecordedSourceURL(sourceURL) {
+		ValidationError(w, invalidSourceURLMessage, nil)
 		return
 	}
 
@@ -781,8 +864,19 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 	hc.Files = req.Manifest.Files
 	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
+	if sourceURL != "" {
+		hc.SourceURL = sourceURL
+	}
 
 	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
+		// Refuse a provisioner block that could never provision an agent
+		// (builtin type, or no command) at upload time, with the same code
+		// dispatch would return, instead of accepting it and failing every
+		// later launch (ptone/scion#3133).
+		if perr := harness.CheckProvisionerUsable(hc.Name, nil, entry); perr != nil {
+			writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
+			return
+		}
 		if entry.Image != "" {
 			if hc.Config == nil {
 				hc.Config = &store.HarnessConfigData{}
@@ -1089,6 +1183,9 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required", nil)
 			return
 		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
 		if scopeID == "" {
 			scopeID = userIdent.ID()
 		} else if scopeID != userIdent.ID() {
@@ -1205,7 +1302,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	sourceURL := req.SourceURL
+	// A sourceUrl override gets the same validation as finalize, before it
+	// is normalized or fetched.
+	sourceURL := strings.TrimSpace(req.SourceURL)
+	if sourceURL != "" && !validReimportSourceURL(sourceURL) {
+		ValidationError(w, invalidSourceURLMessage, nil)
+		return
+	}
 	if sourceURL == "" {
 		sourceURL = hc.SourceURL
 	}
@@ -1255,8 +1358,12 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	kind := s.harnessConfigImportKind()
+	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, nil)
+		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
+			func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+				return applySlugFilter(dirs, skipped, slug)
+			}, fmt.Sprintf("no harness-config in the source matches slug %q", slug))
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1267,6 +1374,9 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	var failures []ImportFailure
 	imported, err := run(failureCollector(&failures))
 	if err != nil {
+		if writeUnusableProvisionerImportError(w, err) {
+			return
+		}
 		writeError(w, http.StatusBadRequest, "reimport_failed", err.Error(), nil)
 		return
 	}
@@ -1286,6 +1396,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		Count:          len(imported),
 		Failed:         failures,
 	})
+}
+
+// reimportTargetSlug returns the slug that selects hc's entry when
+// reimporting it, so a source holding several harness-configs validates and
+// imports only the target (ptone/scion#4213). Discovered entries are persisted
+// under Slugify(name), so selection compares that against the record's slug;
+// matching the record's Name instead could pick another config, since Name and
+// Slug can be changed independently. There is no fallback for an empty slug:
+// every API write path sets a non-empty slug, and an empty slug would match
+// only entries whose names slugify to empty, so the reimport does not guess a
+// different record.
+func reimportTargetSlug(hc *store.HarnessConfig) string {
+	return hc.Slug
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
@@ -1315,8 +1438,8 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	registryStatus := s.checkRegistryImage(ctx, longImage)
 
 	if s.brokerClient == nil {
-		if s.imageManager != nil {
-			entry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
+		if mgr := s.getImageManager(); mgr != nil {
+			entry := s.buildLocalImageEntry(ctx, mgr, shortImage, longImage, registryStatus)
 			writeJSON(w, http.StatusOK, AggregatedImageStatusResponse{
 				Image:    image,
 				Registry: &registryStatus,
@@ -1416,8 +1539,8 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 	}
 	wg.Wait()
 
-	if len(nodeBound) == 0 && s.imageManager != nil {
-		entry := s.buildLocalImageEntry(ctx, shortImage, longImage, registryStatus)
+	if mgr := s.getImageManager(); len(nodeBound) == 0 && mgr != nil {
+		entry := s.buildLocalImageEntry(ctx, mgr, shortImage, longImage, registryStatus)
 		brokerEntries = append(brokerEntries, entry)
 	}
 
@@ -1434,11 +1557,11 @@ func (s *Server) handleHarnessConfigImageStatus(w http.ResponseWriter, r *http.R
 // co-located container runtime (Docker/Podman) when no broker client is
 // available. This ensures workstation-mode users see pulled image state
 // and the Build Image option.
-func (s *Server) buildLocalImageEntry(ctx context.Context, shortImage, longImage string, registryStatus RegistryImageStatus) BrokerImageEntry {
+func (s *Server) buildLocalImageEntry(ctx context.Context, mgr imageManager, shortImage, longImage string, registryStatus RegistryImageStatus) BrokerImageEntry {
 	result := s.imageChecker.CheckAll(ctx, shortImage, longImage)
 
 	brokerName := "Local Runtime"
-	if namer, ok := s.imageManager.(interface{ Name() string }); ok {
+	if namer, ok := mgr.(interface{ Name() string }); ok {
 		if n := namer.Name(); n != "" {
 			brokerName = n
 		}
@@ -1519,12 +1642,13 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		return
 	}
 
-	if s.imageManager == nil {
+	mgr := s.getImageManager()
+	if mgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_runtime", "Container runtime not available", nil)
 		return
 	}
 
-	exists, err := s.imageManager.ImageExists(ctx, image)
+	exists, err := mgr.ImageExists(ctx, image)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "check_failed", fmt.Sprintf("Failed to check image: %v", err), nil)
 		return
@@ -1534,7 +1658,7 @@ func (s *Server) handleHarnessConfigDeleteLocalImage(w http.ResponseWriter, r *h
 		return
 	}
 
-	if err := s.imageManager.RemoveImage(ctx, image); err != nil {
+	if err := mgr.RemoveImage(ctx, image); err != nil {
 		writeError(w, http.StatusInternalServerError, "remove_failed", fmt.Sprintf("Failed to remove image: %v", err), nil)
 		return
 	}
@@ -1588,12 +1712,13 @@ func (s *Server) handleHarnessConfigPullImage(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	if s.imageManager == nil {
+	mgr := s.getImageManager()
+	if mgr == nil {
 		writeError(w, http.StatusServiceUnavailable, "no_runtime", "Container runtime not available", nil)
 		return
 	}
 
-	if err := s.imageManager.PullImage(ctx, pullImage); err != nil {
+	if err := mgr.PullImage(ctx, pullImage); err != nil {
 		writeError(w, http.StatusInternalServerError, "pull_failed", fmt.Sprintf("Failed to pull image: %v", err), nil)
 		return
 	}

@@ -28,8 +28,9 @@ import { customElement, property, state } from 'lit/decorators.js';
 import type { PageData } from '../../shared/types.js';
 import {
   type AdminStatus,
+  canEditHubEnvVars,
   hasAnyPermission,
-  TAB_PERMISSION_MAP,
+  isSettingsTabVisible,
 } from '../../lib/admin-permissions.js';
 import '../shared/env-var-list.js';
 import '../shared/gcp-service-account-list.js';
@@ -79,9 +80,7 @@ export class ScionPageSettings extends LitElement {
    */
   private get visibleTabs(): string[] {
     if (!this.adminStatus) return [];
-    return ALL_TABS.filter((tab) =>
-      hasAnyPermission(this.adminStatus, TAB_PERMISSION_MAP[tab] ?? [])
-    );
+    return ALL_TABS.filter((tab) => isSettingsTabVisible(this.adminStatus, tab));
   }
 
   /** Whether a given tab is visible to the current user. */
@@ -184,7 +183,7 @@ export class ScionPageSettings extends LitElement {
     try {
       const res = await fetch('/api/v1/auth/admin-status', { credentials: 'include' });
       if (res.ok) {
-        const data = await res.json();
+        const data = (await res.json()) as Partial<AdminStatus>;
         this.adminStatus = {
           isAdmin: data.isAdmin === true,
           isSuperAdmin: data.isSuperAdmin === true,
@@ -328,7 +327,12 @@ export class ScionPageSettings extends LitElement {
             : nothing}
           ${this.isTabVisible('env-vars')
             ? html`<sl-tab-panel name="env-vars">
-                <scion-env-var-list scope="hub" apiBasePath="/api/v1" compact></scion-env-var-list>
+                <scion-env-var-list
+                  scope="hub"
+                  apiBasePath="/api/v1"
+                  compact
+                  ?readonly=${!canEditHubEnvVars(this.adminStatus)}
+                ></scion-env-var-list>
               </sl-tab-panel>`
             : nothing}
           ${this.isTabVisible('secrets')

@@ -364,11 +364,11 @@ func TestShutdownDrains(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = relaytest.Wait(t, n.Served, "serve to return")
-	rd, sd, del := log.index(registry.OpSetRelayDraining), log.index(registry.OpSetSessionDraining), log.index(registry.OpDeleteSessionCAS)
+	rd, sd, del := log.index(registry.OpSetRelayDraining), log.index(registry.OpSetRelaySessionsDraining), log.index(registry.OpDeleteSessionCAS)
 	// The two draining writes run concurrently; both precede the GoAway
 	// and so the row delete.
 	if rd < 0 || sd < 0 || del < rd || del < sd {
-		t.Fatalf("ops %v: want SetRelayDraining and SetSessionDraining, then DeleteSessionCAS", log.ops)
+		t.Fatalf("ops %v: want SetRelayDraining and SetRelaySessionsDraining, then DeleteSessionCAS", log.ops)
 	}
 	if n := len(w.Sessions(registry.PrincipalAgent, agentID).Sessions); n != 0 {
 		t.Fatalf("%d rows after shutdown", n)
@@ -547,16 +547,22 @@ func TestDeleteSessionCASRetried(t *testing.T) {
 				return nil
 			})
 			_ = sess.Close()
+			backoff := relay.DeleteBackoffForTest
 			for i := 1; i <= tc.wantTry; i++ {
 				relaytest.Wait(t, attempted, "delete attempt")
 				if i == tc.wantTry {
 					break
 				}
-				// The heartbeat timer plus the backoff timer.
-				if !n.Clock.WaitFor(10*time.Second, func(p int) bool { return p >= 2 }) {
-					t.Fatalf("attempt %d failed but no backoff timer was armed", i)
+				// Wait for this attempt's backoff timer itself (not a
+				// pending count, which other timers such as the heartbeat
+				// disturb), then advance exactly to its deadline: a longer
+				// advance would also fire the next attempt's backoff if
+				// it is armed while Advance is still running.
+				if !n.Clock.WaitForTimer(10*time.Second, n.Clock.Now().Add(backoff)) {
+					t.Fatalf("attempt %d failed but no %s backoff timer was armed", i, backoff)
 				}
-				n.Clock.Advance(5 * time.Second)
+				n.Clock.Advance(backoff)
+				backoff = min(backoff*2, relay.MaxDeleteBackoffForTest)
 			}
 			_ = relaytest.Wait(t, n.Served, "serve to return")
 			if got := int(tries.Load()); got != tc.wantTry {

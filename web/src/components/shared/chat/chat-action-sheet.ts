@@ -214,8 +214,20 @@ export class ScionActionSheet extends LitElement {
     this.open = false;
   }
 
+  override disconnectedCallback(): void {
+    super.disconnectedCallback();
+    window.removeEventListener('popstate', this.handlePopState);
+  }
+
   override updated(changed: PropertyValues<this>): void {
     super.updated(changed);
+    // Back/Forward while the sheet is up moves what is behind it (another
+    // mobile panel, another page), so the sheet closes with it. Android's
+    // back gesture closes a modal dialog by itself, before any navigation.
+    if (changed.has('open')) {
+      if (this.open) window.addEventListener('popstate', this.handlePopState);
+      else window.removeEventListener('popstate', this.handlePopState);
+    }
     if (!changed.has('open') || !this.dialog) return;
     if (this.open && !this.dialog.open) {
       const dialog = this.dialog;
@@ -273,6 +285,10 @@ export class ScionActionSheet extends LitElement {
     );
     this.close();
   }
+
+  private handlePopState = (): void => {
+    this.close();
+  };
 
   /** The dialog closed, by Esc or by `close()`: keep `open` in step and tell the host. */
   private handleDialogClose = (): void => {

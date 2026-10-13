@@ -1,0 +1,422 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//go:build !no_sqlite
+
+package artifacts
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// Review grants on agent-owned artifacts (design D24, ptone/scion#4014).
+
+var (
+	delegator  = principal{PrincipalKindUser, "user-delegator", ""}
+	projAdmin  = principal{PrincipalKindUser, "user-admin", ""}
+	member     = principal{PrincipalKindUser, "user-member", ""}
+	reviewer   = principal{PrincipalKindUser, "user-reviewer", ""}
+	otherProj  = principal{PrincipalKindUser, "user-other", ""}
+	reviewerID = PrincipalRef(reviewer.kind, reviewer.ref)
+)
+
+// newReviewGrantFixture publishes an artifact owned by agentA homed in
+// project-1. delegator stands for agentA's delegating user and projAdmin
+// for an admin of project-1 (the host's ReviewGrantAuthority answers yes
+// for both); member reads project-1 but is neither; otherProj reads only
+// project-2. reviewer, the usual grant subject, reads project-1, so it can
+// read the artifact before any review grant (ptone/scion#4538).
+func newReviewGrantFixture(t *testing.T) (*fixture, string) {
+	t.Helper()
+	f, _ := newLinkFixture(t)
+	id := f.publish(agentA, "review.md", []byte("# draft"), "scope=project-1").Artifact.ID
+	for _, p := range []principal{delegator, projAdmin, member, reviewer} {
+		f.host.allow(p, "project-1", PermissionRead)
+	}
+	f.host.allow(otherProj, "project-2", PermissionRead)
+	f.host.allowReview(delegator, agentA.ref, "project-1")
+	f.host.allowReview(projAdmin, agentA.ref, "project-1")
+	return f, id
+}
+
+func reviewBody(kind, ref, perm string) string {
+	return `{"subjectKind":"` + kind + `","subjectRef":"` + ref + `","permission":"` + perm + `"}`
+}
+
+func (f *fixture) postGrantBody(p principal, id, body string) *httptest.ResponseRecorder {
+	f.t.Helper()
+	return f.do(&p, http.MethodPost, grantsPath(id), []byte(body), map[string]string{"Content-Type": "application/json"})
+}
+
+func (f *fixture) grantOf(id, subject string) *Grant {
+	f.t.Helper()
+	gs, err := f.store.ListGrants(context.Background(), id)
+	if err != nil {
+		f.t.Fatal(err)
+	}
+	for i := range gs {
+		if gs[i].SubjectKind == SubjectPrincipal && gs[i].SubjectRef == subject {
+			return &gs[i]
+		}
+	}
+	return nil
+}
+
+// TestReviewGrantAllowed: the delegating user and a home-project admin may
+// give a user who can already read an agent-owned artifact a review grant;
+// the grantee can then read it and start a review version.
+func TestReviewGrantAllowed(t *testing.T) {
+	for _, granter := range []principal{delegator, projAdmin} {
+		t.Run(granter.ref, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			rec := f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))
+			if rec.Code != http.StatusCreated {
+				t.Fatalf("review grant: %d %s", rec.Code, rec.Body.String())
+			}
+			g := decodeInto[GrantResponse](t, rec).Grant
+			if g.Permission != GrantReview || g.SubjectRef != reviewerID || g.CreatedBy != PrincipalRef(granter.kind, granter.ref) {
+				t.Errorf("grant: %+v", g)
+			}
+			if rec := f.do(&reviewer, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+				t.Errorf("reviewer GET: %d", rec.Code)
+			}
+			files := bundle{"review.md": []byte("# with comments")}
+			req := files.manifest("review.md")
+			req.Kind = VersionKindReview
+			if pend := f.createPending(reviewer, "/api/v1/artifacts/"+id+"/versions", req); pend.Version.Seq != 2 {
+				t.Errorf("reviewer appended seq %d", pend.Version.Seq)
+			}
+			// Repeating it is a 200 on the same grant.
+			if rec := f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusOK {
+				t.Errorf("repeat: %d", rec.Code)
+			}
+		})
+	}
+}
+
+// TestReviewGrantDenied: every other caller or request gets exactly the
+// 403 a non-administrator of its kind gets (an agent gets the agent text,
+// ptone/scion#4576), and nothing is written.
+func TestReviewGrantDenied(t *testing.T) {
+	ok := reviewBody(SubjectPrincipal, reviewerID, GrantReview)
+	for _, tc := range []struct {
+		name   string
+		caller principal
+		body   string
+		setup  func(f *fixture, id string)
+	}{
+		{"owning agent", agentA, ok, func(f *fixture, id string) { f.host.allowReview(agentA, agentA.ref, "project-1") }},
+		{"another agent", agentB, ok, func(f *fixture, id string) { f.host.allowReview(agentB, agentA.ref, "project-1") }},
+		{"project member", member, ok, nil},
+		{"user from another project with read", otherProj, ok, func(f *fixture, id string) {
+			f.grantPrincipal(id, otherProj)
+		}},
+		{"revoked delegation", delegator, ok, func(f *fixture, id string) { f.host.revokeReview(delegator, agentA.ref, "project-1") }},
+		{"authority for another agent", member, ok, func(f *fixture, id string) { f.host.allowReview(member, agentB.ref, "project-1") }},
+		{"authority in another project", member, ok, func(f *fixture, id string) { f.host.allowReview(member, agentA.ref, "project-2") }},
+		{"credential lacks manage", delegator, ok, func(f *fixture, id string) { f.host.deny(delegator, "project-1", PermissionManage) }},
+		{"admin grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantAdmin), nil},
+		{"write grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantWrite), nil},
+		{"subject cannot read yet", delegator, reviewBody(SubjectPrincipal, "user:stranger", GrantReview), nil},
+		{"subject reads only another project", delegator, reviewBody(SubjectPrincipal, PrincipalRef(otherProj.kind, otherProj.ref), GrantReview), nil},
+		{"read grant", delegator, reviewBody(SubjectPrincipal, reviewerID, GrantRead), nil},
+		{"grant to an agent", delegator, reviewBody(SubjectPrincipal, PrincipalRef(agentB.kind, agentB.ref), GrantReview), nil},
+		{"grant to a scope", projAdmin, reviewBody(SubjectScope, "project-2", GrantReview), func(f *fixture, id string) { f.host.crossScope = true }},
+		{"scope kind naming a user", delegator, reviewBody(SubjectScope, reviewerID, GrantReview), nil},
+		{"malformed subject", delegator, reviewBody(SubjectPrincipal, "user:", GrantReview), nil},
+		{"unknown field", delegator, `{"subjectKind":"principal","subjectRef":"user:r","permission":"review","x":1}`, nil},
+		{"trailing data", delegator, ok + ` {}`, nil},
+		{"junk", delegator, "junk", nil},
+		{"too large", delegator, `{"subjectKind":"principal","subjectRef":"user:r","permission":"review"}` + strings.Repeat(" ", maxGrantRequestBytes), nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			// The baseline: a reader of the caller's kind that is not an
+			// administrator. agentB is one before any setup.
+			baseline := member
+			if tc.caller.kind == PrincipalKindAgent {
+				baseline = agentB
+			}
+			want := response(f.postGrantBody(baseline, id, "junk"))
+			if tc.setup != nil {
+				tc.setup(f, id)
+			}
+			before, _ := f.store.ListGrants(context.Background(), id)
+			rec := f.postGrantBody(tc.caller, id, tc.body)
+			if got := response(rec); got != want {
+				t.Errorf("got\n%s\nwant\n%s", got, want)
+			}
+			after, _ := f.store.ListGrants(context.Background(), id)
+			if len(after) != len(before) {
+				t.Errorf("grants %d → %d", len(before), len(after))
+			}
+		})
+	}
+}
+
+// TestReviewGrantNonReader: a caller that cannot read the artifact gets the
+// 404 of a missing artifact, even with review authority, and the authority
+// is never asked.
+func TestReviewGrantNonReader(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	f.host.allowReview(otherProj, agentA.ref, "project-1")
+	ok := reviewBody(SubjectPrincipal, reviewerID, GrantReview)
+	missing := f.postGrantBody(otherProj, "00000000-0000-4000-8000-000000000001", ok)
+	f.host.calls = nil
+	if rec := f.postGrantBody(otherProj, id, ok); response(rec) != response(missing) {
+		t.Errorf("non-reader: %s", response(rec))
+	}
+	for _, c := range f.host.calls {
+		if strings.HasPrefix(c, "review ") {
+			t.Errorf("review authority asked for a non-reader")
+		}
+	}
+}
+
+// TestReviewGrantUserOwnedUnchanged: on a user-owned artifact review
+// authority changes nothing: a non-owner still gets the same 403, and the
+// authority is never asked.
+func TestReviewGrantUserOwnedUnchanged(t *testing.T) {
+	f, _ := newReviewGrantFixture(t)
+	id := f.publish(userU, "mine.md", []byte("# mine"), "scope=project-1").Artifact.ID
+	f.host.allowReview(member, userU.ref, "project-1")
+	want := response(f.postGrantBody(member, id, "junk"))
+	f.host.calls = nil
+	if got := response(f.postGrantBody(member, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+		t.Errorf("user-owned: %s", got)
+	}
+	for _, c := range f.host.calls {
+		if strings.HasPrefix(c, "review ") {
+			t.Errorf("review authority asked for a user-owned artifact")
+		}
+	}
+	// The owner keeps every grant it had.
+	if rec, _ := f.putGrant(userU, id, SubjectPrincipal, reviewerID, GrantAdmin); rec.Code != http.StatusCreated {
+		t.Errorf("owner admin grant: %d", rec.Code)
+	}
+}
+
+// TestReviewGrantNeverReplacesGrant: a user who already holds a read, write
+// or admin grant keeps it; the review grant is refused with the same 403
+// as every other refusal, so the granter learns nothing about the
+// existing grant. (reviewer also reads through the home project, so the
+// refusal comes from the existing grant, not the subject check.)
+func TestReviewGrantNeverReplacesGrant(t *testing.T) {
+	for _, perm := range []string{GrantRead, GrantWrite, GrantAdmin} {
+		t.Run(perm, func(t *testing.T) {
+			f, id := newReviewGrantFixture(t)
+			if _, err := f.store.PutGrant(context.Background(), &Grant{ID: uuid.NewString(), ArtifactID: id,
+				SubjectKind: SubjectPrincipal, SubjectRef: reviewerID, Permission: perm, CreatedAt: time.Now()}, 100, false); err != nil {
+				t.Fatal(err)
+			}
+			want := response(f.postGrantBody(member, id, "junk"))
+			if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+				t.Errorf("lowering %s: %s", perm, got)
+			}
+			if g := f.grantOf(id, reviewerID); g == nil || g.Permission != perm {
+				t.Errorf("%s grant changed: %+v", perm, g)
+			}
+		})
+	}
+}
+
+// TestReviewGrantNeedsHostSupport: a host without ReviewGrantAuthority
+// allows no review grant.
+func TestReviewGrantNeedsHostSupport(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	want := response(f.postGrantBody(member, id, "junk"))
+	svc := NewService(plainHost{f.host})
+	svc.SetStore(f.store)
+	svc.SetBlobStorage(f.blobs, "hub-1")
+	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
+		strings.NewReader(reviewBody(SubjectPrincipal, reviewerID, GrantReview))), delegator)
+	rec := httptest.NewRecorder()
+	svc.ServeHTTP(rec, r)
+	if got := response(rec); got != want {
+		t.Errorf("host without the extension: %s", got)
+	}
+}
+
+// movingReviewStore moves the artifact to another home just before
+// PutReviewGrant runs, as a concurrent re-home would.
+type movingReviewStore struct {
+	Store
+	to string
+}
+
+func (m *movingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+	if _, err := m.UpdateArtifact(ctx, g.ArtifactID, ArtifactUpdate{
+		HomeGrant: &Grant{ID: "moved-" + g.ID, ArtifactID: g.ArtifactID, SubjectKind: SubjectScope, SubjectRef: m.to,
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: max, Actor: testActor}); err != nil {
+		return false, err
+	}
+	return m.Store.PutReviewGrant(ctx, g, max, home)
+}
+
+// TestReviewGrantHomeUnderLock: authority checked against the old home
+// does not carry over to an artifact moved meanwhile.
+func TestReviewGrantHomeUnderLock(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	want := response(f.postGrantBody(member, id, "junk"))
+	f.svc.SetStore(&movingReviewStore{Store: f.store, to: "project-3"})
+	if got := response(f.postGrantBody(projAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+		t.Errorf("after a concurrent move: %s", got)
+	}
+	if g := f.grantOf(id, reviewerID); g != nil {
+		t.Errorf("grant written: %+v", g)
+	}
+}
+
+// TestReviewGrantFollowsCurrentHome pins the D24 clarification on moves:
+// authority is always checked against the artifact's current home. After
+// a move, an admin of the old home project is refused and an admin of the
+// new one is allowed; the delegating user keeps the authority, provided
+// their credential permits artifact.manage in the new home.
+func TestReviewGrantFollowsCurrentHome(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	newAdmin := principal{PrincipalKindUser, "user-new-admin", ""}
+	f.host.allowReview(newAdmin, agentA.ref, "project-3")
+	f.host.allowReview(delegator, agentA.ref, "project-3") // the delegating user, whatever the home
+	for _, p := range []principal{delegator, projAdmin, newAdmin, member, reviewer,
+		{PrincipalKindUser, "second", ""}, {PrincipalKindUser, "third", ""}} {
+		f.host.allow(p, "project-3", PermissionRead)
+	}
+	if _, err := f.store.UpdateArtifact(context.Background(), id, ArtifactUpdate{
+		HomeGrant: &Grant{ID: uuid.NewString(), ArtifactID: id, SubjectKind: SubjectScope, SubjectRef: "project-3",
+			Permission: GrantRead, CreatedAt: time.Now()}, MaxGrants: MaxGrantsPerArtifact, Actor: testActor}); err != nil {
+		t.Fatal(err)
+	}
+	want := response(f.postGrantBody(member, id, "junk"))
+	if got := response(f.postGrantBody(projAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+		t.Errorf("old-home admin after the move: %s", got)
+	}
+	if g := f.grantOf(id, reviewerID); g != nil {
+		t.Fatalf("old-home admin wrote a grant: %+v", g)
+	}
+	if rec := f.postGrantBody(newAdmin, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusCreated {
+		t.Errorf("new-home admin after the move: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, "user:second", GrantReview)); rec.Code != http.StatusCreated {
+		t.Errorf("delegating user after the move: %d", rec.Code)
+	}
+	// The credential gate follows the current home too.
+	f.host.deny(delegator, "project-3", PermissionManage)
+	if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, "user:third", GrantReview))); got != want {
+		t.Errorf("delegating user without manage in the new home: %s", got)
+	}
+}
+
+// deletingReviewStore deletes the artifact just before PutReviewGrant
+// runs, as a concurrent delete or expiry sweep would.
+type deletingReviewStore struct {
+	Store
+	db *sql.DB
+}
+
+func (d *deletingReviewStore) PutReviewGrant(ctx context.Context, g *Grant, max int, home string) (bool, error) {
+	s := d.Store.(*sqlStore)
+	if _, err := d.db.ExecContext(ctx, s.rebind("UPDATE artifact SET deleted_at = ? WHERE id = ?"), s.timeArg(time.Now()), g.ArtifactID); err != nil {
+		return false, err
+	}
+	return d.Store.PutReviewGrant(ctx, g, max, home)
+}
+
+// TestReviewGrantArtifactDeletedMeanwhile: an artifact deleted between the
+// checks and the write takes no grant and answers 404.
+func TestReviewGrantArtifactDeletedMeanwhile(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	f.svc.SetStore(&deletingReviewStore{Store: f.store, db: f.db})
+	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusNotFound {
+		t.Errorf("deleted meanwhile: %d %s", rec.Code, rec.Body.String())
+	}
+	if g := f.grantOf(id, reviewerID); g != nil {
+		t.Errorf("grant written: %+v", g)
+	}
+}
+
+// TestAdminForbiddenCopy: the non-admin 403 states the current rule,
+// review access on agent-owned artifacts included, and is the same for a
+// user-owned and an agent-owned artifact.
+func TestAdminForbiddenCopy(t *testing.T) {
+	f, agentOwned := newReviewGrantFixture(t)
+	userOwned := f.publish(userU, "mine.md", []byte("# mine"), "scope=project-1").Artifact.ID
+	a := f.postGrantBody(member, agentOwned, "junk")
+	u := f.postGrantBody(member, userOwned, "junk")
+	if response(a) != response(u) {
+		t.Errorf("403 differs by owner kind:\n%s\n%s", response(a), response(u))
+	}
+	var e errorResponse
+	if err := json.Unmarshal(a.Body.Bytes(), &e); err != nil || a.Code != http.StatusForbidden {
+		t.Fatalf("%d %v", a.Code, err)
+	}
+	for _, want := range []string{"owner", "admin grant", "delegating user", "admin of the artifact's home project", "review access"} {
+		if !strings.Contains(e.Error.Message, want) {
+			t.Errorf("message %q lacks %q", e.Error.Message, want)
+		}
+	}
+}
+
+// TestReviewGrantKeepsPrincipalRead: a user whose only read is a principal
+// read grant (no home-project membership) cannot receive a review grant
+// through the review-access path. That grant would take the row of the
+// read grant, and with it the read. The request gets the same 403 as
+// every other refusal, and the user keeps the read grant and can still
+// read the artifact.
+func TestReviewGrantKeepsPrincipalRead(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	outsider := principal{PrincipalKindUser, "user-granted", ""}
+	f.grantPrincipal(id, outsider)
+	ref := PrincipalRef(outsider.kind, outsider.ref)
+	want := response(f.postGrantBody(member, id, "junk"))
+	for _, granter := range []principal{delegator, projAdmin} {
+		if got := response(f.postGrantBody(granter, id, reviewBody(SubjectPrincipal, ref, GrantReview))); got != want {
+			t.Errorf("%s: review over the only read grant:\n%s\nwant\n%s", granter.ref, got, want)
+		}
+	}
+	if g := f.grantOf(id, ref); g == nil || g.Permission != GrantRead {
+		t.Errorf("read grant changed: %+v", g)
+	}
+	if rec := f.do(&outsider, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusOK {
+		t.Errorf("GET after the refusal: %d", rec.Code)
+	}
+}
+
+// replacingReviewStore answers PutReviewGrant with ErrReviewReplacesAccess,
+// as the store would if its checks ran in another order.
+type replacingReviewStore struct{ Store }
+
+func (replacingReviewStore) PutReviewGrant(context.Context, *Grant, int, string) (bool, error) {
+	return false, ErrReviewReplacesAccess
+}
+
+// TestReviewGrantReplaceRefusalIsUniform: on the review-access path, a
+// store refusal for an existing grant answers the same 403 as every other
+// refusal, whichever store error reports it.
+func TestReviewGrantReplaceRefusalIsUniform(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	want := response(f.postGrantBody(member, id, "junk"))
+	f.svc.SetStore(replacingReviewStore{f.store})
+	if got := response(f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview))); got != want {
+		t.Errorf("replace refusal:\n%s\nwant\n%s", got, want)
+	}
+}

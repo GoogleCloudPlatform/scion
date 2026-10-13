@@ -76,6 +76,7 @@ func TestValidateEventType(t *testing.T) {
 		{EventDeliveryFailed, false},
 		{EventScheduleFired, false},
 		{EventPortExposed, false},
+		{EventArtifactReview, false},
 		{"unknown.event", true},
 		{"", true},
 	}

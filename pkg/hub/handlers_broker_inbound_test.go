@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +34,7 @@ import (
 )
 
 func TestParseAgentMessageTopic(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name      string
 		topic     string
@@ -106,6 +106,7 @@ func TestParseAgentMessageTopic(t *testing.T) {
 }
 
 func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name        string
 		phase       state.Phase
@@ -217,6 +218,7 @@ func TestHandleBrokerInbound_RejectsNonRunningAgent(t *testing.T) {
 }
 
 func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -394,6 +396,7 @@ func TestHandleBrokerInbound_ConversationResolution(t *testing.T) {
 // AC-8 regression case for each platform surface: external_ref present with
 // empty surface must be rejected at the broker edge.
 func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *testing.T) {
+	t.Parallel()
 	surfaces := []struct {
 		name        string
 		externalRef string
@@ -483,6 +486,7 @@ func TestHandleBrokerInbound_ConversationResolution_PerPlugin_Regression(t *test
 }
 
 func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -559,6 +563,7 @@ func TestHandleBrokerInbound_AllowsRunningAgent(t *testing.T) {
 // TestHandleBrokerInbound_AgentSenderDenied verifies that agent-prefixed
 // senders are denied.
 func TestHandleBrokerInbound_AgentSenderDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -621,6 +626,7 @@ func TestHandleBrokerInbound_AgentSenderDenied(t *testing.T) {
 // Before the fix, convResult was nil on the error path and the trailing log.Info
 // dereferenced convResult.ConversationID, causing a nil-pointer panic.
 func TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -719,6 +725,7 @@ func TestHandleBrokerInbound_ConvResolutionFailure_WriteDenyOff(t *testing.T) {
 // TestHandleBrokerInbound_UnmappedExternalSenderDenied verifies that an
 // unmapped external-channel sender (e.g. "discord:someuser") is denied.
 func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -781,13 +788,12 @@ func TestHandleBrokerInbound_UnmappedExternalSenderDenied(t *testing.T) {
 // is a different mechanism and does not feed the v2 unread computation
 // (LastMessageID != LastReadMessageID).
 func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
-	db, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	defer func() { _ = db.Close() }()
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	srv.SetDispatcher(&brokerMockDispatcher{})
@@ -904,6 +910,7 @@ func TestHandleBrokerInbound_CrossChannelDM_AdvancesSenderReadState(t *testing.T
 // plugin sends mention_co_addressees metadata, the hub reads it and applies
 // CoAddressees/IsMention to the delivery envelope (additive mention routing).
 func TestHandleBrokerInbound_MentionCoAddressees(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 

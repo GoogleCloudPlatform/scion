@@ -20,71 +20,16 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
-
-// fakeHTTPClient records calls to MessageAgent so we can verify the HTTP
-// fallback path. Other methods are stubs.
-type fakeHTTPClient struct {
-	messageAgentCalled bool
-	startAgentCalled   bool
-	stopAgentCalled    bool
-	deleteAgentCalled  bool
-	lastStartExtras    StartExtras
-	lastRestartExtras  StartExtras
-}
-
-func (f *fakeHTTPClient) MessageAgent(context.Context, string, string, string, string, string, bool, *messages.StructuredMessage) error {
-	f.messageAgentCalled = true
-	return nil
-}
-
-// Stub implementations for the RuntimeBrokerClient interface — only MessageAgent matters.
-func (f *fakeHTTPClient) CreateAgent(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
-	return nil, nil
-}
-func (f *fakeHTTPClient) StartAgent(_ context.Context, _, _, _, _, _, _, _, _, _, _ string, _ map[string]string, _ []ResolvedSecret, _ *api.ScionConfig, _ []api.SharedDir, _, _ bool, extras StartExtras) (*RemoteAgentResponse, error) {
-	f.startAgentCalled = true
-	f.lastStartExtras = extras
-	return nil, nil
-}
-func (f *fakeHTTPClient) StopAgent(context.Context, string, string, string, string, string) error {
-	f.stopAgentCalled = true
-	return nil
-}
-func (f *fakeHTTPClient) RestartAgent(_ context.Context, _, _, _, _ string, _ map[string]string, extras StartExtras) (*RemoteAgentResponse, error) {
-	f.lastRestartExtras = extras
-	return nil, nil
-}
-func (f *fakeHTTPClient) ResetAuthAgent(context.Context, string, string, string, string, string, string) error {
-	return nil
-}
-func (f *fakeHTTPClient) DeleteAgent(context.Context, string, string, string, string, DeleteAgentOptions) error {
-	f.deleteAgentCalled = true
-	return nil
-}
-func (f *fakeHTTPClient) CheckAgentPrompt(context.Context, string, string, string, string) (bool, error) {
-	return false, nil
-}
-func (f *fakeHTTPClient) CreateAgentWithGather(context.Context, string, string, *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	return nil, nil, nil
-}
-func (f *fakeHTTPClient) GetAgentLogs(context.Context, string, string, string, string, int) (string, error) {
-	return "", nil
-}
-func (f *fakeHTTPClient) ExecAgent(context.Context, string, string, string, string, []string, int) (string, int, error) {
-	return "", 0, nil
-}
-func (f *fakeHTTPClient) CleanupProject(context.Context, string, string, string, string) error {
-	return nil
-}
 
 func TestHybridBrokerClient_Route(t *testing.T) {
 	ctx := context.Background()
@@ -239,7 +184,7 @@ func TestDispatchWithBrokerRetry_ImmediateSuccess(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(1), d.calls.Load())
 }
@@ -249,7 +194,7 @@ func TestDispatchWithBrokerRetry_RetryThenSuccess(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(4), d.calls.Load())
 }
@@ -259,7 +204,7 @@ func TestDispatchWithBrokerRetry_Timeout(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, ErrBrokerTimeout)
 }
 
@@ -269,7 +214,54 @@ func TestDispatchWithBrokerRetry_NonTransientError(t *testing.T) {
 	agent := &store.Agent{ID: "a1", Slug: "test"}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	err := dispatchWithBrokerRetry(ctx, d, agent, "hello", false, nil)
+	err := dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", false, nil)
 	assert.ErrorIs(t, err, nonTransient)
 	assert.Equal(t, int32(1), d.calls.Load())
+}
+
+// urgentRecordingDispatcher records the urgent flag of each dispatch.
+type urgentRecordingDispatcher struct {
+	brokerMockDispatcher
+	mu     sync.Mutex
+	urgent []bool
+}
+
+func (d *urgentRecordingDispatcher) DispatchAgentMessage(_ context.Context, _ *store.Agent, _ string, urgent bool, _ *messages.StructuredMessage) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.urgent = append(d.urgent, urgent)
+	return nil
+}
+
+// TestDispatchWithBrokerRetry_InterruptDowngrade verifies that an interrupt
+// to an agent that is still initializing is delivered as an ordinary
+// (buffered) message, and that an old image reporting working at once keeps
+// its interrupt.
+func TestDispatchWithBrokerRetry_InterruptDowngrade(t *testing.T) {
+	tests := []struct {
+		name     string
+		phase    string
+		activity string
+		urgent   bool
+		want     bool
+	}{
+		{"initializing interrupt is buffered", "running", "initializing", true, false},
+		{"running without activity keeps interrupt (as before)", "running", "", true, true},
+		{"old image working keeps interrupt", "running", "working", true, true},
+		{"waiting for input keeps interrupt", "running", "waiting_for_input", true, true},
+		{"starting phase is unchanged", "starting", "", true, true},
+		{"non-urgent stays non-urgent", "running", "working", false, false},
+		{"non-urgent initializing stays non-urgent", "running", "initializing", false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &urgentRecordingDispatcher{}
+			agent := &store.Agent{ID: "a1", Slug: "test", Phase: tt.phase, Activity: tt.activity}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			require.NoError(t, dispatchWithBrokerRetry(ctx, nil, d, agent, "hello", tt.urgent, nil))
+			require.Len(t, d.urgent, 1, "the message must still be delivered")
+			assert.Equal(t, tt.want, d.urgent[0])
+		})
+	}
 }

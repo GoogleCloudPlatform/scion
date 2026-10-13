@@ -99,7 +99,7 @@ func (s *scheduledEventService) Create(ctx context.Context, req *CreateScheduled
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScheduledEvent](resp)
+	return apiclient.DecodeRequired[ScheduledEvent](resp)
 }
 
 // Get retrieves a scheduled event by ID.
@@ -108,7 +108,7 @@ func (s *scheduledEventService) Get(ctx context.Context, id string) (*ScheduledE
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScheduledEvent](resp)
+	return apiclient.DecodeRequired[ScheduledEvent](resp)
 }
 
 // List returns scheduled events matching the filter criteria.
@@ -128,7 +128,7 @@ func (s *scheduledEventService) List(ctx context.Context, opts *ListScheduledEve
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListScheduledEventsResponse](resp)
+	return apiclient.DecodeRequired[ListScheduledEventsResponse](resp)
 }
 
 // Cancel cancels a pending scheduled event.

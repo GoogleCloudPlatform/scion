@@ -53,8 +53,8 @@ The directory is not a git repository, and no other agent can see it. It lives u
 - It is kept across suspend/resume where storage allows, including on Kubernetes with NFS workspace storage. On Kubernetes without NFS workspace storage (including `gke-shared-volume`), the contents are lost when the agent stops (see [Kubernetes](/scion/hosted/ha/kubernetes/)).
 - It is deleted together with the agent. Use [shared directories](#2-the-shared-directories-invariant) for files that agents should share or that must outlive an agent.
 - Files from your local project directory are **not** uploaded into it. When you start an agent from a local non-git directory, the CLI shows the Hub's warning that the files were ignored.
-- `scion reincarnate` on the agent's current Runtime Broker is supported on Docker, Podman, and Apple `container`: the new generation reuses this directory in place, with its content, and reincarnation never creates or recreates it. On every other runtime, such as Kubernetes or `cloudrun-sandbox`, it is refused (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)).
-- Reincarnate (moving the agent to another Runtime Broker) is not supported for this mode.
+- `scion reincarnate` on the agent's current Runtime Broker is supported only if that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`): the new generation reuses this directory in place, with its content, and reincarnation never creates or recreates it. On every other runtime, such as Kubernetes or `cloudrun-sandbox`, it is refused (see [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate)).
+- Moving the agent to another Runtime Broker with `scion reincarnate --broker` works only when its workspace is on a shared NFS export that both Runtime Brokers see (Kubernetes with NFS workspace storage; see [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker)). Otherwise the move is refused.
 - Runtime Brokers whose default runtime is Cloud Run or Substrate do not support this mode (the `cloudrun-sandbox` runtime does). Once such a broker has sent its first heartbeat it reports that it lacks the `emptyPerAgentWorkspace` capability, and creating such an agent there fails with `412 Precondition Failed`. Before that first heartbeat, the Hub may still dispatch the agent, and the Cloud Run or Substrate runtime then rejects it with an error. The capability reflects only the broker's default runtime: an agent that uses a Cloud Run or Substrate runtime profile on a broker whose default runtime is neither gets no `412`, and fails with an error when it starts.
 
 Summary:
@@ -88,7 +88,7 @@ For Hub projects, the mode is set **when the project is created** and cannot be 
 
 | Workspace mode value | Project with git remote | Project without git remote |
 |---|---|---|
-| *(not set)* | Clone-based provisioning (the existing default) | Shared-plain |
+| *(not set)* | Clone-per-agent | Shared-plain |
 | `shared` | Shared-plain | Shared-plain |
 | `per-agent` | Clone-per-agent | Empty-per-agent |
 | `worktree-per-agent` | Worktree-per-agent | Rejected (`400`): requires a git remote |
@@ -100,6 +100,12 @@ scion hub projects create --name scratch --workspace-mode per-agent
 # Git project with one worktree per agent
 scion hub projects create https://github.com/acme/widgets.git --workspace-mode worktree-per-agent
 ```
+
+For a git project, only `shared` selects the shared checkout. A git project with no workspace-mode label, or with any other stored value (including a raw `shared-plain` label), resolves as Clone-per-agent and each agent gets its own clone on node-local storage.
+
+:::caution[Unlabeled git projects on an NFS export]
+Earlier releases treated an unlabeled git project as a shared checkout. After upgrading, an existing agent in such a project starts in a new clone on a Runtime Broker that does not have the NFS export mounted. Push any work in the shared checkout before you restart its agents.
+:::
 
 The Hub rejects unknown values with `400`. The mode is stored in the server-owned `scion.dev/workspace-mode` label: you cannot set or change that label directly, on create or later with an update. Creating or starting an Empty-per-agent agent on a Runtime Broker that does not support this mode fails with `412 Precondition Failed` (`unsupported_capability`). The error names the Runtime Broker and says which ones work: Docker, Podman, Apple, and Kubernetes Runtime Brokers. Upgrade an older Runtime Broker, or pick one of those; upgrading does not help a Cloud Run or Substrate Runtime Broker. See [`scion hub projects create`](/scion/reference/cli/#scion-hub) and the [Projects API](/scion/reference/api/#projects-apiv1projects).
 

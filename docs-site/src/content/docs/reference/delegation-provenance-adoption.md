@@ -102,10 +102,13 @@ backfill marker `migration_delegation_edge_backfill_v1` does not affect it.
    edge in the `delegation_adoptions` table, plus the header setting
    `delegation_provenance_adoption_cohort`, in one transaction.
 2. It adopts each `pending` record of that snapshot, top-down, one
-   transaction per hop. Each hop deactivates the original row (cause
-   `provenance_adopted`) only if it is unchanged, then inserts the adopted
-   row. A hop whose state changed is recorded as `skipped_changed`.
-3. When no pending record remains it writes the marker.
+   transaction per hop. Each hop re-plans the delegate against current
+   state, checks the record's original edge and before-fingerprint, then
+   deactivates the original row (cause `provenance_adopted`) only if it is
+   still active with unrecorded provenance, and inserts the adopted row. A
+   hop whose state changed is recorded as `skipped_changed`.
+3. When no pending record remains it runs the **retry pass** (below), then
+   writes the marker with the current `retry_version`.
 
 Later starts never take a new snapshot, so edges written after the snapshot
 are not adopted automatically; the status view lists them as
@@ -134,6 +137,33 @@ At start the Hub logs a summary of record counts, and a warning of the form:
 delegation provenance adoption: N hops on live agent chains remain unrecorded; review GET /api/v1/admin/delegation-adoption
 ```
 
+### Retry of skipped records
+
+The retry pass re-applies the snapshot's `skipped_changed` records whose
+reason is `edge_changed` or `ancestor_not_adopted`, top-down, through the
+same per-hop path as a pending record. Every path rule still applies: the
+hop must still be adoptable, name the record's original edge and match its
+before-fingerprint, and an agent delegator's own hop must already be
+recorded. A retried parent that is adopted unblocks its child in the same
+pass. A hop that really changed is skipped again, with its current reason.
+Records skipped for any other reason (for example `fingerprint_changed`)
+are not retried.
+
+The pass exists because earlier builds compared the edge's `updated` time
+as stored text when deactivating the original row. On SQLite, a row whose
+timestamp text was not in canonical form (RFC 3339 with `Z`, a non-UTC
+offset, or a monotonic clock suffix) failed that check although it was
+unchanged, so the hop was recorded `skipped_changed`/`edge_changed`, its
+descendants `skipped_changed`/`ancestor_not_adopted`, and the marker was
+still written. The check no longer compares the timestamp.
+
+A marker whose `retry_version` is lower than the Hub's (including a marker
+with no `retry_version`, written by an earlier build) makes the next start
+run the retry pass once over the marker's cohort, then rewrite the marker
+with the new `retry_version` and counts. No new snapshot is taken and no
+admin step or database edit is needed. If a hop write fails during the pass,
+the marker is left as it was and the next start runs the pass again.
+
 ## Denial details
 
 A request denied because a hop is unrecorded keeps its existing message and
@@ -148,9 +178,18 @@ adds these keys to the error `details`:
 ```
 
 On a service-account assignment, the message asks for an authorized user to
-recreate the agent directly, which clears the denial whether the unrecorded
-hop is the agent's own edge or an ancestor's. The details name the admin
-alternative: adopting the chain through the route above.
+reincarnate the agent, or to recreate it directly. Either clears the denial
+whether the unrecorded hop is the agent's own edge or an ancestor's. A user's
+reincarnation that keeps the role re-records the agent's edge with the user as
+delegator, as a user's create does, when the agent's own edge is unrecorded or
+an edge above it is unrecorded and every edge between them is accepted on this
+Hub. The denial is only reported in that case, because the check walks up from
+the agent and stops at the first edge that fails, so the reincarnation clears
+it even when an edge further up (for example one recorded with local
+development credentials on a Hub without dev auth) is not accepted. A
+reincarnation by the agent itself or by another agent keeps the edge and does
+not clear it. The details name the admin alternative: adopting the chain
+through the route above.
 
 No edge or ancestor ID is returned to the caller. The Hub's server log, at
 debug level, names the delegate of the unrecorded hop. A hop denied only

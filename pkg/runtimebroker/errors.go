@@ -34,6 +34,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // APIError represents a standardized error response.
@@ -73,6 +75,13 @@ const (
 	// it unchanged instead of folding it into a 502 (ptone/scion#3422).
 	ErrCodeWorkspaceStorageUnconfigured = api.BrokerErrCodeWorkspaceStorageUnconfigured
 
+	// ErrCodeIdentityNotMapped and ErrCodeIdentityKSAMismatch mark a GCP
+	// identity "assign" dispatch on Kubernetes refused for a missing or
+	// conflicting kubernetes_service_account_mappings entry (400). The hub
+	// translates them into its own message (ptone/scion#4024).
+	ErrCodeIdentityNotMapped   = api.BrokerErrCodeIdentityNotMapped
+	ErrCodeIdentityKSAMismatch = api.BrokerErrCodeIdentityKSAMismatch
+
 	// ErrCodeAgentIdentityUnknown marks a delete/stop that could not be
 	// verified as safe because a runtime process restart dropped the
 	// in-memory record needed to tell "not found" apart from "exists, but
@@ -91,6 +100,11 @@ const (
 	// Either way this constant lets broker-level callers and tests branch on
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
+
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
 
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
@@ -119,6 +133,12 @@ const (
 	// reads back to map this to the same fixed message the post-upgrade
 	// 4501 close code produces.
 	ErrCodeRuntimeAttachUnsupported = wsprotocol.ErrCodeRuntimeAttachUnsupported
+
+	// Flat Runtime Broker wire codes, shared with the Hub
+	// (.design/flat-runtime-brokers-contract.md section 9).
+	ErrCodeRuntimeTargetMismatch     = api.ErrCodeRuntimeTargetMismatch
+	ErrCodeRuntimeProfileUnsupported = api.ErrCodeRuntimeProfileUnsupported
+	ErrCodeRuntimeTargetRequired     = api.ErrCodeRuntimeTargetRequired
 )
 
 // writeError writes a JSON error response.
@@ -421,6 +441,90 @@ func notFoundResourceText(err error, templateSlug string) string {
 // text for the same failure (ptone/scion#3113).
 const opCreateAgent = "create agent"
 
+// runtimeCauseCodes maps the Kubernetes reasons that get a details.cause
+// code on a create's 500 to that code: an api.BrokerRuntimeCause value, the
+// set the hub relays. The reasons are kept few on purpose
+// (ptone/scion#4555): a NotFound reaching the start error is ambiguous (the
+// pre-create reads treat a missing pod as normal), and a timeout overlaps
+// the launch deadline handling, so neither gets one.
+var runtimeCauseCodes = map[metav1.StatusReason]string{
+	metav1.StatusReasonForbidden:    api.BrokerRuntimeCauseForbidden,
+	metav1.StatusReasonUnauthorized: api.BrokerRuntimeCauseUnauthorized,
+}
+
+// runtimeFailureCause looks through a Manager.Start error for the failure
+// behind it. The create's client body never carries a start error's text
+// (it gets the fixed runtimeOpError text), and the text of a runtime's
+// start error need not name the underlying failure (the Kubernetes
+// runtime's opaque start errors do not), so the cause is reached through
+// errors.As and Unwrap.
+//
+//   - reason is the Kubernetes status reason ("" when there is none).
+//   - code is the fixed, client-safe details.cause code for reason, or ""
+//     when reason has none (runtimeCauseCodes).
+//   - cause is the first Kubernetes API status in err's chain (errors.As
+//     also searches multi-%w errors). Without one, it is the deepest error
+//     reached by single-error errors.Unwrap, which stops at an error that
+//     wraps several (a multi-%w error) and returns that error. Its text can
+//     name a namespace, ServiceAccount or object, so it is for server logs
+//     only.
+func runtimeFailureCause(err error) (reason metav1.StatusReason, code string, cause error) {
+	if err == nil {
+		return "", "", nil
+	}
+	var status k8serrors.APIStatus
+	if errors.As(err, &status) {
+		if e, ok := status.(error); ok {
+			cause = e
+		}
+		reason = status.Status().Reason
+	}
+	if cause == nil {
+		cause = err
+		for {
+			next := errors.Unwrap(cause)
+			if next == nil {
+				break
+			}
+			cause = next
+		}
+	}
+	return reason, runtimeCauseCodes[reason], cause
+}
+
+// runtimeFailureLogAttrs returns the log attributes describing err's cause
+// (runtimeFailureCause) for a terminal create failure's ERROR record:
+// cause (the innermost error text), and k8s_reason and cause_code when
+// set. Server logs only: none of these may reach a client body except the
+// fixed code.
+func runtimeFailureLogAttrs(err error) []any {
+	reason, code, cause := runtimeFailureCause(err)
+	if cause == nil {
+		return nil
+	}
+	attrs := []any{"cause", cause.Error()}
+	if reason != "" {
+		attrs = append(attrs, "k8s_reason", string(reason))
+	}
+	if code != "" {
+		attrs = append(attrs, "cause_code", code)
+	}
+	return attrs
+}
+
+// writeCreateRuntimeError writes the 500 runtime_error for a create's
+// Manager.Start failure: the fixed runtimeOpError text and, when the
+// failure has a cause code (runtimeFailureCause), details.cause with only
+// that code. The API server message, namespace, ServiceAccount and object
+// names never reach the body.
+func writeCreateRuntimeError(w http.ResponseWriter, err error) {
+	var details map[string]interface{}
+	if _, code, _ := runtimeFailureCause(err); code != "" {
+		details = map[string]interface{}{"cause": code}
+	}
+	writeError(w, http.StatusInternalServerError, ErrCodeRuntimeError, runtimeOpError(opCreateAgent, err).Error(), details)
+}
+
 // writeRuntimeOpError is the call most runtime-op handlers (stop, restart,
 // delete, exec, message, logs, list, and the workspace upload/apply
 // handlers in workspace_handlers.go) make on failure: it logs err
@@ -657,7 +761,11 @@ func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op str
 		return http.StatusInternalServerError
 	}
 	if sce.Status >= 400 && sce.Status < 500 {
-		writeError(w, sce.Status, ErrCodeValidationError, sce.Message, nil)
+		code := sce.Code
+		if code == "" {
+			code = ErrCodeValidationError
+		}
+		writeError(w, sce.Status, code, sce.Message, sce.Details)
 		return sce.Status
 	}
 	s.agentLifecycleLog.Warn("buildStartContext failed", "op", op, "error", startContextDiagnostic(sce))

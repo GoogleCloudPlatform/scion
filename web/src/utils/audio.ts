@@ -68,7 +68,9 @@ export function playChime(): void {
   try {
     if (!audioCtx) {
       if (typeof window === 'undefined') return;
-      const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
       if (!AudioContextClass) return;
       audioCtx = new AudioContextClass();
     }

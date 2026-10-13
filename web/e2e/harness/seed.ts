@@ -65,7 +65,7 @@ async function apiRequest(
   accessToken: string,
   method: string,
   path: string,
-  body?: unknown,
+  body?: unknown
 ): Promise<Response> {
   const url = `${baseURL}${path}`;
   const headers: Record<string, string> = {
@@ -79,7 +79,7 @@ async function apiRequest(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
-  });
+  } as RequestInit);
 
   return res;
 }
@@ -92,7 +92,7 @@ async function apiJSON<T>(
   accessToken: string,
   method: string,
   path: string,
-  body?: unknown,
+  body?: unknown
 ): Promise<T> {
   const res = await apiRequest(baseURL, accessToken, method, path, body);
   if (!res.ok) {
@@ -115,20 +115,14 @@ export async function createGroup(
     slug?: string;
     description?: string;
     labels?: Record<string, string>;
-  },
+  }
 ): Promise<SeedGroup> {
-  const group = await apiJSON<SeedGroup>(
-    baseURL,
-    accessToken,
-    'POST',
-    '/api/v1/groups',
-    {
-      name: opts.name,
-      slug: opts.slug,
-      description: opts.description,
-      labels: opts.labels,
-    },
-  );
+  const group = await apiJSON<SeedGroup>(baseURL, accessToken, 'POST', '/api/v1/groups', {
+    name: opts.name,
+    slug: opts.slug,
+    description: opts.description,
+    labels: opts.labels,
+  });
   console.log(`[seed] Created group: ${group.name} (${group.id})`);
   return group;
 }
@@ -140,7 +134,7 @@ export async function addGroupMember(
   baseURL: string,
   accessToken: string,
   groupId: string,
-  member: SeedMember,
+  member: SeedMember
 ): Promise<void> {
   await apiJSON(baseURL, accessToken, 'POST', `/api/v1/groups/${groupId}/members`, {
     memberType: member.memberType,
@@ -148,7 +142,7 @@ export async function addGroupMember(
     role: member.role,
   });
   console.log(
-    `[seed] Added ${member.memberType} ${member.memberId} to group ${groupId} as ${member.role}`,
+    `[seed] Added ${member.memberType} ${member.memberId} to group ${groupId} as ${member.role}`
   );
 }
 
@@ -169,14 +163,14 @@ export async function createRoleBinding(
     principalId: string;
     scopeType?: string;
     scopeId?: string;
-  },
+  }
 ): Promise<SeedRoleBinding> {
   const scopeType = opts.scopeType || 'system';
   const scopeId = opts.scopeId ?? '';
   if (scopeType === 'system') {
     if (scopeId !== '') {
       throw new Error(
-        `createRoleBinding: system-scope bindings take an empty scopeId, got ${JSON.stringify(scopeId)}`,
+        `createRoleBinding: system-scope bindings take an empty scopeId, got ${JSON.stringify(scopeId)}`
       );
     }
   } else if (!scopeId) {
@@ -193,10 +187,10 @@ export async function createRoleBinding(
       principalId: opts.principalId,
       scopeType,
       scopeId,
-    },
+    }
   );
   console.log(
-    `[seed] Created role binding: ${opts.roleDefinitionId} for ${opts.principalType}:${opts.principalId}`,
+    `[seed] Created role binding: ${opts.roleDefinitionId} for ${opts.principalType}:${opts.principalId}`
   );
   return binding;
 }
@@ -207,13 +201,13 @@ export async function createRoleBinding(
 export async function findRoleDefinition(
   baseURL: string,
   accessToken: string,
-  name: string,
+  name: string
 ): Promise<{ id: string; name: string } | null> {
   const res = await apiJSON<{ items: Array<{ id: string; name: string }> }>(
     baseURL,
     accessToken,
     'GET',
-    '/api/v1/admin/roles',
+    '/api/v1/admin/roles'
   );
   return res.items.find((r) => r.name === name) || null;
 }
@@ -227,38 +221,26 @@ export async function findRoleDefinition(
 export async function setMaxMembersPerGroupQuota(
   baseURL: string,
   accessToken: string,
-  maxMembers: number,
+  maxMembers: number
 ): Promise<void> {
   // List limit definitions to find max_members_per_group
   const limits = await apiJSON<{
     items: Array<{ id: string; name: string; defaultValue: number }>;
   }>(baseURL, accessToken, 'GET', '/api/v1/admin/limits');
 
-  const memberLimit = limits.items.find(
-    (l) => l.name === 'max_members_per_group',
-  );
+  const memberLimit = limits.items.find((l) => l.name === 'max_members_per_group');
 
   if (!memberLimit) {
-    console.warn(
-      '[seed] max_members_per_group limit not found — skipping quota setup',
-    );
+    console.warn('[seed] max_members_per_group limit not found — skipping quota setup');
     return;
   }
 
-  await apiRequest(
-    baseURL,
-    accessToken,
-    'PUT',
-    `/api/v1/admin/limits/${memberLimit.id}`,
-    {
-      ...memberLimit,
-      defaultValue: maxMembers,
-    },
-  );
+  await apiRequest(baseURL, accessToken, 'PUT', `/api/v1/admin/limits/${memberLimit.id}`, {
+    ...memberLimit,
+    defaultValue: maxMembers,
+  });
 
-  console.log(
-    `[seed] Set max_members_per_group quota to ${maxMembers}`,
-  );
+  console.log(`[seed] Set max_members_per_group quota to ${maxMembers}`);
 }
 
 /**
@@ -275,7 +257,7 @@ export async function createAccessBoundary(
     name: string;
     purpose: string;
     groupId: string;
-  },
+  }
 ): Promise<{ id: string }> {
   // Step 1: Create a preview
   const preview = await apiJSON<{ previewToken: string; id: string }>(
@@ -291,7 +273,7 @@ export async function createAccessBoundary(
         groupId: opts.groupId,
       },
       rules: [],
-    },
+    }
   );
 
   // Step 2: Finalize with the preview token
@@ -309,12 +291,10 @@ export async function createAccessBoundary(
         groupId: opts.groupId,
       },
       rules: [],
-    },
+    }
   );
 
-  console.log(
-    `[seed] Created access boundary "${opts.name}" on group ${opts.groupId}`,
-  );
+  console.log(`[seed] Created access boundary "${opts.name}" on group ${opts.groupId}`);
   return constraint;
 }
 
@@ -329,10 +309,7 @@ export async function createAccessBoundary(
  *
  * Returns the seeded data for test assertions.
  */
-export async function seedSmokeData(
-  baseURL: string,
-  devToken: string,
-): Promise<SeedData> {
+export async function seedSmokeData(baseURL: string, devToken: string): Promise<SeedData> {
   // Create a test group
   const group = await createGroup(baseURL, devToken, {
     name: 'E2E Test Group',

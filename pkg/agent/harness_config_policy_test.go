@@ -49,23 +49,8 @@ type policyTestEnv struct {
 
 func newPolicyTestEnv(t *testing.T) *policyTestEnv {
 	t.Helper()
-	mockRuntimeForTest(t)
-	tmp := t.TempDir()
-	oldWd, _ := os.Getwd()
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	t.Setenv("HOME", tmp)
-	if err := config.InitMachine(getTestHarnesses()); err != nil {
-		t.Fatalf("InitMachine: %v", err)
-	}
-	root := filepath.Join(tmp, "project")
-	scion := filepath.Join(root, ".scion")
-	if err := config.InitProject(scion, getTestHarnesses()); err != nil {
-		t.Fatalf("InitProject: %v", err)
-	}
-	if err := os.Chdir(root); err != nil {
-		t.Fatal(err)
-	}
-	return &policyTestEnv{root: root, scion: scion}
+	p := newHermeticProject(t)
+	return &policyTestEnv{root: p.root, scion: p.scion}
 }
 
 func writePolicyHC(t *testing.T, dir, body string) {

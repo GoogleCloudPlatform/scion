@@ -29,7 +29,12 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 
-import type { FileEntry, FileListResult, FileBrowserDataSource } from './file-browser.js';
+import type {
+  FileEntry,
+  FileListResult,
+  FileBrowserDataSource,
+  ScionFileBrowser,
+} from './file-browser.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let FileBrowserCtor: any;
@@ -72,7 +77,7 @@ async function mountWithFiles(entries: FileEntry[]) {
   document.body.appendChild(el);
   await el.updateComplete;
   await el.updateComplete;
-  return el as InstanceType<typeof FileBrowserCtor> & { shadowRoot: ShadowRoot };
+  return el as ScionFileBrowser & { shadowRoot: ShadowRoot };
 }
 
 /**

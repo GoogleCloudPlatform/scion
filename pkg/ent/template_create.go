@@ -112,6 +112,20 @@ func (_c *TemplateCreate) SetNillableConfig(v *string) *TemplateCreate {
 	return _c
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (_c *TemplateCreate) SetAgentConfig(v string) *TemplateCreate {
+	_c.mutation.SetAgentConfig(v)
+	return _c
+}
+
+// SetNillableAgentConfig sets the "agent_config" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableAgentConfig(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetAgentConfig(*v)
+	}
+	return _c
+}
+
 // SetContentHash sets the "content_hash" field.
 func (_c *TemplateCreate) SetContentHash(v string) *TemplateCreate {
 	_c.mutation.SetContentHash(v)
@@ -206,6 +220,20 @@ func (_c *TemplateCreate) SetStoragePath(v string) *TemplateCreate {
 func (_c *TemplateCreate) SetNillableStoragePath(v *string) *TemplateCreate {
 	if v != nil {
 		_c.SetStoragePath(*v)
+	}
+	return _c
+}
+
+// SetLayout sets the "layout" field.
+func (_c *TemplateCreate) SetLayout(v string) *TemplateCreate {
+	_c.mutation.SetLayout(v)
+	return _c
+}
+
+// SetNillableLayout sets the "layout" field if the given value is not nil.
+func (_c *TemplateCreate) SetNillableLayout(v *string) *TemplateCreate {
+	if v != nil {
+		_c.SetLayout(*v)
 	}
 	return _c
 }
@@ -389,6 +417,10 @@ func (_c *TemplateCreate) defaults() {
 		v := template.DefaultScope
 		_c.mutation.SetScope(v)
 	}
+	if _, ok := _c.mutation.Layout(); !ok {
+		v := template.DefaultLayout
+		_c.mutation.SetLayout(v)
+	}
 	if _, ok := _c.mutation.Status(); !ok {
 		v := template.DefaultStatus
 		_c.mutation.SetStatus(v)
@@ -513,6 +545,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 		_spec.SetField(template.FieldConfig, field.TypeString, value)
 		_node.Config = value
 	}
+	if value, ok := _c.mutation.AgentConfig(); ok {
+		_spec.SetField(template.FieldAgentConfig, field.TypeString, value)
+		_node.AgentConfig = value
+	}
 	if value, ok := _c.mutation.ContentHash(); ok {
 		_spec.SetField(template.FieldContentHash, field.TypeString, value)
 		_node.ContentHash = value
@@ -540,6 +576,10 @@ func (_c *TemplateCreate) createSpec() (*Template, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.StoragePath(); ok {
 		_spec.SetField(template.FieldStoragePath, field.TypeString, value)
 		_node.StoragePath = value
+	}
+	if value, ok := _c.mutation.Layout(); ok {
+		_spec.SetField(template.FieldLayout, field.TypeString, value)
+		_node.Layout = value
 	}
 	if value, ok := _c.mutation.Files(); ok {
 		_spec.SetField(template.FieldFiles, field.TypeString, value)
@@ -755,6 +795,24 @@ func (u *TemplateUpsert) ClearConfig() *TemplateUpsert {
 	return u
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsert) SetAgentConfig(v string) *TemplateUpsert {
+	u.Set(template.FieldAgentConfig, v)
+	return u
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateAgentConfig() *TemplateUpsert {
+	u.SetExcluded(template.FieldAgentConfig)
+	return u
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsert) ClearAgentConfig() *TemplateUpsert {
+	u.SetNull(template.FieldAgentConfig)
+	return u
+}
+
 // SetContentHash sets the "content_hash" field.
 func (u *TemplateUpsert) SetContentHash(v string) *TemplateUpsert {
 	u.Set(template.FieldContentHash, v)
@@ -872,6 +930,24 @@ func (u *TemplateUpsert) UpdateStoragePath() *TemplateUpsert {
 // ClearStoragePath clears the value of the "storage_path" field.
 func (u *TemplateUpsert) ClearStoragePath() *TemplateUpsert {
 	u.SetNull(template.FieldStoragePath)
+	return u
+}
+
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsert) SetLayout(v string) *TemplateUpsert {
+	u.Set(template.FieldLayout, v)
+	return u
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsert) UpdateLayout() *TemplateUpsert {
+	u.SetExcluded(template.FieldLayout)
+	return u
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsert) ClearLayout() *TemplateUpsert {
+	u.SetNull(template.FieldLayout)
 	return u
 }
 
@@ -1205,6 +1281,27 @@ func (u *TemplateUpsertOne) ClearConfig() *TemplateUpsertOne {
 	})
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertOne) SetAgentConfig(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetAgentConfig(v)
+	})
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateAgentConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateAgentConfig()
+	})
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertOne) ClearAgentConfig() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearAgentConfig()
+	})
+}
+
 // SetContentHash sets the "content_hash" field.
 func (u *TemplateUpsertOne) SetContentHash(v string) *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
@@ -1342,6 +1439,27 @@ func (u *TemplateUpsertOne) UpdateStoragePath() *TemplateUpsertOne {
 func (u *TemplateUpsertOne) ClearStoragePath() *TemplateUpsertOne {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearStoragePath()
+	})
+}
+
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsertOne) SetLayout(v string) *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsertOne) UpdateLayout() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsertOne) ClearLayout() *TemplateUpsertOne {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearLayout()
 	})
 }
 
@@ -1864,6 +1982,27 @@ func (u *TemplateUpsertBulk) ClearConfig() *TemplateUpsertBulk {
 	})
 }
 
+// SetAgentConfig sets the "agent_config" field.
+func (u *TemplateUpsertBulk) SetAgentConfig(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetAgentConfig(v)
+	})
+}
+
+// UpdateAgentConfig sets the "agent_config" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateAgentConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateAgentConfig()
+	})
+}
+
+// ClearAgentConfig clears the value of the "agent_config" field.
+func (u *TemplateUpsertBulk) ClearAgentConfig() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearAgentConfig()
+	})
+}
+
 // SetContentHash sets the "content_hash" field.
 func (u *TemplateUpsertBulk) SetContentHash(v string) *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
@@ -2001,6 +2140,27 @@ func (u *TemplateUpsertBulk) UpdateStoragePath() *TemplateUpsertBulk {
 func (u *TemplateUpsertBulk) ClearStoragePath() *TemplateUpsertBulk {
 	return u.Update(func(s *TemplateUpsert) {
 		s.ClearStoragePath()
+	})
+}
+
+// SetLayout sets the "layout" field.
+func (u *TemplateUpsertBulk) SetLayout(v string) *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.SetLayout(v)
+	})
+}
+
+// UpdateLayout sets the "layout" field to the value that was provided on create.
+func (u *TemplateUpsertBulk) UpdateLayout() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.UpdateLayout()
+	})
+}
+
+// ClearLayout clears the value of the "layout" field.
+func (u *TemplateUpsertBulk) ClearLayout() *TemplateUpsertBulk {
+	return u.Update(func(s *TemplateUpsert) {
+		s.ClearLayout()
 	})
 }
 

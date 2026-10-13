@@ -1,0 +1,13 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 2. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== HIGH: TestMain separation ==
+  hub/main_test.go:8: moved tests leave the TestMain of hub, so they would run without it (HOME isolation, env clearing, fakes, leak/memory guards, ...); generate the target's TestMain with -testmain-support <pkg> (a test-support package exporting RunTestMain(m *testing.M) int that the source TestMain also calls), or start from the stub hub/zz_alias_sub_safety_testmain.go.txt
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:5: example.com/fx/hub.Home is now example.com/fx/hub/sub.Home for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces

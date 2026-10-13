@@ -18,16 +18,13 @@ package hub
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -41,107 +38,6 @@ import (
 // any unknown thread_id and answered "sent", so the user never saw the
 // message.
 // ---------------------------------------------------------------------------
-
-// seedThreadConversation creates the native group conversation that a
-// free-text thread_id resolves to in projectID, and returns it.
-func seedThreadConversation(t *testing.T, s store.Store, projectID, threadID string) *store.Conversation {
-	t.Helper()
-	extRef, err := messaging.ThreadConversationExternalRef(projectID, threadID)
-	require.NoError(t, err)
-	pid := projectID
-	conv, err := s.UpsertConversationByExternalRef(context.Background(), &store.Conversation{
-		Kind:        "group",
-		Surface:     "native",
-		ExternalRef: extRef,
-		DriftState:  "active",
-		ProjectID:   &pid,
-	})
-	require.NoError(t, err)
-	return conv
-}
-
-func countProjectConversations(t *testing.T, s store.Store, projectID string) int {
-	t.Helper()
-	res, err := s.ListConversations(context.Background(), store.ConversationFilter{ProjectID: projectID}, store.ListOptions{Limit: 100})
-	require.NoError(t, err)
-	return len(res.Items)
-}
-
-// setupThreadTestChannels registers the given channels (each as a no-op
-// spoke) on srv's broker proxy, so Channel:<name> passes
-// validateChannelRegistered, and subscribes the project's user messages so a
-// web send is persisted (asynchronously, by the in-process subscriber).
-func setupThreadTestChannels(t *testing.T, srv *Server, s store.Store, project *store.Project, channels ...string) {
-	t.Helper()
-	buses := []eventbus.NamedEventBus{{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())}}
-	for _, ch := range channels {
-		buses = append(buses, eventbus.NamedEventBus{Name: ch, Bus: nullSpokeEventBus{}})
-	}
-	fanout := eventbus.NewFanOutEventBus(buses, slog.Default())
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	proxy := NewMessageBrokerProxy(fanout, s, events,
-		func() AgentDispatcher { return nil }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-	proxy.subscribeProjectUserMessages(project.ID)
-}
-
-// attachWebChatStore gives srv a real sqlite WebChatStore on s's database
-// and returns it.
-func attachWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
-	t.Helper()
-	dbProvider, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-	return wcs
-}
-
-// waitForSenderMessage waits until a message with text msg from agentID has
-// been persisted (the broker path persists asynchronously) and returns it.
-func waitForSenderMessage(t *testing.T, s store.Store, agentID, msg string) store.Message {
-	t.Helper()
-	var found store.Message
-	require.Eventually(t, func() bool {
-		rows, err := s.ListMessages(context.Background(), store.MessageFilter{SenderID: agentID}, store.ListOptions{Limit: 50})
-		if err != nil {
-			return false
-		}
-		for _, m := range rows.Items {
-			if m.Msg == msg {
-				found = m
-				return true
-			}
-		}
-		return false
-	}, 5*time.Second, 10*time.Millisecond, "message %q was never persisted", msg)
-	return found
-}
-
-// assertOnlyControlMessage sends a plain control message (no thread) after a
-// rejected send, waits for it to be persisted, then asserts it is the only
-// message from the agent. The in-process subscriber persists in publish
-// order, so a rejected message that had been published would be visible by
-// the time the control row is.
-func assertOnlyControlMessage(t *testing.T, srv *Server, s store.Store, project *store.Project, agent *store.Agent, user *store.User) {
-	t.Helper()
-	const control = "control message after rejection"
-	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
-		Recipient: "user:" + user.Email,
-		Msg:       control,
-		Channel:   "web",
-	})
-	require.Equal(t, http.StatusOK, rr.Code, "control send: %s", rr.Body.String())
-	waitForSenderMessage(t, s, agent.ID, control)
-
-	rows, err := s.ListMessages(context.Background(), store.MessageFilter{SenderID: agent.ID}, store.ListOptions{Limit: 50})
-	require.NoError(t, err)
-	require.Len(t, rows.Items, 1, "a rejected send must not persist a message")
-	assert.Equal(t, control, rows.Items[0].Msg)
-}
 
 func decodeErrorResponse(t *testing.T, body []byte) APIError {
 	t.Helper()
@@ -305,11 +201,11 @@ type topicLookupFailingStore struct {
 	WebChatStore
 }
 
-func (topicLookupFailingStore) GetTopicConversationID(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
-func (topicLookupFailingStore) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (topicLookupFailingStore) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return "", errors.New("injected topic lookup failure: secret-detail")
 }
 
@@ -386,11 +282,11 @@ type fakeTopicLookup struct {
 	liveErr, allErr error
 }
 
-func (f fakeTopicLookup) GetTopicConversationID(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDInProject(context.Context, string, string) (string, error) {
 	return f.liveID, f.liveErr
 }
 
-func (f fakeTopicLookup) GetTopicConversationIDIncludingDeleted(context.Context, string) (string, error) {
+func (f fakeTopicLookup) GetTopicConversationIDIncludingDeletedInProject(context.Context, string, string) (string, error) {
 	return f.allID, f.allErr
 }
 
@@ -430,7 +326,7 @@ func TestOutboundThreadConversationState(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "thread:p:t", "t")
+			got, err := outboundThreadConversationState(context.Background(), tc.cr, tc.tl, "p", "thread:p:t", "t")
 			if tc.wantErr {
 				require.Error(t, err)
 				return
@@ -455,4 +351,44 @@ func TestOutboundThreadGateApplies(t *testing.T) {
 	} {
 		assert.Equal(t, want, outboundThreadGateApplies(channel), "channel %q", channel)
 	}
+}
+
+// An outbound threaded send on an external channel stores its conversation
+// under the channel's surface, so an inbound reply on the same thread
+// resolves to the same conversation and no native one is created.
+func TestOutbound_ExternalChannelThread_SharesInboundConversation(t *testing.T) {
+	srv, s, project, agent, user := def138Setup(t)
+	setupThreadTestChannels(t, srv, s, project, "web", "slack")
+
+	const threadID = "C999:1700000000.000200"
+	rr := postOutboundRequest(t, srv, project.ID, agent.ID, OutboundMessageRequest{
+		Recipient: "user:" + user.Email,
+		Msg:       "outbound to a slack thread",
+		ThreadID:  threadID,
+		Channel:   "slack",
+	})
+	require.Equal(t, http.StatusOK, rr.Code, "body: %s", rr.Body.String())
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &body))
+	outboundConvID, _ := body["conversation_id"].(string)
+	require.NotEmpty(t, outboundConvID)
+
+	extRef, err := messaging.ThreadConversationExternalRef(project.ID, threadID)
+	require.NoError(t, err)
+	_, err = s.GetConversationByExternalRef(context.Background(), "native", extRef)
+	assert.ErrorIs(t, err, store.ErrNotFound, "no native conversation for an external thread")
+
+	inbound, err := srv.resolvePhase5Conversation(context.Background(), threadID, project.ID, user.ID, agent.ID, "slack")
+	require.NoError(t, err)
+	require.NotNil(t, inbound)
+	assert.Equal(t, outboundConvID, inbound.ConversationID, "inbound reply must reuse the outbound conversation")
+	assert.Equal(t, "slack", inbound.Surface)
+}
+
+func TestOutboundThreadSurface(t *testing.T) {
+	assert.Equal(t, "slack", outboundThreadSurface("group", "slack"))
+	assert.Equal(t, "", outboundThreadSurface("group", "web"))
+	assert.Equal(t, "", outboundThreadSurface("group", ""))
+	assert.Equal(t, "", outboundThreadSurface("group", "no-such-channel"))
+	assert.Equal(t, "", outboundThreadSurface("direct", "slack"))
 }

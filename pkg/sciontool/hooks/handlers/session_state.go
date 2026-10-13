@@ -15,13 +15,17 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/log"
@@ -36,8 +40,17 @@ type SessionStateStore interface {
 	// saves agg's state, or deletes it when apply reports that the session
 	// ended. All of this happens under one lock. Update calls apply exactly
 	// once, even when it returns an error, so the event is always counted
-	// in memory.
-	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (ended bool)) error
+	// in memory. The one exception: when the persisted state marks the
+	// event's session as already closed and reported (see
+	// FileSessionState.CloseOpenSession), apply is not called and Update
+	// returns nil, so the event can neither reopen nor report that session.
+	//
+	// apply returns the finalized summary and true when the event ended
+	// the session. A store that keeps the summary as a pending report
+	// (FileSessionState does) expects the caller to report it and then
+	// confirm the attempt (see CompleteReport), unless Update returns
+	// ErrSessionReportHeld: then the store sends it later.
+	Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (summary telemetry.SessionSummary, ended bool)) error
 }
 
 const (
@@ -59,10 +72,114 @@ const (
 	sessionStateLockPoll    = 10 * time.Millisecond
 )
 
-// sessionStateFile is the on-disk form of the state.
+// sessionStateFile is the on-disk form of the state. The JSON names of its
+// exported fields are the known top-level keys (sessionStateKnownKeys is
+// derived from the tags); every other top-level key is kept in extra.
 type sessionStateFile struct {
 	Version    int                       `json:"version"`
 	Aggregator telemetry.AggregatorState `json:"aggregator"`
+
+	// Closed marks a tombstone: the session in Aggregator (only its ID and
+	// start time are kept) was finalized and reported by the init daemon
+	// at shutdown, because its session-end was never handled. Hook events
+	// for that session that arrive afterwards are ignored, so a hook still
+	// running during the shutdown (the harness can outlive the backstop)
+	// cannot reopen or report it a second time. The init daemon removes a
+	// leftover tombstone at its next start (ClearSessionTombstone).
+	Closed bool `json:"closed,omitempty"`
+
+	// Pending holds finalized session summaries whose send has not been
+	// confirmed yet (see session_state_pending.go). It is kept across
+	// every rewrite of the file.
+	Pending []pendingReport `json:"pending,omitempty"`
+
+	// extra holds the top-level keys this version does not know, as read,
+	// so that every rewrite of the file keeps them (see encodeSessionState).
+	// A newer tool may add a field that an older tool, still running in
+	// the same container, would otherwise drop on its next write.
+	extra map[string]json.RawMessage
+}
+
+// sessionStateKnownKeys are the JSON names of sessionStateFile's exported
+// fields. Any other top-level key is kept in extra. It is derived from the
+// struct, so a field added later is known without a second list to update.
+var sessionStateKnownKeys = jsonFieldNames(reflect.TypeOf(sessionStateFile{}))
+
+// jsonFieldNames returns the top-level JSON names that encoding/json uses
+// for struct type t: for each exported field, the tag's name before the
+// first comma, or the field name when the tag gives none. Fields tagged
+// "-" are skipped, as are unexported ones.
+//
+// It panics where its answer could differ from encoding/json's, or where
+// the names would be ambiguous, so a field added to sessionStateFile that
+// hits one of these fails at package init (and so in every test) rather
+// than quietly misclassifying keys:
+//   - an embedded field, whose fields encoding/json promotes;
+//   - a tag name encoding/json rejects (see isValidJSONTagName), for which
+//     it would use the field name instead;
+//   - two fields with the same name, or names equal under case folding
+//     (strings.EqualFold), which encoding/json resolves by its own rules.
+func jsonFieldNames(t reflect.Type) []string {
+	var names []string
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if f.Anonymous {
+			panic(fmt.Sprintf("jsonFieldNames: embedded field %s in %s is not supported", f.Name, t))
+		}
+		if !f.IsExported() {
+			continue
+		}
+		tag := f.Tag.Get("json")
+		if tag == "-" {
+			continue
+		}
+		name, _, _ := strings.Cut(tag, ",")
+		if name != "" && !isValidJSONTagName(name) {
+			panic(fmt.Sprintf("jsonFieldNames: field %s in %s has a json tag name %q that encoding/json rejects", f.Name, t, name))
+		}
+		if name == "" {
+			name = f.Name
+		}
+		for _, prev := range names {
+			if strings.EqualFold(prev, name) {
+				panic(fmt.Sprintf("jsonFieldNames: field %s in %s has json name %q, which duplicates %q", f.Name, t, name, prev))
+			}
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// isValidJSONTagName is a copy of encoding/json's isValidTag: the tag names
+// it accepts. Backslash and quote characters are reserved, but any other
+// punctuation is allowed.
+func isValidJSONTagName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case strings.ContainsRune("!#$%&()*+-./:;<=>?@[]^_{|}~ ", c):
+		case !unicode.IsLetter(c) && !unicode.IsDigit(c):
+			return false
+		}
+	}
+	return true
+}
+
+// isKnownSessionStateKey reports whether k names one of sessionStateFile's
+// exported fields. It uses the same case folding as encoding/json's field
+// matching (strings.EqualFold, so "Pending", and even "cloſed" with a long
+// s, match): such a key is decoded into the known field, so it must not also
+// be kept in extra, or it would bring the field's old value back after the
+// field is cleared.
+func isKnownSessionStateKey(k string) bool {
+	for _, known := range sessionStateKnownKeys {
+		if strings.EqualFold(k, known) {
+			return true
+		}
+	}
+	return false
 }
 
 // FileSessionState is a SessionStateStore backed by a JSON file. A sibling
@@ -70,6 +187,17 @@ type sessionStateFile struct {
 // go through a temp file and rename so a crash never leaves a partial file.
 type FileSessionState struct {
 	Path string
+
+	// lockTimeout overrides sessionStateLockTimeout when positive. It is a
+	// test seam: production code always uses the default.
+	lockTimeout time.Duration
+
+	// HoldReports makes Update keep the report of a session it ends as a
+	// held report, for the init daemon to send once late native usage has
+	// been added to it (see "Held reports" in session_state_pending.go),
+	// and return ErrSessionReportHeld. Set it only for a harness whose
+	// usage source is native and when the init daemon reports to the Hub.
+	HoldReports bool
 }
 
 // NewFileSessionState returns a store for the state file under the given
@@ -84,6 +212,12 @@ func NewFileSessionState(home string) *FileSessionState {
 // session's counts; a summary finalized from it must not be reported.
 var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
 
+// ErrSessionReportHeld reports that Update ended the session and kept its
+// report as a held report (FileSessionState.HoldReports). It is not a
+// failure: the caller must neither send the summary nor complete it, because
+// the init daemon or a later hook process sends it once it is due.
+var ErrSessionReportHeld = errors.New("session report held for late native usage")
+
 // Update implements SessionStateStore.
 //
 // Persisted state belongs to one harness session. If the event carries a
@@ -93,7 +227,14 @@ var ErrSessionStateUnavailable = errors.New("session metrics state unavailable")
 // than merged into the new session. This holds for every event, not only
 // session-start, because the new session's session-start may itself have
 // been missed.
-func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() bool) error {
+//
+// When apply ends the session, the session's state is replaced, in the same
+// atomic write, by a pending report of the summary claimed by this process.
+// The caller reports the summary and then calls CompleteReport; if it dies
+// in between, a later hook process or the init daemon sends the report (see
+// session_state_pending.go). With HoldReports, the pending report is held
+// instead, and Update returns ErrSessionReportHeld.
+func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event, apply func() (telemetry.SessionSummary, bool)) error {
 	unlock, err := s.lock()
 	if err != nil {
 		apply()
@@ -101,7 +242,18 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 	}
 	defer unlock()
 
-	if st, ok := s.load(); ok {
+	file, ok := s.load()
+	if ok {
+		st := file.Aggregator
+		if file.Closed {
+			if closedSessionOwnsEvent(st.SessionID, event) {
+				log.Info("Session metrics: ignoring %s event for session %s, already reported at shutdown",
+					event.Name, st.SessionID)
+				return nil
+			}
+			// A new session: the tombstone has done its job.
+			st = telemetry.AggregatorState{}
+		}
 		if st.SessionID != "" && event.Data.SessionID != "" && st.SessionID != event.Data.SessionID {
 			log.Info("Session metrics: %s event for session %s discards the unreported state of session %s",
 				event.Name, event.Data.SessionID, st.SessionID)
@@ -111,16 +263,56 @@ func (s *FileSessionState) Update(agg *telemetry.Aggregator, event *hooks.Event,
 		}
 	}
 
-	if apply() {
-		if err := os.Remove(s.Path); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("removing %s: %w", s.Path, err)
-		}
-		return nil
+	// Whatever the file held besides the session (pending reports and
+	// unknown keys) is kept.
+	next := sessionStateFile{Pending: file.Pending, extra: file.extra}
+	summary, ended := apply()
+	if !ended {
+		next.Aggregator = agg.State()
+		return s.save(next)
 	}
-	return s.save(agg.State())
+	next.addPending(summary)
+	if s.HoldReports {
+		next.holdNewest()
+	}
+	if err := s.save(next); err != nil {
+		// Without the pending report the summary is reported once, by this
+		// process, as before; the open state must still go, or the init
+		// daemon would report the session a second time at shutdown.
+		if rerr := os.Remove(s.Path); rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+			return fmt.Errorf("saving pending report: %v; removing %s: %w", err, s.Path, rerr)
+		}
+		return fmt.Errorf("saving pending report, reporting without it: %w", err)
+	}
+	if s.HoldReports {
+		return ErrSessionReportHeld
+	}
+	return nil
 }
 
-// lock takes the exclusive lock, waiting up to sessionStateLockTimeout.
+// closedSessionOwnsEvent reports whether event belongs to the session that a
+// tombstone closed. A session-start always begins a new session. Any other
+// event belongs to the closed session unless it carries a different session
+// ID. An event without an ID belongs to it, including when the tombstone's
+// ID is a fallback (telemetry.FallbackSessionID). Tombstones do not survive a restart (init
+// clears them before the harness starts), so a resumed session that reuses
+// the ID is counted again.
+func closedSessionOwnsEvent(closedID string, event *hooks.Event) bool {
+	if event.Name == hooks.EventSessionStart {
+		return false
+	}
+	return event.Data.SessionID == "" || event.Data.SessionID == closedID
+}
+
+// lockWait returns how long lock waits for another holder to release it.
+func (s *FileSessionState) lockWait() time.Duration {
+	if s.lockTimeout > 0 {
+		return s.lockTimeout
+	}
+	return sessionStateLockTimeout
+}
+
+// lock takes the exclusive lock, waiting up to lockWait.
 func (s *FileSessionState) lock() (func(), error) {
 	if err := os.MkdirAll(filepath.Dir(s.Path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating state directory: %w", err)
@@ -129,9 +321,16 @@ func (s *FileSessionState) lock() (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
-	deadline := time.Now().Add(sessionStateLockTimeout)
+	return flockWait(f, s.lockWait())
+}
+
+// flockWait takes an exclusive flock on f, polling for up to wait. On
+// success it returns a func that releases the lock and closes f; on failure
+// f is already closed.
+func flockWait(f *os.File, wait time.Duration) (func(), error) {
+	deadline := time.Now().Add(wait)
 	for {
-		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+		err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
 		if err == nil {
 			break
 		}
@@ -141,7 +340,7 @@ func (s *FileSessionState) lock() (func(), error) {
 		}
 		if time.Now().After(deadline) {
 			_ = f.Close()
-			return nil, fmt.Errorf("timed out after %s waiting for lock %s", sessionStateLockTimeout, f.Name())
+			return nil, fmt.Errorf("timed out after %s waiting for lock %s", wait, f.Name())
 		}
 		time.Sleep(sessionStateLockPoll)
 	}
@@ -154,41 +353,101 @@ func (s *FileSessionState) lock() (func(), error) {
 // load reads the persisted state. A missing file yields ok=false silently;
 // an unreadable, oversized, corrupt or wrong-version file is logged and also
 // yields ok=false, so the caller starts fresh.
-func (s *FileSessionState) load() (telemetry.AggregatorState, bool) {
+func (s *FileSessionState) load() (file sessionStateFile, ok bool) {
 	f, err := os.Open(s.Path)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
 			log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
 		}
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, false
 	}
 	defer func() { _ = f.Close() }()
 
 	data, err := io.ReadAll(io.LimitReader(f, sessionStateMaxBytes+1))
 	if err != nil {
 		log.Error("Session metrics: cannot read %s, starting fresh: %v", s.Path, err)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, false
 	}
+	file, err = decodeSessionState(data)
+	if err != nil {
+		log.Error("Session metrics: %s %v, starting fresh", s.Path, err)
+		return sessionStateFile{}, false
+	}
+	return file, true
+}
+
+// decodeSessionState parses a state file read with a limit of
+// sessionStateMaxBytes+1 bytes. Its errors read as a predicate of the file
+// ("is corrupt: ...").
+func decodeSessionState(data []byte) (sessionStateFile, error) {
 	if len(data) > sessionStateMaxBytes {
-		log.Error("Session metrics: %s is larger than %d bytes, starting fresh", s.Path, sessionStateMaxBytes)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("is larger than %d bytes", sessionStateMaxBytes)
 	}
 	var file sessionStateFile
 	if err := json.Unmarshal(data, &file); err != nil {
-		log.Error("Session metrics: %s is corrupt, starting fresh: %v", s.Path, err)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
 	}
 	if file.Version != sessionStateVersion {
-		log.Error("Session metrics: %s has version %d, want %d, starting fresh", s.Path, file.Version, sessionStateVersion)
-		return telemetry.AggregatorState{}, false
+		return sessionStateFile{}, fmt.Errorf("has version %d, want %d", file.Version, sessionStateVersion)
 	}
-	return file.Aggregator, true
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return sessionStateFile{}, fmt.Errorf("is corrupt: %v", err)
+	}
+	for k, v := range all {
+		if isKnownSessionStateKey(k) {
+			continue
+		}
+		if file.extra == nil {
+			file.extra = make(map[string]json.RawMessage)
+		}
+		file.extra[k] = v
+	}
+	return file, nil
 }
 
-// save writes the state to a 0600 temp file in the same directory and
-// renames it over the state file.
-func (s *FileSessionState) save(st telemetry.AggregatorState) error {
-	data, err := json.Marshal(sessionStateFile{Version: sessionStateVersion, Aggregator: st})
+// encodeSessionState encodes file at the current version, with the unknown
+// top-level keys it was read with merged back in. A known field always wins
+// over an unknown key of the same name. Without unknown keys the result is
+// exactly the struct's encoding. Both writers (save and
+// writeStateFileInPlace) encode through it.
+//
+// With unknown keys, the top-level object is re-encoded without HTML
+// escaping, so an unknown value comes back as it was read (apart from
+// whitespace) rather than growing six bytes per <, > or &, which could push
+// a file near sessionStateMaxBytes over the limit. Known fields were
+// already encoded, with escaping, by the struct encoding.
+func encodeSessionState(file sessionStateFile) ([]byte, error) {
+	file.Version = sessionStateVersion
+	data, err := json.Marshal(file)
+	if err != nil || len(file.extra) == 0 {
+		return data, err
+	}
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, err
+	}
+	for k, v := range file.extra {
+		if isKnownSessionStateKey(k) {
+			continue
+		}
+		if _, ok := all[k]; !ok {
+			all[k] = v
+		}
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(all); err != nil {
+		return nil, err
+	}
+	return bytes.TrimSuffix(buf.Bytes(), []byte("\n")), nil
+}
+
+// save writes file to a 0600 temp file in the same directory and renames it
+// over the state file.
+func (s *FileSessionState) save(file sessionStateFile) error {
+	data, err := encodeSessionState(file)
 	if err != nil {
 		return fmt.Errorf("encoding state: %w", err)
 	}

@@ -113,6 +113,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): HubAgentDefaults.Telemetry as a default
+	// below the agent's own config telemetry (requester inline telemetry
+	// from older hubs, and the stored config), and TelemetryPolicy on
+	// create/start/restart as policy above everything. A hub may stop writing those values into
+	// InlineConfig only for a broker that reports this (ptone/scion#4222).
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // ProjectInfo is a summary of a project registered on this broker.
@@ -245,6 +252,13 @@ type CreateAgentRequest struct {
 	HubEndpoint string             `json:"hubEndpoint,omitempty"`
 	AgentToken  string             `json:"agentToken,omitempty"`
 
+	// ExpectedRuntimeTargetID is the runtime target the Hub pinned the agent
+	// to (.design/flat-runtime-brokers-contract.md section 9). A flat
+	// Runtime Broker instance requires it and refuses a different value; a
+	// legacy Runtime Broker refuses any non-empty value. Checked before any
+	// side effect.
+	ExpectedRuntimeTargetID string `json:"expectedRuntimeTargetId,omitempty"`
+
 	// ResolvedEnv contains the fully merged environment variables and secrets
 	// from all applicable scopes (user, project, runtime broker). These are resolved
 	// by the Hub before dispatching the agent creation request.
@@ -283,13 +297,13 @@ type CreateAgentRequest struct {
 	Reprovision bool `json:"reprovision,omitempty"`
 	// SharedDirBackendChanges asks a Reprovision to change the recorded
 	// shared-dir storage backend of the named shared dirs (dir name to
-	// "nfs"; `scion reincarnate --shared-dir-backend`). Only the agent's
+	// "nfs" or "local"; `scion reincarnate --shared-dir-backend`). Only the agent's
 	// record changes; no data is copied, moved or deleted. Refused on a
 	// request that is not a Reprovision.
 	SharedDirBackendChanges map[string]string `json:"sharedDirBackendChanges,omitempty"`
 	// AllowEmptySharedDir, with SharedDirBackendChanges, skips the start
-	// check that refuses an empty nfs directory while the dir's previous
-	// local directory is not empty.
+	// check that refuses an empty directory on the new backend while the
+	// dir's directory on its previous backend is not empty.
 	AllowEmptySharedDir bool `json:"allowEmptySharedDir,omitempty"`
 	// ExpectExistingNFSWorkspace, on a ProvisionOnly request, says the agent
 	// is being moved here from another broker on the same NFS export: before
@@ -454,6 +468,13 @@ type CreateAgentConfig struct {
 	// top-of-chain slot. Nil when the hub sent none: local dispatch, a
 	// file-mode hub, or a hub that predates the field. See design §3.2.3.
 	HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
+
+	// TelemetryPolicy is the project's enforced telemetry on/off (a POLICY
+	// tier, not a default). When set it becomes opts.TelemetryOverride,
+	// applied last at Start, and beats both the agent's config and the
+	// requester's SCION_TELEMETRY_ENABLED env flag (decision E6,
+	// ptone/scion#4218). Nil = no policy.
+	TelemetryPolicy *bool `json:"telemetryPolicy,omitempty"`
 }
 
 // GCPIdentityConfig holds GCP identity configuration passed from Hub to Broker.

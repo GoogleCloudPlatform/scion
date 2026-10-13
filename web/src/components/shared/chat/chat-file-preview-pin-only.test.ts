@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 // This file proves the sink pin alone — with the source-side path/id
 // validators bypassed — still stops the viewer from ever calling apiFetch
 // with a malicious URL. It mocks `chat-file-links.js` so the component's

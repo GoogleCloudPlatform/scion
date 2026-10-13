@@ -24,6 +24,13 @@ import (
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
+// DeleteBackoffForTest and MaxDeleteBackoffForTest are deleteRow's first
+// retry delay and its cap, so tests can wait for the exact backoff timer.
+const (
+	DeleteBackoffForTest    = defaultDeleteBackoff
+	MaxDeleteBackoffForTest = maxDeleteBackoff
+)
+
 // Test-only access to internals for the external test package.
 
 // localEntryForTest waits (bounded) for sessionID to be registered, as
@@ -75,6 +82,10 @@ func (r *Relay) SetBeforeReadyHookForTest(h func()) { r.testHookBeforeReady = h 
 // GoAway when it starts waiting for an admitted, not yet registered session.
 func (r *Relay) SetPendingWaitHookForTest(h func()) { r.testHookPendingWait = h }
 
+// SetAfterReadyHookForTest installs the lifetime-arming seam: h runs in
+// Serve right after the session became visible as ready.
+func (r *Relay) SetAfterReadyHookForTest(h func()) { r.testHookAfterReady = h }
+
 // HeartbeatForTest runs one heartbeat now.
 func (r *Relay) HeartbeatForTest() { r.heartbeat() }
 
@@ -90,10 +101,6 @@ func (r *Relay) NewAdmitterForTest(p Principal, transport string) (conduit.Admit
 	a := &admitter{r: r, p: p, transport: transport}
 	return a, func() (registry.SessionRecord, bool) { rec, _, ok := a.admitted(); return rec, ok }
 }
-
-// DrainWriteConcurrency is the bound on Shutdown's in-flight session
-// draining writes.
-const DrainWriteConcurrency = drainWriteConcurrency
 
 // PongFrame is an inbound Pong.
 var PongFrame = &conduitv1.Frame{Body: &conduitv1.Frame_Pong{Pong: &conduitv1.Pong{}}}

@@ -29,7 +29,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
@@ -42,17 +41,6 @@ func rowsByAgent(t *testing.T, s store.Store, agentID string) []store.Message {
 	rows, err := s.ListMessages(context.Background(), store.MessageFilter{AgentID: agentID}, store.ListOptions{})
 	require.NoError(t, err)
 	return rows.Items
-}
-
-// mockDispatchesTo returns the recorded dispatches to slug.
-func mockDispatchesTo(d *brokerMockDispatcher, slug string) []brokerDispatchedMsg {
-	var out []brokerDispatchedMsg
-	for _, m := range d.getMessages() {
-		if m.agentSlug == slug {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 func TestHandleAgentMessage_HumanBrokerPathCarriesMessageID(t *testing.T) {
@@ -75,33 +63,6 @@ func TestHandleAgentMessage_HumanBrokerPathCarriesMessageID(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, rows[0].ID, got[0].messageID,
 		"human broker dispatch must carry the persisted message ID")
-}
-
-// setupGroupTest creates a project on an online broker plus one agent per
-// (slug, phase) pair. Returns the project ID and agents keyed by slug.
-func setupGroupTest(t *testing.T, s store.Store, prefix string, phases map[string]string) (string, map[string]*store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-	projectID := tid(prefix + "-project")
-	brokerID := tid(prefix + "-broker")
-	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: projectID, Name: prefix + "-project", Slug: prefix + "-project"}))
-	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID: brokerID, Name: prefix + "-broker", Slug: prefix + "-broker", Status: store.BrokerStatusOnline,
-	}))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: projectID, BrokerID: brokerID, BrokerName: prefix + "-broker", Status: store.BrokerStatusOnline,
-	}))
-	_ = s.CreateUser(ctx, &store.User{ID: DevUserID, Email: "dev@localhost", DisplayName: "Development User"})
-	agents := map[string]*store.Agent{}
-	for slug, phase := range phases {
-		a := &store.Agent{
-			ID: api.NewUUID(), Name: slug, Slug: slug, ProjectID: projectID,
-			RuntimeBrokerID: brokerID, Phase: phase,
-		}
-		require.NoError(t, s.CreateAgent(ctx, a))
-		agents[slug] = a
-	}
-	return projectID, agents
 }
 
 func TestGroupMessage_CarriesMessageIDAndGatesNonRunningMember(t *testing.T) {

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"golang.org/x/net/webdav"
 )
 
@@ -117,7 +118,7 @@ func (s *Server) handleProjectWebDAV(w http.ResponseWriter, r *http.Request, pro
 		LockSystem: lockStore.(webdav.LockSystem),
 		Logger: func(r *http.Request, err error) {
 			if err != nil {
-				slog.Debug("webdav operation", "method", r.Method, "path", r.URL.Path, "error", err)
+				slog.Debug("webdav operation", "method", r.Method, "path", logging.RequestPath(r), "error", err)
 			}
 		},
 	}

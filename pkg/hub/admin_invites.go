@@ -165,7 +165,7 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	inviteURL := s.config.HubEndpoint + "/invite?code=" + code
+	inviteURL := s.HubEndpointFor(HubEndpointForInviteLinks) + "/invite?code=" + code
 
 	slog.Info("invite code created",
 		"invite_id", invite.ID,

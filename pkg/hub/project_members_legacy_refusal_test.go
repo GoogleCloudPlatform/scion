@@ -48,10 +48,6 @@ import (
 // artifact.create first.
 const legacyMemberCanDelegateReason = "actor lacks permission for delegation: artifact.create"
 
-func legacyMembersPath(projectID string) string {
-	return "/api/v1/projects/" + projectID + "/members"
-}
-
 // assertLegacyBody asserts the exact response status and body bytes.
 func assertLegacyBody(t *testing.T, gotStatus int, gotBody string, wantStatus int, wantBody string) {
 	t.Helper()

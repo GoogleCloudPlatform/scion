@@ -70,6 +70,11 @@ func canViewAgentEnv(ctx context.Context, s *Server, agent *store.Agent) bool {
 	if identity == nil || agent == nil {
 		return false
 	}
+	// An agent delegated credential never sees an unredacted environment,
+	// whatever its grant holds (.design/agent-delegation.md §11.7).
+	if isDelegatedAgentIdentity(identity) {
+		return false
+	}
 	return s.authzService.CheckAccess(ctx, identity, agentResource(agent), ActionAttach).Allowed
 }
 
@@ -95,6 +100,10 @@ func redactedAgentCopy(ctx context.Context, s *Server, agent *store.Agent) *stor
 // response that computes capabilities decides env visibility here.
 func (s *Server) envViewAllowed(ctx context.Context, identity Identity, agent *store.Agent, cap *Capabilities) bool {
 	if identity == nil || agent == nil {
+		return false
+	}
+	// See canViewAgentEnv: never for an agent delegated credential.
+	if isDelegatedAgentIdentity(identity) {
 		return false
 	}
 	return capabilityAllows(cap, ActionAttach)

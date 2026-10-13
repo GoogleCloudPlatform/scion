@@ -82,6 +82,14 @@ Deployment always renders, so calling it here is what makes the guard
 unconditional. The output is discarded; this is the call, not a use.
 */}}
 {{- $_ := include "scion-hub.agentNamespace" . }}
+{{- /*
+workspaceStorage.nfs, validated, or empty when disabled. Read here for the
+volume and the mount, and by scion-hub.settings for server.workspace_storage -
+one define, so the mount path is mount_root/shares[0].id by construction. Called
+from this always-rendered template so its guards also run under
+config.existingSecret.
+*/}}
+{{- $nfsWs := include "scion-hub.nfsWorkspace" . | fromYaml }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -318,6 +326,31 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- /*
+            The pod's own name. The hub prefixes its per-process instance ID
+            with it, so per-replica metric and trace labels
+            (service.instance.id) read as the pod rather than a bare UUID. It
+            also lets a restarted container find start claims its previous
+            process left behind, and is the default conduit relay instance id
+            when hub conduit config sets none.
+
+            Emitted only when hub.extraEnv does not set POD_NAME itself. Before
+            the chart set it, hub.extraEnv was the documented way to provide it,
+            so a release that does that keeps its own entry (rendered below) and
+            the container env list never carries the name twice.
+            */}}
+            {{- $userPodName := false }}
+            {{- range $entry := .Values.hub.extraEnv }}
+            {{- if eq (toString (dig "name" "" $entry)) "POD_NAME" }}
+            {{- $userPodName = true }}
+            {{- end }}
+            {{- end }}
+            {{- if not $userPodName }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            {{- end }}
             {{- with .Values.hub.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -410,6 +443,17 @@ spec:
               mountPath: {{ printf "%s/settings.yaml" (include "scion-hub.scionDir" .) | quote }}
               subPath: settings.yaml
               readOnly: true
+            {{- /*
+            The NFS workspace share, at exactly <mount_root>/<shares[0].id> from
+            the rendered settings: the path the hub's /readyz requires to exist
+            when server.workspace_storage.backend is nfs. Not a
+            subPath - the hub needs the whole export, since agent trees live at
+            <subpath_root>/<project>/... beneath it.
+            */}}
+            {{- if $nfsWs }}
+            - name: workspace-nfs
+              mountPath: {{ $nfsWs.mountPath | quote }}
+            {{- end }}
         {{- /*
         THE FALLBACK PLACEMENT, for clusters below 1.29 where restartPolicy on
         an initContainers entry is ignored. Here the proxy is an ordinary
@@ -459,6 +503,19 @@ spec:
             items:
               - key: settings.yaml
                 path: settings.yaml
+        {{- /*
+        Inline nfs, not a PVC: the hub needs only the mount, and the claim
+        agents use (workspaceStorage.nfs.pvName) lives in the agent namespace,
+        which may not be this one. GKE Autopilot allows the nfs volume type.
+        No fsGroup is set for it - see the defaultMode note above for why.
+        */}}
+        {{- if $nfsWs }}
+        - name: workspace-nfs
+          nfs:
+            server: {{ $nfsWs.server | quote }}
+            path: {{ $nfsWs.export | quote }}
+            readOnly: false
+        {{- end }}
       {{- with .Values.hub.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

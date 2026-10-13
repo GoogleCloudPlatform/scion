@@ -628,9 +628,7 @@ func TestDefaultKubernetesNamespace(t *testing.T) {
 			t.Fatalf("failed to write temp namespace file: %v", err)
 		}
 
-		prev := serviceAccountNamespacePath
-		serviceAccountNamespacePath = nsFile
-		defer func() { serviceAccountNamespacePath = prev }()
+		setServiceAccountNamespacePathForTest(t, nsFile)
 
 		if got := defaultKubernetesNamespace(); got != "scion-from-file" {
 			t.Fatalf("defaultKubernetesNamespace() = %q, want %q", got, "scion-from-file")
@@ -641,9 +639,7 @@ func TestDefaultKubernetesNamespace(t *testing.T) {
 		t.Setenv("POD_NAMESPACE", "")
 		t.Setenv("SCION_K8S_NAMESPACE", "")
 
-		prev := serviceAccountNamespacePath
-		serviceAccountNamespacePath = filepath.Join(t.TempDir(), "missing")
-		defer func() { serviceAccountNamespacePath = prev }()
+		setServiceAccountNamespacePathForTest(t, filepath.Join(t.TempDir(), "missing"))
 
 		if got := defaultKubernetesNamespace(); got != "default" {
 			t.Fatalf("defaultKubernetesNamespace() = %q, want %q", got, "default")

@@ -208,8 +208,12 @@ func isAppIconPath(path string) bool {
 
 // handleAdminMaintenance handles GET and PUT /api/v1/admin/maintenance.
 // GET returns the current maintenance state; PUT updates it.
-// Authorization: enforced by routeGuard via hub.admin_mode.update permission.
+// Authorization: routeGuard checks hub.admin_mode.read; PUT also needs
+// hub.admin_mode.update, checked here.
 func (s *Server) handleAdminMaintenance(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPut && !s.requireUpdateOnReadGuardedRoute(w, r, "hub.admin_mode.update") {
+		return
+	}
 	// Whenever OperationalSettings is wired (any DB driver, SQLite included),
 	// delegate to DB-backed handlers: maintenance is durable (persisted in
 	// hub_settings) and, on postgres, cluster-wide (LISTEN/NOTIFY). An

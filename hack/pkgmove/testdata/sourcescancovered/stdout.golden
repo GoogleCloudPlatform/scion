@@ -1,0 +1,38 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (0):
+
+Alias entries (1):
+  var   Handler = sub.Handler
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 3. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:3: example.com/fx/hub.Handler is now example.com/fx/hub/sub.Handler for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== INFO: source-scanning test declares coverage of the target ==
+  hub/guard_test.go: source-scanning test declares coverage of hub/sub (marker at hub/guard_test.go:18; reason: "the loop reads both the package directory and sub."); staying test enumerates files (os.ReadDir) - the marker is a claim, not a proof: verify the test really scans hub/sub
+  hub/walk_test.go: source-scanning test declares coverage of hub/sub (marker at hub/walk_test.go:16; reason: "the walk covers the package directory and everything under it."); staying test enumerates files (filepath.WalkDir) - the marker is a claim, not a proof: verify the test really scans hub/sub
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

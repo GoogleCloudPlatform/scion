@@ -158,6 +158,7 @@ func (rs *registrationServer) handleRegister(w http.ResponseWriter, r *http.Requ
 	case http.MethodPost:
 		rs.handleRegisterPost(w, r)
 	default:
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodPost)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }

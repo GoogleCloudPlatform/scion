@@ -15,8 +15,12 @@
 package daemon
 
 import (
+	"bufio"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
+	"syscall"
 	"testing"
 	"time"
 
@@ -292,4 +296,95 @@ func TestLegacyDelegatesToBrokerComponent(t *testing.T) {
 	pid, err = ReadPID(dir)
 	assert.NoError(t, err)
 	assert.Equal(t, 99999, pid)
+}
+
+// startSignalHelper starts a shell child that installs the given SIGINT trap
+// and then blocks. It returns once the trap is in place, and returns a
+// channel that is closed when the child has exited and been reaped. The child
+// is always killed at test cleanup.
+func startSignalHelper(t *testing.T, trap string) (*exec.Cmd, <-chan struct{}) {
+	t.Helper()
+	// "sleep & wait" lets a trapped SIGINT interrupt the wait at once.
+	script := trap + `; sleep 60 & child=$!; echo ready; wait $child; kill $child 2>/dev/null; wait`
+	cmd := exec.Command("sh", "-c", script)
+	// Own process group so cleanup can kill the shell and its sleep together.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+
+	exited := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(exited)
+	}()
+	t.Cleanup(func() {
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		<-exited
+	})
+
+	line, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err)
+	require.Equal(t, "ready\n", line)
+	return cmd, exited
+}
+
+// TestStopComponent_WaitsForSlowExit: stop returns only after a process that
+// takes a while to shut down has exited, and then removes the PID file.
+func TestStopComponent_WaitsForSlowExit(t *testing.T) {
+	dir := t.TempDir()
+	const exitDelay = 700 * time.Millisecond
+	cmd, exited := startSignalHelper(t, `trap 'sleep 0.7; kill $child 2>/dev/null; exit 0' INT`)
+	require.NoError(t, WritePIDComponent("server", dir, cmd.Process.Pid))
+
+	start := time.Now()
+	err := StopComponentWithTimeout("server", dir, 10*time.Second)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, elapsed, exitDelay, "stop returned before the process could have exited")
+	select {
+	case <-exited:
+	case <-time.After(time.Second):
+		t.Fatal("process was not reaped shortly after stop returned")
+	}
+	assert.NoFileExists(t, GetPIDPathComponent("server", dir), "PID file should be removed after exit")
+}
+
+// TestStopComponent_TimeoutKeepsPIDFile: a process that ignores the interrupt
+// hits the bounded timeout, stop reports ErrStopTimeout, and the PID file is
+// kept.
+func TestStopComponent_TimeoutKeepsPIDFile(t *testing.T) {
+	dir := t.TempDir()
+	cmd, exited := startSignalHelper(t, `trap '' INT`)
+	require.NoError(t, WritePIDComponent("server", dir, cmd.Process.Pid))
+
+	const timeout = 300 * time.Millisecond
+	start := time.Now()
+	err := StopComponentWithTimeout("server", dir, timeout)
+	elapsed := time.Since(start)
+
+	require.ErrorIs(t, err, ErrStopTimeout)
+	assert.Contains(t, err.Error(), strconv.Itoa(cmd.Process.Pid))
+	assert.GreaterOrEqual(t, elapsed, timeout)
+	assert.Less(t, elapsed, 5*time.Second, "timeout should be bounded")
+	select {
+	case <-exited:
+		t.Fatal("process exited although it ignores SIGINT")
+	default:
+	}
+	pid, err := ReadPIDComponent("server", dir)
+	require.NoError(t, err, "PID file should be kept on timeout")
+	assert.Equal(t, cmd.Process.Pid, pid)
+}
+
+// TestStopComponent_NotRunning: no PID file, or a stale one, is ErrNotRunning
+// and leaves no PID file behind.
+func TestStopComponent_NotRunning(t *testing.T) {
+	dir := t.TempDir()
+	assert.ErrorIs(t, StopComponentWithTimeout("server", dir, time.Second), ErrNotRunning)
+
+	require.NoError(t, WritePIDComponent("server", dir, 99999999))
+	assert.ErrorIs(t, StopComponentWithTimeout("server", dir, time.Second), ErrNotRunning)
+	assert.NoFileExists(t, GetPIDPathComponent("server", dir))
 }

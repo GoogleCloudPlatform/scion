@@ -34,60 +34,6 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// setupPassthroughSandboxServer is like setupPassthroughServer but creates a
-// broker with a cloudrun-sandbox profile so the passthrough-to-assign
-// translation fires.
-func setupPassthroughSandboxServer(
-	t *testing.T,
-	owner *store.User,
-	hostSAEmail, hostProjectID string,
-) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
-	t.Helper()
-	disp := &createAgentDispatcher{createPhase: string(state.PhaseRunning)}
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	require.NoError(t, s.CreateUser(ctx, owner))
-	ensureHubMembership(ctx, s, owner.ID)
-
-	project := &store.Project{
-		ID:        tid("project-sandbox-pt"),
-		Name:      "Sandbox PT Test Project",
-		Slug:      "sandbox-pt-test-project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	broker := &store.RuntimeBroker{
-		ID:                         tid("broker-sandbox-pt"),
-		Name:                       "Sandbox PT Test Broker",
-		Slug:                       "sandbox-pt-test-broker",
-		Status:                     store.BrokerStatusOnline,
-		CreatedBy:                  owner.ID,
-		GCPHostServiceAccountEmail: hostSAEmail,
-		GCPHostProjectID:           hostProjectID,
-		Profiles: []store.BrokerProfile{
-			{Name: "default", Type: "cloudrun-sandbox", Available: true},
-		},
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}))
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-
-	srv.SetDispatcher(disp)
-	return srv, s, project, broker
-}
-
 // ---------------------------------------------------------------------------
 // Unit: brokerHasCloudRunSandboxProfile
 // ---------------------------------------------------------------------------

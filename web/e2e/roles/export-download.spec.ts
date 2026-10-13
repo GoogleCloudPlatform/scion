@@ -47,7 +47,7 @@ async function createCustomRole(
   devToken: string,
   name: string,
   description: string,
-  permissions: string[],
+  permissions: string[]
 ): Promise<{ id: string; name: string }> {
   const res = await fetch(`${baseURL}/api/v1/admin/roles`, {
     method: 'POST',
@@ -72,11 +72,7 @@ async function createCustomRole(
 /**
  * Delete a custom role via the hub API.
  */
-async function deleteCustomRole(
-  baseURL: string,
-  devToken: string,
-  roleId: string,
-): Promise<void> {
+async function deleteCustomRole(baseURL: string, devToken: string, roleId: string): Promise<void> {
   await fetch(`${baseURL}/api/v1/admin/roles/${roleId}`, {
     method: 'DELETE',
     headers: { Authorization: `Bearer ${devToken}` },
@@ -108,7 +104,7 @@ test.describe('Role export -- browser download', () => {
       env.devToken,
       'e2e-export-list-test',
       'Role for list export E2E test',
-      ['agent.read', 'project.read'],
+      ['agent.read', 'project.read']
     );
     createdRoleIds.push(role.id);
 
@@ -134,8 +130,8 @@ test.describe('Role export -- browser download', () => {
     const downloadPath = await download.path();
     expect(downloadPath).toBeTruthy();
 
-    const content = fs.readFileSync(downloadPath!, 'utf-8');
-    const envelope: RoleExportEnvelope = JSON.parse(content);
+    const content = fs.readFileSync(downloadPath, 'utf-8');
+    const envelope = JSON.parse(content) as RoleExportEnvelope;
 
     // Validate envelope structure
     expect(envelope.version).toBe('1');
@@ -143,13 +139,9 @@ test.describe('Role export -- browser download', () => {
     expect(Array.isArray(envelope.roles)).toBe(true);
 
     // Our test role must be in the export
-    const testRole = envelope.roles.find(
-      (r) => r.name === 'e2e-export-list-test',
-    );
+    const testRole = envelope.roles.find((r) => r.name === 'e2e-export-list-test');
     expect(testRole).toBeTruthy();
-    expect(testRole!.permissions).toEqual(
-      expect.arrayContaining(['agent.read', 'project.read']),
-    );
+    expect(testRole!.permissions).toEqual(expect.arrayContaining(['agent.read', 'project.read']));
   });
 
   test('single-role export produces a real browser download with per-role filename', async ({
@@ -161,7 +153,7 @@ test.describe('Role export -- browser download', () => {
       env.devToken,
       'e2e-single-export-test',
       'Role for single export E2E test',
-      ['agent.read'],
+      ['agent.read']
     );
     createdRoleIds.push(role.id);
 
@@ -182,16 +174,14 @@ test.describe('Role export -- browser download', () => {
     const download = await downloadPromise;
 
     // Verify filename
-    expect(download.suggestedFilename()).toBe(
-      'scion-role-e2e-single-export-test.json',
-    );
+    expect(download.suggestedFilename()).toBe('scion-role-e2e-single-export-test.json');
 
     // Save and validate content
     const downloadPath = await download.path();
     expect(downloadPath).toBeTruthy();
 
-    const content = fs.readFileSync(downloadPath!, 'utf-8');
-    const envelope: RoleExportEnvelope = JSON.parse(content);
+    const content = fs.readFileSync(downloadPath, 'utf-8');
+    const envelope = JSON.parse(content) as RoleExportEnvelope;
 
     expect(envelope.version).toBe('1');
     expect(envelope.exportedAt).toBeTruthy();
@@ -208,7 +198,7 @@ test.describe('Role export -- browser download', () => {
       env.devToken,
       'e2e-header-test',
       'Role for header E2E test',
-      ['agent.read'],
+      ['agent.read']
     );
     createdRoleIds.push(role.id);
 
@@ -217,20 +207,14 @@ test.describe('Role export -- browser download', () => {
     expect(listRes.status()).toBe(200);
     expect(listRes.headers()['content-type']).toBe('application/json');
     expect(listRes.headers()['content-disposition']).toContain('attachment');
-    expect(listRes.headers()['content-disposition']).toContain(
-      'scion-custom-roles.json',
-    );
+    expect(listRes.headers()['content-disposition']).toContain('scion-custom-roles.json');
 
     // Test single-role export headers
-    const singleRes = await request.get(
-      `/api/v1/admin/roles/${role.id}/export`,
-    );
+    const singleRes = await request.get(`/api/v1/admin/roles/${role.id}/export`);
     expect(singleRes.status()).toBe(200);
     expect(singleRes.headers()['content-type']).toBe('application/json');
     expect(singleRes.headers()['content-disposition']).toContain('attachment');
-    expect(singleRes.headers()['content-disposition']).toContain(
-      'scion-role-e2e-header-test.json',
-    );
+    expect(singleRes.headers()['content-disposition']).toContain('scion-role-e2e-header-test.json');
   });
 
   test('system role export is rejected with 422', async ({ request }) => {
@@ -242,11 +226,11 @@ test.describe('Role export -- browser download', () => {
     const systemRole = rolesData.items.find((r) => r.system);
     expect(systemRole).toBeTruthy();
 
-    const exportRes = await request.get(
-      `/api/v1/admin/roles/${systemRole!.id}/export`,
-    );
+    const exportRes = await request.get(`/api/v1/admin/roles/${systemRole!.id}/export`);
     expect(exportRes.status()).toBe(422);
-    const body = await exportRes.json();
-    expect(body.code).toBe('system_role');
+    const body = (await exportRes.json()) as {
+      error?: { code?: string; message?: string; details?: Record<string, unknown> };
+    };
+    expect(body.error?.code).toBe('system_role');
   });
 });

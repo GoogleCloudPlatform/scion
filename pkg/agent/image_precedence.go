@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"log/slog"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -26,13 +27,15 @@ import (
 const (
 	imageTierHarnessConfigFile = "harness-config file"
 	imageTierSettings          = "settings harness_configs"
-	imageTierTemplate          = "template"
-	imageTierTemplateSnapshot  = "recorded template snapshot"
-	imageTierInline            = "inline config"
-	imageTierProfileOverride   = "profile harness_overrides"
-	imageTierRequest           = "explicit --image / request image"
-	imageTierRecordedRequest   = "recorded explicit request image"
-	imageTierProvisioned       = "provisioned config"
+	// imageTierTemplateSnapshot is a legacy tier: a template image recorded
+	// before ptone/scion#4524, replayed only when the template can no
+	// longer be resolved. A template supplies no live image tier.
+	imageTierTemplateSnapshot = "recorded template snapshot"
+	imageTierInline           = "inline config"
+	imageTierProfileOverride  = "profile harness_overrides"
+	imageTierRequest          = "explicit --image / request image"
+	imageTierRecordedRequest  = "recorded explicit request image"
+	imageTierProvisioned      = "provisioned config"
 )
 
 // imageCandidate is one tier's contribution to the container image (or to
@@ -83,25 +86,6 @@ func pickImageField(logger *slog.Logger, agentName, field string, candidates []i
 	return value, source
 }
 
-// templateChainImage returns the template chain's own image and
-// kubernetes.imagePullPolicy (a later template in the chain wins), with no
-// other source folded in. Templates whose config cannot be loaded are skipped.
-func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
-	for _, tpl := range chain {
-		tplCfg, err := tpl.LoadConfig()
-		if err != nil || tplCfg == nil {
-			continue
-		}
-		if tplCfg.Image != "" {
-			image = tplCfg.Image
-		}
-		if tplCfg.Kubernetes != nil && tplCfg.Kubernetes.ImagePullPolicy != "" {
-			pullPolicy = tplCfg.Kubernetes.ImagePullPolicy
-		}
-	}
-	return image, pullPolicy
-}
-
 // withProvisionedImage returns cfg with Image set to the image Start will
 // run for this freshly provisioned agent: the user's request image, then an
 // explicit profile harness_overrides image, then the provisioned config's
@@ -114,7 +98,8 @@ func templateChainImage(chain []*config.Template) (image, pullPolicy string) {
 // The profile override is looked up with the profile recorded in the
 // broker-side image provenance ProvisionAgent just wrote (falling back to
 // opts.Profile only if it is missing), the same profile Start will use.
-func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
+// Settings are read in the request's profile-resolution mode (ctx).
+func withProvisionedImage(ctx context.Context, opts api.StartOptions, agentDir string, cfg *api.ScionConfig) (*api.ScionConfig, error) {
 	if cfg == nil {
 		return nil, nil
 	}
@@ -128,7 +113,10 @@ func withProvisionedImage(opts api.StartOptions, agentDir string, cfg *api.Scion
 	}
 	profileImage := ""
 	if projectDir, err := config.GetResolvedProjectDir(opts.ProjectPath); err == nil {
-		if settings, _, _ := config.LoadEffectiveSettings(projectDir); settings != nil {
+		// The request's profile-resolution mode applies: a flat Runtime Broker
+		// instance skips the profile tier, including the active_profile
+		// fallback (ProfileHarnessOverrideImage with an empty profile).
+		if settings, _, _ := config.LoadEffectiveSettingsFor(ctx, projectDir); settings != nil {
 			profileImage = settings.ProfileHarnessOverrideImage(profile, cfg.HarnessConfig)
 		}
 	}

@@ -23,7 +23,11 @@
 
 import { test, expect, type Locator, type Page, type Route } from '@playwright/test';
 import { projectId, setup, type AgentFixture } from './fixtures.js';
-import { paletteInputHasFocus, slowPaletteModule } from '../palette-focus.js';
+import {
+  expectTapHoldsKeyboard,
+  paletteInputHasFocus,
+  slowPaletteModule,
+} from '../palette-focus.js';
 
 const USER = 'fixture-user';
 
@@ -364,6 +368,45 @@ for (const host of hosts) {
   });
 }
 
+test('same-named agents in different projects show their project slugs, with no project request', async ({
+  page,
+}) => {
+  const twinA = uuid(40);
+  const twinB = uuid(41);
+  const twins: Record<string, AgentFixture> = {
+    [twinA]: {
+      ...fixture(twinA, 'twin', [USER]),
+      projectId: 'p-alpha',
+      project: 'Alpha Project',
+      projectSlug: 'alpha-proj',
+    },
+    [twinB]: {
+      ...fixture(twinB, 'twin', [USER]),
+      projectId: 'p-beta',
+      project: 'Beta Project',
+      projectSlug: 'beta-proj',
+    },
+  };
+  await openHost(page, '/agents/graph', {}, twins);
+  await expect(graphNode(page, twinB)).toBeVisible();
+
+  // A project list or single-project read from palette open on.
+  const projectRequests: string[] = [];
+  page.on('request', (request) => {
+    if (/^\/api\/v1\/projects(\/[^/]+)?$/.test(new URL(request.url()).pathname))
+      projectRequests.push(request.url());
+  });
+  await page.keyboard.press('Control+k');
+  const secondary = page.locator('scion-quick-palette .palette-option .palette-secondary');
+  await expect(secondary).toHaveText(['alpha-proj', 'beta-proj']);
+
+  await page.locator('scion-quick-palette #palette-query-input').fill('beta-proj');
+  await expect(secondary).toHaveText(['beta-proj']);
+  await page.locator('scion-quick-palette #palette-query-input').fill('Alpha Project');
+  await expect(secondary).toHaveText(['alpha-proj']);
+  expect(projectRequests).toEqual([]);
+});
+
 /**
  * After `open`, types `gam` without waiting for the palette and checks it all
  * became the query: the input has focus right after the open, and the
@@ -377,7 +420,7 @@ async function expectTypingRightAfterOpenFilters(
   await page.keyboard.type('gam');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('gam');
   await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/gamma-target/]);
 }
@@ -393,6 +436,28 @@ for (const host of hosts) {
     await expectTypingRightAfterOpenFilters(page, () => page.keyboard.press('Control+k'));
   });
 }
+
+test.describe('on a touch-primary device', () => {
+  test.use({ hasTouch: true, isMobile: true });
+
+  test('a tap on the header button holds the keyboard until the query input has focus', async ({
+    page,
+  }) => {
+    await slowPaletteModule(page);
+    await openHost(page, '/agents/graph', {});
+    await expect(graphNode(page, targetId)).toBeVisible();
+    expect(
+      await page.evaluate(() => matchMedia('(hover: none) and (pointer: coarse)').matches)
+    ).toBe(true);
+
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+    await expect(paletteDialog(page)).toBeVisible();
+
+    await page.keyboard.press('Escape');
+    await expect(paletteDialog(page)).toBeHidden();
+    await expectTapHoldsKeyboard(page, () => paletteButton(page).tap());
+  });
+});
 
 test('typing straight after the header button becomes the query, while the palette module loads', async ({
   page,
@@ -589,7 +654,15 @@ test.describe('/agents does not offer it without a graph', () => {
   test('while loading, and on the error page until a Retry loads the graph', async ({ page }) => {
     const hold = deferred();
     await setupGraph(page, storage);
-    await queueResponses(page, agentsList, [{ fail: true, until: hold.promise }]);
+    // The graph loads through the agent drain, which retries a failed page
+    // (DRAIN_PAGE_RETRIES in src/client/agent-drain.ts), so the list fails
+    // every attempt until the Retry below; the first waits for `hold`.
+    let failing = true;
+    await page.route(agentsList, async (route: Route) => {
+      await hold.promise;
+      if (failing) await route.fulfill({ status: 500, json: { error: 'fixture failure' } });
+      else await route.fallback();
+    });
     await page.goto('/agents');
     await expect(page.getByText('Loading agents...')).toBeVisible();
     await expectNotOffered(page);
@@ -598,6 +671,7 @@ test.describe('/agents does not offer it without a graph', () => {
     await expect(page.getByText('Failed to Load Agents')).toBeVisible();
     await expectNotOffered(page);
 
+    failing = false;
     await page.locator('scion-page-agents sl-button', { hasText: 'Retry' }).click();
     await expect(graphNode(page, targetId)).toBeVisible();
     await expect(paletteButton(page)).toBeVisible();
@@ -638,7 +712,9 @@ test.describe('the project page does not offer it without a graph', () => {
 
   test('with no agents', async ({ page }) => {
     await openHost(page, `/projects/${projectId}`, storage, {});
-    await expect(page.getByText('Fixture Project').first()).toBeVisible();
+    // The page heading, not the first text match: the closed template dialog
+    // also names the project.
+    await expect(page.getByRole('heading', { level: 1, name: 'Fixture Project' })).toBeVisible();
     await expect(page.locator('scion-agent-tree-view')).toHaveCount(0);
     await expectNotOffered(page);
   });

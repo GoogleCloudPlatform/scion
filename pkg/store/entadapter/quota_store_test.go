@@ -19,6 +19,7 @@ package entadapter
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
@@ -676,4 +677,115 @@ func TestQuotaStore_SeedLimitDefinitions_Idempotent(t *testing.T) {
 	list, err := qs.ListLimitDefinitions(ctx)
 	require.NoError(t, err)
 	assert.Len(t, list, 1)
+}
+
+// ---------------------------------------------------------------------------
+// Scope-type-wide reservation queries (ptone/scion#2314)
+// ---------------------------------------------------------------------------
+
+// seedScopeTypeReservations creates active reservations for ld at broker scope
+// across two scope IDs with explicit, out-of-insertion-order created_at
+// values, plus a released row, a row at another scope type, and a row for
+// another limit, none of which may be returned.
+func seedScopeTypeReservations(t *testing.T, qs *QuotaStore, ld, otherLD *store.LimitDefinition, brokerA, brokerB string) (wantOrder []string) {
+	t.Helper()
+	ctx := context.Background()
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+
+	create := func(limitID, scopeType, scopeID string, offset time.Duration) string {
+		resourceID := uuid.New().String()
+		_, err := qs.CreateUsageReservation(ctx, &store.UsageReservation{
+			LimitDefinitionID: limitID,
+			SubjectID:         uuid.New().String(),
+			ScopeType:         scopeType,
+			ScopeID:           scopeID,
+			ResourceID:        resourceID,
+			Reserved:          1,
+			CreatedAt:         base.Add(offset),
+		})
+		require.NoError(t, err)
+		return resourceID
+	}
+
+	// Inserted out of created_at order so the ordering assertion is not
+	// satisfied by insertion order alone.
+	b3 := create(ld.ID, store.QuotaScopeBroker, brokerB, 3*time.Minute)
+	a1 := create(ld.ID, store.QuotaScopeBroker, brokerA, 1*time.Minute)
+	b2 := create(ld.ID, store.QuotaScopeBroker, brokerB, 2*time.Minute)
+	a4 := create(ld.ID, store.QuotaScopeBroker, brokerA, 4*time.Minute)
+
+	released := create(ld.ID, store.QuotaScopeBroker, brokerA, 5*time.Minute)
+	require.NoError(t, qs.ReleaseReservation(ctx, ld.ID, released))
+	create(ld.ID, store.QuotaScopeSystem, "", 6*time.Minute)
+	create(otherLD.ID, store.QuotaScopeBroker, brokerA, 7*time.Minute)
+
+	return []string{a1, b2, b3, a4}
+}
+
+func TestQuotaStore_ListActiveReservationsByScopeType(t *testing.T) {
+	qs := newTestQuotaStore(t)
+	ctx := context.Background()
+
+	ld := createTestLimitDef(t, qs, "scope_type_list_limit")
+	otherLD := createTestLimitDef(t, qs, "scope_type_list_other")
+	brokerA, brokerB := uuid.New().String(), uuid.New().String()
+	wantOrder := seedScopeTypeReservations(t, qs, ld, otherLD, brokerA, brokerB)
+
+	got, err := qs.ListActiveReservationsByScopeType(ctx, ld.ID, store.QuotaScopeBroker)
+	require.NoError(t, err)
+
+	gotOrder := make([]string, len(got))
+	for i, r := range got {
+		gotOrder[i] = r.ResourceID
+		assert.Equal(t, ld.ID, r.LimitDefinitionID)
+		assert.Equal(t, store.QuotaScopeBroker, r.ScopeType)
+		assert.Nil(t, r.ReleasedAt)
+	}
+	assert.Equal(t, wantOrder, gotOrder, "rows ordered by created_at ascending across scope IDs")
+
+	// Per scope ID, the rows match ListActiveReservations for that scope,
+	// in the same order.
+	for _, scopeID := range []string{brokerA, brokerB} {
+		single, err := qs.ListActiveReservations(ctx, ld.ID, store.QuotaScopeBroker, scopeID)
+		require.NoError(t, err)
+		var fromAll []string
+		for _, r := range got {
+			if r.ScopeID == scopeID {
+				fromAll = append(fromAll, r.ResourceID)
+			}
+		}
+		var fromSingle []string
+		for _, r := range single {
+			fromSingle = append(fromSingle, r.ResourceID)
+		}
+		assert.Equal(t, fromSingle, fromAll, "scope %s", scopeID)
+	}
+
+	// No rows for a limit without broker-scoped reservations.
+	none, err := qs.ListActiveReservationsByScopeType(ctx, ld.ID, store.QuotaScopeProject)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+func TestQuotaStore_CountActiveReservationsByScope(t *testing.T) {
+	qs := newTestQuotaStore(t)
+	ctx := context.Background()
+
+	ld := createTestLimitDef(t, qs, "scope_type_count_limit")
+	otherLD := createTestLimitDef(t, qs, "scope_type_count_other")
+	brokerA, brokerB := uuid.New().String(), uuid.New().String()
+	seedScopeTypeReservations(t, qs, ld, otherLD, brokerA, brokerB)
+
+	counts, err := qs.CountActiveReservationsByScope(ctx, ld.ID, store.QuotaScopeBroker)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]int64{brokerA: 2, brokerB: 2}, counts,
+		"released rows, other scope types and other limits are not counted")
+
+	// A scope ID with no active rows is absent from the map.
+	_, ok := counts[uuid.New().String()]
+	assert.False(t, ok)
+
+	empty, err := qs.CountActiveReservationsByScope(ctx, ld.ID, store.QuotaScopeProject)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
 }

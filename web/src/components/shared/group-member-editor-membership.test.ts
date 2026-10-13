@@ -19,8 +19,6 @@
  * window-level membership-changed event, and stays silent on failure.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { addMember, removeMember, listMembers, GroupsApiError } from '../../client/groups-api.js';
 import { showConfirm } from './confirm-dialog.js';
@@ -110,9 +108,7 @@ describe('group member editor membership-changed event', () => {
   });
 
   it('is dispatched once a member is removed', async () => {
-    vi.mocked(removeMember).mockResolvedValue({ outcome: 'ok' } as Awaited<
-      ReturnType<typeof removeMember>
-    >);
+    vi.mocked(removeMember).mockResolvedValue({ outcome: 'ok' });
 
     await editor().handleRemoveMember(BOB);
 
@@ -125,7 +121,7 @@ describe('group member editor membership-changed event', () => {
       outcome: 'lockout',
       detail: 'last owner',
       rawBody: {},
-    } as Awaited<ReturnType<typeof removeMember>>);
+    });
 
     await editor().handleRemoveMember(BOB);
 

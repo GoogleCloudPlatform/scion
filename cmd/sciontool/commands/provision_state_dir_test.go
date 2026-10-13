@@ -107,12 +107,6 @@ func TestRunProvision_StateDir_SentinelOutsideWorkspace(t *testing.T) {
 	if out := gitT(t, workspace, "status", "--porcelain", "--ignored=no"); out != "" {
 		t.Errorf("git status of the workspace is not clean:\n%s", out)
 	}
-
-	// A waiter sees the sentinel in the state directory.
-	setWaitFlags(t, workspace)
-	if err := runWaitForSentinel(context.Background()); err != nil {
-		t.Errorf("wait-for-sentinel: %v", err)
-	}
 }
 
 // A state directory the broker prepared (ChownBestEffortEnv) is left as it
@@ -186,12 +180,6 @@ func TestRunProvision_StateDir_LegacySentinelHonoured(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(stateDir, provision.ProvisionSentinelFile)); err == nil {
 		t.Error("a new sentinel was written for an already-provisioned workspace")
 	}
-
-	// A waiter accepts the legacy sentinel too.
-	setWaitFlags(t, workspace)
-	if err := runWaitForSentinel(context.Background()); err != nil {
-		t.Errorf("wait-for-sentinel with the legacy sentinel: %v", err)
-	}
 }
 
 // The agent-directory modes ignore the variable: their sentinel stays in the
@@ -207,57 +195,6 @@ func TestRunProvision_StateDir_IgnoredInAgentDirMode(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(agentDir, provision.ProvisionSentinelFile)); err != nil {
 		t.Errorf("sentinel not in the agent directory: %v", err)
-	}
-}
-
-// An invalid variable fails the waiter instead of polling the wrong place.
-func TestWaitForSentinel_InvalidStateDir(t *testing.T) {
-	setWaitFlags(t, t.TempDir())
-	t.Setenv(provisionStateDirEnv, "relative")
-	if err := runWaitForSentinel(context.Background()); err == nil {
-		t.Fatal("expected an error for a relative state directory")
-	}
-}
-
-// setWaitFlags sets the --wait-for-sentinel flags for a short wait.
-func setWaitFlags(t *testing.T, workspace string) {
-	t.Helper()
-	oldWorkspace, oldWait, oldTimeout, oldInterval := provisionWorkspace, provisionWaitSentinel, provisionTimeout, provisionPollInterval
-	t.Cleanup(func() {
-		provisionWorkspace, provisionWaitSentinel, provisionTimeout, provisionPollInterval = oldWorkspace, oldWait, oldTimeout, oldInterval
-	})
-	provisionWorkspace = workspace
-	provisionWaitSentinel = true
-	provisionTimeout = 2
-	provisionPollInterval = 1
-}
-
-// A waiter that cannot search the state directory (EACCES) keeps falling
-// back to the legacy sentinel in the workspace root, and otherwise keeps
-// waiting until its timeout.
-func TestWaitForSentinel_StateDirUnreadableFallsBackToLegacy(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root bypasses directory permissions")
-	}
-	workspace, stateDir := newStateDirLayout(t)
-	if err := os.WriteFile(filepath.Join(stateDir, provision.ProvisionSentinelFile), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(stateDir, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(stateDir, 0o755) })
-	setWaitFlags(t, workspace)
-	t.Setenv(provisionStateDirEnv, stateDir)
-
-	if err := runWaitForSentinel(context.Background()); err == nil {
-		t.Fatal("expected a timeout: the state directory cannot be searched and there is no legacy sentinel")
-	}
-	if err := os.WriteFile(filepath.Join(workspace, provision.ProvisionSentinelFile), nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := runWaitForSentinel(context.Background()); err != nil {
-		t.Errorf("legacy sentinel not accepted: %v", err)
 	}
 }
 

@@ -24,13 +24,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import {
-  getE2EEnv,
-  createGroup,
-  uniqueSlug,
-  uniqueName,
-  fillSlInput,
-} from './groups-setup.js';
+import { getE2EEnv, createGroup, uniqueSlug, uniqueName, fillSlInput } from './groups-setup.js';
 
 test.describe('Keyboard-only flows (AC19)', () => {
   const env = getE2EEnv();
@@ -93,9 +87,9 @@ test.describe('Keyboard-only flows (AC19)', () => {
     await page.goto(`/admin/groups/${group.id}`, {
       waitUntil: 'domcontentloaded',
     });
-    await expect(
-      page.getByRole('heading', { name: 'Keyboard Delete Test' }),
-    ).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByRole('heading', { name: 'Keyboard Delete Test' })).toBeVisible({
+      timeout: 15_000,
+    });
 
     // Open overflow menu — use click since Shoelace sl-dropdown handles
     // keyboard internally via its own event delegation

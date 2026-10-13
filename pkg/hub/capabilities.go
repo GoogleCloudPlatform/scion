@@ -182,6 +182,9 @@ func (a *AuthzService) ComputeCapabilities(ctx context.Context, identity Identit
 	if !ok {
 		return &Capabilities{Actions: []string{}}
 	}
+	if isDelegatedAgentIdentity(identity) {
+		return delegatedCapabilities(ctx, resource)
+	}
 
 	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
 	// Hub-admins get correct capabilities from their role bindings.
@@ -216,6 +219,11 @@ func (a *AuthzService) ComputeScopeCapabilities(ctx context.Context, identity Id
 	ctx = withAuthzInputMemo(ctx)
 	actions, ok := ScopeActions[resourceType]
 	if !ok {
+		return &Capabilities{Actions: []string{}}
+	}
+	// An agent delegated credential has no scope capabilities
+	// (.design/agent-delegation.md §11.7).
+	if isDelegatedAgentIdentity(identity) {
 		return &Capabilities{Actions: []string{}}
 	}
 
@@ -274,6 +282,14 @@ func (a *AuthzService) ComputeCapabilitiesBatch(ctx context.Context, identity Id
 		return caps
 	}
 
+	if isDelegatedAgentIdentity(identity) {
+		caps := make([]*Capabilities, len(resources))
+		for i, resource := range resources {
+			caps[i] = delegatedCapabilities(ctx, resource)
+		}
+		return caps
+	}
+
 	// Super-admins get all actions via CheckAccess/Decide step-1 bypass.
 	// Hub-admins get correct capabilities from their role bindings.
 	if IsScopedUserIdentity(identity) {
@@ -323,6 +339,13 @@ func (a *AuthzService) ComputeCapabilitiesForActions(ctx context.Context, identi
 	// across every decision below (no-op if a memo or mask is already set).
 	// Nothing below writes authorization state, so the memo stays valid.
 	ctx = withAuthzInputMemo(ctx)
+	if isDelegatedAgentIdentity(identity) {
+		caps := make([]*Capabilities, len(resources))
+		for i, resource := range resources {
+			caps[i] = delegatedCapabilities(ctx, resource)
+		}
+		return caps
+	}
 	if IsScopedUserIdentity(identity) {
 		caps := make([]*Capabilities, len(resources))
 		for i, resource := range resources {
@@ -396,4 +419,31 @@ func capabilityAllows(cap *Capabilities, action Action) bool {
 		}
 	}
 	return false
+}
+
+// delegatedCapabilities is the capability set of an agent delegated
+// credential on resource (.design/agent-delegation.md §11.7): only the
+// primary action of the route's admitted operation, and only for the
+// route's own target, which the handler has already authorized before it
+// computes capabilities. It calls no Decide and writes no record, and it
+// never reports attach.
+func delegatedCapabilities(ctx context.Context, resource Resource) *Capabilities {
+	none := &Capabilities{Actions: []string{}}
+	entry, ok := delegatedAdmissionFromContext(ctx)
+	if !ok {
+		return none
+	}
+	spec, ok := catalogOperationByID(entry.Operation)
+	if !ok {
+		return none
+	}
+	action, ok := registryActionFor(spec.BasePermission)
+	if !ok || action == ActionAttach {
+		return none
+	}
+	route, ok := agentSubRouteFromContext(ctx)
+	if !ok || resource.Type != "agent" || resource.ID == "" || resource.ID != route.AgentID {
+		return none
+	}
+	return &Capabilities{Actions: []string{string(action)}}
 }

@@ -17,14 +17,12 @@
 package hub
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
@@ -32,35 +30,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// logLinesWithMessage returns the text-handler log lines that contain message.
-func logLinesWithMessage(logs *bytes.Buffer, message string) []string {
-	var lines []string
-	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, message) {
-			lines = append(lines, line)
-		}
-	}
-	return lines
-}
-
-// assertSingleLogLine asserts that exactly one log line carries message, that
-// it has every key=value in fields, and that it contains none of absent.
-// It returns the line.
-func assertSingleLogLine(t *testing.T, logs *bytes.Buffer, message string, fields map[string]string, absent ...string) string {
-	t.Helper()
-	lines := logLinesWithMessage(logs, message)
-	require.Len(t, lines, 1, "expected one %q line in:\n%s", message, logs.String())
-	line := lines[0]
-	for key, value := range fields {
-		assert.Contains(t, line, " "+key+"="+value, "line should carry %s=%s", key, value)
-	}
-	for _, s := range absent {
-		require.NotEmpty(t, s, "absent strings must be non-empty to be meaningful")
-		assert.NotContains(t, line, s)
-	}
-	return line
-}
 
 func TestFSErrorClass(t *testing.T) {
 	tests := []struct {

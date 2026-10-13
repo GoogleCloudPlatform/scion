@@ -16,10 +16,11 @@
 
 import { describe, it, expect, beforeAll } from 'vitest';
 import { render, type TemplateResult } from 'lit';
-import { elementStyleRules } from './__fixtures__/card-layout.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
 
 type ProjectsPage = HTMLElement & {
   renderProjectCard(project: Record<string, unknown>): TemplateResult;
+  renderProjectRow(project: Record<string, unknown>): TemplateResult;
 };
 
 describe('project card layout', () => {
@@ -64,6 +65,42 @@ describe('project card layout', () => {
       container
     );
     expect(container.querySelector('.resource-name > span sl-tooltip')).not.toBeNull();
+  });
+
+  it('shows the workspace mode as the project icon with a label', () => {
+    const container = document.createElement('div');
+    render(
+      page.renderProjectCard({
+        id: 'p3',
+        name: 'empty_project',
+        slug: 'empty_project',
+        agentCount: 0,
+        labels: { 'scion.dev/workspace-mode': 'per-agent' },
+      }),
+      container
+    );
+    const tooltip = container.querySelector('.resource-name > sl-tooltip');
+    expect(tooltip?.getAttribute('content')).toBe('Empty directory per agent');
+    const icon = tooltip?.querySelector('sl-icon.workspace-mode-icon');
+    expect(icon?.getAttribute('name')).toBe('folder-plus');
+    expect(icon?.getAttribute('label')).toBe('Empty directory per agent');
+  });
+
+  it('shows the workspace mode icon in the table row too', () => {
+    const container = document.createElement('table');
+    render(
+      page.renderProjectRow({
+        id: 'p4',
+        name: 'git_project',
+        slug: 'git_project',
+        agentCount: 0,
+        gitRemote: 'https://git.example.com/org/git_project.git',
+      }),
+      container
+    );
+    expect(container.querySelector('.name-cell > sl-tooltip')?.getAttribute('content')).toBe(
+      'Git repository, clone per agent'
+    );
   });
 
   it('lets a long unbroken name and git remote wrap instead of spilling past the card', () => {

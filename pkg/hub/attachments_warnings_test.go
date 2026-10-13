@@ -141,6 +141,9 @@ func attachmentDMSetup(t *testing.T) (*Server, store.Store, *store.Project, stri
 	}
 	require.NoError(t, s.CreateUser(ctx, owner))
 	ensureHubMembership(ctx, s, owner.ID)
+	// The owner is a project member, so the fixture agents are in good
+	// standing (ptone/scion#3433).
+	ensureStandingRoot(t, s, project.ID, owner.ID)
 
 	brokerID := api.NewUUID()
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{

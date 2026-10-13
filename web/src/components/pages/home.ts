@@ -53,7 +53,13 @@ interface HomeAgentsResponse {
   agents?: Agent[];
   nextCursor?: string;
   complete?: boolean;
-  stats?: { total: number; running: number; agents?: Array<[string, string]> };
+  /** `totalApproximate` marks `total` and `running` as lower bounds. */
+  stats?: {
+    total: number;
+    running: number;
+    agents?: Array<[string, string]>;
+    totalApproximate?: boolean;
+  };
 }
 
 interface InviteStats {
@@ -134,13 +140,13 @@ export class ScionPageHome extends LitElement {
     stateManager.setScope({ type: 'dashboard' });
 
     // Subscribe before snapshot so no deltas are missed between read and listen
-    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.addEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.addEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.addEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated as EventListener);
+    stateManager.addEventListener('projects-updated', this.boundOnProjectsUpdated);
 
-    // Use hydrated data if available, avoiding unnecessary fetches on SSR load
-    // or when navigating back from a page that already populated the state.
+    // Use data already in the store, avoiding unnecessary fetches when
+    // navigating back from a page that already populated the state.
     this.agents = stateManager.getAgents();
     this.projects = stateManager.getProjects();
     this.projectScopeCapabilities = stateManager.getScopeCapabilities('project');
@@ -173,13 +179,10 @@ export class ScionPageHome extends LitElement {
 
   override disconnectedCallback(): void {
     super.disconnectedCallback();
-    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated as EventListener);
-    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged as EventListener);
+    stateManager.removeEventListener('agents-updated', this.boundOnAgentsUpdated);
+    stateManager.removeEventListener('agents-changed', this.boundOnAgentsChanged);
     stateManager.removeEventListener('agents-resync', this.boundOnAgentsResync);
-    stateManager.removeEventListener(
-      'projects-updated',
-      this.boundOnProjectsUpdated as EventListener
-    );
+    stateManager.removeEventListener('projects-updated', this.boundOnProjectsUpdated);
   }
 
   private onAgentsUpdated(): void {
@@ -266,7 +269,7 @@ export class ScionPageHome extends LitElement {
       // missed some, so it shows the chip.
       this.countsMayHaveChanged = epoch.sawResync;
     } else {
-      index.seedCounts(stats.total, stats.running);
+      index.seedCounts(stats.total, stats.running, !!stats.totalApproximate);
       // The snapshot cannot be adjusted, so any change that landed while
       // the request was in flight, or a resync that may have missed some,
       // may already have changed it.
@@ -598,7 +601,7 @@ export class ScionPageHome extends LitElement {
         <div class="stat-card">
           <h3>Active Agents</h3>
           <div class="stat-value">
-            <span>${this.activeAgentCount}</span>
+            <span>${this.activeAgentCount}${this.memberIndex?.approximate ? '+' : ''}</span>
           </div>
           ${this.memberIndex?.countOnly
             ? this.renderCountOnlyNote()
@@ -722,8 +725,10 @@ export class ScionPageHome extends LitElement {
    * counts with one agents request.
    */
   private renderCountOnlyNote(): TemplateResult {
+    const mark = this.memberIndex?.approximate ? '+' : '';
+    const total = `${formatNumber(this.memberIndex?.stats.total ?? 0)}${mark}`;
     return html`<div class="stat-change counts-note">
-      <span>${formatNumber(this.memberIndex?.stats.total ?? 0)} agents, as of last refresh</span>
+      <span>${total} agents, as of last refresh</span>
       ${this.renderCountsChip()}
     </div>`;
   }

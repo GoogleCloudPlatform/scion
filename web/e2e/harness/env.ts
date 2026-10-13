@@ -38,7 +38,7 @@ export function getE2EEnv(): E2EEnv {
   if (!fs.existsSync(E2E_ENV_FILE)) {
     throw new Error(
       `E2E env file not found at ${E2E_ENV_FILE}. ` +
-        'Did global-setup run? Use "npm run test:e2e" to run the full suite.',
+        'Did global-setup run? Use "npm run test:e2e" to run the full suite.'
     );
   }
 

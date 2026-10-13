@@ -69,8 +69,9 @@ func (s *backfillTransientFailStore) BackfillOrigin(ctx context.Context) error {
 
 // TestInitOperationalSettings_FailClosed verifies that when the settings
 // store is persistently broken, initOperationalSettingsWithRetry returns a
-// non-nil error. Because the initHubServer caller does log.Fatalf on error,
-// this error prevents the hub from accepting traffic — the fail-closed
+// non-nil error. initHubServer returns it and runServerStart returns before
+// the hub starts serving (fail-closed via the error-return chain), so this
+// error prevents the hub from accepting traffic — the fail-closed
 // invariant for DB-persisted maintenance mode (admin_mode=true).
 func TestInitOperationalSettings_FailClosed(t *testing.T) {
 	ctx := context.Background()

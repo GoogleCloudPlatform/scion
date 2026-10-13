@@ -15,7 +15,6 @@
 package runtimebroker
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,7 +22,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"sync"
 	"time"
@@ -32,10 +30,6 @@ import (
 	scionrt "github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
 	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	"go.opentelemetry.io/otel/propagation"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 )
@@ -141,7 +135,9 @@ const defaultMaxConcurrentDispatches = 20
 
 // ControlChannelClient manages the WebSocket connection to the Hub.
 type ControlChannelClient struct {
-	config         ControlChannelConfig
+	config ControlChannelConfig
+	// conn is written only by doConnect on the connect goroutine, under mu;
+	// readers on other goroutines must copy it under mu.
 	conn           *wsprotocol.Connection
 	handlers       http.Handler // Reuse existing HTTP handlers
 	agentLookup    AgentLookup  // For looking up agent container IDs
@@ -168,6 +164,11 @@ type ControlChannelClient struct {
 	// (conn.WritePing is used); tests set it to simulate a failed write.
 	writePing func(conn *wsprotocol.Connection) error
 
+	// afterDial, when set, runs after a successful dial and before the
+	// connection is stored. It is nil in production; tests set it to order a
+	// Close against a dial that has just completed.
+	afterDial func()
+
 	// Connection state
 	connected   bool
 	sessionID   string
@@ -191,6 +192,108 @@ type StreamHandler struct {
 	closeCh    chan struct{}
 	closed     bool
 	closeMu    sync.Mutex
+
+	// input holds client input not yet taken from dataCh. It is set by
+	// handleStreamOpen; handlers built directly (tests) feed dataCh instead.
+	input *streamInputQueue
+}
+
+// StreamInputLimit is the most client input, in bytes, the broker holds for
+// one stream before the PTY consumes it. Input is queued only while the
+// write into the agent's terminal is blocked (the program in the session is
+// not reading stdin fast enough), so the limit is sized well above any
+// realistic paste: 4 MiB is about 200 times the 20 KB paste that already
+// worked, more than a large source file, and four times the 1 MiB
+// control-channel message cap. Exceeding it closes the stream with
+// closeCodeInputOverflow; input is never dropped silently.
+const StreamInputLimit = 4 << 20
+
+// closeCodeInputOverflow (1009, "message too big") is the close code for a
+// stream whose input exceeded StreamInputLimit. The Hub passes it through
+// unchanged and clients classify it as terminal, so the client reports it
+// instead of reconnecting and pasting again.
+const closeCodeInputOverflow = 1009
+
+// closeReasonInputOverflow is the close reason sent with
+// closeCodeInputOverflow.
+const closeReasonInputOverflow = "input_overflow"
+
+// streamInputQueue is a byte-bounded FIFO of input frames for one stream.
+// The control-channel read loop pushes without blocking; run moves frames
+// into the stream's dataCh in order. A frame counts against the limit until
+// the consumer has taken it from dataCh.
+type streamInputQueue struct {
+	mu     sync.Mutex
+	frames [][]byte
+	queued int
+	limit  int
+	notify chan struct{} // capacity 1
+}
+
+func newStreamInputQueue(limit int) *streamInputQueue {
+	return &streamInputQueue{limit: limit, notify: make(chan struct{}, 1)}
+}
+
+// push queues data. It reports false, queueing nothing, if data would take
+// the queue over its limit.
+func (q *streamInputQueue) push(data []byte) bool {
+	if len(data) == 0 {
+		return true
+	}
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.queued+len(data) > q.limit {
+		return false
+	}
+	q.frames = append(q.frames, data)
+	q.queued += len(data)
+	select {
+	case q.notify <- struct{}{}:
+	default:
+	}
+	return true
+}
+
+// run delivers queued frames to out, in order, until closeCh is closed.
+func (q *streamInputQueue) run(out chan<- []byte, closeCh <-chan struct{}) {
+	for {
+		q.mu.Lock()
+		var data []byte
+		if len(q.frames) > 0 {
+			data = q.frames[0]
+		}
+		q.mu.Unlock()
+
+		if data == nil {
+			select {
+			case <-q.notify:
+				continue
+			case <-closeCh:
+				q.discard()
+				return
+			}
+		}
+
+		select {
+		case out <- data:
+			q.mu.Lock()
+			q.frames[0] = nil
+			q.frames = q.frames[1:]
+			q.queued -= len(data)
+			q.mu.Unlock()
+		case <-closeCh:
+			q.discard()
+			return
+		}
+	}
+}
+
+// discard drops any queued frames once the stream has closed.
+func (q *streamInputQueue) discard() {
+	q.mu.Lock()
+	q.frames = nil
+	q.queued = 0
+	q.mu.Unlock()
 }
 
 // NewControlChannelClient creates a new control channel client.
@@ -237,6 +340,13 @@ func (c *ControlChannelClient) connectWithBackoff() error {
 		}
 
 		if err := c.doConnect(); err != nil {
+			// A connect that failed because the client was closed, or the
+			// context passed to Connect was cancelled, is the ordinary end of
+			// the loop, not a connection failure.
+			if c.ctx.Err() != nil {
+				c.log.Debug("Control channel connect ended: client closed or context cancelled", "error", err)
+				return c.ctx.Err()
+			}
 			c.log.Error("Control channel connection failed", "error", err, "retry_in", backoff)
 
 			select {
@@ -302,19 +412,35 @@ func (c *ControlChannelClient) doConnect() error {
 		}
 		return fmt.Errorf("websocket dial failed: %w", err)
 	}
+	if c.afterDial != nil {
+		c.afterDial()
+	}
 
+	// Close, SendStreamData and CloseStream read c.conn under c.mu from other
+	// goroutines. Close also cancels c.ctx under c.mu before it reads c.conn,
+	// so checking c.ctx and storing conn under c.mu here means either Close
+	// sees conn and closes it, or this sees the cancellation: a connect that
+	// completes after Close never sends the connect message, so no session is
+	// registered for a closed client.
+	c.mu.Lock()
+	if err := c.ctx.Err(); err != nil {
+		c.mu.Unlock()
+		_ = conn.Close()
+		return err
+	}
 	c.conn = conn
+	c.mu.Unlock()
 
 	// Send connect message
 	connectMsg := wsprotocol.NewConnectMessage(c.config.BrokerID, c.config.Version, c.config.Projects)
 	if err := conn.WriteJSON(connectMsg); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("failed to send connect message: %w", err)
 	}
 
 	// Wait for connected response
 	if err := c.waitForConnected(); err != nil {
-		_ = c.conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("connection handshake failed: %w", err)
 	}
 
@@ -358,13 +484,22 @@ func (c *ControlChannelClient) buildWebSocketURL() (string, error) {
 
 // buildAuthHeaders creates the HMAC-signed headers for authentication.
 func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
+	return brokerUpgradeHeaders(c.config.HubEndpoint, "/api/v1/runtime-brokers/connect", c.config.BrokerID, c.config.SecretKey, c.config.TransportSource, c.config.TransportMode)
+}
+
+// brokerUpgradeHeaders returns the headers a broker presents on a WebSocket
+// upgrade to path on the hub: the HMAC signature for a GET of that path
+// (only the broker id when there is no secret, proxy-auth mode) and the
+// transport-layer OIDC credential, if any. The control channel and the
+// conduit dialer both use it.
+func brokerUpgradeHeaders(hubEndpoint, path, brokerID string, secretKey []byte, src transportauth.TokenSource, mode transportauth.HeaderMode) (http.Header, error) {
 	headers := http.Header{}
 
-	if len(c.config.SecretKey) == 0 {
-		headers.Set("X-Scion-Broker-ID", c.config.BrokerID)
+	if len(secretKey) == 0 {
+		headers.Set("X-Scion-Broker-ID", brokerID)
 		// Still apply transport auth even without HMAC (proxy-auth mode)
-		if c.config.TransportSource != nil {
-			if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+		if src != nil {
+			if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 				return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 			}
 		}
@@ -372,11 +507,11 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Build a dummy request for signing
-	u, err := url.Parse(c.config.HubEndpoint)
+	u, err := url.Parse(hubEndpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint: %w", err)
 	}
-	u.Path = "/api/v1/runtime-brokers/connect"
+	u.Path = path
 
 	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
@@ -385,8 +520,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 
 	// Apply HMAC auth using the HMACAuth type
 	hmacAuth := &apiclient.HMACAuth{
-		BrokerID:  c.config.BrokerID,
-		SecretKey: c.config.SecretKey,
+		BrokerID:  brokerID,
+		SecretKey: secretKey,
 	}
 	if err := hmacAuth.ApplyAuth(req); err != nil {
 		return nil, fmt.Errorf("failed to apply HMAC auth: %w", err)
@@ -398,8 +533,8 @@ func (c *ControlChannelClient) buildAuthHeaders() (http.Header, error) {
 	}
 
 	// Transport-layer OIDC for IAP-protected hubs
-	if c.config.TransportSource != nil {
-		if err := transportauth.ApplyHeaders(headers, c.config.TransportSource, c.config.TransportMode); err != nil {
+	if src != nil {
+		if err := transportauth.ApplyHeaders(headers, src, mode); err != nil {
 			return nil, fmt.Errorf("failed to apply transport auth headers: %w", err)
 		}
 	}
@@ -433,7 +568,10 @@ func (c *ControlChannelClient) waitForConnected() error {
 		return fmt.Errorf("failed to parse connected message: %w", err)
 	}
 
+	// SessionID() reads sessionID under c.mu from other goroutines.
+	c.mu.Lock()
 	c.sessionID = connected.SessionID
+	c.mu.Unlock()
 
 	// Update ping interval if specified by Hub
 	if connected.PingIntervalMs > 0 {
@@ -451,11 +589,16 @@ func (c *ControlChannelClient) waitForConnected() error {
 func (c *ControlChannelClient) runMessageLoop() {
 	conn := c.conn
 
+	// If Close has started, it would not wait for a new ping loop, so close
+	// the connection and return instead of starting one.
+	if !c.addTracked() {
+		_ = conn.Close()
+		return
+	}
 	// Start the ping loop for this connection only. loopDone tells it to
 	// exit once this read loop is over; pingDone reports that it has.
 	loopDone := make(chan struct{})
 	pingDone := make(chan struct{})
-	c.wg.Add(1)
 	go func() {
 		defer close(pingDone)
 		c.pingLoop(conn, loopDone)
@@ -580,13 +723,17 @@ func (c *ControlChannelClient) handleRequest(data []byte) error {
 	}
 
 	conn := c.conn
+	// If Close has started, it would not wait for this request: drop it
+	// without registering a cancel or starting a goroutine.
+	if !c.addTracked() {
+		return nil
+	}
 	// Register the request's cancel synchronously, on the read loop, before
 	// the dispatch goroutine starts. The read loop handles frames in order,
 	// so a "cancel" frame the Hub sends for this RequestID always finds it,
 	// including while the request is still queued for a dispatch slot
 	// (ptone/scion#2877).
 	ctx, done := c.trackRequest(req.RequestID)
-	c.wg.Add(1)
 	go c.runRequest(ctx, done, conn, req)
 	return nil
 }
@@ -653,70 +800,9 @@ func (c *ControlChannelClient) runRequest(ctx context.Context, done func(), conn
 		return
 	}
 
-	// Extract trace context from request envelope headers for cross-component propagation.
-	ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(req.Headers))
-	ctx, span := tracer.Start(ctx, "broker.controlchannel.dispatch")
-	defer span.End()
-	span.SetAttributes(
-		attribute.String("scion.request.method", req.Method),
-		attribute.String("scion.request.path", req.Path),
-	)
-
-	// Recover from panics (e.g. httptest.NewRequest on malformed URLs) to
-	// prevent crashing the broker process. Send a 400 error back instead.
-	defer func() {
-		if r := recover(); r != nil {
-			span.SetStatus(codes.Error, fmt.Sprintf("panic: %v", r))
-			c.log.Error("Panic in control channel request handler", "panic", r, "method", req.Method, "path", req.Path)
-			resp := wsprotocol.NewResponseEnvelope(req.RequestID, http.StatusBadRequest, nil, []byte(fmt.Sprintf(`{"error":"request caused panic: %v"}`, r)))
-			if writeErr := conn.WriteJSON(resp); writeErr != nil {
-				c.log.Error("Failed to send panic error response", "error", writeErr)
-			}
-		}
-	}()
-
-	// Build HTTP request
-	path := req.Path
-	if req.Query != "" {
-		path = path + "?" + req.Query
-	}
-
-	var body io.Reader
-	if len(req.Body) > 0 {
-		body = bytes.NewReader(req.Body)
-	}
-
-	httpReq := httptest.NewRequest(req.Method, path, body)
-	httpReq = httpReq.WithContext(ctx)
-	for key, value := range req.Headers {
-		httpReq.Header.Set(key, value)
-	}
-
-	// Inject connection name header so the server can route to the correct hydrator
-	if c.connectionName != "" {
-		httpReq.Header.Set("X-Scion-Hub-Connection", c.connectionName)
-	}
-
-	// Execute through existing handlers
-	w := httptest.NewRecorder()
-	c.handlers.ServeHTTP(w, httpReq)
-
-	// Build response envelope
-	result := w.Result()
-	respBody, _ := io.ReadAll(result.Body)
-	_ = result.Body.Close()
-
-	headers := make(map[string]string)
-	for key := range result.Header {
-		headers[key] = result.Header.Get(key)
-	}
-
-	resp := wsprotocol.NewResponseEnvelope(req.RequestID, result.StatusCode, headers, respBody)
-
-	if err := conn.WriteJSON(resp); err != nil {
-		span.SetStatus(codes.Error, "failed to send response: "+err.Error())
-		c.log.Error("Failed to send response", "error", err, "requestID", req.RequestID)
-	}
+	serveTunneledRequest(ctx, c.handlers, c.connectionName, "broker.controlchannel.dispatch", c.log, req, func(resp *wsprotocol.ResponseEnvelope) error {
+		return conn.WriteJSON(resp)
+	})
 }
 
 // logQueuedCancel records, at debug level, that req was cancelled by the Hub
@@ -836,14 +922,18 @@ func (c *ControlChannelClient) handleStreamOpen(data []byte) error {
 		streamType: open.StreamType,
 		slug:       open.Slug,
 		projectID:  open.ProjectID,
-		dataCh:     make(chan []byte, 256),
-		resizeCh:   make(chan [2]int, 8),
-		closeCh:    make(chan struct{}),
+		// Unbuffered: input waits in the byte-bounded input queue instead.
+		dataCh:   make(chan []byte),
+		resizeCh: make(chan [2]int, 8),
+		closeCh:  make(chan struct{}),
+		input:    newStreamInputQueue(StreamInputLimit),
 	}
 
 	c.streamMu.Lock()
 	c.streams[open.StreamID] = handler
 	c.streamMu.Unlock()
+
+	go handler.input.run(handler.dataCh, handler.closeCh)
 
 	// Start stream handler based on type
 	switch open.StreamType {
@@ -874,13 +964,106 @@ func (c *ControlChannelClient) handleStreamData(data []byte) error {
 		return nil
 	}
 
-	select {
-	case handler.dataCh <- frame.Data:
-	default:
-		c.log.Warn("Stream buffer full", "streamID", frame.StreamID)
+	if handler.isClosed() {
+		// Already closed with a reported code (e.g. input overflow) and
+		// waiting for the Hub's close; late input is not delivered.
+		return nil
+	}
+
+	if handler.input == nil {
+		// Only handlers built outside handleStreamOpen (tests, with a
+		// buffered dataCh) lack an input queue. Hand off without blocking
+		// the read loop; on a full channel, close with the overflow code
+		// rather than dropping the frame.
+		select {
+		case handler.dataCh <- frame.Data:
+		default:
+			c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
+		}
+		return nil
+	}
+
+	if !handler.input.push(frame.Data) {
+		c.log.Warn("Stream input exceeded the buffer limit; closing stream",
+			"streamID", frame.StreamID, "limitBytes", StreamInputLimit)
+		c.closeStreamAsync(handler, closeReasonInputOverflow, closeCodeInputOverflow)
 	}
 
 	return nil
+}
+
+// isClosed reports whether the stream has been closed.
+func (h *StreamHandler) isClosed() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	return h.closed
+}
+
+// claimClose closes the stream locally and reports whether this call did
+// it. Exactly one path claims each stream, and only a claiming path that is
+// responsible for telling the Hub (closeStreamAsync, CloseStream) sends a
+// StreamClose, so the Hub sees one close code per stream.
+func (h *StreamHandler) claimClose() bool {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return false
+	}
+	h.closed = true
+	close(h.closeCh)
+	return true
+}
+
+// closeStreamAsync closes handler's stream locally at once and, if this call
+// claimed the close, reports it to the Hub from a separate goroutine so the
+// read loop never waits on the write. The handler stays registered, marked
+// closed, until the Hub's StreamClose or a CloseStream call removes it; a
+// CloseStream that finds it already claimed sends nothing, so a PTY
+// goroutine finishing at the same time cannot report a second code.
+//
+// It reports whether a report was started: false if another path already
+// closed the stream, or if the client is closing.
+func (c *ControlChannelClient) closeStreamAsync(handler *StreamHandler, reason string, code int) bool {
+	if !handler.claimClose() {
+		return false
+	}
+	conn := c.conn
+	closeMsg := wsprotocol.NewStreamCloseMessage(handler.streamID, reason, code)
+	return c.goTracked(func() {
+		if err := conn.WriteJSON(closeMsg); err != nil {
+			c.log.Warn("Failed to report stream close to Hub", "streamID", handler.streamID, "code", code, "error", err)
+		}
+	})
+}
+
+// goTracked runs f in a goroutine counted by c.wg, unless Close has started.
+// The read loop is not itself tracked and can still be handling a frame
+// after Close cancels c.ctx, so an unguarded c.wg.Add there could run
+// concurrently with Close's c.wg.Wait at a zero count, which WaitGroup does
+// not allow. Checking c.ctx and adding under c.mu, which Close holds while
+// cancelling, orders every Add either before Close's Wait or not at all.
+func (c *ControlChannelClient) goTracked(f func()) bool {
+	if !c.addTracked() {
+		return false
+	}
+	go func() {
+		defer c.wg.Done()
+		f()
+	}()
+	return true
+}
+
+// addTracked adds one to c.wg unless Close has started, and reports whether
+// it did; the caller must then call c.wg.Done exactly once. See goTracked for
+// why the check and the Add happen together under c.mu.
+func (c *ControlChannelClient) addTracked() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.ctx != nil && c.ctx.Err() != nil {
+		return false
+	}
+	c.wg.Add(1)
+	return true
 }
 
 // handleStreamClose processes a stream close message.
@@ -1037,8 +1220,11 @@ func (c *ControlChannelClient) handlePTYStream(handler *StreamHandler, cols, row
 
 // SendStreamData sends data on a stream.
 func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) error {
+	// PTY goroutines are not tracked by c.wg and can outlive a connection,
+	// so read c.conn under c.mu: a reconnect's doConnect may be writing it.
 	c.mu.RLock()
 	connected := c.connected
+	conn := c.conn
 	c.mu.RUnlock()
 
 	if !connected {
@@ -1046,10 +1232,13 @@ func (c *ControlChannelClient) SendStreamData(streamID string, data []byte) erro
 	}
 
 	frame := wsprotocol.NewStreamFrame(streamID, data)
-	return c.conn.WriteJSON(frame)
+	return conn.WriteJSON(frame)
 }
 
-// CloseStream closes a stream.
+// CloseStream closes a stream and reports code and reason to the Hub. If the
+// stream is still registered but another path already closed it with a
+// reported code (input overflow), CloseStream only unregisters it and sends
+// nothing, so the Hub sees a single close code.
 func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) error {
 	c.streamMu.Lock()
 	handler, ok := c.streams[streamID]
@@ -1058,17 +1247,19 @@ func (c *ControlChannelClient) CloseStream(streamID, reason string, code int) er
 	}
 	c.streamMu.Unlock()
 
-	if handler != nil {
-		handler.closeMu.Lock()
-		if !handler.closed {
-			handler.closed = true
-			close(handler.closeCh)
-		}
-		handler.closeMu.Unlock()
+	if handler != nil && !handler.claimClose() {
+		// Another path (input overflow) already closed the stream and
+		// reported its code to the Hub; do not send a second one.
+		return nil
 	}
 
+	// See SendStreamData for why c.conn is read under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
 	closeMsg := wsprotocol.NewStreamCloseMessage(streamID, reason, code)
-	return c.conn.WriteJSON(closeMsg)
+	return conn.WriteJSON(closeMsg)
 }
 
 // markDisconnected updates the connection state.
@@ -1105,8 +1296,13 @@ func (c *ControlChannelClient) Close() error {
 
 	c.wg.Wait()
 
-	if c.conn != nil {
-		return c.conn.Close()
+	// doConnect writes c.conn on the connect goroutine, which Close does not
+	// wait for, so read it under c.mu.
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+	if conn != nil {
+		return conn.Close()
 	}
 	return nil
 }

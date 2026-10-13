@@ -31,6 +31,9 @@ import (
 // buildGlobalAgentPage as the legacy branch.
 func (s *Server) listAgentsSorted(w http.ResponseWriter, r *http.Request, filter store.AgentFilter, p agentListParams, identity Identity) {
 	ctx := r.Context()
+	// ids= narrows every store read below (stats, fit probe, page) as one
+	// more ANDed filter; the per-row read pass is unchanged.
+	narrowFilterByIDs(&filter, p.ids)
 
 	binding := scopedCursorBinding(sortSuffix("agents", p.sort, p.dir), filter, identity)
 

@@ -26,8 +26,10 @@ import { customElement, property, state } from 'lit/decorators.js';
 
 import type { PageData, Template } from '../../shared/types.js';
 import { can } from '../../shared/types.js';
+import { describeSourceUrl, isTemplateSourceRefreshable } from '../../shared/source-url.js';
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
+import '../shared/detail-header.js';
 import '../shared/file-browser.js';
 import '../shared/file-editor.js';
 import { TemplateFileBrowserDataSource } from '../shared/file-browser.js';
@@ -72,6 +74,16 @@ export class ScionPageTemplateDetail extends LitElement {
   @state()
   private editorInitialPreview = false;
 
+  /** Whether a refresh from the template's source is in progress. */
+  @state()
+  private reimportRunning = false;
+
+  @state()
+  private reimportStatus = '';
+
+  @state()
+  private reimportError = '';
+
   private fileBrowserDataSource: FileBrowserDataSource | null = null;
   private fileEditorDataSource: FileEditorDataSource | null = null;
 
@@ -83,59 +95,6 @@ export class ScionPageTemplateDetail extends LitElement {
       margin: 0 auto;
     }
 
-    .back-links {
-      display: flex;
-      align-items: center;
-      gap: 1rem;
-      margin-bottom: 1rem;
-      flex-wrap: wrap;
-    }
-    .back-link {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.35rem;
-      color: var(--sl-color-neutral-600);
-      text-decoration: none;
-      font-size: 0.875rem;
-    }
-    .back-link:hover {
-      color: var(--sl-color-primary-600);
-    }
-
-    .template-header {
-      margin-bottom: 1.5rem;
-    }
-    .template-title {
-      display: flex;
-      align-items: flex-start;
-      gap: 0.75rem;
-      margin: 0 0 0.5rem;
-    }
-    .template-title > sl-icon {
-      flex-shrink: 0;
-      color: var(--sl-color-neutral-500);
-      font-size: 1.25rem;
-      /* Centre the icon on the first line of the name: (1.95rem h1 line box
-         - 1.25rem icon) / 2. */
-      margin-top: 0.35rem;
-    }
-    /* A long name wraps on its own line; the badges then follow on the next
-       line instead of floating beside a multi-line name. */
-    .header-title-text {
-      display: flex;
-      flex-wrap: wrap;
-      align-items: center;
-      gap: 0.5rem 0.75rem;
-      min-width: 0;
-    }
-    .template-title h1 {
-      margin: 0;
-      font-size: 1.5rem;
-      font-weight: 600;
-      line-height: 1.3;
-      min-width: 0;
-      overflow-wrap: anywhere;
-    }
     .harness-badge {
       display: inline-block;
       padding: 0.15rem 0.5rem;
@@ -156,6 +115,24 @@ export class ScionPageTemplateDetail extends LitElement {
       margin-top: 0.5rem;
       font-size: 0.75rem;
       color: var(--sl-color-neutral-500);
+    }
+    .template-meta-row {
+      flex-wrap: wrap;
+    }
+    .template-meta-row .source-url {
+      min-width: 0;
+      overflow-wrap: anywhere;
+    }
+    .reimport-status {
+      margin: 0.5rem 0 0;
+      font-size: 0.8rem;
+      white-space: pre-line;
+    }
+    .reimport-status.success {
+      color: var(--sl-color-success-700);
+    }
+    .reimport-status.error {
+      color: var(--sl-color-danger-700);
     }
     .template-meta-row .hash-meta {
       display: inline-flex;
@@ -293,7 +270,7 @@ export class ScionPageTemplateDetail extends LitElement {
     const browser = this.shadowRoot?.querySelector('scion-file-browser') as
       | import('../shared/file-browser.js').ScionFileBrowser
       | null;
-    browser?.loadFiles();
+    void browser?.loadFiles();
   }
 
   // ── Rendering ──
@@ -313,35 +290,23 @@ export class ScionPageTemplateDetail extends LitElement {
     }
     if (!this.template) return nothing;
 
-    return html`
-      <div class="back-links">
-        ${this.backLinks().map(
-          (link) => html`
-            <a href=${link.href} class="back-link">
-              <sl-icon name="arrow-left"></sl-icon>
-              ${link.label}
-            </a>
-          `
-        )}
-      </div>
-
-      ${this.renderHeader()} ${this.renderFilesSection()}
-    `;
+    return html`${this.renderHeader()} ${this.renderFilesSection()}`;
   }
 
   private renderHeader() {
     const t = this.template!;
     return html`
-      <div class="template-header">
-        <div class="template-title">
-          <sl-icon name="file-earmark-code"></sl-icon>
-          <div class="header-title-text">
-            <h1>${t.displayName || t.name}</h1>
-            ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
-          </div>
-        </div>
-        ${t.description ? html`<p class="template-description">${t.description}</p>` : ''}
-        <div class="template-meta-row">
+      <scion-detail-header heading=${t.displayName || t.name}>
+        ${this.backLinks().map(
+          (link) =>
+            html`<scion-back-link slot="back" href=${link.href}>${link.label}</scion-back-link>`
+        )}
+        <sl-icon slot="icon" name="file-earmark-code"></sl-icon>
+        ${t.harness ? html`<span class="harness-badge">${t.harness}</span>` : ''}
+        ${t.description
+          ? html`<p slot="meta" class="template-description">${t.description}</p>`
+          : ''}
+        <div slot="meta" class="template-meta-row">
           <span>Scope: ${t.scope}</span>
           <span>Status: ${t.status}</span>
           ${t.contentHash
@@ -350,18 +315,93 @@ export class ScionPageTemplateDetail extends LitElement {
                 <scion-hash-display .hash=${t.contentHash} max-width="14ch"></scion-hash-display
               ></span>`
             : ''}
-          ${t.config?.messageMode
+          ${this.renderSourceUrl(t.sourceUrl)}
+          ${t.agentConfig?.message_mode
             ? html`<span>
                 Mode:
                 <scion-message-mode-badge
-                  mode=${t.config.messageMode}
+                  mode=${t.agentConfig.message_mode}
                   size="small"
                 ></scion-message-mode-badge>
               </span>`
             : ''}
         </div>
-      </div>
+        ${this.reimportStatus
+          ? html`<p slot="meta" class="reimport-status success">${this.reimportStatus}</p>`
+          : ''}
+        ${this.reimportError
+          ? html`<p slot="meta" class="reimport-status error">${this.reimportError}</p>`
+          : ''}
+        ${isTemplateSourceRefreshable(t.sourceUrl)
+          ? html`
+              <div slot="actions" class="header-actions">
+                <sl-button
+                  size="small"
+                  variant="default"
+                  class="refresh-from-source"
+                  @click=${() => void this.startReimport()}
+                  ?disabled=${this.reimportRunning}
+                  ?loading=${this.reimportRunning}
+                >
+                  <sl-icon slot="prefix" name="arrow-repeat"></sl-icon>
+                  Refresh from Source
+                </sl-button>
+              </div>
+            `
+          : nothing}
+      </scion-detail-header>
     `;
+  }
+
+  private renderSourceUrl(sourceUrl: string | undefined): unknown {
+    const shown = describeSourceUrl(sourceUrl);
+    if (!shown) return '';
+    if (!shown.href) {
+      return html`<span class="source-url">Source: ${shown.text}</span>`;
+    }
+    return html`<span class="source-url"
+      >Source:
+      <a href=${shown.href} target="_blank" rel="noopener noreferrer">${shown.text}</a></span
+    >`;
+  }
+
+  // ── Refresh from Source ──
+
+  private async startReimport(): Promise<void> {
+    if (!this.template?.id || this.reimportRunning) return;
+    this.reimportRunning = true;
+    this.reimportStatus = '';
+    this.reimportError = '';
+
+    try {
+      const response = await apiFetch(`/api/v1/templates/${this.template.id}/reimport`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+
+      if (!response.ok) {
+        this.reimportError = await extractApiError(response, `HTTP ${response.status}`);
+        return;
+      }
+
+      const result = (await response.json()) as {
+        count?: number;
+        templates?: string[];
+        failed?: Array<{ name: string; reason: string }>;
+      };
+      const failed = result?.failed ?? [];
+      if (failed.length > 0) {
+        this.reimportError = `Refresh failed:\n${failed.map((f) => `${f.name}: ${f.reason}`).join('\n')}`;
+      } else {
+        this.reimportStatus = 'Refreshed from source.';
+      }
+      await this.loadTemplate();
+    } catch (err) {
+      this.reimportError = err instanceof Error ? err.message : 'Failed to refresh from source';
+    } finally {
+      this.reimportRunning = false;
+    }
   }
 
   private renderFilesSection() {

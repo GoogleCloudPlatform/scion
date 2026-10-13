@@ -23,23 +23,24 @@ import (
 )
 
 var (
-	provisionWorkspace    string
-	provisionMode         string
-	provisionDepth        int
-	provisionUID          int
-	provisionGID          int
-	provisionWaitSentinel bool
-	provisionTimeout      int
-	provisionPollInterval int
+	provisionWorkspace string
+	provisionMode      string
+	provisionDepth     int
+	provisionUID       int
+	provisionGID       int
+	provisionTimeout   int
 )
 
 var provisionCmd = &cobra.Command{
 	Use:   "provision",
-	Short: "Provision an NFS workspace (clone or wait for sentinel)",
+	Short: "Provision an NFS workspace",
 	Long: `Provision a shared workspace in an NFS-backed init container.
 
 In default (clone) mode, reads SCION_CLONE_URL and SCION_CLONE_BRANCH from
-the environment and invokes the shared provisioning function. The sentinel
+the environment and invokes the shared provisioning function. When
+GITHUB_TOKEN is set, the clone authenticates with it through a credential
+helper given to the clone command only; the token is not written to the
+clone URL, the workspace or the state directory. The sentinel
 file (.scion-provisioned) and the provisioning lock are kept in the
 project's provisioning state directory, which the Kubernetes runtime mounts
 next to the workspace and names in SCION_PROVISION_STATE_DIR, so nothing of
@@ -60,9 +61,6 @@ SCION_AGENT_SLUG), it does the same without a branch: it makes sure the
 agent's empty workspace directory exists and writes the sentinel. Nothing
 is cloned and no git is run.
 
-In --wait-for-sentinel mode, polls for the sentinel file written by the
-winning node's init container and exits 0 when found or non-zero on timeout.
-
 URL and branch are ALWAYS read from environment variables (never from flags)
 to prevent shell injection via crafted values.`,
 	SilenceErrors: true,
@@ -82,9 +80,6 @@ to prevent shell injection via crafted values.`,
 		ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGTERM, syscall.SIGINT)
 		defer stop()
 
-		if provisionWaitSentinel {
-			return runWaitForSentinel(ctx)
-		}
 		return runProvision(ctx)
 	},
 }
@@ -102,12 +97,8 @@ func init() {
 		"UID for chown of provisioned files (0 means 1000)")
 	provisionCmd.Flags().IntVar(&provisionGID, "gid", 1000,
 		"GID for chown of provisioned files (0 means 1000)")
-	provisionCmd.Flags().BoolVar(&provisionWaitSentinel, "wait-for-sentinel", false,
-		"Poll for sentinel file instead of provisioning (lock-loser mode)")
 	provisionCmd.Flags().IntVar(&provisionTimeout, "timeout", 300,
-		"Timeout in seconds for --wait-for-sentinel mode")
-	provisionCmd.Flags().IntVar(&provisionPollInterval, "poll-interval", 2,
-		"Poll interval in seconds for --wait-for-sentinel mode")
+		"Minimum time in seconds to wait for the provisioning lock (all modes except shared-plain)")
 }
 
 func runProvision(ctx context.Context) error {
@@ -222,14 +213,18 @@ func runProvision(ctx context.Context) error {
 			HostPath:   provisionWorkspace,
 			SharedDirs: sharedDirs,
 		},
-		ProjectID:   projectID,
-		Mode:        mode,
-		GitClone:    gc,
-		Locker:      nil, // no advisory locker in init container
-		NFSUID:      provisionUID,
-		NFSGID:      provisionGID,
-		SentinelDir: sentinelDir,
-		LegacyDir:   legacyDir,
+		ProjectID: projectID,
+		Mode:      mode,
+		GitClone:  gc,
+		// The Kubernetes runtime gives the cloning init container the
+		// project's git token from the agent's Secret (secretKeyRef) when
+		// one is configured. Only the clone command gets the credential
+		// helper; its value names the variable, not the token.
+		CloneWithToken: gc != nil && os.Getenv(provision.GitTokenEnv) != "",
+		NFSUID:         provisionUID,
+		NFSGID:         provisionGID,
+		SentinelDir:    sentinelDir,
+		LegacyDir:      legacyDir,
 		// F-111: this command's entire purpose is the chown. A silent
 		// failure here would reproduce the "workspace stuck root:root" bug
 		// invisibly — the sentinel would still get written, and every future
@@ -264,6 +259,9 @@ func runProvision(ctx context.Context) error {
 
 	log.Info("Provisioning workspace at %s (mode=%s, project=%s, shared_dirs=%d)",
 		provisionWorkspace, mode, projectID, len(sharedDirs))
+	if in.CloneWithToken {
+		log.Info("Cloning with the project's git credential (%s)", provision.GitTokenEnv)
+	}
 	if worktree {
 		log.Info("Adding the worktree for agent %s at %s", agentSlug, provision.WorktreePath(provisionWorkspace, agentSlug))
 	}
@@ -275,7 +273,7 @@ func runProvision(ctx context.Context) error {
 		log.Info("Agent workspace prepared")
 		return nil
 	}
-	if err := provision.ProvisionShared(in); err != nil {
+	if err := provisionShared(in); err != nil {
 		return fmt.Errorf("provision failed: %w", err)
 	}
 	log.Info("Workspace provisioned successfully")
@@ -296,8 +294,7 @@ func setAgentDirInput(in *provision.ProvisionInput, agentSlug, branch string, ti
 // is used as the broker passes it, as for worktrees on the local runtimes,
 // and ProvisionShared checks that it is a valid branch name. In this mode
 // every pod of the project takes the provisioning file lock, so the lock
-// wait is at least the --timeout value, the same time a pod waiting for
-// the sentinel would wait.
+// wait is at least the --timeout value.
 func setWorktreeInput(in *provision.ProvisionInput, agentSlug, branch string, timeoutSeconds int) {
 	in.AgentID = agentSlug
 	in.AgentName = branch
@@ -327,6 +324,10 @@ func worktreeSafeDirectoryEnv(getenv func(string) string, workspace, agentSlug s
 	}
 	return env
 }
+
+// provisionShared is provision.ProvisionShared; a variable so tests can
+// observe the input it is given.
+var provisionShared = provision.ProvisionShared
 
 // prepareStateDir is provision.PrepareStateDir; a variable so tests can
 // observe the owner it is given.
@@ -369,49 +370,6 @@ func provisionStateDir(getenv func(string) string, workspace string) (string, er
 func within(path, dir string) bool {
 	rel, err := filepath.Rel(dir, path)
 	return err == nil && filepath.IsLocal(rel)
-}
-
-func runWaitForSentinel(ctx context.Context) error {
-	// The provisioning container writes the sentinel in the state directory
-	// when the pod mounts one; an older one (or an earlier provisioning)
-	// wrote it in the workspace, which is still accepted.
-	stateDir, err := provisionStateDir(os.Getenv, provisionWorkspace)
-	if err != nil {
-		return err
-	}
-	dirs := []string{provisionWorkspace}
-	sentinelPath := filepath.Join(provisionWorkspace, provision.ProvisionSentinelFile)
-	if stateDir != "" {
-		dirs = []string{stateDir, provisionWorkspace}
-		sentinelPath = filepath.Join(stateDir, provision.ProvisionSentinelFile)
-	}
-	timeout := time.Duration(provisionTimeout) * time.Second
-	interval := time.Duration(provisionPollInterval) * time.Second
-	start := time.Now()
-	deadline := start.Add(timeout)
-
-	log.Info("Waiting for sentinel %s (timeout=%s, interval=%s)", sentinelPath, timeout, interval)
-
-	for {
-		// Any error (including EACCES on a state directory the node just
-		// created as root) means "not yet".
-		if provision.SentinelPresent(dirs...) {
-			log.Info("Sentinel found after %s", time.Since(start).Truncate(time.Second))
-			return nil
-		}
-
-		if time.Now().After(deadline) {
-			return fmt.Errorf("timed out waiting for sentinel %s after %s", sentinelPath, timeout)
-		}
-
-		// Sleep for the poll interval, but wake immediately on cancellation
-		// (SIGTERM/SIGINT) so the init container exits promptly.
-		select {
-		case <-ctx.Done():
-			return fmt.Errorf("cancelled while waiting for sentinel %s: %w", sentinelPath, ctx.Err())
-		case <-time.After(interval):
-		}
-	}
 }
 
 // validateProvisionOwner checks the --uid and --gid values before anything

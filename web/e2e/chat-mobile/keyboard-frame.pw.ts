@@ -65,10 +65,8 @@ async function installFakeKeyboard(page: Page): Promise<void> {
 async function withoutFieldSizing(page: Page): Promise<void> {
   await page.addInitScript(() => {
     const supports = CSS.supports.bind(CSS);
-    CSS.supports = ((...args: [string, string?]) =>
-      String(args[0]).includes('field-sizing')
-        ? false
-        : supports(...(args as [string, string]))) as typeof CSS.supports;
+    CSS.supports = (...args: [string, string?]) =>
+      String(args[0]).includes('field-sizing') ? false : supports(...(args as [string, string]));
   });
 }
 

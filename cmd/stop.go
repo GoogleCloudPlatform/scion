@@ -15,8 +15,10 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +61,11 @@ var stopCmd = &cobra.Command{
 		return getAgentNames(cmd, args, toComplete)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// A target-hub profile refuses the flags that need local state
+		// (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
 		if stopAll {
 			hubCtx, err := CheckHubAvailability(projectPath)
 			if err != nil {
@@ -177,12 +184,12 @@ func stopAllAgents() error {
 	}
 
 	if stopRm {
-		fmt.Printf("\nThe following %d agent(s) will be stopped and removed:\n", len(running))
-		for _, ra := range running {
-			fmt.Printf("  - %s\n", ra.Name)
+		names := make([]string, len(running))
+		for i, ra := range running {
+			names[i] = ra.Name
 		}
-		fmt.Println()
-		if !hubsync.ConfirmAction("Continue?", false, autoConfirm) {
+		if !confirmStopAllRm(names) {
+			// Declined: nothing is stopped; in JSON mode stdout stays empty.
 			return nil
 		}
 	}
@@ -196,14 +203,13 @@ func stopAllAgents() error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, ra := range running {
-		wg.Add(1)
-		go func(name string) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			name := running[i].Name
 
 			res := agentResult{Name: name, Status: "success"}
 
@@ -236,10 +242,7 @@ func stopAllAgents() error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(ra.Name)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if isJSONOutput() {
 		jsonResults := make([]map[string]interface{}, len(results))
@@ -287,6 +290,37 @@ func stopAllAgents() error {
 	return nil
 }
 
+// confirmStopAllRm lists the agents that stop --all --rm will stop and
+// remove, and asks the user to continue. In JSON mode the list and the
+// prompt go to stderr, and --yes skips the prompt silently, so stdout
+// carries only the JSON document.
+func confirmStopAllRm(names []string) bool {
+	if !isJSONOutput() {
+		fmt.Printf("\nThe following %d agent(s) will be stopped and removed:\n", len(names))
+		for _, n := range names {
+			fmt.Printf("  - %s\n", n)
+		}
+		fmt.Println()
+		return hubsync.ConfirmAction("Continue?", false, autoConfirm)
+	}
+	if autoConfirm {
+		return true
+	}
+	fmt.Fprintf(os.Stderr, "\nThe following %d agent(s) will be stopped and removed:\n", len(names))
+	for _, n := range names {
+		fmt.Fprintf(os.Stderr, "  - %s\n", n)
+	}
+	fmt.Fprint(os.Stderr, "\nContinue? (y/N): ")
+	input, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	if err != nil {
+		// Like hubsync.ConfirmAction: any read error, including EOF
+		// without a trailing newline, means the default (No).
+		return false
+	}
+	input = strings.ToLower(strings.TrimSpace(input))
+	return input == "y" || input == "yes"
+}
+
 // stopAllAgentsViaHub stops all running agents in the current project via the Hub.
 func stopAllAgentsViaHub(hubCtx *HubContext) error {
 	PrintUsingHub(hubCtx.Endpoint)
@@ -327,12 +361,12 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 	}
 
 	if stopRm {
-		fmt.Printf("\nThe following %d agent(s) will be stopped and removed:\n", len(running))
-		for _, a := range running {
-			fmt.Printf("  - %s\n", a.Name)
+		names := make([]string, len(running))
+		for i, a := range running {
+			names[i] = a.Name
 		}
-		fmt.Println()
-		if !hubsync.ConfirmAction("Continue?", false, autoConfirm) {
+		if !confirmStopAllRm(names) {
+			// Declined: nothing is stopped; in JSON mode stdout stays empty.
 			return nil
 		}
 	}
@@ -351,14 +385,13 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 
 	var (
 		mu      sync.Mutex
-		wg      sync.WaitGroup
 		results []agentResult
 	)
 
-	for _, a := range running {
-		wg.Add(1)
-		go func(ag hubclient.Agent) {
-			defer wg.Done()
+	// ptone/scion#3602: at most maxFanOutConcurrency agents in flight at once.
+	boundedFanOut(context.Background(), len(running), maxFanOutConcurrency, lifecycleFanOutQueuedHook,
+		func(i int) {
+			ag := running[i]
 
 			res := agentResult{Name: ag.Name, Status: "success"}
 
@@ -411,10 +444,7 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			mu.Lock()
 			results = append(results, res)
 			mu.Unlock()
-		}(a)
-	}
-
-	wg.Wait()
+		}, func(int) {})
 
 	if stopRm {
 		// Confirmed removals get the same local cleanup as scion delete
@@ -591,7 +621,7 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 // was confirmed but whose local cleanup failed. The command still succeeds.
 // stop --rm keeps the git branch, so the retry command does too.
 func stopRmCleanupWarning(agentName string, err error) string {
-	return fmt.Sprintf("removed via Hub but local cleanup failed: %v; run '%s' to retry", err, noHubDeleteCommand(agentName, true))
+	return fmt.Sprintf("removed via Hub but local cleanup failed: %v; run '%s' to retry", err, cleanupOnlyCommand(agentName, true))
 }
 
 // stopQueuedNotRemovedMessage is printed when stop --rm finds the stop queued

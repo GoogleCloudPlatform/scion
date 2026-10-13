@@ -63,8 +63,9 @@ type lifecycleDispatchRule struct {
 var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	"Server.handleAgentLifecycle":          {kind: intentRecorded},
 	"Server.suspendAgent":                  {kind: intentRecorded},
+	"Server.stopHeldAgent":                 {kind: intentRecorded},
 	"Server.handleStopAllAgents":           {kind: intentRecorded},
-	"Server.autoSuspendStalledAgents":      {kind: intentRecorded},
+	"Server.autoSuspendStalledAgent":       {kind: intentRecorded},
 	"Server.dispatchAgentEventHandler":     {kind: intentRecorded, recordedBy: "Server.withStartClaim"},
 	"Server.handleExistingAgent":           {kind: intentRecorded},
 	"Server.createAgentInProject":          {kind: intentRecorded},
@@ -139,7 +140,13 @@ func selectorCallNames(fd *ast.FuncDecl) map[string]int {
 func parseHubFuncs(t *testing.T) map[string]map[string]int {
 	t.Helper()
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards DispatchAgent lifecycle callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards DispatchAgent lifecycle callers.
+	files, err := globGuardScanDirs(".", "*.go")
 	if err != nil {
 		t.Fatalf("list package files: %v", err)
 	}
@@ -152,15 +159,23 @@ func parseHubFuncs(t *testing.T) map[string]map[string]int {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		if f.Name.Name != "hub" {
+		rel := filepath.Dir(name)
+		if f.Name.Name != guardScanPackage(rel) {
 			continue
+		}
+		// Functions of a guardScanSubdirs package are keyed by its slash
+		// path ("maintenance/Name"), so they cannot shadow a pkg/hub
+		// function of the same name.
+		prefix := ""
+		if rel != "." {
+			prefix = filepath.ToSlash(rel) + "/"
 		}
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok {
 				continue
 			}
-			funcs[funcDeclKey(fd)] = selectorCallNames(fd)
+			funcs[prefix+funcDeclKey(fd)] = selectorCallNames(fd)
 		}
 	}
 	if len(funcs) == 0 {

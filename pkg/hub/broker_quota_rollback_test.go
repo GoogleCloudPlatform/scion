@@ -30,18 +30,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// failingStartDispatcher is a quotaLifecycleDispatcher whose start dispatch
-// always fails without touching the agent, as a broker that cannot launch
-// the container would.
-type failingStartDispatcher struct {
-	quotaLifecycleDispatcher
-}
-
-func (d *failingStartDispatcher) DispatchAgentStart(_ context.Context, _ *store.Agent, _ string, _ bool) error {
-	d.startCount.Add(1)
-	return errors.New("simulated broker start failure")
-}
-
 // ptone/scion#1978: a failed start on an agent that is already running (and
 // so already holds its max_agents_per_broker reservation) must keep that
 // reservation, and the broker must still reject a start beyond its cap.
@@ -111,16 +99,6 @@ func TestBrokerQuota_FailedRestartReleasesReservation(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+running.ID+"/restart", nil)
 	require.GreaterOrEqual(t, rec.Code, 500, rec.Body.String())
 	assert.EqualValues(t, 0, brokerReservationCount(t, s, broker.ID))
-}
-
-// failingStopStartDispatcher fails both legs of a restart, as a broker that
-// cannot reach a still-running container would.
-type failingStopStartDispatcher struct {
-	failingStartDispatcher
-}
-
-func (d *failingStopStartDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	return errors.New("simulated broker stop failure")
 }
 
 // ptone/scion#1978, ptone/scion#2710: when the stop leg of a restart fails,
@@ -227,15 +205,6 @@ func (d *swappableStartDispatcher) DispatchAgentStart(ctx context.Context, agent
 	return d.quotaLifecycleDispatcher.DispatchAgentStart(ctx, agent, task, resume)
 }
 
-func hasReservation(t *testing.T, s store.Store, limitName, resourceID string) bool {
-	t.Helper()
-	def, err := s.GetLimitDefinitionByName(context.Background(), limitName)
-	require.NoError(t, err)
-	held, err := s.HasActiveReservation(context.Background(), def.ID, resourceID)
-	require.NoError(t, err)
-	return held
-}
-
 // ptone/scion#1978: the per-project agent reservation lasts as long as the
 // agent exists. Releasing the broker slot (stop, suspend, failed-start
 // rollback) must not release it; delete releases both.
@@ -288,22 +257,6 @@ func TestProjectQuota_KeptAcrossBrokerReleases_ReleasedOnDelete(t *testing.T) {
 	require.Less(t, rec.Code, 300, rec.Body.String())
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, id))
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerProject, id), "delete releases the project reservation")
-}
-
-// brokerReservationIDs returns the IDs of broker's active
-// max_agents_per_broker reservations.
-func brokerReservationIDs(t *testing.T, s store.Store, brokerID string) []string {
-	t.Helper()
-	ctx := context.Background()
-	def, err := s.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
-	require.NoError(t, err)
-	rows, err := s.ListActiveReservations(ctx, def.ID, store.QuotaScopeBroker, brokerID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(rows))
-	for _, r := range rows {
-		ids = append(ids, r.ID)
-	}
-	return ids
 }
 
 // ptone/scion#1978: a restart holds the agent's broker reservation across

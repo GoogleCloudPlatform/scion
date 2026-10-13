@@ -13,6 +13,8 @@
 // limitations under the License.
 
 import type { Page } from '@playwright/test';
+import { stubMainClientModule } from '../client-main-stub.js';
+import { emitEventSourceUpdate, installEventSourceStub } from '../event-source-stub.js';
 
 /** An agent with an existing DM — selecting it must reuse that DM, not create one. */
 export const AGENT_WITH_DM = { id: 'agent-coder-one', name: 'Coder One', slug: 'coder-one' };
@@ -99,58 +101,22 @@ export interface TrackedRequest {
 }
 
 /**
- * chat.ts (and chat-members.ts/chat-thread.ts) import `navigateTo`,
- * `replaceRoute`, `pushRoute` and `stateManager` from `client/main.js` — the
- * app's real bootstrap module, which self-initializes on `DOMContentLoaded` (SSR hydration, feature-flag
- * fetch, the full page router, admin-status probe...) the instant anything
- * imports it, real hub or not. That is exactly the router/bootstrap this
- * fixture deliberately does not run (it mounts scion-page-chat directly), so
- * the module is replaced at the network layer with the minimal real surface
- * those components actually call — this is the browser-test equivalent of
- * `vi.mock('../../client/main.js', ...)` in the vitest unit tests.
- */
-export async function stubMainClientModule(page: Page): Promise<void> {
-  await page.route('**/src/client/main.ts', (route) =>
-    route.fulfill({
-      contentType: 'text/javascript',
-      body: `
-        class FixtureStateManager extends EventTarget {
-          currentScope = null;
-          isConnected() { return false; }
-          setScope() {}
-          setCurrentUserId() {}
-          hydrate() {}
-          getAgent() { return undefined; }
-          getAgents() { return new Map(); }
-          getDeletedAgentIds() { return new Set(); }
-          removeAgent() {}
-          seedAgents() {}
-        }
-        export const stateManager = new FixtureStateManager();
-        export function navigateTo(path) {
-          const url = new URL(path, location.origin);
-          history.pushState({}, '', url.pathname + url.search + url.hash);
-          window.dispatchEvent(new PopStateEvent('popstate'));
-        }
-        export function replaceRoute(path) {
-          history.replaceState(history.state, '', path + location.search + location.hash);
-          return Promise.resolve();
-        }
-        export function pushRoute(path) {
-          history.pushState({}, '', path);
-          return Promise.resolve();
-        }
-      `,
-    })
-  );
-}
-
-/**
  * Optional People/Threads fixture data. Every field defaults to empty, so a
  * spec calling `setupApiMocks(page)` with no second argument gets 0 threads
  * and 0 people; passing overrides opts a spec into real Threads/People rows.
  */
 export interface PaletteFixtureOverrides {
+  /** What `GET /api/v1/chat/unread-count` reports (default 0). */
+  unreadConversations?: number;
+  /** Further messageable agents, listed after the default ones. */
+  agents?: Array<{
+    id: string;
+    name: string;
+    slug: string;
+    projectId?: string;
+    project?: string;
+    projectSlug?: string;
+  }>;
   spaces?: Array<{ projectId: string; projectName: string; projectSlug: string }>;
   threadsByProjectId?: Record<
     string,
@@ -191,62 +157,20 @@ export const DOC_BINARY_ATTACHMENT = {
   sentAt: '2026-09-28T13:00:00Z',
 };
 
-declare global {
-  interface Window {
-    __fixtureEventSources: Array<EventTarget & { readyState: number }>;
-  }
-}
-
 /**
- * Stand-in for the hub's `/events` stream, which the fixture server does not
- * serve. Each `EventSource` opens on the next microtask, so the agent store's
- * feed connects at once instead of waiting out its connect timeout. Streams
- * are kept on `window.__fixtureEventSources`; {@link emitAgentEvent} delivers
- * a hub update on the open ones.
+ * Deliver `project.<projectId>.agent.<type>` on every open stub stream. The
+ * fixture server does not serve the hub's `/events` stream, so
+ * {@link setupApiMocks} installs the shared `EventSource` stub, which opens
+ * each stream on the next microtask and lets the agent store's feed connect
+ * at once instead of waiting out its connect timeout.
  */
-export async function stubEventSource(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    class FixtureEventSource extends EventTarget {
-      readonly url: string;
-      readyState = 0;
-      onopen: ((event: Event) => void) | null = null;
-      onerror: ((event: Event) => void) | null = null;
-      onmessage: ((event: MessageEvent) => void) | null = null;
-      constructor(url: string | URL) {
-        super();
-        this.url = String(url);
-        window.__fixtureEventSources.push(this);
-        queueMicrotask(() => {
-          if (this.readyState !== 0) return;
-          this.readyState = 1;
-          this.onopen?.(new Event('open'));
-        });
-      }
-      close(): void {
-        this.readyState = 2;
-      }
-    }
-    window.__fixtureEventSources = [];
-    window.EventSource = FixtureEventSource as unknown as typeof EventSource;
-  });
-}
-
-/** Deliver `project.<projectId>.agent.<type>` on every open fixture stream. */
 export async function emitAgentEvent(
   page: Page,
   projectId: string,
   type: string,
   data: Record<string, unknown>
 ): Promise<void> {
-  await page.evaluate(
-    ({ subject, data }) => {
-      for (const es of window.__fixtureEventSources) {
-        if (es.readyState !== 1) continue;
-        es.dispatchEvent(new MessageEvent('update', { data: JSON.stringify({ subject, data }) }));
-      }
-    },
-    { subject: `project.${projectId}.agent.${type}`, data }
-  );
+  await emitEventSourceUpdate(page, `project.${projectId}.agent.${type}`, data);
 }
 
 /**
@@ -263,7 +187,7 @@ export async function setupApiMocks(
 ): Promise<TrackedRequest[]> {
   const requests: TrackedRequest[] = [];
   await stubMainClientModule(page);
-  await stubEventSource(page);
+  await installEventSourceStub(page);
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request();
@@ -289,6 +213,11 @@ export async function setupApiMocks(
               _capabilities: { actions: ['lifecycle', 'attach'] },
               _messageability: { canMessage: false, canReachViewer: true },
             },
+            ...(overrides.agents ?? []).map((agent) => ({
+              ...agent,
+              phase: 'running',
+              _capabilities: { actions: ['attach'] },
+            })),
           ],
         },
       });
@@ -328,6 +257,10 @@ export async function setupApiMocks(
         },
       });
     }
+    if (path === '/api/v1/chat/unread-count') {
+      const c = overrides.unreadConversations ?? 0;
+      return route.fulfill({ json: { conversations: c, threads: c, dms: 0 } });
+    }
     if (path === '/api/v1/chat/spaces') {
       return route.fulfill({ json: { spaces: overrides.spaces ?? [] } });
     }
@@ -347,11 +280,6 @@ export async function setupApiMocks(
     }
     if (path === '/api/v1/users') {
       return route.fulfill({ json: { users: overrides.users ?? [] } });
-    }
-    if (path === '/api/v1/messages') {
-      // scion-inbox-tray, mounted by the real header in the `?shell=1`
-      // fixture — expects `{ items: [...] }`.
-      return route.fulfill({ json: { items: [] } });
     }
     if (path === '/api/v1/notifications') {
       // scion-notification-tray, mounted by the real header in the

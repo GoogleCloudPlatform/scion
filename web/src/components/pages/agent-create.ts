@@ -17,21 +17,24 @@
 /**
  * Unified agent creation page component
  *
- * Single-surface form for creating and starting a new agent. All settings
- * (previously split between agent-create and agent-configure) are available
- * in a default section + an "Additional Options" disclosure with tabbed
- * advanced settings.
+ * Single-surface form for creating and starting a new agent: an identity
+ * section (name, project, template, harness config, broker, profile, task,
+ * notify) and an "Additional Options" disclosure that embeds the shared
+ * <scion-agent-config-form> (ptone/scion#3974). The form sends only the
+ * fields the user set; everything else is resolved by the hub, and the
+ * inherited values the page can read are shown as source-labelled
+ * placeholders (resolveInheritedPlaceholders).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import type {
+  AgentLaunch,
+  AgentPhase,
   Project,
   RuntimeBroker,
   Template,
-  GCPServiceAccount,
-  MessageMode,
 } from '../../shared/types.js';
 
 interface HarnessConfigEntry {
@@ -43,16 +46,25 @@ interface HarnessConfigEntry {
   scope: string;
 }
 
-import { isSharedWorkspace } from '../../shared/types.js';
+import { isAgentLaunching, isIncompleteCreate, isSharedWorkspace } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { KNOWN_HARNESS_NAMES, harnessDisplayName } from '../../shared/harness-utils.js';
-import { normalizeModelAlias } from '../../shared/model-utils.js';
-import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { defaultTriggersHint } from '../../shared/notification-triggers.js';
+import {
+  resolveInheritedPlaceholders,
+  type AgentConfigPlaceholder,
+  type HubPublicDefaults,
+  type ProjectCreateDefaults,
+} from '../../shared/agent-config-inherited.js';
+import { GcpIdentityState } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
 import { apiFetch, apiFetchAllPages, parseApiError } from '../../client/api.js';
 import { navigateTo } from '../../client/navigation.js';
-import type { EnvEntry } from '../shared/env-editor.js';
-import '../shared/env-editor.js';
+import { showToast } from '../../utils/toast.js';
+import { showResponseWarnings, showResponseBodyWarnings } from '../../client/response-warnings.js';
+import type { ScionAgentConfigForm } from '../shared/agent-config-form.js';
+import '../shared/agent-config-form.js';
 import '../shared/status-badge.js';
 
 @customElement('scion-page-agent-create')
@@ -61,8 +73,9 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private projects: Project[] = [];
   @state() private brokers: RuntimeBroker[] = [];
   @state() private templates: Template[] = [];
+  /** The template list failed to load; the rest of the form still loads. */
+  @state() private templatesLoadFailed = false;
   @state() private harnessConfigs: HarnessConfigEntry[] = [];
-  @state() private gcpServiceAccounts: GCPServiceAccount[] = [];
 
   // ── UI State ────────────────────────────────────────────────────────
   @state() private loading = true;
@@ -82,146 +95,28 @@ export class ScionPageAgentCreate extends LitElement {
   @state() private task = '';
   @state() private notify = true;
 
-  // ── Additional Options > General Tab ────────────────────────────────
-  @state() private branch = '';
-  @state() private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
-  @state() private customModelId = '';
-  @state() private thinkingLevel: number | null = null;
-  @state() private image = '';
-  @state() private containerUser = '';
-  @state() private telemetryEnabled = false;
-  @state() private autoExposePortsEnabled = false;
-  @state() private hubDefaultRuntimeBroker = '';
-  @state() private hubDefaultHarnessConfig = '';
-  @state() private hubDefaultTemplate = '';
-  @state() private hubDefaultModel = '';
-  @state() private autoExposePortsMode = 'allowlist';
-  @state() private autoExposePortsList = '';
-  @state() private autoExposePortsInterval = '3s';
-  // Set once the user operates the auto-expose toggle or a sub-field. Only
-  // then does buildConfig send the auto-expose env keys, as explicit values,
-  // even when they equal the seeded hub default. Left unsent, the agent
-  // inherits the project, then template, then hub default value.
-  @state() private autoExposeTouched = false;
+  // ── Additional Options ──────────────────────────────────────────
+  /** The hub's public settings, for the hub-tier placeholders. */
+  @state() private hubSettings: HubPublicDefaults = {};
+  /** The selected project's settings, for the project-tier placeholders. */
+  @state() private projectSettings: ProjectCreateDefaults | null = null;
 
-  // ── Additional Options > Auth & Security Tab ────────────────────────
-  @state() private agentRole = '';
-  @state() private messageMode = '';
-  @state() private harnessAuth = '';
-  @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
-  @state() private gcpServiceAccountId = '';
   /**
-   * True once the user has explicitly interacted with the GCP Identity
-   * picker (either select) this session. Reset to false in two cases:
-   * defaults are recomputed from scratch (loadGCPServiceAccounts, e.g. on a
-   * project change); and normalizeGcpModeForTarget rewrites an explicit
-   * "block" choice to "passthrough" because the target became known-
-   * Kubernetes out from under it (e.g. the user picked Block on a docker
-   * broker, then switched brokers) — that rewritten value is not something
-   * the user chose for the new target, so it must not be treated as a user
-   * choice either.
-   *
-   * Gates whether gcp_identity is sent at all on submit: on a known-Kubernetes
-   * target with no explicit user choice, the request omits gcp_identity
-   * entirely so the Hub's own project/hub-default ladder — and, if nothing is
-   * configured anywhere, Phase 1's unset fallback — resolves it. Substituting
-   * an explicit "passthrough" there instead would route the request through
-   * the Hub's passthrough ownership gate (broker owner/admin + registered
-   * host service account), which a request that never asked for passthrough
-   * should not have to pass.
+   * The GCP identity picker's state. Owned here, so submit can validate and
+   * build gcp_identity from it, and rendered by the shared form.
    */
-  @state() private gcpIdentityUserSet = false;
-  /**
-   * True when the user's most recent explicit pick was "Block", and that
-   * pick is currently suspended because normalizeGcpModeForTarget's
-   * Kubernetes constraint overrode it (Block cannot be sent on a
-   * Kubernetes target). Reinstated — mode back to "block", gcpIdentityUserSet
-   * back to true — as soon as the target stops being Kubernetes-only, so the
-   * choice is not lost to a round trip through a Kubernetes target. Cleared
-   * by any new explicit pick or by loadGCPServiceAccounts recomputing from
-   * scratch, so it only ever tracks the single most recent explicit Block
-   * pick and cannot outlive it.
-   */
-  private gcpUserBlockSuspended = false;
-  /**
-   * The GCP identity mode that applies when nothing has been explicitly
-   * chosen, *before* any Kubernetes-only display substitution: this page's
-   * own "block" placeholder, or the project's configured default. Set only
-   * in loadGCPServiceAccounts, which always records the project default it
-   * found here; the current value (gcpMetadataMode) is seeded from it only
-   * when !gcpIdentityUserSet, so an explicit user pick made while the load
-   * was in flight is left in place (ptone/scion#2548).
-   *
-   * normalizeGcpModeForTarget derives the untouched display value fresh from
-   * this field on every relevant change, rather than remembering "the
-   * current value is a substitution" with a sticky flag — a flag like that
-   * can outlive the specific default it was tracking (for example, it stays
-   * set across an awaited settings fetch that later assigns a real default
-   * of "passthrough" or "assign", with nothing to clear it), and then
-   * misfires on an unrelated later change. Recomputing from this field
-   * instead means there is nothing to go stale.
-   */
-  @state() private defaultGcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
-  /**
-   * The service account ID that goes with defaultGcpMetadataMode === 'assign'
-   * (empty otherwise). Set only in loadGCPServiceAccounts, alongside
-   * defaultGcpMetadataMode: it always records the project default, and
-   * gcpServiceAccountId is seeded from it only when !gcpIdentityUserSet. It
-   * exists so normalizeGcpModeForTarget can restore the correct
-   * service account, not just the correct mode, if an explicit choice that
-   * cleared gcpServiceAccountId is later undone by the Kubernetes Block
-   * constraint (see normalizeGcpModeForTarget).
-   */
-  @state() private defaultGcpServiceAccountId = '';
-  /**
-   * This project's own default GCP identity mode ('block', 'passthrough',
-   * 'assign'), or '' when the project has none configured. Set in
-   * loadGCPServiceAccounts. Used only to pick the accurate wording for the
-   * Kubernetes hint when the picker is untouched: with a project default
-   * present, omitting gcp_identity resolves to *that* default, not to
-   * Kubernetes' own broker-level default — and when that default is itself
-   * "block", the create request will be rejected at dispatch, so the hint
-   * must say so rather than just naming "the project's own default".
-   */
-  @state() private projectGCPIdentityDefaultMode = '';
-
-  // ── Additional Options > Prompts Tab ────────────────────────────────
-  @state() private systemPrompt = '';
-  @state() private agentInstructions = '';
-
-  // ── Additional Options > Limits & Resources Tab ─────────────────────
-  @state() private maxTurns = 0;
-  @state() private maxModelCalls = 0;
-  @state() private maxDuration = '';
-  @state() private cpuRequest = '';
-  @state() private memoryRequest = '';
-  @state() private cpuLimit = '';
-  @state() private memoryLimit = '';
-  @state() private disk = '';
-
-  // ── Additional Options > Environment & Labels Tab ───────────────────
-  @state() private envEntries: EnvEntry[] = [];
-  @state() private labelEntries: Array<{ key: string; value: string }> = [];
+  readonly gcp = new GcpIdentityState();
 
   // ── Internal ────────────────────────────────────────────────────────
+
+  /** The form data has loaded at least once. */
+  private loadedOnce = false;
 
   /** Whether the projectId was explicitly passed via URL query param */
   private projectFromUrl = false;
 
   /** Cached project settings keyed by projectId */
-  private projectSettingsCache: Map<
-    string,
-    {
-      defaultTemplate?: string;
-      defaultHarnessConfig?: string;
-      defaultMaxTurns?: number;
-      defaultMaxModelCalls?: number;
-      defaultMaxDuration?: string;
-      defaultGCPIdentityMode?: string;
-      defaultGCPIdentityServiceAccountID?: string;
-      defaultModel?: string;
-    }
-  > = new Map();
+  private projectSettingsCache: Map<string, ProjectCreateDefaults> = new Map();
 
   /** Profiles available on the currently selected broker */
   private get selectedBrokerProfiles(): import('../../shared/types.js').BrokerProfile[] {
@@ -232,8 +127,9 @@ export class ScionPageAgentCreate extends LitElement {
 
   /**
    * Whether the currently selected broker/profile combination is reliably
-   * known to resolve to a Kubernetes runtime. Block is not offered in that
-   * case. This deliberately does not guess: with no broker selected, no
+   * known to resolve to a Kubernetes runtime. The GCP identity hint then says
+   * what Block means there, and the service accounts' mapping state is asked
+   * for that target. This deliberately does not guess: with no broker selected, no
    * matching profile, or (with no profile chosen) a broker whose available
    * profiles mix runtime types, this is false.
    */
@@ -241,73 +137,6 @@ export class ScionPageAgentCreate extends LitElement {
     if (!this.brokerId) return false;
     const broker = this.brokers.find((b) => b.id === this.brokerId);
     return isTargetKubernetesOnly(broker, this.profile);
-  }
-
-  /**
-   * True when omitting gcp_identity would resolve to this project's own
-   * stored default of "block" on a known-Kubernetes target — a request
-   * Phase 1 rejects at dispatch. Unlike the general known-Kubernetes case
-   * (where omitting safely falls through the Hub's ladder), there is no
-   * identity here that is safe to leave unset, so the picker must not show a
-   * pre-selected value: Shoelace only fires `sl-change` when the picked
-   * value differs from the current one, so a picker already showing
-   * "Passthrough" (normalizeGcpModeForTarget's display-only correction)
-   * would silently swallow a user re-picking the same option, leaving
-   * gcpIdentityUserSet false and the dangerous omission in place. Showing no
-   * value means any pick — including Passthrough — is a real change.
-   */
-  private get blockDefaultNeedsExplicitChoice(): boolean {
-    return (
-      this.targetRuntimeIsKubernetesOnly &&
-      this.projectGCPIdentityDefaultMode === 'block' &&
-      !this.gcpIdentityUserSet
-    );
-  }
-
-  /**
-   * The Kubernetes-specific portion of the GCP Identity hint, naming the
-   * actual effective identity rather than overclaiming the broker's own
-   * default applies — that is only true when nothing is configured at any
-   * level. Four cases:
-   *  - the user explicitly picked a mode here: just name that Block isn't an
-   *    option, no further explanation needed;
-   *  - untouched, and this project's own default is itself "block": there is
-   *    no identity that is safe to leave unset here (see
-   *    blockDefaultNeedsExplicitChoice), so say that creation is blocked
-   *    until an explicit choice is made, and name Assign Service Account
-   *    only when the project actually has a service account to offer;
-   *  - untouched, but this project has some other default GCP identity
-   *    configured: omitting gcp_identity resolves to *that* default, not to
-   *    Kubernetes' own default — say so;
-   *  - untouched, and this project has no default: the create request omits
-   *    gcp_identity, and what resolves depends on the hub-wide default (which
-   *    this page has no visibility into) or, if nothing is configured
-   *    anywhere, Kubernetes' own default (passthrough, Phase 1).
-   */
-  private get kubernetesIdentityHintSuffix(): string {
-    if (this.gcpIdentityUserSet) {
-      return 'Block is not available for a Kubernetes runtime target.';
-    }
-    if (this.projectGCPIdentityDefaultMode === 'block') {
-      return (
-        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
-        'dispatch; creating this agent is blocked until you explicitly choose Passthrough' +
-        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account.' : '.')
-      );
-    }
-    if (this.projectGCPIdentityDefaultMode) {
-      return (
-        'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-        "chosen here, so this project's own default GCP identity applies instead; choosing " +
-        'Passthrough or Assign here sends that choice explicitly instead of the project default.'
-      );
-    }
-    return (
-      'Block is not available for a Kubernetes runtime target. No explicit identity has been ' +
-      'chosen, and this project has no default configured, so the hub-wide default — or, if ' +
-      "none is configured there either, Kubernetes' own default — applies automatically; " +
-      'choosing Passthrough or Assign here sends that choice explicitly instead.'
-    );
   }
 
   /** The currently selected project */
@@ -321,9 +150,22 @@ export class ScionPageAgentCreate extends LitElement {
     return this.projects.find((p) => p.id === this.projectId);
   }
 
-  /** Verified GCP service accounts for the assign dropdown */
-  private get verifiedGCPServiceAccounts(): GCPServiceAccount[] {
-    return this.gcpServiceAccounts.filter((sa) => sa.verified);
+  /** The selected template, if any. */
+  private get selectedTemplate(): Template | undefined {
+    return this.templates.find((t) => t.id === this.templateId);
+  }
+
+  /** Inherited values for the form's unset fields, from what this page fetched. */
+  private get placeholders(): Record<string, AgentConfigPlaceholder> {
+    return resolveInheritedPlaceholders({
+      template: this.selectedTemplate,
+      projectSettings: this.projectSettings,
+      hubSettings: this.hubSettings,
+    });
+  }
+
+  private get form(): ScionAgentConfigForm | null {
+    return this.shadowRoot?.querySelector('scion-agent-config-form') ?? null;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -521,20 +363,6 @@ export class ScionPageAgentCreate extends LitElement {
     sl-details::part(content) {
       padding: 0 1rem 1rem 1rem;
     }
-
-    sl-tab-group {
-      --indicator-color: var(--scion-primary, #3b82f6);
-    }
-
-    sl-tab-group::part(body) {
-      padding-top: 1.25rem;
-    }
-
-    .field-row {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 1rem;
-    }
   `;
 
   // ═══════════════════════════════════════════════════════════════════
@@ -563,24 +391,19 @@ export class ScionPageAgentCreate extends LitElement {
 
   override willUpdate(changedProperties: Map<string, unknown>): void {
     super.willUpdate(changedProperties);
-    // Block is not offered for a Kubernetes runtime target: the <sl-option>
-    // is not rendered, so a mode of "block" would leave the select showing
-    // nothing. Re-check whenever the broker/profile selection, the broker
-    // list, the mode, or the underlying default changes, and fall back to
-    // displaying "passthrough" instead. This runs in willUpdate (before
-    // render), not updated, so the correction lands in the same update cycle
-    // instead of scheduling a second one. (This is a display-only correction
-    // — whether an explicit identity is actually sent on submit is gated
-    // separately by gcpIdentityUserSet; see buildConfig/handleSubmit.)
+    // Hand the GCP identity state the current target whenever the
+    // broker/profile selection or the broker list changes: its hint
+    // describes Block on a Kubernetes target. Whether an explicit identity
+    // is sent is gated separately by gcpIdentityUserSet.
     if (
       changedProperties.has('brokerId') ||
       changedProperties.has('profile') ||
-      changedProperties.has('brokers') ||
-      changedProperties.has('gcpMetadataMode') ||
-      changedProperties.has('defaultGcpMetadataMode') ||
-      changedProperties.has('defaultGcpServiceAccountId')
+      changedProperties.has('brokers')
     ) {
-      this.normalizeGcpModeForTarget();
+      this.gcp.setTarget(this.targetRuntimeIsKubernetesOnly, this.profile);
+      // The accounts' mapping state is for one target: ask again when it
+      // changes (ptone/scion#4391). Not before the first load has started.
+      void this.gcpAccounts.targetChanged();
     }
   }
 
@@ -591,82 +414,11 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
-  /**
-   * Keeps the *displayed* gcpMetadataMode correct for the current target.
-   *
-   * Block is never a valid value to send on a known-Kubernetes target (see
-   * targetRuntimeIsKubernetesOnly) — the dispatch rejects it — so a mode of
-   * "block" is corrected away regardless of whether it is an explicit user
-   * choice or this page's own placeholder default. When it overrides an
-   * *explicit* choice, that choice is suspended in gcpUserBlockSuspended
-   * rather than discarded: the user picked Block for a specific (then
-   * non-Kubernetes) target, and switching through a Kubernetes target and
-   * back does not mean they take it back. Clearing gcpIdentityUserSet here
-   * puts the target back in the same "no explicit choice" state as if the
-   * user had never touched the picker, so the suspended Block (or, with no
-   * suspension, nothing) is not silently resent as an explicit "passthrough"
-   * nobody chose for the Kubernetes target (which would otherwise route
-   * through the Hub's passthrough ownership gate for a request that never
-   * asked for passthrough).
-   *
-   * Reinstating the suspended Block as soon as the target stops being
-   * Kubernetes-only — rather than only on the next explicit pick — is what
-   * makes it a *suspension* and not a discard: gcpUserBlockSuspended is
-   * cleared by any new explicit pick (sl-change) or by loadGCPServiceAccounts
-   * recomputing from scratch (a project change), so it can only ever record
-   * the single most recent explicit Block pick and cannot go stale the way a
-   * value substituted into gcpMetadataMode itself could (see
-   * defaultGcpMetadataMode's own doc comment for that history).
-   *
-   * Once there is no explicit choice standing, and no suspended one to
-   * reinstate, the displayed mode is recomputed fresh from
-   * defaultGcpMetadataMode — the project's configured default, or this
-   * page's own "block" placeholder — substituted to "passthrough" only when
-   * that default is itself "block" and the target is Kubernetes-only.
-   * Recomputing this on every relevant change, rather than remembering "the
-   * current value is a substitution" with a flag, means there is nothing
-   * that can go stale: a default of "passthrough" or "assign" is never at
-   * risk of being overwritten by a later target switch, because it was
-   * never treated as a substitution to reverse in the first place.
-   *
-   * Idempotent and safe to call from anywhere that just changed the broker,
-   * profile, mode, or default.
-   */
-  private normalizeGcpModeForTarget(): void {
-    if (this.gcpUserBlockSuspended && !this.targetRuntimeIsKubernetesOnly) {
-      this.gcpMetadataMode = 'block';
-      this.gcpServiceAccountId = '';
-      this.gcpIdentityUserSet = true;
-      this.gcpUserBlockSuspended = false;
-      return;
-    }
-    if (this.gcpIdentityUserSet) {
-      if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
-        this.gcpIdentityUserSet = false;
-        this.gcpUserBlockSuspended = true;
-      } else {
-        return;
-      }
-    }
-    const effective: 'block' | 'passthrough' | 'assign' =
-      this.targetRuntimeIsKubernetesOnly && this.defaultGcpMetadataMode === 'block'
-        ? 'passthrough'
-        : this.defaultGcpMetadataMode;
-    if (this.gcpMetadataMode !== effective) {
-      this.gcpMetadataMode = effective;
-    }
-    // Keep the service account in step with the mode: restoring "assign" is
-    // useless without also restoring which account it assigns — an explicit
-    // pick of a different mode clears gcpServiceAccountId (see the mode
-    // select's own sl-change handler below), and the Kubernetes Block
-    // constraint above can undo that pick without going through sl-change.
-    if (effective === 'assign') {
-      if (this.gcpServiceAccountId !== this.defaultGcpServiceAccountId) {
-        this.gcpServiceAccountId = this.defaultGcpServiceAccountId;
-      }
-    } else if (this.gcpServiceAccountId) {
-      this.gcpServiceAccountId = '';
-    }
+  /** Completes once this page and the embedded form have rendered. */
+  protected override async getUpdateComplete(): Promise<boolean> {
+    const done = await super.getUpdateComplete();
+    await this.form?.updateComplete;
+    return done;
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -698,7 +450,19 @@ export class ScionPageAgentCreate extends LitElement {
           // The unfiltered list is already scoped to what the caller may read.
           apiFetch('/api/v1/projects?limit=100'),
           fetch('/api/v1/runtime-brokers?limit=100', { credentials: 'include' }),
-          apiFetchAllPages<Template>(tmplUrl, 'templates'),
+          // Caught on its own: a failed template page leaves the template
+          // list empty with an inline error instead of failing the form.
+          apiFetchAllPages<Template>(tmplUrl, 'templates').then(
+            (list) => {
+              this.templatesLoadFailed = false;
+              return list;
+            },
+            (err: unknown) => {
+              console.error('Failed to load templates:', err);
+              this.templatesLoadFailed = true;
+              return [] as Template[];
+            }
+          ),
           fetch('/api/v1/settings/public', { credentials: 'include' }),
           apiFetch('/api/v1/harness-configs?status=active&limit=100'),
         ]);
@@ -717,22 +481,7 @@ export class ScionPageAgentCreate extends LitElement {
       this.templates = templates;
 
       if (settingsRes.ok) {
-        const data = (await settingsRes.json()) as {
-          telemetryEnabled?: boolean;
-          autoExposePortsEnabled?: boolean;
-          defaultRuntimeBroker?: string;
-          defaultHarnessConfig?: string;
-          defaultTemplate?: string;
-          defaultModel?: string;
-        };
-        this.telemetryEnabled = data.telemetryEnabled ?? false;
-        if (!this.autoExposeTouched) {
-          this.autoExposePortsEnabled = data.autoExposePortsEnabled ?? false;
-        }
-        this.hubDefaultRuntimeBroker = data.defaultRuntimeBroker ?? '';
-        this.hubDefaultHarnessConfig = data.defaultHarnessConfig ?? '';
-        this.hubDefaultTemplate = data.defaultTemplate ?? '';
-        this.hubDefaultModel = data.defaultModel ?? '';
+        this.hubSettings = (await settingsRes.json()) as HubPublicDefaults;
       }
 
       if (harnessConfigsRes.ok) {
@@ -762,9 +511,9 @@ export class ScionPageAgentCreate extends LitElement {
         await this.loadGCPServiceAccounts();
       }
 
-      // Apply project-settings defaults to advanced fields
+      // Project settings, for the inherited placeholders
       if (this.projectId) {
-        await this.applyProjectDefaults();
+        await this.loadProjectSettings();
       }
 
       // Reload harness configs scoped to the selected project
@@ -776,49 +525,21 @@ export class ScionPageAgentCreate extends LitElement {
       this.error = 'Failed to load form data. Please try again.';
     } finally {
       this.loading = false;
+      this.loadedOnce = true;
     }
   }
 
-  /** Apply project-settings defaults to advanced fields.
-   *  Resets all project-defaultable fields first so that switching projects
-   *  does not leak the previous project's defaults into the new one. */
-  private async applyProjectDefaults(): Promise<void> {
-    // Reset to base defaults before applying new project settings
-    this.maxTurns = 0;
-    this.maxModelCalls = 0;
-    this.maxDuration = '';
-    this.modelSelection = '';
-    this.customModelId = '';
-
+  /**
+   * Loads the selected project's settings, shown as inherited placeholders.
+   * The hub applies them itself when a field is left unset, so the form
+   * never copies them into a field's value.
+   */
+  private async loadProjectSettings(): Promise<void> {
+    const isStale = this.projectLoadGuard();
+    this.projectSettings = null;
     const settings = await this.fetchProjectSettings(this.projectId);
-
-    if (settings) {
-      if (settings.defaultMaxTurns) this.maxTurns = settings.defaultMaxTurns;
-      if (settings.defaultMaxModelCalls) this.maxModelCalls = settings.defaultMaxModelCalls;
-      if (settings.defaultMaxDuration) this.maxDuration = settings.defaultMaxDuration;
-    }
-
-    const effectiveModel = settings?.defaultModel || this.hubDefaultModel;
-    if (effectiveModel) {
-      const derived = this.deriveModelSelection(effectiveModel);
-      this.modelSelection = derived.selection;
-      this.customModelId = derived.customId;
-    }
-  }
-
-  private deriveModelSelection(model: string): {
-    selection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
-    customId: string;
-  } {
-    if (!model) return { selection: '', customId: '' };
-    const normalized = normalizeModelAlias(model);
-    if (['small', 'medium', 'large', 'extra-large'].includes(normalized)) {
-      return {
-        selection: normalized as 'small' | 'medium' | 'large' | 'extra-large',
-        customId: '',
-      };
-    }
-    return { selection: 'other', customId: model };
+    if (isStale()) return;
+    this.projectSettings = settings;
   }
 
   /**
@@ -837,12 +558,13 @@ export class ScionPageAgentCreate extends LitElement {
     }
 
     // Fallback: hub-level default broker
-    if (this.hubDefaultRuntimeBroker) {
+    const hubDefaultRuntimeBroker = this.hubSettings.defaultRuntimeBroker ?? '';
+    if (hubDefaultRuntimeBroker) {
       const hubBroker = this.brokers.find(
         (b) =>
-          b.id === this.hubDefaultRuntimeBroker ||
-          (b.name && b.name.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase()) ||
-          (b.slug && b.slug.toLowerCase() === this.hubDefaultRuntimeBroker.toLowerCase())
+          b.id === hubDefaultRuntimeBroker ||
+          (b.name && b.name.toLowerCase() === hubDefaultRuntimeBroker.toLowerCase()) ||
+          (b.slug && b.slug.toLowerCase() === hubDefaultRuntimeBroker.toLowerCase())
       );
       if (hubBroker) {
         this.brokerId = hubBroker.id;
@@ -891,10 +613,13 @@ export class ScionPageAgentCreate extends LitElement {
    * Select the default template and harness config for the current project.
    */
   private async selectDefaultTemplate(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     const visible = this.filteredTemplates;
 
     const settings = this.projectId ? await this.fetchProjectSettings(this.projectId) : null;
-    const harnessDefault = settings?.defaultHarnessConfig || this.hubDefaultHarnessConfig || 'claude';
+    if (isStale()) return;
+    const harnessDefault =
+      settings?.defaultHarnessConfig || this.hubSettings.defaultHarnessConfig || 'claude';
 
     const harnessFor = (t: { defaultHarnessConfig?: string; harness?: string }) =>
       t.defaultHarnessConfig || t.harness || harnessDefault;
@@ -912,9 +637,10 @@ export class ScionPageAgentCreate extends LitElement {
     }
 
     // Hub-level default template fallback: try before the generic 'default' slug.
-    if (!templateResolved && this.hubDefaultTemplate) {
+    const hubDefaultTemplate = this.hubSettings.defaultTemplate ?? '';
+    if (!templateResolved && hubDefaultTemplate) {
       const hubMatch = visible.find(
-        (t) => t.name === this.hubDefaultTemplate || t.slug === this.hubDefaultTemplate
+        (t) => t.name === hubDefaultTemplate || t.slug === hubDefaultTemplate
       );
       if (hubMatch) {
         this.templateId = hubMatch.id;
@@ -947,7 +673,24 @@ export class ScionPageAgentCreate extends LitElement {
     }
   }
 
+  /**
+   * Incremented on every project switch. Project-scoped loaders capture it
+   * (with the project id) through projectLoadGuard and drop their results
+   * when a switch happened while they were waiting, so a slow response for
+   * the previous project cannot overwrite the current project's template,
+   * limits or harness configs.
+   */
+  private projectLoadSeq = 0;
+
+  /** Returns a check that is true once the project changed since the call. */
+  private projectLoadGuard(): () => boolean {
+    const seq = this.projectLoadSeq;
+    const projectId = this.projectId;
+    return () => seq !== this.projectLoadSeq || this.projectId !== projectId;
+  }
+
   private async loadHarnessConfigs(): Promise<void> {
+    const isStale = this.projectLoadGuard();
     try {
       const url = this.projectId
         ? `/api/v1/harness-configs?status=active&projectId=${encodeURIComponent(this.projectId)}&limit=100`
@@ -955,6 +698,7 @@ export class ScionPageAgentCreate extends LitElement {
       const res = await apiFetch(url);
       if (res.ok) {
         const data = (await res.json()) as { harnessConfigs?: HarnessConfigEntry[] };
+        if (isStale()) return;
         this.harnessConfigs = (data.harnessConfigs || []).sort((a, b) =>
           (a.displayName || a.name).localeCompare(b.displayName || b.name)
         );
@@ -965,97 +709,36 @@ export class ScionPageAgentCreate extends LitElement {
   }
 
   /**
-   * Incremented at the start of every loadGCPServiceAccounts call. Each call
-   * captures its own value and, after every await, drops its results if a
-   * newer call has started since (ptone/scion#2548): project switches fire
-   * the load unawaited, so a slow response for the previous project must not
-   * overwrite the current project's accounts or default.
+   * Loads the project's accounts with their mapping state on the chosen
+   * Kubernetes target, and asks again when the target changes. Its guard
+   * also drops a slow load for a previous project (ptone/scion#2548): project
+   * switches fire the load unawaited.
    */
-  private gcpLoadSeq = 0;
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.projectId,
+    target: () =>
+      assignStatusTarget(this.targetRuntimeIsKubernetesOnly, this.brokerId, this.profile),
+    accounts: () => this.gcp.gcpServiceAccounts,
+    setAccounts: (accounts) => this.gcp.setAccounts(accounts),
+  });
 
   private async loadGCPServiceAccounts(): Promise<void> {
-    const seq = ++this.gcpLoadSeq;
-    const projectId = this.projectId;
-    // True when a newer load has started or the project changed under this
-    // one; a stale load must not touch any state after that point.
-    const isStale = (): boolean => seq !== this.gcpLoadSeq || this.projectId !== projectId;
+    // Recomputing defaults from scratch (initial load, or a project change).
+    // This runs synchronously, before any await, so it is always performed
+    // by the newest load.
+    this.gcp.reset();
 
-    this.gcpServiceAccounts = [];
-    this.gcpServiceAccountId = '';
-    this.gcpMetadataMode = 'block';
-    this.defaultGcpMetadataMode = 'block';
-    this.defaultGcpServiceAccountId = '';
-    // Recomputing defaults from scratch (initial load, or a project change):
-    // whatever this method assigns below is a default, not a user choice,
-    // and any suspended explicit Block pick belonged to the previous
-    // project's context, not this one. This reset runs synchronously, before
-    // any await, so it is always performed by the newest load.
-    this.gcpIdentityUserSet = false;
-    this.gcpUserBlockSuspended = false;
-    this.projectGCPIdentityDefaultMode = '';
+    const isStale = await this.gcpAccounts.load();
+    if (!isStale) return;
 
-    if (projectId) {
-      let accounts: GCPServiceAccount[] = [];
-      try {
-        const res = await apiFetch(
-          `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-        );
-        if (res.ok) {
-          const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-          accounts = Array.isArray(data) ? data : data.items || [];
-        }
-      } catch {
-        // Non-critical
-      }
-      if (isStale()) return;
-      this.gcpServiceAccounts = accounts;
-
-      // Apply project default GCP identity if configured. defaultGcpMetadataMode
-      // (and defaultGcpServiceAccountId) always record the project default, so
-      // normalizeGcpModeForTarget stays in sync with whatever default this
-      // method found. The *current* value (gcpMetadataMode/gcpServiceAccountId)
-      // is only seeded from the default when the user has not already made an
-      // explicit pick while the fetches were in flight: an arriving default
-      // must never overwrite a user choice.
-      const settings = await this.fetchProjectSettings(projectId);
-      if (isStale()) return;
-      if (settings?.defaultGCPIdentityMode) {
-        this.projectGCPIdentityDefaultMode = settings.defaultGCPIdentityMode;
-        const mode = settings.defaultGCPIdentityMode as 'block' | 'passthrough' | 'assign';
-        const applyToCurrent = !this.gcpIdentityUserSet;
-        if (mode === 'assign' && settings.defaultGCPIdentityServiceAccountID) {
-          const verified = this.verifiedGCPServiceAccounts;
-          const match = verified.find(
-            (sa) => sa.id === settings.defaultGCPIdentityServiceAccountID
-          );
-          if (match) {
-            this.defaultGcpMetadataMode = 'assign';
-            this.defaultGcpServiceAccountId = match.id;
-            if (applyToCurrent) {
-              this.gcpMetadataMode = 'assign';
-              this.gcpServiceAccountId = match.id;
-            }
-          }
-        } else if (mode === 'passthrough' || mode === 'block') {
-          this.defaultGcpMetadataMode = mode;
-          if (applyToCurrent) {
-            this.gcpMetadataMode = mode;
-          }
-        }
-      }
-    }
+    // The project's default identity: applied to the displayed value only
+    // when the user has not already picked while the fetches were in flight.
+    const settings = await this.fetchProjectSettings(this.projectId);
+    if (isStale()) return;
+    this.gcp.applyProjectDefaults(settings);
   }
 
-  private async fetchProjectSettings(projectId: string): Promise<{
-    defaultTemplate?: string;
-    defaultHarnessConfig?: string;
-    defaultMaxTurns?: number;
-    defaultMaxModelCalls?: number;
-    defaultMaxDuration?: string;
-    defaultGCPIdentityMode?: string;
-    defaultGCPIdentityServiceAccountID?: string;
-    defaultModel?: string;
-  } | null> {
+  private async fetchProjectSettings(projectId: string): Promise<ProjectCreateDefaults | null> {
     if (!projectId) return null;
 
     const cached = this.projectSettingsCache.get(projectId);
@@ -1064,16 +747,7 @@ export class ScionPageAgentCreate extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects/${projectId}/settings`);
       if (res.ok) {
-        const data = (await res.json()) as {
-          defaultTemplate?: string;
-          defaultHarnessConfig?: string;
-          defaultMaxTurns?: number;
-          defaultMaxModelCalls?: number;
-          defaultMaxDuration?: string;
-          defaultGCPIdentityMode?: string;
-          defaultGCPIdentityServiceAccountID?: string;
-          defaultModel?: string;
-        };
+        const data = (await res.json()) as ProjectCreateDefaults;
         this.projectSettingsCache.set(projectId, data);
         return data;
       }
@@ -1136,110 +810,14 @@ export class ScionPageAgentCreate extends LitElement {
     return `Template suggests: ${configName}`;
   }
 
-  private buildLabels(): Record<string, string> | undefined {
-    const valid = this.labelEntries.filter((l) => l.key.trim());
-    if (valid.length === 0) return undefined;
-    const labels: Record<string, string> = {};
-    for (const l of valid) {
-      labels[l.key.trim()] = l.value.trim();
-    }
-    return labels;
-  }
-
-  /**
-   * Build the config payload for advanced fields (mirrors agent-configure.ts buildConfig).
-   */
-  private buildConfig(): Record<string, unknown> {
-    const config: Record<string, unknown> = {};
-
-    // Model
-    const model = this.modelSelection === 'other' ? this.customModelId : this.modelSelection;
-    if (model) config.model = model;
-
-    // Thinking level
-    config.thinking_level = this.thinkingLevel;
-
-    // Container
-    if (this.image) config.image = this.image;
-    if (this.containerUser) config.user = this.containerUser;
-
-    // Auth
-    if (this.harnessAuth) config.auth_selectedType = this.harnessAuth;
-
-    // Prompts
-    if (this.systemPrompt) config.system_prompt = this.systemPrompt;
-    if (this.agentInstructions) config.agent_instructions = this.agentInstructions;
-
-    // Limits
-    if (this.maxTurns) config.max_turns = this.maxTurns;
-    if (this.maxModelCalls) config.max_model_calls = this.maxModelCalls;
-    if (this.maxDuration) config.max_duration = this.maxDuration;
-
-    // Resources
-    const hasResources =
-      this.cpuRequest || this.memoryRequest || this.cpuLimit || this.memoryLimit || this.disk;
-    if (hasResources) {
-      const resources: Record<string, unknown> = {};
-      if (this.cpuRequest || this.memoryRequest) {
-        const requests: Record<string, string> = {};
-        if (this.cpuRequest) requests.cpu = this.cpuRequest;
-        if (this.memoryRequest) requests.memory = this.memoryRequest;
-        resources.requests = requests;
-      }
-      if (this.cpuLimit || this.memoryLimit) {
-        const limits: Record<string, string> = {};
-        if (this.cpuLimit) limits.cpu = this.cpuLimit;
-        if (this.memoryLimit) limits.memory = this.memoryLimit;
-        resources.limits = limits;
-      }
-      if (this.disk) resources.disk = this.disk;
-      config.resources = resources;
-    }
-
-    // Environment variables
-    const env: Record<string, string> = {};
-    for (const entry of this.envEntries) {
-      if (entry.key) {
-        env[entry.key] = entry.value;
-      }
-    }
-
-    // Telemetry (use structured config property, matching agent-configure.ts)
-    config.telemetry = { enabled: this.telemetryEnabled };
-
-    // Auto-expose ports: sent, as explicit values, only when the user operated
-    // the control. Otherwise the hub resolves the project, then template,
-    // then hub default value. The list is always sent with the control, as
-    // in agent-configure.ts: an empty list means "no list" and, as an
-    // explicit value, overrides a template's list.
-    if (this.autoExposeTouched) {
-      env.SCION_AUTO_EXPOSE_PORTS = this.autoExposePortsEnabled ? 'true' : 'false';
-      if (this.autoExposePortsEnabled) {
-        env.SCION_AUTO_EXPOSE_MODE = this.autoExposePortsMode;
-        env.SCION_AUTO_EXPOSE_PORTS_LIST = this.autoExposePortsList;
-        env.SCION_AUTO_EXPOSE_INTERVAL = this.autoExposePortsInterval || '3s';
-      }
-    }
-
-    if (Object.keys(env).length > 0) {
-      config.env = env;
-    }
-
-    return config;
-  }
-
   // ═══════════════════════════════════════════════════════════════════
   // Submit
   // ═══════════════════════════════════════════════════════════════════
 
   /**
-   * Create the agent without starting it. Navigates to the agent detail page.
+   * Create the agent and start it, then navigate to the agent detail page.
    */
-  private async handleCreateOnly(_e: Event): Promise<void> {
-    return this.handleSubmit(_e, true);
-  }
-
-  private async handleSubmit(_e: Event, provisionOnly = false): Promise<void> {
+  private async handleSubmit(_e: Event): Promise<void> {
     if (!this.name.trim()) {
       this.error = 'Agent name is required.';
       return;
@@ -1249,28 +827,18 @@ export class ScionPageAgentCreate extends LitElement {
       return;
     }
 
-    // Validate GCP assign mode
-    if (this.gcpMetadataMode === 'assign' && !this.gcpServiceAccountId) {
-      this.error = 'Please select a service account for GCP identity assignment.';
-      return;
-    }
+    // The submit-time guards read the live target, even if no update has
+    // handed it to the identity state yet.
+    this.gcp.targetKubernetesOnly = this.targetRuntimeIsKubernetesOnly;
+    this.gcp.profile = this.profile;
 
-    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) {
-      this.error =
-        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
-      return;
-    }
-
-    // This project's own default would otherwise apply silently (via the
-    // omitted gcp_identity below) and be rejected at dispatch — there is no
-    // identity that is safe to leave unset here, so an explicit pick is
-    // required before this can proceed.
-    if (this.blockDefaultNeedsExplicitChoice) {
-      this.error =
-        "This project's default GCP identity is Block, which the Kubernetes runtime rejects at " +
-        'dispatch. Choose Passthrough' +
-        (this.verifiedGCPServiceAccounts.length > 0 ? ' or Assign Service Account' : '') +
-        ' before creating this agent.';
+    // The form's validation includes the GCP identity rules. The form is
+    // rendered once the page has loaded; the identity state is checked
+    // directly otherwise.
+    const form = this.form;
+    const errors = form ? form.validate() : [this.gcp.validate()].filter((e): e is string => !!e);
+    if (errors.length > 0) {
+      this.error = errors.join(' ');
       return;
     }
 
@@ -1284,43 +852,28 @@ export class ScionPageAgentCreate extends LitElement {
         projectId: this.projectId,
         harnessConfig: this.resolvedHarness,
         notify: this.notify,
+        // Take the hub's async launch path when it has it on
+        // (server.hub.async_agent_launch); a hub with it off ignores this
+        // and answers synchronously as before.
+        acceptAsyncLaunch: true,
       };
 
-      if (this.branch.trim()) body.branch = this.branch.trim();
       if (this.templateId) body.template = this.templateId;
       if (this.brokerId) body.runtimeBrokerId = this.brokerId;
       if (this.profile) body.profile = this.profile;
       if (this.task.trim()) body.task = this.task.trim();
-      if (this.agentRole) body.agentRole = this.agentRole;
-      if (this.messageMode) body.messageMode = this.messageMode;
-      if (provisionOnly) body.provisionOnly = true;
 
-      const builtLabels = this.buildLabels();
-      if (builtLabels) body.labels = builtLabels;
-
-      // GCP identity. On a known-Kubernetes target with no explicit user
-      // choice, omit gcp_identity entirely rather than send the displayed
-      // "passthrough" default: an explicit passthrough request routes through
-      // the Hub's passthrough ownership gate (broker owner/admin + a
-      // registered host service account), which a request that never asked
-      // for passthrough should not have to pass. Omitting it lets the Hub's
-      // own project/hub-default ladder resolve it — including Phase 1's
-      // unset-on-Kubernetes fallback when nothing is configured anywhere.
-      if (this.targetRuntimeIsKubernetesOnly && !this.gcpIdentityUserSet) {
-        // omit body.gcp_identity
-      } else if (this.gcpMetadataMode === 'assign' && this.gcpServiceAccountId) {
-        body.gcp_identity = {
-          metadata_mode: 'assign',
-          service_account_id: this.gcpServiceAccountId,
-        };
-      } else if (this.gcpMetadataMode === 'passthrough') {
-        body.gcp_identity = { metadata_mode: 'passthrough' };
-      } else if (this.gcpMetadataMode === 'block') {
-        body.gcp_identity = { metadata_mode: 'block' };
+      // Additional Options: only what the user set. Everything else
+      // (including gcp_identity with no explicit pick) is left to the hub's
+      // own precedence instead of being pinned client-side.
+      if (form) {
+        Object.assign(body, form.collectTopLevel());
+        const config = form.collectConfigPatch();
+        if (Object.keys(config).length > 0) body.config = config;
+      } else {
+        const gcpIdentity = this.gcp.toRequest();
+        if (gcpIdentity) body.gcp_identity = gcpIdentity;
       }
-
-      // Advanced config
-      body.config = this.buildConfig();
 
       const response = await fetch('/api/v1/agents', {
         method: 'POST',
@@ -1343,9 +896,15 @@ export class ScionPageAgentCreate extends LitElement {
       }
 
       const result = (await response.json()) as {
-        agent?: { id: string; status?: string; phase?: string };
+        agent?: { id: string; status?: string; phase?: AgentPhase; launch?: AgentLaunch };
         id?: string;
+        warnings?: string[];
       };
+      // The hub's create warnings (for example, a token issued without
+      // the artifact scopes); the toast stack outlives the navigation. The
+      // start response may repeat one; `shownWarnings` toasts it once.
+      const shownWarnings = new Set<string>();
+      showResponseWarnings(result, shownWarnings);
       const agent = result.agent;
       const agentId = agent?.id || result.id;
 
@@ -1353,18 +912,38 @@ export class ScionPageAgentCreate extends LitElement {
         throw new Error('No agent ID in response');
       }
 
-      // Start the agent unless provisionOnly was requested
-      if (!provisionOnly) {
-        const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
-        const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
-        if (!alreadyStarted) {
+      // Start the agent unless the create response shows it already started.
+      // An async launch the hub accepted is the hub's to finish: while it
+      // runs, and after it failed (the hub refuses that start with 409
+      // agent_create_incomplete), the agent page shows its progress or
+      // failure instead.
+      const startedPhases = ['running', 'provisioning', 'cloning', 'starting'];
+      const alreadyStarted = agent?.phase ? startedPhases.includes(agent.phase) : false;
+      const hubLaunch = !!agent && (isAgentLaunching(agent) || isIncompleteCreate(agent));
+      if (!alreadyStarted && !hubLaunch) {
+        // The agent exists, so a failed start, including a rejected fetch,
+        // is reported and its page still opens, where the user can start
+        // it again without creating a second agent. The toast stack
+        // outlives the navigation.
+        let startError: string | null = null;
+        try {
           const startResp = await fetch(`/api/v1/agents/${agentId}/start`, {
             method: 'POST',
             credentials: 'include',
           });
           if (!startResp.ok) {
-            console.warn('Agent created but failed to start:', startResp.status);
+            const fallback = `HTTP ${startResp.status}`;
+            startError = (await parseApiError(startResp, fallback)).message;
+          } else {
+            await showResponseBodyWarnings(startResp, shownWarnings);
           }
+        } catch (startErr) {
+          startError =
+            startErr instanceof Error && startErr.message ? startErr.message : 'Request failed';
+        }
+        if (startError !== null) {
+          console.warn('Agent created but failed to start:', startError);
+          showToast(`Agent was created but did not start: ${startError}`, 'danger');
         }
       }
 
@@ -1383,7 +962,9 @@ export class ScionPageAgentCreate extends LitElement {
   // ═══════════════════════════════════════════════════════════════════
 
   override render() {
-    if (this.loading) {
+    // After the first load the form stays mounted during a reload, so the
+    // user's Additional Options edits (kept in the form) survive it.
+    if (this.loading && !this.loadedOnce) {
       return html`
         <div class="loading-state">
           <sl-spinner></sl-spinner>
@@ -1443,33 +1024,23 @@ export class ScionPageAgentCreate extends LitElement {
           @sl-show=${(e: Event) => {
             if (e.target !== e.currentTarget) return;
             this.advancedOpen = true;
-            // Force the tab-group to show the General tab when disclosure opens.
-            // sl-tab-group may not initialize correctly when hidden inside sl-details.
-            requestAnimationFrame(() => {
-              const tabGroup = this.shadowRoot?.querySelector('sl-tab-group');
-              if (tabGroup) {
-                (tabGroup as any).show?.('general');
-              }
-            });
+            // Show the General tab when the disclosure opens: a tab group
+            // initialized while hidden inside sl-details may show none.
+            requestAnimationFrame(() => this.form?.showTab('general'));
           }}
           @sl-hide=${(e: Event) => {
             if (e.target !== e.currentTarget) return;
             this.advancedOpen = false;
           }}
         >
-          <sl-tab-group>
-            <sl-tab slot="nav" panel="general" active>General</sl-tab>
-            <sl-tab slot="nav" panel="auth-security">Auth &amp; Security</sl-tab>
-            <sl-tab slot="nav" panel="env-labels">Environment &amp; Labels</sl-tab>
-            <sl-tab slot="nav" panel="limits">Limits &amp; Resources</sl-tab>
-            <sl-tab slot="nav" panel="prompts">Prompts</sl-tab>
-
-            <sl-tab-panel name="general">${this.renderGeneralTab()}</sl-tab-panel>
-            <sl-tab-panel name="auth-security">${this.renderAuthSecurityTab()}</sl-tab-panel>
-            <sl-tab-panel name="env-labels">${this.renderEnvironmentTab()}</sl-tab-panel>
-            <sl-tab-panel name="limits">${this.renderLimitsTab()}</sl-tab-panel>
-            <sl-tab-panel name="prompts">${this.renderPromptsTab()}</sl-tab-panel>
-          </sl-tab-group>
+          <scion-agent-config-form
+            mode="create"
+            .placeholders=${this.placeholders}
+            .gcpIdentity=${this.gcp}
+            ?branchAvailable=${!!this.selectedProject?.gitRemote &&
+            !isSharedWorkspace(this.selectedProject)}
+            ?disabled=${this.submitting}
+          ></scion-agent-config-form>
         </sl-details>
 
         <!-- ═══════ Form Actions ═══════ -->
@@ -1482,13 +1053,6 @@ export class ScionPageAgentCreate extends LitElement {
           >
             <sl-icon slot="prefix" name="play-circle"></sl-icon>
             Start
-          </sl-button>
-          <sl-button
-            variant="default"
-            ?disabled=${this.submitting}
-            @click=${(e: Event) => this.handleCreateOnly(e)}
-          >
-            Create
           </sl-button>
           <sl-button
             variant="text"
@@ -1534,14 +1098,12 @@ export class ScionPageAgentCreate extends LitElement {
                 .value=${this.projectId}
                 @sl-change=${(e: Event) => {
                   this.projectId = (e.target as HTMLElement & { value: string }).value;
+                  this.projectLoadSeq++;
                   this.selectBrokerForProject();
                   void this.selectDefaultTemplate();
                   void this.loadHarnessConfigs();
                   void this.loadGCPServiceAccounts();
-                  void this.applyProjectDefaults();
-                  if (!this.selectedProject?.gitRemote) {
-                    this.branch = '';
-                  }
+                  void this.loadProjectSettings();
                 }}
                 required
               >
@@ -1574,7 +1136,11 @@ export class ScionPageAgentCreate extends LitElement {
               >`
           )}
         </sl-select>
-        <div class="hint">Agent configuration template.</div>
+        ${this.templatesLoadFailed
+          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
+              Could not load templates. Reload the page to try again.
+            </div>`
+          : html`<div class="hint">Agent configuration template.</div>`}
       </div>
 
       <!-- Harness Config -->
@@ -1706,598 +1272,6 @@ export class ScionPageAgentCreate extends LitElement {
         <sl-tooltip content=${defaultTriggersHint()} hoist>
           <span class="help-badge">?</span>
         </sl-tooltip>
-      </div>
-    `;
-  }
-
-  // ── Additional Options > General Tab ──────────────────────────────
-
-  private renderGeneralTab() {
-    return html`
-      <!-- Branch (conditional: project has gitRemote and is not shared workspace) -->
-      ${this.selectedProject?.gitRemote && !isSharedWorkspace(this.selectedProject)
-        ? html`
-            <div class="form-field">
-              <label>Branch</label>
-              <sl-input
-                placeholder="defaults to agent name"
-                .value=${this.branch}
-                @sl-input=${(e: Event) => {
-                  this.branch = (e.target as HTMLElement & { value: string }).value;
-                }}
-              ></sl-input>
-              <div class="hint">Git branch for this agent's workspace.</div>
-            </div>
-          `
-        : nothing}
-
-      <!-- Model -->
-      <div class="form-field">
-        <label>Model</label>
-        <sl-select
-          placeholder="Use harness default"
-          .value=${this.modelSelection}
-          clearable
-          @sl-change=${(e: Event) => {
-            this.modelSelection = (e.target as HTMLElement & { value: string })
-              .value as typeof this.modelSelection;
-            if (this.modelSelection !== 'other') this.customModelId = '';
-          }}
-        >
-          <sl-option value="small">Small</sl-option>
-          <sl-option value="medium">Medium</sl-option>
-          <sl-option value="large">Large</sl-option>
-          <sl-option value="extra-large">Extra Large</sl-option>
-          <sl-option value="other">Other (specify)</sl-option>
-        </sl-select>
-      </div>
-
-      <!-- Custom Model ID (conditional) -->
-      ${this.modelSelection === 'other'
-        ? html`
-            <div class="form-field">
-              <label>Custom Model ID</label>
-              <sl-input
-                placeholder="e.g. claude-opus-4-8"
-                .value=${this.customModelId}
-                @sl-input=${(e: Event) => {
-                  this.customModelId = (e.target as HTMLElement & { value: string }).value;
-                }}
-              ></sl-input>
-            </div>
-          `
-        : nothing}
-
-      <!-- Thinking Level -->
-      <div class="form-field">
-        <label>
-          Thinking
-          Level${this.thinkingLevel !== null
-            ? html` <span style="font-weight:normal;color:var(--sl-color-neutral-500)"
-                >(${this.thinkingLevel})</span
-              >`
-            : nothing}
-        </label>
-        <div style="display:flex;align-items:center;gap:0.75rem">
-          <sl-range
-            min="0"
-            max="100"
-            step="1"
-            .value=${this.thinkingLevel ?? 50}
-            ?disabled=${this.thinkingLevel === null}
-            style="flex:1"
-            @sl-input=${(e: Event) => {
-              this.thinkingLevel = (e.target as HTMLElement & { value: number }).value;
-            }}
-          ></sl-range>
-          <sl-checkbox
-            ?checked=${this.thinkingLevel !== null}
-            @sl-change=${(e: Event) => {
-              this.thinkingLevel = (e.target as HTMLInputElement).checked ? 50 : null;
-            }}
-          >
-            Set
-          </sl-checkbox>
-        </div>
-        <div class="hint" style="display:flex;justify-content:space-between;margin-top:0.25rem">
-          <span>0 = minimal reasoning</span>
-          <span>${this.thinkingLevel === null ? 'Using harness default' : ''}</span>
-          <span>100 = maximum reasoning</span>
-        </div>
-      </div>
-
-      <!-- Container Image -->
-      <div class="form-field">
-        <label>Container Image</label>
-        <sl-input
-          placeholder="Container image override"
-          .value=${this.image}
-          @sl-input=${(e: Event) => {
-            this.image = (e.target as HTMLElement & { value: string }).value;
-          }}
-        ></sl-input>
-        <div class="hint">Override the default container image.</div>
-      </div>
-
-      <!-- Container User -->
-      <div class="form-field">
-        <label>Container User</label>
-        <sl-input
-          placeholder="Unix user inside container"
-          .value=${this.containerUser}
-          @sl-input=${(e: Event) => {
-            this.containerUser = (e.target as HTMLElement & { value: string }).value;
-          }}
-        ></sl-input>
-      </div>
-
-      <!-- Telemetry -->
-      <div class="notify-field">
-        <sl-checkbox
-          ?checked=${this.telemetryEnabled}
-          @sl-change=${(e: Event) => {
-            this.telemetryEnabled = (e.target as HTMLInputElement).checked;
-          }}
-        >
-          Enable Telemetry
-        </sl-checkbox>
-        <sl-tooltip content="Collect telemetry data for this agent." hoist>
-          <span class="help-badge">?</span>
-        </sl-tooltip>
-      </div>
-
-      <!-- Auto-Expose Ports -->
-      <div class="notify-field">
-        <sl-checkbox
-          ?checked=${this.autoExposePortsEnabled}
-          @sl-change=${(e: Event) => {
-            this.autoExposePortsEnabled = (e.target as HTMLInputElement).checked;
-            this.autoExposeTouched = true;
-          }}
-        >
-          Enable Auto-Expose Ports
-        </sl-checkbox>
-        <sl-tooltip
-          content="Automatically detect and expose TCP listening ports from this agent's container. Until you change this control, the agent inherits the project setting, then the template, then the hub default; only the hub default is shown here."
-          hoist
-        >
-          <span class="help-badge">?</span>
-        </sl-tooltip>
-        <span class="source-label" data-testid="auto-expose-source">
-          ${this.autoExposeTouched
-            ? 'Source: explicit'
-            : 'Source: inherited (hub default shown; project or template may override)'}
-        </span>
-      </div>
-
-      <!-- Auto-Expose Sub-fields (conditional) -->
-      ${this.autoExposePortsEnabled
-        ? html`
-            <div class="form-field">
-              <label>Port Filter Mode</label>
-              <sl-select
-                .value=${this.autoExposePortsMode}
-                @sl-change=${(e: Event) => {
-                  this.autoExposePortsMode = (e.target as HTMLElement & { value: string }).value;
-                  this.autoExposeTouched = true;
-                }}
-              >
-                <sl-option value="allowlist">Allowlist</sl-option>
-                <sl-option value="denylist">Denylist</sl-option>
-              </sl-select>
-              <div class="hint">
-                ${this.autoExposePortsMode === 'allowlist'
-                  ? 'Only expose ports in the filter list below.'
-                  : 'Expose all ports except those in the filter list below.'}
-              </div>
-            </div>
-            <div class="form-field">
-              <label>Port Filter List</label>
-              <sl-input
-                placeholder="e.g. 3000,5173,8080"
-                .value=${this.autoExposePortsList}
-                @sl-input=${(e: Event) => {
-                  this.autoExposePortsList = (e.target as HTMLElement & { value: string }).value;
-                  this.autoExposeTouched = true;
-                }}
-              ></sl-input>
-              <div class="hint">
-                Comma-separated list of ports to
-                ${this.autoExposePortsMode === 'allowlist' ? 'allow' : 'deny'}.
-              </div>
-            </div>
-            <div class="form-field">
-              <label>Scan Interval</label>
-              <sl-input
-                placeholder="3s"
-                .value=${this.autoExposePortsInterval}
-                @sl-input=${(e: Event) => {
-                  this.autoExposePortsInterval = (
-                    e.target as HTMLElement & { value: string }
-                  ).value;
-                  this.autoExposeTouched = true;
-                }}
-              ></sl-input>
-              <div class="hint">How often to scan for new listening ports (e.g. 3s, 5s).</div>
-            </div>
-          `
-        : nothing}
-    `;
-  }
-
-  // ── Additional Options > Auth & Security Tab ──────────────────────
-
-  private renderAuthSecurityTab() {
-    return html`
-      <!-- Agent Role -->
-      <div class="form-field">
-        <label>Agent Role</label>
-        <sl-select
-          placeholder="Select a role..."
-          .value=${this.agentRole}
-          @sl-change=${(e: Event) => {
-            this.agentRole = (e.target as HTMLElement & { value: string }).value;
-          }}
-        >
-          <sl-option value="">Default (determined by project settings)</sl-option>
-          <sl-option value="none">None (no hub access)</sl-option>
-          <sl-option value="readonly">Read-only</sl-option>
-          <sl-option value="baseline">Baseline (standard)</sl-option>
-          <sl-option value="full">Full (requires admin)</sl-option>
-        </sl-select>
-        <div class="hint">Authorization role for hub API access.</div>
-      </div>
-
-      <!-- Message Mode -->
-      <div class="form-field">
-        <label>Message Mode</label>
-        <sl-select
-          placeholder="Select a message mode..."
-          .value=${this.messageMode}
-          @sl-change=${(e: Event) => {
-            this.messageMode = (e.target as HTMLElement & { value: string }).value;
-          }}
-        >
-          <sl-option value="">Default (inherit from parent)</sl-option>
-          ${(
-            Object.entries(MESSAGE_MODE_DISPLAY) as [
-              MessageMode,
-              (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
-            ][]
-          ).map(
-            ([mode, display]) => html`
-              <sl-option value=${mode}>
-                <sl-icon slot="prefix" name=${display.icon}></sl-icon>
-                ${display.label} — ${display.description}
-              </sl-option>
-            `
-          )}
-        </sl-select>
-        ${this.messageMode === 'none'
-          ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-              This agent will be created in sealed mode. It will not be able to send or receive
-              messages.
-            </div>`
-          : this.messageMode === 'hub'
-            ? html`<div class="hint">
-                Hub mode enables messaging with permitted agents in other projects on this Hub, in
-                addition to all agents and users in this project. External reach requires the Hub
-                cross-project switch to be enabled.
-              </div>`
-            : html`<div class="hint">
-                Message authorization scope. Default inherits from the parent agent's mode.
-              </div>`}
-      </div>
-
-      <!-- Harness Authentication -->
-      <div class="form-field">
-        <label>Harness Authentication</label>
-        <sl-select
-          placeholder="Select auth method..."
-          .value=${this.harnessAuth}
-          @sl-change=${(e: Event) => {
-            this.harnessAuth = (e.target as HTMLElement & { value: string }).value;
-          }}
-        >
-          <sl-option value="">Auto Detected</sl-option>
-          <sl-option value="api-key">Provider API Key</sl-option>
-          <sl-option value="oauth-token">OAuth Token (env var)</sl-option>
-          <sl-option value="vertex-ai">Vertex Model Garden</sl-option>
-          <sl-option value="auth-file">Harness credential file</sl-option>
-          <sl-option value="none">No Authentication</sl-option>
-        </sl-select>
-        <div class="hint">Override the authentication method for the harness.</div>
-      </div>
-
-      <!-- GCP Identity -->
-      <div class="form-field">
-        <label>GCP Identity</label>
-        <sl-select
-          placeholder="Choose an identity..."
-          .value=${this.blockDefaultNeedsExplicitChoice ? '' : this.gcpMetadataMode}
-          @sl-change=${(e: Event) => {
-            this.gcpMetadataMode = (e.target as HTMLElement & { value: string }).value as
-              | 'block'
-              | 'passthrough'
-              | 'assign';
-            this.gcpIdentityUserSet = true;
-            this.gcpUserBlockSuspended = false;
-            if (this.gcpMetadataMode !== 'assign') {
-              this.gcpServiceAccountId = '';
-            }
-          }}
-        >
-          ${this.targetRuntimeIsKubernetesOnly
-            ? ''
-            : html`<sl-option value="block">Block</sl-option>`}
-          ${this.gcpServiceAccounts.length > 0
-            ? html`<sl-option value="assign">Assign Service Account</sl-option>`
-            : ''}
-          <sl-option value="passthrough">Passthrough</sl-option>
-        </sl-select>
-        <div class="hint">
-          ${this.blockDefaultNeedsExplicitChoice
-            ? 'No GCP identity is selected yet.'
-            : this.gcpMetadataMode === 'block'
-              ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-              : this.gcpMetadataMode === 'assign'
-                ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-                : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-          ${this.targetRuntimeIsKubernetesOnly ? ` ${this.kubernetesIdentityHintSuffix}` : ''}
-        </div>
-      </div>
-
-      <!-- GCP Service Account (conditional) -->
-      ${this.gcpMetadataMode === 'assign'
-        ? html`
-            <div class="form-field">
-              <label>Service Account</label>
-              ${this.verifiedGCPServiceAccounts.length > 0
-                ? html`
-                    <sl-select
-                      placeholder="Select a service account..."
-                      .value=${this.gcpServiceAccountId}
-                      @sl-change=${(e: Event) => {
-                        this.gcpServiceAccountId = (
-                          e.target as HTMLElement & { value: string }
-                        ).value;
-                        this.gcpIdentityUserSet = true;
-                        this.gcpUserBlockSuspended = false;
-                      }}
-                    >
-                      ${this.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${
-                              sa.scope === 'hub' ? ' (Hub)' : ''
-                            }
-                          </sl-option>`
-                      )}
-                    </sl-select>
-                  `
-                : html`
-                    <div class="hint" style="margin-top: 0;">
-                      No verified service accounts available. Register and verify service accounts
-                      in project settings.
-                    </div>
-                  `}
-            </div>
-          `
-        : nothing}
-    `;
-  }
-
-  // ── Additional Options > Prompts Tab ──────────────────────────────
-
-  private renderPromptsTab() {
-    return html`
-      <div class="form-field">
-        <label>System Prompt</label>
-        <sl-textarea
-          placeholder="System prompt content or file:// URI..."
-          .value=${this.systemPrompt}
-          @sl-input=${(e: Event) => {
-            this.systemPrompt = (e.target as HTMLElement & { value: string }).value;
-          }}
-          rows="6"
-          resize="auto"
-        ></sl-textarea>
-        <div class="hint">
-          Custom system prompt for the agent. Can be inline text or a file:// URI.
-        </div>
-      </div>
-
-      <div class="form-field">
-        <label>Agent Instructions</label>
-        <sl-textarea
-          placeholder="Agent instructions content or file:// URI..."
-          .value=${this.agentInstructions}
-          @sl-input=${(e: Event) => {
-            this.agentInstructions = (e.target as HTMLElement & { value: string }).value;
-          }}
-          rows="6"
-          resize="auto"
-        ></sl-textarea>
-        <div class="hint">
-          Additional instructions for the agent. Can be inline text or a file:// URI.
-        </div>
-      </div>
-    `;
-  }
-
-  // ── Additional Options > Limits & Resources Tab ───────────────────
-
-  private renderLimitsTab() {
-    return html`
-      <div class="field-row">
-        <div class="form-field">
-          <label>Max Turns</label>
-          <sl-input
-            type="number"
-            placeholder="0 = unlimited"
-            .value=${String(this.maxTurns || '')}
-            @sl-input=${(e: Event) => {
-              this.maxTurns = parseInt((e.target as HTMLElement & { value: string }).value) || 0;
-            }}
-          ></sl-input>
-        </div>
-        <div class="form-field">
-          <label>Max Model Calls</label>
-          <sl-input
-            type="number"
-            placeholder="0 = unlimited"
-            .value=${String(this.maxModelCalls || '')}
-            @sl-input=${(e: Event) => {
-              this.maxModelCalls =
-                parseInt((e.target as HTMLElement & { value: string }).value) || 0;
-            }}
-          ></sl-input>
-        </div>
-      </div>
-
-      <div class="form-field">
-        <label>Max Duration</label>
-        <sl-input
-          placeholder="e.g. 30m, 2h"
-          .value=${this.maxDuration}
-          @sl-input=${(e: Event) => {
-            this.maxDuration = (e.target as HTMLElement & { value: string }).value;
-          }}
-        ></sl-input>
-        <div class="hint">Go duration string. Empty means no limit.</div>
-      </div>
-
-      <div class="field-row">
-        <div class="form-field">
-          <label>CPU Request</label>
-          <sl-input
-            placeholder='e.g. "2", "500m"'
-            .value=${this.cpuRequest}
-            @sl-input=${(e: Event) => {
-              this.cpuRequest = (e.target as HTMLElement & { value: string }).value;
-            }}
-          ></sl-input>
-        </div>
-        <div class="form-field">
-          <label>Memory Request</label>
-          <sl-input
-            placeholder='e.g. "4Gi"'
-            .value=${this.memoryRequest}
-            @sl-input=${(e: Event) => {
-              this.memoryRequest = (e.target as HTMLElement & { value: string }).value;
-            }}
-          ></sl-input>
-        </div>
-      </div>
-
-      <div class="field-row">
-        <div class="form-field">
-          <label>CPU Limit</label>
-          <sl-input
-            placeholder='e.g. "4"'
-            .value=${this.cpuLimit}
-            @sl-input=${(e: Event) => {
-              this.cpuLimit = (e.target as HTMLElement & { value: string }).value;
-            }}
-          ></sl-input>
-        </div>
-        <div class="form-field">
-          <label>Memory Limit</label>
-          <sl-input
-            placeholder='e.g. "8Gi"'
-            .value=${this.memoryLimit}
-            @sl-input=${(e: Event) => {
-              this.memoryLimit = (e.target as HTMLElement & { value: string }).value;
-            }}
-          ></sl-input>
-        </div>
-      </div>
-
-      <div class="form-field">
-        <label>Disk</label>
-        <sl-input
-          placeholder='e.g. "20Gi"'
-          .value=${this.disk}
-          @sl-input=${(e: Event) => {
-            this.disk = (e.target as HTMLElement & { value: string }).value;
-          }}
-        ></sl-input>
-      </div>
-    `;
-  }
-
-  // ── Additional Options > Environment & Labels Tab ─────────────────
-
-  private renderEnvironmentTab() {
-    return html`
-      <!-- Environment Variables -->
-      <div class="form-field">
-        <label>Environment Variables</label>
-        <scion-env-editor
-          .entries=${this.envEntries}
-          @env-change=${(e: CustomEvent<{ entries: EnvEntry[] }>) => {
-            this.envEntries = e.detail.entries;
-          }}
-        ></scion-env-editor>
-      </div>
-
-      <!-- Labels -->
-      <div class="form-field" style="margin-top: 1.5rem;">
-        <label>Labels</label>
-        ${this.labelEntries.map(
-          (entry, i) => html`
-            <div style="display: flex; gap: 0.5em; margin-bottom: 0.5em; align-items: center;">
-              <sl-input
-                size="small"
-                placeholder="key"
-                .value=${entry.key}
-                @sl-input=${(e: Event) => {
-                  const updated = [...this.labelEntries];
-                  updated[i] = {
-                    ...updated[i],
-                    key: (e.target as HTMLElement & { value: string }).value,
-                  };
-                  this.labelEntries = updated;
-                }}
-                style="flex: 1;"
-              ></sl-input>
-              <sl-input
-                size="small"
-                placeholder="value"
-                .value=${entry.value}
-                @sl-input=${(e: Event) => {
-                  const updated = [...this.labelEntries];
-                  updated[i] = {
-                    ...updated[i],
-                    value: (e.target as HTMLElement & { value: string }).value,
-                  };
-                  this.labelEntries = updated;
-                }}
-                style="flex: 1;"
-              ></sl-input>
-              <sl-icon-button
-                name="x-lg"
-                label="Remove"
-                @click=${() => {
-                  this.labelEntries = this.labelEntries.filter((_, idx) => idx !== i);
-                }}
-              ></sl-icon-button>
-            </div>
-          `
-        )}
-        ${this.labelEntries.length < 16
-          ? html`<sl-button
-              size="small"
-              variant="text"
-              @click=${() => {
-                this.labelEntries = [...this.labelEntries, { key: '', value: '' }];
-              }}
-            >
-              <sl-icon slot="prefix" name="plus-lg"></sl-icon>
-              Add label
-            </sl-button>`
-          : nothing}
-        <div class="hint">Optional key-value labels to organize agents (max 16).</div>
       </div>
     `;
   }

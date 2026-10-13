@@ -15,9 +15,24 @@
  */
 
 import { LitElement, html, css, nothing } from 'lit';
+import type { TemplateResult } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
 import { apiFetch, extractApiError } from '../../client/api.js';
+import {
+  fallbackFieldKey,
+  fieldErrorMessages,
+  genericSaveErrorText,
+  readSettingsSaveError,
+} from '../../shared/settings-save-errors.js';
+import type { SettingsFieldError, SettingsSaveError } from '../../shared/settings-save-errors.js';
+import {
+  renderConflictNotice,
+  renderFieldErrorMessages,
+  renderLayer0Notice,
+  renderSectionErrorSummary,
+  settingsErrorStyles,
+} from '../shared/settings-error-views.js';
 
 // ── Type definitions matching the Go API response ──
 
@@ -98,7 +113,7 @@ const PLATFORM_SECRETS: Record<string, PlatformSecretDef[]> = {
     {
       key: 'webhook_secret',
       label: 'Webhook Secret',
-      description: 'Secret for webhook verification (webhook mode only)',
+      description: 'Secret for webhook verification (required in webhook mode)',
     },
   ],
   discord: [
@@ -445,6 +460,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private detail: IntegrationDetail | null = null;
   @state() private editedSettings: Record<string, string> = {};
   @state() private editedSecrets: Record<string, string> = {};
+  // Structured error from the last failed config save (ptone/scion#3923)
+  @state() private saveError: SettingsSaveError | null = null;
   @state() private saving = false;
   @state() private restarting = false;
   @state() private updating = false;
@@ -463,6 +480,8 @@ export class ScionPageAdminIntegrations extends LitElement {
   @state() private availableProjects: ProjectInfo[] = [];
 
   static override styles = css`
+    ${settingsErrorStyles}
+
     :host {
       display: block;
     }
@@ -709,6 +728,14 @@ export class ScionPageAdminIntegrations extends LitElement {
       border-bottom: 1px solid var(--scion-border, #e2e8f0);
     }
 
+    .secret-row:has(.field-error) {
+      flex-wrap: wrap;
+    }
+
+    .secret-row .field-error {
+      flex-basis: 100%;
+    }
+
     .secret-row:last-child {
       border-bottom: none;
     }
@@ -885,6 +912,7 @@ export class ScionPageAdminIntegrations extends LitElement {
   private async loadDetail(name: string): Promise<void> {
     this.loading = true;
     this.error = null;
+    this.saveError = null;
     try {
       const res = await apiFetch(`/api/v1/admin/integrations/${encodeURIComponent(name)}`);
       if (!res.ok) {
@@ -927,6 +955,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     if (!this.detail) return;
     this.saving = true;
     this.error = null;
+    this.saveError = null;
     this.successMessage = null;
     try {
       const body: { settings: Record<string, string>; secrets?: Record<string, string> } = {
@@ -945,7 +974,12 @@ export class ScionPageAdminIntegrations extends LitElement {
         }
       );
       if (!res.ok) {
-        this.error = await extractApiError(res, 'Failed to save configuration');
+        const err = await readSettingsSaveError(res);
+        if (err.kind === 'generic') {
+          this.error = genericSaveErrorText(err, 'Failed to save configuration');
+        } else {
+          this.saveError = err;
+        }
         return;
       }
       this.successMessage = 'Configuration saved successfully';
@@ -1116,11 +1150,82 @@ export class ScionPageAdminIntegrations extends LitElement {
     );
   }
 
+  /**
+   * Validation entries from the last failed config save, or [].
+   *
+   * PUT /api/v1/admin/integrations/<name>/config emits no validation,
+   * conflict or layer0 body today (only bad-request, forbidden and internal
+   * errors). This handling is kept so the form shows such errors at the
+   * field once the handler sends them, in the same shape as the
+   * server-config PUT (ptone/scion#3923).
+   *
+   * The request body is not a koanf settings section, so a path is keyed by
+   * the body group it names: settings.<key> or secrets.<key>. A path with no
+   * group is placed only when its key exists in exactly one group;
+   * otherwise it is shown in the section summary only.
+   */
+  private get saveFieldErrors(): SettingsFieldError[] {
+    if (this.saveError?.kind !== 'validation') return [];
+    const groups = this.configKeyGroups();
+    return this.saveError.fieldErrors.map((e) => {
+      let key = e.key ?? fallbackFieldKey(e.section, e.path);
+      if (key && !key.startsWith('settings.') && !key.startsWith('secrets.')) {
+        const head = key.split('.')[0];
+        const inSettings = groups.settings.has(head);
+        const inSecrets = groups.secrets.has(head);
+        key = inSettings !== inSecrets ? `${inSettings ? 'settings' : 'secrets'}.${key}` : null;
+      }
+      return { ...e, key };
+    });
+  }
+
+  /** Setting and secret keys the detail view renders. */
+  private configKeyGroups(): { settings: Set<string>; secrets: Set<string> } {
+    const d = this.detail;
+    if (!d) return { settings: new Set(), secrets: new Set() };
+    const platform = resolvePlatform(d.name);
+    return {
+      settings: new Set([
+        ...(PLATFORM_FIELDS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.settings ?? {}),
+      ]),
+      secrets: new Set([
+        ...(PLATFORM_SECRETS[platform] ?? []).map((f) => f.key),
+        ...Object.keys(d.has_secrets ?? {}),
+      ]),
+    };
+  }
+
+  /** Inline messages for one setting or secret. */
+  private renderConfigFieldErrors(
+    group: 'settings' | 'secrets',
+    key: string
+  ): TemplateResult | typeof nothing {
+    const field = `${group}.${key}`;
+    return renderFieldErrorMessages(fieldErrorMessages(this.saveFieldErrors, field), field);
+  }
+
+  private reloadAfterConflict(): void {
+    this.saveError = null;
+    this.error = null;
+    this.successMessage = null;
+    if (this.detail) void this.loadDetail(this.detail.name);
+  }
+
+  private renderSaveError(): TemplateResult | typeof nothing {
+    const err = this.saveError;
+    if (!err) return nothing;
+    if (err.kind === 'conflict') return renderConflictNotice(err, () => this.reloadAfterConflict());
+    if (err.kind === 'layer0') return renderLayer0Notice(err);
+    return nothing;
+  }
+
   override render() {
     const isDetail = this.currentName !== null;
 
     return html`
       ${this.error ? html`<div class="status-message error">${this.error}</div>` : nothing}
+      ${this.renderSaveError()}
       ${this.successMessage
         ? html`<div class="status-message success">${this.successMessage}</div>`
         : nothing}
@@ -1386,6 +1491,7 @@ export class ScionPageAdminIntegrations extends LitElement {
     return html`
       <div class="section">
         <h3 class="section-title">Configuration</h3>
+        ${renderSectionErrorSummary(this.saveFieldErrors, 'configuration')}
         <div class="form-grid">
           ${fieldDefs.map(
             (field) => html`
@@ -1393,6 +1499,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                 <label>${field.label}</label>
                 ${this.renderFieldInput(field)}
                 <span class="hint">${field.description}</span>
+                ${this.renderConfigFieldErrors('settings', field.key)}
               </div>
             `
           )}
@@ -1409,6 +1516,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                     };
                   }}
                 ></sl-input>
+                ${this.renderConfigFieldErrors('settings', key)}
               </div>
             `
           )}
@@ -1902,6 +2010,9 @@ export class ScionPageAdminIntegrations extends LitElement {
     // For A2A, the api_key secret is only relevant when auth_scheme is apiKey or bearer.
     const authScheme = platform === 'a2a' ? (this.editedSettings['auth_scheme'] ?? 'none') : '';
     const apiKeyRelevant = authScheme === 'apiKey' || authScheme === 'bearer';
+    // The Telegram plugin refuses to start in webhook mode without webhook_secret.
+    const telegramWebhook =
+      platform === 'telegram' && this.editedSettings['inbound_mode'] === 'webhook';
 
     return html`
       <div class="section">
@@ -1911,9 +2022,12 @@ export class ScionPageAdminIntegrations extends LitElement {
           if (platform === 'a2a' && key === 'api_key' && !apiKeyRelevant) return nothing;
           const def = secretDefMap.get(key);
           const label = def?.label ?? key;
-          // For A2A, mark api_key as required when the scheme needs it.
-          const isRequired =
-            platform === 'a2a' && key === 'api_key' ? apiKeyRelevant : (def?.required ?? false);
+          // Some secrets are required only in the mode that uses them: A2A
+          // api_key when the scheme needs it, Telegram webhook_secret in
+          // webhook mode.
+          let isRequired = def?.required ?? false;
+          if (platform === 'a2a' && key === 'api_key') isRequired = apiKeyRelevant;
+          if (platform === 'telegram' && key === 'webhook_secret') isRequired = telegramWebhook;
           const isConfigured = d.has_secrets?.[key];
           return html`
             <div class="secret-row">
@@ -1945,6 +2059,7 @@ export class ScionPageAdminIntegrations extends LitElement {
                   };
                 }}
               ></sl-input>
+              ${this.renderConfigFieldErrors('secrets', key)}
             </div>
           `;
         })}

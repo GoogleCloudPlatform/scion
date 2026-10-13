@@ -1,0 +1,40 @@
+[
+  {
+    "name": "global",
+    "type": "global",
+    "config_path": "$HOME/.scion",
+    "status": "ok",
+    "agent_count": 1
+  },
+  {
+    "name": "ext",
+    "project_id": "11111111-0000-4000-8000-000000000001",
+    "type": "external",
+    "config_path": "$HOME/.scion/project-configs/ext__9abc/.scion",
+    "workspace_path": "$HOME/missing",
+    "status": "orphaned",
+    "agent_count": 0
+  },
+  {
+    "name": "gitcfg",
+    "type": "git",
+    "config_path": "$HOME/.scion/project-configs/gitcfg__def0/.scion",
+    "status": "ok",
+    "agent_count": 2
+  },
+  {
+    "name": "legacy",
+    "type": "git",
+    "config_path": "$HOME/.scion/project-configs/legacy__5678/.scion",
+    "workspace_path": "(git repo)",
+    "status": "ok",
+    "agent_count": 1
+  },
+  {
+    "name": "orphan",
+    "type": "git",
+    "config_path": "$HOME/.scion/project-configs/orphan__1234",
+    "status": "orphaned",
+    "agent_count": 0
+  }
+]

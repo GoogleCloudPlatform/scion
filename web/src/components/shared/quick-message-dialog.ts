@@ -102,7 +102,7 @@ export class ScionQuickMessageDialog extends LitElement {
       this.sendError = null;
       this.sending = false;
       // Auto-focus the textarea after the dialog animation completes
-      this.updateComplete.then(() => {
+      void this.updateComplete.then(() => {
         const textarea = this.shadowRoot?.querySelector('sl-textarea');
         if (textarea) {
           textarea.focus();

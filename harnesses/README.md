@@ -155,18 +155,16 @@ byte-identical except for a `# GENERATED` header line. The drift-gate test
 (`TestVendoredLibMatchesCanonical`) enforces this — CI fails if any vendored
 copy drifts from the canonical.
 
-After editing `harnesses/scion_harness.py`, regenerate vendored copies from
-the repo root:
+After editing `harnesses/scion_harness.py`, regenerate vendored copies with
+either command; both produce identical output:
 ```sh
-go run ./harnesses/gen
+go generate ./harnesses/   # runs the //go:generate directive in harnesses/embed.go
+go run ./harnesses/gen     # from the repo root
 ```
 
-(`go generate ./harnesses/...` and `go generate ./harnesses/gen/...` do not
-work here: the `//go:generate` directive lives on `harnesses/embed.go`, and
-`gen`'s own paths are relative to its working directory rather than the
-package declaring the directive, so the first fails outright and the second
-is a silent no-op — there's no `//go:generate` directive inside `gen/`
-itself for it to find.)
+The generator takes a `-dir` flag naming the harnesses directory. It defaults
+to `harnesses` (relative to the repo root); the `//go:generate` directive
+passes `-dir .` because `go generate` runs in the package directory.
 
 ### `provisioner.lib` in config.yaml
 

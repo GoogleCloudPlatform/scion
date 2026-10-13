@@ -25,6 +25,7 @@
  */
 
 import type { Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 export const PROJECT_A = {
   id: 'proj-a-mobile-layout',
@@ -134,16 +135,9 @@ const AGENT_MEMBERS = [
  * suppresses SSE (no real server behind these mocks). Call before `page.goto`.
  */
 export async function setupChatMobileMocks(page: Page): Promise<void> {
+  await installEventSourceStub(page);
   await page.addInitScript(() => {
     window.__SCION_FEATURES__ = { 'web.native_chat': true };
-    window.EventSource = class extends EventTarget {
-      onopen: (() => void) | null = null;
-      constructor() {
-        super();
-        queueMicrotask(() => this.onopen?.());
-      }
-      close(): void {}
-    } as unknown as typeof EventSource;
   });
 
   await page.route('**/auth/me', (route) =>

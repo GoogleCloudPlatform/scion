@@ -28,6 +28,7 @@
 import { SSEClient } from './sse-client.js';
 import type { SSEUpdateEvent } from './sse-client.js';
 import { shouldApplyAcceptedDeletion } from '../shared/agent-deletion.js';
+import { resetReadinessMarks } from './readiness-marks.js';
 import type {
   Agent,
   AgentActivity,
@@ -150,7 +151,9 @@ function exposedPortsEqual(a: ExposedPort[] | undefined, b: ExposedPort[] | unde
 /**
  * Promote `AgentDetail` fields (`message`, `currentTurns`,
  * `currentModelCalls`, `startedAt`) from a delta's nested `detail` onto the
- * delta's own top level, leaving `detail` itself untouched. A no-op (returns
+ * delta's own top level, leaving `detail` itself untouched. `message` is
+ * copied whenever it is an own key of `detail`, `''` included, so a cleared
+ * message clears the top-level copy too. A no-op (returns
  * `delta` unchanged) when `delta.detail` is absent. Called once per delta,
  * inside `mergeAgentDelta` and `foldCompactedDelta` (§7).
  */
@@ -158,7 +161,10 @@ function promoteDetailFields(delta: Partial<Agent>): Partial<Agent> {
   const detail = delta.detail;
   if (!detail) return delta;
   const promoted: Partial<Agent> = { ...delta };
-  if (detail.message) {
+  // An own `message` key is copied even when it is '' (ptone/scion#4415):
+  // the hub sends an explicit empty message when the agent's status message
+  // clears, and the top-level copy must clear with it.
+  if (Object.prototype.hasOwnProperty.call(detail, 'message')) {
     (promoted as Record<string, unknown>).message = detail.message;
   }
   if (detail.currentTurns !== undefined) {
@@ -212,7 +218,7 @@ function mergeAgentDelta(
     delta = promoteDetailFields(delta);
   }
   // Ensure id is always set
-  const updated = { ...base, ...delta, id: agentId } as Agent;
+  const updated = { ...base, ...delta, id: agentId };
   // Preserve _capabilities from existing state when the delta doesn't
   // provide valid capabilities (SSE status deltas typically omit them).
   if (!delta._capabilities && base._capabilities) {
@@ -407,7 +413,7 @@ export interface AppState {
   connected: boolean;
   scope: ViewScope | null;
   /**
-   * Scope-level capabilities from the SSR-prefetched list response, keyed by
+   * Scope-level capabilities from the list page's REST response, keyed by
    * the resource they were computed for.
    *
    * Keyed rather than a single slot because agent-scope and project-scope
@@ -432,7 +438,6 @@ export type StateEventType =
   | 'disconnected'
   | 'scope-changed'
   | 'notification-created'
-  | 'user-message-created'
   | 'chat-message-received'
   | 'chat-topic-updated'
   | 'chat-presence-updated'
@@ -441,6 +446,7 @@ export type StateEventType =
   | 'chat-message-edited'
   | 'chat-message-deleted'
   | 'chat-dm-promoted'
+  | 'chat-scheduled-updated'
   | 'agent-created';
 
 /**
@@ -573,11 +579,10 @@ export class StateManager extends EventTarget {
   private sseClient = new SSEClient();
 
   /**
-   * Current user's ID, set once by the app bootstrap. Chat notifications are
-   * published on the subscriber-scoped subject `user.<id>.notification` (the
-   * unscoped `notification.created` subject is readable by every session, and
-   * chat payloads carry a sender name and a message preview), so the client
-   * needs to know who it is before it can subscribe to its own notifications.
+   * Current user's ID, set once by the app bootstrap. DM messages, member
+   * thread messages and the user's own read-state changes are published on
+   * the subscriber-scoped subject `user.<id>.chat.>`, so the client needs
+   * to know who it is before it can subscribe to them on every page.
    */
   private currentUserId = '';
 
@@ -611,45 +616,6 @@ export class StateManager extends EventTarget {
       this.sawDisconnectThisGeneration = true;
       this.notify('disconnected');
     });
-  }
-
-  /**
-   * Initialize state from server-rendered data.
-   * Called once on page load with the __SCION_DATA__ payload.
-   *
-   * @param initialData - Agents and/or projects from the prefetched API response.
-   * @param scopeCapabilities - Scope-level capabilities from the API response's
-   *   top-level `_capabilities` field (if present). The payload is prefetched
-   *   for one page, so these belong to whichever list it carries; they are
-   *   attributed to that resource. When the payload carries both lists the
-   *   owner is ambiguous, so they are dropped rather than guessed — the page
-   *   then fetches its own, which is correct if slower.
-   */
-  hydrate(
-    initialData: { agents?: Agent[]; projects?: Project[] },
-    scopeCapabilities?: import('../shared/types.js').Capabilities
-  ): void {
-    if (initialData.agents) {
-      for (const agent of initialData.agents) {
-        this.state.agents.set(agent.id, agent);
-      }
-    }
-
-    if (initialData.projects) {
-      for (const project of initialData.projects) {
-        this.state.projects.set(project.id, project);
-      }
-    }
-
-    if (scopeCapabilities) {
-      const hasAgents = Array.isArray(initialData.agents);
-      const hasProjects = Array.isArray(initialData.projects);
-      if (hasAgents && !hasProjects) {
-        this.state.scopeCapabilities.set('agent', scopeCapabilities);
-      } else if (hasProjects && !hasAgents) {
-        this.state.scopeCapabilities.set('project', scopeCapabilities);
-      }
-    }
   }
 
   /** The signed-in user's id, or '' before it is known. */
@@ -689,6 +655,8 @@ export class StateManager extends EventTarget {
     }
 
     this.state.scope = scope;
+    // A scope change starts a new load for the readiness marks.
+    resetReadinessMarks();
 
     // Clear state from previous scope
     this.state.agents.clear();
@@ -774,14 +742,24 @@ export class StateManager extends EventTarget {
       }
     })();
 
-    // Chat notifications arrive on the subscriber-scoped subject, which the
-    // server authorizes against the session user. It is added in every scope,
-    // not just chat: a mention must still reach the tray and the title badge
-    // while the user is looking at the agent list. Note that the chat scope's
-    // `user.<id>.chat.>` does not cover it — `notification` is not under `chat`.
+    // DM messages and read-state changes arrive on the caller's own chat
+    // subject, which the server authorizes against the session user. It is
+    // added in every scope, not just chat: a DM must still raise a popup and
+    // move the unread badge while the user is looking at the agent list.
+    // The same subject also carries DM typing, edit and delete events; pages
+    // without a chat view have no listener for those and ignore them.
+    //
+    // The subscriber-scoped notification subject carries bell rows addressed
+    // to this user alone, such as SCHEDULE_BLOCKED, which name the user's
+    // agents and schedules and so never go out on `notification.*`. The
+    // chat subject's `chat.>` does not cover it: `notification` is not under
+    // `chat`. It is added in every scope so the bell hears about them live.
     const userId = this.currentUserId || (scope.type === 'chat' ? scope.userId : '');
     if (userId) {
-      subs.push(`user.${userId}.notification`);
+      const own = `user.${userId}.chat.>`;
+      if (!subs.includes(own)) subs.push(own);
+      const ownNotifications = `user.${userId}.notification`;
+      if (!subs.includes(ownNotifications)) subs.push(ownNotifications);
     }
     return subs;
   }
@@ -821,24 +799,24 @@ export class StateManager extends EventTarget {
       return;
     }
 
-    // User-scoped notifications: user.{userId}.notification
-    //
-    // Without an explicit case here the subject is silently dropped: it has
-    // three tokens, and the user-scoped chat branch below requires four, so
-    // it falls past every branch to the end of handleUpdate. The tray and the
-    // unread badge would then never hear about a chat notification. (It does
-    // not get misrouted to 'chat-message-received' — measured, not assumed.)
+    // User-scoped notifications: user.{userId}.notification, bell rows
+    // addressed to this user alone (such as SCHEDULE_BLOCKED). Without an
+    // explicit case the subject is dropped: it has three tokens, and the
+    // user-scoped chat branch below requires four.
     if (parts[0] === 'user' && parts.length === 3 && parts[2] === 'notification') {
       this.notifyWithData('notification-created', data);
       return;
     }
 
-    // User-scoped chat events: user.{userId}.chat.{dm|typing|message.edited|message.deleted}
+    // User-scoped chat events: user.{userId}.chat.{dm|typing|scheduled|message.edited|message.deleted}
     if (parts[0] === 'user' && parts.length >= 4 && parts[2] === 'chat') {
       // Human-to-human DMs have no project, so their typing events arrive on
       // the user-scoped subject rather than project.{id}.chat.typing.
       if (parts[3] === 'dm' && parts.length >= 5 && parts[4] === 'promoted') {
         this.notifyWithData('chat-dm-promoted', data);
+      } else if (parts[3] === 'scheduled') {
+        // The user's own scheduled messages (sender-only; never a message).
+        this.notifyWithData('chat-scheduled-updated', data);
       } else if (parts[3] === 'typing') {
         this.notifyWithData('chat-typing-received', data);
       } else if (parts[3] === 'read-state') {
@@ -853,7 +831,12 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-message-deleted', data);
         }
       } else {
-        this.notifyWithData('chat-message-received', data);
+        // Marked as addressed to this user: only conversations the user
+        // takes part in are published on their own subject.
+        this.notifyWithData('chat-message-received', {
+          ...(data as Record<string, unknown>),
+          deliveredToUser: true,
+        });
       }
       return;
     }
@@ -919,16 +902,13 @@ export class StateManager extends EventTarget {
         } else if (chatEventType === 'typing') {
           this.notifyWithData('chat-typing-received', chatDetail);
         }
-        // Also dispatch the legacy user-message-created for v1 compat
-        if (chatEventType === 'message') {
-          this.notify('user-message-created');
-        }
         return;
       }
 
-      // User-targeted message events: project.{projectId}.user.{userId}
+      // User-targeted message events: project.{projectId}.user.{userId}.
+      // Nothing consumes these any more; stop them reaching the project
+      // metadata handler below.
       if (parts[2] === 'user') {
-        this.notify('user-message-created');
         return;
       }
 
@@ -938,6 +918,12 @@ export class StateManager extends EventTarget {
   }
 
   private handleAgentEvent(agentId: string, eventType: string, data: unknown): void {
+    // `agent.{id}.message` carries a chat message payload, not an agent
+    // delta. Message views read the agent messages stream instead.
+    if (eventType === 'message') {
+      return;
+    }
+
     if (eventType === 'deleted') {
       this.state.agents.delete(agentId);
       this.state.deletedAgentIds.add(agentId);
@@ -1154,7 +1140,7 @@ export class StateManager extends EventTarget {
     const existing = this.dirty.unknown.get(agentId) ?? {};
     const next: UnknownAgentDelta = { ...existing };
     if (delta.phase !== undefined) next.phase = delta.phase;
-    if (delta.activity !== undefined) next.activity = delta.activity as string;
+    if (delta.activity !== undefined) next.activity = delta.activity;
     if (delta.lastActivityEvent !== undefined) next.lastActivityEvent = delta.lastActivityEvent;
     this.dirty.unknown.set(agentId, next);
   }
@@ -1222,7 +1208,7 @@ export class StateManager extends EventTarget {
       if (!summaryData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     } else {
       // Project lifecycle events: created, updated
       const projectData = data as Partial<Project> & { projectId?: string };
@@ -1232,7 +1218,7 @@ export class StateManager extends EventTarget {
       if (!projectData._capabilities && existing._capabilities) {
         updated._capabilities = existing._capabilities;
       }
-      this.state.projects.set(id, updated as Project);
+      this.state.projects.set(id, updated);
     }
     this.notify('projects-updated');
   }
@@ -1247,7 +1233,7 @@ export class StateManager extends EventTarget {
       // Map brokerId field from event payload to id
       const id = ((delta as Record<string, unknown>).brokerId as string) || brokerId;
       const updated = { ...existing, ...delta, id };
-      this.state.brokers.set(id, updated as RuntimeBroker);
+      this.state.brokers.set(id, updated);
     }
     this.notify('brokers-updated');
   }
@@ -1385,7 +1371,7 @@ export class StateManager extends EventTarget {
       let toStore: Agent = agent;
       if (partial) {
         const existing = this.state.agents.get(agent.id);
-        toStore = existing ? ({ ...existing, ...agent, id: agent.id } as Agent) : agent;
+        toStore = existing ? { ...existing, ...agent, id: agent.id } : agent;
       }
       const recorded = recordedDeltas?.get(agent.id);
       if (recorded) {

@@ -383,3 +383,46 @@ func TestAgent_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
 		t.Errorf("expected explicit provisionedOnly false, got %s", data)
 	}
 }
+
+// The Hub returns the applied GCP identity under appliedConfig.gcpIdentity on
+// agent reads; the client must decode it so the CLI can show which account an
+// agent runs as.
+func TestAgent_JSON_DecodesAppliedGCPIdentity(t *testing.T) {
+	jsonData := `{
+		"id": "agent-1",
+		"appliedConfig": {
+			"profile": "gke",
+			"gcpIdentity": {
+				"metadataMode": "assign",
+				"serviceAccountId": "sa-1",
+				"serviceAccountEmail": "worker@example.com",
+				"projectId": "example-gcp-project",
+				"requireLocalRuntime": true
+			}
+		}
+	}`
+	var a Agent
+	if err := json.Unmarshal([]byte(jsonData), &a); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if a.AppliedConfig == nil || a.AppliedConfig.GCPIdentity == nil {
+		t.Fatalf("appliedConfig.gcpIdentity not decoded: %+v", a.AppliedConfig)
+	}
+	want := GCPIdentity{
+		MetadataMode:        "assign",
+		ServiceAccountID:    "sa-1",
+		ServiceAccountEmail: "worker@example.com",
+		ProjectID:           "example-gcp-project",
+	}
+	if got := *a.AppliedConfig.GCPIdentity; got != want {
+		t.Errorf("gcpIdentity = %+v, want %+v", got, want)
+	}
+
+	var none Agent
+	if err := json.Unmarshal([]byte(`{"id": "agent-2", "appliedConfig": {"profile": "gke"}}`), &none); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if none.AppliedConfig.GCPIdentity != nil {
+		t.Errorf("absent gcpIdentity should decode as nil, got %+v", none.AppliedConfig.GCPIdentity)
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -41,6 +42,10 @@ var hubDashboardPath = filepath.Join("..", "..", "..", "deploy", "monitoring", "
 var pointAttributeLabels = map[string]map[string]bool{
 	reapermetrics.MetricLaunchReaperTicks: {reapermetrics.AttrTickOutcome: true},
 	dbmetrics.MetricNotificationsDropped:  {dbmetrics.AttrDropReason: true},
+	dbmetrics.MetricPoolConnectionsActive: {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsIdle:   {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsWaits:  {dbmetrics.AttrPool: true},
+	dbmetrics.MetricPoolConnectionsMax:    {dbmetrics.AttrPool: true},
 }
 
 // --- instrument discovery --------------------------------------------------
@@ -65,6 +70,7 @@ type capturingMeterProvider struct {
 	noop.MeterProvider
 	mu          sync.Mutex
 	instruments map[string]instrumentKind
+	units       map[string]string
 	unsupported []string
 }
 
@@ -76,6 +82,15 @@ func (p *capturingMeterProvider) add(name string, k instrumentKind) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.instruments[name] = k
+}
+
+func (p *capturingMeterProvider) setUnit(name, unit string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.units == nil {
+		p.units = map[string]string{}
+	}
+	p.units[name] = unit
 }
 
 func (p *capturingMeterProvider) addUnsupported(name string) {
@@ -111,11 +126,13 @@ func (m *capturingMeter) Float64UpDownCounter(n string, o ...otelmetric.Float64U
 
 func (m *capturingMeter) Int64Histogram(n string, o ...otelmetric.Int64HistogramOption) (otelmetric.Int64Histogram, error) {
 	m.p.add(n, kindInt64Histogram)
+	m.p.setUnit(n, otelmetric.NewInt64HistogramConfig(o...).Unit())
 	return m.Meter.Int64Histogram(n, o...)
 }
 
 func (m *capturingMeter) Float64Histogram(n string, o ...otelmetric.Float64HistogramOption) (otelmetric.Float64Histogram, error) {
 	m.p.add(n, kindFloat64Histogram)
+	m.p.setUnit(n, otelmetric.NewFloat64HistogramConfig(o...).Unit())
 	return m.Meter.Float64Histogram(n, o...)
 }
 
@@ -159,6 +176,23 @@ func (m *capturingMeter) Int64ObservableGauge(n string, o ...otelmetric.Int64Obs
 func (m *capturingMeter) Float64ObservableGauge(n string, o ...otelmetric.Float64ObservableGaugeOption) (otelmetric.Float64ObservableGauge, error) {
 	m.p.addUnsupported(n)
 	return m.Meter.Float64ObservableGauge(n, o...)
+}
+
+// hubHistogramUnits returns the unit of every histogram the hub recorders
+// register, keyed by OTel metric name.
+func hubHistogramUnits(t *testing.T) map[string]string {
+	t.Helper()
+	p := &capturingMeterProvider{instruments: map[string]instrumentKind{}}
+	if _, err := dbmetrics.New(p); err != nil {
+		t.Fatalf("dbmetrics.New: %v", err)
+	}
+	if _, err := dispatchmetrics.New(p); err != nil {
+		t.Fatalf("dispatchmetrics.New: %v", err)
+	}
+	if _, err := reapermetrics.New(p); err != nil {
+		t.Fatalf("reapermetrics.New: %v", err)
+	}
+	return p.units
 }
 
 // hubRecorderInstruments returns every instrument registered by the hub
@@ -662,6 +696,12 @@ func TestHubDashboardJSON(t *testing.T) {
 			if len(agg.GroupByFields) == 0 || agg.GroupByFields[0] != replicaGroup {
 				t.Errorf("chart %q: first groupByField must be %s, got %v", w.Title, replicaGroup, agg.GroupByFields)
 			}
+			// Two pools write scion.db.pool.*: a chart that does not group by
+			// pool sums or mixes them per replica (ptone/scion#3618).
+			if pointAttributeLabels[em.otelName][dbmetrics.AttrPool] &&
+				!slices.Contains(agg.GroupByFields, `metric.label."`+dbmetrics.AttrPool+`"`) {
+				t.Errorf("chart %q: must group by metric.label.%q, got %v", w.Title, dbmetrics.AttrPool, agg.GroupByFields)
+			}
 
 			// Every label referenced must reach Cloud Monitoring: a
 			// resource-derived label (checked against the export above) or
@@ -688,7 +728,7 @@ func TestHubDashboardJSON(t *testing.T) {
 	for _, name := range []string{
 		dbmetrics.MetricPoolConnectionsActive,
 		dbmetrics.MetricPoolConnectionsIdle,
-		dbmetrics.MetricPoolConnectionsWaiting,
+		dbmetrics.MetricPoolConnectionsWaits,
 		dbmetrics.MetricPoolConnectionsMax,
 		dispatchmetrics.MetricDispatchClaimed,
 		dispatchmetrics.MetricDispatchDone,

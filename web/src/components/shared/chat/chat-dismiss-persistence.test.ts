@@ -23,8 +23,6 @@
  * thing that comes after the dismissal, which is the whole point.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll } from 'vitest';
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -32,7 +30,7 @@ import { describe, it, expect, vi, beforeAll } from 'vitest';
 vi.mock('../../../client/api.js', () => ({
   apiFetch: vi.fn(() => Promise.resolve(new Response('{}', { status: 200 }))),
 }));
-vi.mock('../../../client/main.js', () => ({ navigateTo: vi.fn() }));
+vi.mock('../../../client/main.js', () => import('../../../client/__fixtures__/main-stub.js'));
 
 beforeAll(async () => {
   await import('./chat-composer.js');

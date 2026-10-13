@@ -31,6 +31,10 @@ func scrubScionEnv(t *testing.T) {
 		"SCION_OTEL_GCP_CREDENTIALS",
 		"SCION_GCP_PROJECT_ID",
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
+		// An agent container of a native-usage harness exports
+		// SCION_USAGE_SOURCE=native, which makes session-end hooks hold
+		// their reports; tests that want it set it themselves.
+		"SCION_USAGE_SOURCE",
 	} {
 		t.Setenv(key, "")
 	}

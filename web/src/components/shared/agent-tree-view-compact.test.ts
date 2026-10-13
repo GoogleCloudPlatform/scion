@@ -27,8 +27,6 @@
  *   parent is the root user, never has one.
  */
 
-// @vitest-environment happy-dom
-
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import './agent-tree-view.js';
 import type { ScionAgentTreeView } from './agent-tree-view.js';

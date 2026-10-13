@@ -250,6 +250,118 @@ func (_c *MutationAuditCreate) SetNillableExecutorID(v *string) *MutationAuditCr
 	return _c
 }
 
+// SetActorAgentID sets the "actor_agent_id" field.
+func (_c *MutationAuditCreate) SetActorAgentID(v string) *MutationAuditCreate {
+	_c.mutation.SetActorAgentID(v)
+	return _c
+}
+
+// SetNillableActorAgentID sets the "actor_agent_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableActorAgentID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetActorAgentID(*v)
+	}
+	return _c
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (_c *MutationAuditCreate) SetAuthorizingUserID(v string) *MutationAuditCreate {
+	_c.mutation.SetAuthorizingUserID(v)
+	return _c
+}
+
+// SetNillableAuthorizingUserID sets the "authorizing_user_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableAuthorizingUserID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetAuthorizingUserID(*v)
+	}
+	return _c
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (_c *MutationAuditCreate) SetSourceGrantID(v string) *MutationAuditCreate {
+	_c.mutation.SetSourceGrantID(v)
+	return _c
+}
+
+// SetNillableSourceGrantID sets the "source_grant_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableSourceGrantID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetSourceGrantID(*v)
+	}
+	return _c
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (_c *MutationAuditCreate) SetParentGrantID(v string) *MutationAuditCreate {
+	_c.mutation.SetParentGrantID(v)
+	return _c
+}
+
+// SetNillableParentGrantID sets the "parent_grant_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableParentGrantID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetParentGrantID(*v)
+	}
+	return _c
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (_c *MutationAuditCreate) SetDelegationEdgeID(v string) *MutationAuditCreate {
+	_c.mutation.SetDelegationEdgeID(v)
+	return _c
+}
+
+// SetNillableDelegationEdgeID sets the "delegation_edge_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableDelegationEdgeID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetDelegationEdgeID(*v)
+	}
+	return _c
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (_c *MutationAuditCreate) SetExchangeAgentCredentialID(v string) *MutationAuditCreate {
+	_c.mutation.SetExchangeAgentCredentialID(v)
+	return _c
+}
+
+// SetNillableExchangeAgentCredentialID sets the "exchange_agent_credential_id" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableExchangeAgentCredentialID(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetExchangeAgentCredentialID(*v)
+	}
+	return _c
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (_c *MutationAuditCreate) SetActorKind(v string) *MutationAuditCreate {
+	_c.mutation.SetActorKind(v)
+	return _c
+}
+
+// SetNillableActorKind sets the "actor_kind" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableActorKind(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetActorKind(*v)
+	}
+	return _c
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (_c *MutationAuditCreate) SetAgentDelegationCode(v string) *MutationAuditCreate {
+	_c.mutation.SetAgentDelegationCode(v)
+	return _c
+}
+
+// SetNillableAgentDelegationCode sets the "agent_delegation_code" field if the given value is not nil.
+func (_c *MutationAuditCreate) SetNillableAgentDelegationCode(v *string) *MutationAuditCreate {
+	if v != nil {
+		_c.SetAgentDelegationCode(*v)
+	}
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *MutationAuditCreate) SetID(v uuid.UUID) *MutationAuditCreate {
 	_c.mutation.SetID(v)
@@ -465,6 +577,38 @@ func (_c *MutationAuditCreate) createSpec() (*MutationAudit, *sqlgraph.CreateSpe
 	if value, ok := _c.mutation.ExecutorID(); ok {
 		_spec.SetField(mutationaudit.FieldExecutorID, field.TypeString, value)
 		_node.ExecutorID = value
+	}
+	if value, ok := _c.mutation.ActorAgentID(); ok {
+		_spec.SetField(mutationaudit.FieldActorAgentID, field.TypeString, value)
+		_node.ActorAgentID = value
+	}
+	if value, ok := _c.mutation.AuthorizingUserID(); ok {
+		_spec.SetField(mutationaudit.FieldAuthorizingUserID, field.TypeString, value)
+		_node.AuthorizingUserID = value
+	}
+	if value, ok := _c.mutation.SourceGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldSourceGrantID, field.TypeString, value)
+		_node.SourceGrantID = value
+	}
+	if value, ok := _c.mutation.ParentGrantID(); ok {
+		_spec.SetField(mutationaudit.FieldParentGrantID, field.TypeString, value)
+		_node.ParentGrantID = value
+	}
+	if value, ok := _c.mutation.DelegationEdgeID(); ok {
+		_spec.SetField(mutationaudit.FieldDelegationEdgeID, field.TypeString, value)
+		_node.DelegationEdgeID = value
+	}
+	if value, ok := _c.mutation.ExchangeAgentCredentialID(); ok {
+		_spec.SetField(mutationaudit.FieldExchangeAgentCredentialID, field.TypeString, value)
+		_node.ExchangeAgentCredentialID = value
+	}
+	if value, ok := _c.mutation.ActorKind(); ok {
+		_spec.SetField(mutationaudit.FieldActorKind, field.TypeString, value)
+		_node.ActorKind = value
+	}
+	if value, ok := _c.mutation.AgentDelegationCode(); ok {
+		_spec.SetField(mutationaudit.FieldAgentDelegationCode, field.TypeString, value)
+		_node.AgentDelegationCode = value
 	}
 	return _node, _spec
 }
@@ -809,6 +953,150 @@ func (u *MutationAuditUpsert) UpdateExecutorID() *MutationAuditUpsert {
 // ClearExecutorID clears the value of the "executor_id" field.
 func (u *MutationAuditUpsert) ClearExecutorID() *MutationAuditUpsert {
 	u.SetNull(mutationaudit.FieldExecutorID)
+	return u
+}
+
+// SetActorAgentID sets the "actor_agent_id" field.
+func (u *MutationAuditUpsert) SetActorAgentID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldActorAgentID, v)
+	return u
+}
+
+// UpdateActorAgentID sets the "actor_agent_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateActorAgentID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldActorAgentID)
+	return u
+}
+
+// ClearActorAgentID clears the value of the "actor_agent_id" field.
+func (u *MutationAuditUpsert) ClearActorAgentID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldActorAgentID)
+	return u
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (u *MutationAuditUpsert) SetAuthorizingUserID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldAuthorizingUserID, v)
+	return u
+}
+
+// UpdateAuthorizingUserID sets the "authorizing_user_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateAuthorizingUserID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldAuthorizingUserID)
+	return u
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (u *MutationAuditUpsert) ClearAuthorizingUserID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldAuthorizingUserID)
+	return u
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (u *MutationAuditUpsert) SetSourceGrantID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldSourceGrantID, v)
+	return u
+}
+
+// UpdateSourceGrantID sets the "source_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateSourceGrantID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldSourceGrantID)
+	return u
+}
+
+// ClearSourceGrantID clears the value of the "source_grant_id" field.
+func (u *MutationAuditUpsert) ClearSourceGrantID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldSourceGrantID)
+	return u
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (u *MutationAuditUpsert) SetParentGrantID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldParentGrantID, v)
+	return u
+}
+
+// UpdateParentGrantID sets the "parent_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateParentGrantID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldParentGrantID)
+	return u
+}
+
+// ClearParentGrantID clears the value of the "parent_grant_id" field.
+func (u *MutationAuditUpsert) ClearParentGrantID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldParentGrantID)
+	return u
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (u *MutationAuditUpsert) SetDelegationEdgeID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldDelegationEdgeID, v)
+	return u
+}
+
+// UpdateDelegationEdgeID sets the "delegation_edge_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateDelegationEdgeID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldDelegationEdgeID)
+	return u
+}
+
+// ClearDelegationEdgeID clears the value of the "delegation_edge_id" field.
+func (u *MutationAuditUpsert) ClearDelegationEdgeID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldDelegationEdgeID)
+	return u
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsert) SetExchangeAgentCredentialID(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldExchangeAgentCredentialID, v)
+	return u
+}
+
+// UpdateExchangeAgentCredentialID sets the "exchange_agent_credential_id" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateExchangeAgentCredentialID() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldExchangeAgentCredentialID)
+	return u
+}
+
+// ClearExchangeAgentCredentialID clears the value of the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsert) ClearExchangeAgentCredentialID() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldExchangeAgentCredentialID)
+	return u
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (u *MutationAuditUpsert) SetActorKind(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldActorKind, v)
+	return u
+}
+
+// UpdateActorKind sets the "actor_kind" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateActorKind() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldActorKind)
+	return u
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (u *MutationAuditUpsert) ClearActorKind() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldActorKind)
+	return u
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (u *MutationAuditUpsert) SetAgentDelegationCode(v string) *MutationAuditUpsert {
+	u.Set(mutationaudit.FieldAgentDelegationCode, v)
+	return u
+}
+
+// UpdateAgentDelegationCode sets the "agent_delegation_code" field to the value that was provided on create.
+func (u *MutationAuditUpsert) UpdateAgentDelegationCode() *MutationAuditUpsert {
+	u.SetExcluded(mutationaudit.FieldAgentDelegationCode)
+	return u
+}
+
+// ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
+func (u *MutationAuditUpsert) ClearAgentDelegationCode() *MutationAuditUpsert {
+	u.SetNull(mutationaudit.FieldAgentDelegationCode)
 	return u
 }
 
@@ -1203,6 +1491,174 @@ func (u *MutationAuditUpsertOne) UpdateExecutorID() *MutationAuditUpsertOne {
 func (u *MutationAuditUpsertOne) ClearExecutorID() *MutationAuditUpsertOne {
 	return u.Update(func(s *MutationAuditUpsert) {
 		s.ClearExecutorID()
+	})
+}
+
+// SetActorAgentID sets the "actor_agent_id" field.
+func (u *MutationAuditUpsertOne) SetActorAgentID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetActorAgentID(v)
+	})
+}
+
+// UpdateActorAgentID sets the "actor_agent_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateActorAgentID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateActorAgentID()
+	})
+}
+
+// ClearActorAgentID clears the value of the "actor_agent_id" field.
+func (u *MutationAuditUpsertOne) ClearActorAgentID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearActorAgentID()
+	})
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (u *MutationAuditUpsertOne) SetAuthorizingUserID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetAuthorizingUserID(v)
+	})
+}
+
+// UpdateAuthorizingUserID sets the "authorizing_user_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateAuthorizingUserID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateAuthorizingUserID()
+	})
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (u *MutationAuditUpsertOne) ClearAuthorizingUserID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearAuthorizingUserID()
+	})
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (u *MutationAuditUpsertOne) SetSourceGrantID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetSourceGrantID(v)
+	})
+}
+
+// UpdateSourceGrantID sets the "source_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateSourceGrantID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateSourceGrantID()
+	})
+}
+
+// ClearSourceGrantID clears the value of the "source_grant_id" field.
+func (u *MutationAuditUpsertOne) ClearSourceGrantID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearSourceGrantID()
+	})
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (u *MutationAuditUpsertOne) SetParentGrantID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetParentGrantID(v)
+	})
+}
+
+// UpdateParentGrantID sets the "parent_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateParentGrantID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateParentGrantID()
+	})
+}
+
+// ClearParentGrantID clears the value of the "parent_grant_id" field.
+func (u *MutationAuditUpsertOne) ClearParentGrantID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearParentGrantID()
+	})
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (u *MutationAuditUpsertOne) SetDelegationEdgeID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetDelegationEdgeID(v)
+	})
+}
+
+// UpdateDelegationEdgeID sets the "delegation_edge_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateDelegationEdgeID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateDelegationEdgeID()
+	})
+}
+
+// ClearDelegationEdgeID clears the value of the "delegation_edge_id" field.
+func (u *MutationAuditUpsertOne) ClearDelegationEdgeID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearDelegationEdgeID()
+	})
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsertOne) SetExchangeAgentCredentialID(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetExchangeAgentCredentialID(v)
+	})
+}
+
+// UpdateExchangeAgentCredentialID sets the "exchange_agent_credential_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateExchangeAgentCredentialID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateExchangeAgentCredentialID()
+	})
+}
+
+// ClearExchangeAgentCredentialID clears the value of the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsertOne) ClearExchangeAgentCredentialID() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearExchangeAgentCredentialID()
+	})
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (u *MutationAuditUpsertOne) SetActorKind(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetActorKind(v)
+	})
+}
+
+// UpdateActorKind sets the "actor_kind" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateActorKind() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateActorKind()
+	})
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (u *MutationAuditUpsertOne) ClearActorKind() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearActorKind()
+	})
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (u *MutationAuditUpsertOne) SetAgentDelegationCode(v string) *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetAgentDelegationCode(v)
+	})
+}
+
+// UpdateAgentDelegationCode sets the "agent_delegation_code" field to the value that was provided on create.
+func (u *MutationAuditUpsertOne) UpdateAgentDelegationCode() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateAgentDelegationCode()
+	})
+}
+
+// ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
+func (u *MutationAuditUpsertOne) ClearAgentDelegationCode() *MutationAuditUpsertOne {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearAgentDelegationCode()
 	})
 }
 
@@ -1764,6 +2220,174 @@ func (u *MutationAuditUpsertBulk) UpdateExecutorID() *MutationAuditUpsertBulk {
 func (u *MutationAuditUpsertBulk) ClearExecutorID() *MutationAuditUpsertBulk {
 	return u.Update(func(s *MutationAuditUpsert) {
 		s.ClearExecutorID()
+	})
+}
+
+// SetActorAgentID sets the "actor_agent_id" field.
+func (u *MutationAuditUpsertBulk) SetActorAgentID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetActorAgentID(v)
+	})
+}
+
+// UpdateActorAgentID sets the "actor_agent_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateActorAgentID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateActorAgentID()
+	})
+}
+
+// ClearActorAgentID clears the value of the "actor_agent_id" field.
+func (u *MutationAuditUpsertBulk) ClearActorAgentID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearActorAgentID()
+	})
+}
+
+// SetAuthorizingUserID sets the "authorizing_user_id" field.
+func (u *MutationAuditUpsertBulk) SetAuthorizingUserID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetAuthorizingUserID(v)
+	})
+}
+
+// UpdateAuthorizingUserID sets the "authorizing_user_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateAuthorizingUserID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateAuthorizingUserID()
+	})
+}
+
+// ClearAuthorizingUserID clears the value of the "authorizing_user_id" field.
+func (u *MutationAuditUpsertBulk) ClearAuthorizingUserID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearAuthorizingUserID()
+	})
+}
+
+// SetSourceGrantID sets the "source_grant_id" field.
+func (u *MutationAuditUpsertBulk) SetSourceGrantID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetSourceGrantID(v)
+	})
+}
+
+// UpdateSourceGrantID sets the "source_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateSourceGrantID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateSourceGrantID()
+	})
+}
+
+// ClearSourceGrantID clears the value of the "source_grant_id" field.
+func (u *MutationAuditUpsertBulk) ClearSourceGrantID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearSourceGrantID()
+	})
+}
+
+// SetParentGrantID sets the "parent_grant_id" field.
+func (u *MutationAuditUpsertBulk) SetParentGrantID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetParentGrantID(v)
+	})
+}
+
+// UpdateParentGrantID sets the "parent_grant_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateParentGrantID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateParentGrantID()
+	})
+}
+
+// ClearParentGrantID clears the value of the "parent_grant_id" field.
+func (u *MutationAuditUpsertBulk) ClearParentGrantID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearParentGrantID()
+	})
+}
+
+// SetDelegationEdgeID sets the "delegation_edge_id" field.
+func (u *MutationAuditUpsertBulk) SetDelegationEdgeID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetDelegationEdgeID(v)
+	})
+}
+
+// UpdateDelegationEdgeID sets the "delegation_edge_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateDelegationEdgeID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateDelegationEdgeID()
+	})
+}
+
+// ClearDelegationEdgeID clears the value of the "delegation_edge_id" field.
+func (u *MutationAuditUpsertBulk) ClearDelegationEdgeID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearDelegationEdgeID()
+	})
+}
+
+// SetExchangeAgentCredentialID sets the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsertBulk) SetExchangeAgentCredentialID(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetExchangeAgentCredentialID(v)
+	})
+}
+
+// UpdateExchangeAgentCredentialID sets the "exchange_agent_credential_id" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateExchangeAgentCredentialID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateExchangeAgentCredentialID()
+	})
+}
+
+// ClearExchangeAgentCredentialID clears the value of the "exchange_agent_credential_id" field.
+func (u *MutationAuditUpsertBulk) ClearExchangeAgentCredentialID() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearExchangeAgentCredentialID()
+	})
+}
+
+// SetActorKind sets the "actor_kind" field.
+func (u *MutationAuditUpsertBulk) SetActorKind(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetActorKind(v)
+	})
+}
+
+// UpdateActorKind sets the "actor_kind" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateActorKind() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateActorKind()
+	})
+}
+
+// ClearActorKind clears the value of the "actor_kind" field.
+func (u *MutationAuditUpsertBulk) ClearActorKind() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearActorKind()
+	})
+}
+
+// SetAgentDelegationCode sets the "agent_delegation_code" field.
+func (u *MutationAuditUpsertBulk) SetAgentDelegationCode(v string) *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.SetAgentDelegationCode(v)
+	})
+}
+
+// UpdateAgentDelegationCode sets the "agent_delegation_code" field to the value that was provided on create.
+func (u *MutationAuditUpsertBulk) UpdateAgentDelegationCode() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.UpdateAgentDelegationCode()
+	})
+}
+
+// ClearAgentDelegationCode clears the value of the "agent_delegation_code" field.
+func (u *MutationAuditUpsertBulk) ClearAgentDelegationCode() *MutationAuditUpsertBulk {
+	return u.Update(func(s *MutationAuditUpsert) {
+		s.ClearAgentDelegationCode()
 	})
 }
 

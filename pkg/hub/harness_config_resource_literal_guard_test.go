@@ -53,7 +53,13 @@ func TestHarnessConfigResourceLiterals_AllUseCanonicalConstructor(t *testing.T) 
 	fset := token.NewFileSet()
 	total := 0
 
-	entries, err := os.ReadDir(dir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards harness_config Resource literals.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards harness_config Resource literals.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards harness_config Resource literals.
+	entries, err := readGuardScanDirs(dir)
 	if err != nil {
 		t.Fatalf("failed to read %s: %v", dir, err)
 	}

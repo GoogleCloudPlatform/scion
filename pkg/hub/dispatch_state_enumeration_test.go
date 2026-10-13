@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -35,7 +34,13 @@ func TestDispatchStateEnumeration(t *testing.T) {
 	hubDir := findHubDir(t)
 	fset := token.NewFileSet()
 
-	entries, err := os.ReadDir(hubDir)
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards store.Message literals.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards store.Message literals.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards store.Message literals.
+	entries, err := readGuardScanDirs(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
 	}

@@ -28,11 +28,15 @@ const hostedUserGuide = {
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
+		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
+		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'Using Artifacts', slug: 'hosted/user/artifacts' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
+		{ label: 'Scheduled Chat Messages', slug: 'hosted/user/scheduled-send' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },
 		{ label: 'A2A Protocol Bridge', slug: 'hosted/user/a2a-bridge' },
 		{ label: 'AWS Federation', slug: 'hosted/user/aws-federation' },
@@ -97,6 +101,7 @@ export default defineConfig({
 							label: 'Release Notes',
 							items: [
 								{ label: 'Overview', slug: 'release-notes' },
+								{ label: 'Oct 5 -- 11', slug: 'release-notes/2026-10-05' },
 								{ label: 'Sep 28 -- Oct 4', slug: 'release-notes/2026-09-28' },
 								{ label: 'Sep 21 -- 27', slug: 'release-notes/2026-09-21' },
 								{ label: 'Sep 14 -- 20', slug: 'release-notes/2026-09-14' },

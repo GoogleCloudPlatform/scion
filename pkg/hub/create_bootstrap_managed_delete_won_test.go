@@ -27,7 +27,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/transfer"
 	"github.com/stretchr/testify/assert"
@@ -104,74 +103,6 @@ func TestBootstrapCreate_DeleteWon_Answers409(t *testing.T) {
 	}
 }
 
-// recordingManagedBackend is a managed-agent backend whose CreateInteraction
-// runs hook (with the create's row ID) and succeeds, and which records the
-// interactions it is asked to cancel. Every interaction reads in progress.
-type recordingManagedBackend struct {
-	failingManagedAgentBackend
-	s         store.Store
-	projectID string
-	hook      func(agentID string)
-
-	mu        sync.Mutex
-	cancelled []string
-	cancelErr error
-	getErr    error
-	// noState makes GetInteraction answer no state and no error.
-	noState bool
-	// cancelCtxErr records the ctx error each cancel saw.
-	cancelCtxErr []error
-}
-
-func (b *recordingManagedBackend) CreateInteraction(context.Context, managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
-	if b.hook != nil {
-		result, err := b.s.ListAgents(context.Background(), store.AgentFilter{ProjectID: b.projectID}, store.ListOptions{})
-		if err == nil && len(result.Items) == 1 {
-			b.hook(result.Items[0].ID)
-		}
-	}
-	return &managedagent.InteractionHandle{InteractionID: "interaction-1"}, nil
-}
-
-func (b *recordingManagedBackend) GetInteraction(_ context.Context, id string) (*managedagent.InteractionState, error) {
-	if b.getErr != nil {
-		return nil, b.getErr
-	}
-	if b.noState {
-		return nil, nil
-	}
-	return &managedagent.InteractionState{InteractionID: id, Status: managedagent.StatusInProgress}, nil
-}
-
-func (b *recordingManagedBackend) CancelInteraction(ctx context.Context, id string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.cancelled = append(b.cancelled, id)
-	b.cancelCtxErr = append(b.cancelCtxErr, ctx.Err())
-	return b.cancelErr
-}
-
-func (b *recordingManagedBackend) cancels() []string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return append([]string(nil), b.cancelled...)
-}
-
-// useManagedBackend installs backend for the test. Tests that call it must
-// not run in parallel: the backend is package-level.
-func useManagedBackend(t *testing.T, backend managedagent.ManagedAgentBackend) {
-	t.Helper()
-	managedBackendMu.Lock()
-	prev := managedBackendInst
-	managedBackendInst = backend
-	managedBackendMu.Unlock()
-	t.Cleanup(func() {
-		managedBackendMu.Lock()
-		managedBackendInst = prev
-		managedBackendMu.Unlock()
-	})
-}
-
 // afterRunningWriteStore runs hook once, right after the managed create's
 // post-create write (phase running) succeeds: a delete that claims the row
 // after that write and before the created publish.
@@ -193,10 +124,15 @@ func (s *afterRunningWriteStore) UpdateAgent(ctx context.Context, a *store.Agent
 
 // The delete lands while the backend creates the first interaction, before
 // the create's post-create write. A delete claim bumps state_version, so
-// that write conflicts and the delete's row has no interaction ID: the
-// create stops the interaction itself and reports it. A hard delete or soft
-// delete written straight to the store (no engine) behaves the same.
-func TestManagedCreate_DeleteWon_BeforeWrite_Answers409AndStopsInteraction(t *testing.T) {
+// that write conflicts and no row records the interaction ID: the create
+// stops the interaction itself and reports it. A delete that holds or
+// removed the row (claimed, finalizing, hard or soft delete written straight
+// to the store) answers 409. A delete that gave up (failed, or its lease
+// lapsed) leaves the agent live: the create re-reads the row once, re-applies
+// its fields and retries the write, and answers 201 with the interaction
+// recorded and running (ptone/scion#3746). With no delete, the create
+// answers 201.
+func TestManagedCreate_DeleteWon_BeforeWrite_StopsInteraction(t *testing.T) {
 	for i, del := range landingDeletes {
 		t.Run(del.name, func(t *testing.T) {
 			srv, s, project := setupCreateAgentServer(t, &createRaceDispatcher{})
@@ -213,6 +149,21 @@ func TestManagedCreate_DeleteWon_BeforeWrite_Answers409AndStopsInteraction(t *te
 			})
 			require.NotEmpty(t, agentID, "the hook ran: %d %s", rec.Code, rec.Body.String())
 
+			if !del.compensate && del.name != "none" {
+				// A delete that gave up (failed, or its lease lapsed)
+				// still bumped state_version, so the post-create write
+				// conflicted while the agent stays live: the create
+				// re-reads the row, retries once and answers 201 with the
+				// interaction recorded (ptone/scion#3746).
+				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+				row, err := s.GetAgent(context.Background(), agentID)
+				require.NoError(t, err)
+				assert.True(t, isManagedAgentRuntime(row.Runtime), "the managed Runtime is persisted")
+				assert.Equal(t, "interaction-1", row.Annotations[annotationInteractionID])
+				assert.Empty(t, backend.cancels(), "a live agent's interaction is left running")
+				assert.Equal(t, 1, pub.count("created"), "created is published: %v", pub.kinds())
+				return
+			}
 			if !del.compensate {
 				require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 				var resp CreateAgentResponse

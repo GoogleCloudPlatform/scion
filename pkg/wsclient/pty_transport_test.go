@@ -194,7 +194,7 @@ func TestConnect_AttachUnsupportedPreUpgrade_MapsToExplicitError(t *testing.T) {
 
 	err := client.Connect(context.Background())
 	require.Error(t, err, "expected a non-nil error so the CLI exits non-zero")
-	assert.Equal(t, attachUnsupportedMessage, err.Error())
+	assert.Equal(t, AttachUnsupportedMessage, err.Error())
 }
 
 // TestConnect_FallsBackToRawBodyWhenNotJSON covers a handshake rejection

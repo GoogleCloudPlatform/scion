@@ -35,12 +35,13 @@ import (
 // restrictions on POST /api/v1/brokers and POST /api/v1/projects/register.
 //
 // broker.create is a hub-level permission. Its selector is mintable only on
-// a hub-boundary UAT, and broker creation does not admit bearer credentials.
-// These tests exercise that boundary
+// a hub-boundary UAT, and a hub-boundary UAT carrying it is admitted for
+// registration through the bearer gate. These tests exercise that boundary
 // through real middleware and handlers — no manually constructed identity
-// stands in for the authorization decision itself — and confirm that neither
-// the target-owner nor the super-admin shortcut in
-// authorizedForBrokerRotate admits a scoped UAT.
+// stands in for the authorization decision itself — and confirm that a UAT
+// without broker.create in its ceiling never reaches the re-registration
+// target check, and that neither the creator nor the super-admin arm
+// of authorizedForBrokerRotate admits a UAT for rotation.
 // ============================================================================
 
 // TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied pins the primary
@@ -48,6 +49,7 @@ import (
 // project must be denied on first registration, and must leave no broker or
 // join-token state behind.
 func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-uat-proj")
 	ownerID := tid("gate-uat-owner")
@@ -71,13 +73,11 @@ func TestBrokerCreateGate_ProjectUATLimitedToAgentReadDenied(t *testing.T) {
 // TestBrokerCreateGate_OwnerUATCannotRemint pins the end-to-end rule that a
 // UAT belonging to the broker's own recorded creator, scoped to agent:read
 // (not broker-related at all), must be denied re-registration of that
-// broker. The broker.create gate is the first, and today the only, denier
-// here: a project-scoped UAT is rejected against this hub-level resource
-// before authorizedForBrokerRotate ever runs. The scoped-credential
-// exclusion in authorizedForBrokerRotate (see
-// TestBrokerCreateGate_OwnerUATCannotRotate) is what enforces the same rule
-// on the owner shortcut once a caller reaches that check at all.
+// broker. The broker.create gate denies it: a project-scoped UAT is
+// rejected against this hub-level resource before
+// brokerRemintTargetAuthorized runs.
 func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-uat-remint-proj")
 	ownerID := tid("gate-uat-remint-owner")
@@ -99,11 +99,11 @@ func TestBrokerCreateGate_OwnerUATCannotRemint(t *testing.T) {
 // TestBrokerCreateGate_SuperAdminUATCannotRemint pins the end-to-end rule
 // that a super-admin's UAT, scoped to agent:read only, must be denied
 // re-registering a broker it does not own. As with the owner case above, the
-// broker.create gate denies this first; the scoped-credential exclusion in
-// authorizedForBrokerRotate (see
-// TestBrokerCreateGate_SuperAdminUATCannotRotate) enforces the same rule on
-// the admin shortcut once a caller reaches that check at all.
+// broker.create gate denies it before brokerRemintTargetAuthorized runs, so
+// the super-admin arm is reached only by a token whose ceiling contains
+// broker.create.
 func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	owner := newPlainUser(t, s, "gate-uat-admin-remint-owner")
 	broker := createReregistrationTestBroker(t, s, "gate-uat-admin-remint-broker", owner.ID)
@@ -131,6 +131,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRemint(t *testing.T) {
 // UAT minted by the broker's own recorded creator, scoped to agent:read
 // only, must be denied.
 func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	projectID := tid("gate-uat-owner-rotate-proj")
@@ -159,6 +160,7 @@ func TestBrokerCreateGate_OwnerUATCannotRotate(t *testing.T) {
 // so authorizedForBrokerRotate is the only check standing between a
 // scoped super-admin UAT and another user's HMAC secret.
 func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "gate-uat-admin-rotate-owner")
@@ -190,6 +192,7 @@ func TestBrokerCreateGate_SuperAdminUATCannotRotate(t *testing.T) {
 // through srv.Handler().ServeHTTP, the same as a real broker's outbound
 // call, rather than constructing the broker identity by hand.
 func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	owner := newPlainUser(t, s, "gate-unrelated-self-owner")
@@ -228,6 +231,7 @@ func TestBrokerRotateSecret_UnrelatedBrokerSelfDenied(t *testing.T) {
 // together by the hub-member role), pinned with a synthetic role so a future
 // role split cannot silently drop the check.
 func TestProjectRegisterEmbeddedBroker_NoBrokerCreateDenied(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 
@@ -286,6 +290,7 @@ func TestProjectRegisterEmbeddedBroker_NoBrokerCreateDenied(t *testing.T) {
 // UAT selector is "broker:create" and that it is allowed under the hub
 // boundary only.
 func TestBrokerCreateGate_SelectorIsHubBoundaryOnly(t *testing.T) {
+	t.Parallel()
 	found := false
 	for _, p := range permissions.Registry {
 		if p.ID != "broker.create" {
@@ -305,6 +310,7 @@ func TestBrokerCreateGate_SelectorIsHubBoundaryOnly(t *testing.T) {
 // project-boundary token cannot carry broker:create: the selector is not
 // allowed under a project boundary, whatever the issuer's authority.
 func TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	projectID := tid("gate-mint-brokercreate-proj")
 	ownerID := tid("gate-mint-brokercreate-owner")
@@ -319,12 +325,12 @@ func TestBrokerCreateGate_ProjectBoundaryCannotMintBrokerCreate(t *testing.T) {
 	assert.Equal(t, MintDenialBoundaryNotAllowed, violation.Reason)
 }
 
-// TestBrokerCreateGate_HubUATNotAdmittedForBrokerCreation pins that broker
-// creation does not admit bearer credentials: a hub-boundary UAT carrying
-// broker:create, held by a user with a live system broker.create grant, is
-// denied on POST /api/v1/brokers, while a session for the same user is
-// admitted.
-func TestBrokerCreateGate_HubUATNotAdmittedForBrokerCreation(t *testing.T) {
+// TestBrokerCreateGate_HubUATAdmittedForBrokerCreation pins that a
+// hub-boundary UAT carrying broker:create, held by a user with a live system
+// broker.create grant, is admitted on POST /api/v1/brokers, and that the
+// new broker is owned by the token's user.
+func TestBrokerCreateGate_HubUATAdmittedForBrokerCreation(t *testing.T) {
+	t.Parallel()
 	srv, s := testServer(t)
 	ctx := context.Background()
 	projectID := tid("gate-hubuat-brokercreate-proj")
@@ -343,14 +349,8 @@ func TestBrokerCreateGate_HubUATNotAdmittedForBrokerCreation(t *testing.T) {
 
 	const uatBroker = "gate-hubuat-brokercreate-uat"
 	rec := doRequestWithToken(t, srv, key, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: uatBroker})
-	assert.Equal(t, http.StatusForbidden, rec.Code, "a hub UAT must not be admitted for broker creation; got: %s", rec.Body.String())
-	assert.NotContains(t, rec.Body.String(), "joinToken", "denied response must not carry a join token")
-	_, err = s.GetRuntimeBrokerByName(ctx, uatBroker)
-	assert.ErrorIs(t, err, store.ErrNotFound, "a denied registration must not create a broker record")
-
-	owner, err := s.GetUser(ctx, ownerID)
+	require.Equal(t, http.StatusCreated, rec.Code, "a hub UAT carrying broker:create must be admitted for broker creation; got: %s", rec.Body.String())
+	created, err := s.GetRuntimeBrokerByName(ctx, uatBroker)
 	require.NoError(t, err)
-	const sessionBroker = "gate-hubuat-brokercreate-session"
-	rec = doRequestAsUser(t, srv, owner, http.MethodPost, "/api/v1/brokers", CreateBrokerRegistrationRequest{Name: sessionBroker})
-	assert.Less(t, rec.Code, 300, "a session for a user with broker.create must be admitted; got %d: %s", rec.Code, rec.Body.String())
+	assert.Equal(t, ownerID, created.CreatedBy, "the token's user owns the new broker")
 }

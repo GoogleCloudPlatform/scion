@@ -148,26 +148,6 @@ func (_u *ProjectUpdate) SetUpdated(v time.Time) *ProjectUpdate {
 	return _u
 }
 
-// SetCreatedBy sets the "created_by" field.
-func (_u *ProjectUpdate) SetCreatedBy(v string) *ProjectUpdate {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *ProjectUpdate) SetNillableCreatedBy(v *string) *ProjectUpdate {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *ProjectUpdate) ClearCreatedBy() *ProjectUpdate {
-	_u.mutation.ClearCreatedBy()
-	return _u
-}
-
 // SetOwnerID sets the "owner_id" field.
 func (_u *ProjectUpdate) SetOwnerID(v string) *ProjectUpdate {
 	_u.mutation.SetOwnerID(v)
@@ -419,6 +399,12 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 			}
 		}
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(project.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(project.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(project.FieldName, field.TypeString, value)
 	}
@@ -457,9 +443,6 @@ func (_u *ProjectUpdate) sqlSave(ctx context.Context) (_node int, err error) {
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(project.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(project.FieldCreatedBy, field.TypeString)
@@ -686,26 +669,6 @@ func (_u *ProjectUpdateOne) ClearSharedDirs() *ProjectUpdateOne {
 // SetUpdated sets the "updated" field.
 func (_u *ProjectUpdateOne) SetUpdated(v time.Time) *ProjectUpdateOne {
 	_u.mutation.SetUpdated(v)
-	return _u
-}
-
-// SetCreatedBy sets the "created_by" field.
-func (_u *ProjectUpdateOne) SetCreatedBy(v string) *ProjectUpdateOne {
-	_u.mutation.SetCreatedBy(v)
-	return _u
-}
-
-// SetNillableCreatedBy sets the "created_by" field if the given value is not nil.
-func (_u *ProjectUpdateOne) SetNillableCreatedBy(v *string) *ProjectUpdateOne {
-	if v != nil {
-		_u.SetCreatedBy(*v)
-	}
-	return _u
-}
-
-// ClearCreatedBy clears the value of the "created_by" field.
-func (_u *ProjectUpdateOne) ClearCreatedBy() *ProjectUpdateOne {
-	_u.mutation.ClearCreatedBy()
 	return _u
 }
 
@@ -990,6 +953,12 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 			}
 		}
 	}
+	if _u.mutation.FixtureRootIDCleared() {
+		_spec.ClearField(project.FieldFixtureRootID, field.TypeUUID)
+	}
+	if _u.mutation.FixtureIssuerIDCleared() {
+		_spec.ClearField(project.FieldFixtureIssuerID, field.TypeUUID)
+	}
 	if value, ok := _u.mutation.Name(); ok {
 		_spec.SetField(project.FieldName, field.TypeString, value)
 	}
@@ -1028,9 +997,6 @@ func (_u *ProjectUpdateOne) sqlSave(ctx context.Context) (_node *Project, err er
 	}
 	if value, ok := _u.mutation.Updated(); ok {
 		_spec.SetField(project.FieldUpdated, field.TypeTime, value)
-	}
-	if value, ok := _u.mutation.CreatedBy(); ok {
-		_spec.SetField(project.FieldCreatedBy, field.TypeString, value)
 	}
 	if _u.mutation.CreatedByCleared() {
 		_spec.ClearField(project.FieldCreatedBy, field.TypeString)

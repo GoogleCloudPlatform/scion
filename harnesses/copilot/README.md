@@ -52,6 +52,19 @@ authenticate via browser-based OAuth device flow, then capture credentials:
 python3 /home/scion/.scion/harness/capture_auth.py
 ```
 
+### Credential File (`COPILOT_CONFIG`)
+
+A captured `~/.copilot/config.json`, staged as the `COPILOT_CONFIG` file
+secret, selects the `auth-file` method. That file is also copilot's settings
+file, and the provisioner writes `trustedFolders` into it on every start, so a
+`config.json` already in the container counts as sign-in only when it holds a
+top-level key other than `trustedFolders` (or cannot be parsed). A start with
+no credential therefore falls back to the no-auth shell, and an explicit
+`auth-file` selection fails with a clear error. The check is key-based: if the
+copilot CLI itself writes other settings keys into `config.json` without a
+sign-in, a later start in the same agent home still treats the file as
+sign-in.
+
 ## Known Limitations
 
 - **No turn/model-call limits** — Copilot CLI has no hook dialect for individual

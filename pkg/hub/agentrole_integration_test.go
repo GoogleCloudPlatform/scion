@@ -31,39 +31,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// setupAgentRoleTest creates a server with a member user and project.
-// The user is the project creator and is in the hub-members group.
-func setupAgentRoleTest(t *testing.T) (*Server, store.Store, *store.User, *store.Project) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          tid("user-role-test"),
-		Email:       "roletest@test.com",
-		DisplayName: "Role Tester",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	project := &store.Project{
-		ID:        tid("project-role-test"),
-		Name:      "role-test-project",
-		Slug:      "role-test-project",
-		OwnerID:   user.ID,
-		CreatedBy: user.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	return srv, s, user, project
-}
-
 func doAgentRoleRequest(t *testing.T, srv *Server, user *store.User, body interface{}) *httptest.ResponseRecorder {
 	t.Helper()
 	token, _, _, err := srv.userTokenService.GenerateTokenPair(
@@ -360,7 +327,6 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	// Use a non-dev-auth server so the role is not auto-upgraded to full.
 	s, err := newTestStore(t, ":memory:")
 	require.NoError(t, err)
-	require.NoError(t, s.Migrate(context.Background()))
 
 	cfg := DefaultServerConfig()
 	cfg.AgentTokenConfig = AgentTokenConfig{
@@ -369,9 +335,8 @@ func TestTemplateHubAccessScopes_StoredButIgnoredForToken(t *testing.T) {
 	}
 	// Deliberately NOT setting DevAuthToken so role-based scopes are enforced.
 
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 
 	ctx := context.Background()
 
@@ -922,67 +887,6 @@ func TestCreateAgent_ProjectMaxReadonly_MemberGetsReadonly(t *testing.T) {
 // Phase 7 — Read endpoint enforcement (ScopeProjectRead)
 // ---------------------------------------------------------------------------
 
-// doAgentReadRequest makes a GET request to the given path using an agent token
-// with the specified scopes.
-func doAgentReadRequest(t *testing.T, srv *Server, agentID, projectID, path string, scopes []AgentTokenScope) *httptest.ResponseRecorder {
-	t.Helper()
-	tokenSvc := srv.GetAgentTokenService()
-	require.NotNil(t, tokenSvc)
-
-	token, err := tokenSvc.GenerateAgentToken(agentID, projectID, scopes, nil)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodGet, path, nil)
-	req.Header.Set("X-Scion-Agent-Token", token)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// setupReadScopeTest creates a server, user, project, and agent for read scope tests.
-func setupReadScopeTest(t *testing.T) (*Server, store.Store, *store.Agent, *store.Project) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	user := &store.User{
-		ID:          tid("user-read-scope"),
-		Email:       "readscope@test.com",
-		DisplayName: "Read Scope Tester",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	project := &store.Project{
-		ID:        tid("project-read-scope"),
-		Name:      "read-scope-project",
-		Slug:      "read-scope-project",
-		OwnerID:   user.ID,
-		CreatedBy: user.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-
-	agent := &store.Agent{
-		ID:        tid("agent-read-scope"),
-		Slug:      "read-scope-agent",
-		Name:      "Read Scope Agent",
-		ProjectID: project.ID,
-		Phase:     "running",
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return srv, s, agent, project
-}
-
 func TestReadEndpoint_BaselineAgent_Allowed(t *testing.T) {
 	srv, _, agent, project := setupReadScopeTest(t)
 
@@ -1212,28 +1116,27 @@ func TestCreateAgent_ProjectDefaultFull_NotOverriddenByHubBaseline(t *testing.T)
 }
 
 // ---------------------------------------------------------------------------
-// R2 — GetAgent failure for parent agent defaults ceiling to baseline
+// R2 — a creating agent with no stored row is refused before the role ceiling
 // ---------------------------------------------------------------------------
 
-func TestCreateSubAgent_ParentLookupFails_CeilingIsBaseline(t *testing.T) {
+func TestCreateSubAgent_ParentMissing_RefusedBeforeRoleCeiling(t *testing.T) {
 	srv, _, project := setupFullMaxProject(t)
 
-	// Use a non-existent parent agent ID so GetAgent returns an error.
-	// The ceiling should fall back to baseline (fail-closed).
+	// The calling agent has no stored row.
 	nonExistentParentID := tid("parent-does-not-exist")
 
-	// Request a full sub-agent; the baseline ceiling should cap it to baseline.
 	rec := doAgentCallerRequest(t, srv, nonExistentParentID, project.ID, CreateAgentRequest{
 		Name:      "child-parent-missing",
 		ProjectID: project.ID,
 		AgentRole: "full",
 	})
 
-	// Requesting full when the ceiling is baseline should trigger the
-	// no-escalation check and return 403.
 	assert.Equal(t, http.StatusForbidden, rec.Code,
-		"requesting full with a missing parent should be forbidden (baseline ceiling); got: %s",
+		"a create by an agent with no stored row is forbidden; got: %s",
 		rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "parent agent role",
-		"error should mention the parent agent role constraint")
+	// A creating agent with no stored row has no good standing
+	// (ptone/scion#3433), so the create is refused before the role ceiling
+	// is evaluated, with the chain refusal.
+	assert.Contains(t, rec.Body.String(), `"denied_by":"delegation_ceiling"`,
+		"a missing parent is refused as a chain refusal")
 }

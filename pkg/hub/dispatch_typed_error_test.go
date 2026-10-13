@@ -32,8 +32,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,134 +51,6 @@ func typedRuntimeUnavailableError() *brokerStatusError {
 	return &brokerStatusError{StatusCode: http.StatusServiceUnavailable, Body: brokerRuntimeUnavailableBody, RetryAfter: "17"}
 }
 
-// ownerErrDispatcher is the executing node's dispatcher. Each op returns its
-// configured error, as the local broker client would on an HTTP error answer.
-type ownerErrDispatcher struct {
-	lifecycleTestDispatcher
-	err         error
-	beforeStart func()
-	// createResult, when set, is what create returns (with a nil error).
-	createResult *CreateDispatchResult
-	// finalizeErr, when set, is what finalize_env returns instead of err.
-	finalizeErr error
-}
-
-func (d *ownerErrDispatcher) DispatchAgentStart(ctx context.Context, a *store.Agent, task string, resume bool) error {
-	if d.beforeStart != nil {
-		d.beforeStart()
-	}
-	_ = d.lifecycleTestDispatcher.DispatchAgentStart(ctx, a, task, resume)
-	return d.err
-}
-func (d *ownerErrDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
-	_ = d.lifecycleTestDispatcher.DispatchAgentStop(ctx, a)
-	return d.err
-}
-func (d *ownerErrDispatcher) DispatchAgentRestart(ctx context.Context, a *store.Agent) error {
-	_ = d.lifecycleTestDispatcher.DispatchAgentRestart(ctx, a)
-	return d.err
-}
-func (d *ownerErrDispatcher) DispatchCheckAgentPrompt(ctx context.Context, a *store.Agent) (bool, error) {
-	_, _ = d.lifecycleTestDispatcher.DispatchCheckAgentPrompt(ctx, a)
-	return false, d.err
-}
-func (d *ownerErrDispatcher) DispatchAgentCreateWithGather(ctx context.Context, a *store.Agent) (*CreateDispatchResult, error) {
-	_, _ = d.lifecycleTestDispatcher.DispatchAgentCreateWithGather(ctx, a)
-	if d.createResult != nil {
-		return d.createResult, nil
-	}
-	return nil, d.err
-}
-func (d *ownerErrDispatcher) DispatchFinalizeEnv(ctx context.Context, a *store.Agent, env map[string]string) (*CreateDispatchResult, error) {
-	_, _ = d.lifecycleTestDispatcher.DispatchFinalizeEnv(ctx, a, env)
-	if d.finalizeErr != nil {
-		return nil, d.finalizeErr
-	}
-	return nil, d.err
-}
-
-// ownerSignalBus delivers the requesting node's signal to the owner node,
-// which drains the broker's dispatch rows with its real reconcileBroker.
-type ownerSignalBus struct {
-	NoopCommandBus
-	owner *Server
-}
-
-func (b ownerSignalBus) SignalBrokerCmd(_ context.Context, brokerID string) error {
-	go b.owner.reconcileBroker(context.Background(), brokerID)
-	return nil
-}
-
-// crossNodeFixture is two hub nodes over one store and one event bus: the
-// requester's broker client always defers, and the owner executes the
-// dispatch rows.
-type crossNodeFixture struct {
-	store     store.Store
-	events    *ChannelEventPublisher
-	owner     *Server
-	ownerDisp *ownerErrDispatcher
-	requester *HTTPAgentDispatcher
-	agent     *store.Agent
-}
-
-// newCrossNodeFixture builds the fixture. With signalOwner false the
-// requester's signal goes nowhere and the test plays the owner itself.
-func newCrossNodeFixture(t *testing.T, ownerErr error, signalOwner bool) *crossNodeFixture {
-	t.Helper()
-	cs := entadapter.NewCompositeStore(enttest.NewClient(t))
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-
-	disp := &ownerErrDispatcher{err: ownerErr}
-	owner := &Server{
-		store:             cs,
-		instanceID:        "hub-owner-" + uuid.NewString()[:8],
-		agentLifecycleLog: slog.Default(),
-		events:            events,
-	}
-	owner.SetDispatcher(disp)
-	owner.execDispatch = owner.executeDispatch
-	owner.deliverMsg = owner.deliverMessage
-
-	requester := NewHTTPAgentDispatcherWithClient(cs, &deferredTestClient{localBroker: "local-broker"}, false, slog.Default())
-	var bus CommandBus = NoopCommandBus{}
-	if signalOwner {
-		bus = ownerSignalBus{owner: owner}
-	}
-	requester.SetCrossNodeDeps(events, bus)
-
-	agent := seedAgentWithBrokerID(t, cs, uuid.NewString())
-	return &crossNodeFixture{store: cs, events: events, owner: owner, ownerDisp: disp, requester: requester, agent: agent}
-}
-
-// claimPending waits for the agent's single pending dispatch row and claims
-// it as an owner node would. It runs on a helper goroutine, so it reports
-// failures with assert and returns ok=false instead of stopping the test.
-func (f *crossNodeFixture) claimPending(t *testing.T) (store.BrokerDispatch, bool) {
-	t.Helper()
-	var row store.BrokerDispatch
-	ok := assert.Eventually(t, func() bool {
-		pending, err := f.store.ListPendingDispatch(context.Background(), f.agent.RuntimeBrokerID)
-		if err != nil || len(pending) == 0 {
-			return false
-		}
-		row = pending[0]
-		return true
-	}, 5*time.Second, 5*time.Millisecond, "no dispatch row was written")
-	if !ok {
-		return row, false
-	}
-	claimed, err := f.store.ClaimBrokerDispatch(context.Background(), row.ID, "test-owner")
-	return row, assert.NoError(t, err) && assert.True(t, claimed)
-}
-
-// failRow fails a claimed row with execErr exactly as reconcileBroker does.
-// Like claimPending it runs on a helper goroutine and reports with assert.
-func (f *crossNodeFixture) failRow(t *testing.T, id string, execErr error) bool {
-	t.Helper()
-	return assert.NoError(t, f.store.FailBrokerDispatch(context.Background(), id, execErr.Error(), dispatchFailureResult(execErr)))
-}
-
 // requireSkillRelay asserts err relays as the broker's typed skill error.
 func requireSkillRelay(t *testing.T, err error) {
 	t.Helper()
@@ -194,16 +64,6 @@ func requireSkillRelay(t *testing.T, err error) {
 	assert.Equal(t, "rate_limited", details["cause"])
 	assert.Contains(t, rec.Body.String(), "could not be resolved: rate limited")
 	assert.NotContains(t, rec.Body.String(), "runtime broker returned error", "relayed without a hub prefix")
-}
-
-// crossNodeCtx bounds a cross-node call. Without the result envelope the
-// requester waits for a status event that never comes, so a call that ends
-// well inside this bound proves the row's failure ended the wait.
-func crossNodeCtx(t *testing.T) context.Context {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	t.Cleanup(cancel)
-	return ctx
 }
 
 func TestCrossNodeLifecycle_RelaysTypedBrokerError(t *testing.T) {
@@ -256,6 +116,38 @@ func TestCrossNodeStop_ReturnsTypedFailure(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, isBrokerRuntimeUnavailable(err), "error is not the broker's runtime_unavailable: %v", err)
 	assert.Less(t, time.Since(began), 3*time.Second)
+}
+
+// crossNodeStopRunMismatchBody is the broker's run_mismatch 404 body for a
+// stop naming run-1 while run-2 holds the agent's name.
+const crossNodeStopRunMismatchBody = `{"error":{"code":"` + api.BrokerErrorCodeRunMismatch + `","message":"Agent not found for the requested run","details":{"runId":"run-1","currentRunId":"run-2"}}}`
+
+// A cross-node run-scoped stop that the owning broker answers with its
+// run_mismatch 404 (ErrStopRunNotFound on the owning node,
+// ptone/scion#3079) fails the dispatch row, and the requester's wait ends
+// as soon as the row fails, with the broker's 404, instead of waiting for
+// a stopped phase that will not come.
+func TestCrossNodeStop_RunMismatch404ReleasesWait(t *testing.T) {
+	ownerErr := stopAgentError(&brokerStatusError{StatusCode: http.StatusNotFound, Body: crossNodeStopRunMismatchBody}, "run-1")
+	require.ErrorIs(t, ownerErr, ErrStopRunNotFound, "fixture: the owner's error is the run-scoped stop's 404")
+	f := newCrossNodeFixture(t, ownerErr, true)
+	f.agent.RunID = "run-1"
+
+	began := time.Now()
+	err := f.requester.DispatchAgentStop(crossNodeCtx(t), f.agent)
+	elapsed := time.Since(began)
+
+	require.Error(t, err)
+	require.NotErrorIs(t, err, context.DeadlineExceeded, "the wait ran to the caller's deadline")
+	require.NotErrorIs(t, err, ErrDispatchFailed, "the wait ran out its rolling window")
+	var se *brokerStatusError
+	require.True(t, errors.As(err, &se), "error is not the broker's status error: %v", err)
+	assert.Equal(t, http.StatusNotFound, se.StatusCode)
+	current, ok := brokerRunMismatch(err)
+	assert.True(t, ok, "error is not the broker's run_mismatch 404: %v", err)
+	assert.Equal(t, "run-2", current)
+	assert.Less(t, elapsed, 3*time.Second)
+	assert.Equal(t, int32(1), f.ownerDisp.stopCalled.Load(), "the owning node sent the stop once")
 }
 
 // An error phase that reaches the requester before the done event (a stale

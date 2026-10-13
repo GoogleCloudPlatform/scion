@@ -202,8 +202,8 @@ func TestArtifactsListUserAccessTokensAreBounded(t *testing.T) {
 	assert.Empty(t, list(artifactTestUAT(t, session, p1.ID, "agent:read"), artifactListPath).Artifacts, "UAT without artifact:read")
 	assert.Equal(t, sortedIDs(inP2), listedIDs(list(artifactTestUAT(t, session, p2.ID, "artifact:read"), artifactListPath)), "UAT bounded to p2")
 	assert.Equal(t, sortedIDs(inP1...), listedIDs(list(artifactTestUAT(t, session, p1.ID, "artifact:read"), artifactListPath)), "UAT bounded to p1")
-	hubUAT := newScopedUserIdentity(session, TokenBoundary{Kind: BoundaryKindHub}, []string{"artifact:read"}, "uat-hub",
-		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: uatCeilingFromSelectors(t, "artifact:read").PermissionIDs}, nil)
+	hubUAT := NewScopedUserIdentityWithBoundary(session, TokenBoundary{Kind: BoundaryKindHub}, []string{"artifact:read"}, "uat-hub",
+		permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: uatCeilingFromSelectors(t, "artifact:read").PermissionIDs})
 	assert.Len(t, list(hubUAT, artifactListPath).Artifacts, 4, "hub-boundary UAT with artifact:read")
 
 	// Walk p1 a page at a time with a sealed cursor.

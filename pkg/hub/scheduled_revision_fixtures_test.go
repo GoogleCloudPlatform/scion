@@ -21,7 +21,7 @@ import (
 
 // The revision fixtures in this file need no store, so they build under
 // every tag set; the ones that read a stored row are in
-// scheduled_authority_fixtures_test.go.
+// scheduled_sqlite_helpers_test.go.
 
 // withSessionRevision returns evt carrying the recorded authorization
 // revision a session create or resume by userID writes: session attribution

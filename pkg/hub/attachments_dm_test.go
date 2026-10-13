@@ -19,7 +19,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"mime/multipart"
 	"net/http"
@@ -34,38 +33,6 @@ import (
 // A DM belongs to no space, so the composer has no project to send with an
 // upload. These tests pin the project-less path end to end: the upload is
 // accepted, the file is stored, and the recipient can fetch it back.
-
-// attachmentTestServer wires a chat-capable server with attachment storage.
-func attachmentTestServer(t *testing.T) (*Server, store.Store) {
-	t.Helper()
-
-	srv, s := testServer(t)
-
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	// Each pooled connection to ":memory:" is a separate, empty database, so
-	// a second connection opened under concurrent load sees none of the
-	// tables Init() created on the first. Pin the pool to one connection to
-	// keep every caller on the same in-memory database.
-	db.SetMaxOpenConns(1)
-
-	wcs := NewWebChatStore(db, "sqlite3")
-	if err := wcs.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
-	srv.SetWebChatStore(wcs)
-
-	as, err := NewLocalDiskAttachmentStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewLocalDiskAttachmentStore: %v", err)
-	}
-	srv.SetAttachmentStore(as)
-
-	return srv, s
-}
 
 // uploadAttachment posts one file to the upload endpoint. The composer always
 // sends project_id, empty string and all, so the helper does the same; pass

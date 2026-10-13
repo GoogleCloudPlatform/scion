@@ -59,6 +59,15 @@ var layer0Prefixes = []string{
 	"server.env",
 	"server.hub.hub_id",
 	"server.hub.gcp_project_id",
+	// Hub class (test admin tier gate input). Layer-0 so no DB section can
+	// hold it; the server-config API additionally refuses it in every mode,
+	// including workstation hubs where other Layer-0 keys are writable.
+	"server.hub.class",
+	// Test identity workload issuers (ptone/scion#4240, phase X2): the
+	// startup allowlist of workload subjects that may hold an issuer
+	// delegation. Layer-0 so no DB section can hold it; the server-config
+	// API additionally refuses it in every mode.
+	"server.hub.test_identities",
 	// Logging
 	"server.log_level",
 	"server.log_format",
@@ -77,11 +86,17 @@ var layer0Prefixes = []string{
 	// Request performance tracing — the middleware and the authorization
 	// store and audit-emitter decorators are installed at startup.
 	"server.hub.perf_trace",
+	// Membership-standing sweep report-only mode — the sweep reads it from
+	// ServerConfig, set at startup.
+	"server.hub.membership_sweep_report_only",
 	// Missing-container reconcile grace — read into ServerConfig at startup.
 	"server.hub.missing_agent_grace",
 	// Conduit relay and grant settings — the relay, its internal listener and
 	// peer auth are built at startup.
 	"server.hub.conduit",
+	// Agent port proxy settings — the response header bound is read into
+	// ServerConfig at startup.
+	"server.hub.port_proxy",
 }
 
 // isLayer0Key reports whether the given koanf key belongs to the Layer-0
@@ -117,9 +132,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 		"server.hub.start_create_unconfirmed_hold": "start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"server.hub.public_url": "public_url",
-		"server.hub.hub_name":   "hub_name",
-		"image_registry":        "image_registry",
+		"server.hub.public_url":               "public_url",
+		"server.hub.hub_name":                 "hub_name",
+		"image_registry":                      "image_registry",
+		"server.hub.monitoring_dashboard_url": "monitoring_dashboard_url",
 	},
 	"github_app": {
 		"server.github_app.app_id":           "app_id",
@@ -133,6 +149,10 @@ var koanfPathToJSONField = map[string]map[string]string{
 	},
 	"quotas": {
 		"quotas.enforce_broker_quotas": "enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"server.hub.gcp_iam_check_mode":          "gcp_iam_check_mode",
+		"server.hub.gcp_iam_deny_unknown_policy": "gcp_iam_deny_unknown_policy",
 	},
 	"agent_secrets": {
 		"agent_secrets.user_scope_only": "user_scope_only",
@@ -169,9 +189,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 		"start_create_unconfirmed_hold": "server.hub.start_create_unconfirmed_hold",
 	},
 	"endpoints": {
-		"public_url":     "server.hub.public_url",
-		"hub_name":       "server.hub.hub_name",
-		"image_registry": "image_registry",
+		"public_url":               "server.hub.public_url",
+		"hub_name":                 "server.hub.hub_name",
+		"image_registry":           "image_registry",
+		"monitoring_dashboard_url": "server.hub.monitoring_dashboard_url",
 	},
 	"github_app": {
 		"app_id":           "server.github_app.app_id",
@@ -185,6 +206,10 @@ var jsonFieldToKoanfPaths = map[string]map[string]string{
 	},
 	"quotas": {
 		"enforce_broker_quotas": "quotas.enforce_broker_quotas",
+	},
+	"gcp_iam": {
+		"gcp_iam_check_mode":          "server.hub.gcp_iam_check_mode",
+		"gcp_iam_deny_unknown_policy": "server.hub.gcp_iam_deny_unknown_policy",
 	},
 	"agent_secrets": {
 		"user_scope_only": "agent_secrets.user_scope_only",
@@ -339,21 +364,41 @@ func loadSectionIntoKoanf(k *koanf.Koanf, sectionName string, doc json.RawMessag
 	}
 }
 
+// loadPrefixed loads a section document under prefix as a nested map.
+//
+// The document is not flattened into "." delimited paths: koanf splits such
+// paths on every ".", so a free-form map key that contains a dot (for
+// example the telemetry.resource key "service.namespace", or an event name
+// in telemetry.filter.sampling.rates) would turn into nested maps and no
+// longer decode into its map[string]string field (ptone/scion#4108).
+// Loading the nested map with an empty delimiter keeps each key whole;
+// koanf still indexes every leaf path, so lookups such as
+// "telemetry.cloud.endpoint" work as before.
+//
+// Empty maps are left out, as the flattened load did, so an empty document
+// (or an empty nested object) adds no keys.
 func loadPrefixed(k *koanf.Koanf, prefix string, raw map[string]interface{}) error {
-	flat := make(map[string]interface{})
-	flattenMap(prefix, raw, flat)
-	return k.Load(confmap.Provider(flat, "."), nil)
+	pruned := withoutEmptyMaps(raw)
+	if len(pruned) == 0 {
+		return nil
+	}
+	return k.Load(confmap.Provider(map[string]interface{}{prefix: pruned}, ""), nil)
 }
 
-func flattenMap(prefix string, m map[string]interface{}, out map[string]interface{}) {
+// withoutEmptyMaps returns a copy of m without nested maps that are empty,
+// or that hold only empty maps. Map keys are kept as they are.
+func withoutEmptyMaps(m map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(m))
 	for key, val := range m {
-		fullKey := prefix + "." + key
 		if sub, ok := val.(map[string]interface{}); ok {
-			flattenMap(fullKey, sub, out)
-		} else {
-			out[fullKey] = val
+			if p := withoutEmptyMaps(sub); len(p) > 0 {
+				out[key] = p
+			}
+			continue
 		}
+		out[key] = val
 	}
+	return out
 }
 
 func loadMappedSection(k *koanf.Koanf, sectionName string, raw map[string]interface{}) error {
@@ -492,7 +537,7 @@ type DeprecatedEnvVar struct {
 func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	var deprecated []DeprecatedEnvVar
 	for _, key := range serverEnvKoanf.Keys() {
-		if !IsLayer1Key(key) {
+		if !IsLayer1Key(key) || envPinnedLayer1Keys[key] {
 			continue
 		}
 		// koanfKeyToEnvSuffix strips the "server." prefix, so the suffix
@@ -519,12 +564,30 @@ func DetectDeprecatedServerEnv(serverEnvKoanf *koanf.Koanf) []DeprecatedEnvVar {
 	return deprecated
 }
 
+// envSuffixOverrides lists the keys whose env variable is not the spelling
+// derived from the koanf path. It is the reverse of the opsettings env key
+// aliases in pkg/config (opsettingsEnvKeyAliases).
+var envSuffixOverrides = map[string]string{
+	"server.hub.public_url": "HUB_ENDPOINT", // SCION_SERVER_HUB_ENDPOINT
+}
+
+// envPinnedLayer1Keys lists the Layer-1 keys for which a SCION_SERVER_*
+// variable is the supported way to pin the value on a node, not a
+// deprecated seed input. server.hub.public_url resolves env first, then the
+// database, then settings.yaml (ptone/scion#3905).
+var envPinnedLayer1Keys = map[string]bool{
+	"server.hub.public_url": true,
+}
+
 // koanfKeyToEnvSuffix converts a koanf key back to the env var suffix form.
 // e.g. "server.hub.admin_emails" → "HUB_ADMINEMAILS"
 // The "server." prefix is stripped because it corresponds to the SCION_SERVER_
 // env prefix that was already removed during key mapping. Without stripping,
 // the output would produce double-SERVER var names (SCION_SERVER_SERVER_HUB_...).
 func koanfKeyToEnvSuffix(key string) string {
+	if suffix, ok := envSuffixOverrides[key]; ok {
+		return suffix
+	}
 	key = strings.TrimPrefix(key, "server.")
 	parts := strings.Split(key, ".")
 	for i, part := range parts {

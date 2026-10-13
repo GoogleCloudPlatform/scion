@@ -17,7 +17,7 @@
  */
 
 import { test, expect } from '@playwright/test';
-import { getE2EEnv, apiRequest } from './groups-setup.js';
+import { getE2EEnv } from './groups-setup.js';
 
 test.describe('project_agents group (AC9)', () => {
   const env = getE2EEnv();

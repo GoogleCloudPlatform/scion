@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // targetResolveResponse is the response for GET /api/v1/messaging/targets/resolve.
@@ -59,14 +60,6 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Check Hub feature enabled first, before target lookup.
-	ops := s.GetOperationalSettings()
-	if ops == nil || !ops.CrossProjectMessagingEnabled() {
-		writeError(w, http.StatusNotFound, "cross_project_disabled",
-			"Cross-project messaging is not enabled", nil)
-		return
-	}
-
 	ctx := r.Context()
 	q := r.URL.Query()
 	projectRef := q.Get("project")
@@ -74,6 +67,14 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 
 	if projectRef == "" || agentRef == "" {
 		BadRequest(w, "Both 'project' and 'agent' query parameters are required")
+		return
+	}
+
+	// Check Hub feature enabled before target lookup.
+	ops := s.GetOperationalSettings()
+	if ops == nil || !ops.CrossProjectMessagingEnabled() {
+		writeError(w, http.StatusNotFound, "cross_project_disabled",
+			"Cross-project messaging is not enabled", nil)
 		return
 	}
 
@@ -113,9 +114,17 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 	canReachViewer := false
 	replyReason := ""
 
-	// Forward direction: caller → target
+	// Forward direction: caller → target. The lookup answers only for
+	// targets the caller may message; any other target, including one that
+	// could only reply to the caller, gets the same answer as an unknown
+	// target and the reason is logged.
 	forwardAllowed, _, _ := s.authorizeAgentMessage(ctx, identity, targetAgent, false)
 	canMessage = forwardAllowed
+	if !canMessage {
+		logReferenceRefused(ctx, logging.RequestPath(r), "target not messageable", identity)
+		NotFound(w, "Target")
+		return
+	}
 
 	// Reverse direction: target → caller (for reply capability).
 	// Only evaluate if the caller is an agent.
@@ -129,14 +138,6 @@ func (s *Server) handleMessagingTargetsResolve(w http.ResponseWriter, r *http.Re
 				replyReason = reverseReason
 			}
 		}
-	}
-
-	// Privacy-preserving: if the caller cannot message the target in either
-	// direction, return the same NotFound as for nonexistent targets so that
-	// existence cannot be distinguished from non-existence.
-	if !canMessage && !canReachViewer {
-		NotFound(w, "Target")
-		return
 	}
 
 	resp := targetResolveResponse{

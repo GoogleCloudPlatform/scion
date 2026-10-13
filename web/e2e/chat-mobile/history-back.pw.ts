@@ -33,25 +33,59 @@ import { touchSwipe, assertNoHorizontalOverflow } from './helpers.js';
 
 /**
  * Tag the current chat page element and count `popstate` events from now
- * on. `assertSamePage` then checks that no history navigation happened and
+ * on. `assertSamePage` then checks which history navigations happened and
  * that the tagged element is still the one in the document.
  */
 async function watchForNavigation(page: Page): Promise<void> {
   await page.evaluate(() => {
-    const w = window as unknown as { __popstates: string[] };
+    const w = window as unknown as { __popstates: string[]; __traversals: string[] };
     w.__popstates = [];
+    w.__traversals = [];
     window.addEventListener('popstate', () => w.__popstates.push(location.pathname));
+    // Record every history traversal a script starts. The app steps back
+    // with history.go(-n); a browser history swipe starts none.
+    const go = history.go.bind(history);
+    const back = history.back.bind(history);
+    const forward = history.forward.bind(history);
+    history.go = (delta?: number): void => {
+      w.__traversals.push(`go(${delta ?? 0})`);
+      go(delta);
+    };
+    history.back = (): void => {
+      w.__traversals.push('back()');
+      back();
+    };
+    history.forward = (): void => {
+      w.__traversals.push('forward()');
+      forward();
+    };
     document.querySelector('scion-page-chat')?.setAttribute('data-history-probe', '');
   });
 }
 
-async function assertSamePage(page: Page, context: string): Promise<void> {
+/**
+ * `popstates` lists the paths of the history navigations expected since
+ * `watchForNavigation`: none for a drag that must not move the panels, and
+ * one on the same path for each step back to a panel, which the app makes
+ * with `history.go(-1)` to that panel's history entry. Each popstate must
+ * match one such app traversal: a browser history swipe lands on the same
+ * entry, but starts no traversal of its own.
+ */
+async function assertSamePage(
+  page: Page,
+  context: string,
+  popstates: string[] = []
+): Promise<void> {
   const state = await page.evaluate(() => ({
     popstates: (window as unknown as { __popstates: string[] }).__popstates,
+    traversals: (window as unknown as { __traversals: string[] }).__traversals,
     tagged: document.querySelectorAll('scion-page-chat[data-history-probe]').length,
     pages: document.querySelectorAll('scion-page-chat').length,
   }));
-  expect(state.popstates, `${context}: no history navigation (popstate)`).toEqual([]);
+  expect(state.popstates, `${context}: history navigations (popstate)`).toEqual(popstates);
+  expect(state.traversals, `${context}: each one the app's own step back`).toEqual(
+    popstates.map(() => 'go(-1)')
+  );
   expect(state.tagged, `${context}: the chat page element survived`).toBe(1);
   expect(state.pages, `${context}: exactly one chat page`).toBe(1);
 }
@@ -68,7 +102,7 @@ test.describe('horizontal drags never navigate browser history', () => {
   test('a rightward drag across the rail leaves the page and the panel alone', async ({ page }) => {
     await openChatRail(page);
     await expandSpace(page);
-    // The redirect from the legacy space URL left an entry to go back to.
+    // The page before chat left an entry to go back to.
     expect(await page.evaluate(() => history.length)).toBeGreaterThan(1);
     await watchForNavigation(page);
 
@@ -107,7 +141,9 @@ test.describe('horizontal drags never navigate browser history', () => {
     await touchSwipe(page, w * 0.3, h / 2, w * 0.3 + 150, h / 2, 8, 300);
     await page.waitForTimeout(SETTLE_MS);
 
-    await assertSamePage(page, 'conversation -> rail');
+    // Exactly one step back, to the rail's entry on the same URL.
+    const path = new URL(url).pathname;
+    await assertSamePage(page, 'conversation -> rail', [path]);
     expect(await currentPanel(page)).toBe('left');
     expect(page.url(), 'the URL is unchanged').toBe(url);
     await assertNoHorizontalOverflow(page);
@@ -116,7 +152,7 @@ test.describe('horizontal drags never navigate browser history', () => {
     await touchSwipe(page, w * 0.7, h / 2, w * 0.7 - 150, h / 2, 8, 300);
     await page.waitForTimeout(SETTLE_MS);
     expect(await currentPanel(page)).toBe('center');
-    await assertSamePage(page, 'rail -> conversation');
+    await assertSamePage(page, 'rail -> conversation', [path]);
   });
 
   test('a rightward drag on the header does not navigate either', async ({ page }) => {
@@ -195,7 +231,12 @@ test.describe('horizontal drags never navigate browser history', () => {
       await page.evaluate(() => (window as unknown as { __wide: HTMLElement }).__wide.scrollLeft),
       'the code block is back at its start'
     ).toBe(0);
-    await assertSamePage(page, 'rightward drag on a code block at its start');
+    // The drag at its start is a panel swipe back to the rail: one step to
+    // the rail's entry on the same URL, and nothing more.
+    expect(await currentPanel(page)).toBe('left');
+    await assertSamePage(page, 'rightward drag on a code block at its start', [
+      new URL(page.url()).pathname,
+    ]);
   });
 
   test('the panels and their scrollers keep pinch-zoom and vertical panning', async ({ page }) => {
@@ -249,7 +290,7 @@ test.describe('horizontal drags never navigate browser history', () => {
     await touchSwipe(page, 40, h * 0.6, w - 55, h * 0.6);
     await page.waitForTimeout(SETTLE_MS);
 
-    await assertSamePage(page, 'members -> conversation');
+    await assertSamePage(page, 'members -> conversation', [new URL(page.url()).pathname]);
     expect(await currentPanel(page)).toBe('center');
   });
 });

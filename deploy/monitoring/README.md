@@ -61,16 +61,18 @@ for details.
 
 1. Notification channels must be created before alert policies that reference
    them. See `notification-channels.yaml`.
-2. Custom metrics (prefixed `custom.googleapis.com/scion.*`) must be emitted by
-   the application before alert policies can evaluate. Metrics are emitted via
-   the OTLP pipeline described in `.design/hosted/metrics-system.md`.
+2. The metrics must be exported before alert policies can evaluate. The Hub
+   exports them through the Google Cloud metric exporter as
+   `workload.googleapis.com/scion.*` (see above);
+   `pkg/observability/hubmetrics/alert_policies_test.go` checks every policy
+   metric type against the metrics the Hub defines.
 3. The GCP project must have the Cloud Monitoring API enabled.
 
 ## File inventory
 
 | File | Contents |
 |------|----------|
-| `alert-policies.yaml` | 15 alert policies covering DB health, dispatch health, telemetry pipeline, and Hub auth |
+| `alert-policies.yaml` | 18 alert policies covering DB health, dispatch health, telemetry pipeline, Hub auth, and log delivery |
 | `uptime-checks.yaml` | 4 uptime checks for Hub and Broker health/readiness endpoints |
 | `notification-channels.yaml` | 3 notification channel definitions (email, Slack, PagerDuty) |
 | `dashboards/scion-hub.json` | Importable Cloud Monitoring dashboard for Hub metrics, per Hub replica |

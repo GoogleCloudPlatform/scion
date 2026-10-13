@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1252,9 +1251,6 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	cfg := DefaultServerConfig()
@@ -1267,7 +1263,7 @@ func TestColdStartSuperAdminBinding(t *testing.T) {
 	// Configure the admin email BEFORE server creation. On a fresh start
 	// ReconcileSuperAdminBindings will find zero users and create nothing.
 	cfg.AdminEmails = []string{"first-admin@example.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1336,9 +1332,6 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 		}
 		t.Fatalf("failed to create test store: %v", err)
 	}
-	if err := s.Migrate(ctx); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
 	_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 	cfg := DefaultServerConfig()
@@ -1350,7 +1343,7 @@ func TestD11Fix2_LoginDemotionDeletesBinding(t *testing.T) {
 	}
 	// AdminEmails does NOT include the user we will test.
 	cfg.AdminEmails = []string{"real-admin@test.com"}
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
@@ -1590,9 +1583,10 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 	var resp AdminStatusResponse
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 
-	// Custom role with permissions → isAdmin=true, isSuperAdmin=false.
-	if !resp.IsAdmin {
-		t.Error("expected isAdmin=true for user with custom role permissions")
+	// A custom role grants permissions but does not make the user a hub
+	// admin: isAdmin=false, isSuperAdmin=false, permissions listed.
+	if resp.IsAdmin {
+		t.Error("expected isAdmin=false for user with custom role permissions")
 	}
 	if resp.IsSuperAdmin {
 		t.Error("expected isSuperAdmin=false for user with custom role")
@@ -1607,6 +1601,83 @@ func TestHandleAuthAdminStatus_CustomRole(t *testing.T) {
 		"template.delete",
 	}
 	require.ElementsMatch(t, expectedPerms, resp.Permissions)
+}
+
+// adminStatusForSystemRole creates a member user bound at system scope to the
+// given role definition and returns that user's admin-status response.
+func adminStatusForSystemRole(t *testing.T, srv *Server, s store.Store, name string, rd *store.RoleDefinition) AdminStatusResponse {
+	t.Helper()
+	ctx := context.Background()
+
+	userID := tid(name)
+	email := name + "@test.com"
+	require.NoError(t, s.CreateUser(ctx, &store.User{
+		ID: userID, Email: email, DisplayName: name, Role: "member", Status: "active",
+	}))
+	// Only the system reconciler may create super-admin bindings.
+	createdBy := "test"
+	if rd.Name == store.SystemRoleSuperAdmin {
+		createdBy = store.SystemReconcileCreatedBy
+	}
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalUser,
+		PrincipalID:      userID,
+		ScopeType:        store.RoleScopeSystem,
+		ScopeID:          "",
+		CreatedBy:        createdBy,
+	})
+	require.NoError(t, err)
+
+	token, _, _, err := srv.userTokenService.GenerateTokenPair(
+		userID, email, name, "member", ClientTypeWeb,
+	)
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/admin-status", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, "response body: %s", rec.Body.String())
+
+	var resp AdminStatusResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
+	return resp
+}
+
+// A member whose only system-scoped role grants a single permission is not a
+// hub admin: isAdmin is false and the permission is still listed, so the web
+// UI can show the one admin section that permission opens.
+func TestHandleAuthAdminStatus_MemberWithOneSystemPermissionIsNotAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	role, err := s.CreateRoleDefinition(context.Background(), &store.RoleDefinition{
+		Name:        "quota-reader",
+		Description: "Can read quotas only",
+		ScopeType:   store.RoleScopeSystem,
+		Permissions: []string{"quota.read"},
+		System:      false,
+	})
+	require.NoError(t, err)
+
+	resp := adminStatusForSystemRole(t, srv, s, "one-perm-member", role)
+
+	require.False(t, resp.IsAdmin, "a single system-scoped permission must not set isAdmin")
+	require.False(t, resp.IsSuperAdmin)
+	require.Equal(t, []string{"quota.read"}, resp.Permissions)
+}
+
+// A member bound to the super-admin role at system scope is an admin.
+func TestHandleAuthAdminStatus_SuperAdminRoleBindingIsAdmin(t *testing.T) {
+	srv, s := testServer(t)
+
+	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleSuperAdmin, store.RoleScopeSystem)
+	require.NoError(t, err, "super-admin role definition must exist")
+
+	resp := adminStatusForSystemRole(t, srv, s, "super-admin-binding", rd)
+
+	require.True(t, resp.IsAdmin, "a super-admin role binding must set isAdmin")
+	require.NotEmpty(t, resp.Permissions)
 }
 
 func TestHandleAuthAdminStatus_PermissionsSerializedAsEmptyArray(t *testing.T) {
@@ -1652,50 +1723,6 @@ func TestHandleAuthAdminStatus_WrongMethod(t *testing.T) {
 // Login paths: hub role grants follow the role, and invites get the default
 // role at join time (design §5.C, §5.D; AC 1, 2, 4).
 // ---------------------------------------------------------------------------
-
-// newLoginGrantServer returns a server backed by a real, seeded store and
-// configured with the given default role and admin emails. Login-time
-// demotion is enabled (as after a successful startup reconcile).
-func newLoginGrantServer(t *testing.T, defaultRole string, adminEmails []string) (*Server, store.Store) {
-	t.Helper()
-	srv, s := testServer(t)
-	srv.config.DefaultUserRole = defaultRole
-	srv.config.AdminEmails = adminEmails
-	srv.config.UserAccessMode = "open"
-	srv.demotionSafe.Store(true)
-	return srv, s
-}
-
-// createLoginGrantUser creates a user row directly in the store.
-func createLoginGrantUser(t *testing.T, s store.Store, id, email, role, status string) *store.User {
-	t.Helper()
-	u := &store.User{
-		ID:          tid(id),
-		Email:       email,
-		DisplayName: id,
-		Role:        role,
-		Status:      status,
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}
-
-// createSystemBinding creates a system-scoped role binding for the user.
-func createSystemBinding(t *testing.T, s store.Store, userID, roleName, createdBy string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        createdBy,
-	})
-	require.NoError(t, err)
-}
 
 // assertViewerGrants checks the stored role, the grant state and the
 // immediate authz effect for a viewer.
@@ -1930,94 +1957,6 @@ func TestAuthRefresh_AdminDemotedToMemberGetsHubMembers(t *testing.T) {
 }
 
 // --- web proxy login and web OAuth callback (real store) ---
-
-// webLoginSettings returns live access settings for the web login tests.
-func webLoginSettings(defaultRole string, adminEmails ...string) *staticAccessSettings {
-	return &staticAccessSettings{adminEmails: adminEmails, defaultUserRole: defaultRole}
-}
-
-// webProxyLogin performs one proxy-auth request for email against a
-// WebServer backed by s.
-func webProxyLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
-	t.Helper()
-	ws := newTestWebServer(t, WebServerConfig{
-		AuthMode: "proxy",
-		ProxyAuthenticator: &mockProxyAuthenticator{user: &ProxyUserInfo{
-			Subject: "sub-" + email,
-			Email:   email,
-			Domain:  "example.com",
-		}},
-	})
-	ws.SetAccessSettingsProvider(settings)
-	ws.SetStore(s)
-	var safe atomic.Bool
-	safe.Store(true)
-	ws.SetDemotionSafe(&safe)
-
-	req := httptest.NewRequest(http.MethodGet, "/projects", nil)
-	req.Header.Set("Accept", "text/html")
-	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
-	require.NotEqual(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-}
-
-// webOAuthLogin runs the web OAuth callback for email against a WebServer
-// backed by s.
-func webOAuthLogin(t *testing.T, s store.Store, settings *staticAccessSettings, email string) {
-	t.Helper()
-	const secret = "test-session-secret-for-login-grant-tests-1234567890"
-	ws := newTestWebServer(t, WebServerConfig{
-		SessionSecret: secret,
-		BaseURL:       "http://localhost:8080",
-	})
-	ws.oauthService = NewOAuthService(OAuthConfig{
-		Web: OAuthClientConfig{
-			Google: OAuthProviderConfig{
-				ClientID:     "test-client-id",
-				ClientSecret: "test-client-secret",
-			},
-		},
-	}, nil)
-	ws.oauthService.httpClient = &http.Client{
-		Transport: &mockOAuthTransport{
-			tokenJSON:    `{"access_token":"mock-token","token_type":"Bearer","expires_in":3600}`,
-			userinfoJSON: `{"id":"id-` + email + `","email":"` + email + `","verified_email":true,"name":"OAuth User"}`,
-		},
-	}
-	ws.SetStore(s)
-	ws.SetAccessSettingsProvider(settings)
-	var safe atomic.Bool
-	safe.Store(true)
-	ws.SetDemotionSafe(&safe)
-
-	reqSetup := httptest.NewRequest(http.MethodGet, "/auth/login/google", nil)
-	recSetup := httptest.NewRecorder()
-	sess, err := ws.sessionStore.Get(reqSetup, webSessionName)
-	require.NoError(t, err)
-	const oauthState = "test-state-login-grants"
-	sess.Values[sessKeyOAuthState] = oauthState
-	require.NoError(t, sess.Save(reqSetup, recSetup))
-	cookies := recSetup.Result().Cookies()
-	require.NotEmpty(t, cookies)
-
-	req := httptest.NewRequest(http.MethodGet, "/auth/callback/google?code=test-code&state="+oauthState, nil)
-	for _, c := range cookies {
-		req.AddCookie(c)
-	}
-	rec := httptest.NewRecorder()
-	ws.Handler().ServeHTTP(rec, req)
-	require.Equal(t, http.StatusFound, rec.Code, rec.Body.String())
-	require.NotContains(t, rec.Header().Get("Location"), "error=", "OAuth callback must succeed")
-}
-
-// webLoginPaths runs each web login test against both web login paths.
-var webLoginPaths = []struct {
-	name  string
-	login func(t *testing.T, s store.Store, settings *staticAccessSettings, email string)
-}{
-	{"proxy", webProxyLogin},
-	{"oauth", webOAuthLogin},
-}
 
 func TestWebLogin_ViewerHasHubReadImmediately(t *testing.T) {
 	for _, p := range webLoginPaths {

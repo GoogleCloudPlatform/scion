@@ -42,35 +42,13 @@ func testWorkspaceServer(t *testing.T) (*Server, store.Store) {
 		t.Fatalf("failed to create test store: %v", err)
 	}
 
-	if err := s.Migrate(context.Background()); err != nil {
-		t.Fatalf("failed to migrate test store: %v", err)
-	}
-
 	cfg := DefaultServerConfig()
 	cfg.DevAuthToken = testWorkspaceDevToken
-	srv, err := New(cfg, s)
+	srv, err := newTestHubServer(t, cfg, s)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
 	return srv, s
-}
-
-// createTestProject creates a project for tests that need to create agents.
-// It uses projectID to generate unique slug and git remote to avoid unique constraint violations.
-func createTestProject(t *testing.T, s store.Store, projectID string) {
-	t.Helper()
-	project := &store.Project{
-		ID:        projectID,
-		Slug:      projectID, // Use projectID as slug to ensure uniqueness
-		Name:      "Test Project " + projectID,
-		GitRemote: "https://github.com/test/" + projectID, // Unique git remote per project
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	if err := s.CreateProject(context.Background(), project); err != nil {
-		t.Fatalf("failed to create project: %v", err)
-	}
 }
 
 func TestWorkspaceRoutesParsing(t *testing.T) {

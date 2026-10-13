@@ -35,7 +35,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/knadh/koanf/v2"
 )
 
 // def169Envelope is a minimal struct matching the DeliveryEnvelope shape,
@@ -58,41 +57,6 @@ func parseDEF169Envelope(t *testing.T, deliveryText string) def169Envelope {
 		t.Fatalf("failed to unmarshal envelope JSON: %v\nJSON: %s", err, jsonStr)
 	}
 	return env
-}
-
-// extractDEF169JSON pulls the raw JSON from between delimiters.
-func extractDEF169JSON(t *testing.T, deliveryText string) string {
-	t.Helper()
-	const begin = "---BEGIN SCION MESSAGE---"
-	const end = "---END SCION MESSAGE---"
-
-	startIdx := 0
-	for i := 0; i+len(begin) <= len(deliveryText); i++ {
-		if deliveryText[i:i+len(begin)] == begin {
-			startIdx = i + len(begin) + 1 // skip newline after delimiter
-			break
-		}
-	}
-	endIdx := len(deliveryText)
-	for i := len(deliveryText) - len(end); i >= 0; i-- {
-		if deliveryText[i:i+len(end)] == end {
-			endIdx = i - 1 // trim newline before end delimiter
-			break
-		}
-	}
-	if startIdx == 0 || endIdx <= startIdx {
-		t.Fatalf("could not find delimiters in DeliveryText:\n%s", deliveryText)
-	}
-	return deliveryText[startIdx:endIdx]
-}
-
-// enableEnvelopeSwitch creates OperationalSettings with defaults (envelope
-// switch is ON by compiled default when the messaging section is absent)
-// and attaches them to the server so writeDenyEnabled() returns true.
-func enableEnvelopeSwitch(t *testing.T, srv *Server, s store.Store) {
-	t.Helper()
-	ops := NewOperationalSettings(s, koanf.New("."), koanf.New("."))
-	srv.SetOperationalSettings(ops)
 }
 
 // TestDEF169_Integration_MultiMention_EnvelopeTypeAndTo verifies that when

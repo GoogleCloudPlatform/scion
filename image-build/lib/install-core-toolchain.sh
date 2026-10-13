@@ -158,10 +158,12 @@ step_apt_common() {
 
 # chromium. On Debian it is a real apt package. On Ubuntu it is snap-only, so we
 # install Google Chrome from Google's own apt repository and put it on PATH
-# under the expected name. The name matters as much as the browser: the web-dev
-# template runs a service literally called `chromium`, pkg/api/types_test.go
-# expects CHROME_PATH=/usr/bin/chromium, and
-# pkg/hub/suspended_page_browser_test.go calls exec.LookPath("chromium").
+# under the name chromium. The hub test
+# TestSuspendedPage_HeadlessBrowser_ZeroFanOut
+# (pkg/hub/suspended_page_browser_test.go) needs a headless browser: it looks
+# for chromium, then google-chrome, and skips if neither is found. The chromium
+# name on PATH is kept as part of the base-image contract, for templates that
+# run a service called chromium.
 #
 # The apt route is both predicted and verified, and both halves earn their keep:
 #   * predicted, so that Ubuntu's `chromium` virtual name — a shim that depends
@@ -316,6 +318,52 @@ step_gh() {
   rm -rf /tmp/gh.tar.gz "/tmp/${tarball}"
 }
 
+# helm. An exact pin with a checksum per architecture, not a floor: chart work
+# (deploy/helm/scion-hub) regenerates golden output, and two helm versions can
+# render different manifests. Keep the version in step with chart CI
+# (.github/workflows/chart-ci.yml). The sha256 values are the tarball checksums
+# published at https://get.helm.sh/helm-v<ver>-linux-<arch>.tar.gz.sha256sum.
+step_helm() {
+  local want="${1:?usage: helm <version> <sha256-amd64> <sha256-arm64>}"
+  local sha_amd64="${2:?usage: helm <version> <sha256-amd64> <sha256-arm64>}"
+  local sha_arm64="${3:?usage: helm <version> <sha256-amd64> <sha256-arm64>}"
+  want="${want#v}"
+
+  if command -v helm >/dev/null 2>&1; then
+    local have
+    have="$(helm version --template '{{.Version}}' 2>/dev/null | sed 's/^v//')"
+    if [ "$have" = "$want" ]; then
+      skip "helm $have already present ($(command -v helm))"
+      return 0
+    fi
+    log "helm ${have:-unknown} is not the pinned $want; installing $want to /usr/local/bin"
+  fi
+
+  local arch sha tarball
+  arch="$(deb_arch)"
+  case "$arch" in
+  amd64) sha="$sha_amd64" ;;
+  arm64) sha="$sha_arm64" ;;
+  *)
+    echo "FAIL: unsupported architecture $arch for helm" >&2
+    exit 1
+    ;;
+  esac
+  tarball="helm-v${want}-linux-${arch}.tar.gz"
+  log "installing helm $want"
+  curl -fsSL "https://get.helm.sh/${tarball}" -o /tmp/helm.tar.gz
+  if ! echo "${sha}  /tmp/helm.tar.gz" | sha256sum -c - >/dev/null; then
+    echo "FAIL: sha256 mismatch for ${tarball}" >&2
+    echo "      expected ${sha}" >&2
+    echo "      got      $(sha256sum /tmp/helm.tar.gz | awk '{print $1}')" >&2
+    rm -f /tmp/helm.tar.gz
+    exit 1
+  fi
+  tar -xzf /tmp/helm.tar.gz -C /tmp
+  install -o root -g root -m 0755 "/tmp/linux-${arch}/helm" /usr/local/bin/helm
+  rm -rf /tmp/helm.tar.gz "/tmp/linux-${arch}"
+}
+
 step_golangci_lint() {
   if command -v golangci-lint >/dev/null 2>&1; then
     skip "golangci-lint already present"
@@ -399,13 +447,14 @@ main() {
   gcloud) step_gcloud "$@" ;;
   kubectl) step_kubectl "$@" ;;
   gh) step_gh "$@" ;;
+  helm) step_helm "$@" ;;
   golangci-lint) step_golangci_lint "$@" ;;
   npm-global) step_npm_global "$@" ;;
   npm-tools) step_npm_tools "$@" ;;
   free-uid-1000) step_free_uid_1000 "$@" ;;
   *)
     echo "unknown step: $step" >&2
-    echo "steps: apt-common chromium go gcsfuse gcloud kubectl gh golangci-lint npm-global npm-tools free-uid-1000" >&2
+    echo "steps: apt-common chromium go gcsfuse gcloud kubectl gh helm golangci-lint npm-global npm-tools free-uid-1000" >&2
     exit 2
     ;;
   esac

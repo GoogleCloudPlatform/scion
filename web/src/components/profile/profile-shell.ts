@@ -22,6 +22,7 @@
  */
 
 import { LitElement, html, css } from 'lit';
+import { keyed } from 'lit/directives/keyed.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import './profile-nav.js';
@@ -30,6 +31,11 @@ import type { User } from '../../shared/types.js';
 import { performLogout } from '../../utils/auth.js';
 import { setDocumentTitle } from '../../client/page-title.js';
 import { enterAppFrame, exitAppFrame } from '../shared/app-frame.js';
+import {
+  TestHubBannerController,
+  renderTestHubBanner,
+  testHubBannerStyles,
+} from '../shared/test-hub-banner.js';
 
 const PROFILE_TITLES: Record<string, string> = {
   '/profile': 'Profile',
@@ -55,7 +61,12 @@ export class ScionProfileShell extends LitElement {
   @state()
   _sidebarCollapsed = false;
 
+  /** The test-hub banner's status (shared/test-hub-banner.ts). */
+  private _testHubBanner = new TestHubBannerController(this);
+
   static override styles = css`
+    ${testHubBannerStyles}
+
     :host {
       display: flex;
       height: var(--scion-app-height, 100dvh);
@@ -179,6 +190,7 @@ export class ScionProfileShell extends LitElement {
   override updated(changedProperties: Map<string, unknown>): void {
     if (changedProperties.has('currentPath')) {
       this.updateDocumentTitle();
+      this._testHubBanner.ensure();
     }
   }
 
@@ -214,6 +226,7 @@ export class ScionProfileShell extends LitElement {
       </sl-drawer>
 
       <main class="main">
+        ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

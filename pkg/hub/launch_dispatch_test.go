@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -32,106 +31,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// asyncLaunchClient is a broker client whose create answers the launch the
-// way an async-capable broker does: launchPending with the requested ID.
-type asyncLaunchClient struct {
-	*mockRuntimeBrokerClient
-	// answer builds the create answer from the request. nil means "echo
-	// the launch as accepted".
-	answer     func(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error)
-	wouldDefer bool
-	sends      []RemoteCreateAgentRequest
-}
-
-func (c *asyncLaunchClient) respond(req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	c.sends = append(c.sends, *req)
-	if c.answer != nil {
-		return c.answer(req)
-	}
-	if !req.AsyncLaunch {
-		return &RemoteAgentResponse{Agent: &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Phase: string(state.PhaseRunning)}, Created: true}, nil, nil
-	}
-	return acceptedAnswer(req, req.LaunchID), nil, nil
-}
-
-func acceptedAnswer(req *RemoteCreateAgentRequest, launchID string) *RemoteAgentResponse {
-	return &RemoteAgentResponse{
-		Agent:            &RemoteAgentInfo{ID: req.ID, Slug: req.Slug, Name: req.Name, Template: "tmpl-from-broker", Phase: string(state.PhaseRunning)},
-		Created:          true,
-		LaunchPending:    true,
-		LaunchID:         launchID,
-		LaunchInstanceID: "broker-instance-1",
-	}
-}
-
-func (c *asyncLaunchClient) CreateAgent(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, error) {
-	resp, _, err := c.respond(req)
-	return resp, err
-}
-
-func (c *asyncLaunchClient) CreateAgentWithGather(_ context.Context, _, _ string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	return c.respond(req)
-}
-
-func (c *asyncLaunchClient) createWithGatherWouldDefer(context.Context, string, string) bool {
-	return c.wouldDefer
-}
-
-type asyncLaunchFixture struct {
-	store      store.Store
-	client     *asyncLaunchClient
-	dispatcher *HTTPAgentDispatcher
-	broker     *store.RuntimeBroker
-	settings   AsyncLaunchSettings
-}
-
 func newAsyncLaunchFixture(t *testing.T, caps *store.BrokerCapabilities) *asyncLaunchFixture {
 	t.Helper()
 	return newAsyncLaunchFixtureOn(t, createTestStore(t), caps)
-}
-
-// newAsyncLaunchFixtureOn builds the fixture on an existing store, so a
-// Server sharing the store can serve requests with f.dispatcher.
-func newAsyncLaunchFixtureOn(t *testing.T, s store.Store, caps *store.BrokerCapabilities) *asyncLaunchFixture {
-	t.Helper()
-	ctx := context.Background()
-	project := &store.Project{ID: tid("al-project"), Name: "al-project", Slug: "al-project"}
-	require.NoError(t, s.CreateProject(ctx, project))
-	broker := &store.RuntimeBroker{
-		ID: tid("al-broker"), Name: "al-broker", Slug: "al-broker",
-		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline, Capabilities: caps,
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-	f := &asyncLaunchFixture{
-		store:    s,
-		client:   &asyncLaunchClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}},
-		broker:   broker,
-		settings: AsyncLaunchSettings{Enabled: true, Timeout: 5 * time.Minute, KeepaliveSeconds: 15},
-	}
-	f.dispatcher = NewHTTPAgentDispatcherWithClient(s, f.client, false, slog.Default())
-	f.dispatcher.SetAsyncLaunchSettingsProvider(func() AsyncLaunchSettings { return f.settings })
-	return f
-}
-
-func (f *asyncLaunchFixture) agent(t *testing.T, name, phase string, optIn bool) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid("al-agent-" + name), Slug: "al-" + name, Name: "al-" + name,
-		ProjectID: tid("al-project"), RuntimeBrokerID: f.broker.ID,
-		Phase: phase, LaunchAsyncOptIn: optIn,
-		AppliedConfig: &store.AgentAppliedConfig{HarnessConfig: "claude", Task: "do the thing"},
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	got, err := f.store.GetAgent(context.Background(), a.ID)
-	require.NoError(t, err)
-	return got
-}
-
-func (f *asyncLaunchFixture) row(t *testing.T, id string) *store.Agent {
-	t.Helper()
-	got, err := f.store.GetAgent(context.Background(), id)
-	require.NoError(t, err)
-	return got
 }
 
 func TestDispatchAgentCreate_AsyncAcceptedMarksProvisioning(t *testing.T) {

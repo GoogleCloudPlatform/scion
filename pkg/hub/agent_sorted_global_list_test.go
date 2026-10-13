@@ -23,97 +23,12 @@ import (
 	"net/http"
 	"net/url"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/agentsort"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// globalSortedFixture is a hub-admin bound project-admin on the one project
-// every test agent lives in, for the global endpoint's sorted-mode tests.
-// Every row is then in scope and fully readable with every action granted,
-// and each page costs 9 decisions per returned row plus 4 scope-capability
-// decisions, all through real authzService decisions.
-//
-// The caller is deliberately store.UserRoleMember + SystemRoleHubAdmin, not
-// UserRoleAdmin + SystemRoleSuperAdmin: authorizeAgentMessage's super-admin
-// bypass (authorize_message.go) keys on the flat User.Role being "admin" and
-// short-circuits ComputeMessageability to zero decisions. For the same
-// reason the project role is project-admin, not project-owner:
-// authorizeUserToAgent's project-owner bypass would also zero out
-// messageability's decision cost.
-type globalSortedFixture struct {
-	srv     *Server
-	store   store.Store
-	admin   *store.User
-	project *store.Project
-}
-
-func globalSortedSetup(t *testing.T) *globalSortedFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	adminID := tid("sg-admin")
-	createTestUserWithRole(t, s, adminID, "sg-admin@test.com", store.UserRoleMember, store.SystemRoleHubAdmin)
-	admin, err := s.GetUser(ctx, adminID)
-	require.NoError(t, err)
-
-	project := &store.Project{
-		ID: tid("sg-project"), Name: "Sorted Global Project", Slug: "sg-project",
-		OwnerID: adminID, CreatedBy: adminID, Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	createTestUserWithProjectRole(t, s, adminID, "sg-admin@test.com", project.ID, store.ProjectRoleAdmin)
-
-	return &globalSortedFixture{srv: srv, store: s, admin: admin, project: project}
-}
-
-func (f *globalSortedFixture) listPath(query string) string {
-	p := "/api/v1/agents"
-	if query != "" {
-		p += "?" + query
-	}
-	return p
-}
-
-func (f *globalSortedFixture) createAgent(t *testing.T, slug, phase string) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid("sg-agent-" + slug), Slug: slug, Name: slug,
-		ProjectID: f.project.ID, Phase: phase,
-		CreatedBy: f.admin.ID, OwnerID: f.admin.ID,
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-// createAgentsBulk inserts n agents inside one transaction (fast for the
-// 500+ row sizes the decision-count tests below need), mirroring
-// sortedListFixture.createAgentsBulk in agent_sorted_project_list_test.go.
-func (f *globalSortedFixture) createAgentsBulk(t *testing.T, n int, slugPrefix, phase string) []*store.Agent {
-	t.Helper()
-	agents := make([]*store.Agent, n)
-	err := f.store.WithTx(context.Background(), func(tx store.Store) error {
-		for i := 0; i < n; i++ {
-			slug := fmt.Sprintf("%s-%d", slugPrefix, i)
-			a := &store.Agent{
-				ID: tid("sg-bulk-" + slug), Slug: slug, Name: slug,
-				ProjectID: f.project.ID, Phase: phase,
-				CreatedBy: f.admin.ID, OwnerID: f.admin.ID,
-			}
-			if err := tx.CreateAgent(context.Background(), a); err != nil {
-				return err
-			}
-			agents[i] = a
-		}
-		return nil
-	})
-	require.NoError(t, err)
-	return agents
-}
 
 // --- parameter validation -------------------------------------------------
 
@@ -191,17 +106,6 @@ func TestListAgentsSorted_DirValidatedBeforeSort(t *testing.T) {
 	assert.Equal(t, "invalid sort", decodeErrorMessage(t, rec.Body.Bytes()))
 }
 
-func decodeErrorMessage(t *testing.T, body []byte) string {
-	t.Helper()
-	var e struct {
-		Error struct {
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(body, &e))
-	return e.Error.Message
-}
-
 // --- legacy byte identity --------------------------------------------------
 
 // TestListAgentsSorted_LegacyIgnoresSortedParamsWithoutSort pins the rule
@@ -231,22 +135,6 @@ func TestListAgentsSorted_LegacyIgnoresSortedParamsWithoutSort(t *testing.T) {
 	withExtra := doRequestAsUser(t, f.srv, f.admin, http.MethodGet, f.listPath("fit=500&stats=1&dir=asc"), nil)
 	require.Equal(t, http.StatusOK, withExtra.Code)
 	assertResponsesEqualIgnoringServerTime(t, unlimited.Body.Bytes(), withExtra.Body.Bytes())
-}
-
-// assertResponsesEqualIgnoringServerTime compares two ListAgentsResponse
-// JSON bodies for equality except the serverTime field.
-func assertResponsesEqualIgnoringServerTime(t *testing.T, a, b []byte) {
-	t.Helper()
-	var am, bm map[string]interface{}
-	require.NoError(t, json.Unmarshal(a, &am))
-	require.NoError(t, json.Unmarshal(b, &bm))
-	delete(am, "serverTime")
-	delete(bm, "serverTime")
-	aj, err := json.Marshal(am)
-	require.NoError(t, err)
-	bj, err := json.Marshal(bm)
-	require.NoError(t, err)
-	assert.JSONEq(t, string(aj), string(bj))
 }
 
 // --- sort order ----------------------------------------------------------

@@ -82,9 +82,7 @@ test.describe('Sole-owner protection (AC14)', () => {
     await expect(page.getByText('Second Owner')).toBeVisible({ timeout: 10_000 });
 
     // Now remove buttons should NOT be disabled (both owners can be removed)
-    const enabledRemoveButtons = page.locator(
-      'sl-icon-button[name="trash"]:not([disabled])',
-    );
+    const enabledRemoveButtons = page.locator('sl-icon-button[name="trash"]:not([disabled])');
     // There should be at least one enabled remove button
     await expect(enabledRemoveButtons.first()).toBeVisible({ timeout: 5_000 });
   });

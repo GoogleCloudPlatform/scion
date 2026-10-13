@@ -19,18 +19,20 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 
 import {
   ScionHealthBrokerTable,
   agentsCell,
+  brokerHasProblem,
+  healthCauses,
+  healthCell,
   sortBrokers,
   storageCell,
   type HealthSummaryBroker,
   type HealthSummaryBrokerList,
 } from './health-broker-table.js';
-import { elementStyleRules } from './__fixtures__/card-layout.js';
+import { elementStyleRules } from './__fixtures__/css-rules.js';
+import { contrast, over, resolver, themeTokens } from './__fixtures__/theme-contrast.js';
 
 function broker(over: Partial<HealthSummaryBroker> = {}): HealthSummaryBroker {
   return {
@@ -207,6 +209,108 @@ describe('scion-health-broker-table neutral values', () => {
   });
 });
 
+describe('scion-health-broker-table health', () => {
+  it('shows a failing default runtime as degraded with its cause, while online', async () => {
+    const root = await mount(
+      list([broker({ health: { status: 'degraded', checks: { runtime: 'unavailable' } } })])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('degraded: runtime unavailable');
+    expect(r.querySelector('td.health .tone-warn')).not.toBeNull();
+    expect(cell(r, 'status')).toBe('online');
+    expect(r.querySelector('td.health')?.getAttribute('title')).toBe('runtime: unavailable');
+  });
+
+  it('shows not reported for an older broker, never healthy', async () => {
+    for (const health of [null, undefined]) {
+      const root = await mount(list([broker({ health })]));
+      const r = rows(root)[0]!;
+      expect(cell(r, 'health')).toBe('not reported');
+      expect(r.querySelector('td.health .muted')).not.toBeNull();
+      expect(r.querySelector('td.health .pill')).toBeNull();
+      expect(r.querySelector('td.health')?.hasAttribute('title')).toBe(false);
+    }
+  });
+
+  it('shows a healthy broker as healthy', async () => {
+    const root = await mount(
+      list([broker({ health: { status: 'healthy', checks: { docker: 'available' } } })])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('healthy');
+    expect(r.querySelector('td.health .tone-ok')).not.toBeNull();
+  });
+
+  it("greys an offline broker's health as last reported", async () => {
+    const root = await mount(
+      list([
+        broker({
+          status: 'offline',
+          health: { status: 'degraded', checks: { runtime: 'unavailable' } },
+        }),
+      ])
+    );
+    const r = rows(root)[0]!;
+    expect(cell(r, 'health')).toBe('last reported: degraded: runtime unavailable');
+    expect(r.querySelector('td.health .muted.stale')).not.toBeNull();
+    expect(r.querySelector('td.health .pill')).toBeNull();
+  });
+
+  it('marks an unhealthy report and lists every failing check by name', () => {
+    const c = healthCell(
+      broker({
+        health: {
+          status: 'unhealthy',
+          checks: {
+            runtime: 'unavailable',
+            nfs_mounts: 'unhealthy',
+            docker: 'available',
+          },
+        },
+      })
+    );
+    expect(c.text).toBe('unhealthy: nfs_mounts unhealthy, runtime unavailable');
+    expect(c.tone).toBe('bad');
+    expect(c.title).toBe('docker: available\nnfs_mounts: unhealthy\nruntime: unavailable');
+  });
+
+  it('shows a degraded report without failing checks as its status alone', () => {
+    expect(healthCell(broker({ health: { status: 'degraded' } })).text).toBe('degraded');
+    expect(healthCauses({ status: 'healthy', checks: { nfs_mounts: 'healthy' } })).toEqual([]);
+  });
+
+  it('counts a degraded or unhealthy report as a problem, not a missing one', () => {
+    expect(brokerHasProblem(broker({ health: { status: 'degraded' } }))).toBe(true);
+    expect(brokerHasProblem(broker({ health: { status: 'unhealthy' } }))).toBe(true);
+    expect(brokerHasProblem(broker({ health: { status: 'healthy' } }))).toBe(false);
+    expect(brokerHasProblem(broker({ health: null }))).toBe(false);
+    const sorted = sortBrokers([
+      broker({ id: '1', name: 'alpha' }),
+      broker({
+        id: '2',
+        name: 'zulu',
+        health: { status: 'degraded', checks: { runtime: 'unavailable' } },
+      }),
+    ]);
+    expect(sorted.map((b) => b.name)).toEqual(['zulu', 'alpha']);
+  });
+
+  it('places the Health column between Runtime and Workspace storage', async () => {
+    const root = await mount(list([broker()]));
+    const heads = [...root.querySelectorAll('thead th')].map((th) => th.textContent?.trim());
+    expect(heads).toEqual([
+      'Name',
+      'Status',
+      'Runtime',
+      'Health',
+      'Workspace storage',
+      'Agents',
+      'Version',
+      'Last heartbeat',
+    ]);
+  });
+});
+
 describe('scion-health-broker-table ordering and truncation', () => {
   it('sorts problems first, then by name', () => {
     const sorted = sortBrokers([
@@ -244,7 +348,7 @@ describe('scion-health-broker-table layout', () => {
       const root = await mount(list(items));
       expect(root.querySelectorAll('table')).toHaveLength(1);
       expect(rows(root)).toHaveLength(n);
-      for (const r of rows(root)) expect(r.querySelectorAll('td')).toHaveLength(7);
+      for (const r of rows(root)) expect(r.querySelectorAll('td')).toHaveLength(8);
       // No per-broker card that could grow to fill the row on its own.
       expect(root.querySelector('.broker-card, .broker-grid')).toBeNull();
     });
@@ -271,73 +375,8 @@ describe('scion-health-broker-table layout', () => {
 // surface. Translucent badge backgrounds are composited onto the surface.
 // ---------------------------------------------------------------------------
 
-type RGBA = [number, number, number, number];
-
-function block(cssText: string, selectorStart: string): string {
-  const at = cssText.indexOf(selectorStart);
-  if (at < 0) throw new Error(`no block ${selectorStart}`);
-  const open = cssText.indexOf('{', at);
-  let depth = 0;
-  for (let i = open; i < cssText.length; i++) {
-    if (cssText[i] === '{') depth++;
-    if (cssText[i] === '}' && --depth === 0) return cssText.slice(open + 1, i);
-  }
-  throw new Error('unbalanced');
-}
-
-function decls(body: string): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const m of body.replace(/\/\*[\s\S]*?\*\//g, '').matchAll(/(--[\w-]+)\s*:\s*([^;]+);/g)) {
-    out.set(m[1]!, m[2]!.trim());
-  }
-  return out;
-}
-
-function parseColor(v: string): RGBA {
-  const hex = /^#([0-9a-f]{6})$/i.exec(v);
-  if (hex) {
-    const n = parseInt(hex[1]!, 16);
-    return [(n >> 16) & 255, (n >> 8) & 255, n & 255, 1];
-  }
-  const rgba = /^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(
-    v
-  );
-  if (rgba) return [+rgba[1]!, +rgba[2]!, +rgba[3]!, rgba[4] === undefined ? 1 : +rgba[4]];
-  throw new Error(`unparsed colour ${v}`);
-}
-
-function resolver(vars: Map<string, string>) {
-  const get = (name: string, depth = 0): RGBA => {
-    const v = vars.get(name);
-    if (v === undefined || depth > 10) throw new Error(`unresolved ${name}`);
-    const ref = /^var\((--[\w-]+)\)$/.exec(v);
-    return ref ? get(ref[1]!, depth + 1) : parseColor(v);
-  };
-  return get;
-}
-
-function over(fg: RGBA, bg: RGBA): RGBA {
-  const a = fg[3];
-  return [0, 1, 2].map((i) => fg[i]! * a + bg[i]! * (1 - a)).concat(1) as RGBA;
-}
-
-function luminance([r, g, b]: RGBA): number {
-  const lin = (c: number) => {
-    const s = c / 255;
-    return s <= 0.03928 ? s / 12.92 : ((s + 0.055) / 1.055) ** 2.4;
-  };
-  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
-}
-
-function contrast(a: RGBA, b: RGBA): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi! + 0.05) / (lo! + 0.05);
-}
-
 describe('scion-health-broker-table contrast', () => {
-  const themeCss = readFileSync(resolve(__dirname, '../../styles/theme.css'), 'utf8');
-  const light = decls(block(themeCss, '.sl-theme-light {'));
-  const dark = new Map([...light, ...decls(block(themeCss, '.sl-theme-dark,'))]);
+  const { light, dark } = themeTokens();
   const pairs: Array<[string, string | null]> = [
     ['--scion-text', null],
     ['--scion-text-muted', null],

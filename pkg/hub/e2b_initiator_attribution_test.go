@@ -1552,9 +1552,8 @@ func TestInitiatorMatchesExecutor(t *testing.T) {
 // newScopedUATInitiatorContext builds a live-request context carrying a
 // scoped UAT identity/credential (kind=uat), for tests that exercise
 // InitiatorAttribution capture directly rather than through the
-// scheduled-event/schedule HTTP authoring path, which refuses a
-// project-scoped UAT at the token boundary check: no scheduled_event
-// permission is eligible for a project boundary. Its only user is
+// scheduled-event/schedule HTTP authoring path, which refuses every UAT at
+// the authoring credential gate. Its only user is
 // TestCaptureInitiatorAttribution_ScopedUATFixture below.
 func newScopedUATInitiatorContext(userID, tokenID, projectID string, scopes []string) context.Context {
 	user := NewAuthenticatedUser(userID, userID+"@example.com", "Test User", "member", "api")
@@ -1723,7 +1722,6 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 			t.Fatalf("failed to create test store: %v", err)
 		}
 		ctx := context.Background()
-		require.NoError(t, s.Migrate(ctx))
 		_ = s.DeleteHubSetting(ctx, "migration_delegation_edge_backfill_v1")
 
 		// Seed the DevUserID row directly, exactly as server.go's startup
@@ -1734,7 +1732,7 @@ func TestAuthzService_DevLocalAuthorityEnabled(t *testing.T) {
 
 		cfg := DefaultServerConfig()
 		cfg.DevAuthToken = "" // dev-auth off
-		srv, err := New(cfg, s)
+		srv, err := newTestHubServer(t, cfg, s)
 		require.NoError(t, err)
 		t.Cleanup(func() {
 			_ = srv.Shutdown(context.Background())

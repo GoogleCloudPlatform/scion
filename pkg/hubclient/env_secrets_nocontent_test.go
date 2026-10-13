@@ -15,9 +15,12 @@
 package hubclient
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 )
 
 // newNoContentServer answers GET path with 204 and no body.
@@ -52,6 +55,9 @@ func TestEnvGet_NoContent(t *testing.T) {
 	if want := `hub returned no content for "GONE"`; err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
+	if !errors.Is(err, apiclient.ErrNoContent) {
+		t.Errorf("error %v should wrap apiclient.ErrNoContent", err)
+	}
 }
 
 func TestSecretGet_NoContent(t *testing.T) {
@@ -70,5 +76,8 @@ func TestSecretGet_NoContent(t *testing.T) {
 	}
 	if want := `hub returned no content for "GONE"`; err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
+	}
+	if !errors.Is(err, apiclient.ErrNoContent) {
+		t.Errorf("error %v should wrap apiclient.ErrNoContent", err)
 	}
 }

@@ -20,13 +20,9 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
-	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -36,110 +32,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
-
-// fakeGCSJSONServer is a minimal subset of the GCS JSON API: an object
-// metadata GET and a media (alt=media) GET, with ifGenerationMatch
-// precondition support. It records every request's Authorization header and
-// query string so the test can assert on them: this test runs the
-// production source against an httptest.Server that speaks a minimal GCS
-// JSON API subset, asserting the Authorization: Bearer <minted> header,
-// generation pinning, 404/403 mapping and ReadCompressed.
-type fakeGCSJSONServer struct {
-	mu       sync.Mutex
-	requests []*http.Request
-
-	name            string
-	size            int64
-	generation      int64
-	contentType     string
-	contentEncoding string
-	body            []byte
-
-	// denyMetadata/denyMedia, when non-zero, make the corresponding call
-	// respond with that HTTP status instead of succeeding.
-	denyMetadataStatus int
-	denyMediaStatus    int
-
-	// metadataBlock/mediaBlock, when non-nil, make the corresponding call
-	// wait to respond until the channel is closed, simulating a hung
-	// upstream GCS call.
-	metadataBlock chan struct{}
-	mediaBlock    chan struct{}
-}
-
-func (f *fakeGCSJSONServer) lastAuthHeader() string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if len(f.requests) == 0 {
-		return ""
-	}
-	return f.requests[len(f.requests)-1].Header.Get("Authorization")
-}
-
-// ServeHTTP routes two request shapes, matching the real storage client's
-// own split: Attrs always uses the JSON metadata API
-// (.../b/{bucket}/o/{object}, a single percent-encoded object segment), and
-// NewReader — since production code never sets storage.WithJSONReads — uses
-// the plain "XML" media GET (/{bucket}/{object}, literal path segments, no
-// query string), authenticated by the same underlying http.Client either
-// way. The precondition on the media path arrives as the
-// x-goog-if-generation-match header, not a query parameter.
-func (f *fakeGCSJSONServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	f.requests = append(f.requests, r.Clone(context.Background()))
-	f.mu.Unlock()
-
-	writeGoogleAPIError := func(status int) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(status)
-		_, _ = fmt.Fprintf(w, `{"error":{"code":%d,"message":"denied"}}`, status)
-	}
-
-	if idx := strings.Index(r.URL.Path, "/b/"); idx != -1 {
-		rest := r.URL.Path[idx+len("/b/"):]
-		if parts := strings.SplitN(rest, "/o/", 2); len(parts) == 2 {
-			// Metadata GET (alt=json).
-			if f.metadataBlock != nil {
-				<-f.metadataBlock
-			}
-			if f.denyMetadataStatus != 0 {
-				writeGoogleAPIError(f.denyMetadataStatus)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, `{"name":%q,"size":"%d","generation":"%d","contentType":%q,"contentEncoding":%q}`,
-				f.name, f.size, f.generation, f.contentType, f.contentEncoding)
-			return
-		}
-	}
-
-	// Media GET (XML-style): /{bucket}/{object}.
-	if f.mediaBlock != nil {
-		<-f.mediaBlock
-	}
-	if f.denyMediaStatus != 0 {
-		writeGoogleAPIError(f.denyMediaStatus)
-		return
-	}
-	if ig := r.Header.Get("x-goog-if-generation-match"); ig != "" {
-		want, _ := strconv.ParseInt(ig, 10, 64)
-		if want != f.generation {
-			writeGoogleAPIError(http.StatusPreconditionFailed)
-			return
-		}
-	}
-	// A real Content-Encoding header is what makes ReadCompressed(true) mean
-	// anything to Go's http.Transport: without it, there is nothing to
-	// transparently decompress either way, and the flag makes no observable
-	// difference (see TestGCSLink_RealClient_ReadCompressedServesStoredBytes).
-	if f.contentEncoding != "" {
-		w.Header().Set("Content-Encoding", f.contentEncoding)
-	}
-	w.Header().Set("Content-Length", strconv.Itoa(len(f.body)))
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(f.body)
-}
 
 // newRealGCSClientSource builds a gcsClientSource backed by a real
 // *storage.Client pointed at ts, authenticated with a static bearer token

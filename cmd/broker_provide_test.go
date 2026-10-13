@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -24,15 +25,119 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// provideMockHub records register bodies and resolves projects by ID.
+// provideHub is an httptest hub that serves the project providers API for
+// one project and records every request it receives.
+type provideHub struct {
+	mu        sync.Mutex
+	requests  []string
+	added     []hubclient.AddProviderRequest
+	providers []hubclient.ProjectProvider
+}
+
+func newProvideHub(t *testing.T, projectID string, providers []hubclient.ProjectProvider) (*provideHub, *httptest.Server) {
+	t.Helper()
+	h := &provideHub{providers: providers}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		h.requests = append(h.requests, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID+"/providers":
+			_ = json.NewEncoder(w).Encode(hubclient.ListProvidersResponse{Providers: h.providers})
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/projects/"+projectID+"/providers":
+			var req hubclient.AddProviderRequest
+			require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
+			h.added = append(h.added, req)
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(hubclient.AddProviderResponse{
+				Provider: &hubclient.ProjectProvider{BrokerID: req.BrokerID, LocalPath: req.LocalPath},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/projects/"+projectID:
+			_ = json.NewEncoder(w).Encode(hubclient.Project{ID: projectID, Name: "provide-project", DefaultRuntimeBrokerID: "broker-1"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"not found"}}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return h, srv
+}
+
+func TestProvideBrokerToProject_UsesProvidersAPI(t *testing.T) {
+	hub, srv := newProvideHub(t, "proj-1", nil)
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	project, err := provideBrokerToProject(context.Background(), client, "proj-1", "broker-1", "/home/dev/repo")
+
+	require.NoError(t, err)
+	assert.Equal(t, "proj-1", project.ID)
+	assert.Equal(t, "broker-1", project.DefaultRuntimeBrokerID)
+	assert.Equal(t, []hubclient.AddProviderRequest{{BrokerID: "broker-1", LocalPath: "/home/dev/repo"}}, hub.added)
+	for _, req := range hub.requests {
+		assert.NotContains(t, req, "/projects/register", "provide links through the providers API")
+	}
+	assert.Contains(t, hub.requests, "POST /api/v1/projects/proj-1/providers")
+}
+
+func TestProvideBrokerToProject_EmptyPathSendsNoPath(t *testing.T) {
+	hub, srv := newProvideHub(t, "proj-2", []hubclient.ProjectProvider{
+		{BrokerID: "broker-1", LocalPath: "/home/dev/repo/.scion"},
+	})
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	_, err = provideBrokerToProject(context.Background(), client, "proj-2", "broker-1", "")
+
+	require.NoError(t, err)
+	assert.Equal(t, []hubclient.AddProviderRequest{{BrokerID: "broker-1"}}, hub.added,
+		"an empty local path is sent as no path; the hub decides what an existing provider keeps")
+	assert.NotContains(t, hub.requests, "GET /api/v1/projects/proj-2/providers",
+		"the client does not read the stored provider path")
+}
+
+func TestProvideBrokerToProject_ReturnsAddError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"error":{"code":"forbidden","message":"only the broker's owner or a super-admin may associate this broker with a project"}}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(hubclient.ListProvidersResponse{})
+	}))
+	defer srv.Close()
+	client, err := hubclient.New(srv.URL)
+	require.NoError(t, err)
+
+	_, err = provideBrokerToProject(context.Background(), client, "proj-3", "broker-1", "")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "owner")
+}
+
+// provideMockHub records provider-add bodies and project updates, and
+// resolves projects by ID.
 type provideMockHub struct {
 	mu        sync.Mutex
-	registers []map[string]interface{}
-	projects  map[string]string // id -> name
+	registers []map[string]interface{} // POST /projects/register bodies (provide sends none)
+	adds      []map[string]interface{} // POST /projects/{id}/providers bodies, with "projectId" added
+	updates   []map[string]interface{} // PATCH /projects/{id} bodies, with "projectId" added
+	projects  map[string]string        // id -> name
+	defaults  map[string]string        // id -> defaultRuntimeBrokerId
+}
+
+func (m *provideMockHub) project(id string) map[string]interface{} {
+	return map[string]interface{}{
+		"id": id, "name": m.projects[id], "slug": m.projects[id],
+		"defaultRuntimeBrokerId": m.defaults[id],
+	}
 }
 
 func (m *provideMockHub) handler(t *testing.T) http.HandlerFunc {
@@ -52,29 +157,60 @@ func (m *provideMockHub) handler(t *testing.T) http.HandlerFunc {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"project": map[string]interface{}{"id": body["id"], "name": body["name"], "slug": body["name"]},
 			})
-		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && strings.HasSuffix(r.URL.Path, "/providers") && r.Method == http.MethodPost:
+			id := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/v1/projects/"), "/providers")
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("decode provider body: %v", err)
+			}
+			m.mu.Lock()
+			body["projectId"] = id
+			m.adds = append(m.adds, body)
+			if m.defaults[id] == "" {
+				// The hub makes the first provider the project default.
+				m.defaults[id], _ = body["brokerId"].(string)
+			}
+			m.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"provider": body})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && (r.Method == http.MethodGet || r.Method == http.MethodPatch):
 			id := strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
-			name, ok := m.projects[id]
-			if !ok {
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			if _, ok := m.projects[id]; !ok {
 				w.WriteHeader(http.StatusNotFound)
 				_ = json.NewEncoder(w).Encode(map[string]interface{}{
 					"error": map[string]interface{}{"code": "not_found", "message": "not found"},
 				})
 				return
 			}
-			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": id, "name": name, "slug": name})
+			if r.Method == http.MethodPatch {
+				var body map[string]interface{}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode update body: %v", err)
+				}
+				body["projectId"] = id
+				m.updates = append(m.updates, body)
+				if d, ok := body["defaultRuntimeBrokerId"].(string); ok && d != "" {
+					m.defaults[id] = d
+				}
+			}
+			_ = json.NewEncoder(w).Encode(m.project(id))
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
 	}
 }
 
-func (m *provideMockHub) lastRegister(t *testing.T) map[string]interface{} {
+// lastAdd returns the last provider-add body and checks that provide sent
+// no project register request.
+func (m *provideMockHub) lastAdd(t *testing.T) map[string]interface{} {
 	t.Helper()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	require.NotEmpty(t, m.registers, "no register request reached the hub")
-	return m.registers[len(m.registers)-1]
+	require.Empty(t, m.registers, "provide links through the providers API, not project register")
+	require.NotEmpty(t, m.adds, "no provider-add request reached the hub")
+	return m.adds[len(m.adds)-1]
 }
 
 // setupProvideTest runs provide from a broker user's home directory, which
@@ -88,7 +224,10 @@ func setupProvideTest(t *testing.T) (*provideMockHub, string) {
 		brokerProjectID, brokerBrokerID, brokerHubFlag, brokerProvidePath, brokerMakeDefault = origProject, origBroker, origHub, origPath, origDefault
 	})
 
-	mock := &provideMockHub{projects: map[string]string{"p-web": "web-app", "p-global": "global"}}
+	mock := &provideMockHub{
+		projects: map[string]string{"p-web": "web-app", "p-global": "global"},
+		defaults: map[string]string{},
+	}
 	server := httptest.NewServer(mock.handler(t))
 	t.Cleanup(server.Close)
 
@@ -119,10 +258,10 @@ func TestRunBrokerProvide_ProjectFlagFromHomeSendsNoPath(t *testing.T) {
 
 	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
 
-	body := mock.lastRegister(t)
-	assert.Equal(t, "p-web", body["id"])
+	body := mock.lastAdd(t)
+	assert.Equal(t, "p-web", body["projectId"])
 	assert.Equal(t, "broker-1", body["brokerId"])
-	assert.NotContains(t, body, "path", "provide --project must not send the current directory's path")
+	assert.NotContains(t, body, "localPath", "provide --project must not send the current directory's path")
 }
 
 func TestRunBrokerProvide_ProjectFlagWithPathSendsPath(t *testing.T) {
@@ -136,7 +275,7 @@ func TestRunBrokerProvide_ProjectFlagWithPathSendsPath(t *testing.T) {
 
 	wantPath, err := filepath.EvalSymlinks(filepath.Join(checkout, ".scion"))
 	require.NoError(t, err)
-	assert.Equal(t, wantPath, mock.lastRegister(t)["path"])
+	assert.Equal(t, wantPath, mock.lastAdd(t)["localPath"])
 }
 
 func TestRunBrokerProvide_PathToGlobalDirRefusedForProject(t *testing.T) {
@@ -148,6 +287,7 @@ func TestRunBrokerProvide_PathToGlobalDirRefusedForProject(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "global scion directory")
 	assert.Empty(t, mock.registers, "no register request may be sent")
+	assert.Empty(t, mock.adds, "no provider-add request may be sent")
 }
 
 // The global project keeps its existing flow: provide from the home
@@ -164,10 +304,10 @@ func TestRunBrokerProvide_GlobalProjectFromHomeSendsGlobalDir(t *testing.T) {
 
 	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
 
-	body := mock.lastRegister(t)
-	assert.Equal(t, "p-global", body["id"])
-	assert.Equal(t, "global", body["name"])
-	assert.Equal(t, globalDir, body["path"])
+	body := mock.lastAdd(t)
+	assert.Equal(t, "p-global", body["projectId"])
+	assert.Equal(t, "broker-1", body["brokerId"])
+	assert.Equal(t, globalDir, body["localPath"])
 }
 
 // hub link from a linked project checkout registers the local broker as a
@@ -251,9 +391,9 @@ func TestRunBrokerProvide_CurrentLinkedProjectSendsItsPath(t *testing.T) {
 
 	wantPath, err := filepath.EvalSymlinks(scionDir)
 	require.NoError(t, err)
-	body := mock.lastRegister(t)
-	assert.Equal(t, "p-web", body["id"])
-	assert.Equal(t, wantPath, body["path"])
+	body := mock.lastAdd(t)
+	assert.Equal(t, "p-web", body["projectId"])
+	assert.Equal(t, wantPath, body["localPath"])
 }
 
 // --path may name the global directory for the global project (hub slug
@@ -264,5 +404,40 @@ func TestRunBrokerProvide_PathToGlobalDirAllowedForGlobalProject(t *testing.T) {
 	brokerProvidePath = globalDir
 
 	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
-	assert.Equal(t, globalDir, mock.lastRegister(t)["path"])
+	assert.Equal(t, globalDir, mock.lastAdd(t)["localPath"])
+}
+
+// provide --make-default sets the broker as the project's default through a
+// project update when another broker is the default.
+func TestRunBrokerProvide_MakeDefaultUpdatesProjectDefault(t *testing.T) {
+	mock, _ := setupProvideTest(t)
+	mock.defaults["p-web"] = "broker-other"
+	brokerProjectID = "p-web"
+	brokerMakeDefault = true
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+
+	assert.Equal(t, "broker-1", mock.lastAdd(t)["brokerId"])
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	require.Len(t, mock.updates, 1, "--make-default sends one project update")
+	assert.Equal(t, "p-web", mock.updates[0]["projectId"])
+	assert.Equal(t, "broker-1", mock.updates[0]["defaultRuntimeBrokerId"])
+	assert.Equal(t, "broker-1", mock.defaults["p-web"])
+}
+
+// provide --make-default sends no update when the broker is already the
+// project's default.
+func TestRunBrokerProvide_MakeDefaultAlreadyDefaultSendsNoUpdate(t *testing.T) {
+	mock, _ := setupProvideTest(t)
+	brokerProjectID = "p-web"
+	brokerMakeDefault = true
+
+	require.NoError(t, runBrokerProvide(brokerProvideCmd, nil))
+
+	mock.lastAdd(t)
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	assert.Empty(t, mock.updates, "the hub sets the first provider as the default")
+	assert.Equal(t, "broker-1", mock.defaults["p-web"])
 }

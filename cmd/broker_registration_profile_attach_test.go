@@ -18,46 +18,21 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// serveStoredBroker round-trips a persisted store.RuntimeBroker through
-// JSON and serves it as a Hub GET /runtime-brokers/{id} response, returning
-// a HubContext whose client reads it back in the hubclient wire shape.
-func serveStoredBroker(t *testing.T, broker *store.RuntimeBroker) *HubContext {
-	t.Helper()
-	raw, err := json.Marshal(broker)
-	require.NoError(t, err)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/runtime-brokers/"+broker.ID {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(raw)
-	}))
-	t.Cleanup(srv.Close)
-	client, err := hubclient.New(srv.URL)
-	require.NoError(t, err)
-	return &HubContext{Client: client, Endpoint: srv.URL}
-}
-
 // TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfileAttach
 // covers the settings-profiles branch of buildStoreBrokerProfiles through
 // the real registration producer — the branch every broker with profiles
 // configured takes, and which the empty-settings producer test never
 // reaches. A profile resolving to the opted-out default runtime's type must
-// persist Attach=&false (so the CLI refuses it), while a profile of another
+// persist Attach=&false (so the Hub picks no broker PTY path for it), while a profile of another
 // type — no live instance backs it — must persist Attach=nil (unknown, read
 // as supported), not inherit the default runtime's answer.
 func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfileAttach(t *testing.T) {
@@ -72,7 +47,7 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfi
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 	brokerID := tid("broker-optout-profiles")
 
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-profiles-broker", "http://localhost:9800", rt, true, settings, nil, nil)
 	require.NoError(t, err)
 
 	broker, err := s.GetRuntimeBroker(ctx, brokerID)
@@ -91,22 +66,6 @@ func TestRegisterGlobalProjectAndBroker_AttachOptOut_ConfiguredProfiles_PerProfi
 	k8s, ok := byName["k8s-prof"]
 	require.True(t, ok)
 	assert.Nil(t, k8s.Attach, "a profile of a different type has no live instance to ask and must stay unknown, not inherit the default runtime's answer")
-
-	hubCtx := serveStoredBroker(t, broker)
-	optoutSupported, optoutUnreadable := attachSupportedByBroker(ctx, hubCtx, brokerID, "optout-prof")
-	assert.False(t, optoutSupported,
-		"CLI must refuse attach for the opted-out profile as persisted by the real producer")
-	assert.False(t, optoutUnreadable, "the broker record was read successfully")
-	// k8s-prof's own Attach is unknown (nil), so attachSupportedByBroker
-	// falls through to the broker-wide Capabilities.Attach, which is false
-	// here — the accepted cost documented on attachSupportedByBroker: a
-	// non-default-type profile with no live instance of its own inherits
-	// the opted-out default runtime's broker-wide answer rather than being
-	// treated as supported by default.
-	k8sSupported, k8sUnreadable := attachSupportedByBroker(ctx, hubCtx, brokerID, "k8s-prof")
-	assert.False(t, k8sSupported,
-		"CLI must fall through to the broker-wide false for a profile with no Attach of its own")
-	assert.False(t, k8sUnreadable, "the broker record was read successfully")
 }
 
 // TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRuntime
@@ -124,7 +83,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	brokerID := tid("broker-optout-rereg")
 
 	supporting := &runtime.MockRuntime{NameFunc: func() string { return "optout" }}
-	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings, nil)
+	_, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", supporting, true, settings, nil, nil)
 	require.NoError(t, err)
 	before, err := s.GetRuntimeBroker(ctx, brokerID)
 	require.NoError(t, err)
@@ -132,7 +91,7 @@ func TestRegisterGlobalProjectAndBroker_ReRegistration_RefreshesAttachFromLiveRu
 	require.True(t, before.Capabilities.Attach, "precondition: first registration with an attach-capable runtime records Attach=true")
 
 	optOut := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
-	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings, nil)
+	effectiveID, err := registerGlobalProjectAndBroker(ctx, s, brokerID, "optout-rereg-broker", "http://localhost:9800", optOut, true, settings, nil, nil)
 	require.NoError(t, err)
 	require.Equal(t, brokerID, effectiveID, "precondition: second registration must take the update branch for the same record")
 
@@ -162,7 +121,7 @@ func TestBuildStoreBrokerProfiles_AllProfilesFiltered_DefaultAsksLiveRuntime(t *
 	}
 	rt := &optOutRuntime{MockRuntime: &runtime.MockRuntime{NameFunc: func() string { return "optout" }}}
 
-	profiles := buildStoreBrokerProfiles(settings, "optout", rt)
+	profiles := buildStoreBrokerProfiles(settings, nil, "optout", rt)
 
 	require.Len(t, profiles, 1)
 	require.Equal(t, "default", profiles[0].Name, "precondition: the docker profile must be filtered out on a non-local default")

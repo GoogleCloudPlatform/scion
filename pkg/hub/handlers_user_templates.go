@@ -141,10 +141,16 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	var req CreateTemplateRequest
 	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
+		return
+	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
 		return
 	}
 
@@ -179,7 +185,6 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        store.TemplateScopeUser,
 		ScopeID:      userIdent.ID(),
 		OwnerID:      userIdent.ID(),
@@ -188,14 +193,16 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Status:       store.TemplateStatusPending,
 	}
 
-	// Generate storage path and URI
-	storagePath := storage.TemplateStoragePath(s.HubID(), template.Scope, template.ScopeID, template.Slug)
+	// New templates start in the blob layout, with a row-unique storage
+	// path (ptone/scion#4221).
+	storagePath := s.templateBlobStoragePath(template)
 	template.StoragePath = storagePath
+	template.Layout = store.TemplateLayoutBlobs
 
 	stor := s.GetStorage()
 	if stor != nil {
 		template.StorageBucket = stor.Bucket()
-		template.StorageURI = storage.TemplateStorageURI(s.HubID(), stor.Bucket(), template.Scope, template.ScopeID, template.Slug)
+		template.StorageURI = storage.StorageURIForPath(stor.Bucket(), storagePath)
 	}
 
 	if err := s.store.CreateTemplate(ctx, template); err != nil {
@@ -211,16 +218,14 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		Template: template,
 	}
 
-	// Generate upload URLs if files were specified
+	// Generate staging upload URLs if files were specified; finalize
+	// commits them.
 	if len(req.Files) > 0 && stor != nil {
-		uploadURLs, manifestURL, err := generateUploadURLs(ctx, stor, storagePath, req.Files)
-		if err == nil || len(uploadURLs) > 0 {
-			if stor.Provider() == storage.ProviderLocal {
-				hubURL := requestBaseURL(r)
-				uploadURLs = rewriteLocalUploadURLs(uploadURLs, hubURL, "templates", template.ID)
-			}
+		uploadID := api.NewUUID()
+		uploadURLs, err := s.generateTemplateUploadURLs(ctx, stor, template, req.Files, uploadID, requestBaseURL(r))
+		if err == nil {
 			response.UploadURLs = uploadURLs
-			response.ManifestURL = manifestURL
+			response.UploadID = uploadID
 		}
 	}
 
@@ -261,6 +266,9 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -274,27 +282,20 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
-	// Preserve immutable fields
-	template.ID = existing.ID
-	template.Scope = store.TemplateScopeUser
-	template.ScopeID = userIdent.ID()
-	template.OwnerID = userIdent.ID()
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
-	template.UpdatedBy = userIdent.ID()
-	// Preserve system-managed fields that must not be zeroed by client input
-	template.StoragePath = existing.StoragePath
-	template.StorageBucket = existing.StorageBucket
-	template.StorageURI = existing.StorageURI
-	template.Files = existing.Files
-	template.ContentHash = existing.ContentHash
-	template.Status = existing.Status
+	// A PUT replaces only the metadata; every other field, including
+	// BaseTemplate, SourceURL and ProjectID, keeps its stored value
+	// (applyTemplateMetadataUpdate). Ownership was verified above, so the
+	// stored scope, scope ID and owner are the caller's.
+	template := applyTemplateMetadataUpdate(existing, &req, userIdent.ID())
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)
 	}
@@ -319,6 +320,9 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		Unauthorized(w)
 		return
 	}
+	if !requireProfileWriter(w, r) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -336,7 +340,7 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	deleteFiles := r.URL.Query().Get("deleteFiles") == "true"
 	if deleteFiles && existing.StoragePath != "" {
 		if stor := s.GetStorage(); stor != nil {
-			_ = stor.DeletePrefix(ctx, storage.DirPrefix(existing.StoragePath))
+			_ = s.deleteTemplateStorage(ctx, stor, existing)
 		}
 	}
 
@@ -360,6 +364,9 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 
@@ -391,6 +398,9 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !requireProfileWriter(w, r) {
 		return
 	}
 

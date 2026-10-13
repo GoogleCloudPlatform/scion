@@ -25,9 +25,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -35,128 +33,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// sortedListFixture builds a project with an owner (full capabilities) and a
-// plain member (read-only: the read-pass and race tests need a
-// caller for whom some agents are unreadable), for the sorted-mode project
-// list tests.
-type sortedListFixture struct {
-	srv     *Server
-	store   store.Store
-	project *store.Project
-	owner   *store.User
-	member  *store.User // project member, no elevated role -- see grantMemberReadOnly
-}
-
-func sortedListSetup(t *testing.T) *sortedListFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	return sortedListSetupOn(t, srv, s)
-}
-
-// sortedListSetupWithFault is sortedListSetup with a switch-gated store
-// wrapper (see installStoreFault) installed on the server BEFORE the
-// fixture's audited setup (seedProjectCreatorMembership emits a mutation
-// audit whose goroutine reads srv.store). Tests call fault.Arm() where they
-// used to assign f.srv.store, which would race that goroutine
-// (ptone/scion#3184).
-func sortedListSetupWithFault[W store.Store](t *testing.T, wrap func(inner store.Store, fault *storeFaultSwitch) W) (*sortedListFixture, W, *storeFaultSwitch) {
-	t.Helper()
-	srv, s, wrapped, fault := testServerWithStoreFault(t, wrap)
-	return sortedListSetupOn(t, srv, s), wrapped, fault
-}
-
-func sortedListSetupOn(t *testing.T, srv *Server, s store.Store) *sortedListFixture {
-	t.Helper()
-	ctx := context.Background()
-	f := &sortedListFixture{srv: srv, store: s}
-
-	f.owner = &store.User{
-		ID: tid("sl-owner"), Email: "sl-owner@test.com", DisplayName: "Owner",
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, f.owner))
-	ensureHubMembership(ctx, s, f.owner.ID)
-
-	f.member = &store.User{
-		ID: tid("sl-member"), Email: "sl-member@test.com", DisplayName: "Member",
-		Role: store.UserRoleMember, Status: "active", Created: time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, f.member))
-	ensureHubMembership(ctx, s, f.member.ID)
-
-	f.project = &store.Project{
-		ID: tid("sl-project"), Name: "Sorted List Project", Slug: "sl-project",
-		OwnerID: f.owner.ID, CreatedBy: f.owner.ID, Created: time.Now(), Updated: time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, f.project))
-	srv.seedProjectCreatorMembership(ctx, f.project)
-	createTestUserWithProjectRole(t, s, f.owner.ID, f.owner.Email, f.project.ID, store.ProjectRoleOwner)
-	msgAuthzAddProjectMember(t, s, f.member.ID, f.project.ID, f.project.Slug, store.GroupMemberRoleMember)
-
-	return f
-}
-
-func (f *sortedListFixture) listPath(query string) string {
-	p := "/api/v1/projects/" + f.project.ID + "/agents"
-	if query != "" {
-		p += "?" + query
-	}
-	return p
-}
-
-// createAgent creates one agent, owned by the project owner unless
-// ownerOverride is non-empty.
-func (f *sortedListFixture) createAgent(t *testing.T, slug, phase string, labels map[string]string) *store.Agent {
-	t.Helper()
-	a := &store.Agent{
-		ID: tid("sl-agent-" + slug), Slug: slug, Name: slug,
-		ProjectID: f.project.ID, Phase: phase,
-		CreatedBy: f.owner.ID, OwnerID: f.owner.ID,
-		Labels: labels,
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), a))
-	return a
-}
-
-// createAgentsBulk creates n agents in f.project inside one transaction
-// (store.Store.WithTx), so a large fixture (hundreds to low thousands of
-// rows) is fast regardless of the per-statement autocommit cost a loop of
-// plain CreateAgent calls would otherwise pay. ownerFor, when non-nil,
-// picks the OwnerID for agent index i (0-based); nil means every agent is
-// owned by f.owner, matching createAgent's single-agent default.
-func (f *sortedListFixture) createAgentsBulk(t *testing.T, n int, slugPrefix, phase string, ownerFor func(i int) string) []*store.Agent {
-	t.Helper()
-	agents := make([]*store.Agent, n)
-	err := f.store.WithTx(context.Background(), func(tx store.Store) error {
-		for i := 0; i < n; i++ {
-			owner := f.owner.ID
-			if ownerFor != nil {
-				owner = ownerFor(i)
-			}
-			slug := fmt.Sprintf("%s-%d", slugPrefix, i)
-			a := &store.Agent{
-				ID: tid("sl-bulk-" + slug), Slug: slug, Name: slug,
-				ProjectID: f.project.ID, Phase: phase,
-				CreatedBy: owner, OwnerID: owner,
-			}
-			if err := tx.CreateAgent(context.Background(), a); err != nil {
-				return err
-			}
-			agents[i] = a
-		}
-		return nil
-	})
-	require.NoError(t, err)
-	return agents
-}
-
-func mustDecodeListAgentsResponse(t *testing.T, rec interface{ Bytes() []byte }) ListAgentsResponse {
-	t.Helper()
-	var resp ListAgentsResponse
-	require.NoError(t, json.Unmarshal(rec.Bytes(), &resp))
-	return resp
-}
 
 // --- cursor and parameter rejection ---------------------------------
 
@@ -291,91 +167,6 @@ func TestListProjectAgentsSorted_CursorPhaseReplayRejected(t *testing.T) {
 
 // --- candidate ceiling (hard gate) -----------------------------------
 
-// countingAgentStore wraps a real store.Store and lets tests fake
-// CountAgents/ListAgentMembers results, or count calls, without paying for
-// thousands of real row inserts in the test SQLite backend.
-type countingAgentStore struct {
-	store.Store
-	fault             *storeFaultSwitch // nil: always counting/faking
-	mu                sync.Mutex
-	countAgentsCalls  int
-	membersCalls      int
-	getByIDsCalls     int
-	listAgentsCalls   int
-	listAgentsIDs     [][]string // filter.IDs seen by each ListAgents call, in call order
-	fakeCandidateSize int        // if > 0, CountAgents and ListAgentMembers report this size
-	maxSeen           int        // last "max" ListAgentMembers was called with
-}
-
-// newCountingAgentStore is the installStoreFault wrap func for
-// countingAgentStore: it passes calls straight through, uncounted, until
-// the switch is armed.
-func newCountingAgentStore(inner store.Store, fault *storeFaultSwitch) *countingAgentStore {
-	return &countingAgentStore{Store: inner, fault: fault}
-}
-
-func (c *countingAgentStore) CountAgents(ctx context.Context, filter store.AgentFilter) (int, error) {
-	if !c.fault.Active() {
-		return c.Store.CountAgents(ctx, filter)
-	}
-	c.mu.Lock()
-	c.countAgentsCalls++
-	c.mu.Unlock()
-	if c.fakeCandidateSize > 0 {
-		return c.fakeCandidateSize, nil
-	}
-	return c.Store.CountAgents(ctx, filter)
-}
-
-func (c *countingAgentStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	if !c.fault.Active() {
-		return c.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	}
-	c.mu.Lock()
-	c.membersCalls++
-	c.maxSeen = max
-	c.mu.Unlock()
-	if c.fakeCandidateSize > 0 {
-		n := c.fakeCandidateSize
-		if n > max {
-			n = max
-		}
-		out := make([]store.AgentMember, n)
-		for i := range out {
-			out[i] = store.AgentMember{ID: fmt.Sprintf("fake-%d", i), ProjectID: filter.ProjectID}
-		}
-		return out, nil
-	}
-	return c.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-}
-
-func (c *countingAgentStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
-	if !c.fault.Active() {
-		return c.Store.GetAgentsByIDs(ctx, ids)
-	}
-	c.mu.Lock()
-	c.getByIDsCalls++
-	c.mu.Unlock()
-	return c.Store.GetAgentsByIDs(ctx, ids)
-}
-
-// ListAgents is overridden so tests can observe loadFullRowsForPage's actual
-// full-row read: how many times it runs per request, and exactly which IDs
-// it asks for (the old getByIDsCalls assertion in
-// TestListProjectAgentsSorted_CandidateCeiling was vacuous after the
-// full-row read moved from GetAgentsByIDs to ListAgents to honor
-// includeDeleted, so it passed regardless of what the handler actually did).
-func (c *countingAgentStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	if !c.fault.Active() {
-		return c.Store.ListAgents(ctx, filter, opts)
-	}
-	c.mu.Lock()
-	c.listAgentsCalls++
-	c.listAgentsIDs = append(c.listAgentsIDs, append([]string(nil), filter.IDs...))
-	c.mu.Unlock()
-	return c.Store.ListAgents(ctx, filter, opts)
-}
-
 // TestListProjectAgentsSorted_CandidateCeiling is the candidate-ceiling hard
 // gate: a candidate pool above authorizedListMaxCandidates gets the 422
 // refusal, with exactly
@@ -435,40 +226,6 @@ func TestListProjectAgentsSorted_CandidateCeiling_Race(t *testing.T) {
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodGet, f.listPath("sort=updated&fit=500"), nil)
 	require.Equal(t, http.StatusUnprocessableEntity, rec.Code, rec.Body.String())
 	assert.Len(t, emitter.records, 1, "the race must still cost only the agent.list gate decision")
-}
-
-// raceMembersStore always answers ListAgentMembers with memberCount rows
-// (capped at the caller's max), independent of CountAgents' answer,
-// simulating candidate growth between the two reads.
-type raceMembersStore struct {
-	*countingAgentStore
-	memberCount int
-}
-
-// newRaceMembersStore returns an installStoreFault wrap func for a
-// raceMembersStore over a countingAgentStore, both gated by the switch.
-func newRaceMembersStore(memberCount int) func(store.Store, *storeFaultSwitch) *raceMembersStore {
-	return func(inner store.Store, fault *storeFaultSwitch) *raceMembersStore {
-		return &raceMembersStore{countingAgentStore: newCountingAgentStore(inner, fault), memberCount: memberCount}
-	}
-}
-
-func (r *raceMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	if !r.fault.Active() {
-		return r.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	}
-	r.mu.Lock()
-	r.membersCalls++
-	r.mu.Unlock()
-	n := r.memberCount
-	if n > max {
-		n = max
-	}
-	out := make([]store.AgentMember, n)
-	for i := range out {
-		out[i] = store.AgentMember{ID: fmt.Sprintf("race-%d", i), ProjectID: filter.ProjectID}
-	}
-	return out, nil
 }
 
 // TestListProjectAgentsSorted_FullRowRead_ExactlyOncePerRequest_IDsAreThePage
@@ -778,40 +535,6 @@ func TestListProjectAgentsSorted_NilVsEmptyLabelsNoRedecision(t *testing.T) {
 
 // --- Race behavior (member read vs full-row read) --------------------------
 
-// mutatingAfterMembersStore mutates an agent's labels (via the real store,
-// bypassing the read path) the first time ListAgentMembers is called,
-// simulating a write landing between the member read and the full-row
-// read.
-type mutatingAfterMembersStore struct {
-	store.Store
-	fault     *storeFaultSwitch // nil: always active
-	once      sync.Once
-	agentID   string
-	newLabels map[string]string
-}
-
-// newMutatingAfterMembersStore is the installStoreFault wrap func for
-// mutatingAfterMembersStore. Set agentID and newLabels before arming.
-func newMutatingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *mutatingAfterMembersStore {
-	return &mutatingAfterMembersStore{Store: inner, fault: fault}
-}
-
-func (m *mutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	members, err := m.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	if err != nil || !m.fault.Active() {
-		return members, err
-	}
-	m.once.Do(func() {
-		a, gerr := m.GetAgent(ctx, m.agentID)
-		if gerr != nil {
-			return
-		}
-		a.Labels = m.newLabels
-		_ = m.UpdateAgent(ctx, a)
-	})
-	return members, nil
-}
-
 // TestListProjectAgentsSorted_Race_LabelChange_StillMatchesFilter is the
 // decision-count gate's race sub-case: a page item's labels change between
 // the two reads but it still matches the request's label filter, so it is
@@ -875,28 +598,6 @@ func TestListProjectAgentsSorted_Race_MissingRow(t *testing.T) {
 	assert.Equal(t, 0, resp.TotalCount)
 }
 
-type deletingAfterMembersStore struct {
-	store.Store
-	fault   *storeFaultSwitch // nil: always active
-	once    sync.Once
-	agentID string
-}
-
-// newDeletingAfterMembersStore is the installStoreFault wrap func for
-// deletingAfterMembersStore. Set agentID before arming.
-func newDeletingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *deletingAfterMembersStore {
-	return &deletingAfterMembersStore{Store: inner, fault: fault}
-}
-
-func (d *deletingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sort, dir string, max int) ([]store.AgentMember, error) {
-	members, err := d.Store.ListAgentMembers(ctx, filter, sort, dir, max)
-	if err != nil || !d.fault.Active() {
-		return members, err
-	}
-	d.once.Do(func() { _ = d.DeleteAgent(ctx, d.agentID) })
-	return members, nil
-}
-
 // TestListProjectAgentsSorted_Race_ProjectMismatch proves: a full row
 // whose ProjectID differs from the request project is dropped at no
 // decision cost. UpdateAgent never mutates ProjectID in this codebase
@@ -917,32 +618,6 @@ func TestListProjectAgentsSorted_Race_ProjectMismatch(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := mustDecodeListAgentsResponse(t, rec.Body)
 	assert.Empty(t, resp.Agents, "a row that moved to another project between the two reads must be dropped")
-}
-
-type reprojectingListAgentsStore struct {
-	store.Store
-	fault        *storeFaultSwitch // nil: always active
-	agentID      string
-	newProjectID string
-}
-
-// newReprojectingListAgentsStore is the installStoreFault wrap func for
-// reprojectingListAgentsStore. Set agentID and newProjectID before arming.
-func newReprojectingListAgentsStore(inner store.Store, fault *storeFaultSwitch) *reprojectingListAgentsStore {
-	return &reprojectingListAgentsStore{Store: inner, fault: fault}
-}
-
-func (r *reprojectingListAgentsStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	result, err := r.Store.ListAgents(ctx, filter, opts)
-	if err != nil || !r.fault.Active() {
-		return result, err
-	}
-	for i := range result.Items {
-		if result.Items[i].ID == r.agentID {
-			result.Items[i].ProjectID = r.newProjectID
-		}
-	}
-	return result, nil
 }
 
 // fullRowReadRecorder records the full-row reads loadFullRowsForPage could

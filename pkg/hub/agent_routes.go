@@ -65,6 +65,12 @@ const (
 	AgentRouteActionReincarnate  AgentSubRouteID = "agents.action.reincarnate"
 	AgentRouteActionResetAuth    AgentSubRouteID = "agents.action.resetAuth"
 	AgentRouteActionKeys         AgentSubRouteID = "agents.action.keys"
+	AgentRouteHoldLift           AgentSubRouteID = "agents.hold.lift"
+	// Agent delegation (.design/agent-delegation.md §18.4).
+	AgentRouteDelegations          AgentSubRouteID = "agents.delegations"
+	AgentRouteDelegationExchange   AgentSubRouteID = "agents.delegations.exchange"
+	AgentRouteDelegationItem       AgentSubRouteID = "agents.delegations.byId"
+	AgentRouteDelegationCredential AgentSubRouteID = "agents.delegations.credentials.byId"
 )
 
 // Agent sub-routes under /api/v1/projects/{projectId}/agents.
@@ -95,9 +101,14 @@ const (
 
 // AgentSubRouteSuffix is the typed tail of an agent sub-route.
 type AgentSubRouteSuffix struct {
-	// Param is the decoded value of the route's single parameter segment
-	// (the port number on the port item and proxy routes), or "".
+	// Param is the decoded value of the route's first parameter segment
+	// (the port number on the port item and proxy routes, the grant ID on
+	// the agent delegation routes), or "".
 	Param string
+	// SecondParam is the decoded value of the route's second parameter
+	// segment (the credential ID on the delegated credential revoke
+	// route), or "".
+	SecondParam string
 	// Opaque is the raw (still escaped) payload after the route's literal
 	// segments on routes that carry one (port proxy path, secret key,
 	// workspace action). It keeps its leading "/" when present, so "" and
@@ -129,7 +140,8 @@ const (
 	agentFormProject
 )
 
-// agentRouteParam marks the single parameter segment of a row's literal path.
+// agentRouteParam marks a parameter segment of a row's literal path. A row
+// has at most two.
 const agentRouteParam = "{param}"
 
 type agentSubRouteRow struct {
@@ -151,6 +163,9 @@ type agentSubRouteRow struct {
 	allMethodsOp authzop.OperationID
 	// kind is the catalog entry point kind for this row.
 	kind authzop.EntryPointKind
+	// paramNames are the catalog placeholders for the row's parameter
+	// segments, in order; a missing name means "{port}".
+	paramNames []string
 }
 
 func (row agentSubRouteRow) operation(method string) authzop.OperationID {
@@ -173,11 +188,19 @@ const (
 	opAgentExec             authzop.OperationID = "agent.lifecycle.exec"
 	opAgentEnv              authzop.OperationID = "agent.lifecycle.env"
 	opAgentResetAuth        authzop.OperationID = "agent.lifecycle.resetauth"
+	opAgentHoldLift         authzop.OperationID = "agent.hold.lift"
 	opAgentReincarnate      authzop.OperationID = "agent.lifecycle.reincarnate"
 	opAgentSetMessageMode   authzop.OperationID = "agent.setmessagemode"
 	opAgentTokenRefresh     authzop.OperationID = "agent.token.refresh"
 	opAgentOutboundMessage  authzop.OperationID = "agent.outbound.message"
 	opAgentMetricsReport    authzop.OperationID = "agent.metrics.report"
+
+	opAgentDelegationCreate           authzop.OperationID = "agent.delegation.create"
+	opAgentDelegationExchange         authzop.OperationID = "agent.delegation.exchange"
+	opAgentDelegationList             authzop.OperationID = "agent.delegation.list"
+	opAgentDelegationRead             authzop.OperationID = "agent.delegation.read"
+	opAgentDelegationRevoke           authzop.OperationID = "agent.delegation.revoke"
+	opAgentDelegationCredentialRevoke authzop.OperationID = "agent.delegation.credential.revoke"
 )
 
 func postOp(op authzop.OperationID) map[string]authzop.OperationID {
@@ -235,6 +258,24 @@ var agentSubRouteTable = []agentSubRouteRow{
 	// (authorizeAgentKeys in handleAgentAction). The keys action has no
 	// catalog operation.
 	{id: AgentRouteActionKeys, form: agentFormByID, segs: []string{"keys"}},
+	// Hub-admin lift of an agent's holds (ptone/scion#3433).
+	{id: AgentRouteHoldLift, form: agentFormByID, segs: []string{"hold", "lift"}, ops: postOp(opAgentHoldLift)},
+	// Agent delegation (.design/agent-delegation.md §18.4): grant issuance
+	// and credential exchange, behind hub.agent_delegation; grant list,
+	// read and revoke, and delegated credential revoke, which answer while
+	// the experiment is off (§10).
+	{id: AgentRouteDelegations, form: agentFormByID, segs: []string{"delegations"}, ops: map[string]authzop.OperationID{
+		http.MethodPost: opAgentDelegationCreate,
+		http.MethodGet:  opAgentDelegationList,
+	}},
+	{id: AgentRouteDelegationExchange, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "exchange"}, ops: postOp(opAgentDelegationExchange), paramNames: []string{"{grantId}"}},
+	{id: AgentRouteDelegationItem, form: agentFormByID, segs: []string{"delegations", agentRouteParam}, ops: map[string]authzop.OperationID{
+		http.MethodGet:    opAgentDelegationRead,
+		http.MethodDelete: opAgentDelegationRevoke,
+	}, paramNames: []string{"{grantId}"}},
+	{id: AgentRouteDelegationCredential, form: agentFormByID, segs: []string{"delegations", agentRouteParam, "credentials", agentRouteParam}, ops: map[string]authzop.OperationID{
+		http.MethodDelete: opAgentDelegationCredentialRevoke,
+	}, paramNames: []string{"{grantId}", "{credentialId}"}},
 
 	// --- /api/v1/projects/{projectId}/agents ---
 	{id: ProjectAgentRouteCollection, form: agentFormProject, noAgent: true, trailingSlash: true},
@@ -279,10 +320,16 @@ func (row agentSubRouteRow) catalogPattern(withOpaque bool) string {
 	if !row.noAgent {
 		b.WriteString("/{id}")
 	}
+	params := 0
 	for _, seg := range row.segs {
 		b.WriteByte('/')
 		if seg == agentRouteParam {
-			b.WriteString("{port}")
+			if params < len(row.paramNames) && row.paramNames[params] != "" {
+				b.WriteString(row.paramNames[params])
+			} else {
+				b.WriteString("{port}")
+			}
+			params++
 			continue
 		}
 		b.WriteString(seg)
@@ -402,6 +449,7 @@ func (row agentSubRouteRow) match(rest []string) (AgentSubRoute, bool) {
 		route.AgentID = agentID
 		segs = segs[1:]
 	}
+	params := 0
 	for _, lit := range row.segs {
 		if len(segs) == 0 {
 			return AgentSubRoute{}, false
@@ -411,7 +459,12 @@ func (row agentSubRouteRow) match(rest []string) (AgentSubRoute, bool) {
 			if !ok {
 				return AgentSubRoute{}, false
 			}
-			route.Suffix.Param = param
+			if params == 0 {
+				route.Suffix.Param = param
+			} else {
+				route.Suffix.SecondParam = param
+			}
+			params++
 		} else if segs[0] != lit {
 			return AgentSubRoute{}, false
 		}

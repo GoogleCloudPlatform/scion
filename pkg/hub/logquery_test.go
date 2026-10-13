@@ -122,7 +122,7 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				LogID:   "scion-messages",
 			},
 			projectID: "my-project",
-			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*)`,
 		},
 		{
 			name: "logID without project ID",
@@ -131,7 +131,7 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				LogID:   "scion-messages",
 			},
 			projectID: "",
-			expected:  `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
+			expected:  `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*)`,
 		},
 		{
 			name: "no logID with project ID uses whitelist filter",
@@ -148,7 +148,19 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				LogID:   "scion-messages",
 			},
 			projectID: "my-project",
-			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*)`,
+		},
+		{
+			// Project Messages view: only message records, no
+			// log_kind=event entries and none without sender or
+			// recipient labels.
+			name: "project message log keeps message records only",
+			opts: LogQueryOptions{
+				ProjectID: "project-abc",
+				LogID:     "scion-messages",
+			},
+			projectID: "my-project",
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*) AND labels.project_id = "project-abc"`,
 		},
 		{
 			name: "message log with project_id filter",
@@ -158,7 +170,7 @@ func TestBuildLogFilter_LogID(t *testing.T) {
 				LogID:     "scion-messages",
 			},
 			projectID: "my-project",
-			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND labels.project_id = "project-abc"`,
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND (labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*) AND labels.project_id = "project-abc"`,
 		},
 	}
 
@@ -207,7 +219,7 @@ func TestBuildLogFilter_Whitelist(t *testing.T) {
 				LogID: "scion-messages",
 			},
 			projectID: "my-project",
-			expected:  `logName = "projects/my-project/logs/scion-messages"`,
+			expected:  `logName = "projects/my-project/logs/scion-messages" AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*)`,
 		},
 	}
 
@@ -586,7 +598,7 @@ func TestBuildLogFilter_ParticipantID(t *testing.T) {
 				LogID:         "scion-messages",
 			},
 			projectID: "my-project",
-			wantIn:    `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123")`,
+			wantIn:    `(labels.recipient_id = "agent-123" OR labels.sender_id = "agent-123") AND NOT labels.log_kind = "event" AND (labels.sender:* OR labels.recipient:*)`,
 		},
 	}
 

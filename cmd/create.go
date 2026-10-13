@@ -51,7 +51,21 @@ The agent is provisioned but not started, even when a task is given. Run
 		agentName := api.Slugify(args[0])
 		task := strings.TrimSpace(strings.Join(args[1:], " "))
 
+		// A target-hub profile refuses the flags that need local state
+		// before anything else (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+
 		if err := validateHarnessAuthFlag(harnessAuthFlag); err != nil {
+			return asUsageError(err)
+		}
+
+		if err := validateTaskFileStdin(); err != nil {
+			return err
+		}
+		task, err := applyTaskFile(task, taskFilePath, os.Stdin)
+		if err != nil {
 			return asUsageError(err)
 		}
 
@@ -387,6 +401,7 @@ func createAgentViaHub(hubCtx *HubContext, agentName string, task string) error 
 		HarnessConfig:   harnessConfigFlag,
 		HarnessAuth:     harnessAuthFlag,
 		RuntimeBrokerID: runtimeBrokerID,
+		Profile:         profile,
 		Task:            task,
 		Branch:          branch,
 		Labels:          parsedLabels,
@@ -462,6 +477,7 @@ func init() {
 
 	// Inline config flag
 	createCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")
+	createCmd.Flags().StringVar(&taskFilePath, "task-file", "", taskFileFlagUsage)
 
 	// Label flags
 	createCmd.Flags().StringArrayVar(&labelFlags, "label", nil, "Label in key=value format (repeatable)")
@@ -472,10 +488,11 @@ func init() {
 
 	// Agent message mode flag
 	createCmd.Flags().StringVar(&messageModeFlag, "message-mode", "",
-		"Agent message mode: none, lineage, branch, project")
+		"Agent message mode: none, lineage, branch, project, hub\n"+
+			"Default: the template's mode, else the parent agent's, else 'project'.")
 
 	// GCP service account assignment flag
-	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account ID to assign to this agent (requires Hub mode)")
+	createCmd.Flags().StringVar(&serviceAccountFlag, "service-account", "", "GCP service account to assign to this agent: its id, email or display name (requires Hub mode)")
 }
 
 // skillResolverHubOptions returns the EnsureHubReady options for the hub
@@ -485,6 +502,7 @@ func skillResolverHubOptions(projectPath string) hubsync.EnsureHubReadyOptions {
 	return hubsync.EnsureHubReadyOptions{
 		NoHub:           noHub,
 		AutoConfirm:     true,
+		NonInteractive:  nonInteractive,
 		SkipSync:        true,
 		ExplicitProject: explicitProjectTargetFor(projectPath),
 	}

@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"fmt"
+	"html"
 	"net"
 	"net/http"
 	"sync"
@@ -80,7 +81,8 @@ const authSuccessHTML = `<!DOCTYPE html>
 </body>
 </html>`
 
-// authErrorHTML is the HTML template for authentication errors.
+// authErrorHTML is the HTML template for authentication errors. The
+// message inserted at %s must be escaped with html.EscapeString.
 const authErrorHTML = `<!DOCTYPE html>
 <html>
 <head>
@@ -204,7 +206,7 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("state mismatch"))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, "State mismatch - possible CSRF attack")
+		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString("State mismatch - possible CSRF attack"))
 		return
 	}
 
@@ -217,7 +219,7 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("auth failed: %s", errDesc))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, errDesc)
+		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString(errDesc))
 		return
 	}
 
@@ -227,7 +229,7 @@ func (s *LocalhostAuthServer) handleCallback(w http.ResponseWriter, r *http.Requ
 		s.sendError(fmt.Errorf("no authorization code received"))
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = fmt.Fprintf(w, authErrorHTML, "No authorization code received")
+		_, _ = fmt.Fprintf(w, authErrorHTML, html.EscapeString("No authorization code received"))
 		return
 	}
 

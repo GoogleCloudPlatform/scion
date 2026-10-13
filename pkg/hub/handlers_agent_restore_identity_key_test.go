@@ -29,23 +29,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// softDeleteAgent soft-deletes f.target via the ordinary DELETE route,
-// forcing the soft-delete branch (SoftDeleteRetention > 0, no force) rather
-// than relying on server defaults. Returns once the row is confirmed to
-// carry a non-zero DeletedAt.
-func softDeleteAgent(t *testing.T, f *projectAgentAuthzFixture) {
-	t.Helper()
-	f.srv.config.SoftDeleteRetention = 24 * time.Hour
-
-	rec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, f.targetPath(), nil)
-	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, rec.Code,
-		"DELETE body: %s", rec.Body.String())
-
-	deleted, err := f.store.GetAgent(context.Background(), f.target.ID)
-	require.NoError(t, err)
-	require.False(t, deleted.DeletedAt.IsZero(), "expected a soft delete, not a hard delete")
-}
-
 // TestRestoreAgent_RestoresAndReassertsOwnKey is the happy-path anchor for
 // the restore-path identity-key wiring: restoring a soft-deleted agent
 // through the project-scoped route clears DeletedAt and leaves its own slug

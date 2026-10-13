@@ -173,8 +173,7 @@ describe('scion-page-profile-settings — display timezone', () => {
   function userPatchCalls(): Array<[unknown, RequestInit]> {
     const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
     return (fetchMock.mock.calls as Array<[unknown, RequestInit | undefined]>).filter(
-      ([url, init]) =>
-        init?.method === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(String(url))
+      ([url, init]) => init?.method === 'PATCH' && /\/api\/v1\/users\/[^/]+$/.test(String(url))
     ) as Array<[unknown, RequestInit]>;
   }
 
@@ -272,7 +271,7 @@ describe('scion-page-profile-settings — display timezone', () => {
   // assumption about the contract, which is exactly what round 2 found
   // wasn't enough (R2-2): a mismatch on the picker's side wouldn't fail a
   // test built from a synthetic event.
-  it('is wired to the picker\'s real timezone-change event with e.detail.timezone (review R1-2/R2-2)', async () => {
+  it("is wired to the picker's real timezone-change event with e.detail.timezone (review R1-2/R2-2)", async () => {
     let captured: Record<string, unknown> | null = null;
     element = await createComponent(
       createFetchHandler({}, undefined, { body: makeAuthMe() }, (body) => {
@@ -357,5 +356,234 @@ describe('scion-page-profile-settings — display timezone', () => {
 
     expect(userPatchCalls()).toHaveLength(0);
     expect(await pickerDisplayText(element)).toBe('Auto');
+  });
+});
+
+describe('scion-page-profile-settings — alert toggles', () => {
+  let element: AnyEl = null;
+
+  class FakeNotification {
+    static permission: NotificationPermission = 'granted';
+    static requestPermission = vi.fn(() => Promise.resolve(FakeNotification.permission));
+  }
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function toggle(el: AnyEl, category: 'chat' | 'agent'): AnyEl {
+    return el.shadowRoot?.querySelector(`sl-switch[data-push-category="${category}"]`);
+  }
+
+  it('shows separate chat message and agent event toggles', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    element = await createComponent(createFetchHandler({}));
+    expect(toggle(element, 'chat')?.getAttribute('aria-label')).toBe('Chat message alerts');
+    expect(toggle(element, 'agent')?.getAttribute('aria-label')).toBe('Agent event alerts');
+    expect(shadowText(element)).toContain('Chat message alerts');
+    expect(shadowText(element)).toContain('Agent event alerts');
+    expect(shadowText(element)).not.toContain('Enable Push Notifications');
+  });
+
+  it('carries an old single opt-in over to both toggles', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-notifications', 'true');
+    element = await createComponent(createFetchHandler({}));
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(true);
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns one category off without touching the other', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'true');
+    localStorage.setItem('scion-push-agent-events', 'true');
+    element = await createComponent(createFetchHandler({}));
+
+    const chat = toggle(element, 'chat');
+    chat.checked = false;
+    chat.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('false');
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('true');
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(false);
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns agent alerts off without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'true');
+    localStorage.setItem('scion-push-agent-events', 'true');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = false;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('false');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('true');
+    expect(toggle(element, 'agent')?.hasAttribute('checked')).toBe(false);
+    expect(toggle(element, 'chat')?.hasAttribute('checked')).toBe(true);
+  });
+
+  it('turns agent alerts on without touching chat alerts', async () => {
+    (window as unknown as { Notification: unknown }).Notification = FakeNotification;
+    localStorage.setItem('scion-push-chat-messages', 'false');
+    localStorage.setItem('scion-push-agent-events', 'false');
+    element = await createComponent(createFetchHandler({}));
+
+    const agent = toggle(element, 'agent');
+    agent.checked = true;
+    agent.dispatchEvent(new CustomEvent('sl-change'));
+    await settle(element);
+
+    expect(localStorage.getItem('scion-push-agent-events')).toBe('true');
+    expect(localStorage.getItem('scion-push-chat-messages')).toBe('false');
+  });
+});
+
+describe('scion-page-profile-settings — view mode shortcuts', () => {
+  let element: AnyEl = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler({})));
+    await import('./profile-settings.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    localStorage.clear();
+    vi.restoreAllMocks();
+  });
+
+  function shortcutsSwitch(): AnyEl {
+    return element.shadowRoot.querySelector('.view-mode-shortcuts-switch');
+  }
+
+  async function toggleTo(checked: boolean): Promise<void> {
+    const sw = shortcutsSwitch();
+    sw.checked = checked;
+    sw.dispatchEvent(new CustomEvent('sl-change', { bubbles: true, composed: true }));
+    await element.updateComplete;
+  }
+
+  it('shows the toggle on by default', async () => {
+    element = await createComponent(createFetchHandler({}));
+
+    expect(shadowText(element)).toContain('View mode shortcuts');
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+  });
+
+  it('stores the preference when turned off and back on', async () => {
+    const { areViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+    element = await createComponent(createFetchHandler({}));
+
+    await toggleTo(false);
+    expect(areViewModeShortcutsEnabled()).toBe(false);
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+    await toggleTo(true);
+    expect(areViewModeShortcutsEnabled()).toBe(true);
+  });
+
+  it('reflects a stored off preference on load', async () => {
+    const { setViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+    setViewModeShortcutsEnabled(false);
+    element = await createComponent(createFetchHandler({}));
+
+    expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+  });
+
+  it('makes no request when toggled', async () => {
+    element = await createComponent(createFetchHandler({}));
+    const before = (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+
+    await toggleTo(false);
+    await settle(element);
+
+    expect((globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(
+      before
+    );
+  });
+
+  describe('when the preference changes outside this page', () => {
+    /** Writes the store directly and fires the storage event another tab's write would. */
+    function writeFromOtherTab(key: string, value: string | null): void {
+      if (value === null) {
+        localStorage.removeItem(key);
+      } else {
+        localStorage.setItem(key, value);
+      }
+      window.dispatchEvent(
+        new StorageEvent('storage', { key, newValue: value, storageArea: localStorage })
+      );
+    }
+
+    it('updates the toggle when another tab changes the preference', async () => {
+      element = await createComponent(createFetchHandler({}));
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+
+      writeFromOtherTab('scion-view-mode-shortcuts', 'false');
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+      writeFromOtherTab('scion-view-mode-shortcuts', null);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('updates the toggle when the preference changes elsewhere in this tab', async () => {
+      const { setViewModeShortcutsEnabled } = await import('../../client/view-mode-shortcuts.js');
+      element = await createComponent(createFetchHandler({}));
+
+      setViewModeShortcutsEnabled(false);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(false);
+
+      setViewModeShortcutsEnabled(true);
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('ignores a storage event for an unrelated key', async () => {
+      element = await createComponent(createFetchHandler({}));
+
+      // Change the stored value without its own event, then fire an event
+      // for a different key: the toggle must not re-read the preference.
+      localStorage.setItem('scion-view-mode-shortcuts', 'false');
+      writeFromOtherTab('some-other-key', 'x');
+      await element.updateComplete;
+      expect(shortcutsSwitch().hasAttribute('checked')).toBe(true);
+    });
+
+    it('removes the same listeners it added once disconnected', async () => {
+      const { VIEW_MODE_SHORTCUTS_CHANGED_EVENT } =
+        await import('../../client/view-mode-shortcuts.js');
+      const addSpy = vi.spyOn(window, 'addEventListener');
+      element = await createComponent(createFetchHandler({}));
+      const added = (type: string): unknown => addSpy.mock.calls.find(([t]) => t === type)?.[1];
+      const storageHandler = added('storage');
+      const changedHandler = added(VIEW_MODE_SHORTCUTS_CHANGED_EVENT);
+      expect(storageHandler).toBeTypeOf('function');
+      expect(changedHandler).toBeTypeOf('function');
+
+      const removeSpy = vi.spyOn(window, 'removeEventListener');
+      element.remove();
+      element = null;
+      const removed = (type: string): unknown[] =>
+        removeSpy.mock.calls.filter(([t]) => t === type).map(([, h]) => h);
+      expect(removed('storage')).toContain(storageHandler);
+      expect(removed(VIEW_MODE_SHORTCUTS_CHANGED_EVENT)).toContain(changedHandler);
+    });
   });
 });

@@ -37,9 +37,7 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -47,15 +45,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
-	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/require"
 )
-
-const mentionBystanderSlug = "amf-bystander"
 
 // mentionFanoutPollTimeout bounds waitForNonMentionMessages, matching the headroom
 // handlers_outbound_def162_test.go uses for the same broker-async-persist
@@ -81,97 +75,6 @@ func waitForNonMentionMessages(t *testing.T, s store.Store, conversationID strin
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-}
-
-// enableConversationEnvelopeForMentionTests turns on the consolidated conversation
-// envelope switch (writeDenyEnabled) so DeliveryText gets rendered — needed
-// to assert on the rendered envelope's content. An empty fake settings store
-// has no "messaging" section, which ConversationEnvelopeSwitch documents as
-// defaulting to ON, but this makes the ON state explicit and independent of
-// that default.
-func enableConversationEnvelopeForMentionTests(t *testing.T, srv *Server) {
-	t.Helper()
-	fakeStore := newFakeHubSettingStore()
-	fakeStore.seed("messaging", json.RawMessage(`{}`))
-	ops := NewOperationalSettings(fakeStore, emptyKoanf(), emptyKoanf())
-	if _, err := ops.Refresh(context.Background()); err != nil {
-		t.Fatalf("failed to refresh operational settings: %v", err)
-	}
-	srv.SetOperationalSettings(ops)
-}
-
-// mentionFanoutSetup reuses paritySetup (two same-project agents + DM conversation,
-// recording dispatcher, broker proxy) and adds a third same-project agent,
-// the bystander, which is only ever @mentioned in message bodies.
-func mentionFanoutSetup(t *testing.T) (srv *Server, s store.Store, project *store.Project,
-	sender, target, bystander *store.Agent, dmConvID string, dispatcher *recordingDispatcher) {
-	t.Helper()
-	srv, s, project, sender, target, dmConvID, dispatcher, _ = paritySetup(t)
-	bystander = &store.Agent{
-		ID:              tid("amf-bystander"),
-		Name:            mentionBystanderSlug,
-		Slug:            mentionBystanderSlug,
-		ProjectID:       project.ID,
-		Phase:           "running",
-		RuntimeBrokerID: target.RuntimeBrokerID,
-		MessageMode:     store.MessageModeProject,
-		Ancestry:        sender.Ancestry,
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), bystander))
-	return
-}
-
-func dispatchesTo(d *recordingDispatcher, agentID string) []dispatchCall {
-	var out []dispatchCall
-	for _, c := range d.getCalls() {
-		if c.Agent != nil && c.Agent.ID == agentID {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-func agentCtx(ctx context.Context, a *store.Agent) context.Context {
-	return contextWithIdentity(ctx, &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: a.ID},
-		ProjectID: a.ProjectID,
-		Ancestry:  a.Ancestry,
-	}})
-}
-
-// wireWebBrokerForMentionTests swaps in a production-shaped broker proxy with a "web"
-// spoke and the project's user-message subscription, so agent→user and
-// agent→group-conversation sends take the deliveryUserBroker path end to end
-// (handler → PublishUserMessage → MessageBrokerProxy.deliverToUser). The
-// dispatcher is the same recordingDispatcher, so any mention fan-out would
-// be observed.
-func wireWebBrokerForMentionTests(t *testing.T, srv *Server, s store.Store, projectID string, dispatcher *recordingDispatcher) {
-	t.Helper()
-	if srv.webChatStore == nil {
-		dbProvider, ok := s.(interface{ DB() *sql.DB })
-		require.True(t, ok)
-		wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
-		require.NoError(t, wcs.Init())
-		srv.SetWebChatStore(wcs)
-	}
-	if old := srv.GetMessageBrokerProxy(); old != nil {
-		old.Stop()
-	}
-	fanout := eventbus.NewFanOutEventBus([]eventbus.NamedEventBus{
-		{Name: eventbus.InProcessBusName, Bus: eventbus.NewInProcessEventBus(slog.Default())},
-		{Name: "web", Bus: nullSpokeEventBus{}},
-	}, slog.Default())
-	events := NewChannelEventPublisher()
-	t.Cleanup(events.Close)
-	proxy := NewMessageBrokerProxy(fanout, s, events,
-		func() AgentDispatcher { return dispatcher }, slog.Default())
-	proxy.Start()
-	t.Cleanup(proxy.Stop)
-	srv.SetMessageBrokerProxy(proxy)
-	srv.mu.RLock()
-	proxy.webChatStore = srv.webChatStore
-	srv.mu.RUnlock()
-	proxy.subscribeProjectUserMessages(projectID)
 }
 
 // Path 1: agent → agent via POST /agents/{target}/message (handleAgentMessage

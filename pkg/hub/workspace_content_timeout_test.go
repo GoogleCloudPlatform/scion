@@ -31,33 +31,11 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// hangReadDirFor makes workspaceReadDir block for any path under hungPrefix
-// until the test ends, and shortens workspaceContentTimeout. Other paths use
-// os.ReadDir. These tests mutate package-level seams and must not call
-// t.Parallel(); parallel tests in this package run only after the serial
-// ones, so they cannot observe the swapped values.
-func hangReadDirFor(t *testing.T, hungPrefix string) {
-	t.Helper()
-	release := make(chan struct{})
-	prevRead, prevTimeout := workspaceReadDir, workspaceContentTimeout
-	workspaceReadDir = func(dir string) ([]os.DirEntry, error) {
-		if strings.HasPrefix(dir, hungPrefix) {
-			<-release
-			return nil, os.ErrDeadlineExceeded
-		}
-		return os.ReadDir(dir)
-	}
-	workspaceContentTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		close(release)
-		workspaceReadDir, workspaceContentTimeout = prevRead, prevTimeout
-	})
-}
 
 func TestProbeWorkspaceContent(t *testing.T) {
 	dir := t.TempDir()
@@ -89,34 +67,6 @@ func TestProbeWorkspaceContent_TimesOutOnHungRead(t *testing.T) {
 	assert.ErrorIs(t, err, errWorkspaceContentTimeout)
 	assert.False(t, has)
 	assert.Less(t, elapsed, 5*time.Second, "probe must not block on a hung read")
-}
-
-// hungPathFixture is a temp HOME with a legacy local project dir that has
-// content.
-type hungPathFixture struct {
-	tmpHome  string
-	slug     string
-	localDir string
-}
-
-func newHungPathFixture(t *testing.T, slug string) hungPathFixture {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	localDir := filepath.Join(tmpHome, ".scion", "projects", slug)
-	require.NoError(t, os.MkdirAll(localDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(localDir, "existing.txt"), []byte("data"), 0644))
-	return hungPathFixture{tmpHome: tmpHome, slug: slug, localDir: localDir}
-}
-
-func nfsConfig(mountRoot string) *config.V1WorkspaceStorageConfig {
-	return &config.V1WorkspaceStorageConfig{
-		Backend: "nfs",
-		NFS: &config.V1NFSConfig{
-			MountRoot: mountRoot,
-			Shares:    []config.V1NFSShare{{ID: "share1", Server: "10.0.0.2", Export: "/scion"}},
-		},
-	}
 }
 
 // A hung NFS mount must not resolve to either path: the legacy local path
@@ -485,7 +435,9 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 	ctx := context.Background()
 	disp := &mockDispatcher{}
 	srv.SetDispatcher(disp)
-	srv.SetStorage(newMockStorage("hung-storage-bucket"))
+	hungStor := newMockStorage("hung-storage-bucket")
+	hungStor.provider = storage.ProviderGCS
+	srv.SetStorage(hungStor)
 
 	broker := &store.RuntimeBroker{
 		ID: tid("broker-hung-caller-ws"), Slug: "hung-caller-ws-broker",
@@ -497,6 +449,45 @@ func TestCreateAgent_CallerWorkspace_HungStorageReturns503NoAgentNoDispatch(t *t
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
 		"name":            "hung-caller-ws-agent",
+		"projectId":       project.ID,
+		"runtimeBrokerId": broker.ID,
+		"workspace":       "subdir",
+	})
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "body: %s", rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), mountRoot, "response must not leak the path")
+	assert.Contains(t, rec.Body.String(), "Workspace storage is not responding")
+
+	agents, err := s.ListAgents(ctx, store.AgentFilter{ProjectID: project.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, agents.Items, "the agent row must be cleaned up")
+	assert.Empty(t, disp.dispatchedAgents, "nothing may be dispatched")
+}
+
+// ptone/scion#3765: a shared-workspace project with a git remote on a hub
+// whose storage is not GCS skips only the workspace sync, not the probe
+// before it, so hung workspace storage still fails the create with 503.
+func TestCreateAgent_SharedGitNonGCS_HungStorageReturns503NoAgentNoDispatch(t *testing.T) {
+	srv, s, mountRoot := hungStorageServer(t)
+	ctx := context.Background()
+	disp := &mockDispatcher{}
+	srv.SetDispatcher(disp)
+	srv.SetStorage(newMockStorage("local"))
+
+	broker := &store.RuntimeBroker{
+		ID: tid("broker-hung-shared-git"), Slug: "hung-shared-git-broker",
+		Name: "Hung Shared Git Broker", Status: store.BrokerStatusOnline,
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{
+		ID: tid("project-hung-shared-git"), Slug: "hung-shared-git", Name: "Hung Shared Git Project",
+		GitRemote: "github.com/example/repo",
+		Labels:    map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeShared},
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.True(t, project.IsSharedWorkspace(), "fixture check: shared-workspace project")
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents", map[string]interface{}{
+		"name":            "hung-shared-git-agent",
 		"projectId":       project.ID,
 		"runtimeBrokerId": broker.ID,
 		"workspace":       "subdir",

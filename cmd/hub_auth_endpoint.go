@@ -19,7 +19,6 @@ import (
 	"io"
 	"os"
 	"strconv"
-	"strings"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
@@ -28,32 +27,64 @@ import (
 	"github.com/spf13/pflag"
 )
 
-// hubAuthURLPrecedence documents the hub URL order 'scion hub auth login'
-// (and logout, without --hub-url) uses; resolveHubAuthURL implements it.
+// hubAuthURLPrecedence documents the effective hub URL order 'scion hub
+// auth login' (and logout, without --hub-url) uses. resolveHubAuthURL
+// implements it; SCION_HUB_ENDPOINT ranks above the settings files because
+// settings loading applies it as an override of hub.endpoint. After
+// --hub-url it is the order every other hub command uses (GetHubEndpoint).
 const hubAuthURLPrecedence = `The hub URL is taken from, in order:
-  1. --hub-url
-  2. the root --hub flag
-  3. the SCION_HUB_ENDPOINT environment variable
-  4. hub.endpoint in settings (the current project's, else global)`
+  1. --hub-url (a URL or a hub nickname)
+  2. the root --hub flag (a URL or a hub nickname)
+  3. the SCION_HUB_ENDPOINT environment variable (applied as an override
+     of hub.endpoint when settings are loaded)
+  4. hub.endpoint in settings (the current project's, else global)
+  5. the SCION_HUB_URL environment variable
+This is the order the other hub commands use, plus --hub-url first.`
 
 // resolveHubAuthURL resolves the hub URL for hub auth login and logout:
-// --hub-url, then the root --hub flag, then SCION_HUB_ENDPOINT, then the
-// settings endpoint (ptone/scion#3537). It returns the URL and its source
-// ("--hub-url", "--hub", "env", "settings" or "" when none is set).
-func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) string, settingsEndpoint func() string) (string, string) {
+// --hub-url, then the root --hub flag, then the loaded settings endpoint
+// (which already carries any SCION_HUB_ENDPOINT override), then
+// SCION_HUB_ENDPOINT and SCION_HUB_URL directly, for when settings loading
+// yields no endpoint. Apart from --hub-url this mirrors GetHubEndpoint in
+// root.go exactly (ptone/scion#3627); keep the two in step.
+func resolveHubAuthURL(hubURLFlag, rootHubFlag string, getenv func(string) string, settingsEndpoint func() string) string {
 	if hubURLFlag != "" {
-		return hubURLFlag, "--hub-url"
+		return hubURLFlag
 	}
 	if rootHubFlag != "" {
-		return rootHubFlag, "--hub"
-	}
-	if env := getenv("SCION_HUB_ENDPOINT"); env != "" {
-		return env, "env"
+		return rootHubFlag
 	}
 	if ep := settingsEndpoint(); ep != "" {
-		return ep, "settings"
+		return ep
 	}
-	return "", ""
+	if env := getenv("SCION_HUB_ENDPOINT"); env != "" {
+		return env
+	}
+	return getenv("SCION_HUB_URL")
+}
+
+// hubAuthURLFlag returns the hub URL a --hub-url value names: the value
+// itself for a URL, or the endpoint of the hub entry for a nickname. An
+// unknown nickname is an error that lists the registered names. The root
+// --hub flag is resolved the same way by resolveInvocationTarget;
+// --hub-url is a subcommand flag, so it is resolved here, before
+// resolveHubAuthURL.
+func hubAuthURLFlag(v string) (string, error) {
+	if !isHubNickname(v) || contextDisabled(resolveMode()) {
+		return v, nil
+	}
+	c, err := config.LoadCLIContext()
+	if err != nil {
+		return "", fmt.Errorf("cannot look up hub '%s': %w", v, err)
+	}
+	h := c.Hubs[v]
+	if h == nil {
+		return "", unknownHubError(v, c)
+	}
+	if h.Endpoint == "" {
+		return "", hubWithoutEndpointError(v)
+	}
+	return h.Endpoint, nil
 }
 
 // settingsHubEndpoint returns hub.endpoint from the settings of the current
@@ -70,11 +101,11 @@ func settingsHubEndpoint() string {
 	return settings.GetHubEndpoint()
 }
 
-// sameHubURL reports whether a and b name the same hub, ignoring a trailing
-// slash and letter case in the scheme and host.
+// sameHubURL reports whether a and b name the same hub: equal after
+// config.NormalizeEndpoint (trailing slash, letter case in the scheme and
+// host, and the default port do not matter).
 func sameHubURL(a, b string) bool {
-	norm := func(s string) string { return strings.ToLower(strings.TrimRight(strings.TrimSpace(s), "/")) }
-	return norm(a) == norm(b)
+	return config.NormalizeEndpoint(a) == config.NormalizeEndpoint(b)
 }
 
 // loginEndpointOptions carries what persistLoginEndpoint needs, so tests can

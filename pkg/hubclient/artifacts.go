@@ -56,12 +56,53 @@ type ArtifactService interface {
 	// FinalizeVersion makes pending version seq ready and current.
 	FinalizeVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
 
+	// FinalizeReview finalizes pending review version seq, naming base, the
+	// version the review was started from. The hub refuses it with 409
+	// stale_review unless base is still the current version.
+	FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error)
+
 	// ListVersions returns the ready versions of an artifact, newest
 	// first, without their files.
 	ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error)
 
+	// ListVersionHistory returns the ready versions of an artifact, as
+	// ListVersions does, and the discarded ones (versions that stopped
+	// being pending without becoming ready), both newest first.
+	ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error)
+
 	// GetVersion returns an artifact with version seq and its files.
 	GetVersion(ctx context.Context, id string, seq int) (*ArtifactResponse, error)
+
+	// CreateLink creates a share link for an artifact, lasting ttlHours
+	// (0 = the hub's default). Only users may create links.
+	CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error)
+
+	// ListLinks returns an artifact's unexpired share links (without
+	// their tokens).
+	ListLinks(ctx context.Context, id string) ([]ArtifactLink, error)
+
+	// RevokeLink revokes one share link.
+	RevokeLink(ctx context.Context, id, linkID string) error
+
+	// Delete deletes an artifact (a soft delete: its grants and share
+	// links end with it, and its bytes are removed later).
+	Delete(ctx context.Context, id string) error
+}
+
+// ArtifactLink describes a share link. It never carries the token.
+type ArtifactLink struct {
+	ID        string    `json:"id"`
+	CreatedAt time.Time `json:"createdAt"`
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedBy string    `json:"createdBy,omitempty"`
+}
+
+// ArtifactLinkCreated answers CreateLink. URL is the hub-relative path of
+// the link, the only place its token appears.
+type ArtifactLinkCreated struct {
+	Link                    ArtifactLink `json:"link"`
+	URL                     string       `json:"url"`
+	ClampedToArtifactExpiry bool         `json:"clampedToArtifactExpiry,omitempty"`
 }
 
 // CreateVersionRequest mirrors the hub's version manifest.
@@ -160,6 +201,8 @@ type Artifact struct {
 	CurrentSeq int       `json:"currentSeq"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
+	// OwnerDeleted is true when the hub found the artifact's owner gone.
+	OwnerDeleted bool `json:"ownerDeleted,omitempty"`
 }
 
 // ArtifactVersion describes one version of an artifact.
@@ -176,6 +219,16 @@ type ArtifactVersion struct {
 	CreatedAt     time.Time      `json:"createdAt"`
 	State         string         `json:"state"`
 	Files         []ArtifactFile `json:"files"`
+}
+
+// ArtifactDiscardedVersion is a discarded version as the versions list
+// shows it: its number, state, reason code and the time its number was
+// taken (ptone/scion#4577).
+type ArtifactDiscardedVersion struct {
+	Seq       int       `json:"seq"`
+	State     string    `json:"state"`
+	Reason    string    `json:"reason"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 // ArtifactFile describes one file of a version.
@@ -230,7 +283,7 @@ func (s *artifactService) Publish(ctx context.Context, req *PublishArtifactReque
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // Get implements ArtifactService.
@@ -239,7 +292,7 @@ func (s *artifactService) Get(ctx context.Context, id string) (*ArtifactResponse
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // List implements ArtifactService.
@@ -267,7 +320,7 @@ func (s *artifactService) List(ctx context.Context, opts *ListArtifactsOptions) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactListResponse](resp)
+	return apiclient.DecodeRequired[ArtifactListResponse](resp)
 }
 
 // OpenFile implements ArtifactService. The hub either streams the bytes or
@@ -355,7 +408,7 @@ func (s *artifactService) CreateVersion(ctx context.Context, id string, req *Cre
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[PendingVersionResponse](resp)
+	return apiclient.DecodeRequired[PendingVersionResponse](resp)
 }
 
 // UploadFile implements ArtifactService.
@@ -383,12 +436,29 @@ func (s *artifactService) FinalizeVersion(ctx context.Context, id string, seq in
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// FinalizeReview implements ArtifactService.
+func (s *artifactService) FinalizeReview(ctx context.Context, id string, seq, base int) (*ArtifactResponse, error) {
+	resp, err := s.longTransport().PostNoRetry(ctx, artifactPath(id)+"/versions/"+strconv.Itoa(seq)+"/finalize",
+		map[string]int{"base": base}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
 }
 
 // ListVersions implements ArtifactService.
 func (s *artifactService) ListVersions(ctx context.Context, id string) ([]ArtifactVersion, error) {
+	versions, _, err := s.ListVersionHistory(ctx, id)
+	return versions, err
+}
+
+// ListVersionHistory implements ArtifactService.
+func (s *artifactService) ListVersionHistory(ctx context.Context, id string) ([]ArtifactVersion, []ArtifactDiscardedVersion, error) {
 	var all []ArtifactVersion
+	var discarded []ArtifactDiscardedVersion
 	before := 0
 	for {
 		p := artifactPath(id) + "/versions"
@@ -397,18 +467,20 @@ func (s *artifactService) ListVersions(ctx context.Context, id string) ([]Artifa
 		}
 		resp, err := s.c.get(ctx, p, nil)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		page, err := apiclient.DecodeResponse[struct {
-			Versions   []ArtifactVersion `json:"versions"`
-			NextBefore int               `json:"nextBefore"`
+		page, err := apiclient.DecodeRequired[struct {
+			Versions   []ArtifactVersion          `json:"versions"`
+			Discarded  []ArtifactDiscardedVersion `json:"discarded"`
+			NextBefore int                        `json:"nextBefore"`
 		}](resp)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		all = append(all, page.Versions...)
+		discarded = append(discarded, page.Discarded...)
 		if page.NextBefore <= 0 || (before > 0 && page.NextBefore >= before) {
-			return all, nil
+			return all, discarded, nil
 		}
 		before = page.NextBefore
 	}
@@ -420,5 +492,52 @@ func (s *artifactService) GetVersion(ctx context.Context, id string, seq int) (*
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ArtifactResponse](resp)
+	return apiclient.DecodeRequired[ArtifactResponse](resp)
+}
+
+// CreateLink implements ArtifactService. It is sent once, never retried,
+// because a replay would create a second link.
+func (s *artifactService) CreateLink(ctx context.Context, id string, ttlHours int) (*ArtifactLinkCreated, error) {
+	body := map[string]int{}
+	if ttlHours > 0 {
+		body["ttlHours"] = ttlHours
+	}
+	resp, err := s.c.postNoRetry(ctx, artifactPath(id)+"/links", body, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ArtifactLinkCreated](resp)
+}
+
+// ListLinks implements ArtifactService.
+func (s *artifactService) ListLinks(ctx context.Context, id string) ([]ArtifactLink, error) {
+	resp, err := s.c.get(ctx, artifactPath(id)+"/links", nil)
+	if err != nil {
+		return nil, err
+	}
+	out, err := apiclient.DecodeRequired[struct {
+		Links []ArtifactLink `json:"links"`
+	}](resp)
+	if err != nil {
+		return nil, err
+	}
+	return out.Links, nil
+}
+
+// RevokeLink implements ArtifactService.
+func (s *artifactService) RevokeLink(ctx context.Context, id, linkID string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id)+"/links/"+url.PathEscape(linkID), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
+}
+
+// Delete implements ArtifactService.
+func (s *artifactService) Delete(ctx context.Context, id string) error {
+	resp, err := s.c.delete(ctx, artifactPath(id), nil)
+	if err != nil {
+		return err
+	}
+	return apiclient.CheckResponse(resp)
 }

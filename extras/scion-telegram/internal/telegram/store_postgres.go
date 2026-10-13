@@ -17,6 +17,7 @@ package telegram
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/integration/lockloop"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
@@ -142,8 +144,59 @@ CREATE TABLE IF NOT EXISTS telegram_processed_updates (
 	processed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 `
-	_, err := s.db.Exec(ddl)
-	return err
+	return withSchemaLock(context.Background(), s.db, func(conn *sql.Conn) error {
+		_, err := conn.ExecContext(context.Background(), ddl)
+		return err
+	})
+}
+
+// withSchemaLock runs fn on a pinned connection while holding the Telegram
+// schema advisory lock. Replicas that start together against one database
+// would otherwise run the CREATE IF NOT EXISTS statements concurrently,
+// which Postgres can reject with a unique violation on its catalog. The
+// lock is session-scoped, so acquire, work and release share a connection.
+func withSchemaLock(ctx context.Context, db *sql.DB, fn func(conn *sql.Conn) error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire schema connection: %w", err)
+	}
+	// locked is set once the advisory lock is held and released only after
+	// a successful unlock, so a panic in fn or a failed unlock discards the
+	// connection instead of pooling it with the lock still held.
+	locked := false
+	defer func() { releaseSchemaConn(conn, locked) }()
+
+	key := int64(store.LockTelegramSchema)
+	if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_lock($1)", key); err != nil {
+		return fmt.Errorf("acquire schema lock: %w", err)
+	}
+	locked = true
+	fnErr := fn(conn)
+	_, unlockErr := conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock($1)", key)
+	if unlockErr == nil {
+		locked = false
+	} else {
+		slog.Warn("Failed to release Telegram schema lock; discarding connection", "error", unlockErr)
+		if fnErr == nil {
+			return fmt.Errorf("release schema lock: %w", unlockErr)
+		}
+	}
+	return fnErr
+}
+
+// releaseSchemaConn returns conn to the pool, or closes it when the
+// schema lock is still held because the unlock failed or fn panicked. A
+// pooled connection would keep the session-scoped lock and block later
+// schema setup. Returning driver.ErrBadConn from Raw makes database/sql
+// close the underlying connection instead of pooling it.
+func releaseSchemaConn(conn *sql.Conn, lockHeld bool) {
+	if lockHeld {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		return
+	}
+	if err := conn.Close(); err != nil {
+		slog.Warn("Failed to return Telegram schema connection", "error", err)
+	}
 }
 
 func (s *postgresStore) Close() error {

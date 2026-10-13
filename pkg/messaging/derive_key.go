@@ -247,14 +247,32 @@ func ResolveOrCreateConversationByKey(
 	// and converge via the partial unique index, making this intercept
 	// redundant for them. It stays as belt-and-braces for the pre-fix
 	// population until the switch collapse normalises them.
+	// A thread key names its project ("thread:<projectID>:<threadID>"). It
+	// resolves only within the project of the conversation being resolved:
+	// a key naming another project is answered exactly like a conversation
+	// that belongs to another project. Keys derived by DeriveConversationKey
+	// always carry the same project; a caller-supplied external_ref (chat
+	// integrations) may not.
+	if kind == "group" && projectID != nil && *projectID != "" && strings.HasPrefix(extRef, "thread:") {
+		if parts := strings.SplitN(extRef, ":", 3); len(parts) == 3 && parts[1] != *projectID {
+			return nil, fmt.Errorf("thread key names another project (external_ref=%q): %w", extRef, store.ErrConversationProjectMismatch)
+		}
+	}
+
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		// Extract threadID from "thread:<projectID>:<threadID>"
 		parts := strings.SplitN(extRef, ":", 3)
 		if len(parts) != 3 {
 			return nil, fmt.Errorf("malformed thread: ref (external_ref=%q, parts=%d)", extRef, len(parts))
 		}
+		// The topic is looked up within the key's project (parts[1]),
+		// which the check above has matched to the conversation's project
+		// when one is given. A topic of another project answers ErrNotFound
+		// and takes the "not a native topic" fall-through below. Agent
+		// outbound sends answer a missing thread before they reach this
+		// point (outboundThreadConversationState).
 		threadID := parts[2]
-		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeletedInProject(ctx, parts[1], threadID)
 		if lookupErr == nil && convID != "" {
 			log.Debug("conversation resolved via topic lookup (sink-level)",
 				"external_ref", extRef, "conversation_id", convID)

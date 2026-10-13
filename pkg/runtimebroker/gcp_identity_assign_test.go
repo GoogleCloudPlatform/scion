@@ -645,7 +645,9 @@ runtimes:
 
 // TestBuildStartContext_KubernetesAssignProjectSettingsLoadError covers a
 // project settings file that fails to load: the dispatch reports the
-// settings error rather than a missing ServiceAccount mapping.
+// settings error rather than a missing ServiceAccount mapping. The file is
+// not valid YAML; a wrong-typed value would not do, since the settings
+// loader falls back to the default for that key and the load succeeds.
 func TestBuildStartContext_KubernetesAssignProjectSettingsLoadError(t *testing.T) {
 	cfg := DefaultServerConfig()
 	cfg.StateDir = t.TempDir()
@@ -658,7 +660,7 @@ runtimes:
         kubernetes_service_account_mappings:
             agent-worker@my-project.iam.gserviceaccount.com: agent-worker-ksa
 `)
-	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles:\n    - not-a-map\n"), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(dotScion, "settings.yaml"), []byte("schema_version: \"1\"\nactive_profile: local\nprofiles: [not valid yaml\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
 

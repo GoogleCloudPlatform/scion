@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -399,17 +398,6 @@ func TestServerHubManagedProjectPath_NFSPrefersNFSWhenBothExist(t *testing.T) {
 	path, err := srv.hubManagedProjectPath(slug)
 	require.NoError(t, err)
 	assert.Equal(t, nfsDir, path)
-}
-
-// setVolumeMountBase points the platform volume mount base at dir for the
-// duration of the test, so a test can create the mount root that a real
-// deployment gets from Cloud Run or a Kubernetes pod spec. Tests in this
-// package do not run in parallel, so mutating the package-level seam is safe.
-func setVolumeMountBase(t *testing.T, dir string) {
-	t.Helper()
-	prev := volumeMountBase
-	volumeMountBase = dir
-	t.Cleanup(func() { volumeMountBase = prev })
 }
 
 // This test pins the literal default mount root: a deployment gets
@@ -987,17 +975,6 @@ const ephemeralWarnMessage = "hub-managed project served from ephemeral local pa
 // them in a fixed order and checking the running count.
 func countEphemeralWarnings(logs *bytes.Buffer) int {
 	return len(logLinesWithMessage(logs, ephemeralWarnMessage))
-}
-
-// captureProjectsLog redirects the projects subsystem logger into a buffer the
-// test can assert on.
-func captureProjectsLog(t *testing.T, srv *Server) *bytes.Buffer {
-	t.Helper()
-	buf := &bytes.Buffer{}
-	prev := srv.projectsLog
-	srv.projectsLog = slog.New(slog.NewTextHandler(buf, nil))
-	t.Cleanup(func() { srv.projectsLog = prev })
-	return buf
 }
 
 // setContainerRootPath overrides the reference path isMountedVolume compares

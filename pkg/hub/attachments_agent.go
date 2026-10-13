@@ -367,6 +367,49 @@ func linkAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID string,
 	}
 }
 
+// linkSenderOwnedAttachmentRefs is linkAttachmentRefs for refs taken from
+// message metadata. A ref is linked only when its attachment row belongs to
+// the sender: a file of the sender's project (senderProjectID), or a file
+// with no project uploaded by senderID. Anything else, and any lookup error,
+// is skipped and logged.
+func linkSenderOwnedAttachmentRefs(ctx context.Context, wcs WebChatStore, messageID, senderProjectID, senderID string, refs []AttachmentRef, log *slog.Logger) {
+	if wcs == nil || messageID == "" {
+		return
+	}
+	owned := make([]AttachmentRef, 0, len(refs))
+	for _, ref := range refs {
+		if ref.ID == "" {
+			continue
+		}
+		meta, err := wcs.GetAttachment(ctx, ref.ID)
+		if err != nil || meta == nil {
+			if log != nil {
+				log.Warn("Attachment not linked: lookup failed",
+					"message_id", messageID, "attachment", ref.ID, "error", err)
+			}
+			continue
+		}
+		if !attachmentOwnedBySender(meta, senderProjectID, senderID) {
+			if log != nil {
+				log.Info("Attachment not linked: not owned by the sender",
+					"message_id", messageID, "attachment", ref.ID, "sender", senderID)
+			}
+			continue
+		}
+		owned = append(owned, ref)
+	}
+	linkAttachmentRefs(ctx, wcs, messageID, owned, log)
+}
+
+// attachmentOwnedBySender reports whether a file belongs to a sender: a file
+// of the sender's project, or a project-less file the sender uploaded.
+func attachmentOwnedBySender(meta *AttachmentMeta, senderProjectID, senderID string) bool {
+	if meta.ProjectID != "" {
+		return senderProjectID != "" && meta.ProjectID == senderProjectID
+	}
+	return senderID != "" && meta.UploadedBy == senderID
+}
+
 // Sentinel errors for skipped attachments, reported in the ingest log line.
 type attachmentSkipError string
 

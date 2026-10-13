@@ -45,92 +45,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// doMultipartRequest creates a multipart form request with file uploads.
-// files is a map of field name (relative path) to file content.
-func doMultipartRequest(t *testing.T, srv *Server, method, path string, files map[string][]byte) *httptest.ResponseRecorder {
-	t.Helper()
-	var buf bytes.Buffer
-	writer := multipart.NewWriter(&buf)
-
-	for fieldName, content := range files {
-		part, err := writer.CreateFormFile(fieldName, fieldName)
-		require.NoError(t, err)
-		_, err = part.Write(content)
-		require.NoError(t, err)
-	}
-	require.NoError(t, writer.Close())
-
-	req := httptest.NewRequest(method, path, &buf)
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+testDevToken)
-
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	return rec
-}
-
-// createTestHubManagedProject creates a hub-managed project (no git remote) via the API
-// and returns the project and its workspace path. Cleans up the workspace and any
-// external project-config directory on test completion.
-func createTestHubManagedProject(t *testing.T, srv *Server, name string) (*store.Project, string) {
-	t.Helper()
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{Name: name})
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-
-	workspacePath, err := hubManagedProjectPath(project.Slug)
-	require.NoError(t, err)
-
-	t.Cleanup(func() {
-		// Clean up the external project-config directory created by initInRepoProject
-		// (e.g. ~/.scion/project-configs/<slug>__<uuid>/).
-		scionDir := filepath.Join(workspacePath, ".scion")
-		if extAgentsDir, err := config.GetGitProjectExternalAgentsDir(scionDir); err == nil && extAgentsDir != "" {
-			// extAgentsDir is ~/.scion/project-configs/<slug>__<uuid>/.scion/agents
-			// Go up past "agents" and ".scion" to remove the <slug>__<uuid> parent dir
-			_ = os.RemoveAll(filepath.Dir(filepath.Dir(extAgentsDir)))
-		}
-		// Remove the project-configs directory named by the project record.
-		_ = os.RemoveAll(filepath.Dir(filepath.Dir(resolveTestSharedDirPath(t, &project, "x"))))
-		_ = os.RemoveAll(workspacePath)
-	})
-
-	return &project, workspacePath
-}
-
-// resolveTestSharedDirPath returns the shared dir path for a test hub-managed
-// project, computed from the project record (slug and ID) alone:
-// ~/.scion/project-configs/<slug>__<first 8 hex chars of ID>/shared-dirs/<dirName>.
-func resolveTestSharedDirPath(t *testing.T, project *store.Project, dirName string) string {
-	t.Helper()
-	home, err := os.UserHomeDir()
-	require.NoError(t, err)
-	shortID := strings.ReplaceAll(project.ID, "-", "")
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-	return filepath.Join(home, config.GlobalDir, config.ProjectConfigsDir,
-		project.Slug+"__"+shortID, config.SharedDirsSubdir, dirName)
-}
-
-// createTestGitProject creates a git-backed project via the API.
-func createTestGitProject(t *testing.T, srv *Server, name, remote string) *store.Project {
-	t.Helper()
-
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/projects", CreateProjectRequest{
-		Name:      name,
-		GitRemote: remote,
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-
-	var project store.Project
-	require.NoError(t, json.NewDecoder(rec.Body).Decode(&project))
-	return &project
-}
-
 // ============================================================================
 // List Tests
 // ============================================================================
@@ -964,44 +878,6 @@ func TestProjectWorkspace_SlugFormatProjectID(t *testing.T) {
 // ============================================================================
 // Shared Directory File Tests
 // ============================================================================
-
-// addSharedDirToProject adds a shared directory to a project via the API.
-func addSharedDirToProject(t *testing.T, srv *Server, projectID, dirName string) {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, fmt.Sprintf("/api/v1/projects/%s/shared-dirs", projectID), map[string]interface{}{
-		"name": dirName,
-	})
-	require.Equal(t, http.StatusCreated, rec.Code, "body: %s", rec.Body.String())
-}
-
-// setNFSSharedDirStorageGlobalSettings writes a global settings.yaml with
-// server.shared_dir_storage: nfs, under a fresh HOME, and returns the
-// resolved host base (<mount_root>/<share id>) so the caller can
-// pre-populate/inspect the export directly. Must be called BEFORE
-// testServer(t), since HOME must be set before any settings are read.
-func setNFSSharedDirStorageGlobalSettings(t *testing.T) (hostBase string) {
-	t.Helper()
-	tmpHome := t.TempDir()
-	t.Setenv("HOME", tmpHome)
-	globalScionDir := filepath.Join(tmpHome, ".scion")
-	require.NoError(t, os.MkdirAll(globalScionDir, 0755))
-
-	hostBase = filepath.Join(tmpHome, "nfs-export")
-	require.NoError(t, os.MkdirAll(hostBase, 0o2775))
-
-	settingsYAML := `schema_version: "1"
-server:
-  shared_dir_storage:
-    backend: nfs
-    nfs:
-      mount_root: ` + tmpHome + `
-      shares:
-        - id: nfs-export
-          pv_name: pv
-`
-	require.NoError(t, os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(settingsYAML), 0644))
-	return hostBase
-}
 
 // TestSharedDirFiles_NFSBackend_ListsExportLeaf is Phase 2 item 4 (design
 // §3.2.5): when the hub's own global settings carry shared_dir_storage:

@@ -41,6 +41,12 @@ var ProjectTargetApplicability = map[string]bool{
 	"agent.set_message_mode": true, "agent.grant_hub_mode": true,
 	"agent.status_update": true, "agent.log_append": true, "agent.notify": true,
 	"agent.token_refresh": true, "agent.port_forward": true, "agent.identity_token": true,
+	// agent.delegation.* — issuance and exchange target an existing agent
+	// in its project (.design/agent-delegation.md §18.5).
+	"agent.delegation.create": true, "agent.delegation.exchange": true,
+	// Grant management is held on a project for grants bounded to it.
+	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
+	"agent.delegation.list": true, "agent.delegation.read": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
@@ -49,6 +55,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
+	"project.manage_visitors": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; create_global and register are explicitly hub-catalog actions.
@@ -90,6 +97,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// broker.* — user-owned hub resource, not project-contained.
 	"broker.create": false, "broker.read": false, "broker.update": false,
 	"broker.delete": false, "broker.list": false, "broker.dispatch": false,
+	"broker.auto_provide": false,
 
 	// gcp_service_account.* — create/list/mint are CapabilityScope: create
 	// has no existing SA yet, list is the hub collection view, and mint (a
@@ -133,6 +141,11 @@ var ProjectTargetApplicability = map[string]bool{
 	"hub.teams_manifest.read": false, "hub.teams_manifest.update": false,
 	"hub.validate.execute": false, "hub.github_app.read": false, "hub.github_app.update": false,
 	"hub.metrics.read": false, "hub.audit.read": false,
+	"hub.env_vars.read": false,
+
+	// test_identity.issue — the hub-level test identity collection.
+	"test_identity.issue":       false,
+	"test_identity.issue_admin": false, "test_identity.issue_super_admin": false,
 
 	// quota.* — every live route (handlers_quota.go) authorizes against
 	// Resource{Type:"quota", ID:"hub"}, matching this family's own
@@ -205,7 +218,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
-	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub},
+	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
 	"skill.update": {BoundaryKindProject, BoundaryKindHub}, "skill.delete": {BoundaryKindProject, BoundaryKindHub},
 	"skill.list": {BoundaryKindProject, BoundaryKindHub}, "skill.register": {BoundaryKindHub},
@@ -244,6 +257,21 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"hub.messaging.update": {BoundaryKindHub}, "hub.experiments.update": {BoundaryKindHub},
 	"hub.lifecycle_hooks.read": {BoundaryKindHub}, "hub.lifecycle_hooks.update": {BoundaryKindHub},
 	"hub.settings.update": {BoundaryKindHub},
+
+	// scheduled_event.* reads, cancellation and pause act on one project's
+	// schedules. Authoring (scheduled_event.create) has no selector.
+	"scheduled_event.read": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.list": {BoundaryKindProject, BoundaryKindHub},
+	"scheduled_event.update": {BoundaryKindProject, BoundaryKindHub}, "scheduled_event.delete": {BoundaryKindProject, BoundaryKindHub},
+
+	// hub.* integration and observability permissions act on the hub
+	// itself, so their selectors are hub-only.
+	"hub.scheduler.read": {BoundaryKindHub}, "hub.health.read": {BoundaryKindHub},
+	"hub.validate.execute": {BoundaryKindHub}, "hub.metrics.read": {BoundaryKindHub},
+	"test_identity.issue":       {BoundaryKindHub},
+	"test_identity.issue_admin": {BoundaryKindHub}, "test_identity.issue_super_admin": {BoundaryKindHub},
+	"hub.integrations.read": {BoundaryKindHub}, "hub.integrations.update": {BoundaryKindHub},
+	"hub.teams_manifest.read": {BoundaryKindHub}, "hub.diagnostics.read": {BoundaryKindHub},
+	"hub.github_app.read": {BoundaryKindHub}, "hub.github_app.update": {BoundaryKindHub},
 }
 
 // SelectorAllowedBoundaries returns the reviewed boundary kinds for a single
@@ -326,11 +354,11 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
 
-	// project.* — read/update/manage target an existing project; clone is a
-	// hub-level collection action (reviewed false in ProjectTargetApplicability)
-	// even though it is mintable.
+	// project.* — read/update/manage/set_messaging_policy target an existing
+	// project; clone is a hub-level collection action (false in
+	// ProjectTargetApplicability) even though it is mintable.
 	"project.read": {TargetClassKindProjectScoped}, "project.update": {TargetClassKindProjectScoped},
-	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource},
+	"project.manage": {TargetClassKindProjectScoped}, "project.clone": {TargetClassKindHubResource}, "project.set_messaging_policy": {TargetClassKindProjectScoped},
 
 	// artifact.* — project-homed, no scope-kind split and no global catalog.
 	"artifact.read": {TargetClassKindProjectScoped}, "artifact.create": {TargetClassKindProjectScoped},
@@ -409,6 +437,20 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"hub.messaging.update": {TargetClassKindHubResource}, "hub.experiments.update": {TargetClassKindHubResource},
 	"hub.lifecycle_hooks.read": {TargetClassKindHubResource}, "hub.lifecycle_hooks.update": {TargetClassKindHubResource},
 	"hub.settings.update": {TargetClassKindHubResource},
+
+	// scheduled_event.* target a project's schedules.
+	"scheduled_event.read": {TargetClassKindProjectScoped}, "scheduled_event.list": {TargetClassKindProjectScoped},
+	"scheduled_event.update": {TargetClassKindProjectScoped}, "scheduled_event.delete": {TargetClassKindProjectScoped},
+
+	// hub.* integration and observability permissions target the hub
+	// instance.
+	"hub.scheduler.read": {TargetClassKindHubResource}, "hub.health.read": {TargetClassKindHubResource},
+	"hub.validate.execute": {TargetClassKindHubResource}, "hub.metrics.read": {TargetClassKindHubResource},
+	"test_identity.issue":       {TargetClassKindHubResource},
+	"test_identity.issue_admin": {TargetClassKindHubResource}, "test_identity.issue_super_admin": {TargetClassKindHubResource},
+	"hub.integrations.read": {TargetClassKindHubResource}, "hub.integrations.update": {TargetClassKindHubResource},
+	"hub.teams_manifest.read": {TargetClassKindHubResource}, "hub.diagnostics.read": {TargetClassKindHubResource},
+	"hub.github_app.read": {TargetClassKindHubResource}, "hub.github_app.update": {TargetClassKindHubResource},
 }
 
 // SupportedTargetClassesFor returns the reviewed classes for permissionID.

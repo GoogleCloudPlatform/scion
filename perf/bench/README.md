@@ -492,6 +492,57 @@ total wall-clock time. The report is written incrementally (after every
 scenario and every burst run), so a Chromium crash mid-benchmark loses at
 most the in-flight run, not the whole report.
 
+**The project grid and list are paged.** `project-grid` and `project-list`
+render one page of agents at a time (the pager's page size, 25 by default),
+so for them `populated` means *the first page rendered*: `min(pageSize,
+total)` cards or rows, with the pager idle. The page size and total are read
+from the rendered `<scion-agent-pager>`, not assumed; with no pager the view
+is treated as unpaged and every agent is expected, as before.
+`expectedCount` is that first-page count, and each run adds `agentCount`,
+`pageSize`, `pageTotal` and `pageCount`. A populated run then clicks Next up
+to `--page-changes` times (default 3; fewer when the view has fewer pages)
+and times each change from the click until the pager shows the next page,
+idle, with its `rowsOnPage` rendered and a different first item
+(`pageChanges`: `toPageIndex`, `ok`, `ms`, `rows`). `pageChangesStopReason`
+says how the run's walk ended: `completed` (all requested changes timed),
+`none-requested` (`--page-changes 0`), `no-next-page` (the last page was
+reached), `next-unavailable-before-last-page` (Next disabled although the
+pager's own total says more pages exist: the walk ended early, a product
+behaviour; also reported when every requested change completed but the last
+one landed on such a page), `next-disabled`, `pager-busy`, `timed-out`,
+`no-pager` or `not-populated`; `pageChangesStopPager` records the pager at
+that point. The scenario summary adds `paged`, `pageSize`, `pageCount`,
+`pageChangeAttemptCount`, `pageChangeSuccessCount`,
+`pageChangeFailureCount`, `pageWalkEarlyStopCount` (runs that ended with
+`next-unavailable-before-last-page`; the console paged line prints it) and
+median/min/max/stddev of `pageChangeMs` over completed changes of populated
+runs; the report top level adds `pageChangesPerRun`. The network fields
+(`networkStatus`, `networkFailed`, `networkObservedAtMs`) still describe the
+first load only: the watch is detached before any page change. For grid and
+list, `expectedCount`, `populated` and `navToPopulatedMs` now refer to the
+first page; every other field keeps its meaning. A seed with no agents
+renders the project's empty state instead of a pager; such a run counts as
+populated once that empty state is on screen. Before this, these two
+scenarios waited for one card per agent, which a paged view never renders
+above one page, so at 100 and 500 agents they always ended
+`loaded-not-rendered`.
+
+**Readiness marks.** Every populated run also reads the web client's
+readiness marks (`scion:ready:agents-data`, `scion:ready:rows-grid`,
+`scion:ready:rows-list`, `scion:ready:graph`), which the client writes
+only while the hub's `profiling.readiness_marks` setting is on (turn it on
+with `PUT /api/v1/admin/profiling` as an admin; see the perf tracing
+guide's "Readiness marks" section). Each run adds `readinessMarks` (name to
+ms since navigation start), `readinessMarksMissing` and
+`readinessMarksUnexpected`. Each scenario adds `readinessMarks` (per mark:
+`count`, `medianMs`, `minMs`, `maxMs`, `medianMsCold`, `medianMsWarm`),
+`readinessMarksMissingRunCount` and `readinessMarksUnexpectedRunCount`, and
+the report top level adds `expectReadinessMarks`. Pass
+`--expect-readiness-marks` when the setting is on: each run then waits up
+to 3 seconds for its scenario's data mark and view mark, and a run still
+lacking one is counted as missing. Without the flag the setting is expected
+off, and a run that finds any readiness mark is counted as unexpected.
+
 For the two graph scenarios, a populated run also performs a short
 pan/zoom/hover interaction sequence (hover over up to 5 nodes, wheel-zoom
 in and out, drag-pan) and reports the long-task cost specifically
@@ -509,6 +560,11 @@ long-task delta (`graphInteraction.longTasks`), not `interactionMs`,** as
 the measurement of actual UI cost -- it is the field that scales with agent
 count (near-zero at 25 agents, up to ~733ms at 500 for
 `standalone-graph`) and the one `measurements.md` bases its conclusions on.
+
+The burst scenario below likewise waits only for the grid's first page,
+and picks its target agents from the cards on that page (an agent on
+another page has no badge to observe), so `--burst-count` is effectively
+capped at the number of non-suspended cards on that first page.
 
 It then runs the SSE burst-update scenario `--burst-runs` times (default:
 same as `--runs`; pass `--burst-only` to skip the four view scenarios above
@@ -660,6 +716,11 @@ baseline section).
 
 ## Choosing regression budgets
 
+(The budgets now exist: counter budgets in CI, and the wall-clock
+median-ratio check below. This section keeps the reasoning behind them.
+One correction to it: long-task count does depend on the host's CPU and
+load, so the CI budget for it uses a median and a wide margin.)
+
 Not implemented by this harness, and deliberately not guessed at: this
 container is a shared 16-CPU development host with a
 load average observed to swing from roughly 47 to 450 depending on what
@@ -686,17 +747,97 @@ apibench run) are recorded so a reader can sanity-check whether a given
 historical run's numbers are trustworthy for wall-clock comparisons, not to
 derive budgets from directly.
 
+## Wall-clock budgets (median ratio)
+
+Counter budgets (store calls, decisions, response bytes, DOM elements,
+long tasks) run in CI; see
+`docs-site/src/content/docs/contributing/perf-tracing.md`, "Regression
+budgets in CI". Wall-clock budgets are separate and run **only on a quiet,
+dedicated runner booked for the run, never as a required check on shared
+CI hosts**. `web/e2e-perf/median-ratio.mjs` compares the median of repeated
+timed trials with a stored baseline median, per metric:
+
+- **Metrics.** `api:<scenario>` is the `totalMs` of each successful
+  `apibench` attempt; `browser:<scenario>` is the `navToPopulatedMs` of each
+  warm, populated `large-project-bench.mjs` run.
+- **Warm-up.** `apibench --warmup 2` (two untimed requests per scenario,
+  discarded before the report). In the browser report, the first (cold,
+  fresh-context) run of each scenario is the warm-up and is not counted.
+- **Trials.** `apibench --runs 15` and `large-project-bench.mjs --runs 11`
+  (1 cold plus 10 warm). A metric with fewer than 10 timed samples (for
+  example after failed attempts) fails as `insufficient`, it never passes.
+- **Ratio.** A metric fails when its median is more than **1.25x** its
+  baseline median. The median, not the mean or the standard deviation,
+  because this data is heavy-tailed (see above): one slow trial moves the
+  mean, not the median.
+- **Baseline.** Taken on the same runner, at 100 agents, with the same
+  commands, and stored with the commit and a runner description (no host
+  names). A baseline from one runner says nothing about another.
+
+### Running it: `perf/bench/wallclock.sh`
+
+One script does the whole run from a plain checkout. It builds the hub,
+`seed` and `apibench`, runs `npm ci` and `npm run build` in `web/`, and
+installs Playwright's Chromium. Then it seeds 100 agents into a fresh
+SQLite file, starts an isolated hub on loopback (scrubbed environment, as
+in "Isolate the hub environment" above), runs both benchmarks with the
+trial counts above, and runs `median-ratio.mjs`.
+
+Prerequisites: Linux with bash 4.4 or newer and GNU coreutils, Go (the
+`go.mod` version), Node.js 20 or newer with npm, curl and git. Network
+access is needed once, for `npm ci` and the Chromium download. No root is
+needed, but Playwright's Chromium needs the usual system libraries
+(`npx playwright install-deps chromium` installs them, with root).
+
+```sh
+# From the repo root. Record a baseline on the booked runner:
+perf/bench/wallclock.sh --write-baseline perf/bench/wallclock-baseline.json \
+  --runner "<runner description: CPU count, memory, OS; no host names>"
+
+# Later runs on the same runner, against that baseline (exit 1 on a regression):
+perf/bench/wallclock.sh --baseline perf/bench/wallclock-baseline.json
+```
+
+Options: `--workdir DIR` (default: a new `/tmp/scion-wallclock.*`
+directory, kept after the run), `--skip-build` (reuse the binaries and web
+build from an earlier run in the same `--workdir`) and `--port N` (default
+`18080`; the hub also uses `N+1`). `--api-runs`, `--api-warmup`,
+`--browser-runs` and `--min-trials` change the trial counts; values below
+the defaults are refused unless `--smoke` is given. That is for a setup
+smoke run only: a baseline written with `--smoke` is marked as such, and a
+normal check refuses it.
+
+Outputs, in the work directory: `seed-100.json`, `api-100.json` (the
+apibench report), `browser-100.json` (the browser report), `hub.log` and,
+for a check run, `median-ratio.txt`. The script prints one line per metric
+(`ok`, `over`, `insufficient` or `new`) with the median, the baseline
+median, the ratio and the trial count. Exit status: 0 within budget or
+baseline written, 1 over budget or too few trials, 2 usage or setup error.
+
+Expected runtime: about 5-10 minutes to build on a cold Go and npm cache,
+then about 2 minutes for the API benchmark (3 scenarios x 17 requests) and
+about 10-15 minutes for the browser benchmark (4 scenarios x 11 loads),
+so 20-30 minutes in all.
+
+The same comparison by hand, for reports produced some other way:
+
+```sh
+cd web
+node e2e-perf/median-ratio.mjs --baseline ../perf/bench/wallclock-baseline.json \
+  --api /path/to/api-100.json --browser /path/to/browser-100.json
+```
+
+`--ratio` (a finite number above 0) and `--min-trials` (an integer of at
+least 1) override the defaults (1.25 and 10); an invalid value is a setup
+error (exit 2), as are an unreadable report or baseline and a baseline with
+no metrics. Both are
+also stored in the baseline file, and a baseline's values apply unless
+overridden on the command line.
+
 ## #2393 acceptance-criteria gaps
 
 Tracked here rather than silently dropped:
 
-- **In-app readiness marks** (data arrival / visible rows / graph ready)
-  -- infeasible without web source changes: there are currently no such
-  marks anywhere in the app (confirmed by grepping for
-  `performance.mark`/custom ready events), so exposing them requires
-  instrumenting `web/src/components/pages/project-detail.ts` and
-  `agent-tree-view.ts` themselves. This harness only measures from the
-  outside, per the brief's "no hub or web source changes" constraint.
 - **Large-file-list dataset** -- infeasible in this PR: `perf/bench/seed`
   only seeds agents/projects/users, not file-browser data sources. Adding
   realistic file trees is a separate, non-trivial seeding surface.

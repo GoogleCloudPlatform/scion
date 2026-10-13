@@ -197,7 +197,7 @@ test('typing straight after a button click becomes the query, even while the mod
   await page.keyboard.type('coder');
 
   await expect(paletteDialog(page)).toBeVisible();
-  expect(await paletteInputHasFocus(page)).toBe(true);
+  await expect.poll(() => paletteInputHasFocus(page)).toBe(true);
   await expect(page.locator('scion-quick-palette #palette-query-input')).toHaveValue('coder');
   await expect(page.locator('scion-quick-palette .palette-option')).toHaveText([/Coder One/]);
 });

@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -48,25 +47,6 @@ func countParticipants(t *testing.T, s store.Store, conversationID, kind, princi
 		}
 	}
 	return n
-}
-
-// listConversationIDsAsUser calls GET /api/v1/conversations as the given user
-// and returns the listed conversation IDs.
-func listConversationIDsAsUser(t *testing.T, srv *Server, user *store.User) []string {
-	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/api/v1/conversations", nil)
-	req = req.WithContext(contextWithIdentity(req.Context(),
-		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, "web")))
-	rr := httptest.NewRecorder()
-	srv.handleListConversations(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code, "list body: %s", rr.Body.String())
-	var result conversationListResponse
-	require.NoError(t, json.Unmarshal(rr.Body.Bytes(), &result))
-	ids := make([]string, 0, len(result.Conversations))
-	for _, c := range result.Conversations {
-		ids = append(ids, c.ID)
-	}
-	return ids
 }
 
 // latestConversationID returns the conversation ID of the most recent
@@ -97,6 +77,7 @@ func routedThreadPost(env routedTestEnv, threadID, text string) routedInboundReq
 }
 
 func TestBrokerInboundRouted_GroupPost_ListsUserAsParticipant(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedThreadPost(env, "group-user-thread-1", "hello @beta"))
@@ -117,6 +98,7 @@ func TestBrokerInboundRouted_GroupPost_ListsUserAsParticipant(t *testing.T) {
 }
 
 func TestBrokerInboundRouted_GroupRepeatPost_DoesNotDuplicateUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	for _, text := range []string{"first", "second"} {
@@ -129,6 +111,7 @@ func TestBrokerInboundRouted_GroupRepeatPost_DoesNotDuplicateUser(t *testing.T) 
 }
 
 func TestBrokerInboundRouted_GroupParticipantFailure_StillDelivers(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	env.srv.store = &failingParticipantStore{Store: env.store}
 
@@ -156,6 +139,7 @@ func (s *createMessageFailCaptureStore) CreateMessage(_ context.Context, msg *st
 }
 
 func TestBrokerInboundRouted_GroupPostNotStored_DoesNotListUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	failing := &createMessageFailCaptureStore{Store: env.store}
 	env.srv.store = failing
@@ -187,6 +171,7 @@ func TestBrokerInboundRouted_GroupPostNotStored_DoesNotListUser(t *testing.T) {
 }
 
 func TestBrokerInboundRouted_DirectConversation_ParticipantsUnchanged(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	req := routedThreadPost(env, "", "hello direct")
@@ -219,6 +204,7 @@ func legacyThreadPost(f def135Fixture, threadID, text string) *messages.Structur
 }
 
 func TestBrokerInbound_GroupPost_ListsUserAndAgentAsParticipants(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 
 	for _, text := range []string{"first", "second"} {
@@ -241,6 +227,7 @@ func TestBrokerInbound_GroupPost_ListsUserAndAgentAsParticipants(t *testing.T) {
 }
 
 func TestBrokerInbound_GroupPost_DeferredAgent_ListsOnlyUser(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 	ctx := context.Background()
 
@@ -261,6 +248,7 @@ func TestBrokerInbound_GroupPost_DeferredAgent_ListsOnlyUser(t *testing.T) {
 }
 
 func TestBrokerInbound_GroupParticipantFailure_StillDelivers(t *testing.T) {
+	t.Parallel()
 	f := setupDEF135(t)
 	f.srv.store = &failingParticipantStore{Store: f.store}
 
@@ -271,4 +259,59 @@ func TestBrokerInbound_GroupParticipantFailure_StillDelivers(t *testing.T) {
 	require.NoError(t, json.NewDecoder(rec.Body).Decode(&resp))
 	require.Equal(t, true, resp["delivered"])
 	require.Len(t, f.dispatcher.getCalls(), 1)
+}
+
+// TestConversationList_ChatBridgePosterSeesGroupWhileMember: a chat user who
+// is a member of the project sees the group their post created in their
+// conversation list.
+func TestConversationList_ChatBridgePosterSeesGroupWhileMember(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+
+	rec := env.doRoutedRequest(t, routedThreadPost(env, "list-member-thread", "hello"))
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	convID := latestConversationID(t, env.store, env.agent1.ID)
+
+	require.Contains(t, listConversationIDsAsUser(t, env.srv, env.user), convID)
+}
+
+// TestConversationList_ChatBridgePosterWithoutProjectReadNotListed: a chat
+// user whose message the project accepts, but who cannot read the project,
+// is recorded as a participant, and the group is still not listed for them.
+func TestConversationList_ChatBridgePosterWithoutProjectReadNotListed(t *testing.T) {
+	t.Parallel()
+	env := setupRoutedTestEnv(t)
+	ctx := context.Background()
+
+	poster := &store.User{
+		ID:          tid("user-routed-poster-no-read"),
+		Email:       "poster-no-read@example.com",
+		DisplayName: "Poster Without Read",
+		Role:        store.UserRoleMember,
+		Status:      "active",
+		Created:     time.Now(),
+	}
+	require.NoError(t, env.store.CreateUser(ctx, poster))
+	ensureHubMembership(ctx, env.store, poster.ID)
+	msgAuthzGrantAgentMessage(t, env.store, poster.ID, env.project.ID)
+	posterIdent := NewAuthenticatedUser(poster.ID, poster.Email, poster.DisplayName, poster.Role, "web")
+	require.False(t, env.srv.canReadProject(ctx, posterIdent, env.project.ID),
+		"precondition: the poster cannot read the project")
+
+	post := routedThreadPost(env, "list-no-read-thread", "hello")
+	post.Message.Sender = "user:" + poster.Email
+	rec := env.doRoutedRequest(t, post)
+	require.Equal(t, http.StatusOK, rec.Code, "body: %s", rec.Body.String())
+	convID := latestConversationID(t, env.store, env.agent1.ID)
+	require.Equal(t, 1, countParticipants(t, env.store, convID, "user", poster.ID),
+		"the poster is recorded as a participant")
+
+	require.NotContains(t, listConversationIDsAsUser(t, env.srv, poster), convID,
+		"the group is not listed for a caller who cannot read its project")
+	// A project member who takes part in the conversation still sees it.
+	require.NoError(t, env.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+		ConversationID: convID, PrincipalKind: "user", PrincipalID: env.user.ID, Role: "member",
+	}))
+	require.Contains(t, listConversationIDsAsUser(t, env.srv, env.user), convID,
+		"a project member still sees it")
 }

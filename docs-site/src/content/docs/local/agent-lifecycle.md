@@ -109,18 +109,25 @@ ends, then classifies it:
 
 A crash surfaces as the **`error` phase** — the activity is cleared, and the
 crash detail is carried in the agent's message (e.g. `Agent crashed with exit
-code 137`). Two paths can set `error`: `sciontool` reports it from the recovered
+code 137`). On Kubernetes, a container killed for exceeding its memory limit
+carries exit reason `oom_killed` and a memory-limit message instead (see
+[Out-of-memory kills](/scion/hosted/ha/kubernetes/#out-of-memory-kills)). Two paths can set `error`: `sciontool` reports it from the recovered
 exit code (the authoritative path), and the Hub also derives `error` from a
 non-zero container exit reported in the broker heartbeat — which covers cases
 where the container died before `sciontool` could report.
 
 A third path covers a container that vanishes without reporting an exit (for
-example, removed outside Scion). In Hub-connected setups, a `running` agent
-that is missing from its online Runtime Broker's complete runtime inventory for longer
-than `missing_agent_grace` (default **3 minutes**, see
+example, removed outside Scion). In Hub-connected setups, a `running` agent (or
+a `stopping` agent whose final stop report never arrived) that is missing from
+its online Runtime Broker's complete runtime inventory for longer than
+`missing_agent_grace` (default **3 minutes**, see
 [server configuration](/scion/reference/server-config/)) moves to `error` with
 exit reason `container_missing`, instead of staying `running` while messages
 to it are buffered. It can then be restarted like any other `error`-phase agent.
+
+On Kubernetes, a preempted or evicted agent pod leaves `running` without
+waiting for that grace period; see
+[Preempted and evicted status](/scion/hosted/ha/kubernetes/#preempted-and-evicted-status).
 
 :::note
 A normal `scion stop` sends `SIGTERM`, which harnesses like Claude Code handle
@@ -152,28 +159,32 @@ In Hub mode only one start of an agent runs at a time. If you start, resume, or 
 
 #### Reincarnating an Agent
 
-To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces; agents in worktree-per-agent projects are not yet supported.
+To move an existing agent onto the current template, image, and harness config without losing its identity, use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). It keeps the agent ID and slug, starts a new generation with a freshly resolved config, and hands it the task you supply with `--handoff-file`. Use `--dry-run` to preview the changes first. Reincarnation requires a Hub, and works for agents in clone-per-agent, shared-workspace, and Hub-managed workspaces. An agent in an empty-per-agent project can be reincarnated on its current Runtime Broker only if that Runtime Broker is up to date and uses a local-disk runtime (Docker, Podman, or Apple `container`). Agents in worktree-per-agent projects are not yet supported: the Hub rejects the request, and the Runtime Broker also refuses such a reprovision on its own.
 
-In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
+Reincarnating is also how an existing agent picks up changed harness dotfiles (including hook registrations kept in them, such as Claude's `.claude/settings.json`) and changed template skills, which are otherwise copied only when the agent is created. Harnesses whose provisioner writes its hook configuration at start, such as Copilot, Antigravity and Grok Build, pick up provisioner changes on the next start. See [Changing a harness config affects new agents only](/scion/reference/harness-settings/#changing-a-harness-config-affects-new-agents-only).
+
+In a hosted setup with several Runtime Brokers, `scion reincarnate <agent> --broker <name|id>` also moves the agent to another Runtime Broker, keeping its workspace, when both Runtime Brokers mount the same NFS export. An agent in an empty-per-agent project can move only when its workspace is on that export (Kubernetes with NFS workspace storage). See [Moving an agent to another Runtime Broker](/scion/hosted/ha/multi-broker/#moving-an-agent-to-another-runtime-broker).
 
 ## Auto-Suspend of Stalled Agents
 
 To reclaim resources from agents that are no longer making progress, the Hub can
-automatically suspend agents that have **stalled**.
+automatically suspend agents that have **stalled**. Auto-suspend is **off by
+default**; turn it on with `server.hub.auto_suspend_stalled` (or **Auto-suspend
+stalled agents** in **Admin > Server Config**).
 
-An agent is marked `stalled` by the platform when its heartbeat is still being
-received (the process is alive) but no activity events have arrived within the
-stall threshold (default: **5 minutes**). After it remains stalled for an
-additional grace period (a further **5 minutes**, so roughly **10 minutes** of
-inactivity in total), the Hub auto-suspends it — provided that:
-
-- the agent's harness supports session resume, and
-- the container is still alive.
+An agent is marked `stalled` by the platform when it is `running`, its heartbeat
+arrived within the last 2 minutes (the process is alive), but no activity events
+have arrived within the stall threshold (`server.hub.stalled_threshold`, default
+**5 minutes**; a value under 2 minutes falls back to the default). The Hub
+checks every 5 minutes. With auto-suspend on, the Hub suspends an agent in the
+same check that marks it stalled, unless the agent's harness does not support
+session resume. Agents already `stalled` when you turn auto-suspend on are not
+suspended unless they become active and stall again.
 
 Auto-suspend uses the same machinery as a manual `scion suspend`, so the agent's
-phase becomes `suspended` and its harness session is preserved. The agent is
-**resumed automatically on the next message** sent to it, continuing right where
-it left off.
+phase becomes `suspended` and its harness session is preserved. The agent
+resumes, continuing where it left off, when someone sends it a message with wake
+(`scion message --wake`, or the web UI's wake prompt) or starts it.
 
 :::tip
 If your agent is *intentionally* idle — for example, waiting on a child agent or
@@ -183,9 +194,9 @@ detection and therefore from auto-suspend.
 :::
 
 :::caution
-The stall threshold and grace period are currently hardwired and not
-user-configurable. Auto-suspend is a Hub-driven behavior and depends on the
-Hub's scheduler being operational.
+Auto-suspend is a Hub-driven behavior and depends on the Hub's scheduler being
+operational. For `auto_suspend_stalled` and `stalled_threshold`, see
+[`server.hub`](/scion/reference/server-config/#hub-settings-serverhub).
 :::
 
 ---
@@ -215,7 +226,7 @@ Always start by running `scion look <agent-name>` to inspect the active screen s
 
 `scion delete <agent-name> --non-interactive` immediately reclaims container resources. Since an agent's true deliverable is its **artifact** (pushed commits, opened PRs, files written to a shared volume), **deleting a completed agent is the default, recommended clean-up path.**
 
-In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
+In Hub mode, teardown on the Runtime Broker can outlast the request. If it does, `scion delete` waits up to three minutes for the Hub to confirm the delete, and only then removes the local worktree. If the delete fails, the worktree is kept. If the Runtime Broker teardown is still unresolved, the agent also can't be started, restarted or woken (`409 delete_in_progress`) until you run `scion delete` again. If the Runtime Broker holds a different run of the agent than the Hub recorded, it deletes nothing and the Hub refuses the delete with `409 conflict` and keeps the agent, even with `--force`. See [`scion delete`](/scion/reference/cli/#scion-delete-or-rm) and [`DELETE /agents/:id`](/scion/reference/api/).
 
 However, to prevent premature deletion of agents with active or pending tasks, strict teardown guidelines must be followed.
 

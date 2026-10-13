@@ -415,7 +415,7 @@ func TestMergeInjectedSkills_ProgenyDeduplication(t *testing.T) {
 	// Count how many times the base URI appears — should be exactly 1.
 	count := 0
 	for _, ref := range agent.AppliedConfig.InlineConfig.Skills {
-		if skillBaseURI(ref.URI) == "scion://shared-skill" {
+		if api.SkillBaseURI(ref.URI) == "scion://shared-skill" {
 			count++
 		}
 	}
@@ -494,29 +494,28 @@ func TestMergeSkillRefs_VersionConflictWarnAndWin(t *testing.T) {
 }
 
 // =============================================================================
-// skillBaseURI unit tests
+// api.SkillBaseURI keying in the hub
 // =============================================================================
 
-func TestSkillBaseURI_StripVersion(t *testing.T) {
-	cases := []struct {
-		uri      string
-		expected string
-	}{
-		{"scion://my-skill@1.0", "scion://my-skill"},
-		{"scion://my-skill@2.3.4", "scion://my-skill"},
-		{"scion://my-skill", "scion://my-skill"},
-		{"scion://org/my-skill@1.0", "scion://org/my-skill"},
-		{"https://example.com/skills/my-skill@1.0", "https://example.com/skills/my-skill"},
-		{"https://example.com/skills/my-skill", "https://example.com/skills/my-skill"},
-		{"scion://my-skill@latest", "scion://my-skill"},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.uri, func(t *testing.T) {
-			got := skillBaseURI(tc.uri)
-			assert.Equal(t, tc.expected, got)
-		})
-	}
+// TestMergeSkillRefs_KeysLikeBroker checks that the hub keys skill URIs with
+// userinfo or a query by the same rule as the runtime broker (ptone/scion#4179):
+// an "@" outside the last path segment is not a version specifier.
+func TestMergeSkillRefs_KeysLikeBroker(t *testing.T) {
+	// Two different skills on the same host with userinfo stay separate.
+	result := mergeSkillRefs(
+		[]api.SkillReference{{URI: "skill://u@host/a"}},
+		[]api.SkillReference{{URI: "skill://u@host/b"}},
+	)
+	require.Len(t, result, 2, "skills behind the same userinfo must not share a key")
+
+	// Two versions of one skill whose query holds an "@" collapse to one entry,
+	// and the higher-precedence version wins.
+	result = mergeSkillRefs(
+		[]api.SkillReference{{URI: "gh://o/r/s@v1?token=a@b"}},
+		[]api.SkillReference{{URI: "gh://o/r/s@v2?token=a@b"}},
+	)
+	require.Len(t, result, 1, "versions of one skill must share a key despite '@' in the query")
+	assert.Equal(t, "gh://o/r/s@v2?token=a@b", result[0].URI)
 }
 
 // =============================================================================

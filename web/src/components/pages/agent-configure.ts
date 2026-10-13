@@ -35,13 +35,19 @@ import type {
   GCPIdentityConfig,
   GCPServiceAccount,
   HarnessAdvancedCapabilities,
-  MessageMode,
   RuntimeBroker,
 } from '../../shared/types.js';
 import { isTargetKubernetesOnly } from '../../shared/runtime-kind.js';
 import { normalizeModelAlias } from '../../shared/model-utils.js';
-import { MESSAGE_MODE_DISPLAY } from '../../shared/message-mode.js';
 import { isValidTimeZone } from '../../utils/time.js';
+import { KUBERNETES_BLOCK_HINT } from '../../shared/gcp-identity-state.js';
+import { assignStatusTarget, orderByAssignStatus } from '../../shared/gcp-sa-assign-status.js';
+import { GCPServiceAccountsLoader } from '../../client/gcp-sa-accounts-loader.js';
+import {
+  assignStatusStyles,
+  renderAssignStatusHelp,
+  renderServiceAccountOption,
+} from '../shared/gcp-sa-picker-options.js';
 import type { EnvEntry } from '../shared/env-editor.js';
 import type { TimezoneChangeDetail } from '../shared/timezone-picker.js';
 import '../shared/env-editor.js';
@@ -185,6 +191,8 @@ function envMapsEqual(a: Record<string, string>, b: Record<string, string>): boo
 
 interface AppliedConfig {
   image?: string;
+  /** The agent's git branch, fixed once the worktree is provisioned. */
+  branch?: string;
   model?: string;
   thinkingLevel?: number | null;
   harnessConfig?: string;
@@ -210,6 +218,9 @@ interface AgentWithConfig extends Omit<Agent, 'appliedConfig'> {
   appliedConfig?: AppliedConfig;
 }
 
+/** The model choices offered by the configure form's model select. */
+type ModelSelection = '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other';
+
 @customElement('scion-page-agent-configure')
 export class ScionPageAgentConfigure extends LitElement {
   @state() private agent: AgentWithConfig | null = null;
@@ -222,13 +233,19 @@ export class ScionPageAgentConfigure extends LitElement {
 
   // Form fields — General
   @state() private model = '';
-  @state() private modelSelection: '' | 'small' | 'medium' | 'large' | 'extra-large' | 'other' = '';
+  @state() private modelSelection: ModelSelection = '';
   @state() private customModelId = '';
   @state() private thinkingLevel: number | null = null;
   @state() private image = '';
   @state() private branch = '';
   @state() private containerUser = '';
   @state() private authMethod = '';
+  /**
+   * The auth method the page loaded. An unchanged value is not echoed back
+   * (ptone/scion#4013): a stored "none" that the harness's PATCH validation
+   * rejects would otherwise fail every save.
+   */
+  private loadedAuthMethod = '';
   @state() private harnessConfig = '';
   @state() private telemetryEnabled = false;
   @state() private autoExposePortsEnabled = false;
@@ -296,9 +313,6 @@ export class ScionPageAgentConfigure extends LitElement {
   /** Bumped to remount the picker with a fresh value when Pin… opens. */
   @state() private tzPickerRevision = 0;
 
-  // Form fields — Message Mode
-  @state() private messageMode = '';
-
   // Form fields — GCP Identity
   @state() private gcpMetadataMode: 'block' | 'passthrough' | 'assign' = 'block';
   @state() private gcpServiceAccountId = '';
@@ -325,11 +339,6 @@ export class ScionPageAgentConfigure extends LitElement {
    */
   @state() private gcpIdentityUserSet = false;
 
-  /** Explanation text shared by the help-text slot and the disabled option's tooltip. */
-  private static readonly gcpIdentityK8sHintText =
-    'Block is not supported on the Kubernetes runtime: this agent targets a Kubernetes ' +
-    'broker/profile. Choose Passthrough or Assign Service Account instead.';
-
   /** The agent's own runtime broker, loaded to determine its runtime kind for the GCP Identity picker. */
   @state() private targetBroker: RuntimeBroker | null = null;
 
@@ -339,13 +348,38 @@ export class ScionPageAgentConfigure extends LitElement {
     return this.gcpServiceAccounts.filter((sa) => sa.verified);
   }
 
+  /** The selected account's mapping state on this agent's profile, when the hub reported one. */
+  private get selectedAssignStatus(): GCPServiceAccount['assignStatus'] {
+    if (!this.gcpServiceAccountId) return undefined;
+    return this.gcpServiceAccounts.find((sa) => sa.id === this.gcpServiceAccountId)?.assignStatus;
+  }
+
+  /**
+   * Loads the project's accounts with their mapping state on this agent's
+   * Kubernetes target (its runtime broker and profile, ptone/scion#4391),
+   * with the same guard and fallback as the Create Agent picker. The target
+   * is known only once the broker has loaded, so the state is asked for then.
+   */
+  private readonly gcpAccounts = new GCPServiceAccountsLoader({
+    projectId: () => this.agent?.projectId ?? '',
+    target: () =>
+      assignStatusTarget(
+        this.targetRuntimeIsKubernetesOnly,
+        this.agent?.runtimeBrokerId ?? '',
+        this.agent?.appliedConfig?.profile ?? ''
+      ),
+    accounts: () => this.gcpServiceAccounts,
+    setAccounts: (accounts) => {
+      this.gcpServiceAccounts = accounts;
+    },
+  });
+
   /**
    * Whether this agent's runtime broker/profile is reliably known to be
-   * Kubernetes. A NEW selection of Block is disabled in that case
-   * (ptone/scion#2328 Phase 2) — an already-stored Block stays selectable as
-   * the displayed value, see render(). Unknown until targetBroker has loaded,
-   * which reads as false — the same "do not guess" default as
-   * agent-create.ts.
+   * Kubernetes. Block is offered there like anywhere else (ptone/scion#4077);
+   * the help text says what it means on Kubernetes. Unknown until
+   * targetBroker has loaded, which reads as false — the same "do not guess"
+   * default as agent-create.ts.
    */
   private get targetRuntimeIsKubernetesOnly(): boolean {
     return isTargetKubernetesOnly(
@@ -356,8 +390,8 @@ export class ScionPageAgentConfigure extends LitElement {
 
   /**
    * Short explanation rendered into the GCP identity select's `help-text`
-   * slot when this agent's target is reliably known to be Kubernetes: block
-   * is disabled for a NEW selection in that case.
+   * slot when this agent's target is reliably known to be Kubernetes: what
+   * Block means there, and, while untouched, which identity is in effect.
    *
    * Rendered as a slotted child of the `<sl-select>` (not a sibling
    * `aria-describedby` reference) because the element that receives focus is
@@ -369,7 +403,7 @@ export class ScionPageAgentConfigure extends LitElement {
   private renderKubernetesBlockHint(): TemplateResult | typeof nothing {
     if (!this.targetRuntimeIsKubernetesOnly) return nothing;
     if (this.gcpIdentityUserSet) {
-      return html`<div slot="help-text">${ScionPageAgentConfigure.gcpIdentityK8sHintText}</div>`;
+      return html`<div slot="help-text">${KUBERNETES_BLOCK_HINT}</div>`;
     }
     // Untouched: name the actual effective identity rather than overclaiming
     // the broker's own default applies — that is only true when this agent
@@ -382,30 +416,38 @@ export class ScionPageAgentConfigure extends LitElement {
             ? 'Passthrough'
             : 'Block';
       return html`<div slot="help-text">
-        ${ScionPageAgentConfigure.gcpIdentityK8sHintText} This agent's current identity is
-        "${modeLabel}", as previously configured; it stays in effect until you change it here.
+        ${KUBERNETES_BLOCK_HINT} This agent's current identity is "${modeLabel}", as previously
+        configured; it stays in effect until you change it here.
       </div>`;
     }
     return html`<div slot="help-text">
-      ${ScionPageAgentConfigure.gcpIdentityK8sHintText} No explicit identity is configured for this
-      agent, so the broker's own Kubernetes default applies automatically; choosing Passthrough or
-      Assign here sends that choice explicitly instead.
+      ${KUBERNETES_BLOCK_HINT} No explicit identity is configured for this agent, so the broker's
+      own Kubernetes default applies automatically; choosing a mode here sends that choice
+      explicitly instead.
     </div>`;
   }
 
-  private async loadGCPServiceAccounts(projectId: string): Promise<void> {
+  /**
+   * The selected mode's description under the GCP identity select. On a
+   * known-Kubernetes target Block is described only by the help-text slot
+   * (KUBERNETES_BLOCK_HINT): the generic Block text ("token requests are
+   * denied") does not hold there.
+   */
+  private renderGcpModeHint(): TemplateResult | typeof nothing {
+    if (this.gcpMetadataMode === 'block' && this.targetRuntimeIsKubernetesOnly) return nothing;
+    const text =
+      this.gcpMetadataMode === 'block'
+        ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
+        : this.gcpMetadataMode === 'assign'
+          ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
+          : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership.";
+    return html`<div class="hint">${text}</div>`;
+  }
+
+  private async loadGCPServiceAccounts(): Promise<void> {
+    // Non-critical: a failed fetch just won't show the assign option.
     this.gcpServiceAccounts = [];
-    try {
-      const res = await apiFetch(
-        `/api/v1/projects/${projectId}/gcp-service-accounts?includeHubScoped=true`
-      );
-      if (res.ok) {
-        const data = (await res.json()) as { items?: GCPServiceAccount[] } | GCPServiceAccount[];
-        this.gcpServiceAccounts = Array.isArray(data) ? data : data.items || [];
-      }
-    } catch {
-      // Non-critical — just won't show assign option
-    }
+    await this.gcpAccounts.load();
   }
 
   /** Loads this agent's own runtime broker, to classify its runtime kind for the GCP Identity picker. */
@@ -457,6 +499,7 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   static override styles = css`
+    ${assignStatusStyles}
     :host {
       display: block;
     }
@@ -722,15 +765,14 @@ export class ScionPageAgentConfigure extends LitElement {
     super.willUpdate(changedProperties);
     // Re-check whenever the target broker (loaded asynchronously, after
     // populateForm has already read the agent's stored mode) or the mode
-    // itself changes. Unlike agent-create.ts, this does NOT correct away a
-    // value that came from storage (gcpMetadataModeFromStorage) — a stored
-    // "block" is not migrated, same as a project default. The Block option is
-    // always rendered here (merely disabled on a known-Kubernetes target, see
-    // render()), so there is no blank-select case to fix for a stored value;
-    // normalisation exists only to stop this page's own "nothing configured"
-    // placeholder default from looking and acting like an explicit choice.
+    // itself changes; see showPlaceholderForTarget.
     if (changedProperties.has('targetBroker') || changedProperties.has('gcpMetadataMode')) {
-      this.normalizeGcpModeForTarget();
+      this.showPlaceholderForTarget();
+    }
+    // The accounts' mapping state is for this agent's broker and profile:
+    // ask for it once they are known (ptone/scion#4391).
+    if (changedProperties.has('targetBroker') || changedProperties.has('agent')) {
+      void this.gcpAccounts.targetChanged();
     }
   }
 
@@ -742,30 +784,19 @@ export class ScionPageAgentConfigure extends LitElement {
   }
 
   /**
-   * Corrects the *displayed* gcpMetadataMode away from "block" when this
-   * agent's target is reliably known to be Kubernetes (see
-   * targetRuntimeIsKubernetesOnly) — but only when "block" is this page's own
-   * placeholder default (gcpMetadataModeFromStorage is false), never when it
-   * reflects a real stored decision.
-   *
-   * Also clears gcpIdentityUserSet when it rewrites the mode, for the same
-   * reason as agent-create.ts's normalizeGcpModeForTarget: the target broker
-   * loads asynchronously, so a user could explicitly pick "Block" while it is
-   * still unknown (Block is enabled until targetRuntimeIsKubernetesOnly is
-   * confirmed true) and then have the broker resolve as Kubernetes-only out
-   * from under that choice. Without clearing the flag, Save/Start would send
-   * the auto-substituted "passthrough" as if the user had picked it for this
-   * target, through the Hub's passthrough ownership gate.
+   * With nothing stored and nothing picked, shows this page's "nothing
+   * configured" placeholder as the runtime default the broker applies:
+   * Passthrough on a known-Kubernetes target, Block elsewhere. A stored value
+   * (gcpMetadataModeFromStorage) and an explicit pick are never rewritten,
+   * and Block is a valid pick on every target (ptone/scion#4077). The
+   * placeholder is not sent: see buildGCPIdentityPayload.
    */
-  private normalizeGcpModeForTarget(): void {
-    if (
-      this.gcpMetadataMode === 'block' &&
-      !this.gcpMetadataModeFromStorage &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
-      this.gcpMetadataMode = 'passthrough';
-      this.gcpIdentityUserSet = false;
-    }
+  private showPlaceholderForTarget(): void {
+    if (this.gcpMetadataModeFromStorage || this.gcpIdentityUserSet) return;
+    const mode = this.targetRuntimeIsKubernetesOnly ? 'passthrough' : 'block';
+    if (this.gcpMetadataMode === mode && !this.gcpServiceAccountId) return;
+    this.gcpMetadataMode = mode;
+    this.gcpServiceAccountId = '';
   }
 
   override connectedCallback(): void {
@@ -818,7 +849,7 @@ export class ScionPageAgentConfigure extends LitElement {
         return;
       }
 
-      void this.loadGCPServiceAccounts(this.agent.projectId);
+      void this.loadGCPServiceAccounts();
       if (this.agent.runtimeBrokerId) {
         void this.loadTargetBroker(this.agent.runtimeBrokerId);
       }
@@ -861,9 +892,12 @@ export class ScionPageAgentConfigure extends LitElement {
     this.customModelId = derived.customId;
     this.thinkingLevel = ac?.thinkingLevel ?? ic?.thinking_level ?? null;
     this.image = ac?.image || ic?.image || '';
-    this.branch = ic?.branch || '';
+    // Read-only display: the live branch (AppliedConfig.Branch) is what the
+    // provisioned worktree actually uses; fall back to the inline value.
+    this.branch = ac?.branch || ic?.branch || '';
     this.containerUser = ic?.user || '';
     this.authMethod = ac?.harnessAuth || ic?.auth_selectedType || '';
+    this.loadedAuthMethod = this.authMethod;
     this.harnessConfig = ac?.harnessConfig || ic?.harness_config || '';
     this.telemetryEnabled = ic?.telemetry?.enabled ?? this.globalTelemetryDefault;
     const autoExpose = effectiveAutoExposePorts(
@@ -911,9 +945,6 @@ export class ScionPageAgentConfigure extends LitElement {
 
     // Detect required keys that are empty (from env gathering)
     this.requiredEnvKeys = this.envEntries.filter((e) => e.key && !e.value).map((e) => e.key);
-
-    // Message Mode
-    this.messageMode = this.agent.messageMode || '';
 
     // GCP Identity
     const gcpId = ac?.gcpIdentity;
@@ -1031,7 +1062,11 @@ export class ScionPageAgentConfigure extends LitElement {
     if (model) config.model = model;
     config.thinking_level = this.thinkingLevel;
     if (this.image) config.image = this.image;
-    if (this.authMethod && this.authMethodSupported(this.authMethod))
+    if (
+      this.authMethod &&
+      this.authMethod !== this.loadedAuthMethod &&
+      this.authMethodSupported(this.authMethod)
+    )
       config.auth_selectedType = this.authMethod;
     if (this.task) config.task = this.task;
 
@@ -1045,7 +1080,12 @@ export class ScionPageAgentConfigure extends LitElement {
     // for `scion reincarnate` to restore. A harness-unsupported field is
     // still omitted entirely, since this page gives the user no way to view
     // or edit it in that case.
-    config.branch = this.branch;
+    //
+    // branch is deliberately never sent (ptone/scion#3984): this page only
+    // edits agents in "created" phase, which are already provisioned, so the
+    // worktree and its branch exist and no later transition would apply a
+    // changed value. The field is shown read-only instead, and the hub keeps
+    // the stored value when the key is absent.
     config.user = this.containerUser;
     config.agent_instructions = this.agentInstructions;
     if (!this.isUnsupported(caps?.prompts.system_prompt)) config.system_prompt = this.systemPrompt;
@@ -1148,10 +1188,9 @@ export class ScionPageAgentConfigure extends LitElement {
    * user choice — the same scope as agent-create.ts, not every runtime.
    * Sending an explicit "passthrough" there would hit the Hub's passthrough
    * ownership gate for a request that never asked for passthrough, and a
-   * resave of an untouched stored value must not rewrite it — Kubernetes is
-   * also where the Block option is disabled for a NEW selection, so an
-   * untouched value there is reliably either "nothing configured" or
-   * "stored", never a fresh pick. On every other runtime this method keeps
+   * resave of an untouched stored value must not rewrite it: an untouched
+   * value there is reliably either "nothing configured" or "stored", never a
+   * fresh pick. On every other runtime this method keeps
    * the pre-existing behavior of always sending the current mode/service
    * account explicitly: there is no passthrough-gate or block-migration
    * concern to avoid there, and the request shape for non-Kubernetes agents
@@ -1182,32 +1221,11 @@ export class ScionPageAgentConfigure extends LitElement {
       return;
     }
 
-    // Transition-only: a resave of an already-stored "block" (gcpIdentityUserSet
-    // false) must succeed — it is refused only when the user actively set
-    // "block" themselves, which the UI itself already prevents (the Block
-    // option is disabled for new selection on a known-Kubernetes target, see
-    // render()). This guard is defense-in-depth, not the primary control.
-    if (
-      this.gcpIdentityUserSet &&
-      this.gcpMetadataMode === 'block' &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
-      this.error =
-        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
-      this.saving = false;
-      return;
-    }
-
     try {
       const config = this.buildConfig();
       const body: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) body.gcp_identity = gcpIdentity;
-      // Always include messageMode for created-phase agents so "Default" can
-      // clear a previously set mode. Use null to signal "unset" to the backend.
-      if (this.agent?.phase === 'created') {
-        body.messageMode = this.messageMode || null;
-      }
       const res = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1256,29 +1274,12 @@ export class ScionPageAgentConfigure extends LitElement {
       return;
     }
 
-    // Transition-only — see the identical guard in handleSave for why.
-    if (
-      this.gcpIdentityUserSet &&
-      this.gcpMetadataMode === 'block' &&
-      this.targetRuntimeIsKubernetesOnly
-    ) {
-      this.error =
-        'Block is not available for a Kubernetes runtime target. Choose Passthrough or Assign Service Account.';
-      this.starting = false;
-      return;
-    }
-
     try {
       // Save config first
       const config = this.buildConfig();
       const saveBody: Record<string, unknown> = { config };
       const gcpIdentity = this.buildGCPIdentityPayload();
       if (gcpIdentity) saveBody.gcp_identity = gcpIdentity;
-      // Always include messageMode for created-phase agents so "Default" can
-      // clear a previously set mode. Use null to signal "unset" to the backend.
-      if (this.agent?.phase === 'created') {
-        saveBody.messageMode = this.messageMode || null;
-      }
       const saveRes = await apiFetch(`/api/v1/agents/${this.agentId}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1522,9 +1523,9 @@ export class ScionPageAgentConfigure extends LitElement {
           placeholder="use harness default"
           .value=${this.modelSelection}
           clearable
-          @sl-change=${(e: any) => {
-            this.modelSelection = e.target.value;
-            if (e.target.value !== 'other') this.customModelId = '';
+          @sl-change=${(e: Event) => {
+            this.modelSelection = (e.target as HTMLSelectElement).value as ModelSelection;
+            if ((e.target as HTMLSelectElement).value !== 'other') this.customModelId = '';
           }}
         >
           <sl-option value="small">Small</sl-option>
@@ -1540,8 +1541,8 @@ export class ScionPageAgentConfigure extends LitElement {
                 label="Model ID"
                 placeholder="e.g. claude-opus-4-8"
                 .value=${this.customModelId}
-                @sl-input=${(e: any) => {
-                  this.customModelId = e.target.value;
+                @sl-input=${(e: Event) => {
+                  this.customModelId = (e.target as HTMLInputElement).value;
                 }}
                 style="margin-top: 0.75rem"
               >
@@ -1567,14 +1568,15 @@ export class ScionPageAgentConfigure extends LitElement {
             .value=${this.thinkingLevel ?? 50}
             ?disabled=${this.thinkingLevel === null}
             style="flex:1"
-            @sl-input=${(e: any) => {
-              this.thinkingLevel = e.target.value;
+            @sl-input=${(e: Event) => {
+              // sl-range reports its value as a number.
+              this.thinkingLevel = (e.target as HTMLElement & { value: number }).value;
             }}
           ></sl-range>
           <sl-checkbox
             ?checked=${this.thinkingLevel !== null}
-            @sl-change=${(e: any) => {
-              this.thinkingLevel = e.target.checked ? 50 : null;
+            @sl-change=${(e: Event) => {
+              this.thinkingLevel = (e.target as HTMLInputElement).checked ? 50 : null;
             }}
             >Set</sl-checkbox
           >
@@ -1602,12 +1604,16 @@ export class ScionPageAgentConfigure extends LitElement {
       <div class="form-field">
         <label>Branch</label>
         <sl-input
-          placeholder="Git branch for the agent"
+          data-testid="branch-input"
+          placeholder=${this.agent?.slug
+            ? `Agent's own branch (scion/${this.agent.slug})`
+            : "Agent's own branch"}
           .value=${this.branch}
-          @sl-input=${(e: Event) => {
-            this.branch = (e.target as HTMLElement & { value: string }).value;
-          }}
+          readonly
         ></sl-input>
+        <div class="hint" data-testid="branch-hint">
+          Set at creation; recreate the agent to change it.
+        </div>
       </div>
 
       <div class="form-field">
@@ -1674,66 +1680,31 @@ export class ScionPageAgentConfigure extends LitElement {
           `
         : nothing}
 
-      <!-- Message Mode -->
-      ${this.agent?.phase === 'created'
+      <!-- Message Mode: read-only. The agent PATCH does not carry it; it
+           changes only through the set_message_mode endpoint (agent detail
+           page or CLI), which applies its own authorization. -->
+      ${this.agent?.messageMode
         ? html`
-            <div class="form-field">
+            <div class="form-field" data-testid="message-mode-readonly">
               <label>Message Mode</label>
-              <sl-select
-                placeholder="Select a message mode..."
-                .value=${this.messageMode}
-                @sl-change=${(e: Event) => {
-                  this.messageMode = (e.target as HTMLElement & { value: string }).value;
-                }}
-              >
-                <sl-option value="">Default (inherit from parent)</sl-option>
-                ${(
-                  Object.entries(MESSAGE_MODE_DISPLAY) as [
-                    MessageMode,
-                    (typeof MESSAGE_MODE_DISPLAY)[MessageMode],
-                  ][]
-                ).map(
-                  ([mode, display]) => html`
-                    <sl-option value=${mode}>
-                      <sl-icon slot="prefix" name=${display.icon}></sl-icon>
-                      ${display.label} — ${display.description}
-                    </sl-option>
-                  `
-                )}
-              </sl-select>
-              ${this.messageMode === 'none'
-                ? html`<div class="hint" style="color: var(--sl-color-danger-600);">
-                    This agent is configured in sealed mode. It will not be able to send or receive
-                    messages.
-                  </div>`
-                : this.messageMode === 'hub'
-                  ? html`<div class="hint">
-                      Hub mode enables messaging with permitted agents in other projects on this
-                      Hub, in addition to all agents and users in this project. External reach
-                      requires the Hub cross-project switch to be enabled.
-                    </div>`
-                  : html`<div class="hint">
-                      Message authorization scope. Default inherits from the parent agent's mode.
-                    </div>`}
+              <div style="padding: 0.25rem 0;">
+                <scion-message-mode-badge
+                  mode=${this.agent.messageMode}
+                  size="medium"
+                ></scion-message-mode-badge>
+              </div>
+              <div class="hint">
+                Message mode cannot be changed here. Use the Configuration tab of the
+                <a
+                  data-testid="message-mode-detail-link"
+                  href="/agents/${this.agent.id || this.agentId}"
+                  >agent detail page</a
+                >
+                to change it (requires permission to set message mode).
+              </div>
             </div>
           `
-        : this.agent?.messageMode
-          ? html`
-              <div class="form-field">
-                <label>Message Mode</label>
-                <div style="padding: 0.25rem 0;">
-                  <scion-message-mode-badge
-                    mode=${this.agent.messageMode}
-                    size="medium"
-                  ></scion-message-mode-badge>
-                </div>
-                <div class="hint">
-                  Message mode is read-only for started agents. Use the agent detail page to change
-                  it.
-                </div>
-              </div>
-            `
-          : nothing}
+        : nothing}
 
       <div class="form-field">
         <label for="gcp-mode">GCP Identity</label>
@@ -1751,27 +1722,14 @@ export class ScionPageAgentConfigure extends LitElement {
             }
           }}
         >
-          <sl-option
-            value="block"
-            ?disabled=${this.targetRuntimeIsKubernetesOnly}
-            title=${this.targetRuntimeIsKubernetesOnly
-              ? ScionPageAgentConfigure.gcpIdentityK8sHintText
-              : nothing}
-            >Block</sl-option
-          >
+          <sl-option value="block">Block</sl-option>
           ${this.gcpServiceAccounts.length > 0
             ? html`<sl-option value="assign">Assign Service Account</sl-option>`
             : nothing}
           <sl-option value="passthrough">Passthrough</sl-option>
           ${this.renderKubernetesBlockHint()}
         </sl-select>
-        <div class="hint">
-          ${this.gcpMetadataMode === 'block'
-            ? 'Prevents the agent from accessing any GCP identity. Token requests are denied.'
-            : this.gcpMetadataMode === 'assign'
-              ? 'Assigns a registered GCP service account. GCP client libraries will authenticate automatically.'
-              : "No metadata interception. The agent inherits the broker's GCP identity. Requires broker ownership."}
-        </div>
+        ${this.renderGcpModeHint()}
       </div>
 
       ${this.gcpMetadataMode === 'assign'
@@ -1791,15 +1749,10 @@ export class ScionPageAgentConfigure extends LitElement {
                         this.gcpIdentityUserSet = true;
                       }}
                     >
-                      ${this.verifiedGCPServiceAccounts.map(
-                        (sa) =>
-                          html`<sl-option value=${sa.id}>
-                            ${sa.email}${sa.displayName ? ` (${sa.displayName})` : ''}${sa.scope ===
-                            'hub'
-                              ? ' (Hub)'
-                              : ''}
-                          </sl-option>`
+                      ${orderByAssignStatus(this.verifiedGCPServiceAccounts).map((sa) =>
+                        renderServiceAccountOption(sa)
                       )}
+                      ${renderAssignStatusHelp(this.selectedAssignStatus)}
                     </sl-select>
                   `
                 : html`

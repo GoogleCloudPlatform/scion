@@ -32,49 +32,12 @@ import (
 // Tests for ptone/scion#2598: deleting a user must not orphan a project, and
 // a deleted user's role bindings must be removed with the user.
 
-// requireLastOwnerDenial asserts a 409 last_owner response whose
-// details.projects lists exactly the given project.
-func requireLastOwnerDenial(t *testing.T, rec *httptest.ResponseRecorder, project *store.Project) {
-	t.Helper()
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
-	var resp struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-			Details struct {
-				Projects []lastOwnerProjectRef `json:"projects"`
-			} `json:"details"`
-		} `json:"error"`
-	}
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-	assert.Equal(t, ErrCodeLastOwner, resp.Error.Code)
-	assert.NotEmpty(t, resp.Error.Message)
-	assert.Equal(t, []lastOwnerProjectRef{{ID: project.ID, Name: project.Name}}, resp.Error.Details.Projects)
-}
-
 // allBindingsFor returns every role binding (any scope) held by the user.
 func allBindingsFor(t *testing.T, s store.Store, userID string) []*store.RoleBinding {
 	t.Helper()
 	got, err := s.ListRoleBindingsForPrincipal(context.Background(), store.RoleBindingPrincipalUser, userID)
 	require.NoError(t, err)
 	return got
-}
-
-// grantSystemRole gives the user a system-scoped binding for the named
-// system role directly in the store.
-func grantSystemRole(t *testing.T, s store.Store, userID, roleName string) {
-	t.Helper()
-	ctx := context.Background()
-	rd, err := s.GetRoleDefinitionByName(ctx, roleName, store.RoleScopeSystem)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeSystem,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
 }
 
 func TestDeleteUser_SoleProjectOwnerDenied(t *testing.T) {
@@ -173,16 +136,6 @@ func TestDeleteUser_SoleOwnerThenRestartDoesNotRegrantCreator(t *testing.T) {
 	requireSingleOwnerBinding(t, s, project.ID, bob.ID)
 }
 
-// newInvitedUser creates a user in invited status, as the allow-list
-// endpoints manage.
-func newInvitedUser(t *testing.T, s store.Store, id, email string) *store.User {
-	t.Helper()
-	u := &store.User{ID: tid(id), Email: email, DisplayName: id,
-		Role: store.UserRoleMember, Status: store.UserStatusInvited, Created: time.Now()}
-	require.NoError(t, s.CreateUser(context.Background(), u))
-	return u
-}
-
 func TestDeprecatedAllowListDelete_CascadesRoleBindings(t *testing.T) {
 	srv, s, alice, _, project := setupDemoPolicyTest(t)
 	ctx := context.Background()
@@ -222,26 +175,6 @@ func TestDeprecatedAllowListDelete_SoleProjectOwnerDenied(t *testing.T) {
 	_, err := s.GetUser(ctx, carol.ID)
 	require.NoError(t, err, "denied delete must keep the invited user")
 	requireSingleOwnerBinding(t, s, project.ID, carol.ID)
-}
-
-// createOwnerBinding gives the principal a project-owner binding directly in
-// the store, optionally pending (notBefore) or expired (expiresAt).
-func createOwnerBinding(t *testing.T, s store.Store, userID, projectID string, notBefore, expiresAt *time.Time) {
-	t.Helper()
-	ctx := context.Background()
-	ownerRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleOwner, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: ownerRD.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      userID,
-		ScopeType:        store.RoleScopeProject,
-		ScopeID:          projectID,
-		NotBefore:        notBefore,
-		ExpiresAt:        expiresAt,
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
 }
 
 // newTestProject creates a bare project directly in the store.

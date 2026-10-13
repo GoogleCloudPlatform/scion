@@ -173,6 +173,15 @@ describe('buildGraphAgentCandidates', () => {
     expect(rows[0].secondaryLabel).toBe('P2');
   });
 
+  it("names the project by the row's slug", () => {
+    const rows = buildGraphAgentCandidates([
+      { ...agent('a', 'Twin', 'One'), projectSlug: 'one' },
+      { ...agent('b', 'Twin', 'Two'), projectSlug: 'two' },
+    ]);
+    expect(rows.map((r) => r.secondaryLabel)).toEqual(['one', 'two']);
+    expect(rows[0].searchFields).toEqual(expect.arrayContaining(['one', 'One']));
+  });
+
   it('skips an agent without an id', () => {
     const rows = buildGraphAgentCandidates([agent('', 'Nameless'), agent('a', 'Alpha')]);
     expect(rows.map((r) => r.id)).toEqual([JSON.stringify(['agent', 'a'])]);

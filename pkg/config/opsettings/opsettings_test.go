@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -33,7 +34,7 @@ import (
 func TestRegistryHasAllSections(t *testing.T) {
 	expected := []string{"access", "lifecycle", "maintenance", "messaging",
 		"telemetry", "agent_defaults", "endpoints", "github_app", "notifications",
-		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments", "artifacts"}
+		"project_defaults", "auto_expose_ports", "quotas", "agent_secrets", "federation", "experiments", "artifacts", "profiling"}
 	for _, name := range expected {
 		if SectionByName(name) == nil {
 			t.Errorf("section %q not found in registry", name)
@@ -72,6 +73,7 @@ func TestSectionHasKoanfPaths(t *testing.T) {
 		"messaging":   true,
 		"experiments": true,
 		"artifacts":   true,
+		"profiling":   true,
 	}
 	for _, sec := range Registry {
 		if dbOnlySections[sec.Name] {
@@ -1104,6 +1106,22 @@ func TestGlobalDefaultsReserved(t *testing.T) {
 
 // --- DetectDeprecatedServerEnv tests ---
 
+// TestDetectDeprecatedServerEnv_PublicURLIsPin checks that
+// SCION_SERVER_HUB_ENDPOINT, which pins server.hub.public_url on a node, is
+// not reported as a deprecated seed input (ptone/scion#3905).
+func TestDetectDeprecatedServerEnv_PublicURLIsPin(t *testing.T) {
+	envK := koanf.New(".")
+	_ = envK.Load(confmap.Provider(map[string]interface{}{
+		"server.hub.public_url":   "https://hub.example.com",
+		"server.hub.admin_emails": []string{"admin@test.com"},
+	}, "."), nil)
+
+	deprecated := DetectDeprecatedServerEnv(envK)
+	if len(deprecated) != 1 || deprecated[0].KoanfKey != "server.hub.admin_emails" {
+		t.Fatalf("DetectDeprecatedServerEnv = %+v, want only server.hub.admin_emails", deprecated)
+	}
+}
+
 func TestDetectDeprecatedServerEnv_Layer1Keys(t *testing.T) {
 	envK := koanf.New(".")
 	_ = envK.Load(confmap.Provider(map[string]interface{}{
@@ -1701,7 +1719,7 @@ func TestKoanfKeyToEnvSuffix(t *testing.T) {
 		// server. prefix is stripped — it maps to the SCION_SERVER_ env prefix
 		{"server.hub.admin_emails", "HUB_ADMINEMAILS"},
 		{"server.auth.user_access_mode", "AUTH_USERACCESSMODE"},
-		{"server.hub.public_url", "HUB_PUBLICURL"},
+		{"server.hub.public_url", "HUB_ENDPOINT"},
 		// non-server keys are unchanged
 		{"telemetry.enabled", "TELEMETRY_ENABLED"},
 		{"default_max_turns", "DEFAULTMAXTURNS"},
@@ -1759,6 +1777,75 @@ func TestSafeToEvictSchemaValidation(t *testing.T) {
 		if errs := Validate(sec, json.RawMessage(doc)); len(errs) == 0 {
 			t.Errorf("%s: expected a non-boolean safe_to_evict to be rejected", sec)
 		}
+	}
+}
+
+// TestCloneDepthSchemaValidation checks the profiles section schema for
+// clone_depth: "full" or an integer from 1 to 999999999, as a string or a
+// bare integer, with null and "" meaning unset. It is the same rule as
+// settings-v1.schema.json.
+func TestCloneDepthSchemaValidation(t *testing.T) {
+	for _, doc := range []string{
+		`{"gke": {"runtime": "gke", "clone_depth": "full"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 50}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "50"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 999999999}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "999999999"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": null}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": ""}}`,
+		`{"gke": {"runtime": "gke"}}`,
+	} {
+		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) > 0 {
+			t.Errorf("expected %s to be valid, got errors: %v", doc, errs)
+		}
+	}
+	for _, doc := range []string{
+		`{"gke": {"runtime": "gke", "clone_depth": 0}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "0"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": -1}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "shallow"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": true}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": 1000000000}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "1000000000"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "1234567890"}}`,
+		`{"gke": {"runtime": "gke", "clone_depth": "Full"}}`,
+	} {
+		if errs := Validate("profiles", json.RawMessage(doc)); len(errs) == 0 {
+			t.Errorf("expected %s to be rejected", doc)
+		}
+	}
+}
+
+// TestCloneDepthSchemaFromSettingsSchema checks that the profiles section
+// serves the clone_depth rule from settings-v1.schema.json unchanged.
+func TestCloneDepthSchemaFromSettingsSchema(t *testing.T) {
+	data, err := config.GetSettingsSchemaJSON("1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	defs, _ := root["$defs"].(map[string]interface{})
+	want := profileCloneDepthSchema(defs)
+	if want == nil {
+		t.Fatal("settings schema has no profileConfig.clone_depth")
+	}
+
+	info, ok := SchemaInfo()["profiles"]
+	if !ok {
+		t.Fatal("no profiles section schema")
+	}
+	served, _ := json.Marshal(info.Schema)
+	var section map[string]interface{}
+	if err := json.Unmarshal(served, &section); err != nil {
+		t.Fatal(err)
+	}
+	entry, _ := section["additionalProperties"].(map[string]interface{})
+	props, _ := entry["properties"].(map[string]interface{})
+	if got := props["clone_depth"]; !reflect.DeepEqual(got, want) {
+		t.Errorf("profiles clone_depth schema = %v, want %v", got, want)
 	}
 }
 

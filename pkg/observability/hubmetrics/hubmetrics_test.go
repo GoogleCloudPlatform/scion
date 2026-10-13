@@ -153,7 +153,7 @@ func TestPoolMetricsNotDroppedWhenNotifyDisabled(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	dbRec.ObservePoolStats(ctx, dbmetrics.PoolStats{Active: 5, Idle: 3, Waiting: 0, Max: 10})
+	dbRec.ObservePoolStats(ctx, dbmetrics.PoolStore, dbmetrics.PoolStats{Active: 5, Idle: 3, WaitCount: 0, Max: 10})
 
 	var rm metricdata.ResourceMetrics
 	if err := reader.Collect(ctx, &rm); err != nil {

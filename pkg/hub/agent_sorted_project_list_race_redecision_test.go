@@ -108,37 +108,10 @@ func TestListProjectAgentsSorted_IncludeDeleted_Paged(t *testing.T) {
 
 // --- the OwnerID-change race --------------------------------------
 
-// ownerChangingAfterMembersStore mutates an agent's OwnerID (via the real
-// store) the first time ListAgentMembers is called, simulating a write
-// landing between the member read and the full-row read.
-type ownerChangingAfterMembersStore struct {
-	store.Store
-	fault      *storeFaultSwitch // nil: always active
-	once       sync.Once
-	agentID    string
-	newOwnerID string
-}
-
 // newOwnerChangingAfterMembersStore is the installStoreFault wrap func for
 // ownerChangingAfterMembersStore. Set agentID and newOwnerID before arming.
 func newOwnerChangingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *ownerChangingAfterMembersStore {
 	return &ownerChangingAfterMembersStore{Store: inner, fault: fault}
-}
-
-func (o *ownerChangingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
-	members, err := o.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil || !o.fault.Active() {
-		return members, err
-	}
-	o.once.Do(func() {
-		a, gerr := o.GetAgent(ctx, o.agentID)
-		if gerr != nil {
-			return
-		}
-		a.OwnerID = o.newOwnerID
-		_ = o.UpdateAgent(ctx, a)
-	})
-	return members, nil
 }
 
 // TestListProjectAgentsSorted_Race_OwnerChange_BecomesUnreadable proves: a
@@ -316,42 +289,6 @@ func TestListProjectAgentsSorted_NilVsEmptyLabels_EndToEndZeroRedecisions(t *tes
 	require.Len(t, resp.Agents, 1, "the item must be kept: nil vs empty Labels must not look like a project/filter mismatch either")
 
 	assert.Len(t, emitter.records, 13, "nil-to-empty Labels must cost zero re-decisions: 5+8*1, not 5+9*1")
-}
-
-// fieldMutatingAfterMembersStore generalizes labelsNilToEmptyAfterMembersStore
-// (and mutatingAfterMembersStore) to any single-field mutation applied after
-// the first ListAgentMembers call: closes a gap where the original
-// end-to-end test exercised only Labels nil->empty, when
-// normalizeResourceForCompare normalizes both Labels and Ancestry, in both
-// directions.
-type fieldMutatingAfterMembersStore struct {
-	store.Store
-	fault   *storeFaultSwitch // nil: always active
-	once    sync.Once
-	agentID string
-	mutate  func(a *store.Agent)
-}
-
-// newFieldMutatingAfterMembersStore is the installStoreFault wrap func for
-// fieldMutatingAfterMembersStore. Set agentID and mutate before arming.
-func newFieldMutatingAfterMembersStore(inner store.Store, fault *storeFaultSwitch) *fieldMutatingAfterMembersStore {
-	return &fieldMutatingAfterMembersStore{Store: inner, fault: fault}
-}
-
-func (f *fieldMutatingAfterMembersStore) ListAgentMembers(ctx context.Context, filter store.AgentFilter, sortKey, dir string, max int) ([]store.AgentMember, error) {
-	members, err := f.Store.ListAgentMembers(ctx, filter, sortKey, dir, max)
-	if err != nil || !f.fault.Active() {
-		return members, err
-	}
-	f.once.Do(func() {
-		a, gerr := f.GetAgent(ctx, f.agentID)
-		if gerr != nil {
-			return
-		}
-		f.mutate(a)
-		_ = f.UpdateAgent(ctx, a)
-	})
-	return members, nil
 }
 
 // TestListProjectAgentsSorted_NilVsEmpty_TableDriven_EndToEndZeroRedecisions

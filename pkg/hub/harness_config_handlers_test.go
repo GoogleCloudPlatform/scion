@@ -718,46 +718,6 @@ func TestHandleHarnessConfigFinalize_KeepsObjectsNotInPreviousRecord(t *testing.
 	}
 }
 
-// localStorageHarnessConfig sets up a server backed by real local storage
-// (rooted at a bucket directory below root) and a harness-config record whose
-// file list is recordPaths. Every path in storedPaths is written to storage
-// below the config's storage path. Local storage resolves object paths with
-// filepath.Join, so it shows what a path really points at on disk.
-func localStorageHarnessConfig(t *testing.T, recordPaths, storedPaths []string) (srv *Server, s store.Store, hc *store.HarnessConfig, root string) {
-	t.Helper()
-	srv, s, _ = testHarnessConfigFileServer(t)
-	root = t.TempDir()
-	stor, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "b", LocalPath: root})
-	if err != nil {
-		t.Fatalf("NewLocal: %v", err)
-	}
-	srv.SetStorage(stor)
-
-	hc = &store.HarnessConfig{
-		ID:            tid("hc-local-paths"),
-		Name:          "test-hc",
-		Slug:          "test-hc",
-		Harness:       "claude",
-		Scope:         store.HarnessConfigScopeGlobal,
-		Status:        store.HarnessConfigStatusActive,
-		StoragePath:   "harness-configs/global/test-hc",
-		StorageBucket: "b",
-	}
-	for _, p := range storedPaths {
-		if _, err := stor.Upload(context.Background(), hc.StoragePath+"/"+p, strings.NewReader("x\n"), storage.UploadOptions{}); err != nil {
-			t.Fatalf("upload %s: %v", p, err)
-		}
-	}
-	for _, p := range recordPaths {
-		hc.Files = append(hc.Files, store.TemplateFile{Path: p, Size: 2, Hash: "sha256:placeholder"})
-	}
-	hc.ContentHash = computeContentHash(hc.Files)
-	if err := s.CreateHarnessConfig(context.Background(), hc); err != nil {
-		t.Fatalf("CreateHarnessConfig: %v", err)
-	}
-	return srv, s, hc, root
-}
-
 func finalizeHarnessConfigRequest(t *testing.T, srv *Server, hcID string, paths ...string) int {
 	t.Helper()
 	files := make([]map[string]interface{}, 0, len(paths))
@@ -766,19 +726,6 @@ func finalizeHarnessConfigRequest(t *testing.T, srv *Server, hcID string, paths 
 	}
 	body := map[string]interface{}{"manifest": map[string]interface{}{"files": files}}
 	return doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs/"+hcID+"/finalize", body).Code
-}
-
-// outsidePath is four levels up from harness-configs/global/test-hc in bucket
-// "b", i.e. the storage root's parent directory, outside the bucket.
-const outsidePath = "../../../../outside.txt"
-
-func writeOutsideFile(t *testing.T, root string) string {
-	t.Helper()
-	outside := filepath.Join(root, "outside.txt")
-	if err := os.WriteFile(outside, []byte("keep\n"), 0644); err != nil {
-		t.Fatal(err)
-	}
-	return outside
 }
 
 // TestHandleHarnessConfigFinalize_RejectsNonCanonicalPaths verifies that

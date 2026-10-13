@@ -20,60 +20,123 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 )
 
+// resetDebugState clears explicit debug state, the SCION_* level variables
+// (which the container may export) and the shared level state, restoring
+// all of it when the test ends.
+func resetDebugState(t *testing.T) {
+	t.Helper()
+	reset := func() {
+		debugMu.Lock()
+		debugEnabled = false
+		debugInitialized = false
+		debugMu.Unlock()
+		loglevel.Reset(true)
+	}
+	t.Setenv(loglevel.EnvLogLevel, "")
+	t.Setenv(loglevel.EnvDebug, "")
+	loglevel.SetWarningOutput(io.Discard)
+	reset()
+	t.Cleanup(func() {
+		reset()
+		loglevel.SetWarningOutput(os.Stderr)
+	})
+}
+
 func TestDebugEnabled(t *testing.T) {
-	// Reset state for testing
-	debugMu.Lock()
-	debugEnabled = false
-	debugInitialized = false
-	debugMu.Unlock()
+	tests := []struct {
+		name     string
+		logLevel string
+		debugEnv string
+		explicit bool
+		want     bool
+	}{
+		{name: "nothing set", want: false},
+		{name: "SCION_LOG_LEVEL=debug", logLevel: "debug", want: true},
+		{name: "SCION_LOG_LEVEL=DEBUG case-insensitive", logLevel: "DEBUG", want: true},
+		{name: "SCION_LOG_LEVEL=info", logLevel: "info", want: false},
+		{name: "SCION_LOG_LEVEL=warn", logLevel: "warn", want: false},
+		{name: "component-only debug leaves default off", logLevel: "info,hubsync=debug", want: false},
+		{name: "deprecated SCION_DEBUG alias", debugEnv: "1", want: true},
+		{name: "SCION_LOG_LEVEL wins over SCION_DEBUG", logLevel: "info", debugEnv: "1", want: false},
+		{name: "EnableDebug overrides env", logLevel: "error", explicit: true, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resetDebugState(t)
+			t.Setenv(loglevel.EnvLogLevel, tt.logLevel)
+			t.Setenv(loglevel.EnvDebug, tt.debugEnv)
+			if tt.explicit {
+				EnableDebug()
+			}
+			if got := DebugEnabled(); got != tt.want {
+				t.Errorf("DebugEnabled() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
-	// Clean environment
-	_ = os.Unsetenv("SCION_DEBUG")
+func TestDebugfTaggedComponentLevel(t *testing.T) {
+	resetDebugState(t)
+	t.Setenv(loglevel.EnvLogLevel, "info,hubsync=debug")
 
-	// Test 1: No debug when not set
-	if DebugEnabled() {
-		t.Error("DebugEnabled should return false when not enabled")
+	if !debugEnabledFor("hubsync") {
+		t.Error("hubsync tag should be enabled by hubsync=debug")
+	}
+	if debugEnabledFor("other") {
+		t.Error("other tag should follow the info default")
 	}
 
-	// Test 2: Debug via environment variable
-	_ = os.Setenv("SCION_DEBUG", "1")
-	if !DebugEnabled() {
-		t.Error("DebugEnabled should return true when SCION_DEBUG is set")
+	out := captureStderr(t, func() {
+		DebugfTagged("hubsync", "synced %d", 3)
+		DebugfTagged("other", "hidden")
+		Debugf("hidden too")
+	})
+	if out != "[hubsync] synced 3\n" {
+		t.Errorf("stderr = %q, want only the hubsync line", out)
 	}
-	_ = os.Unsetenv("SCION_DEBUG")
+}
 
-	// Test 3: Debug via EnableDebug()
-	debugMu.Lock()
-	debugEnabled = false
-	debugInitialized = false
-	debugMu.Unlock()
+func TestDebugEnvDeprecationWarningOnce(t *testing.T) {
+	resetDebugState(t)
+	t.Setenv(loglevel.EnvDebug, "1")
+	var warn bytes.Buffer
+	loglevel.SetWarningOutput(&warn)
 
-	EnableDebug()
-	if !DebugEnabled() {
-		t.Error("DebugEnabled should return true after EnableDebug()")
+	for i := 0; i < 3; i++ {
+		if !DebugEnabled() {
+			t.Fatal("SCION_DEBUG should still enable debug output")
+		}
 	}
-
-	// Test 4: EnableDebug() overrides environment
-	_ = os.Unsetenv("SCION_DEBUG")
-	if !DebugEnabled() {
-		t.Error("DebugEnabled should remain true after EnableDebug() even without env var")
+	if got := strings.Count(warn.String(), "SCION_DEBUG is deprecated"); got != 1 {
+		t.Errorf("deprecation warning printed %d times, want 1: %q", got, warn.String())
 	}
+	if !strings.Contains(warn.String(), "SCION_LOG_LEVEL") {
+		t.Errorf("deprecation warning should name SCION_LOG_LEVEL: %q", warn.String())
+	}
+}
 
-	// Cleanup
-	debugMu.Lock()
-	debugEnabled = false
-	debugInitialized = false
-	debugMu.Unlock()
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	fn()
+	_ = w.Close()
+	os.Stderr = oldStderr
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	return buf.String()
 }
 
 func TestDebugf(t *testing.T) {
-	// Reset state
-	debugMu.Lock()
-	debugEnabled = false
-	debugInitialized = false
-	debugMu.Unlock()
+	resetDebugState(t)
 
 	// Capture stderr
 	oldStderr := os.Stderr
@@ -81,7 +144,6 @@ func TestDebugf(t *testing.T) {
 	os.Stderr = w
 
 	// Test: No output when debug disabled
-	_ = os.Unsetenv("SCION_DEBUG")
 	Debugf("test message %d", 42)
 
 	_ = w.Close()
@@ -122,11 +184,7 @@ func TestDebugf(t *testing.T) {
 }
 
 func TestDebugfTagged(t *testing.T) {
-	// Reset state
-	debugMu.Lock()
-	debugEnabled = false
-	debugInitialized = false
-	debugMu.Unlock()
+	resetDebugState(t)
 
 	// Capture stderr
 	oldStderr := os.Stderr

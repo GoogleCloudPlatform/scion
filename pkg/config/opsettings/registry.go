@@ -31,6 +31,53 @@ type Section struct {
 	Schema     *jsonschema.Schema
 	KoanfPaths []string
 	New        func() any
+
+	// RestartRequired lists the koanf paths of this section whose saved
+	// value takes effect only after a hub restart. Every other key is
+	// applied to the running hub when it is saved (ptone/scion#3904). A
+	// save reports a changed restart-required key as pending a restart.
+	// Each entry must also be listed in KoanfPaths.
+	RestartRequired []string
+
+	// Durations lists the koanf paths of this section whose value is a Go
+	// duration string. A DB-tier save rejects a value of one of these keys
+	// that does not parse as a duration; "" or null clears the key. Each
+	// entry must also be listed in KoanfPaths and be a top-level key of the
+	// section document (see DurationKeys).
+	Durations []string
+
+	// NestedDurations lists duration-valued keys below the top level of
+	// the section document, as koanf paths that begin with the section
+	// name. A "*" segment matches every key of a map (for example each
+	// named runtime). A DB-tier save validates them as for Durations.
+	NestedDurations []string
+}
+
+// DurationKey is a duration-valued key of a section (Section.Durations).
+type DurationKey struct {
+	// KoanfPath is the key's koanf path, e.g. server.hub.stalled_threshold.
+	KoanfPath string
+	// SectionKey is the key's JSON field in the section document.
+	SectionKey string
+}
+
+// DurationKeys returns the duration-valued keys of the named section, or
+// nil if it has none. A koanf path without a section-level mapping (the
+// agent_defaults keys are top-level) is its own section key.
+func DurationKeys(section string) []DurationKey {
+	sec := SectionByName(section)
+	if sec == nil || len(sec.Durations) == 0 {
+		return nil
+	}
+	out := make([]DurationKey, 0, len(sec.Durations))
+	for _, kp := range sec.Durations {
+		key := SectionKeyFromKoanfPath(kp)
+		if key == "" {
+			key = kp
+		}
+		out = append(out, DurationKey{KoanfPath: kp, SectionKey: key})
+	}
+	return out
 }
 
 // dns1123SubdomainOrEmptyPattern mirrors the pattern used for
@@ -62,6 +109,17 @@ func kubernetesServiceAccountMappingsSchema() map[string]interface{} {
 			"maxLength": 253,
 		},
 	}
+}
+
+// profileCloneDepthSchema returns profileConfig.clone_depth from the
+// settings schema $defs, so the profiles section validates clone_depth
+// with the same rule as settings-v1.schema.json. It returns nil when the
+// definition is missing.
+func profileCloneDepthSchema(defs map[string]interface{}) map[string]interface{} {
+	profile, _ := defs["profileConfig"].(map[string]interface{})
+	props, _ := profile["properties"].(map[string]interface{})
+	cd, _ := props["clone_depth"].(map[string]interface{})
+	return cd
 }
 
 // sharedDirStorageBackendsSchema mirrors shared_dir_storage_backends in
@@ -99,6 +157,7 @@ func init() {
 			Name:       "lifecycle",
 			KoanfPaths: []string{"server.hub.auto_suspend_stalled", "server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.soft_delete_retain_files", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 			New:        func() any { return &LifecycleSettings{} },
+			Durations:  []string{"server.hub.stalled_threshold", "server.hub.soft_delete_retention", "server.hub.start_claim_lease_ttl", "server.hub.start_max_duration", "server.hub.start_unconfirmed_hold", "server.hub.start_create_unconfirmed_hold"},
 		},
 		{
 			// maintenance is durable via DB but has no settings.yaml representation.
@@ -123,6 +182,7 @@ func init() {
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
+				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
 				"telemetry.hub", "telemetry.hub.enabled", "telemetry.hub.report_interval",
 				"telemetry.local", "telemetry.local.enabled", "telemetry.local.file", "telemetry.local.console",
@@ -132,7 +192,8 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.resource",
 			},
-			New: func() any { return &TelemetrySettings{} },
+			New:             func() any { return &TelemetrySettings{} },
+			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval"},
 		},
 		{
 			Name: "auto_expose_ports",
@@ -147,6 +208,16 @@ func init() {
 				"quotas.enforce_broker_quotas",
 			},
 			New: func() any { return &QuotaSettings{} },
+		},
+		{
+			// gcp_iam holds the GCP service-account permission-check
+			// settings (reloadable; see GCPIAMSettings).
+			Name: "gcp_iam",
+			KoanfPaths: []string{
+				"server.hub.gcp_iam_check_mode",
+				"server.hub.gcp_iam_deny_unknown_policy",
+			},
+			New: func() any { return &GCPIAMSettings{} },
 		},
 		{
 			Name: "agent_secrets",
@@ -168,12 +239,15 @@ func init() {
 				"default_gcp_identity_mode",
 				"default_gcp_identity_service_account_id",
 			},
-			New: func() any { return &AgentDefaultsSettings{} },
+			New:       func() any { return &AgentDefaultsSettings{} },
+			Durations: []string{"default_max_duration"},
 		},
 		{
 			Name:       "endpoints",
-			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry"},
+			KoanfPaths: []string{"server.hub.public_url", "server.hub.hub_name", "image_registry", "server.hub.monitoring_dashboard_url"},
 			New:        func() any { return &EndpointsSettings{} },
+			// public_url is resolved into the hub endpoint at startup.
+			RestartRequired: []string{"server.hub.public_url"},
 		},
 		{
 			Name: "github_app",
@@ -183,6 +257,9 @@ func init() {
 				"server.github_app.private_key_path",
 			},
 			New: func() any { return &GitHubAppSettings{} },
+			// The agent dispatcher sets up its GitHub App token minter at
+			// startup, and only when an app_id is configured then.
+			RestartRequired: []string{"server.github_app.app_id"},
 		},
 		{
 			Name:       "notifications",
@@ -208,16 +285,18 @@ func init() {
 				"server.federation.refresh_interval",
 				"server.federation.debounce_interval",
 			},
-			New: func() any { return &FederationSettings{} },
+			New:       func() any { return &FederationSettings{} },
+			Durations: []string{"server.federation.refresh_interval", "server.federation.debounce_interval"},
 		},
 		{
 			// runtimes is a map-of-objects section: one hub_settings row stores
 			// the entire map as JSONB. Prefix-only KoanfPath ("runtimes") means
 			// OwningSection walks up from any nested key (e.g. "runtimes.docker.type")
 			// and hits this entry.
-			Name:       "runtimes",
-			KoanfPaths: []string{"runtimes"},
-			New:        func() any { m := make(RuntimesSettings); return &m },
+			Name:            "runtimes",
+			KoanfPaths:      []string{"runtimes"},
+			New:             func() any { m := make(RuntimesSettings); return &m },
+			NestedDurations: []string{"runtimes.*.substrate.template_ready_timeout"},
 		},
 		{
 			// profiles is a map-of-objects section, same pattern as runtimes.
@@ -230,6 +309,12 @@ func init() {
 			Name:       "harness_configs",
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{
+				"harness_configs.*.provisioner.timeout",
+				"harness_configs.*.ready.settle",
+				"harness_configs.*.ready.timeout",
+				"harness_configs.*.delivery.extra_submit_delay",
+			},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml
@@ -248,6 +333,15 @@ func init() {
 			Name:       "artifacts",
 			KoanfPaths: nil,
 			New:        func() any { return &ArtifactsSettings{} },
+		},
+		{
+			// profiling is durable via DB but has no settings.yaml
+			// representation; it is written through PUT
+			// /api/v1/admin/profiling. Absent DB row = everything off.
+			// Seeding skips this section (KoanfPaths nil).
+			Name:       "profiling",
+			KoanfPaths: nil,
+			New:        func() any { return &ProfilingSettings{} },
 		},
 	}
 
@@ -305,6 +399,22 @@ func IsLayer1Key(koanfKey string) bool {
 	return OwningSection(koanfKey) != ""
 }
 
+// IsRestartRequired reports whether a saved value of the given Layer-1 koanf
+// key takes effect only after a hub restart (Section.RestartRequired). A key
+// nested under a restart-required path is restart-required too.
+func IsRestartRequired(koanfKey string) bool {
+	sec := SectionByName(OwningSection(koanfKey))
+	if sec == nil {
+		return false
+	}
+	for _, p := range sec.RestartRequired {
+		if koanfKey == p || strings.HasPrefix(koanfKey, p+".") {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Schema compilation and validation ---
 
 var schemaCompileErr error
@@ -320,6 +430,9 @@ var rawSchemas map[string]map[string]interface{}
 type SectionSchemaInfo struct {
 	Schema     interface{} `json:"schema"`
 	KoanfPaths []string    `json:"koanf_paths"`
+	// RestartRequired lists the koanf paths whose saved value applies only
+	// after a hub restart (Section.RestartRequired).
+	RestartRequired []string `json:"restart_required,omitempty"`
 }
 
 // SchemaInfo returns the raw JSON-schema fragment and koanf paths for every
@@ -335,7 +448,8 @@ func SchemaInfo() map[string]SectionSchemaInfo {
 	result := make(map[string]SectionSchemaInfo, len(Registry))
 	for _, s := range Registry {
 		info := SectionSchemaInfo{
-			KoanfPaths: s.KoanfPaths,
+			KoanfPaths:      s.KoanfPaths,
+			RestartRequired: s.RestartRequired,
 		}
 		if info.KoanfPaths == nil {
 			info.KoanfPaths = []string{}
@@ -362,6 +476,12 @@ func compileSchemas() {
 	}
 
 	defs, _ := root["$defs"].(map[string]interface{})
+
+	cloneDepthSchema := profileCloneDepthSchema(defs)
+	if cloneDepthSchema == nil {
+		schemaCompileErr = fmt.Errorf("opsettings: settings schema has no profileConfig.clone_depth")
+		return
+	}
 
 	sectionSchemaMap := map[string]map[string]interface{}{
 		"access": {
@@ -422,6 +542,17 @@ func compileSchemas() {
 		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
+		// gcp_iam schema is hand-written -- the keys have no definition in
+		// settings-v1.schema.json. An empty string is not a valid value:
+		// clearing a key is done by resetting the section.
+		"gcp_iam": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"gcp_iam_check_mode":          map[string]interface{}{"type": "string", "enum": GCPIAMCheckModes},
+				"gcp_iam_deny_unknown_policy": map[string]interface{}{"type": "string", "enum": GCPIAMDenyUnknownPolicies},
+			},
+			"additionalProperties": false,
+		},
 		// experiments schema is hand-written -- it is runtime/API-owned
 		// state with no $defs in settings-v1.schema.json (like maintenance
 		// and messaging). overrides is a map of experiment name -> bool;
@@ -450,6 +581,15 @@ func compileSchemas() {
 		// stored document that breaks them is handled by Resolve (an invalid
 		// remote image value turns remote images off; any other invalid
 		// value disables the service).
+		// profiling schema is hand-written -- it is runtime/API-owned state
+		// with no $defs in settings-v1.schema.json (like messaging).
+		"profiling": {
+			"type": "object",
+			"properties": map[string]interface{}{
+				"readiness_marks": map[string]interface{}{"type": "boolean"},
+			},
+			"additionalProperties": false,
+		},
 		"artifacts": {
 			"type": "object",
 			"properties": map[string]interface{}{
@@ -460,6 +600,7 @@ func compileSchemas() {
 				"default_retention_days":       map[string]interface{}{"type": "integer", "minimum": 0},
 				"link_default_ttl_hours":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"link_max_ttl_hours":           map[string]interface{}{"type": "integer", "minimum": 1},
+				"gc_grace_hours":               map[string]interface{}{"type": "integer", "minimum": ArtifactsMinGCGraceHours},
 				"remote_images_enabled":        map[string]interface{}{"type": "boolean"},
 				"remote_image_max_count":       map[string]interface{}{"type": "integer", "minimum": 1},
 				"remote_image_max_bytes":       map[string]interface{}{"type": "integer", "minimum": 1},
@@ -479,7 +620,7 @@ func compileSchemas() {
 				"default_max_duration":                    getSchemaProperty(root, "default_max_duration"),
 				"default_resources":                       getSchemaProperty(root, "default_resources"),
 				"default_model":                           map[string]interface{}{"type": "string"},
-				"default_thinking_level":                  map[string]interface{}{"type": "integer"},
+				"default_thinking_level":                  getSchemaProperty(root, "default_thinking_level"),
 				"default_max_agent_role":                  getSchemaProperty(root, "default_max_agent_role"),
 				"default_agent_role":                      getSchemaProperty(root, "default_agent_role"),
 				"default_runtime_broker":                  getSchemaProperty(root, "default_runtime_broker"),
@@ -492,9 +633,10 @@ func compileSchemas() {
 		"endpoints": {
 			"type": "object",
 			"properties": map[string]interface{}{
-				"public_url":     getSchemaProperty(root, "server", "hub", "public_url"),
-				"hub_name":       getSchemaProperty(root, "server", "hub", "hub_name"),
-				"image_registry": getSchemaProperty(root, "image_registry"),
+				"public_url":               getSchemaProperty(root, "server", "hub", "public_url"),
+				"hub_name":                 getSchemaProperty(root, "server", "hub", "hub_name"),
+				"image_registry":           getSchemaProperty(root, "image_registry"),
+				"monitoring_dashboard_url": getSchemaProperty(root, "server", "hub", "monitoring_dashboard_url"),
 			},
 			"additionalProperties": false,
 		},
@@ -563,6 +705,7 @@ func compileSchemas() {
 						},
 					},
 					"secrets":                     map[string]interface{}{"type": "array"},
+					"clone_depth":                 cloneDepthSchema,
 					"shared_dir_storage_class":    map[string]interface{}{"type": "string"},
 					"shared_dir_size":             map[string]interface{}{"type": "string"},
 					"safe_to_evict":               map[string]interface{}{"type": "boolean"},

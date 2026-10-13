@@ -385,7 +385,7 @@ export class ScionUnifiedLogViewer extends LitElement {
   override connectedCallback(): void {
     super.connectedCallback();
     this.severity = this.initialSeverity || 'INFO';
-    this.loadInitialData();
+    void this.loadInitialData();
   }
 
   override disconnectedCallback(): void {
@@ -449,7 +449,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as DiagnosticLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as DiagnosticLogEntry;
         this.mergeEntries([entry]);
 
         // Only count entries that pass current filters for the "new entries" banner
@@ -500,25 +500,27 @@ export class ScionUnifiedLogViewer extends LitElement {
     const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempt), 30000);
     this.reconnectAttempt++;
 
-    this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null;
-      // Gap-fill: fetch entries since our last entry
-      if (this.entries.length > 0) {
-        try {
-          const params = new URLSearchParams({ tail: '200' });
-          if (this.severity) params.set('severity', this.severity);
-          // Entries are sorted oldest-first (ascending), so last element is the latest
-          params.set('since', this.entries[this.entries.length - 1].timestamp);
-          const res = await apiFetch(`/api/v1/admin/diagnostics/logs?${params}`);
-          if (res.ok) {
-            const data = (await res.json()) as DiagnosticsLogResponse;
-            this.mergeEntries(data.entries);
+    this.reconnectTimer = setTimeout(() => {
+      void (async () => {
+        this.reconnectTimer = null;
+        // Gap-fill: fetch entries since our last entry
+        if (this.entries.length > 0) {
+          try {
+            const params = new URLSearchParams({ tail: '200' });
+            if (this.severity) params.set('severity', this.severity);
+            // Entries are sorted oldest-first (ascending), so last element is the latest
+            params.set('since', this.entries[this.entries.length - 1].timestamp);
+            const res = await apiFetch(`/api/v1/admin/diagnostics/logs?${params}`);
+            if (res.ok) {
+              const data = (await res.json()) as DiagnosticsLogResponse;
+              this.mergeEntries(data.entries);
+            }
+          } catch {
+            // Gap-fill failed, but we'll still try to reconnect the stream
           }
-        } catch {
-          // Gap-fill failed, but we'll still try to reconnect the stream
         }
-      }
-      this.startStream();
+        this.startStream();
+      })();
     }, delay);
   }
 
@@ -576,7 +578,7 @@ export class ScionUnifiedLogViewer extends LitElement {
 
     // Auto-scroll after render
     if (this.autoScroll) {
-      this.updateComplete.then(() => this.scrollToBottom());
+      void this.updateComplete.then(() => this.scrollToBottom());
     }
   }
 
@@ -613,7 +615,7 @@ export class ScionUnifiedLogViewer extends LitElement {
     this.entries = [];
     this.expandedIds.clear();
     this.newEntriesBelowCount = 0;
-    this.loadInitialData();
+    void this.loadInitialData();
   }
 
   private handleSourceToggle(source: string): void {

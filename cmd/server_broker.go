@@ -25,7 +25,9 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -34,8 +36,9 @@ import (
 // Returns the effective broker ID, which may differ from the input if an
 // existing broker was found by name (deduplication). workspaceStorage is the
 // broker's workspace storage descriptor; nil leaves an existing record's
-// descriptor unchanged.
-func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage) (string, error) {
+// descriptor unchanged. profileTypeSettings resolves each profile's runtime
+// type (loadBrokerProfileTypeSettings); nil registers runtime keys as types.
+func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID, brokerName, endpoint string, rt runtime.Runtime, autoProvide bool, settings *config.Settings, workspaceStorage *api.BrokerWorkspaceStorage, profileTypeSettings *config.VersionedSettings) (string, error) {
 	// Check if global project already exists
 	globalProject, err := s.GetProjectBySlug(ctx, GlobalProjectName)
 	if err != nil && err != store.ErrNotFound {
@@ -70,7 +73,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	}
 
 	// Build profiles from settings, falling back to a default profile if none defined
-	profiles := buildStoreBrokerProfiles(settings, runtimeType, rt)
+	profiles := buildStoreBrokerProfiles(settings, profileTypeSettings, runtimeType, rt)
 
 	// The broker's own active/default profile name, so the hub can resolve
 	// an agent dispatch with no explicit profile against this registration
@@ -89,12 +92,19 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	if err != nil && err != store.ErrNotFound {
 		return brokerID, fmt.Errorf("failed to check for runtime broker: %w", err)
 	}
+	// A flat Runtime Broker row is never re-registered by this legacy path
+	// (flat contract R4): its target, name and profiles stay as stored.
+	if broker.IsFlat() {
+		return brokerID, fmt.Errorf("%s: Runtime Broker %s is a flat Runtime Broker serving runtime target %s; the legacy embedded registration cannot re-register it",
+			hub.ErrCodeRuntimeTargetChanged, brokerID, broker.RuntimeTarget.ID)
+	}
 
 	// If not found by ID, try to find an existing broker with the same name
 	// to prevent duplicate registrations when the broker ID changes (e.g.,
-	// settings file recreated, format migration, or database reset).
+	// settings file recreated, format migration, or database reset). Only
+	// legacy rows are candidates: a flat row is never adopted by name.
 	if broker == nil && brokerName != "" {
-		existingByName, nameErr := s.GetRuntimeBrokerByName(ctx, brokerName)
+		existingByName, nameErr := s.GetLegacyRuntimeBrokerByName(ctx, brokerName)
 		if nameErr != nil && nameErr != store.ErrNotFound {
 			return brokerID, fmt.Errorf("failed to check for runtime broker by name: %w", nameErr)
 		}
@@ -124,6 +134,16 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 	}
 
 	if broker == nil {
+		// Creating a legacy row next to a flat row with the same name or
+		// slug is refused (flat contract R4): no duplicate is created.
+		conflict, conflictErr := store.RuntimeBrokerNameConflict(ctx, s, brokerName, api.Slugify(brokerName), brokerID, true)
+		if conflictErr != nil {
+			return brokerID, fmt.Errorf("failed to check Runtime Broker name conflicts: %w", conflictErr)
+		}
+		if conflict != nil {
+			return brokerID, fmt.Errorf("%s: Runtime Broker name %q (slug %q) is already used by a flat Runtime Broker; choose another name",
+				hub.ErrCodeRuntimeBrokerNameConflict, brokerName, api.Slugify(brokerName))
+		}
 		broker = &store.RuntimeBroker{
 			ID:                         brokerID,
 			Name:                       brokerName,
@@ -135,20 +155,11 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 			AutoProvide:                autoProvide,
 			GCPHostServiceAccountEmail: detectedSAEmail,
 			GCPHostProjectID:           detectedProjectID,
-			Capabilities: &store.BrokerCapabilities{
-				WebPTY:                   false,
-				Sync:                     true,
-				Attach:                   runtime.HasAttachSupport(rt),
-				Reprovision:              true,
-				AsyncLaunch:              true,
-				EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
-				AgentMove:                true,
-				ReprovisionEmptyPerAgent: true,
-			},
-			Profiles:         profiles,
-			DefaultProfile:   defaultProfile,
-			WorkspaceStorage: workspaceStorage,
-			Labels:           brokerLabels,
+			Capabilities:               storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt)),
+			Profiles:                   profiles,
+			DefaultProfile:             defaultProfile,
+			WorkspaceStorage:           workspaceStorage,
+			Labels:                     brokerLabels,
 		}
 
 		if err := s.CreateRuntimeBroker(ctx, broker); err != nil {
@@ -181,16 +192,7 @@ func registerGlobalProjectAndBroker(ctx context.Context, s store.Store, brokerID
 		// path) never runs for the embedded broker. That produced a
 		// permanent false 412 on `scion reincarnate` for every embedded
 		// deployment.
-		broker.Capabilities = &store.BrokerCapabilities{
-			WebPTY:                   false,
-			Sync:                     true,
-			Attach:                   runtime.HasAttachSupport(rt),
-			Reprovision:              true,
-			AsyncLaunch:              true,
-			EmptyPerAgentWorkspace:   runtime.HasEmptyPerAgentSupport(rt),
-			AgentMove:                true,
-			ReprovisionEmptyPerAgent: true,
-		}
+		broker.Capabilities = storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
 		// A nil descriptor (not reported) keeps the stored one; the
 		// broker's heartbeats refresh it either way.
 		if workspaceStorage != nil {
@@ -303,7 +305,26 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 	return false
 }
 
+// loadBrokerProfileTypeSettings loads the global settings (plus the DB
+// settings overlay, when installed) that buildStoreBrokerProfiles resolves
+// profile runtime types from. On failure it logs a warning and returns nil:
+// profiles then register their runtime key as their type, and registration
+// goes ahead.
+func loadBrokerProfileTypeSettings() *config.VersionedSettings {
+	vs, _, err := config.LoadGlobalSettingsWithOverlay()
+	if err != nil {
+		log.Printf("Warning: could not load settings to resolve broker profile runtime types; registering each profile's runtime key as its type: %v", err)
+		return nil
+	}
+	return vs
+}
+
 // buildStoreBrokerProfiles builds store.BrokerProfile objects from settings.Profiles.
+// Each profile's Type is its resolved runtime type (the runtime entry's
+// explicit type, else its key), so the local-only filter and the attach
+// answer below also use the resolved type. Types resolve from
+// profileTypeSettings (see loadBrokerProfileTypeSettings); nil keeps each
+// profile's runtime key as its type.
 // If no profiles are defined in settings, returns a default profile with the detected runtime type.
 // When the detected default runtime is not local-only (e.g. cloudrun, kubernetes),
 // profiles referencing local-only runtimes (docker, podman, container) are
@@ -315,7 +336,7 @@ func isLocalOnlyRuntime(runtimeType string) bool {
 // real runtime.HasAttachSupport answer; any other profile gets nil
 // (unknown, read as supported), since this function never constructs a
 // runtime just to answer that field.
-func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType string, defaultRuntime runtime.Runtime) []store.BrokerProfile {
+func buildStoreBrokerProfiles(settings *config.Settings, profileTypeSettings *config.VersionedSettings, defaultRuntimeType string, defaultRuntime runtime.Runtime) []store.BrokerProfile {
 	attachForType := func(rtType string) *bool {
 		if rtType != defaultRuntimeType || defaultRuntime == nil {
 			return nil
@@ -333,10 +354,13 @@ func buildStoreBrokerProfiles(settings *config.Settings, defaultRuntimeType stri
 
 	var profiles []store.BrokerProfile
 	for name, profileCfg := range settings.Profiles {
-		// Determine runtime type from the profile's runtime reference
+		// Determine runtime type from the profile's runtime reference:
+		// the resolved type of the runtime entry it names, else the key.
 		runtimeType := profileCfg.Runtime
 		if runtimeType == "" {
 			runtimeType = defaultRuntimeType
+		} else {
+			runtimeType = resolveProfileRuntimeType(profileTypeSettings, name, profileCfg.Runtime)
 		}
 
 		if !isLocalOnlyRuntime(defaultRuntimeType) && isLocalOnlyRuntime(runtimeType) {

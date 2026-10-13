@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import './deletion-banner.js';
 import type { ScionDeletionBanner } from './deletion-banner.js';

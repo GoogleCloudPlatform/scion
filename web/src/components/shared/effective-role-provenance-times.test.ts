@@ -21,8 +21,6 @@
  * display preference here is Asia/Tokyo (UTC+9), where 15:00Z is midnight.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
 

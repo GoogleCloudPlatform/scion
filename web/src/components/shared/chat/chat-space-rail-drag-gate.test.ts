@@ -23,8 +23,6 @@
  * a native drag would swallow it.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import type { ChatSpace, ChatSpaceThread } from './chat-space-rail.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';

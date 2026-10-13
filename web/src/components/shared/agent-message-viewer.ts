@@ -70,6 +70,17 @@ interface ParsedMessage {
 
 const MAX_BUFFER = 500;
 
+/**
+ * Reports whether a message log entry is a message record. Lifecycle and
+ * bookkeeping entries (tagged log_kind=event, or carrying neither a sender
+ * nor a recipient) are not listed.
+ */
+function isMessageRecord(entry: MessageLogEntry, parsed: ParsedMessage): boolean {
+  const kind = entry.labels?.['log_kind'] ?? entry.jsonPayload?.['log_kind'];
+  if (kind === 'event') return false;
+  return parsed.sender !== '' || parsed.recipient !== '';
+}
+
 @customElement('scion-agent-message-viewer')
 export class ScionAgentMessageViewer extends LitElement {
   /** Re-renders timestamps and date dividers when the display zone changes. */
@@ -598,8 +609,8 @@ export class ScionAgentMessageViewer extends LitElement {
     const body = (payload['message_content'] as string) || '';
 
     // Cross-project provenance from log labels
-    const senderProjectId = (labels['sender_project_id'] as string) || undefined;
-    const recipientProjectId = (labels['recipient_project_id'] as string) || undefined;
+    const senderProjectId = labels['sender_project_id'] || undefined;
+    const recipientProjectId = labels['recipient_project_id'] || undefined;
     const crossProject =
       !!this.projectId &&
       ((!!senderProjectId && senderProjectId !== this.projectId) ||
@@ -625,7 +636,9 @@ export class ScionAgentMessageViewer extends LitElement {
   private mergeEntries(newEntries: MessageLogEntry[]): void {
     for (const entry of newEntries) {
       if (!this.entryMap.has(entry.insertId)) {
-        this.entryMap.set(entry.insertId, this.parseEntry(entry));
+        const parsed = this.parseEntry(entry);
+        if (!isMessageRecord(entry, parsed)) continue;
+        this.entryMap.set(entry.insertId, parsed);
       }
     }
 
@@ -659,7 +672,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // UserMessageEvent payload (hub store record) per message.
     this.eventSource.addEventListener('message', (event: Event) => {
       try {
-        const msg = JSON.parse((event as MessageEvent).data) as Message;
+        const msg = JSON.parse((event as MessageEvent<string>).data) as Message;
         this.mergeHubMessages([msg]);
       } catch {
         // Skip unparseable entries
@@ -670,7 +683,7 @@ export class ScionAgentMessageViewer extends LitElement {
     // when explicitly opted in): emits "log" events with raw log entries.
     this.eventSource.addEventListener('log', (event: Event) => {
       try {
-        const entry = JSON.parse((event as MessageEvent).data) as MessageLogEntry;
+        const entry = JSON.parse((event as MessageEvent<string>).data) as MessageLogEntry;
         this.mergeEntries([entry]);
       } catch {
         // Skip unparseable entries
@@ -961,6 +974,7 @@ export class ScionAgentMessageViewer extends LitElement {
       const fromLabel = msg.sender || 'unknown';
       const toLabel = msg.recipient || 'unknown';
 
+      // prettier-ignore
       rows.push(html`
         <div class="message-row" @click=${() => this.toggleExpand(msg.insertId)}>
           <div class="msg-direction ${msg.direction}">

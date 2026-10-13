@@ -47,17 +47,6 @@ import (
 // R1: human-sender deferred path must still run notify + @mention fan-out
 // ---------------------------------------------------------------------------
 
-// setReincarnationState sets an agent's ReincarnationState via UpdateAgent.
-// CreateAgent's ent mapping does not persist this field (see
-// entadapter/agent_store.go: SetReincarnationState is wired only into
-// UpdateAgent's mutation builder), so every test that needs a migrating
-// agent must create it first and set this separately.
-func setReincarnationState(t *testing.T, s store.Store, a *store.Agent, rs string) {
-	t.Helper()
-	a.ReincarnationState = rs
-	require.NoError(t, s.UpdateAgent(context.Background(), a))
-}
-
 // setupR1TestAgents creates a project, a runtime broker, a migrating primary
 // agent, and a running peer agent that can be @mentioned.
 func setupR1TestAgents(t *testing.T, s store.Store) (projectID, primaryID, peerID string) {
@@ -304,8 +293,8 @@ func TestSendAgentRouted_R3_MigratingPrimaryDuringProvisioningDeferred(t *testin
 	req = req.WithContext(contextWithIdentity(req.Context(), owner))
 	rr := httptest.NewRecorder()
 
-	msgID := srv.sendAgentRouted(rr, req, "topic:"+project.ID, project.ID, owner,
-		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{})
+	msgID := writeChatSendOutcome(rr)(srv.sendAgentRouted(req.Context(), "topic:"+project.ID, project.ID, owner,
+		"hello", "Owner", []*store.Agent{primary}, nil, nil, nil, time.Now(), "", nil, chatSendOptions{}))
 
 	require.NotEmpty(t, msgID, "the message must still be persisted; response: %d %s", rr.Code, rr.Body.String())
 	require.Empty(t, dispatcher.getMessages(), "a migrating primary during provisioning must not be dispatched to")
@@ -459,10 +448,10 @@ func TestMessageEventHandler_R3_MigratingTargetFailsLoudly(t *testing.T) {
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("r3-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("r3-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)
@@ -507,10 +496,10 @@ func TestMessageEventHandler_OA_AuthzDenialPrecedesReincarnationCheck(t *testing
 
 	payload, err := json.Marshal(MessageEventPayload{AgentID: target.ID, Message: "wake up"})
 	require.NoError(t, err)
-	evt := store.ScheduledEvent{
-		ID: tid("oa-sched-event"), ProjectID: project.ID, Payload: string(payload),
+	evt := withAgentRevision(t, srv, store.ScheduledEvent{
+		ID: tid("oa-sched-event"), ProjectID: project.ID, EventType: "message", Payload: string(payload),
 		CreatedBy: creator.ID,
-	}
+	}, creator.ID)
 
 	handler := srv.messageEventHandler()
 	err = handler(ctx, evt)

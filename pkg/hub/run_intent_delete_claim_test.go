@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -61,18 +60,6 @@ func preClaim(a *store.Agent) *store.Agent {
 	c.DeletionState = ""
 	c.DeletionLeaseAt = nil
 	return &c
-}
-
-// requireIntentDeleteInProgress asserts the delete_in_progress answer of a
-// refused running-intent write, in the shape every delete_in_progress
-// answer has: details.agentId names the agent (round 6 n1).
-func requireIntentDeleteInProgress(t *testing.T, rec *httptest.ResponseRecorder, agentID string) {
-	t.Helper()
-	requireDeleteInProgress(t, rec)
-	var body ErrorResponse
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-	assert.Equal(t, ErrCodeDeleteInProgress, body.Error.Code)
-	assert.Equal(t, agentID, body.Error.Details["agentId"], "details.agentId")
 }
 
 // A delete that claims the row after the start gate passed refuses the

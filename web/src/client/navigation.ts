@@ -26,6 +26,8 @@
  * listens for, so this module has no dependency on the router.
  */
 
+import { hasInPageState, IN_PAGE_STATE_KEY } from './route-history.js';
+
 /**
  * Prefix an app path (e.g. `/projects/abc`) with the configured base path
  * for use as a browser URL. Returns the path unchanged when the app is
@@ -90,4 +92,33 @@ export function replaceSearch(search: URLSearchParams | string): void {
   const qs = (typeof search === 'string' ? search : search.toString()).replace(/^\?/, '');
   const url = `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`;
   window.history.replaceState(window.history.state, '', url);
+}
+
+/**
+ * Move to a fragment of the page on screen as an in-page history entry,
+ * without rendering. The entry being left is marked in-page first (its
+ * other state kept, `leaving` as its marker) unless it already is, and the
+ * new entry carries `state` as its marker (IN_PAGE_STATE_KEY, see
+ * route-history.ts). The router leaves Back and Forward between such
+ * entries of one path to the page; a plain fragment navigation would
+ * instead render the route again. The path (already base-prefixed) and the
+ * query are kept. `fragment` starts with "#".
+ */
+export function pushInPageFragment(
+  fragment: string,
+  state: Record<string, unknown>,
+  leaving: Record<string, unknown>
+): void {
+  const h = window.history;
+  const current: unknown = h.state;
+  if (!hasInPageState(current)) {
+    const kept: Record<string, unknown> =
+      typeof current === 'object' && current !== null ? (current as Record<string, unknown>) : {};
+    h.replaceState({ ...kept, [IN_PAGE_STATE_KEY]: leaving }, '');
+  }
+  h.pushState(
+    { [IN_PAGE_STATE_KEY]: state },
+    '',
+    `${window.location.pathname}${window.location.search}${fragment}`
+  );
 }

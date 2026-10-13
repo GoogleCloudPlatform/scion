@@ -97,37 +97,6 @@ func (s *constraintHistoryFailureStore) AppendConstraintHistoryTx(ctx context.Co
 	return s.err
 }
 
-func commitAuditedConstraint(
-	t *testing.T,
-	ctx context.Context,
-	gs *GovernanceService,
-	ps *PreviewService,
-	draft *store.AccessConstraint,
-	actor PrincipalContext,
-) (*CommitResult, error) {
-	t.Helper()
-	preview, err := ps.GeneratePreview(context.Background(), PreviewRequest{
-		Operation: "create",
-		Draft:     draft,
-		Actor:     actor,
-	})
-	require.NoError(t, err)
-	return gs.CommitBoundaryChange(ctx, CommitRequest{
-		Operation:    "create",
-		Draft:        draft,
-		PreviewToken: preview.PreviewToken,
-		PreviewID:    preview.PreviewID,
-		DraftHash:    preview.DraftHash,
-		Actor:        actor,
-		AuditRequest: &auditevent.RequestRef{
-			ID:      "request-audit-create",
-			Method:  "POST",
-			Route:   "/api/v1/admin/access-constraints",
-			Surface: "api",
-		},
-	})
-}
-
 func TestGovernanceCreateAudit_OneEnvelopeTransactionAndScope(t *testing.T) {
 	for _, tc := range []struct {
 		name         string

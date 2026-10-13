@@ -43,65 +43,6 @@ import (
 // DEF-138 test fixtures
 // ---------------------------------------------------------------------------
 
-// def138Setup creates a project, an agent, and a user. The agent is
-// configured as the sender for outbound messages.
-func def138Setup(t *testing.T) (srv *Server, s store.Store, project *store.Project, agent *store.Agent, user *store.User) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	project = &store.Project{
-		ID:   tid("def138-project"),
-		Name: "def138-project",
-		Slug: "def138-project",
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	user = &store.User{
-		ID:          tid("def138-user"),
-		Email:       "def138@example.com",
-		DisplayName: "DEF138 User",
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-
-	agent = &store.Agent{
-		ID:        tid("def138-agent"),
-		Name:      "def138-agent",
-		Slug:      "def138-agent",
-		ProjectID: project.ID,
-		Phase:     "running",
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	return srv, s, project, agent, user
-}
-
-// postOutboundWithConv sends an outbound message with a conversation_id.
-func postOutboundWithConv(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg, convID string) *httptest.ResponseRecorder {
-	t.Helper()
-	body, _ := json.Marshal(OutboundMessageRequest{
-		Recipient:      "user:" + recipientEmail,
-		Msg:            msg,
-		ConversationID: convID,
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/outbound-message", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req = req.WithContext(contextWithIdentity(req.Context(), &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-	}}))
-
-	rr := httptest.NewRecorder()
-	srv.handleAgentOutboundMessage(rr, req, agentID)
-	return rr
-}
-
-// postOutboundNoConv sends an outbound message without a conversation_id.
-func postOutboundNoConv(t *testing.T, srv *Server, projectID, agentID, recipientEmail, msg string) *httptest.ResponseRecorder {
-	t.Helper()
-	return postOutboundWithConv(t, srv, projectID, agentID, recipientEmail, msg, "")
-}
-
 // ---------------------------------------------------------------------------
 // AC-1: Round trip — reply carrying the envelope's conversation persists
 // with conversation_id equal to the inbound message's.
@@ -190,8 +131,9 @@ func TestDEF138_AC2_UnauthorisedConversation_DirectDM_Denied(t *testing.T) {
 
 	// Agent tries to claim a conversation it is not a participant of.
 	rr := postOutboundWithConv(t, srv, project.ID, agent.ID, otherUser.Email, "unauthorized", created.ID)
-	require.Equal(t, http.StatusForbidden, rr.Code,
-		"should deny with 403, body: %s", rr.Body.String())
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"should answer as an unknown conversation_id, body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 
 	// AC-2: assert NO message row was written.
 	msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 100})
@@ -229,8 +171,9 @@ func TestDEF138_AC2_UnauthorisedConversation_GroupWrongProject_Denied(t *testing
 
 	// Agent in project A tries to claim a conversation in project B.
 	rr := postOutboundWithConv(t, srv, agent.ProjectID, agent.ID, user.Email, "cross-project", created.ID)
-	require.Equal(t, http.StatusForbidden, rr.Code,
-		"should deny cross-project assertion, body: %s", rr.Body.String())
+	require.Equal(t, http.StatusBadRequest, rr.Code,
+		"should answer a conversation of another project as an unknown conversation_id, body: %s", rr.Body.String())
+	require.Contains(t, rr.Body.String(), "caller-supplied conversation_id does not exist")
 
 	// AC-2: assert NO message row was written.
 	msgsAfter, err := s.ListMessages(ctx, store.MessageFilter{AgentID: agent.ID}, store.ListOptions{Limit: 100})

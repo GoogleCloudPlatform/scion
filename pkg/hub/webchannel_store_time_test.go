@@ -35,41 +35,17 @@ import (
 
 // The tests in this file use the production SQLite driver (modernc, "sqlite").
 // It stores a bound time.Time as time.Time.String() text, which is the source
-// of the bugs they cover; the mattn driver used by older webchat tests does
-// not, and so hides them.
+// of the bugs they cover. (Webchat tests once used mattn/go-sqlite3, which
+// does not, and so hid them; ptone/scion#4694 removed it.)
 
 // newModerncWebChatStore opens a webchat store on a fresh in-memory modernc
 // database without the ent schema.
 func newModerncWebChatStore(t *testing.T) (*sqliteWebChatStore, *sql.DB) {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	require.NoError(t, err)
-	db.SetMaxOpenConns(1) // one connection, so every query sees the same in-memory database
-	t.Cleanup(func() { _ = db.Close() })
+	db := openTestMemorySQLite(t, "sqlite")
 	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
 	require.NoError(t, wcs.Init())
 	return wcs, db
-}
-
-// newEntWebChatStore opens a webchat store on the ent-migrated test store's
-// database, as the hub does in production.
-func newEntWebChatStore(t *testing.T) (*sqliteWebChatStore, store.Store, *sql.DB) {
-	t.Helper()
-	s := createTestStore(t)
-	t.Cleanup(func() { _ = s.Close() })
-	dbp, ok := s.(interface{ DB() *sql.DB })
-	require.True(t, ok, "test store must expose DB()")
-	db := dbp.DB()
-	wcs := NewWebChatStore(db, "sqlite").(*sqliteWebChatStore)
-	require.NoError(t, wcs.Init())
-	return wcs, s, db
-}
-
-func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
-	t.Helper()
-	var s string
-	require.NoError(t, db.QueryRow(query, args...).Scan(&s))
-	return s
 }
 
 // requireCanonicalWebchatText asserts the stored text is RFC3339Nano in UTC,
@@ -77,12 +53,6 @@ func rawText(t *testing.T, db *sql.DB, query string, args ...any) string {
 func requireCanonicalWebchatText(t *testing.T, text string, want time.Time) {
 	t.Helper()
 	require.Equal(t, want.UTC().Format(time.RFC3339Nano), text)
-}
-
-func requireUTCInstant(t *testing.T, got, want time.Time) {
-	t.Helper()
-	assert.True(t, got.Equal(want), "got %v, want %v", got, want)
-	assert.Equal(t, time.UTC, got.Location(), "got %v", got)
 }
 
 func tokyoTime(t *testing.T) time.Time {

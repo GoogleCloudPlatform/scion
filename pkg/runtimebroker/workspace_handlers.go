@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/gcp"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -250,6 +251,16 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The apply writes into the workspace (for a shared-workspace agent,
+	// the project's shared checkout) under the process-wide workspace lock
+	// on that path, through the permission changes below.
+	unlockWorkspace, err := s.locks().Lock(ctx, workspacePath)
+	if err != nil {
+		s.writeRuntimeOpError(w, ctx, opDownloadWorkspace, err, "agent_slug", req.Slug)
+		return
+	}
+	defer unlockWorkspace()
+
 	// Sync workspace from GCS to local using rclone
 	filesPath := req.StoragePath + "/files"
 	if err := s.workspaceDownloader()(ctx, bucket, filesPath, workspacePath); err != nil {
@@ -298,8 +309,9 @@ func (s *Server) handleWorkspaceApply(w http.ResponseWriter, r *http.Request) {
 // It first tries to find the container and inspect its volume mounts,
 // then falls back to the known worktree location pattern.
 func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (string, error) {
+	defMgr, defRT := s.defaultPair()
 	// First, try to find the agent in the manager
-	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true"})
+	agents, err := defMgr.List(ctx, map[string]string{"scion.agent": "true"})
 	if err != nil {
 		return "", fmt.Errorf("failed to list agents: %w", err)
 	}
@@ -308,13 +320,25 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	var projectPath string
 	var agentName string
 
+	matches := 0
 	for _, agent := range agents {
 		if agent.Name == agentID || agent.ContainerID == agentID || agent.Slug == agentID || strings.EqualFold(agent.Name, agentID) {
+			matches++
+			if matches > 1 {
+				continue
+			}
 			containerID = agent.ContainerID
 			projectPath = agent.ProjectPath
 			agentName = agent.Name
-			break
+			if !s.isFlat() {
+				break
+			}
 		}
+	}
+	// A flat instance never picks one of several owned agents matching the
+	// name (the request carries no project scope here).
+	if s.isFlat() && matches > 1 {
+		return "", fmt.Errorf("agent %q is ambiguous: %d owned agents match", agentID, matches)
 	}
 
 	if containerID == "" {
@@ -322,8 +346,8 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	}
 
 	// Try to get workspace from runtime (Docker volume mounts)
-	if s.runtime != nil {
-		workspacePath, err := s.runtime.GetWorkspacePath(ctx, containerID)
+	if defRT != nil {
+		workspacePath, err := defRT.GetWorkspacePath(ctx, containerID)
 		if err == nil && workspacePath != "" {
 			// Verify the path exists
 			if _, statErr := os.Stat(workspacePath); statErr == nil {
@@ -379,9 +403,19 @@ func (s *Server) getAgentWorkspacePath(ctx context.Context, agentID string) (str
 	return "", fmt.Errorf("could not resolve workspace path for agent %s", agentID)
 }
 
+// workspaceIdentityManifestExclude keeps the root .scion identity entry out
+// of workspace manifests, matching what gcp.SyncToGCS uploads.
+const workspaceIdentityManifestExclude = config.DotScion + "/**"
+
 // buildWorkspaceManifest builds a manifest from the workspace directory.
 func (s *Server) buildWorkspaceManifest(workspacePath string, excludePatterns []string) (*transfer.Manifest, error) {
 	builder := transfer.NewManifestBuilder(workspacePath)
+
+	// gcp.SyncToGCS never uploads the root .scion identity entry (marker
+	// file or directory), so leave it out of the manifest too. In
+	// transfer's matcher this pattern is anchored to the root and matches
+	// both forms.
+	builder.WithExcludePatterns([]string{workspaceIdentityManifestExclude})
 
 	// Add custom exclude patterns
 	if len(excludePatterns) > 0 {

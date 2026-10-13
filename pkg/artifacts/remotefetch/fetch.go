@@ -32,6 +32,11 @@
 //     WebP; SVG and everything else are refused. The returned content type
 //     is the sniffed one, never the server's.
 //
+// FetchBytes applies the same request rules but returns the capped body
+// without sniffing its type, for callers that fetch non-image content. A
+// Config.AllowedHosts list, when set, further limits every hop (including
+// redirects) to the named hosts.
+//
 // Errors carry a Reason for server-side logs. Callers must not show the
 // reason to the publisher or to readers: a refused address and a missing
 // image must look the same from outside.
@@ -69,19 +74,20 @@ type Reason string
 
 // Failure reasons.
 const (
-	ReasonBadURL        Reason = "bad_url"
-	ReasonScheme        Reason = "scheme_not_https"
-	ReasonUserinfo      Reason = "userinfo"
-	ReasonPort          Reason = "port_not_443"
-	ReasonHost          Reason = "bad_host"
-	ReasonResolve       Reason = "resolve_failed"
-	ReasonDeniedAddress Reason = "denied_address"
-	ReasonConnect       Reason = "connect_failed"
-	ReasonTimeout       Reason = "timeout"
-	ReasonRedirects     Reason = "too_many_redirects"
-	ReasonStatus        Reason = "bad_status"
-	ReasonTooLarge      Reason = "too_large"
-	ReasonType          Reason = "type_not_allowed"
+	ReasonBadURL         Reason = "bad_url"
+	ReasonScheme         Reason = "scheme_not_https"
+	ReasonUserinfo       Reason = "userinfo"
+	ReasonPort           Reason = "port_not_443"
+	ReasonHost           Reason = "bad_host"
+	ReasonResolve        Reason = "resolve_failed"
+	ReasonDeniedAddress  Reason = "denied_address"
+	ReasonConnect        Reason = "connect_failed"
+	ReasonTimeout        Reason = "timeout"
+	ReasonRedirects      Reason = "too_many_redirects"
+	ReasonStatus         Reason = "bad_status"
+	ReasonTooLarge       Reason = "too_large"
+	ReasonType           Reason = "type_not_allowed"
+	ReasonHostNotAllowed Reason = "host_not_allowed"
 )
 
 // Error is a failed fetch.
@@ -102,11 +108,11 @@ func fail(r Reason, format string, args ...any) *Error {
 	return &Error{Reason: r, Detail: fmt.Sprintf(format, args...)}
 }
 
-// Result is a fetched image.
+// Result is a fetched body.
 type Result struct {
 	Body []byte
-	// ContentType is the sniffed media type: image/png, image/jpeg,
-	// image/gif or image/webp.
+	// ContentType is the sniffed media type for Fetch: image/png,
+	// image/jpeg, image/gif or image/webp. It is empty for FetchBytes.
 	ContentType string
 	// SHA256 is the lowercase hex digest of Body.
 	SHA256 string
@@ -124,6 +130,11 @@ type Config struct {
 	ConnectTimeout time.Duration
 	MaxRedirects   int
 	Logger         *slog.Logger
+	// AllowedHosts, when non-empty, is the complete set of host names the
+	// fetcher may contact, checked on the first request and on every
+	// redirect hop. Names are compared case-insensitively and exactly (no
+	// subdomain matching). Empty means any host that passes the other rules.
+	AllowedHosts []string
 }
 
 // Fetcher fetches remote images. It is safe for concurrent use.
@@ -164,12 +175,31 @@ func New(cfg Config) *Fetcher {
 	}
 }
 
+// fetchMode selects how a successful response body is read.
+type fetchMode int
+
+const (
+	modeImage fetchMode = iota // capped, must sniff as an allowed image
+	modeBytes                  // capped, any content
+)
+
 // Fetch downloads one image. The per-fetch timeout applies on top of any
 // deadline ctx already carries (the caller's total budget).
 func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
+	return f.run(ctx, rawURL, modeImage)
+}
+
+// FetchBytes downloads one body of any content type under the same request
+// rules as Fetch (https, port, address vetting, redirect checks, AllowedHosts,
+// size cap and timeouts). The body is not sniffed.
+func (f *Fetcher) FetchBytes(ctx context.Context, rawURL string) (*Result, error) {
+	return f.run(ctx, rawURL, modeBytes)
+}
+
+func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode) (*Result, error) {
 	ctx, cancel := context.WithTimeout(ctx, f.cfg.Timeout)
 	defer cancel()
-	res, err := f.fetch(ctx, rawURL)
+	res, err := f.fetch(ctx, rawURL, mode)
 	if err != nil {
 		var fe *Error
 		if !errors.As(err, &fe) {
@@ -178,14 +208,18 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string) (*Result, error) {
 		if ctx.Err() != nil && fe.Reason != ReasonDeniedAddress {
 			fe = fail(ReasonTimeout, "%v", err)
 		}
-		f.cfg.Logger.WarnContext(ctx, "artifacts: remote image not fetched",
+		msg := "artifacts: remote image not fetched"
+		if mode == modeBytes {
+			msg = "remotefetch: remote content not fetched"
+		}
+		f.cfg.Logger.WarnContext(ctx, msg,
 			"reason", string(fe.Reason), "detail", fe.Detail, "url", redactURL(rawURL))
 		return nil, fe
 	}
 	return res, nil
 }
 
-func (f *Fetcher) fetch(ctx context.Context, rawURL string) (*Result, error) {
+func (f *Fetcher) fetch(ctx context.Context, rawURL string, mode fetchMode) (*Result, error) {
 	current := rawURL
 	for hop := 0; ; hop++ {
 		u, err := f.checkURL(current)
@@ -196,7 +230,7 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string) (*Result, error) {
 		if err != nil {
 			return nil, err
 		}
-		resp, err := f.get(ctx, u, addr)
+		resp, err := f.get(ctx, u, addr, mode)
 		if err != nil {
 			return nil, err
 		}
@@ -214,6 +248,9 @@ func (f *Fetcher) fetch(ctx context.Context, rawURL string) (*Result, error) {
 			continue
 		}
 		defer func() { _ = resp.Body.Close() }()
+		if mode == modeBytes {
+			return f.readBytes(resp)
+		}
 		return f.readImage(resp)
 	}
 }
@@ -238,6 +275,9 @@ func (f *Fetcher) checkURL(raw string) (*url.URL, error) {
 	if host == "" {
 		return nil, fail(ReasonHost, "empty host")
 	}
+	if len(f.cfg.AllowedHosts) > 0 && !f.hostAllowed(host) {
+		return nil, fail(ReasonHostNotAllowed, "host %q is not allowed", host)
+	}
 	if a, err := netip.ParseAddr(host); err == nil {
 		if a.Zone() != "" {
 			return nil, fail(ReasonHost, "zone in IP literal")
@@ -248,6 +288,17 @@ func (f *Fetcher) checkURL(raw string) (*url.URL, error) {
 		return nil, fail(ReasonHost, "host %q is neither an IP literal nor a DNS name", host)
 	}
 	return u, nil
+}
+
+// hostAllowed reports whether host is in Config.AllowedHosts.
+func (f *Fetcher) hostAllowed(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	for _, h := range f.cfg.AllowedHosts {
+		if strings.EqualFold(host, h) {
+			return true
+		}
+	}
+	return false
 }
 
 // plausibleDNSName rejects host strings that some resolvers would read as a
@@ -309,7 +360,7 @@ func (f *Fetcher) vet(ctx context.Context, host string) (netip.Addr, error) {
 
 // get sends one request to addr, the vetted address of u's host. The
 // transport dials that address only and verifies TLS against u's host.
-func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr) (*http.Response, error) {
+func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fetchMode) (*http.Response, error) {
 	target := net.JoinHostPort(addr.String(), f.port)
 	dialer := &net.Dialer{Timeout: f.cfg.ConnectTimeout}
 	transport := &http.Transport{
@@ -343,7 +394,11 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr) (*http.R
 		return nil, fail(ReasonBadURL, "build request: %v", err)
 	}
 	req.Header.Set("User-Agent", "scion-artifacts/1")
-	req.Header.Set("Accept", "image/png, image/jpeg, image/gif, image/webp")
+	if mode == modeBytes {
+		req.Header.Set("Accept", "*/*")
+	} else {
+		req.Header.Set("Accept", "image/png, image/jpeg, image/gif, image/webp")
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fail(ReasonConnect, "%s via %s: %v", u.Hostname(), target, err)
@@ -362,6 +417,20 @@ func isRedirect(code int) bool {
 
 // readImage reads a 200 response under the size cap and sniffs its type.
 func (f *Fetcher) readImage(resp *http.Response) (*Result, error) {
+	res, err := f.readBytes(resp)
+	if err != nil {
+		return nil, err
+	}
+	ctype := SniffImage(res.Body)
+	if ctype == "" {
+		return nil, fail(ReasonType, "body is not an allowed image type")
+	}
+	res.ContentType = ctype
+	return res, nil
+}
+
+// readBytes reads a 200 response under the size cap.
+func (f *Fetcher) readBytes(resp *http.Response) (*Result, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fail(ReasonStatus, "status %d", resp.StatusCode)
 	}
@@ -376,12 +445,8 @@ func (f *Fetcher) readImage(resp *http.Response) (*Result, error) {
 	if n > f.cfg.MaxBytes {
 		return nil, fail(ReasonTooLarge, "body over %d bytes", f.cfg.MaxBytes)
 	}
-	ctype := SniffImage(buf.Bytes())
-	if ctype == "" {
-		return nil, fail(ReasonType, "body is not an allowed image type")
-	}
 	sum := sha256.Sum256(buf.Bytes())
-	return &Result{Body: buf.Bytes(), ContentType: ctype, SHA256: hex.EncodeToString(sum[:])}, nil
+	return &Result{Body: buf.Bytes(), SHA256: hex.EncodeToString(sum[:])}, nil
 }
 
 // SniffImage returns the media type of an allowed raster image from its

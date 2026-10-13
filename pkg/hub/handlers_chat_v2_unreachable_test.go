@@ -23,8 +23,6 @@
 package hub
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"testing"
@@ -35,54 +33,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
-
-// unreachableTestSetup creates a project and a topic whose default agent has
-// the given phase (and is optionally soft-deleted), and wires the given
-// dispatcher. Mirrors setupSendTest in handlers_chat_v2_test.go.
-func unreachableTestSetup(t *testing.T, phase string, deleted bool, disp AgentDispatcher) (*Server, store.Store, string, *store.Agent) {
-	t.Helper()
-	srv, s, wcs, proj, db := setupSendTest(t)
-	srv.SetDispatcher(disp)
-	ctx := t.Context()
-	a := &store.Agent{ID: tid("unreachable-" + phase), ProjectID: proj.ID, Name: "Unreachable", Slug: "unreachable-" + phase,
-		Phase: phase, OwnerID: DevUserID, CreatedBy: DevUserID}
-	if err := s.CreateAgent(ctx, a); err != nil {
-		t.Fatal(err)
-	}
-	if deleted {
-		a.DeletedAt = time.Now()
-		if err := s.UpdateAgent(ctx, a); err != nil {
-			t.Fatal(err)
-		}
-	}
-	topicID := tid("unreachable-topic-" + phase)
-	if err := wcs.CreateTopic(ctx, WebChatTopic{ID: topicID, ProjectID: proj.ID, Name: "unreachable-" + phase,
-		CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: a.Slug}); err != nil {
-		t.Fatal(err)
-	}
-	setTopicConversationID(t, db, s, topicID, proj.ID)
-	return srv, s, topicID, a
-}
-
-// unreachableSend posts content to topicID and returns the HTTP status, the
-// decoded JSON response body, and the persisted store row (nil if the
-// response carried no message ID).
-func unreachableSend(t *testing.T, srv *Server, s store.Store, topicID, content string) (int, map[string]any, *store.Message) {
-	t.Helper()
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+topicID+"/messages",
-		map[string]string{"content": content})
-	var resp map[string]any
-	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v (body=%s)", err, rec.Body.String())
-	}
-	id, _ := resp["id"].(string)
-	var m *store.Message
-	if id != "" {
-		m, _ = s.GetMessage(t.Context(), id)
-	}
-	t.Logf("HTTP %d body=%s", rec.Code, rec.Body.String())
-	return rec.Code, resp, m
-}
 
 // Suspended default agent: the phase gate must persist the row failed,
 // report it in the response, and never dispatch.
@@ -255,12 +205,11 @@ func TestUnreachableNC_StartingDefault_DispatchedAsToday(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // R1: a human @mention in a topic whose default agent was deleted must still
-// notify. sendUnreachableDefaultAgent used to be a near-copy of
-// sendHumanToHuman that dropped fireHumanMentionNotifications entirely; it is
-// now merged into sendHumanToHuman via unreachableAgentOverride so the two
-// paths share one notification pipeline. This test would fail against that
-// regression.
-func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
+// make the mentioned human a member of the thread. The unreachable-default
+// path is merged into sendHumanToHuman via unreachableAgentOverride so the
+// two paths share one post-send pipeline. This test would fail if the
+// unreachable path dropped it.
+func TestUnreachableNC_DeletedDefault_HumanMentionStillMakesMember(t *testing.T) {
 	d := &brokerMockDispatcher{}
 	srv, s, topic, _ := unreachableTestSetup(t, "running", true, d)
 	ctx := t.Context()
@@ -321,12 +270,15 @@ func TestUnreachableNC_DeletedDefault_HumanMentionStillNotifies(t *testing.T) {
 		t.Fatalf("expected dispatchFailureCode=agent_unreachable, got %v", resp)
 	}
 
-	// fireHumanMentionNotifications runs in a goroutine; poll for it.
+	// Membership is recorded in a goroutine; poll for it.
+	require.NotEmpty(t, m.ConversationID, "message must be attributed to the thread conversation")
 	require.Eventually(t, func() bool {
-		notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
-		return err == nil && len(notifs) == 1
-	}, 2*time.Second, 20*time.Millisecond,
-		"human @mention must still notify when the topic default agent was deleted (R1)")
+		return isUserParticipant(t, s, m.ConversationID, humanUser.ID)
+	}, 5*time.Second, 20*time.Millisecond,
+		"human @mention must still make a member when the topic default agent was deleted (R1)")
+	notifs, err := s.GetNotifications(ctx, store.SubscriberTypeUser, humanUser.ID, false)
+	require.NoError(t, err)
+	require.Empty(t, notifs, "chat mentions must not create notification rows")
 }
 
 // R3: a leading @mention of a running agent must override a deleted topic
@@ -456,44 +408,13 @@ func TestUnreachableNC_DispatchErrorBranch_ResponseReasonSanitizedLikeRow(t *tes
 	}
 }
 
-// transientAgentLookupStore wraps a store and injects a non-ErrNotFound error
-// from GetAgentBySlug for a specific slug, to exercise the nit-1 fix: a
-// transient store error resolving a topic's default agent must not be
-// classified the same as "deleted".
-type transientAgentLookupStore struct {
-	store.Store
-	failSlug string
-	err      error
-}
-
-func (t *transientAgentLookupStore) GetAgentBySlug(ctx context.Context, projectID, slug string) (*store.Agent, error) {
-	if slug == t.failSlug {
-		return nil, t.err
-	}
-	return t.Store.GetAgentBySlug(ctx, projectID, slug)
-}
-
-// errListAgentsStore wraps a store and forces ListAgents to fail, which is
-// the seam resolveRoutingAgents (via listAllProjectAgents) uses to list
-// project agents for mention resolution. Injecting a failure there is the
-// cleanest way to force resolveRoutingAgents to return a non-nil error
-// without adding a hacky new seam to production code.
-type errListAgentsStore struct {
-	store.Store
-	err error
-}
-
-func (e *errListAgentsStore) ListAgents(ctx context.Context, filter store.AgentFilter, opts store.ListOptions) (*store.ListResult[store.Agent], error) {
-	return nil, e.err
-}
-
 // Consider 2 (review round 2): a routing-plan error (resolveRoutingAgents
 // itself failing, not just resolving to zero agents) in a topic whose
-// default agent is soft-deleted must not be mislabelled "Agent unreachable
-// (deleted)". Before the fix, handleConversationSend gated the unreachable-
+// default agent is soft-deleted must not be mislabelled "Agent
+// unreachable". Before the fix, handleConversationSend gated the unreachable-
 // default override only on unresolvedDefaultAgent being set, so a plan error
-// in this exact topic shape reported the same "Agent unreachable (deleted)"
-// outcome as an actually-unreachable default. The fix gates that override on
+// in this exact topic shape reported the same "Agent unreachable" outcome
+// as an actually-unreachable default. The fix gates that override on
 // planErr == nil, so a plan error now keeps the pre-existing human-to-human
 // error handling instead.
 func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable(t *testing.T) {
@@ -517,14 +438,14 @@ func TestUnreachableNC_RoutingPlanError_DeletedDefault_NotMislabelledUnreachable
 	if resp["dispatchFailureCode"] == "agent_unreachable" {
 		t.Fatalf("expected no agent_unreachable code on a routing-plan error, got %v", resp)
 	}
-	if want := "Agent unreachable (deleted)"; m.DispatchFailureReason != nil && *m.DispatchFailureReason == want {
+	if want := agentGoneReason; m.DispatchFailureReason != nil && *m.DispatchFailureReason == want {
 		t.Fatalf("expected the routing-plan error to NOT persist %q, got %+v", want, m)
 	}
 }
 
 // Nit 1 (review round 2): a transient (non-not-found) error resolving the
 // topic's default agent must not be classified as "deleted" — that would
-// permanently persist "Agent unreachable (deleted)" for a DB hiccup. Keep the
+// permanently persist "Agent unreachable" for a DB hiccup. Keep the
 // pre-nc-delivery-unreachable behaviour: fall through to an ordinary
 // human-to-human message.
 func TestUnreachableNC_TransientDefaultLookupError_FallsThroughToHumanToHuman(t *testing.T) {
@@ -558,4 +479,109 @@ func TestUnreachableNC_TransientDefaultLookupError_FallsThroughToHumanToHuman(t 
 	if resp["dispatchFailureCode"] == "agent_unreachable" {
 		t.Fatalf("expected no agent_unreachable code on a transient lookup error, got %v", resp)
 	}
+}
+
+// dmOutcome is the sender-visible result of a DM send: response fields and
+// the persisted row's delivery state.
+type dmOutcome struct {
+	Code       int
+	State      any
+	Reason     any
+	FailCode   any
+	Type       any
+	RowState   string
+	RowReason  string
+	Dispatches int
+}
+
+func sendDMOutcome(t *testing.T, srv *Server, s store.Store, d *brokerMockDispatcher, agentID string) dmOutcome {
+	t.Helper()
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	setDMConversationID(t, s, dmKey, "")
+	before := len(d.getMessages())
+	code, resp, m := unreachableSend(t, srv, s, dmKey, "hello")
+	if m == nil {
+		t.Fatalf("expected a persisted message, got body=%v", resp)
+	}
+	out := dmOutcome{Code: code, State: resp["dispatchState"], Reason: resp["dispatchFailureReason"],
+		FailCode: resp["dispatchFailureCode"], Type: resp["type"], RowState: m.DispatchState,
+		Dispatches: len(d.getMessages()) - before}
+	if m.DispatchFailureReason != nil {
+		out.RowReason = *m.DispatchFailureReason
+	}
+	return out
+}
+
+// dmRefusal sends a DM to agentID and returns the refusal response. It
+// fails the test if the send persisted a message or dispatched anything.
+func dmRefusal(t *testing.T, srv *Server, s store.Store, d *brokerMockDispatcher, agentID string) (int, string) {
+	t.Helper()
+	dmKey := "dm:agent:" + agentID + ":user:" + DevUserID
+	before := len(d.getMessages())
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/chat/conversations/"+dmKey+"/messages",
+		map[string]string{"content": "hello"})
+	res, err := s.ListMessages(t.Context(), store.MessageFilter{ThreadID: dmKey}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Empty(t, res.Items, "a refused DM must not persist a message")
+	require.Equal(t, before, len(d.getMessages()), "a refused DM must not dispatch")
+	return rec.Code, rec.Body.String()
+}
+
+// A DM to a soft-deleted agent is recorded and reported as undelivered. A
+// DM to an agent whose record is gone (hard-deleted) is refused exactly
+// like a DM to an agent ID that never existed: the DM peer check refuses
+// a missing peer with the uniform non-participant answer (404, as for a
+// missing thread) and stores nothing.
+func TestUnreachableNC_DM_DeletedAndMissingAgentSameOutcome(t *testing.T) {
+	d := &brokerMockDispatcher{}
+	srv, s, _, proj, _ := setupSendTest(t)
+	srv.SetDispatcher(d)
+	ctx := t.Context()
+
+	soft := &store.Agent{ID: tid("dm-soft-gone"), ProjectID: proj.ID, Name: "Soft", Slug: "soft-gone",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateAgent(ctx, soft))
+	soft.DeletedAt = time.Now()
+	require.NoError(t, s.UpdateAgent(ctx, soft))
+
+	hard := &store.Agent{ID: tid("dm-hard-gone"), ProjectID: proj.ID, Name: "Hard", Slug: "hard-gone",
+		Phase: "running", OwnerID: DevUserID, CreatedBy: DevUserID}
+	require.NoError(t, s.CreateAgent(ctx, hard))
+	require.NoError(t, s.DeleteAgent(ctx, hard.ID))
+
+	softOut := sendDMOutcome(t, srv, s, d, soft.ID)
+	want := dmOutcome{Code: http.StatusCreated, State: store.MessageDispatchFailed, Reason: agentGoneReason,
+		FailCode: dispatchFailureCodeAgentUnreachable, Type: messages.TypeInstruction,
+		RowState: store.MessageDispatchFailed, RowReason: agentGoneReason}
+	require.Equal(t, want, softOut, "soft-deleted agent")
+
+	missingCode, missingBody := dmRefusal(t, srv, s, d, tid("dm-never-existed"))
+	require.Equal(t, http.StatusNotFound, missingCode, missingBody)
+	hardCode, hardBody := dmRefusal(t, srv, s, d, hard.ID)
+	require.Equal(t, missingCode, hardCode, "hard-deleted agent must match missing agent")
+	require.Equal(t, missingBody, hardBody, "hard-deleted agent must match missing agent")
+}
+
+// A topic whose default agent was soft-deleted and one whose default names
+// no agent at all report the same failure reason.
+func TestUnreachableNC_TopicDeletedAndMissingDefaultSameReason(t *testing.T) {
+	d := &brokerMockDispatcher{}
+	srv, s, topic, _ := unreachableTestSetup(t, "running", true, d)
+	_, deletedResp, deletedRow := unreachableSend(t, srv, s, topic, "hello")
+
+	srv2, s2, wcs2, proj2, db2 := setupSendTest(t)
+	srv2.SetDispatcher(d)
+	missingTopic := tid("missing-default-topic")
+	require.NoError(t, wcs2.CreateTopic(t.Context(), WebChatTopic{ID: missingTopic, ProjectID: proj2.ID,
+		Name: "missing-default", CreatedBy: "dev", CreatedAt: time.Now().UTC(), DefaultAgent: "never-existed"}))
+	setTopicConversationID(t, db2, s2, missingTopic, proj2.ID)
+	_, missingResp, missingRow := unreachableSend(t, srv2, s2, missingTopic, "hello")
+
+	require.NotNil(t, deletedRow)
+	require.NotNil(t, missingRow)
+	require.Equal(t, missingResp["dispatchFailureReason"], deletedResp["dispatchFailureReason"])
+	require.Equal(t, missingResp["dispatchFailureCode"], deletedResp["dispatchFailureCode"])
+	require.Equal(t, missingRow.DispatchState, deletedRow.DispatchState)
+	require.Equal(t, *missingRow.DispatchFailureReason, *deletedRow.DispatchFailureReason)
+	require.Equal(t, agentGoneReason, *deletedRow.DispatchFailureReason)
 }

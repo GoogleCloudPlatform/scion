@@ -24,7 +24,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -33,13 +32,6 @@ import (
 // seeds the same chain with an edge that carries no provenance -- the
 // unrecorded state of an edge written before provenance recording -- and
 // asserts the consumer denies with DenyCause ceiling_unrecorded.
-
-func assertUnrecordedDeny(t *testing.T, d Decision) {
-	t.Helper()
-	require.False(t, d.Allowed, "reason %q", d.Reason)
-	assert.Equal(t, DeniedByDelegationCeiling, d.DeniedBy, "reason %q", d.Reason)
-	assert.Equal(t, DenyCauseCeilingUnrecorded, d.DenyCause, "reason %q", d.Reason)
-}
 
 // gcp_service_account.assign: the SA-assign gate's Layer 1 CheckAccess.
 func TestUnrecordedEdgeDeniesSAAssign(t *testing.T) {

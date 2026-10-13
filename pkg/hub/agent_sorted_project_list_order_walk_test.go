@@ -50,54 +50,6 @@ import (
 // covered at n=100 by the existing small-fixture tests elsewhere in this
 // package.
 
-// referenceOrderIDs returns the authorized, filtered set's IDs in the
-// sorted-mode total order for (sort, dir), independent of any HTTP
-// pagination: a direct, single, unpaged store.Store.ListAgentMembers call.
-func referenceOrderIDs(t *testing.T, s store.Store, projectID, sortKey, dir string, max int) []string {
-	t.Helper()
-	members, err := s.ListAgentMembers(context.Background(), store.AgentFilter{ProjectID: projectID}, sortKey, dir, max)
-	require.NoError(t, err)
-	ids := make([]string, len(members))
-	for i, m := range members {
-		ids[i] = m.ID
-	}
-	return ids
-}
-
-// walkAllPagesIDs drives the real HTTP endpoint page by page (sort=updated)
-// and returns the concatenated agent IDs, as f.owner.
-func walkAllPagesIDs(t *testing.T, f *sortedListFixture, dir string, limit int) []string {
-	t.Helper()
-	return walkAllPagesIDsAs(t, f, f.owner, dir, limit)
-}
-
-// walkAllPagesIDsAs is walkAllPagesIDs for a caller other than f.owner: the
-// R<n walk needs a caller with a strict readable subset, via
-// grantProjectListOnly.
-func walkAllPagesIDsAs(t *testing.T, f *sortedListFixture, user *store.User, dir string, limit int) []string {
-	t.Helper()
-	var ids []string
-	cursor := ""
-	for pages := 0; ; pages++ {
-		require.Lessf(t, pages, 5000, "walk did not terminate within a sane number of pages")
-		q := fmt.Sprintf("sort=updated&dir=%s&limit=%d", dir, limit)
-		if cursor != "" {
-			q += "&cursor=" + url.QueryEscape(cursor)
-		}
-		rec := doRequestAsUser(t, f.srv, user, http.MethodGet, f.listPath(q), nil)
-		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		resp := mustDecodeListAgentsResponse(t, rec.Body)
-		for _, a := range resp.Agents {
-			ids = append(ids, a.ID)
-		}
-		if resp.NextCursor == "" {
-			break
-		}
-		cursor = resp.NextCursor
-	}
-	return ids
-}
-
 func TestListProjectAgentsSorted_OrderParity_1200Agents(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping large order-parity walk in -short mode")

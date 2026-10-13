@@ -19,16 +19,13 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"sort"
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,158 +59,10 @@ func parseRoutedEnvelope(t *testing.T, deliveryText string) routedEnvelope {
 	return env
 }
 
-func sortedStrings(s []string) []string {
-	c := make([]string, len(s))
-	copy(c, s)
-	sort.Strings(c)
-	return c
-}
-
-// routedTestEnv holds the common test fixtures for routed inbound tests.
-type routedTestEnv struct {
-	srv          *Server
-	store        store.Store
-	dispatcher   *recordingDispatcher
-	webChatStore WebChatStore
-	user         *store.User
-	project      *store.Project
-	agent1       *store.Agent // "alpha" — running, project mode
-	agent2       *store.Agent // "beta" — running, project mode
-	agent3       *store.Agent // "gamma" — stopped
-}
-
-func setupRoutedTestEnv(t *testing.T) routedTestEnv {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	// Wire a recording dispatcher so dispatch tests exercise the full path.
-	dispatcher := &recordingDispatcher{}
-	srv.SetDispatcher(dispatcher)
-
-	// Enable the envelope switch for DeliveryText assertions.
-	enableWriteDenySwitch(t, srv)
-
-	// Wire webChatStore for reply affinity assertions.
-	wcsDB, err := sql.Open("sqlite3", ":memory:")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = wcsDB.Close() })
-	wcs := NewWebChatStore(wcsDB, "sqlite3")
-	require.NoError(t, wcs.Init())
-	srv.SetWebChatStore(wcs)
-
-	// Create a project owner (separate from the test sender).
-	owner := &store.User{
-		ID:          tid("owner-routed"),
-		Email:       "owner-routed@example.com",
-		DisplayName: "Routed Owner",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, owner))
-	ensureHubMembership(ctx, s, owner.ID)
-
-	// Create a separate sender user (non-owner).
-	user := &store.User{
-		ID:          tid("user-routed"),
-		Email:       "routed@example.com",
-		DisplayName: "Routed User",
-		Role:        store.UserRoleMember,
-		Status:      "active",
-		Created:     time.Now(),
-	}
-	require.NoError(t, s.CreateUser(ctx, user))
-	ensureHubMembership(ctx, s, user.ID)
-
-	project := &store.Project{
-		ID:        tid("proj-routed"),
-		Slug:      "routed-proj",
-		Name:      "Routed Test Project",
-		OwnerID:   owner.ID,
-		CreatedBy: owner.ID,
-		Created:   time.Now(),
-		Updated:   time.Now(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	srv.seedProjectCreatorMembership(ctx, project)
-	msgAuthzAddProjectMember(t, s, user.ID, project.ID, project.Slug, store.GroupMemberRoleMember)
-
-	// Grant explicit agent.message send authority. Upstream removed
-	// agent.message from the project-member role; tests must not rely on
-	// that implicit grant. The negative tests (InactiveUser, UnknownSender)
-	// still verify denial for users without this explicit binding.
-	msgAuthzGrantAgentMessage(t, s, user.ID, project.ID)
-
-	agent1 := &store.Agent{
-		ID:           tid("agent-alpha"),
-		Slug:         "alpha",
-		Name:         "Alpha Agent",
-		ProjectID:    project.ID,
-		Phase:        string(state.PhaseRunning),
-		MessageMode:  store.MessageModeProject,
-		StateVersion: 1,
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent1))
-
-	agent2 := &store.Agent{
-		ID:           tid("agent-beta"),
-		Slug:         "beta",
-		Name:         "Beta Agent",
-		ProjectID:    project.ID,
-		Phase:        string(state.PhaseRunning),
-		MessageMode:  store.MessageModeProject,
-		StateVersion: 1,
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent2))
-
-	agent3 := &store.Agent{
-		ID:           tid("agent-gamma"),
-		Slug:         "gamma",
-		Name:         "Gamma Agent",
-		ProjectID:    project.ID,
-		Phase:        string(state.PhaseStopped),
-		MessageMode:  store.MessageModeProject,
-		StateVersion: 1,
-		Created:      time.Now(),
-		Updated:      time.Now(),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent3))
-
-	return routedTestEnv{
-		srv:          srv,
-		store:        s,
-		dispatcher:   dispatcher,
-		webChatStore: wcs,
-		user:         user,
-		project:      project,
-		agent1:       agent1,
-		agent2:       agent2,
-		agent3:       agent3,
-	}
-}
-
-func (e routedTestEnv) doRoutedRequest(t *testing.T, req routedInboundRequest) *httptest.ResponseRecorder {
-	t.Helper()
-	body, err := json.Marshal(req)
-	require.NoError(t, err)
-
-	httpReq := httptest.NewRequest(http.MethodPost, "/api/v1/broker/inbound/routed", bytes.NewReader(body))
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq = httpReq.WithContext(contextWithBrokerIdentity(httpReq.Context(), NewBrokerIdentity("test-broker")))
-
-	rec := httptest.NewRecorder()
-	e.srv.mux.ServeHTTP(rec, httpReq)
-	return rec
-}
-
 // --- Lifecycle tests (F-3): exercises dispatch → persist → SSE → affinity ---
 
 func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -274,6 +123,7 @@ func TestHandleBrokerInboundRouted_BasicDelivery(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Message with @beta mention → should route to alpha (default) + beta.
@@ -391,6 +241,7 @@ func TestHandleBrokerInboundRouted_MentionRouting(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Leading @beta overrides default alpha.
@@ -421,6 +272,7 @@ func TestHandleBrokerInboundRouted_LeadingMentionOverride(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -449,6 +301,7 @@ func TestHandleBrokerInboundRouted_UnresolvedMentionDiagnostic(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// No default, but @alpha is mentioned → alpha becomes primary.
@@ -476,6 +329,7 @@ func TestHandleBrokerInboundRouted_MissingDefault_WithMention(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// gamma is stopped → should fail with not_running.
@@ -499,6 +353,7 @@ func TestHandleBrokerInboundRouted_StoppedAgentPrimary(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_PrimaryFailureStopsFanOut(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Make dispatcher fail for all calls.
@@ -536,6 +391,7 @@ func TestHandleBrokerInboundRouted_PrimaryFailureStopsFanOut(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// Make the dispatcher succeed for alpha (first call) but fail for beta (second call).
@@ -586,6 +442,7 @@ func TestHandleBrokerInboundRouted_SecondaryFailureReported(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -610,6 +467,7 @@ func TestHandleBrokerInboundRouted_InterruptStripping(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -650,6 +508,7 @@ func TestHandleBrokerInboundRouted_IncomingMentionMetadataStripped(t *testing.T)
 }
 
 func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -679,6 +538,7 @@ func TestHandleBrokerInboundRouted_AttachmentsDeepCopied(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ConversationPersisted(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -708,6 +568,7 @@ func TestHandleBrokerInboundRouted_ConversationPersisted(t *testing.T) {
 // --- Validation tests (these don't need dispatcher) ---
 
 func TestHandleBrokerInboundRouted_MissingProjectID(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -724,6 +585,7 @@ func TestHandleBrokerInboundRouted_MissingProjectID(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MissingMessage(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -734,6 +596,7 @@ func TestHandleBrokerInboundRouted_MissingMessage(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NonUserSender(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -752,6 +615,7 @@ func TestHandleBrokerInboundRouted_NonUserSender(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_BroadcastRejected(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -771,6 +635,7 @@ func TestHandleBrokerInboundRouted_BroadcastRejected(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_DMThreadRejected(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -790,6 +655,7 @@ func TestHandleBrokerInboundRouted_DMThreadRejected(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ExternalRefWithoutSurface(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -809,6 +675,7 @@ func TestHandleBrokerInboundRouted_ExternalRefWithoutSurface(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_ParentRefWithoutExternalRef(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -828,6 +695,7 @@ func TestHandleBrokerInboundRouted_ParentRefWithoutExternalRef(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NoRecipient(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	// No default, no mentions → 422
@@ -849,6 +717,7 @@ func TestHandleBrokerInboundRouted_NoRecipient(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_InactiveUser(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 	ctx := context.Background()
 
@@ -878,6 +747,7 @@ func TestHandleBrokerInboundRouted_InactiveUser(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_UnknownSender(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{
@@ -896,6 +766,7 @@ func TestHandleBrokerInboundRouted_UnknownSender(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_NoBrokerAuth(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	body, err := json.Marshal(routedInboundRequest{
@@ -922,6 +793,7 @@ func TestHandleBrokerInboundRouted_NoBrokerAuth(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	httpReq := httptest.NewRequest(http.MethodGet, "/api/v1/broker/inbound/routed", nil)
@@ -936,6 +808,7 @@ func TestHandleBrokerInboundRouted_MethodNotAllowed(t *testing.T) {
 }
 
 func TestHandleBrokerInboundRouted_EmptyBody(t *testing.T) {
+	t.Parallel()
 	env := setupRoutedTestEnv(t)
 
 	rec := env.doRoutedRequest(t, routedInboundRequest{

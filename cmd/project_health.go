@@ -88,6 +88,7 @@ type ProjectHealthSummary struct {
 	Stopped         int `json:"stopped"`
 	Error           int `json:"error"`
 	OtherPhase      int `json:"otherPhase,omitempty"`
+	Initializing    int `json:"initializing,omitempty"` // running, activity initializing (shown as Starting)
 	Working         int `json:"working"`
 	Thinking        int `json:"thinking"`
 	Executing       int `json:"executing"`
@@ -276,6 +277,8 @@ func runProjectHealth(cmd *cobra.Command, args []string) error {
 			switch state.Activity(a.Activity) {
 			case "":
 				// No activity set (e.g., when agent is not running)
+			case state.ActivityInitializing:
+				report.Summary.Initializing++
 			case state.ActivityWorking:
 				report.Summary.Working++
 			case state.ActivityThinking:
@@ -351,6 +354,7 @@ func formatActivitySummary(s ProjectHealthSummary) string {
 		label string
 		val   int
 	}{
+		{"Starting", s.Initializing},
 		{"Executing", s.Executing},
 		{"WaitingForInput", s.WaitingForInput},
 		{"Stalled", s.Stalled},

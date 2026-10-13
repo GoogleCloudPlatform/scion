@@ -1,0 +1,35 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (1):
+  git mv hub/move.go hub/sub/move.go
+
+Renames (1):
+  type   gadget -> Gadget  (hub/move.go:3)
+
+Alias entries (1):
+  type  gadget = sub.Gadget
+
+Alias files (1):
+  hub/zz_alias_sub.go (13 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+ERRORS (3) - the move cannot be generated; see the safety report below.
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 1. Errors: 3.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== ERRORS (the move was not generated) ==
+  - hub/move.go:5: method Keeper.Polish moves but its receiver type Keeper stays in hub (declared at hub/stay.go:3); Go forbids methods on non-local types - move stay.go too or keep this file
+  - hub/move.go:5: moved file uses type Keeper, which stays in hub (hub/stay.go:3); the target cannot import hub (the alias file makes hub import the target) - move it too, or invert the dependency first
+  - hub/stay.go:5: method gadget.Spin stays in hub but its receiver type gadget moves (declared at hub/move.go:3); Go forbids methods on non-local types - move stay.go too
+
+== WARN: reflect-visible type name changes (all users, not only moved files) ==
+  hub/move.go:3: hub.gadget becomes sub.Gadget for %T, reflect Type.String/PkgPath, gob names and messages that print type names (the alias keeps identity, not the name)

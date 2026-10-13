@@ -27,22 +27,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// activeReservationResources returns the resource IDs of the active
-// reservations for limitName in the given scope.
-func activeReservationResources(t *testing.T, s store.Store, limitName, scopeType, scopeID string) []string {
-	t.Helper()
-	ctx := context.Background()
-	def, err := s.GetLimitDefinitionByName(ctx, limitName)
-	require.NoError(t, err)
-	res, err := s.ListActiveReservations(ctx, def.ID, scopeType, scopeID)
-	require.NoError(t, err)
-	ids := make([]string, 0, len(res))
-	for _, r := range res {
-		ids = append(ids, r.ResourceID)
-	}
-	return ids
-}
-
 // TestCreateAgent_ProjectLimitRefusal_ReleasesBrokerReservation pins the
 // first releaseAgentQuotas call in createAgentInProject (ptone/scion#2018):
 // the max_agents_per_broker reservation succeeds, then the

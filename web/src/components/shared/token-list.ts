@@ -121,6 +121,7 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
   project: 'Project',
   skill: 'Skill',
   template: 'Template',
+  test_identity: 'Test Identity',
   user: 'User',
 };
 
@@ -130,7 +131,8 @@ const RESOURCE_TYPE_LABELS: Record<string, string> = {
  * it never carries eligibility (every entry is selectable), so it must not
  * be used to answer "may I select this restriction" -- only the live
  * /api/v1/auth/scopes response does that. The list mirrors every registry
- * selector, including boundary-restricted ones such as broker:create
+ * selector the server offers (reserved permissions' selectors are not
+ * offered), including boundary-restricted ones such as broker:create
  * (hub-boundary tokens only): the live response marks those
  * boundary_not_allowed for a project-scoped token, and the server rejects
  * them on submit.
@@ -215,13 +217,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
-    value: 'artifact:delete',
-    label: 'artifact:delete',
-    description: 'Delete artifacts',
-    resource: 'artifact',
-    isAlias: false,
-  },
-  {
     value: 'artifact:manage',
     label: 'artifact:manage',
     description: 'Manage artifact grants and share links',
@@ -232,13 +227,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'artifact:read',
     label: 'artifact:read',
     description: 'Read artifacts',
-    resource: 'artifact',
-    isAlias: false,
-  },
-  {
-    value: 'artifact:update',
-    label: 'artifact:update',
-    description: 'Edit artifact metadata (title, key, expiry)',
     resource: 'artifact',
     isAlias: false,
   },
@@ -469,6 +457,94 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'hub_scheduler:read',
+    label: 'hub_scheduler:read',
+    description: 'Read scheduler',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_health:read',
+    label: 'hub_health:read',
+    description: 'Read health summary',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_validate:execute',
+    label: 'hub_validate:execute',
+    description: 'Validate resources',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'test_identity:issue',
+    label: 'test_identity:issue',
+    description:
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)',
+    resource: 'test_identity',
+    isAlias: false,
+  },
+  {
+    value: 'test_identity:issue_admin',
+    label: 'test_identity:issue_admin',
+    description:
+      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin); held only by super-admin',
+    resource: 'test_identity',
+    isAlias: false,
+  },
+  {
+    value: 'hub_integrations:read',
+    label: 'hub_integrations:read',
+    description: 'Read integrations',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_integrations:update',
+    label: 'hub_integrations:update',
+    description:
+      'Update integration settings and restart integrations (install, update and credential settings need an interactive session)',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_teams_manifest:read',
+    label: 'hub_teams_manifest:read',
+    description: 'Read teams manifest',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_diagnostics:read',
+    label: 'hub_diagnostics:read',
+    description: 'Read diagnostics and logs',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_metrics:read',
+    label: 'hub_metrics:read',
+    description: 'Read metrics dashboard',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_github_app:read',
+    label: 'hub_github_app:read',
+    description: 'Read GitHub app configuration',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
+    value: 'hub_github_app:update',
+    label: 'hub_github_app:update',
+    description:
+      'Manage GitHub App installations, discover and sync permissions (configuration updates need an interactive session)',
+    resource: 'hub',
+    isAlias: false,
+  },
+  {
     value: 'inbox:read',
     label: 'inbox:read',
     description: 'Read your own inbox, notifications and direct messages',
@@ -508,6 +584,41 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'project:update',
     description: 'Update projects',
     resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'project:set_messaging_policy',
+    label: 'project:set_messaging_policy',
+    description: 'Set project cross-project messaging policy (owner/admin only)',
+    resource: 'project',
+    isAlias: false,
+  },
+  {
+    value: 'scheduled_event:delete',
+    label: 'scheduled_event:delete',
+    description: 'Cancel scheduled events and delete schedules',
+    resource: 'scheduled_event',
+    isAlias: false,
+  },
+  {
+    value: 'scheduled_event:list',
+    label: 'scheduled_event:list',
+    description: 'List scheduled events and schedules',
+    resource: 'scheduled_event',
+    isAlias: false,
+  },
+  {
+    value: 'scheduled_event:read',
+    label: 'scheduled_event:read',
+    description: 'Read scheduled events, schedules and schedule history',
+    resource: 'scheduled_event',
+    isAlias: false,
+  },
+  {
+    value: 'scheduled_event:update',
+    label: 'scheduled_event:update',
+    description: 'Pause schedules',
+    resource: 'scheduled_event',
     isAlias: false,
   },
   {
@@ -620,13 +731,6 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'user:invite',
     label: 'user:invite',
     description: 'Invite users',
-    resource: 'user',
-    isAlias: false,
-  },
-  {
-    value: 'user:list',
-    label: 'user:list',
-    description: 'List users',
     resource: 'user',
     isAlias: false,
   },

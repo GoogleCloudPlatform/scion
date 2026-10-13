@@ -18,6 +18,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -143,6 +144,26 @@ type HealthStats struct {
 // This can be called directly by co-located components (e.g., the WebServer)
 // to build composite health responses without making an HTTP round-trip.
 func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
+	checks := s.healthChecks(ctx)
+	return &HealthResponse{
+		Status:       deriveHealthStatus(checks),
+		Version:      "0.1.0", // TODO: Get from build info
+		ScionVersion: version.Short(),
+		HubID:        s.HubID(),
+		HubName:      s.HubName(),
+		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
+		Checks:       checks,
+		Stats:        s.healthStats(ctx),
+	}
+}
+
+// healthChecks runs this process's health checks and returns the check map
+// (see the check-map contract on criticalHealthChecks): one store Ping,
+// workspace storage, the co-located broker, the audit log writer and, when
+// configured, the Cloud Logging path.
+// It runs no count queries, so the hub-instance registry tick can call it
+// every tick (hub_instance_registry.go).
+func (s *Server) healthChecks(ctx context.Context) map[string]string {
 	checks := make(map[string]string)
 
 	// Check database
@@ -158,7 +179,18 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	// Check co-located broker registration when this Hub expects one
 	s.checkColocatedBrokerHealth(checks)
 
-	// Get stats
+	// Audit log writer (non-critical: degraded, never unhealthy).
+	s.checkAuditWriterHealth(checks)
+
+	// Direct Cloud Logging path, when configured (non-critical).
+	s.checkCloudLoggingHealth(checks)
+
+	return checks
+}
+
+// healthStats counts running agents, projects and online runtime brokers
+// for GetHealthInfo. A failed count is left at zero.
+func (s *Server) healthStats(ctx context.Context) *HealthStats {
 	stats := &HealthStats{}
 	if agentResult, err := s.store.ListAgents(ctx, store.AgentFilter{Phase: string(state.PhaseRunning)}, store.ListOptions{Limit: 1}); err == nil {
 		stats.ActiveAgents = agentResult.TotalCount
@@ -169,17 +201,7 @@ func (s *Server) GetHealthInfo(ctx context.Context) *HealthResponse {
 	if count, err := s.countOnlineRuntimeBrokers(ctx); err == nil {
 		stats.ConnectedBrokers = count
 	}
-
-	return &HealthResponse{
-		Status:       deriveHealthStatus(checks),
-		Version:      "0.1.0", // TODO: Get from build info
-		ScionVersion: version.Short(),
-		HubID:        s.HubID(),
-		HubName:      s.HubName(),
-		Uptime:       time.Since(s.startTime).Round(time.Second).String(),
-		Checks:       checks,
-		Stats:        stats,
-	}
+	return stats
 }
 
 // connectedBrokerPageSize is the page size countOnlineRuntimeBrokers uses
@@ -241,30 +263,16 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 	// latch healthy over ephemeral storage. See isMountedVolume.
 	requireMount := wsCfg.Backend == "gke-shared-volume"
 
-	// Wrap os.Stat in a goroutine with a timeout to prevent blocking on a
-	// hung NFS mount. A stuck stat call would otherwise hang the health
-	// endpoint indefinitely, taking down readiness probes.
-	type statResult struct {
-		err          error
-		mounted      bool
-		determinable bool
-	}
-	ch := make(chan statResult, 1)
-	go func() {
-		fi, err := os.Stat(mountPath)
-		if err != nil {
-			ch <- statResult{err: err}
-			return
-		}
-		mounted, determinable := true, true
-		if requireMount {
-			mounted, determinable = isMountedVolume(fi, containerRootPath)
-		}
-		ch <- statResult{mounted: mounted, determinable: determinable}
-	}()
+	// Stat the mount in a goroutine with a timeout so a hung NFS mount cannot
+	// block the health endpoint (and with it the readiness probes). Probes of
+	// the same mount share one in-flight stat; see workspaceHealthProbesInFlight.
+	call := startWorkspaceHealthProbe(mountPath, requireMount)
+	timer := time.NewTimer(workspaceHealthTimeout)
+	defer timer.Stop()
 
 	select {
-	case res := <-ch:
+	case <-call.done:
+		res := call.res
 		if res.err != nil {
 			checks["workspace_storage"] = "unhealthy: mount not available"
 			return
@@ -293,9 +301,76 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 			checks["workspace_storage_mount_verification"] = "unavailable: could not compare filesystem device IDs"
 		}
 		checks["workspace_storage"] = "healthy"
-	case <-time.After(2 * time.Second):
+	case <-timer.C:
 		checks["workspace_storage"] = "unhealthy: mount check timed out"
 	}
+}
+
+// workspaceHealthTimeout bounds the mount stat in checkWorkspaceStorageHealth.
+// It is a package-level var so tests can shorten it.
+var workspaceHealthTimeout = 2 * time.Second
+
+// workspaceHealthStat is the stat used by checkWorkspaceStorageHealth. It is
+// a package-level var so tests can inject a stat that hangs.
+var workspaceHealthStat = os.Stat
+
+// workspaceHealthStatResult is the outcome of one mount stat.
+type workspaceHealthStatResult struct {
+	err          error
+	mounted      bool
+	determinable bool
+}
+
+// workspaceHealthProbeCall is one in-flight mount stat shared by every
+// checkWorkspaceStorageHealth call for the same key.
+type workspaceHealthProbeCall = inFlightCall[workspaceHealthStatResult]
+
+// workspaceHealthProbeKey identifies an in-flight mount stat. requireMount is
+// part of the key because it changes what the stat goroutine computes.
+type workspaceHealthProbeKey struct {
+	path         string
+	requireMount bool
+}
+
+// workspaceHealthProbesInFlight maps a workspaceHealthProbeKey to its
+// in-flight *workspaceHealthProbeCall. On a hung mount a stat never returns
+// and its goroutine holds an OS thread in the syscall. Without deduplication
+// every health probe would add one more stuck thread. With it, there is at
+// most one stuck stat per mount: later probes wait on the existing stat, with
+// their own timeout, instead of starting a new one. This mirrors
+// workspaceProbesInFlight on the request path.
+var workspaceHealthProbesInFlight sync.Map
+
+// workspaceHealthProbeBeforeDone, when non-nil, is called by the stat
+// goroutine just before it closes done. It is a test seam for checking that
+// the in-flight entry is already gone by then; it is nil in production.
+var workspaceHealthProbeBeforeDone func(key workspaceHealthProbeKey)
+
+// startWorkspaceHealthProbe returns the in-flight stat for mountPath, starting
+// one if none is running. The stat goroutine removes its entry before closing
+// done, so the first probe after a stat returns starts a fresh one. A probe
+// that joins an in-flight stat can return a result up to one stat old.
+func startWorkspaceHealthProbe(mountPath string, requireMount bool) *workspaceHealthProbeCall {
+	key := workspaceHealthProbeKey{path: mountPath, requireMount: requireMount}
+	return joinOrStartInFlight(&workspaceHealthProbesInFlight, key, func() (func() workspaceHealthStatResult, func()) {
+		stat, rootPath, hook := workspaceHealthStat, containerRootPath, workspaceHealthProbeBeforeDone
+		run := func() workspaceHealthStatResult {
+			fi, err := stat(mountPath)
+			if err != nil {
+				return workspaceHealthStatResult{err: err}
+			}
+			mounted, determinable := true, true
+			if requireMount {
+				mounted, determinable = isMountedVolume(fi, rootPath)
+			}
+			return workspaceHealthStatResult{mounted: mounted, determinable: determinable}
+		}
+		var beforeDone func()
+		if hook != nil {
+			beforeDone = func() { hook(key) }
+		}
+		return run, beforeDone
+	})
 }
 
 // checkColocatedBrokerHealth reports on the co-located (embedded) runtime
@@ -321,16 +396,20 @@ func (s *Server) checkWorkspaceStorageHealth(checks map[string]string) {
 // Consumers treat degraded as up and name this check — `scion server status`
 // and `scion server start` (cmd/server_daemon.go) print it,
 // gce-start-hub.sh warns, the diagnostics banner shows an amber "Degraded",
-// and the admin health summary lists it under hub.checks. The
+// and the admin health summary lists it under hub.unhealthy_checks (tagged
+// with the instance) and hub_instances[].checks, from the instance's
+// registry row. The
 // registration-pending window is bounded (registration runs immediately
 // after the listener starts), so `scion server start` keeps polling for
 // "healthy" until its deadline before settling for degraded.
 func (s *Server) checkColocatedBrokerHealth(checks map[string]string) {
 	state := s.embeddedBrokerSnapshot()
 	switch {
-	case state.id != "":
+	case len(state.ids) > 0 && state.regErr == "":
 		checks["colocated_broker"] = "healthy"
 	case state.regErr != "":
+		// With several co-located flat instances, one refused instance
+		// degrades the check even when its siblings activated.
 		// Fixed string: /healthz and /health are unauthenticated (see
 		// isPublicRoute in web.go), and state.regErr is the verbatim error
 		// chain from registerGlobalProjectAndBroker, which can carry store/

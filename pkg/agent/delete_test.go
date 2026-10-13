@@ -153,7 +153,7 @@ func TestDeleteAgentFiles_CleansStaleWorktree(t *testing.T) {
 	if !branchDeleted {
 		t.Error("expected branch to be deleted")
 	}
-	if util.BranchExists(agentName) {
+	if util.BranchExistsIn(projectDir, agentName) {
 		t.Error("expected branch to be gone after DeleteAgentFiles")
 	}
 
@@ -961,14 +961,6 @@ func TestDeleteAgentFiles_ProvisionAgentLayout_ScionInSubdirectory(t *testing.T)
 func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 	t.Helper()
 	projectDir := filepath.Dir(scionDir)
-	// reprovisionSetup leaves CWD outside the repo (broker-like), which is
-	// deliberate for the CWD-dependent bug it exists to catch elsewhere. This
-	// test instead needs util.BranchExists/FindWorktreeByBranch (which run
-	// git from the process CWD) to actually see the branch/worktree agent-b
-	// attaches to — a local/CLI-like CWD, inside the repo.
-	if err := os.Chdir(projectDir); err != nil {
-		t.Fatal(err)
-	}
 
 	// Production code (both ProvisionAgent and DeleteAgentFiles) resolves the
 	// caller-supplied scionDir through config.GetResolvedProjectDir, which
@@ -1047,7 +1039,7 @@ func runProvisionAgentLayoutFirstLastDelete(t *testing.T, scionDir string) {
 
 // TestDeleteAgentFiles_ProvisionAgentAttachToUserWorktree_NeverRemoved covers
 // the second required regression case: ProvisionAgent's attach-to-an-
-// existing-worktree path (pkg/agent/provision.go, via util.FindWorktreeByBranch)
+// existing-worktree path (pkg/agent/provision.go, via util.FindWorktreeByBranchIn)
 // can register a sharer for a worktree at a location scion did not create —
 // most commonly a worktree a user set up by hand before running scion against
 // that branch. Such a WorktreePath matches neither scion-created shape, so it

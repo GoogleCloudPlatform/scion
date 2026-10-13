@@ -40,72 +40,9 @@ import (
 // Mock GCP token generator for tests (no real GCP calls)
 // ---------------------------------------------------------------------------
 
-type mockTokenGenerator struct {
-	mu             sync.Mutex
-	accessToken    string
-	accessTokenErr error
-	email          string
-	calls          int
-}
-
-func (m *mockTokenGenerator) GenerateAccessToken(_ context.Context, _ string, _ []string) (*GCPAccessToken, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.calls++
-	if m.accessTokenErr != nil {
-		return nil, m.accessTokenErr
-	}
-	return &GCPAccessToken{
-		AccessToken: m.accessToken,
-		ExpiresIn:   3600,
-		TokenType:   "Bearer",
-	}, nil
-}
-
-func (m *mockTokenGenerator) GenerateIDToken(_ context.Context, _ string, _ string) (*GCPIDToken, error) {
-	return &GCPIDToken{Token: "mock-id-token"}, nil
-}
-
-func (m *mockTokenGenerator) VerifyImpersonation(_ context.Context, _ string) error {
-	return nil
-}
-
-func (m *mockTokenGenerator) ServiceAccountEmail() string {
-	return m.email
-}
-
 // ---------------------------------------------------------------------------
 // Audit logger that captures events for inspection
 // ---------------------------------------------------------------------------
-
-type capturingAuditLogger struct {
-	mu     sync.Mutex
-	events []*LifecycleHookExecutionEvent
-	// Embed the real logger so we satisfy the full interface without
-	// implementing every method from scratch.
-	*LogAuditLogger
-}
-
-func newCapturingAuditLogger() *capturingAuditLogger {
-	return &capturingAuditLogger{
-		LogAuditLogger: NewLogAuditLogger("[Test]", true),
-	}
-}
-
-func (l *capturingAuditLogger) LogLifecycleHookExecutionEvent(_ context.Context, event *LifecycleHookExecutionEvent) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.events = append(l.events, event)
-	return nil
-}
-
-func (l *capturingAuditLogger) getEvents() []*LifecycleHookExecutionEvent {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	out := make([]*LifecycleHookExecutionEvent, len(l.events))
-	copy(out, l.events)
-	return out
-}
 
 // ---------------------------------------------------------------------------
 // Test store setup
@@ -182,21 +119,6 @@ func makeTestAgent(projectID string) *store.Agent {
 		Created:     time.Now(),
 		Updated:     time.Now(),
 	}
-}
-
-// newTestExecutor creates an HTTPExecutor with a test-friendly HTTP client
-// that allows loopback connections (httptest servers bind to 127.0.0.1).
-// The client still blocks ALL redirects, matching production behavior.
-func newTestExecutor(s store.Store, tokenGen GCPTokenGenerator, auditLog AuditLogger, log *slog.Logger) *HTTPExecutor {
-	executor := NewHTTPExecutor(s, tokenGen, auditLog, log)
-	executor.newHTTPClient = func() *http.Client {
-		return &http.Client{
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return fmt.Errorf("redirects are blocked for lifecycle hook requests (SSRF protection)")
-			},
-		}
-	}
-	return executor
 }
 
 // ---------------------------------------------------------------------------

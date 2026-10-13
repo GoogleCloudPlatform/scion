@@ -98,3 +98,11 @@ func TestAgentStatusEmoji_UnknownActivityFallsToPhase(t *testing.T) {
 	got = agentStatusEmoji("unknown_activity", "error")
 	assert.Equal(t, "❌", got, "unknown activity should fall through to error phase icon")
 }
+
+// The initializing activity (harness not yet reading input) shows the
+// starting icon rather than the running phase fallback.
+func TestAgentStatusEmoji_Initializing(t *testing.T) {
+	if got := agentStatusEmoji("initializing", "running"); got != "\U0001f680" {
+		t.Errorf("agentStatusEmoji(initializing, running) = %q, want rocket", got)
+	}
+}

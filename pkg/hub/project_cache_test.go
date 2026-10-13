@@ -17,15 +17,19 @@
 package hub
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,6 +315,90 @@ func TestProjectCacheRefresh_MethodNotAllowed(t *testing.T) {
 	rec := doRequest(t, srv, http.MethodGet,
 		fmt.Sprintf("/api/v1/projects/%s/workspace/cache/refresh", project.ID), nil)
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// TestHandleProjectCacheRefresh_Failure_FixedText checks that a failed cache
+// refresh sends the client a fixed message, and that the refresh error
+// detail is logged at the hub with the project ID and not sent to the client
+// (ptone/scion#3887).
+func TestHandleProjectCacheRefresh_Failure_FixedText(t *testing.T) {
+	srv, st := testServer(t)
+	ctx := context.Background()
+	srv.SetStorage(newMockStorage("bucket"))
+
+	var logs bytes.Buffer
+	srv.workspaceLog = slog.New(slog.NewTextHandler(&logs, nil))
+
+	// A linked project whose only provider is connected but has no local
+	// path recorded, so the refresh fails before any broker request.
+	project := &store.Project{
+		ID:        api.NewUUID(),
+		Name:      "Cache Refresh Failure",
+		Slug:      "cache-refresh-failure",
+		GitRemote: "github.com/org/refresh-failure",
+	}
+	require.NoError(t, st.CreateProject(ctx, project))
+	broker := &store.RuntimeBroker{ID: tid("refresh-fail-broker"), Name: "refresh-fail-broker", Slug: "refresh-fail-broker"}
+	require.NoError(t, st.CreateRuntimeBroker(ctx, broker))
+	require.NoError(t, st.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID: project.ID, BrokerID: broker.ID, BrokerName: broker.Name,
+	}))
+	srv.controlChannel.mu.Lock()
+	srv.controlChannel.connections[broker.ID] = &BrokerConnection{brokerID: broker.ID, sessionID: "s1"}
+	srv.controlChannel.mu.Unlock()
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/workspace/cache/refresh", nil)
+	rec := httptest.NewRecorder()
+	srv.handleProjectCacheRefresh(rec, req, project)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	const detail = "has no local path recorded"
+	assert.NotContains(t, rec.Body.String(), detail)
+	assert.NotContains(t, rec.Body.String(), broker.ID)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeRuntimeError, errResp.Error.Code)
+	assert.Equal(t, "Cache refresh failed", errResp.Error.Message)
+
+	assert.Contains(t, logs.String(), detail)
+	assert.Contains(t, logs.String(), "project_id="+project.ID)
+	assert.Contains(t, logs.String(), "broker_id="+broker.ID)
+}
+
+// TestHandleProjectCacheNotify_DownloadFailure_FixedText checks that a failed
+// GCS download into the hub cache sends the client a fixed message, and that
+// the download error detail is logged at the hub with the project ID and not
+// sent to the client (ptone/scion#3572).
+func TestHandleProjectCacheNotify_DownloadFailure_FixedText(t *testing.T) {
+	identityTestHome(t)
+	srv, st := testServer(t)
+	ctx := context.Background()
+	srv.SetStorage(newMockStorage("bucket"))
+
+	const detail = "sync detail /internal/cache/path gs://bucket/prefix 403"
+	srv.setHubWorkspaceDownloader(func(context.Context, string, string, string) error {
+		return errors.New(detail)
+	})
+
+	var logs bytes.Buffer
+	srv.workspaceLog = slog.New(slog.NewTextHandler(&logs, nil))
+
+	project := sharedWorkspaceProject("cache-notify-fail")
+	require.NoError(t, st.CreateProject(ctx, project))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/projects/"+project.ID+"/workspace/cache/notify", nil)
+	rec := httptest.NewRecorder()
+	srv.handleProjectCacheNotify(rec, req, project)
+
+	require.Equal(t, http.StatusBadGateway, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), detail)
+	var errResp ErrorResponse
+	require.NoError(t, json.NewDecoder(rec.Body).Decode(&errResp))
+	assert.Equal(t, ErrCodeRuntimeError, errResp.Error.Code)
+	assert.Equal(t, "Failed to download workspace from GCS", errResp.Error.Message)
+
+	assert.Contains(t, logs.String(), detail)
+	assert.Contains(t, logs.String(), "project_id="+project.ID)
 }
 
 // ============================================================================

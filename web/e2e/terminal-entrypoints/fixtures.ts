@@ -21,6 +21,7 @@
  */
 
 import type { Page } from '@playwright/test';
+import { installEventSourceStub } from '../event-source-stub.js';
 
 // ---------------------------------------------------------------------------
 // Fixture agent UUIDs — trusted format matching the router regex.
@@ -40,6 +41,9 @@ export interface AgentFixture {
   name: string;
   phase: string;
   projectId: string;
+  /** The project's display name and slug, as the hub resolves them on agent rows. */
+  project?: string;
+  projectSlug?: string;
   slug?: string;
   canAttach?: boolean;
   activity?: string;
@@ -93,20 +97,13 @@ export async function setup(
   let closes = 0;
   const sent: string[] = [];
 
+  await installEventSourceStub(page);
   await page.addInitScript(
     ({ enabled: e }) => {
       window.__SCION_FEATURES__ = {
         'web.terminal_workspace': e,
         'web.native_chat': true,
       };
-      window.EventSource = class extends EventTarget {
-        onopen: (() => void) | null = null;
-        constructor() {
-          super();
-          queueMicrotask(() => this.onopen?.());
-        }
-        close(): void {}
-      } as unknown as typeof EventSource;
     },
     { enabled }
   );
@@ -163,6 +160,33 @@ export async function setup(
         name: 'Fixture Project',
         slug: projectId,
         agents: Object.values(agents).map((a) => apiAgent(a)),
+        _capabilities: { actions: ['attach'] },
+      },
+    });
+  });
+
+  // Project agent list, shaped like the hub's ListAgentsResponse.
+  // Registered after the catch-all above, so it takes precedence for this
+  // path. As on the hub, `complete` is sent only for a sorted (`fit`)
+  // request and `stats` only for `stats=1`; a legacy drain request gets a
+  // single page with no `nextCursor`.
+  await page.route(/\/api\/v1\/projects\/[^/]+\/agents(\?|$)/, (route) => {
+    const params = new URL(route.request().url()).searchParams;
+    const list = Object.values(agents);
+    void route.fulfill({
+      json: {
+        agents: list.map((a) => apiAgent(a)),
+        totalCount: list.length,
+        ...(params.has('fit') ? { complete: true } : {}),
+        ...(params.get('stats') === '1'
+          ? {
+              stats: {
+                total: list.length,
+                running: list.filter((a) => a.phase === 'running').length,
+                agents: list.map((a) => [a.id, a.phase]),
+              },
+            }
+          : {}),
         _capabilities: { actions: ['attach'] },
       },
     });

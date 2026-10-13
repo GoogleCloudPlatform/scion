@@ -18,7 +18,6 @@ package hub
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
@@ -41,34 +40,6 @@ import (
 // They also verify that internal identifiers (user IDs, role IDs, credential
 // IDs, policy internals, raw evaluator reasons) are NOT exposed.
 // ---------------------------------------------------------------------------
-
-// parseErrorResponse decodes an HTTP response body into ErrorResponse.
-func parseErrorResponse(t *testing.T, body []byte) ErrorResponse {
-	t.Helper()
-	var resp ErrorResponse
-	require.NoError(t, json.Unmarshal(body, &resp), "response body: %s", string(body))
-	return resp
-}
-
-// assertStructuredDenial verifies the 403 response has the expected structured
-// denial detail and redacts internal information.
-func assertStructuredDenial(t *testing.T, resp ErrorResponse, wantResourceType, wantAction string) {
-	t.Helper()
-
-	assert.Equal(t, ErrCodeForbidden, resp.Error.Code, "error code")
-	require.NotNil(t, resp.Error.Details, "expected structured details in 403 response")
-
-	if wantResourceType != "" {
-		got, ok := resp.Error.Details["resource_type"]
-		assert.True(t, ok, "expected details.resource_type")
-		assert.Equal(t, wantResourceType, got, "details.resource_type")
-	}
-	if wantAction != "" {
-		got, ok := resp.Error.Details["denied_action"]
-		assert.True(t, ok, "expected details.denied_action")
-		assert.Equal(t, wantAction, got, "details.denied_action")
-	}
-}
 
 // assertNoIDLeakage verifies the response body does not contain any of the
 // given IDs.

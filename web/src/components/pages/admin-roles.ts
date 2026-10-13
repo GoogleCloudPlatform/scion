@@ -1217,6 +1217,7 @@ export class ScionPageAdminRoles extends LitElement {
     const results = this.importResults!;
     const hasErrors = results.errors.filter((e) => e.status === 'error').length > 0;
 
+    // prettier-ignore
     return html`
       <div class="import-results">
         <sl-alert variant=${hasErrors ? 'warning' : 'success'} open>

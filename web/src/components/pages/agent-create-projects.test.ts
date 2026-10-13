@@ -28,9 +28,8 @@
  * the response handling was always correct.
  */
 
-// @vitest-environment happy-dom
-
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { requestUrl } from '../../client/__fixtures__/request-url.js';
 
 /** Every URL the component fetched, in order. */
 let requested: string[] = [];
@@ -41,12 +40,13 @@ function stubFetch(): void {
   vi.stubGlobal(
     'fetch',
     vi.fn((input: RequestInfo | URL) => {
-      const url = typeof input === 'string' ? input : input.toString();
+      const url = requestUrl(input);
       requested.push(url);
       return Promise.resolve({
         ok: true,
         status: 200,
-        json: async () => ({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
+        json: () =>
+          Promise.resolve({ projects: [], brokers: [], templates: [], harnessConfigs: [] }),
       } as Response);
     })
   );

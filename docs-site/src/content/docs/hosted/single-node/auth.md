@@ -46,6 +46,37 @@ is reserved for organizational isolation, a different concern. See the
 [Glossary](/scion/glossary/).
 :::
 
+### Who can sign in (user access mode)
+
+:::caution[The default access mode is open]
+The default user access mode is `open`: once OAuth is configured, any account that the identity provider accepts can sign in and gets an account with the default role described below (`member` unless changed). Choose a mode before the Hub is reachable by others.
+:::
+
+`server.auth.user_access_mode` controls who can sign in:
+
+| Mode | Who can sign in |
+|------|-----------------|
+| `open` (default) | Any account the identity provider accepts, limited to `authorized_domains` when that list is set. |
+| `domain_restricted` | Only accounts from `authorized_domains`. With an empty list, no one except `admin_emails` can sign in. |
+| `invite_only` | Only users who were invited or already have an account, still limited to `authorized_domains` when set. |
+
+Accounts in `admin_emails` can always sign in. On a single-node Hub, set the initial values in `hub.env`; an admin can change them later in **Admin > Server Config**:
+
+```bash
+SCION_SEED_SERVER_AUTH_USERACCESSMODE=invite_only
+SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS=example.com
+```
+
+Or in `settings.yaml`:
+
+```yaml
+server:
+  auth:
+    user_access_mode: invite_only     # open (default) | domain_restricted | invite_only
+    authorized_domains:
+      - example.com
+```
+
 ### Default role for new users
 
 In a multi-user deployment, each user has a hub role: `admin`, `member` or `viewer`. Users listed in `admin_emails` are always admins. Everyone else gets the role set by `server.auth.default_user_role` (`member` by default) when their account is first created or activated. This includes the first sign-in of an invited or allow-listed user. Set it to `viewer` if new users should be able to work in projects they are added to, but not create projects of their own:
@@ -110,10 +141,12 @@ For enterprise SSO setups, Scion supports authenticating Web UI users via an ext
 When registering Scion as a client in your identity provider, set the **redirect URI** (sometimes called "callback URL") to:
 
 ```
-https://<your-hub-domain>/auth/callback/oidc
+<hub-base-url>/auth/callback/oidc
 ```
 
-Replace `<your-hub-domain>` with the public hostname of your Scion Hub (the value of `SCION_SERVER_HUB_ENDPOINT` or `server.hub.endpoint` in `settings.yaml`). This is the endpoint the IdP redirects users to after authentication.
+Replace `<hub-base-url>` with the Hub base URL, including the scheme, for example `https://hub.example.com`. The Hub base URL is set by the `--base-url` flag or, when the flag is not set, by `SCION_SERVER_BASE_URL`; without either, it defaults to `http://localhost:<web port>`. This is the endpoint the IdP redirects users to after authentication.
+
+The Hub builds the redirect URI from its base URL, so a Hub served over plain HTTP uses an `http://` redirect URI. The Hub does not require HTTPS for OIDC login, and it marks the session cookie `Secure` only when the base URL starts with `https://`. Whether an `http://` redirect URI is accepted is up to your identity provider; many require HTTPS for production clients. The `issuer_url` is different: it must use `https://` unless its host is `localhost` or `127.0.0.1`, and the Hub does not start otherwise.
 
 #### Configuration
 
@@ -133,7 +166,7 @@ server:
 Prefer `settings.yaml` for these keys. Underscored environment variables such as `SCION_SERVER_OIDC_LOGIN_ENABLED` are ignored, and the Hub logs a warning at startup for each one. The collapsed names (`SCION_SERVER_OIDCLOGIN_ENABLED`, `SCION_SERVER_OIDCLOGIN_ISSUERURL`, `SCION_SERVER_OIDCLOGIN_CLIENTID`, and so on) take effect only when `settings.yaml` has a `server:` section, as above. They are ignored on the legacy `server.yaml` path ([ptone/scion#3038](https://github.com/ptone/scion/issues/3038)).
 
 :::tip[Troubleshooting: `invalid redirect_uri`]
-If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `https://<your-hub-domain>/auth/callback/oidc` exactly — including the scheme, hostname, and path. The value must match `SCION_SERVER_HUB_ENDPOINT` plus `/auth/callback/oidc`.
+If your identity provider returns an `invalid redirect_uri` error during login, verify that the redirect URI registered in your IdP matches `<hub-base-url>/auth/callback/oidc` exactly, including the scheme, hostname, port, and path. The value must be the Hub base URL, set by `--base-url` or `SCION_SERVER_BASE_URL`, plus `/auth/callback/oidc`.
 :::
 
 ### Verified Email Requirement
@@ -149,7 +182,7 @@ Users whose only email address is unverified at their provider can no longer sig
 
 ## Domain Authorization
 
-You can restrict authentication to specific email domains using the `SCION_AUTHORIZED_DOMAINS` setting. This provides an additional layer of access control beyond OAuth authentication.
+You can restrict authentication to specific email domains using the `server.auth.authorized_domains` setting. This provides an additional layer of access control beyond OAuth authentication. See also [Who can sign in](#who-can-sign-in-user-access-mode).
 
 ### Configuration
 
@@ -157,7 +190,7 @@ Set the environment variable with a comma-separated list of allowed domains:
 
 ```bash
 # Allow only users from these domains
-export SCION_AUTHORIZED_DOMAINS="example.com,mycompany.org"
+export SCION_SEED_SERVER_AUTH_AUTHORIZEDDOMAINS="example.com,mycompany.org"
 ```
 
 Or configure in `server.yaml`:
@@ -294,6 +327,7 @@ server:
   - `hub`: Identifies requests originating from federated partner Hubs.
   - `service_account`: Authenticates automated workloads via GCP Service Accounts.
   - `user`: Maps OIDC tokens to standard user identities, with configurable `default_role` (defaults to `viewer`; this is separate from `server.auth.default_user_role`, which applies to users who sign in through OAuth, OIDC login or an auth proxy) and domain restrictions using wildcards (e.g. `allowed_emails: ["*@example.com"]`).
+- **Write limits for federated callers**: A federated caller keeps visitor rights on the resources it has been granted, but the Hub refuses its writes to profile and other non-agent resources: user-scope templates, skills and harness configs, imports, env vars and secrets, chat preferences, presence, and attachments outside a project. Federated callers also cannot redeem invites.
 
 ### External Bearer Tokens (Google credential pass-through)
 
@@ -424,7 +458,7 @@ Scion provides a native mechanism to assign Google Cloud Platform (GCP) identiti
 
 When creating an agent, you can configure its **GCP Identity Mode**:
 
-- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). Kubernetes does not offer Block at all — an agent dispatched to the Kubernetes runtime with an explicit Block is rejected. An agent with no GCP identity mode configured gets Passthrough on Kubernetes instead. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
+- **Block (Default on every runtime except Kubernetes)**: All requests to the metadata server are intercepted and return a 403 Forbidden. This ensures agents cannot expose the host's identity (e.g., when running on a GCE instance). On the Kubernetes runtime, Block is accepted but works differently: the agent pod runs as the runtime profile's block Kubernetes ServiceAccount, or the namespace's default ServiceAccount when none is configured, with no GCP credentials mounted. On Workload Identity nodes that ServiceAccount still receives a federated token, so the agent's GCP access is whatever IAM grants that ServiceAccount holds. An agent with no GCP identity mode configured gets Passthrough on Kubernetes. See the Kubernetes runtime note in [Permissions](/scion/hosted/ha/permissions/#hub-default-gcp-identity).
 - **Assign**: Assigns a specific Google Service Account to the agent.
   - The agent's `sciontool` sidecar intercepts requests to the metadata server.
   - Token requests are proxied to the Scion Hub, which uses its own broad permissions to generate a short-lived access token for the requested Service Account (via the `iam.serviceAccounts.getAccessToken` permission).

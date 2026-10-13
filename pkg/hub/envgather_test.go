@@ -30,38 +30,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// envGatherMockBrokerClient extends mockRuntimeBrokerClient with env-gather methods.
-type envGatherMockBrokerClient struct {
-	mockRuntimeBrokerClient
-
-	// Env-gather fields
-	createWithGatherCalled bool
-	gatherReturnEnvReqs    *RemoteEnvRequirementsResponse
-}
-
-func (m *envGatherMockBrokerClient) CreateAgentWithGather(ctx context.Context, brokerID, brokerEndpoint string, req *RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
-	m.createWithGatherCalled = true
-	m.lastBrokerID = brokerID
-	m.lastEndpoint = brokerEndpoint
-	m.lastCreateReq = req
-	if m.returnErr != nil {
-		return nil, nil, m.returnErr
-	}
-	if m.gatherReturnEnvReqs != nil {
-		return nil, m.gatherReturnEnvReqs, nil
-	}
-	// All env satisfied
-	return &RemoteAgentResponse{
-		Agent: &RemoteAgentInfo{
-			ID:     req.ID,
-			Slug:   req.Slug,
-			Name:   req.Name,
-			Status: "running",
-		},
-		Created: true,
-	}, nil, nil
-}
-
 // TestEnvGather_HubDispatch_AllSatisfied tests that when env-gather is enabled
 // and all env vars are satisfied, the agent starts normally.
 func TestEnvGather_HubDispatch_AllSatisfied(t *testing.T) {

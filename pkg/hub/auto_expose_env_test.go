@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"testing"
 
@@ -30,24 +29,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-const aeKey = api.EnvAutoExposePorts
-
-// createAutoExposeTemplate creates a global template whose config env carries
-// the given entries.
-func createAutoExposeTemplate(t *testing.T, s store.Store, slug string, env map[string]string) {
-	t.Helper()
-	require.NoError(t, s.CreateTemplate(context.Background(), &store.Template{
-		ID:          tid("template-" + slug + "-" + t.Name()),
-		Name:        slug,
-		Slug:        slug,
-		Harness:     "claude",
-		ContentHash: "d00dfeed",
-		Scope:       store.TemplateScopeGlobal,
-		Status:      "active",
-		Config:      &store.TemplateConfig{Env: env},
-	}))
-}
 
 type autoExposeCreate struct {
 	hubDefault  *bool
@@ -88,26 +69,10 @@ func createAutoExposeAgent(t *testing.T, in autoExposeCreate) *store.Agent {
 	return ag
 }
 
-func inlineEnv(ag *store.Agent) map[string]string {
-	if ag.AppliedConfig.InlineConfig == nil {
-		return nil
-	}
-	return ag.AppliedConfig.InlineConfig.Env
-}
-
-func createInputsEnv(ag *store.Agent) map[string]string {
-	ci := ag.AppliedConfig.CreateInputs
-	if ci == nil || ci.InlineConfig == nil {
-		return nil
-	}
-	return ci.InlineConfig.Env
-}
-
-func ptrBool(b bool) *bool { return &b }
-
 // TestCreateAgent_AutoExposePrecedence pins the hub half of the auto-expose
-// precedence (user-explicit > project annotation > template env > hub
-// default) on the persisted maps. Each case runs with and without unrelated
+// precedence (user-explicit > project annotation > hub default) on the
+// persisted maps. A template's SCION_AUTO_EXPOSE_PORTS is a reserved key the
+// hub never copies (ptone/scion#4222, ptone/scion#4524). Each case runs with and without unrelated
 // request env, since a request without config takes a different branch in
 // buildAppliedConfig.
 func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
@@ -121,12 +86,12 @@ func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
 		wantExplicit string
 	}{
 		{
-			name:    "AC1 template false beats hub default true",
+			name:    "AC1 template value is not copied; hub default stays unpersisted",
 			in:      autoExposeCreate{hubDefault: ptrBool(true), templateEnv: map[string]string{aeKey: "false"}},
-			wantEnv: "false",
+			wantEnv: "",
 		},
 		{
-			name:    "AC2 project true beats template false",
+			name:    "AC2 project true, template value ignored",
 			in:      autoExposeCreate{projectAnno: "true", templateEnv: map[string]string{aeKey: "false"}},
 			wantEnv: "true",
 		},
@@ -203,9 +168,9 @@ func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
 }
 
 // TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv pins buildAppliedConfig's
-// separate Env map: the template-env fill and the project tier write
-// AppliedConfig.Env, and none of it may leak into InlineConfig.Env, which
-// holds the requester's explicit keys only.
+// separate Env map: the project tier writes AppliedConfig.Env, and none of
+// it may leak into InlineConfig.Env, which holds the requester's explicit
+// keys only. The template's env reaches neither (ptone/scion#4222).
 func TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv(t *testing.T) {
 	ag := createAutoExposeAgent(t, autoExposeCreate{
 		projectAnno: "true",
@@ -215,7 +180,7 @@ func TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv(t *testing.T) {
 
 	assert.Equal(t, map[string]string{"OTHER": "x"}, inlineEnv(ag), "InlineConfig.Env")
 	assert.Equal(t, map[string]string{"OTHER": "x"}, createInputsEnv(ag), "CreateInputs.InlineConfig.Env")
-	assert.Equal(t, map[string]string{"OTHER": "x", "TPL": "t", aeKey: "true"}, ag.AppliedConfig.Env, "AppliedConfig.Env")
+	assert.Equal(t, map[string]string{"OTHER": "x", aeKey: "true"}, ag.AppliedConfig.Env, "AppliedConfig.Env")
 }
 
 func TestResolveAutoExposeEnv(t *testing.T) {
@@ -250,38 +215,12 @@ func TestResolveAutoExposeEnv(t *testing.T) {
 	})
 }
 
-// autoExposeDispatchFixture builds a dispatcher with a store holding one
-// project/broker/provider, so start and restart dispatches can run.
-func autoExposeDispatchFixture(t *testing.T) (*HTTPAgentDispatcher, *mockRuntimeBrokerClient, *store.Agent) {
-	t.Helper()
-	ctx := context.Background()
-	memStore := createTestStore(t)
-	require.NoError(t, memStore.CreateProject(ctx, &store.Project{
-		ID: tid("project-1"), Name: "test-project", Slug: "test-project",
-		GitRemote: "https://github.com/example/repo.git",
-	}))
-	require.NoError(t, memStore.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID: tid("broker-1"), Name: "test-broker", Slug: "test-broker",
-		Endpoint: "http://localhost:9800", Status: store.BrokerStatusOnline,
-	}))
-	require.NoError(t, memStore.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID: tid("project-1"), BrokerID: tid("broker-1"), BrokerName: "test-broker",
-		LocalPath: "/home/user/projects/myproject/.scion", Status: store.BrokerStatusOnline,
-	}))
-	client := &mockRuntimeBrokerClient{}
-	d := NewHTTPAgentDispatcherWithClient(memStore, client, false, slog.Default())
-	ag := &store.Agent{
-		ID: "agent-uuid-123", Name: "test-agent", Slug: "test-agent-slug",
-		ProjectID: tid("project-1"), OwnerID: "owner-uuid-789", RuntimeBrokerID: tid("broker-1"),
-	}
-	return d, client, ag
-}
-
 // TestDispatch_AutoExposeDefault_OnCreateStartAndRestart pins the hub default's
 // transport: it rides HubAgentDefaults on create, start and restart, so a
 // change to it reaches an agent at its next start (AC5). Start and restart
-// carry the auto-expose default only: the hub limit/resource defaults stay
-// create/provision-only, so start behaviour for limits is unchanged.
+// also carry the hub resources, which the broker applies per start
+// (ptone/scion#4561); the hub limits stay create/provision-only, so start
+// behaviour for limits is unchanged.
 func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	ctx := context.Background()
 	d, client, ag := autoExposeDispatchFixture(t)
@@ -307,7 +246,7 @@ func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 	assert.Equal(t, "1h", hd.MaxDuration)
 	assert.NotNil(t, hd.Resources)
 
-	assertAutoExposeOnly := func(label string, hd *RemoteHubAgentDefaults, want bool) {
+	assertStartWire := func(label string, hd *RemoteHubAgentDefaults, want bool) {
 		t.Helper()
 		require.NotNil(t, hd, "%s must carry the hub auto-expose default", label)
 		require.NotNil(t, hd.AutoExposePorts, label)
@@ -315,16 +254,17 @@ func TestDispatch_AutoExposeDefault_OnCreateStartAndRestart(t *testing.T) {
 		assert.Zero(t, hd.MaxTurns, "%s must not carry hub limits", label)
 		assert.Zero(t, hd.MaxModelCalls, "%s must not carry hub limits", label)
 		assert.Empty(t, hd.MaxDuration, "%s must not carry hub limits", label)
-		assert.Nil(t, hd.Resources, "%s must not carry hub resources", label)
+		require.NotNil(t, hd.Resources, "%s must carry the hub resources", label)
+		assert.Equal(t, "2", hd.Resources.Limits.CPU, label)
 	}
 
 	require.NoError(t, d.DispatchAgentStart(ctx, ag, "", false))
-	assertAutoExposeOnly("start", client.lastStartExtras.HubAgentDefaults, true)
+	assertStartWire("start", client.lastStartExtras.HubAgentDefaults, true)
 
 	// A changed hub default reaches the next restart.
 	hubDefault = ptrBool(false)
 	require.NoError(t, d.DispatchAgentRestart(ctx, ag))
-	assertAutoExposeOnly("restart", client.lastRestartExtras.HubAgentDefaults, false)
+	assertStartWire("restart", client.lastRestartExtras.HubAgentDefaults, false)
 }
 
 func TestDispatch_AutoExposeDefault_UnsetSendsNothingOnStart(t *testing.T) {
@@ -342,7 +282,7 @@ func TestApplyStartExtras_HubAgentDefaults(t *testing.T) {
 	_, ok := payload["hubAgentDefaults"]
 	assert.False(t, ok, "no hubAgentDefaults key without a value")
 
-	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(ptrBool(false), nil)})
+	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, ptrBool(false), nil, nil)})
 	blob, err := json.Marshal(payload)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"hubAgentDefaults":{"autoExposePorts":false}}`, string(blob))

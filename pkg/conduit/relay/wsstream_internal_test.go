@@ -95,7 +95,7 @@ func TestWSStreamWindowUpdateSendFailure(t *testing.T) {
 	conn.frames <- b
 
 	p := make([]byte, 8)
-	n, err := s.Read(p)
+	n, err := readWithin(t, s, p)
 	if err != nil || string(p[:n]) != "12345678" {
 		t.Fatalf("Read = %d %q, %v; want the 8 bytes", n, p[:n], err)
 	}
@@ -107,7 +107,7 @@ func TestWSStreamWindowUpdateSendFailure(t *testing.T) {
 	if ended, endErr := s.endedErr(); !ended || !errors.Is(endErr, errLinkLost) {
 		t.Fatalf("endedErr = %v, %v; want ended with errLinkLost", ended, endErr)
 	}
-	if _, err := s.Read(p); err == nil {
+	if _, err := readWithin(t, s, p); err == nil {
 		t.Fatal("Read after the stream ended: want an error")
 	}
 }
@@ -161,6 +161,42 @@ func deliver(t *testing.T, c *peerConn, b []byte) {
 	case c.in <- b:
 	case <-time.After(5 * time.Second):
 		t.Fatal("frame not read: the stream stopped reading")
+	}
+}
+
+// nextWrite returns the next frame the stream wrote, failing if none is
+// written within 5s.
+func nextWrite(t *testing.T, c *peerConn) []byte {
+	t.Helper()
+	select {
+	case b := <-c.writes:
+		return b
+	case <-time.After(5 * time.Second):
+		t.Fatal("no frame written: the stream stopped writing")
+		return nil
+	}
+}
+
+// readWithin calls s.Read(p), failing if it does not return within 5s. On
+// timeout it closes s so the reading goroutine returns.
+func readWithin(t *testing.T, s *wsStream, p []byte) (int, error) {
+	t.Helper()
+	type result struct {
+		n   int
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := s.Read(p)
+		done <- result{n, err}
+	}()
+	select {
+	case r := <-done:
+		return r.n, r.err
+	case <-time.After(5 * time.Second):
+		_ = s.Close()
+		t.Fatal("Read did not return: no data, fin or close arrived")
+		return 0, nil
 	}
 }
 
@@ -233,7 +269,7 @@ func TestWSStreamCloseWaitsForPeer(t *testing.T) {
 				t.Fatal("Done not closed after CloseWithCode")
 			}
 			f := &conduitv1.Frame{}
-			if err := proto.Unmarshal(<-c.writes, f); err != nil {
+			if err := proto.Unmarshal(nextWrite(t, c), f); err != nil {
 				t.Fatal(err)
 			}
 			if sc := f.GetStreamClose(); sc == nil || sc.GetCode() != conduit.CloseForbidden || sc.GetReason() != "forbidden: test" {
@@ -276,7 +312,7 @@ func TestWSStreamCloseWaitDeliversNothing(t *testing.T) {
 	if err := s.CloseWithCode(conduit.CloseNormal, ""); err != nil {
 		t.Fatal(err)
 	}
-	<-c.writes // the StreamClose
+	nextWrite(t, c) // the StreamClose
 	window, err := proto.Marshal(&conduitv1.Frame{Body: &conduitv1.Frame_StreamWindow{StreamWindow: &conduitv1.StreamWindow{StreamId: hopStreamID, Increment: 1}}})
 	if err != nil {
 		t.Fatal(err)
@@ -300,11 +336,16 @@ func TestWSStreamCloseWaitDeliversNothing(t *testing.T) {
 	if isClosed(s.linkClosed()) {
 		t.Fatal("link closed by a discarded frame")
 	}
-	if n, err := s.Read(make([]byte, 64)); n != 0 || !errors.Is(err, conduit.ErrStreamClosed) {
+	if n, err := readWithin(t, s, make([]byte, 64)); n != 0 || !errors.Is(err, conduit.ErrStreamClosed) {
 		t.Fatalf("Read = %d, %v; want 0, ErrStreamClosed", n, err)
 	}
-	if ws, ok := <-s.Resizes(); ok {
-		t.Fatalf("resize %v delivered after close", ws)
+	select {
+	case ws, ok := <-s.Resizes():
+		if ok {
+			t.Fatalf("resize %v delivered after close", ws)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resizes not closed after close")
 	}
 	s.mu.Lock()
 	credit, buffered := s.sendCredit, s.rbuf.Len()

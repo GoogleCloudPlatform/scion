@@ -66,7 +66,7 @@ func TestLifecycleNilAgentGuards(t *testing.T) {
 			return srv.restoreAgentTx(ctx, nil, AuditActor{})
 		}},
 		{"reincarnateClaimTx", func(t *testing.T) error {
-			return srv.reincarnateClaimTx(ctx, nil, &store.AgentReincarnation{}, nil, AuditActor{})
+			return srv.reincarnateClaimTx(ctx, nil, &store.AgentReincarnation{}, nil, nil, AuditActor{})
 		}},
 		{"deactivateProjectAgentEdges", func(t *testing.T) error {
 			_, _, err := deactivateProjectAgentEdges(ctx, nilPageStore{Store: s}, bystander.ProjectID, time.Now())

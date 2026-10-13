@@ -55,10 +55,15 @@ type tokenService struct {
 
 // CreateTokenRequest is the request for creating a user access token.
 type CreateTokenRequest struct {
-	Name      string     `json:"name"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
+	Name string `json:"name"`
+	// ProjectID is the project-boundary shorthand. Leave it empty when
+	// Boundary is set.
+	ProjectID string `json:"projectId,omitempty"`
+	// Boundary is the explicit boundary, e.g. {"kind":"hub"} for a token
+	// not tied to a project. Nil means the project boundary of ProjectID.
+	Boundary  *TokenBoundary `json:"boundary,omitempty"`
+	Scopes    []string       `json:"scopes"`
+	ExpiresAt *time.Time     `json:"expiresAt,omitempty"`
 
 	// E.1 descriptive credential metadata: optional, bounded, immutable
 	// after issuance (there is no update endpoint).
@@ -74,15 +79,18 @@ type CreateTokenResponse struct {
 
 // TokenInfo represents token metadata (without the actual token value).
 type TokenInfo struct {
-	ID        string     `json:"id"`
-	Name      string     `json:"name"`
-	Prefix    string     `json:"prefix"`
-	ProjectID string     `json:"projectId"`
-	Scopes    []string   `json:"scopes"`
-	Revoked   bool       `json:"revoked"`
-	ExpiresAt *time.Time `json:"expiresAt,omitempty"`
-	LastUsed  *time.Time `json:"lastUsed,omitempty"`
-	Created   time.Time  `json:"created"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Prefix    string `json:"prefix"`
+	ProjectID string `json:"projectId"`
+	// Boundary is the boundary the token was issued under; nil from a hub
+	// that does not report it.
+	Boundary  *TokenBoundary `json:"boundary,omitempty"`
+	Scopes    []string       `json:"scopes"`
+	Revoked   bool           `json:"revoked"`
+	ExpiresAt *time.Time     `json:"expiresAt,omitempty"`
+	LastUsed  *time.Time     `json:"lastUsed,omitempty"`
+	Created   time.Time      `json:"created"`
 
 	// E.1 descriptive credential metadata: empty for tokens created before
 	// E.1 or without metadata supplied at issuance.
@@ -176,7 +184,7 @@ func (s *tokenService) Create(ctx context.Context, req *CreateTokenRequest) (*Cr
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[CreateTokenResponse](resp)
+	return apiclient.DecodeRequired[CreateTokenResponse](resp)
 }
 
 // List returns all tokens for the authenticated user.
@@ -185,7 +193,7 @@ func (s *tokenService) List(ctx context.Context) (*ListTokensResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ListTokensResponse](resp)
+	return apiclient.DecodeRequired[ListTokensResponse](resp)
 }
 
 // Get returns details for a specific token.
@@ -194,7 +202,7 @@ func (s *tokenService) Get(ctx context.Context, id string) (*TokenInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[TokenInfo](resp)
+	return apiclient.DecodeRequired[TokenInfo](resp)
 }
 
 // Revoke soft-revokes a token.
@@ -232,7 +240,7 @@ func (s *tokenService) ListScopes(ctx context.Context, opts *ListScopesOptions) 
 	if err != nil {
 		return nil, err
 	}
-	return apiclient.DecodeResponse[ScopesResponse](resp)
+	return apiclient.DecodeRequired[ScopesResponse](resp)
 }
 
 // AsScopeViolation reports whether err is the scope_violation error POST

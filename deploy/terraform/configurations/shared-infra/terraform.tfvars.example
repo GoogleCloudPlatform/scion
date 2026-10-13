@@ -15,3 +15,8 @@ sql_availability_type = "ZONAL"
 # Leave true always outside a deliberate, documented teardown — see the
 # README's destroy runbook.
 deletion_protection = true
+
+# Opt-in. DATA_READ audit logs for iamcredentials.googleapis.com, required
+# before any GKE hub enables test_runner (modules/hub-test-runner). Data-access
+# logs are billed as log volume.
+# iamcredentials_data_access_logs = true

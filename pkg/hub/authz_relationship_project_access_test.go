@@ -31,7 +31,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"sync"
 	"testing"
 	"time"
 
@@ -41,193 +40,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// rpaStore wraps the server store, counts GetUser calls per user ID, and can
-// inject a GetUser fault for one user ID. GetUser is the first store read of
-// ProjectMembershipEvidence (requireActiveUser), so a fault there is a real
-// store fault inside the admission lookup.
-type rpaStore struct {
-	store.Store
-	mu              sync.Mutex
-	getUserCalls    map[string]int
-	failGetUserFor  string
-	failBindingsFor string
-}
-
-// ListRoleBindingsForPrincipals fails when the closure's first (direct)
-// principal is failBindingsFor: a binding lookup fault, a fault class
-// distinct from the GetUser fault.
-func (s *rpaStore) ListRoleBindingsForPrincipals(ctx context.Context, principals []store.PrincipalRef, scopeTypes []string, scopeIDs []string) ([]*store.RoleBinding, error) {
-	s.mu.Lock()
-	fail := s.failBindingsFor != "" && len(principals) > 0 && principals[0].ID == s.failBindingsFor
-	s.mu.Unlock()
-	if fail {
-		return nil, errors.New("injected: binding lookup failure")
-	}
-	return s.Store.ListRoleBindingsForPrincipals(ctx, principals, scopeTypes, scopeIDs)
-}
-
-func (s *rpaStore) setBindingFault(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failBindingsFor = id
-}
-
-func (s *rpaStore) GetUser(ctx context.Context, id string) (*store.User, error) {
-	s.mu.Lock()
-	s.getUserCalls[id]++
-	fail := s.failGetUserFor != "" && s.failGetUserFor == id
-	s.mu.Unlock()
-	if fail {
-		return nil, errors.New("injected: user lookup failure")
-	}
-	return s.Store.GetUser(ctx, id)
-}
-
-func (s *rpaStore) calls(id string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.getUserCalls[id]
-}
-
-func (s *rpaStore) setFault(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.failGetUserFor = id
-}
-
-type rpaFixture struct {
-	srv       *Server
-	store     store.Store // the real store, for fixture writes
-	counting  *rpaStore   // the store the authz service reads through
-	projectID string
-	ownerID   string // the project owner (not a principal under test)
-}
-
-func newRPAFixture(t *testing.T, name string) *rpaFixture {
-	t.Helper()
-	srv, s := testServer(t)
-	f := &rpaFixture{
-		srv:       srv,
-		store:     s,
-		projectID: tid("rpa-" + name + "-project"),
-		ownerID:   tid("rpa-" + name + "-powner"),
-	}
-	createRS1Project(t, s, f.projectID, f.ownerID)
-	f.counting = &rpaStore{Store: s, getUserCalls: map[string]int{}}
-	orig := srv.authzService.store
-	srv.authzService.store = f.counting
-	t.Cleanup(func() { srv.authzService.store = orig })
-	return f
-}
-
-// hubUser creates an active user with hub membership and no project binding.
-func (f *rpaFixture) hubUser(t *testing.T, id string) {
-	t.Helper()
-	ctx := context.Background()
-	require.NoError(t, f.store.CreateUser(ctx, &store.User{
-		ID: id, Email: id + "@test.com", DisplayName: "User", Role: "member", Status: store.UserStatusActive,
-	}))
-	ensureHubMembership(ctx, f.store, id)
-}
-
-// expiringMember creates an active user whose only project binding is a
-// project-member binding that expires at expiresAt.
-func (f *rpaFixture) expiringMember(t *testing.T, id string, expiresAt time.Time) {
-	t.Helper()
-	ctx := context.Background()
-	f.hubUser(t, id)
-	rd, err := f.store.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
-	require.NoError(t, err)
-	_, err = f.store.CreateRoleBinding(ctx, &store.RoleBinding{
-		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: id,
-		ScopeType: store.RoleScopeProject, ScopeID: f.projectID, ExpiresAt: &expiresAt, CreatedBy: "test",
-	})
-	require.NoError(t, err)
-}
-
-// clearBindings removes every role binding held directly by userID (the
-// test server seeds system bindings for the dev user), so project access
-// comes only from what the test grants.
-func (f *rpaFixture) clearBindings(t *testing.T, userID string) {
-	t.Helper()
-	ctx := context.Background()
-	bindings, err := f.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
-	require.NoError(t, err)
-	for _, b := range bindings {
-		require.NoError(t, f.store.DeleteRoleBinding(ctx, b.ID))
-	}
-}
-
-// rpaPrincipal names the two principal classes every row runs for.
-type rpaPrincipal string
-
-const (
-	rpaInteractive rpaPrincipal = "interactive"
-	rpaUAT         rpaPrincipal = "uat"
-)
-
 var rpaPrincipals = []rpaPrincipal{rpaInteractive, rpaUAT}
-
-// rpaUATScopes is the ceiling of the UAT used by every row: it covers the
-// permissions the rows evaluate, so only live authority decides.
-var rpaUATScopes = []string{"agent:attach", "agent:read"}
-
-func rpaIdentity(kind rpaPrincipal, userID, projectID string) Identity {
-	switch kind {
-	case rpaUAT:
-		return NewScopedUserIdentity(NewAuthenticatedUser(userID, userID+"@test.com", "User", "member", "api"), projectID, rpaUATScopes)
-	default:
-		return NewAuthenticatedUser(userID, userID+"@test.com", "User", "member", "web")
-	}
-}
-
-// rpaOutcome is what one row evaluation observed.
-type rpaOutcome struct {
-	decision Decision
-	// stageKind is the direct stage result for rule ("" = passes).
-	stageKind string
-	// gateAdmitted is the Decide step-1 bearer gate result (UAT only).
-	gateAdmitted bool
-	gateDecision *Decision
-}
-
-// evaluate runs Decide (with Explain) for the principal and, for rule, the
-// stage directly. For a UAT it also runs the Decide step-1 bearer gate
-// admission and asserts that the gate and the stage each read the store
-// (fresh memos) and agree.
-func (f *rpaFixture) evaluate(t *testing.T, kind rpaPrincipal, userID string, res Resource, perm string, rule RelationshipRuleID) rpaOutcome {
-	t.Helper()
-	ctx := context.Background()
-	authz := f.srv.authzService
-	ident := rpaIdentity(kind, userID, f.projectID)
-	principal := principalContextForIdentity(ident)
-	action, ok := registryActionFor(perm)
-	require.True(t, ok)
-
-	var out rpaOutcome
-	out.decision = decidePerm(authz, ident, res, action, perm, true)
-
-	before := f.counting.calls(userID)
-	out.stageKind, _ = authz.relationshipProjectAccessStage(ctx, principal, res, perm, rule, &ProjectAdmissionCache{})
-	stageReads := f.counting.calls(userID) - before
-
-	if kind == rpaUAT {
-		in, gated := bearerGateInputsFor(principal, credentialContextForIdentity(ident))
-		require.True(t, gated, "UAT request must reach the bearer gate")
-		before = f.counting.calls(userID)
-		var trace bearerGateTrace
-		out.gateDecision = authz.evaluateBearerGate(ctx, principal, in, res, TargetScopeEvidence{}, action, perm, &ProjectAdmissionCache{}, &trace)
-		gateReads := f.counting.calls(userID) - before
-		out.gateAdmitted = out.gateDecision == nil
-
-		// Both checks ran (each made its own store read) and agree.
-		assert.Positive(t, gateReads, "the step-1 admission must run")
-		assert.Positive(t, stageReads, "the relationship stage must run")
-		assert.Equal(t, out.gateAdmitted, out.stageKind == "",
-			"step-1 admission (%v) and relationship stage (%q) must agree", out.gateDecision, out.stageKind)
-	}
-	return out
-}
 
 // assertRelationshipAdmit asserts Decide admitted through rule and the stage
 // passed.
@@ -535,10 +348,11 @@ func TestRelationshipProjectAccess_Invariants(t *testing.T) {
 		assert.True(t, r.Accepted)
 	})
 
-	// The delegation-ceiling walk evaluates a user delegator's
-	// relationships with the stage disabled (userRelationshipAuthority is
-	// not covered by this decision).
-	t.Run("CeilingWalkUnchanged", func(t *testing.T) {
+	// The delegation-ceiling walk applies the stage to a user
+	// delegator too (ptone/scion#3433): a delegator with no project access
+	// gets no relationship authority there (see
+	// authz_ceiling_project_access_test.go for the member case).
+	t.Run("CeilingWalkRequiresProjectAccess", func(t *testing.T) {
 		f := newRPAFixture(t, "ceiling")
 		userID := tid("rpa-ceiling-user")
 		f.hubUser(t, userID)
@@ -548,7 +362,8 @@ func TestRelationshipProjectAccess_Invariants(t *testing.T) {
 
 		ok, reason, err := f.srv.authzService.userRelationshipAuthority(ctx, user, agentResource(agent), ActionAttach, "agent.attach")
 		require.NoError(t, err)
-		assert.True(t, ok, "ceiling-walk relationship authority unchanged: %s", reason)
+		assert.False(t, ok, "ceiling-walk relationship authority requires project access: %s", reason)
+		assert.Contains(t, reason, RelationshipRejectProjectAccess)
 	})
 }
 
@@ -706,24 +521,6 @@ func TestRelationshipProjectAccess_ProjectScopedResources(t *testing.T) {
 			assert.Equal(t, "owner", d.MatchedGrant)
 		})
 	}
-}
-
-// messageAgent creates an agent in the fixture project with the given
-// message mode, owned by the project owner, with ancestry.
-func (f *rpaFixture) messageAgent(t *testing.T, suffix, mode string, ancestry ...string) *store.Agent {
-	t.Helper()
-	agent := &store.Agent{
-		ID:          tid("rpa-msg-agent-" + suffix),
-		Slug:        "rpa-msg-agent-" + suffix,
-		Name:        "RPA Message Agent " + suffix,
-		ProjectID:   f.projectID,
-		OwnerID:     f.ownerID,
-		Phase:       "stopped",
-		Ancestry:    ancestry,
-		MessageMode: mode,
-	}
-	require.NoError(t, f.store.CreateAgent(context.Background(), agent))
-	return agent
 }
 
 // TestRelationshipProjectAccess_Message covers the messaging ancestry allow
@@ -1012,10 +809,10 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 			fire := func(creatorID, agentID string) string {
 				t.Helper()
 				payload := `{"agentId":"` + agentID + `","message":"hello"}`
-				err := handler(ctx, store.ScheduledEvent{
+				err := handler(ctx, withSessionRevision(store.ScheduledEvent{
 					ID: tid("rpa-surfaces-evt-" + creatorID + agentID), ProjectID: f.projectID,
 					EventType: "message", Payload: payload, CreatedBy: creatorID,
-				})
+				}, creatorID))
 				require.Error(t, err, "scheduled message from %s must be refused", creatorID)
 				return err.Error()
 			}
@@ -1033,7 +830,7 @@ func TestRelationshipProjectAccess_RefusalSurfaces(t *testing.T) {
 			assert.Equal(t, want, fire(formerID, agent.ID), "scheduled: former member")
 			assert.Equal(t, want, fire(userFaultID, agent.ID), "scheduled: user lookup fault")
 			assert.Equal(t, want, fire(bindingFaultID, agent.ID), "scheduled: binding lookup fault")
-			assert.Equal(t, want, fire(outsiderID, tid("rpa-surfaces-missing-"+mode)), "scheduled: missing target")
+			assert.Equal(t, want, fire(f.ownerID, tid("rpa-surfaces-missing-"+mode)), "scheduled: missing target")
 
 			outsiderRouted := routed(outsiderID)
 			assert.Equal(t, routedDeliveryResult{AgentSlug: agent.Slug, Type: "mention", Status: "unauthorized", Error: routedRefusalError}, outsiderRouted)
@@ -1072,10 +869,10 @@ func TestRelationshipProjectAccess_ScheduledTargetLookupFault(t *testing.T) {
 	t.Cleanup(func() { f.srv.store = orig })
 	logs := installSentinelLogCapture(t)
 
-	err := f.srv.messageEventHandler()(ctx, store.ScheduledEvent{
+	err := f.srv.messageEventHandler()(ctx, withSessionRevision(store.ScheduledEvent{
 		ID: tid("rpa-schedfault-evt"), ProjectID: f.projectID, EventType: "message",
 		Payload: `{"agentId":"` + agent.ID + `","message":"hello"}`, CreatedBy: f.ownerID,
-	})
+	}, f.ownerID))
 	require.Error(t, err)
 	assert.Equal(t, errScheduledMessageRefused.Error(), err.Error())
 	assert.NotContains(t, err.Error(), "injected")

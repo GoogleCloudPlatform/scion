@@ -409,6 +409,84 @@ func TestListReconcilesPhaseWithContainerStatus(t *testing.T) {
 	}
 }
 
+// TestListRuntimeStartingPhase: a runtime entry reporting Phase and
+// ContainerStatus "starting" (a start the runtime has not confirmed, for
+// example one interrupted by a crash) is listed as starting, whatever
+// agent-info.json holds: "created" from provisioning, a previous run's
+// stopped, error or running, or nothing at all (ptone/scion#4756). The
+// broker heartbeat lists agents through the same Manager.List.
+func TestListRuntimeStartingPhase(t *testing.T) {
+	tests := []struct {
+		name         string
+		writeInfo    bool
+		infoPhase    string
+		infoActivity string
+	}{
+		{name: "created from provisioning", writeInfo: true, infoPhase: string(state.PhaseCreated)},
+		{name: "provisioning", writeInfo: true, infoPhase: string(state.PhaseProvisioning)},
+		{name: "previous run stopped", writeInfo: true, infoPhase: string(state.PhaseStopped)},
+		{name: "previous run error", writeInfo: true, infoPhase: string(state.PhaseError)},
+		{name: "previous run running", writeInfo: true, infoPhase: string(state.PhaseRunning), infoActivity: string(state.ActivityThinking)},
+		{name: "already starting", writeInfo: true, infoPhase: string(state.PhaseStarting)},
+		{name: "no agent-info.json", writeInfo: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			projectPath := filepath.Join(tmpDir, ".scion")
+			agentName := "starting-agent"
+			agentHome := filepath.Join(projectPath, "agents", agentName, "home")
+			if err := os.MkdirAll(agentHome, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if tc.writeInfo {
+				infoData, _ := json.MarshalIndent(api.AgentInfo{Name: agentName, Phase: tc.infoPhase, Activity: tc.infoActivity}, "", "  ")
+				if err := os.WriteFile(filepath.Join(agentHome, "agent-info.json"), infoData, 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			mock := &runtime.MockRuntime{
+				ListFunc: func(_ context.Context, _ map[string]string) ([]api.AgentInfo, error) {
+					return []api.AgentInfo{{
+						Name:            agentName,
+						ProjectPath:     projectPath,
+						Phase:           string(state.PhaseStarting),
+						ContainerStatus: "starting",
+					}}, nil
+				},
+			}
+
+			agents, err := NewManager(mock).List(context.Background(), nil)
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			var found []api.AgentInfo
+			for _, a := range agents {
+				if a.Name == agentName {
+					found = append(found, a)
+				}
+			}
+			if len(found) != 1 {
+				t.Fatalf("listed %d entries for the agent, want exactly 1: %+v", len(found), found)
+			}
+			if found[0].Phase != string(state.PhaseStarting) {
+				t.Errorf("Phase = %q, want %q", found[0].Phase, state.PhaseStarting)
+			}
+			if found[0].Activity != "" {
+				t.Errorf("Activity = %q, want empty", found[0].Activity)
+			}
+			if found[0].ContainerStatus != "starting" {
+				t.Errorf("ContainerStatus = %q, want %q", found[0].ContainerStatus, "starting")
+			}
+		})
+	}
+}
+
 func TestListPreservesRuntimeTerminalStateForKubernetes(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	nonZero := 1
@@ -1117,5 +1195,108 @@ func TestListCreatedAgentScanMatchesRuntimeFilter(t *testing.T) {
 	}
 	if matched == 0 || matched == len(filters) {
 		t.Errorf("matched %d of %d filters; the fixture must exercise both outcomes", matched, len(filters))
+	}
+}
+
+// TestListLocalProvisionedOnly covers ptone/scion#2875: a container-less
+// local agent in phase "created" was provisioned but never started.
+func TestListLocalProvisionedOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		info api.AgentInfo
+		want bool
+	}{
+		{name: "created, never started", info: api.AgentInfo{Phase: "created"}, want: true},
+		{name: "stopped", info: api.AgentInfo{Phase: "stopped"}, want: false},
+		{name: "error", info: api.AgentInfo{Phase: "error"}, want: false},
+		{name: "created but soft-deleted", info: api.AgentInfo{Phase: "created", DeletedAt: time.Now()}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectPath := filepath.Join(t.TempDir(), ".scion")
+			tt.info.Name = "po-agent"
+			writeCreatedAgentDirWithInfo(t, projectPath, tt.info)
+
+			agents, err := NewManager(&runtime.MockRuntime{}).List(context.Background(), map[string]string{
+				"scion.project_path": projectPath,
+			})
+			if err != nil {
+				t.Fatalf("List() error: %v", err)
+			}
+			if len(agents) != 1 {
+				t.Fatalf("List() returned %d agents, want 1", len(agents))
+			}
+			if got := agents[0].ProvisionedOnly; got != tt.want {
+				t.Errorf("ProvisionedOnly = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// A vanished-pod report (the previous pod, removed by a preemption) must not
+// rewrite agent-info.json: a start may be provisioning the next generation,
+// and its live pod (runtime phase "") takes its phase from that file.
+func TestListVanishedPodReportDoesNotTouchAgentInfo(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	tmpDir := t.TempDir()
+	projectPath := filepath.Join(tmpDir, ".scion")
+	agentName := "k8s-agent"
+	agentHome := filepath.Join(projectPath, "agents", agentName, "home")
+	if err := os.MkdirAll(agentHome, 0755); err != nil {
+		t.Fatal(err)
+	}
+	infoData, _ := json.MarshalIndent(api.AgentInfo{
+		Name: agentName, Phase: string(state.PhaseCreated), Runtime: "kubernetes",
+	}, "", "  ")
+	infoPath := filepath.Join(agentHome, "agent-info.json")
+	if err := os.WriteFile(infoPath, infoData, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectPath, "agents", agentName, "scion-agent.json"), []byte("{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var entry api.AgentInfo
+	mock := &runtime.MockRuntime{
+		ListFunc: func(_ context.Context, _ map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{entry}, nil
+		},
+	}
+	mgr := NewManager(mock)
+	filter := map[string]string{"scion.project_path": projectPath}
+
+	entry = api.AgentInfo{
+		Name: agentName, ProjectPath: projectPath, Runtime: "kubernetes",
+		Phase: string(state.PhaseError), ExitReason: string(state.ExitReasonPreempted),
+		ContainerStatus: "deleted (Preempted)", VanishedPodReport: true,
+	}
+	agents, err := mgr.List(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Phase != string(state.PhaseError) || agents[0].ExitReason != string(state.ExitReasonPreempted) {
+		t.Fatalf("tombstone entry = %+v, want its own error phase and reason", agents)
+	}
+	data, err := os.ReadFile(infoPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onDisk api.AgentInfo
+	if err := json.Unmarshal(data, &onDisk); err != nil {
+		t.Fatal(err)
+	}
+	if onDisk.Phase != string(state.PhaseCreated) {
+		t.Fatalf("agent-info.json phase = %q, want it unchanged (%q)", onDisk.Phase, state.PhaseCreated)
+	}
+
+	// The new generation's pod, still pending (runtime phase ""), keeps the
+	// on-disk phase.
+	entry = api.AgentInfo{Name: agentName, ProjectPath: projectPath, Runtime: "kubernetes", ContainerStatus: "Pending"}
+	agents, err = mgr.List(context.Background(), filter)
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	if len(agents) != 1 || agents[0].Phase != string(state.PhaseCreated) {
+		t.Fatalf("live pending entry = %+v, want phase %q", agents, state.PhaseCreated)
 	}
 }

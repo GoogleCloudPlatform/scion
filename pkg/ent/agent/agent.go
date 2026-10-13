@@ -16,6 +16,10 @@ const (
 	Label = "agent"
 	// FieldID holds the string denoting the id field in the database.
 	FieldID = "id"
+	// FieldFixtureRootID holds the string denoting the fixture_root_id field in the database.
+	FieldFixtureRootID = "fixture_root_id"
+	// FieldFixtureIssuerID holds the string denoting the fixture_issuer_id field in the database.
+	FieldFixtureIssuerID = "fixture_issuer_id"
 	// FieldSlug holds the string denoting the slug field in the database.
 	FieldSlug = "slug"
 	// FieldName holds the string denoting the name field in the database.
@@ -70,6 +74,12 @@ const (
 	FieldRuntimeBrokerID = "runtime_broker_id"
 	// FieldWorkspacePlacement holds the string denoting the workspace_placement field in the database.
 	FieldWorkspacePlacement = "workspace_placement"
+	// FieldPinnedRuntimeBrokerID holds the string denoting the pinned_runtime_broker_id field in the database.
+	FieldPinnedRuntimeBrokerID = "pinned_runtime_broker_id"
+	// FieldPinnedRuntimeTargetID holds the string denoting the pinned_runtime_target_id field in the database.
+	FieldPinnedRuntimeTargetID = "pinned_runtime_target_id"
+	// FieldPinnedRuntimeTargetType holds the string denoting the pinned_runtime_target_type field in the database.
+	FieldPinnedRuntimeTargetType = "pinned_runtime_target_type"
 	// FieldWebPtyEnabled holds the string denoting the web_pty_enabled field in the database.
 	FieldWebPtyEnabled = "web_pty_enabled"
 	// FieldExposedPorts holds the string denoting the exposed_ports field in the database.
@@ -112,6 +122,12 @@ const (
 	FieldRunID = "run_id"
 	// FieldPreviousRunIds holds the string denoting the previous_run_ids field in the database.
 	FieldPreviousRunIds = "previous_run_ids"
+	// FieldRunIDUpdatedAt holds the string denoting the run_id_updated_at field in the database.
+	FieldRunIDUpdatedAt = "run_id_updated_at"
+	// FieldSSHHostKey holds the string denoting the ssh_host_key field in the database.
+	FieldSSHHostKey = "ssh_host_key"
+	// FieldSSHHostKeyRunID holds the string denoting the ssh_host_key_run_id field in the database.
+	FieldSSHHostKeyRunID = "ssh_host_key_run_id"
 	// FieldLaunchState holds the string denoting the launch_state field in the database.
 	FieldLaunchState = "launch_state"
 	// FieldLaunchEndReason holds the string denoting the launch_end_reason field in the database.
@@ -184,6 +200,8 @@ const (
 	EdgePolicyBindings = "policy_bindings"
 	// EdgeHolds holds the string denoting the holds edge name in mutations.
 	EdgeHolds = "holds"
+	// EdgeReportedRuns holds the string denoting the reported_runs edge name in mutations.
+	EdgeReportedRuns = "reported_runs"
 	// Table holds the table name of the agent in the database.
 	Table = "agents"
 	// ProjectTable is the table that holds the project relation/edge.
@@ -214,11 +232,20 @@ const (
 	HoldsInverseTable = "agent_holds"
 	// HoldsColumn is the table column denoting the holds relation/edge.
 	HoldsColumn = "agent_id"
+	// ReportedRunsTable is the table that holds the reported_runs relation/edge.
+	ReportedRunsTable = "broker_reported_runs"
+	// ReportedRunsInverseTable is the table name for the BrokerReportedRun entity.
+	// It exists in this package in order to avoid circular dependency with the "brokerreportedrun" package.
+	ReportedRunsInverseTable = "broker_reported_runs"
+	// ReportedRunsColumn is the table column denoting the reported_runs relation/edge.
+	ReportedRunsColumn = "agent_id"
 )
 
 // Columns holds all SQL columns for agent fields.
 var Columns = []string{
 	FieldID,
+	FieldFixtureRootID,
+	FieldFixtureIssuerID,
 	FieldSlug,
 	FieldName,
 	FieldTemplate,
@@ -246,6 +273,9 @@ var Columns = []string{
 	FieldRuntime,
 	FieldRuntimeBrokerID,
 	FieldWorkspacePlacement,
+	FieldPinnedRuntimeBrokerID,
+	FieldPinnedRuntimeTargetID,
+	FieldPinnedRuntimeTargetType,
 	FieldWebPtyEnabled,
 	FieldExposedPorts,
 	FieldTaskSummary,
@@ -267,6 +297,9 @@ var Columns = []string{
 	FieldLaunchID,
 	FieldRunID,
 	FieldPreviousRunIds,
+	FieldRunIDUpdatedAt,
+	FieldSSHHostKey,
+	FieldSSHHostKeyRunID,
 	FieldLaunchState,
 	FieldLaunchEndReason,
 	FieldLaunchKind,
@@ -326,6 +359,8 @@ var (
 	DefaultDetached bool
 	// DefaultWorkspacePlacement holds the default value on creation for the "workspace_placement" field.
 	DefaultWorkspacePlacement string
+	// DefaultPinnedRuntimeTargetType holds the default value on creation for the "pinned_runtime_target_type" field.
+	DefaultPinnedRuntimeTargetType string
 	// DefaultWebPtyEnabled holds the default value on creation for the "web_pty_enabled" field.
 	DefaultWebPtyEnabled bool
 	// DefaultCreated holds the default value on creation for the "created" field.
@@ -456,6 +491,16 @@ func ByID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldID, opts...).ToFunc()
 }
 
+// ByFixtureRootID orders the results by the fixture_root_id field.
+func ByFixtureRootID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureRootID, opts...).ToFunc()
+}
+
+// ByFixtureIssuerID orders the results by the fixture_issuer_id field.
+func ByFixtureIssuerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldFixtureIssuerID, opts...).ToFunc()
+}
+
 // BySlug orders the results by the slug field.
 func BySlug(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSlug, opts...).ToFunc()
@@ -581,6 +626,21 @@ func ByWorkspacePlacement(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWorkspacePlacement, opts...).ToFunc()
 }
 
+// ByPinnedRuntimeBrokerID orders the results by the pinned_runtime_broker_id field.
+func ByPinnedRuntimeBrokerID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeBrokerID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetID orders the results by the pinned_runtime_target_id field.
+func ByPinnedRuntimeTargetID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetID, opts...).ToFunc()
+}
+
+// ByPinnedRuntimeTargetType orders the results by the pinned_runtime_target_type field.
+func ByPinnedRuntimeTargetType(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldPinnedRuntimeTargetType, opts...).ToFunc()
+}
+
 // ByWebPtyEnabled orders the results by the web_pty_enabled field.
 func ByWebPtyEnabled(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldWebPtyEnabled, opts...).ToFunc()
@@ -669,6 +729,21 @@ func ByLaunchID(opts ...sql.OrderTermOption) OrderOption {
 // ByRunID orders the results by the run_id field.
 func ByRunID(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldRunID, opts...).ToFunc()
+}
+
+// ByRunIDUpdatedAt orders the results by the run_id_updated_at field.
+func ByRunIDUpdatedAt(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldRunIDUpdatedAt, opts...).ToFunc()
+}
+
+// BySSHHostKey orders the results by the ssh_host_key field.
+func BySSHHostKey(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSSHHostKey, opts...).ToFunc()
+}
+
+// BySSHHostKeyRunID orders the results by the ssh_host_key_run_id field.
+func BySSHHostKeyRunID(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldSSHHostKeyRunID, opts...).ToFunc()
 }
 
 // ByLaunchState orders the results by the launch_state field.
@@ -879,6 +954,20 @@ func ByHolds(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
 		sqlgraph.OrderByNeighborTerms(s, newHoldsStep(), append([]sql.OrderTerm{term}, terms...)...)
 	}
 }
+
+// ByReportedRunsCount orders the results by reported_runs count.
+func ByReportedRunsCount(opts ...sql.OrderTermOption) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborsCount(s, newReportedRunsStep(), opts...)
+	}
+}
+
+// ByReportedRuns orders the results by reported_runs terms.
+func ByReportedRuns(term sql.OrderTerm, terms ...sql.OrderTerm) OrderOption {
+	return func(s *sql.Selector) {
+		sqlgraph.OrderByNeighborTerms(s, newReportedRunsStep(), append([]sql.OrderTerm{term}, terms...)...)
+	}
+}
 func newProjectStep() *sqlgraph.Step {
 	return sqlgraph.NewStep(
 		sqlgraph.From(Table, FieldID),
@@ -905,5 +994,12 @@ func newHoldsStep() *sqlgraph.Step {
 		sqlgraph.From(Table, FieldID),
 		sqlgraph.To(HoldsInverseTable, FieldID),
 		sqlgraph.Edge(sqlgraph.O2M, false, HoldsTable, HoldsColumn),
+	)
+}
+func newReportedRunsStep() *sqlgraph.Step {
+	return sqlgraph.NewStep(
+		sqlgraph.From(Table, FieldID),
+		sqlgraph.To(ReportedRunsInverseTable, FieldID),
+		sqlgraph.Edge(sqlgraph.O2M, false, ReportedRunsTable, ReportedRunsColumn),
 	)
 }

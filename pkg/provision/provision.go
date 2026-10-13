@@ -94,19 +94,9 @@ func findSentinel(dirs ...string) (string, bool) {
 	return "", false
 }
 
-// provisionLockRetries is the number of times to retry acquiring the
-// per-project advisory lock before giving up. Each retry sleeps briefly
-// (provisionLockRetryDelay) to allow the current holder to finish.
-const provisionLockRetries = 30
-
-// provisionLockRetryDelay is the sleep between advisory lock acquisition
-// retries. Provisioning (git clone) is typically short (seconds), so a
-// short retry cadence is appropriate.
-const provisionLockRetryDelay = 1 * time.Second
-
-// provisionFileLockName is the lock directory used to serialize provisioning
-// when no store.AdvisoryLocker is available (e.g. a k8s init container,
-// which has no Hub/DB connection by design — see the package doc above).
+// provisionFileLockName is the lock directory used to serialize provisioning.
+// Every caller, including the k8s init container (which has no Hub/DB
+// connection by design — see the package doc above), uses this file lock.
 // It is a distinct name from ProvisionSentinelFile: the sentinel is written
 // only AFTER provisioning succeeds and so cannot gate the provisioning work
 // itself, but this lock is acquired BEFORE mkdir/clone/chown run.
@@ -179,13 +169,6 @@ var (
 	// deadline), to avoid
 	// callers with no ctx deadline of their own waiting forever on a
 	// genuinely wedged (not crashed, not progressing) holder.
-	//
-	// This is deliberately a separate, longer budget from
-	// provisionLockRetries/provisionLockRetryDelay below, which govern the
-	// store.AdvisoryLocker path only: a Postgres advisory lock has no staleness
-	// concept (it releases automatically when the holding connection drops), so
-	// that path has no equivalent "outlive the stale window" requirement and
-	// keeps its original, shorter budget.
 	fileLockRetries    = 110
 	fileLockRetryDelay = 2 * time.Second
 )
@@ -259,17 +242,13 @@ type ProvisionInput struct {
 	// GitClone holds git-clone config when the project is git-backed; nil otherwise.
 	GitClone *api.GitCloneConfig
 
-	// Locker provides the per-project advisory lock for the NFS first-access
-	// provisioning guard (design §7, risk RN1). On Postgres-backed deployments
-	// this uses pg_try_advisory_lock(classid, objid) for cross-node mutual
-	// exclusion; on SQLite it's a no-op (single-writer serializes already).
-	//
-	// May be nil — ProvisionShared then falls back to acquireFileLock, a
-	// filesystem-based mutex on the shared NFS mount itself (see its doc).
-	// This is the common case: the k8s init container has no Hub/DB
-	// connection at all, so Locker is always nil there, and in practice no
-	// caller anywhere sets it today (see acquireFileLock's doc).
-	Locker store.AdvisoryLocker
+	// CloneWithToken makes the clone authenticate with the token in the
+	// GITHUB_TOKEN environment variable (GitTokenEnv). The clone command
+	// alone gets a credential helper, through GIT_CONFIG_* entries in its
+	// own environment, that reads the variable when git asks for a
+	// credential (GitTokenCredentialHelper). The token is not added to the
+	// clone URL, the command line or any file.
+	CloneWithToken bool
 
 	// NFSUID and NFSGID are the stable NFS ownership values (default 1000:1000).
 	// Used for one-time chown of newly provisioned workspace directories.
@@ -292,7 +271,7 @@ type ProvisionInput struct {
 	//   - a sentinel found there also counts as provisioned (the new sentinel
 	//     is only ever written in the sentinel directory), and
 	//     "/.scion-provisioned" is added to the workspace's git excludes;
-	//   - with no Locker, the file lock in LegacyDir is taken BEFORE the one
+	//   - the file lock in LegacyDir is taken BEFORE the one
 	//     in the sentinel directory and released after it, so a pod running
 	//     an older sciontool (which takes only the legacy lock) and a newer
 	//     one always exclude each other, and the fixed order rules out a
@@ -341,8 +320,8 @@ type ProvisionInput struct {
 	//     ensureMountedWorktree).
 	MountedWorktree bool
 
-	// LockWait raises how long ProvisionShared waits for the file lock
-	// (when Locker is nil). Values below the default budget (about 3m40s)
+	// LockWait raises how long ProvisionShared waits for the file lock.
+	// Values below the default budget (about 3m40s)
 	// are ignored. The Kubernetes provisioning init container sets it in
 	// worktree-per-agent mode, where every pod of the project takes the
 	// lock: a pod that starts while another one clones the shared checkout
@@ -350,24 +329,22 @@ type ProvisionInput struct {
 	LockWait time.Duration
 }
 
-// heldLock represents a successfully acquired provisioning lock — either a
-// store.AdvisoryLocker-backed lock or the filesystem fallback — plus the
-// hooks ProvisionShared needs to detect and react to losing it mid-provision:
-// a holder must not simply assume it holds the lock forever once acquired.
+// heldLock represents a successfully acquired provisioning file lock (or
+// an ordered set of them; see acquireOrderedFileLocks) plus the hooks
+// ProvisionShared needs to detect and react to losing it mid-provision: a
+// holder must not simply assume it holds the lock forever once acquired.
 type heldLock struct {
 	// release releases the lock. ProvisionShared calls it exactly once, via
 	// a single deferred call.
 	release func() error
 
-	// ctx is derived from the ctx passed to the acquire call. For the
-	// filesystem fallback, it is cancelled early if the heartbeat
+	// ctx is derived from the ctx passed to the acquire call. It is
+	// cancelled early if the heartbeat
 	// determines this holder no longer owns the lock (a reclaimer beat it
 	// to it), in addition to normal parent cancellation. Provisioning work
 	// (git clone, chown) must run under this ctx, not the original one, so
 	// a detected loss kills any in-flight subprocess instead of letting it
-	// run to completion under a lock that no longer belongs to it. For the
-	// store.AdvisoryLocker path, which has no independent loss-detection
-	// signal, this is just the original ctx.
+	// run to completion under a lock that no longer belongs to it.
 	ctx context.Context
 
 	// stillOwned reports, via a fresh synchronous check (not merely the
@@ -376,12 +353,12 @@ type heldLock struct {
 	// irreversible step (finalizing a clone move, writing the completion
 	// sentinel) — the background heartbeat's periodic check alone leaves a
 	// gap between "last confirmed" and the exact instant of that step; this
-	// closes it. Always true for the store.AdvisoryLocker path.
+	// closes it.
 	stillOwned func() bool
 }
 
 // resolveSentinelDir returns the directory used for both the completion
-// sentinel and (when no Locker is available) the fallback file lock: an
+// sentinel and the provisioning file lock: an
 // explicit override, or the workspace directory's parent by default. Shared
 // by ProvisionShared and gitCloneWorkspace so the two never disagree about
 // where the lock actually lives.
@@ -465,7 +442,7 @@ func excludeLegacySentinel(in ProvisionInput) {
 //     already-provisioned project must not contend the lock at all,
 //     including a file lock that a crashed holder elsewhere is still
 //     sitting on.
-//  2. Acquire per-project advisory lock (try with retry).
+//  2. Acquire the per-project provisioning file lock (waiting if held).
 //  3. Re-check the sentinel now that the lock is held, in case another node
 //     finished between step 1 and step 2.
 //  4. Else: mkdir -p, git clone, chown 1000:1000, mode 0770, write sentinel.
@@ -477,7 +454,7 @@ func excludeLegacySentinel(in ProvisionInput) {
 // by localBackend. An assert guards this.
 //
 // The flow is idempotent and safe under concurrency: two agents for the same
-// project starting on two different nodes contend on the advisory lock;
+// project starting on two different nodes contend on the provisioning lock;
 // exactly one clones, the second sees the sentinel and reuses the workspace.
 func ProvisionShared(in ProvisionInput) error {
 	// Guard: ClonePerAgent must never use the NFS path. SelectWorkspaceBackend
@@ -522,22 +499,21 @@ func ProvisionShared(in ProvisionInput) error {
 		}
 	}
 
-	// --- Step 1: Acquire per-project advisory lock ---
+	// --- Step 1: Acquire the per-project provisioning lock ---
 	held, err := acquireProvisionLock(ctx, in, sentinelDir)
 	if err != nil {
 		return fmt.Errorf("ProvisionShared: failed to acquire lock for project %s: %w", in.ProjectID, err)
 	}
 	defer func() {
 		if releaseErr := held.release(); releaseErr != nil {
-			slog.Warn("ProvisionShared: failed to release advisory lock",
+			slog.Warn("ProvisionShared: failed to release provisioning lock",
 				"project_id", in.ProjectID, "error", releaseErr)
 		}
 	}()
-	// From here on, use the lock-aware ctx: for the filesystem fallback it
-	// is cancelled early if the heartbeat detects this holder lost the lock,
-	// which kills any in-flight git/chown subprocess below instead of
-	// letting it run to completion under a lock that no longer belongs to
-	// it.
+	// From here on, use the lock-aware ctx: it is cancelled early if the
+	// heartbeat detects this holder lost the lock, which kills any in-flight
+	// git/chown subprocess below instead of letting it run to completion
+	// under a lock that no longer belongs to it.
 	ctx = held.ctx
 
 	// --- Step 2: Check sentinel (under the lock: closes the gap between
@@ -591,7 +567,7 @@ func ProvisionShared(in ProvisionInput) error {
 	}
 
 	// Chown to stable NFS UID/GID (design §9.1). This is a ONE-TIME operation
-	// under the advisory lock — per-start chown is skipped for NFS (see N1-5).
+	// under the provisioning lock — per-start chown is skipped for NFS (see N1-5).
 	// chown -R on an existing, differently-owned directory (e.g. one kubelet
 	// auto-created as root:root before this mechanism ran) re-owns it and
 	// everything already inside it — self-healing on the next start needs no
@@ -912,62 +888,23 @@ func fileLockWait(in ProvisionInput) time.Duration {
 	return in.LockWait
 }
 
-// acquireProvisionLock acquires the per-project advisory lock, retrying briefly
-// if another node currently holds it. Returns a heldLock.
+// acquireProvisionLock acquires the provisioning file lock in sentinelDir
+// (preceded by the legacy one when LegacyDir applies). Returns a heldLock.
 //
-// The retry loop respects context cancellation so that server shutdown is not
-// blocked for up to provisionLockRetries × provisionLockRetryDelay.
-//
-// sentinelDir is used only by the no-Locker fallback (acquireFileLock) — it
-// is the directory both a lock-winner and any concurrent waiters already see
-// identically (the NFS-mounted project root), so it doubles as the shared
-// medium for a filesystem-based mutex when no store.AdvisoryLocker is wired
-// up. This is the common case for the k8s init container: it has no Hub/DB
-// connection at all (see the package doc above), so in.Locker is always nil
-// there — see cmd/sciontool/commands/provision.go's ProvisionInput.
+// sentinelDir is the directory both a lock-winner and any concurrent
+// waiters already see identically (the NFS-mounted project root), so it
+// doubles as the shared medium for a filesystem-based mutex. The k8s init
+// container has no Hub/DB connection at all (see the package doc above), so
+// a filesystem lock is the coordination medium available to every caller.
 func acquireProvisionLock(ctx context.Context, in ProvisionInput, sentinelDir string) (heldLock, error) {
-	if in.Locker == nil {
-		if legacy := legacyDir(in, sentinelDir); legacy != "" {
-			// Legacy lock first, then the state-directory lock, always in
-			// this order (see ProvisionInput.LegacyDir). The legacy lock can
-			// be dropped once no supported sciontool image takes only the
-			// legacy lock; tracked in ptone/scion#2974.
-			return acquireOrderedFileLocks(ctx, []string{legacy, sentinelDir}, fileLockWait(in))
-		}
-		return acquireFileLockWithin(ctx, sentinelDir, fileLockWait(in))
+	if legacy := legacyDir(in, sentinelDir); legacy != "" {
+		// Legacy lock first, then the state-directory lock, always in
+		// this order (see ProvisionInput.LegacyDir). The legacy lock can
+		// be dropped once no supported sciontool image takes only the
+		// legacy lock; tracked in ptone/scion#2974.
+		return acquireOrderedFileLocks(ctx, []string{legacy, sentinelDir}, fileLockWait(in))
 	}
-
-	objID := store.StableProjectHash(in.ProjectID)
-	ticker := time.NewTicker(provisionLockRetryDelay)
-	defer ticker.Stop()
-
-	for attempt := 0; attempt < provisionLockRetries; attempt++ {
-		acquired, release, err := in.Locker.TryAdvisoryLockObject(ctx, store.LockWorkspaceProvision, objID)
-		if err != nil {
-			return heldLock{}, fmt.Errorf("advisory lock attempt %d: %w", attempt, err)
-		}
-		if acquired {
-			// No independent loss-detection signal on this path (a Postgres
-			// advisory lock releases automatically if the holding
-			// connection drops, but nothing here observes that
-			// independently) — ctx is just the caller's own, and stillOwned
-			// is trivially true.
-			return heldLock{release: release, ctx: ctx, stillOwned: func() bool { return true }}, nil
-		}
-		// Another node holds the lock — it's provisioning this project.
-		// Wait briefly and retry, but honour context cancellation.
-		slog.Debug("ProvisionShared: lock held by another node, retrying",
-			"project_id", in.ProjectID, "attempt", attempt+1)
-		select {
-		case <-ctx.Done():
-			return heldLock{}, fmt.Errorf("context cancelled while waiting for provisioning lock (project %s): %w",
-				in.ProjectID, ctx.Err())
-		case <-ticker.C:
-		}
-	}
-
-	return heldLock{}, fmt.Errorf("failed to acquire provisioning lock after %d attempts (project %s)",
-		provisionLockRetries, in.ProjectID)
+	return acquireFileLockWithin(ctx, sentinelDir, fileLockWait(in))
 }
 
 // acquireOrderedFileLocks takes the file lock in each of dirs, in order,
@@ -1137,10 +1074,8 @@ var lchownFile = os.Lchown
 var timeNow = time.Now
 
 // acquireFileLock acquires a mutual-exclusion lock backed by the shared
-// filesystem itself, for use when no store.AdvisoryLocker is available —
-// which today is every caller: RunConfig.Locker is never populated by any
-// runtime (k8s, docker, Cloud Run), so this is not just the k8s init
-// container's fallback, it is the only lock any of them ever actually gets.
+// filesystem itself. It is the provisioning lock for every caller (k8s,
+// docker, Cloud Run), not just the k8s init container.
 // Every concurrent provisioner for the same project already sees the same
 // NFS-mounted dir identically — that shared filesystem, not a DB
 // connection, is the coordination medium actually available in that context.
@@ -2313,7 +2248,7 @@ func SafeGitCommand(ctx context.Context, dir string, args ...string) (*exec.Cmd,
 // content is left as it is.
 //
 // This relies on every start taking the provisioning file lock before it
-// looks at the workspace (no store.AdvisoryLocker; see acquireProvisionLock).
+// looks at the workspace (see acquireProvisionLock).
 // A start that only waited for the marker would not wait for this clone.
 func markedWorkspaceNeedsClone(in ProvisionInput) bool {
 	if in.Mode != store.SharingModeSharedPlain || in.GitClone == nil || in.GitClone.URL == "" {
@@ -2488,7 +2423,7 @@ func nonIgnorableWorkspaceEntries(in ProvisionInput, dir string) ([]string, erro
 //     long clone runs.
 //
 // stillOwned reports whether the caller still holds the provisioning lock;
-// nil means not applicable (the store.AdvisoryLocker path).
+// nil skips the check.
 func gitCloneWorkspace(ctx context.Context, in ProvisionInput, stillOwned func() bool) error {
 	dest := in.Resolved.HostPath
 
@@ -2589,7 +2524,7 @@ func excludeProvisioningFiles(in ProvisionInput) {
 	dest := in.Resolved.HostPath
 	patterns := []string{"/" + cloneTempDirPrefix + "*"}
 	sentinelDir := resolveSentinelDir(in)
-	if in.Locker == nil && (sentinelDir == dest || legacyDir(in, sentinelDir) == dest) {
+	if sentinelDir == dest || legacyDir(in, sentinelDir) == dest {
 		patterns = append(patterns, "/"+provisionFileLockName, "/"+provisionFileLockName+".*")
 	}
 	if sentinelDir == dest {
@@ -2887,22 +2822,83 @@ func runGitClone(ctx context.Context, in ProvisionInput) error {
 
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if in.CloneWithToken {
+		cmd.Env = append(cmd.Env, TokenCredentialHelperEnv(cmd.Env)...)
+	}
 	output, err := cmd.CombinedOutput()
 	if err == nil {
 		return nil
 	}
-	return cloneError(gc.URL, string(output), err)
+	return cloneError(gc.URL, string(output), err, in.CloneWithToken, os.Getenv(GitTokenEnv))
+}
+
+// redactedCredential replaces a credential value in clone error output.
+const redactedCredential = "[REDACTED]"
+
+// GitTokenEnv is the environment variable holding the project's git token,
+// the same variable the agent container's clone uses.
+const GitTokenEnv = "GITHUB_TOKEN"
+
+// GitTokenCredentialHelper is the git credential helper that answers with
+// the token in GITHUB_TOKEN, read from the environment when git runs it.
+// sciontool init configures the same helper for the agent container, so
+// workspace provisioning and the agent authenticate the same way.
+const GitTokenCredentialHelper = `!f() { echo "password=${GITHUB_TOKEN}"; echo "username=oauth2"; }; f`
+
+// TokenCredentialHelperEnv returns the GIT_CONFIG_COUNT/KEY/VALUE entries
+// to append to env, the environment of one git command, so that the command
+// uses GitTokenCredentialHelper and no other credential helper: the first
+// entry clears the helpers from git's config files (so none of them stores
+// the credential), the second adds this one. Entries already counted in env
+// are kept. The returned values name the variable, never the token.
+func TokenCredentialHelperEnv(env []string) []string {
+	base := 0
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, "GIT_CONFIG_COUNT="); ok {
+			// The last entry is the one exec uses.
+			base = 0
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				base = n
+			}
+		}
+	}
+	return []string{
+		"GIT_CONFIG_COUNT=" + strconv.Itoa(base+2),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=", base),
+		fmt.Sprintf("GIT_CONFIG_KEY_%d=credential.helper", base+1),
+		fmt.Sprintf("GIT_CONFIG_VALUE_%d=%s", base+1, GitTokenCredentialHelper),
+	}
 }
 
 // cloneError builds the error for a failed clone of rawURL. git's output is
 // stripped of the URL's credentials before it is included.
-func cloneError(rawURL, output string, runErr error) error {
+// withToken reports whether the clone was given the project's git token.
+// token is the value of GitTokenEnv in the clone's environment; when it is
+// non-empty, any occurrence of it in the included output is replaced with
+// redactedCredential.
+func cloneError(rawURL, output string, runErr error, withToken bool, token string) error {
 	safeURL := redactCloneURL(rawURL)
 	detail := strings.TrimSpace(sanitizeCloneOutput(output, rawURL))
 	if detail == "" && runErr != nil {
 		detail = runErr.Error()
 	}
-	switch util.ClassifyGitError(detail).Kind {
+	if token != "" {
+		detail = strings.ReplaceAll(detail, token, redactedCredential)
+	}
+	kind := util.ClassifyGitError(detail).Kind
+	if withToken {
+		switch kind {
+		case util.GitErrAuth:
+			return fmt.Errorf("git clone %s: the repository did not accept the project's git credential (GITHUB_TOKEN): %s", safeURL, detail)
+		case util.GitErrNotFound:
+			return fmt.Errorf("git clone %s: repository or branch not found, "+
+				"or the project's git credential (GITHUB_TOKEN) has no access to it: %s", safeURL, detail)
+		default:
+			return fmt.Errorf("git clone %s: %s", safeURL, detail)
+		}
+	}
+	switch kind {
 	case util.GitErrAuth:
 		return fmt.Errorf("git clone %s: the repository needs credentials, and workspace provisioning has none "+
 			"(it clones without a git token, so a private repository cannot be cloned here): %s", safeURL, detail)
@@ -3225,8 +3221,8 @@ type worktreeOutcome struct {
 //   - Otherwise, a new worktree is created and the agent registers as its
 //     first sharer.
 //
-// The worktree add is done under the already-held advisory lock (design §9.2:
-// worktree add/remove touches shared .git metadata).
+// The worktree add is done under the already-held provisioning lock
+// (design §9.2: worktree add/remove touches shared .git metadata).
 //
 // It reports what it did in a worktreeOutcome.
 func ensureWorktree(ctx context.Context, in ProvisionInput) (worktreeOutcome, error) {
@@ -4028,7 +4024,7 @@ func chownTarget(hostPath string) string {
 }
 
 // chownProjectTree sets ownership of the project root and its contents to the
-// given UID/GID. This is a ONE-TIME operation done under the advisory lock
+// given UID/GID. This is a ONE-TIME operation done under the provisioning lock
 // during first provisioning (design §9.1). Per-start chown is NOT done for
 // NFS (slow, and unsafe to run concurrently with other starts, over the network).
 //

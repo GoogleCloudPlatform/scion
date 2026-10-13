@@ -16,10 +16,13 @@ package entadapter
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
+	entsql "entgo.io/ent/dialect/sql"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -121,6 +124,12 @@ func (s *DelegationEdgeStore) CreateDelegationEdge(ctx context.Context, edge *st
 	if err := validateEdgeCeiling(edge.EffectCeiling); err != nil {
 		return err
 	}
+	// Principal and scope IDs that are UUIDs are stored in canonical form,
+	// so the descendant walk and every lookup by ID match them whatever
+	// form the caller passed (ptone/scion#3433). Other IDs are kept as given.
+	edge.DelegatorID = canonicalPrincipalID(edge.DelegatorID)
+	edge.DelegateID = canonicalPrincipalID(edge.DelegateID)
+	edge.ScopeID = canonicalPrincipalID(edge.ScopeID)
 	builder := s.client.DelegationEdge.Create().
 		SetDelegatorType(delegationedge.DelegatorType(edge.DelegatorType)).
 		SetDelegatorID(edge.DelegatorID).
@@ -365,11 +374,24 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 }
 
 // DeactivateDelegationEdgeGuarded deactivates edgeID with cause and opID when
-// it is active and satisfies guard. Every guard predicate, including the
-// updated time, is part of the UPDATE's WHERE clause, so a concurrent change
-// between the caller's read and the write affects zero rows rather than
-// deactivating a changed edge. The existence read only distinguishes
-// ErrNotFound from an unmet precondition. A guard with both Unrecorded and
+// it is active and satisfies guard. Every guard predicate is part of the
+// UPDATE's WHERE clause, so a concurrent change between the store's read and
+// its write affects zero rows rather than deactivating a changed edge. This
+// holds inside and outside WithTx.
+//
+// guard.UpdatedAt is compared as an instant, not as stored text: on SQLite
+// the updated column is TEXT, and one instant can be stored in several forms
+// (an offset other than Z, Go's time.String layout) that a bound time.Time
+// never equals. The store therefore reads the row, refuses (false, nil, no
+// UPDATE) when it is inactive or its updated instant differs from
+// guard.UpdatedAt, and otherwise puts the exact stored value it read into the
+// WHERE as a compare-and-swap: on SQLite the raw text, bound as a string
+// against the column; on Postgres the timestamptz value, which compares as an
+// instant. The raw read runs before the typed read, on the same (possibly
+// transaction-bound) client, so any ent write between them bumps updated
+// and changes the stored value, and the UPDATE matches no row.
+//
+// A missing edge returns ErrNotFound. A guard with both Unrecorded and
 // Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
 func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard store.DelegationEdgeDeactivateGuard, cause store.EdgeDeactivationCause, opID string) (bool, error) {
 	if guard.Unrecorded && guard.Recorded {
@@ -382,7 +404,17 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	if _, err := s.client.DelegationEdge.Get(ctx, uid); err != nil {
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	var rawUpdated string
+	rawFound := false
+	if guard.UpdatedAt != nil && !pg {
+		rawUpdated, rawFound, err = s.rawUpdatedText(ctx, uid)
+		if err != nil {
+			return false, err
+		}
+	}
+	row, err := s.client.DelegationEdge.Get(ctx, uid)
+	if err != nil {
 		return false, mapError(err)
 	}
 	preds := []predicate.DelegationEdge{
@@ -390,7 +422,19 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 		delegationedge.ActiveEQ(true),
 	}
 	if guard.UpdatedAt != nil {
-		preds = append(preds, delegationedge.UpdatedEQ(*guard.UpdatedAt))
+		if !row.Active || !row.Updated.Equal(*guard.UpdatedAt) {
+			return false, nil
+		}
+		if pg {
+			preds = append(preds, delegationedge.UpdatedEQ(row.Updated))
+		} else {
+			if !rawFound {
+				return false, nil
+			}
+			preds = append(preds, predicate.DelegationEdge(func(sel *entsql.Selector) {
+				sel.Where(entsql.EQ(sel.C(delegationedge.FieldUpdated), rawUpdated))
+			}))
+		}
 	}
 	if guard.Unrecorded {
 		preds = append(preds,
@@ -417,6 +461,32 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 		return false, mapError(err)
 	}
 	return n == 1, nil
+}
+
+// rawUpdatedText returns the stored text of the updated column of edgeID on
+// SQLite, read through s.client so that inside WithTx it runs on the
+// transaction's connection. found is false when no row has that ID.
+func (s *DelegationEdgeStore) rawUpdatedText(ctx context.Context, uid uuid.UUID) (text string, found bool, err error) {
+	rows := &entsql.Rows{}
+	query := "SELECT CAST(" + delegationedge.FieldUpdated + " AS TEXT) FROM " + delegationedge.Table + " WHERE " + delegationedge.FieldID + " = ?"
+	if err := s.client.Driver().Query(ctx, query, []any{uid}, rows); err != nil {
+		return "", false, mapError(err)
+	}
+	defer func() { _ = rows.Close() }()
+	if !rows.Next() {
+		return "", false, mapError(rows.Err())
+	}
+	var raw sql.NullString
+	if err := rows.Scan(&raw); err != nil {
+		return "", false, mapError(err)
+	}
+	if err := rows.Err(); err != nil {
+		return "", false, mapError(err)
+	}
+	if !raw.Valid {
+		return "", false, nil
+	}
+	return raw.String, true, nil
 }
 
 // ReactivateDelegationEdge reactivates edgeID when it is inactive with cause
@@ -775,4 +845,28 @@ func (s *DelegationEdgeStore) heldForRoot(ctx context.Context, rootID string, ca
 		}
 	}
 	return held, nil
+}
+
+// canonicalPrincipalID returns id in canonical UUID form when it parses as a
+// UUID (upper case, braced or urn forms included), and id unchanged
+// otherwise.
+func canonicalPrincipalID(id string) string {
+	if id == "" {
+		return id
+	}
+	u, err := uuid.Parse(id)
+	if err != nil {
+		return id
+	}
+	return u.String()
+}
+
+// canonicalPrincipalIDs returns a copy of ids with every UUID in canonical
+// form (see canonicalPrincipalID).
+func canonicalPrincipalIDs(ids []string) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = canonicalPrincipalID(id)
+	}
+	return out
 }

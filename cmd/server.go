@@ -22,19 +22,20 @@ import (
 const GlobalProjectName = "global"
 
 var (
-	serverConfigPath    string
-	hubPort             int
-	hubHost             string
-	enableHub           bool
-	enableRuntimeBroker bool
-	runtimeBrokerPort   int
-	dbURL               string
-	noAutoMigrate       bool
-	enableDevAuth       bool
-	enableTestLogin     bool
-	enableDebug         bool
-	storageBucket       string
-	storageDir          string
+	serverConfigPath     string
+	hubPort              int
+	hubHost              string
+	enableHub            bool
+	enableRuntimeBroker  bool
+	runtimeBrokerPort    int
+	dbURL                string
+	noAutoMigrate        bool
+	enableDevAuth        bool
+	enableTestLogin      bool
+	enableDebugEndpoints bool
+	enableDebug          bool
+	storageBucket        string
+	storageDir           string
 
 	// Template cache settings for Runtime Broker
 	templateCacheDir string
@@ -240,7 +241,7 @@ func init() {
 	// Hub API flags
 	serverStartCmd.Flags().BoolVar(&enableHub, "enable-hub", false, "Enable the Hub API")
 	serverStartCmd.Flags().IntVar(&hubPort, "port", 9810, "Hub API port (standalone mode only; ignored when --enable-web is set, use --web-port instead)")
-	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Hub API host to bind")
+	serverStartCmd.Flags().StringVar(&hubHost, "host", "0.0.0.0", "Listen address for the Hub API and web server; the runtime broker listener is set by server.broker.host (workstation default 127.0.0.1; 0.0.0.0 counts as unset)")
 	serverStartCmd.Flags().StringVar(&dbURL, "db", "", "Database URL/path")
 	serverStartCmd.Flags().BoolVar(&noAutoMigrate, "no-auto-migrate", false, "Skip automatic in-process upgrade of a legacy raw-SQL hub.db to the Ent schema (operator opt-out)")
 
@@ -251,9 +252,11 @@ func init() {
 	// Auth flags
 	serverStartCmd.Flags().BoolVar(&enableDevAuth, "dev-auth", false, "Enable development authentication (auto-generates token)")
 	serverStartCmd.Flags().BoolVar(&enableTestLogin, "enable-test-login", false, "Enable the test-login endpoint for integration testing (do not use in production)")
+	registerTestModeFlags(serverStartCmd)
 
 	// Debug flags
-	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode, including DEBUG-level logs (SCION_LOG_LEVEL=debug only raises the log level; SCION_DEBUG does not)")
+	serverStartCmd.Flags().BoolVar(&enableDebugEndpoints, "enable-debug-endpoints", false, "Serve diagnostic endpoints for local development; refused in hosted mode and independent of --debug")
+	serverStartCmd.Flags().BoolVar(&enableDebug, "debug", false, "Enable server debug mode; sets the default log level to debug, overriding the SCION_LOG_LEVEL default (per-component levels are kept)")
 
 	// Storage flags
 	serverStartCmd.Flags().StringVar(&storageBucket, "storage-bucket", "", "GCS bucket name for template storage")

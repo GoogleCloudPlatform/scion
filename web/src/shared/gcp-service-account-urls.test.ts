@@ -30,6 +30,7 @@ import {
   saListUrl,
   saMintUrl,
   saRef,
+  saStatusUrl,
   saVerifyUrl,
 } from './gcp-service-account-urls.js';
 
@@ -166,12 +167,33 @@ describe('saMintUrl — scope-appropriate mint endpoint', () => {
 });
 
 describe('saDetailPath', () => {
-  it('offers a detail page for parentless accounts only', () => {
+  it('offers the plain detail page for parentless accounts', () => {
     expect(saDetailPath(hubScoped)).toBe('/settings/service-accounts/sa-2');
     expect(saDetailPath(userScoped)).toBe('/settings/service-accounts/sa-3');
-    // Project-scoped accounts are managed from their project's settings tab,
-    // which is the surface whose list route computes their capabilities. A
-    // detail page for them could only render buttons from existence.
-    expect(saDetailPath(projectScoped)).toBeNull();
+  });
+
+  it('names the owning Scion project for a project-scoped account', () => {
+    // scopeId, never projectId (the GCP project): the page reads the status
+    // view and the row from the owning project.
+    expect(saDetailPath(projectScoped)).toBe(
+      '/settings/service-accounts/sa-1?project=scion-project-abc'
+    );
+    expect(saDetailPath({ ...projectScoped, scopeId: '' })).toBeNull();
+  });
+});
+
+describe('saStatusUrl', () => {
+  it('is nested under the Scion project and escapes the ref', () => {
+    expect(saStatusUrl('scion-project-abc', 'sa-1')).toBe(
+      '/api/v1/projects/scion-project-abc/gcp-service-accounts/sa-1/status'
+    );
+    expect(saStatusUrl('p', 'Worker SA')).toBe(
+      '/api/v1/projects/p/gcp-service-accounts/Worker%20SA/status'
+    );
+  });
+
+  it('refuses a missing project or account', () => {
+    expect(() => saStatusUrl('', 'sa-1')).toThrow();
+    expect(() => saStatusUrl('p', '')).toThrow();
   });
 });

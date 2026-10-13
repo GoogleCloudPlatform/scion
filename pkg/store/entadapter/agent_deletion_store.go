@@ -65,7 +65,7 @@ func (s *AgentStore) UpdateAgentDeletion(ctx context.Context, id string, pred st
 	if err != nil {
 		return 0, err
 	}
-	useLock := s.usesRowLocks(ctx)
+	useLock := s.usesRowLocks()
 
 	for attempt := 0; attempt < updateAgentDeletionAttempts; attempt++ {
 		affected, retry, err := s.updateAgentDeletionOnce(ctx, uid, pred, set, useLock)

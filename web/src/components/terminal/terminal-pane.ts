@@ -24,7 +24,13 @@
 import { LitElement, html, css, nothing, unsafeCSS } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 
-import type { Agent, AgentPhase, AgentActivity, ExposedPort } from '../../shared/types.js';
+import type {
+  Agent,
+  AgentPhase,
+  AgentActivity,
+  ExposedPort,
+  SharedDir,
+} from '../../shared/types.js';
 import {
   TerminalSessionRegistry,
   type TerminalSession,
@@ -35,13 +41,15 @@ import {
 import { apiFetch, extractApiError } from '../../client/api.js';
 import { dispatchPageTitle } from '../../client/page-title.js';
 import type { TerminalAgentMetadata } from '../../client/terminal-metadata.js';
-import type { StatusType } from '../shared/status-badge.js';
 import '../shared/status-badge.js';
 import { showToast } from '../../utils/toast.js';
 import { buildAgentDMKey, chatConversationPath } from '../../client/chat-routes.js';
 import { isFeatureEnabled } from '../../utils/feature-flags.js';
 import { TERMINAL_DRAG_MIME } from '../../client/terminal-workspace-events.js';
 import { navigateTo } from '../../client/navigation.js';
+
+/** Back to Agent in a compact pane header (U+1F916 ROBOT FACE). */
+const ROBOT_EMOJI = '\u{1F916}';
 
 // xterm.js imports are client-side only — guarded by typeof check in lifecycle
 // These will be imported dynamically in firstUpdated() since they require DOM APIs
@@ -51,6 +59,9 @@ type FitAddon = import('@xterm/addon-fit').FitAddon;
 
 /** Which tmux window is active */
 type TmuxWindow = 'agent' | 'shell';
+
+/** Where captured harness credentials are stored. */
+type CaptureAuthScope = 'project' | 'user';
 
 // The terminal viewport stays dark in both app themes: it renders TUI output
 // that is generally authored against a dark background. The viewport wrapper
@@ -71,6 +82,13 @@ export class ScionTerminalPane extends LitElement {
 
   /** User ID for building chat DM keys. Set by workspace root. */
   @state() userId: string = '';
+
+  /**
+   * Set by the workspace root when the pane header has little room (a
+   * narrow viewport or the 4-up layout): Back to Project and Back to Agent
+   * show as a folder icon and a robot emoji (ptone/scion#4324).
+   */
+  @state() compactHeader = false;
 
   private registry: TerminalSessionRegistry | null = null;
   private disposed = false;
@@ -105,10 +123,10 @@ export class ScionTerminalPane extends LitElement {
   private reconnectInProgress = false;
 
   /**
-   * Derived from `connection ∈ {loading, connecting}` rather than
-   * `session.reconnecting`. `pending` clears once the WebSocket is
-   * constructed, before the handshake finishes, so it under-reports how
-   * long an attempt is actually running; connection state does not.
+   * True while `connection ∈ {loading, connecting}` or `session.reconnecting`.
+   * Connection state covers the attempt through the handshake (`pending`
+   * clears once the WebSocket is constructed); `session.reconnecting` adds
+   * the jitter wait before an automatic attempt after a 4503 close.
    */
   @state()
   private attempting = false;
@@ -165,7 +183,7 @@ export class ScionTerminalPane extends LitElement {
 
   /** Remembers the scope chosen in the scope dialog so force-update reuses it. */
   @state()
-  private captureAuthSelectedScope: 'project' | 'user' = 'project';
+  private captureAuthSelectedScope: CaptureAuthScope = 'project';
 
   /**
    * Hub admin policy (agent_secrets.user_scope_only), fetched fresh from
@@ -268,6 +286,31 @@ export class ScionTerminalPane extends LitElement {
       color: var(--scion-primary, #3b82f6);
     }
 
+    /* Compact header (ptone/scion#4324): icon-only back links, the size of
+       the other header buttons. */
+    .back-link.compact {
+      justify-content: center;
+      width: 32px;
+      height: 32px;
+      border-radius: 4px;
+      font-size: 1rem;
+      line-height: 1;
+    }
+
+    .back-link.compact:hover,
+    .back-link.compact:focus-visible {
+      background: var(--scion-badge-primary-bg, #dbeafe);
+    }
+
+    /* Header controls keep their full size when the header is crowded; only
+       the agent name gives way (see .agent-name). */
+    .back-link,
+    .separator,
+    .toggle-group,
+    .pane-action-btn {
+      flex-shrink: 0;
+    }
+
     .separator {
       width: 1px;
       height: 20px;
@@ -275,6 +318,11 @@ export class ScionTerminalPane extends LitElement {
     }
 
     .agent-name {
+      /* Shrinks first, with an ellipsis, but never below a readable width:
+         4rem (about eight characters), or the whole name when it is shorter
+         (--agent-name-chars is its length, set in renderAgentName). */
+      flex: 0 1 auto;
+      min-width: min(4rem, calc(var(--agent-name-chars, 8) * 1ch));
       font-size: 0.875rem;
       font-weight: 500;
       color: var(--scion-text, #1e293b);
@@ -933,7 +981,7 @@ export class ScionTerminalPane extends LitElement {
       // (e.g. from shouldAutoFocusTerminal() → terminal.focus()).
       this._focused =
         this.contains(document.activeElement) ||
-        this.shadowRoot?.contains(document.activeElement as Node) ||
+        this.shadowRoot?.contains(document.activeElement) ||
         false;
       if (this._focused) this.dataset.focused = '';
       else delete this.dataset.focused;
@@ -1000,7 +1048,13 @@ export class ScionTerminalPane extends LitElement {
     this.error = this.metadataError ?? state.error;
     this.disconnectReason = state.disconnectReason;
     this.reconnectInProgress = this.ownedSession?.reconnecting ?? false;
-    this.attempting = state.connection === 'loading' || state.connection === 'connecting';
+    // Also true during the jitter wait before an automatic attempt
+    // (session.reconnecting), so the overlay says RECONNECTING... from the
+    // close through the redial.
+    this.attempting =
+      state.connection === 'loading' ||
+      state.connection === 'connecting' ||
+      this.reconnectInProgress;
     this.idle = state.connection === 'idle';
     this.reconnectFailed = state.reconnectFailed;
     this.reconnectFailedManual = state.reconnectFailedManual;
@@ -1123,7 +1177,7 @@ export class ScionTerminalPane extends LitElement {
       if (match) {
         const name = match[1];
         if (name === 'agent' || name === 'shell') {
-          this.activeWindow = name as TmuxWindow;
+          this.activeWindow = name;
         }
       }
       return true;
@@ -1135,7 +1189,7 @@ export class ScionTerminalPane extends LitElement {
     this.terminal.parser.registerOscHandler(0, (data: string) => {
       const trimmed = data.trim();
       if (trimmed === 'agent' || trimmed === 'shell') {
-        this.activeWindow = trimmed as TmuxWindow;
+        this.activeWindow = trimmed;
       }
       // Return false to allow other OSC 0 handlers (if any) to also process
       return false;
@@ -1238,12 +1292,16 @@ export class ScionTerminalPane extends LitElement {
     if (this.measurable()) {
       // Container is already laid out — fit immediately.
       this.fitAddon.fit();
-    } else if (!this.hidden) {
-      // Pane is visible but container isn't measurable yet (e.g. mid-layout).
-      // Wait for the ResizeObserver or reveal() to signal readiness.
+    } else {
+      // Container isn't measurable yet: either the pane is hidden, or it is
+      // visible but mid-layout. Wait for the ResizeObserver or reveal() to
+      // signal readiness, so the session attaches once, at the measured size,
+      // only after the pane is shown. Closing the pane aborts the signal,
+      // which rejects this wait and clears layoutReady, so it never attaches.
       await new Promise<void>((resolve, reject) => {
         const abort = (): void => {
           this.layoutReady = null;
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- rejects with the AbortSignal reason unchanged, as signal.throwIfAborted() does, so callers can still match it.
           reject(signal.reason);
         };
         this.layoutReady = () => {
@@ -1257,9 +1315,6 @@ export class ScionTerminalPane extends LitElement {
       signal.throwIfAborted();
       this.fitAddon.fit();
     }
-    // else: pane is hidden — skip fit, use default 80×24 dimensions.
-    // reveal() will call fitAddon.fit() and sendResize() when the pane
-    // becomes visible, updating both the local terminal and the remote PTY.
 
     // Clipboard key bindings & CSI u extended keys — xterm.js inside Shadow DOM
     // needs explicit handling for these since it doesn't natively emit CSI u
@@ -1406,12 +1461,8 @@ export class ScionTerminalPane extends LitElement {
         this.uploadDisabledReason = 'Could not determine shared directories for file upload';
         return;
       }
-      const data = await resp.json();
-      const dirs = (data.sharedDirs ?? []) as Array<{
-        name: string;
-        read_only?: boolean;
-        in_workspace?: boolean;
-      }>;
+      const data = (await resp.json()) as { sharedDirs?: SharedDir[] };
+      const dirs = data.sharedDirs ?? [];
       // Filter: writable, non-in_workspace
       const candidates = dirs.filter((d) => !d.read_only && !d.in_workspace);
       const target = candidates.find((d) => d.name === 'scratchpad') || candidates[0];
@@ -1554,7 +1605,7 @@ export class ScionTerminalPane extends LitElement {
   }
 
   private _quoteForShell(path: string): string {
-    if (/^[A-Za-z0-9._\/-]+$/.test(path)) return path;
+    if (/^[A-Za-z0-9._/-]+$/.test(path)) return path;
     return "'" + path.replace(/'/g, "'\\''") + "'";
   }
 
@@ -1916,8 +1967,8 @@ export class ScionTerminalPane extends LitElement {
   private get overlayTitle(): string {
     // While an attempt (automatic or manual) is running, the overlay always
     // shows "Reconnecting...", regardless of the reason that preceded it.
-    // Derived from connection state, not from session.reconnecting: `pending`
-    // clears once the socket is constructed, before the handshake finishes.
+    // Connection state covers the attempt through the handshake;
+    // session.reconnecting adds the jitter wait before an automatic attempt.
     if (this.attempting) return 'RECONNECTING...';
     switch (this.disconnectReason) {
       case 'auth-401':
@@ -1936,6 +1987,8 @@ export class ScionTerminalPane extends LitElement {
         return 'AGENT UNAVAILABLE';
       case 'agent-deleted':
         return 'AGENT DELETED';
+      case 'attach-unsupported':
+        return 'ATTACH NOT SUPPORTED';
       default:
         return 'DISCONNECTED';
     }
@@ -2019,17 +2072,44 @@ export class ScionTerminalPane extends LitElement {
     </svg>`;
   }
 
+  /**
+   * Back to Project (when the agent has a project) and Back to Agent. With
+   * a compact header they show as a folder icon and a robot emoji, with
+   * the same destinations, the full text as accessible name and tooltip.
+   */
+  private renderBackLinks() {
+    const projectHref = `/projects/${this.projectId}`;
+    const agentHref = `/agents/${this.agentId}`;
+    if (this.compactHeader) {
+      return html`${this.projectId
+          ? html`<sl-tooltip content="Back to Project">
+              <a href=${projectHref} class="back-link compact" aria-label="Back to Project"
+                ><sl-icon name="folder" aria-hidden="true"></sl-icon
+              ></a>
+            </sl-tooltip>`
+          : nothing}
+        <sl-tooltip content="Back to Agent">
+          <a href=${agentHref} class="back-link compact" aria-label="Back to Agent"
+            ><span aria-hidden="true">${ROBOT_EMOJI}</span></a
+          >
+        </sl-tooltip>`;
+    }
+    return html`${this.projectId
+        ? html`<a href=${projectHref} class="back-link">&larr; Back to Project</a>`
+        : nothing} <a href=${agentHref} class="back-link"> &larr; Back to Agent </a>`;
+  }
+
+  /** The agent name in the header, with its length for the .agent-name minimum width. */
+  private renderAgentName(name: string) {
+    return html`<span class="agent-name" style="--agent-name-chars: ${[...name].length}"
+      >${name}</span
+    >`;
+  }
+
   override render() {
     if (this.loading) {
       return html`
-        <div class="toolbar">
-          ${this.projectId
-            ? html`<a href="/projects/${this.projectId}" class="back-link"
-                >&larr; Back to Project</a
-              >`
-            : ''}
-          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
-        </div>
+        <div class="toolbar">${this.renderBackLinks()}</div>
         <div class="loading-state">
           <div class="spinner"></div>
           <p>Connecting to agent...</p>
@@ -2041,16 +2121,11 @@ export class ScionTerminalPane extends LitElement {
     if (this.session?.state.error && !this.terminal) {
       return html`
         <div class="toolbar">
-          ${this.projectId
-            ? html`<a href="/projects/${this.projectId}" class="back-link"
-                >&larr; Back to Project</a
-              >`
-            : ''}
-          <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
+          ${this.renderBackLinks()}
           ${this.agentName
             ? html`
                 <div class="separator"></div>
-                <span class="agent-name">${this.agentName}</span>
+                ${this.renderAgentName(this.agentName)}
               `
             : ''}
         </div>
@@ -2064,14 +2139,12 @@ export class ScionTerminalPane extends LitElement {
       `;
     }
 
+    // prettier-ignore
     return html`
       <div class="toolbar">
-        ${this.projectId
-          ? html`<a href="/projects/${this.projectId}" class="back-link">&larr; Back to Project</a>`
-          : ''}
-        <a href="/agents/${this.agentId}" class="back-link"> &larr; Back to Agent </a>
+        ${this.renderBackLinks()}
         <div class="separator"></div>
-        <span class="agent-name">${this.agentName || this.agentId}</span>
+        ${this.renderAgentName(this.agentName || this.agentId)}
         <div class="toggle-group" title="Switch between agent and shell tmux windows">
           <button
             class=${this.activeWindow === 'agent' ? 'active' : ''}
@@ -2125,7 +2198,7 @@ export class ScionTerminalPane extends LitElement {
             `
           : ''}
         <scion-status-badge
-          status=${this.agentDisplayStatus as StatusType}
+          status=${this.agentDisplayStatus}
           size="small"
         ></scion-status-badge>
         <div class="status-indicator">
@@ -2228,8 +2301,9 @@ export class ScionTerminalPane extends LitElement {
         <sl-radio-group
           id="capture-scope-group"
           .value=${this.captureAuthSelectedScope}
-          @sl-change=${(e: any) => {
-            this.captureAuthSelectedScope = e.target.value;
+          @sl-change=${(e: Event) => {
+            this.captureAuthSelectedScope = (e.target as HTMLInputElement)
+              .value as CaptureAuthScope;
           }}
         >
           <sl-radio

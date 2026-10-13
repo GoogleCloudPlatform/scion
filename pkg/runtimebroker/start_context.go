@@ -25,7 +25,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -39,6 +38,8 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"gopkg.in/yaml.v3"
+
+	"github.com/google/uuid"
 )
 
 // startContext holds all the resolved state needed to start an agent.
@@ -50,9 +51,14 @@ type startContext struct {
 	TemplateSlug string
 	Manager      agent.Manager
 
+	// ownedStart is the flat instance's ownership mirror installed for
+	// Opts.RunID (installOwnedStart), or nil when none was installed.
+	ownedStart *ownedStart
+
 	// RuntimeType is the runtime type this dispatch resolved to through
-	// resolveManagerForOpts (dispatchRuntimeType), which can differ from the
-	// broker's default runtime. The create path reports it to the hub.
+	// resolveExistingAgentManager (dispatchRuntimeType; pinned to the
+	// found-on runtime on restart), which can differ from the broker's
+	// default runtime. The create path reports it to the hub.
 	RuntimeType string
 
 	// EnvClassifications is the merged provenance map: what the hub sent,
@@ -77,6 +83,12 @@ type startContext struct {
 	// namespace from, or nil when no ServiceAccount was resolved. The start
 	// and restart handlers compare it with their own later resolution.
 	AssignSelection *dispatchProfileSelection
+
+	// BlockSelection is the profile and runtime entry a GCP identity
+	// "block" dispatch on Kubernetes read its block ServiceAccount from, or
+	// nil when the dispatch is not one. Compared the same way as
+	// AssignSelection.
+	BlockSelection *dispatchProfileSelection
 }
 
 // startContextInputs captures the handler-specific fields that vary across
@@ -88,7 +100,11 @@ type startContextInputs struct {
 	// Agent identity
 	Name    string
 	AgentID string // Hub UUID (for env injection and logging)
-	Slug    string
+	// OwnershipAgentID is the Hub agent ID a flat instance records
+	// ownership under when AgentID is not set for the operation (restart
+	// carries it only in the Hub-injected resolved env).
+	OwnershipAgentID string
+	Slug             string
 
 	// SharedWorkspace is the shared-workspace flag for a start/restart that
 	// carries no Config (restart): it selects the agents root the agent's
@@ -115,6 +131,11 @@ type startContextInputs struct {
 
 	// Config from CreateAgentConfig (nil for startAgent/restartAgent)
 	Config *CreateAgentConfig
+
+	// TelemetryPolicy is the project's enforced telemetry on/off sent on a
+	// start or restart body (create carries it as Config.TelemetryPolicy).
+	// See resolveTelemetryOverride.
+	TelemetryPolicy *bool
 
 	// InlineConfig for provisioning
 	InlineConfig *api.ScionConfig
@@ -155,6 +176,13 @@ type startContextInputs struct {
 	// never to locate or load a template; a create's Config.Template slug
 	// takes precedence. A content hash is ignored.
 	TemplateName string
+	// TemplateID and TemplateHash are the agent's Hub template identity as
+	// sent on start and restart (ptone/scion#2157). They are used only when
+	// the agent has to be provisioned again because its broker-side state
+	// did not survive the stop: the template is then hydrated from them,
+	// as create hydrates it. See applyStartTemplateIdentity.
+	TemplateID   string
+	TemplateHash string
 
 	// HTTP request (for hub connection resolution)
 	HTTPRequest *http.Request
@@ -172,6 +200,12 @@ type startContextInputs struct {
 	// bundle or container exists. Hub-managed project path initialization
 	// and hydration precede it, since resolution reads their results.
 	PolicyPreflight bool
+
+	// PinnedRuntime is the runtime a restart found the agent's container
+	// on. With no saved or provisioned profile, the runtime selection uses
+	// it instead of the project's active profile, so the start lands on
+	// the runtime the stop acts on. Zero value: no pin.
+	PinnedRuntime pinnedRuntime
 
 	// Prehydrated carries hydration results createAgent's preflights
 	// already obtained, so launch provisions the same bundle they evaluated
@@ -218,6 +252,42 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	defer span.End()
 	span.SetAttributes(attribute.String("scion.agent.name", in.Name))
 
+	// A flat instance records the run in its durable ownership record
+	// before any agent file or runtime object exists (ptone/scion#3274).
+	// The run gets an ID here when the request carried none, so the same ID
+	// labels every object the start creates.
+	var ownedProjectID, ownedAgentID string
+	if s.ownership != nil {
+		if in.RunID == "" {
+			in.RunID = uuid.NewString()
+		}
+		slug := in.Slug
+		if slug == "" {
+			slug = api.Slugify(in.Name)
+		}
+		agentID := in.AgentID
+		if agentID == "" {
+			agentID = in.OwnershipAgentID
+		}
+		if err := s.beginOwnedRun(in.ProjectID, agentID, slug, in.RunID, in.Operation == opCreate); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			msg := "The agent's ownership cannot be recorded by this Runtime Broker instance"
+			instance := s.ownership.RuntimeBrokerID()
+			var elsewhere *slugReservedElsewhereError
+			if errors.As(err, &elsewhere) {
+				instance = elsewhere.instance
+			}
+			switch {
+			case errors.Is(err, ErrOwnershipSlugPending):
+				msg = fmt.Sprintf("Agent slug %q is still reserved on Runtime Broker instance %s: the cleanup of an earlier delete of this slug is not yet confirmed", slug, instance)
+			case elsewhere != nil:
+				msg = fmt.Sprintf("Agent slug %q is reserved in this project by Runtime Broker instance %s of the same host", slug, instance)
+			}
+			return nil, &startContextError{Status: http.StatusConflict, Message: msg, OriginalErr: err}
+		}
+		ownedProjectID, ownedAgentID = in.ProjectID, agentID
+	}
+
 	// --- Hub-managed project path resolution ---
 	if in.ProjectSlug != "" && in.ProjectPath == "" {
 		globalDir, err := config.GetGlobalDir()
@@ -248,6 +318,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// recorded profile is computed (ptone/scion#1799): see
 	// verifySharedProjectIdentity.
 	if in.SharedWorkspace || (in.Config != nil && in.Config.SharedWorkspace) {
+		// A marker naming an earlier ID of the same project (a re-link) is
+		// carried over to the current ID first (ptone/scion#4440).
+		if err := s.relinkSharedProjectIdentity(ctx, in.ProjectPath, in.ProjectSlug, in.ProjectID, in.Name); err != nil {
+			span.SetStatus(codes.Error, "shared-workspace project re-link failed")
+			return nil, projectRelinkStartContextError(err)
+		}
 		if err := verifySharedProjectIdentity(in.ProjectPath, in.ProjectID); err != nil {
 			span.SetStatus(codes.Error, "shared-workspace project identity check failed")
 			return nil, s.projectIdentityStartContextError(err, in.Name)
@@ -273,115 +349,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// directory; it is not a project root to initialize, so it skips this
 	// block (see ProjectPathFromContainer).
 	if in.ProjectPath != "" && !in.ProjectPathFromContainer && (in.ProjectSlug != "" || in.ProjectID != "") {
-		// A broker copy of a hub workspace (~/.scion/projects/<slug>)
-		// records the hub project ID as its identity; see
-		// recordHubProjectIdentity. Done before the checks below, which
-		// then find it matching.
-		s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
-
-		scionPath := filepath.Join(in.ProjectPath, config.DotScion)
-
-		if config.IsProjectMarkerFile(scionPath) {
-			// .scion is a marker file — project-id is already recorded.
-			if marker, err := config.ReadProjectMarker(scionPath); err == nil && marker.ProjectID != "" {
-				// Detect stale marker: hub's project ID differs and the old
-				// external config dir was cleaned up (project was deleted and
-				// recreated with the same name — miller79/scion#28).
-				// The global marker is only rewritten for the global project
-				// itself (see globalDirProjectConflict above).
-				if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
-					extPath, _ := marker.ExternalProjectPath()
-					if isStaleExternalDir(extPath) {
-						slug := marker.ProjectSlug
-						if in.ProjectSlug != "" {
-							slug = in.ProjectSlug
-						}
-						updated := &config.ProjectMarker{
-							ProjectID:   in.ProjectID,
-							ProjectName: slug,
-							ProjectSlug: slug,
-						}
-						if wErr := config.WriteProjectMarker(scionPath, updated); wErr != nil {
-							s.agentLifecycleLog.Warn("Failed to update stale .scion marker",
-								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "error", wErr)
-						} else {
-							s.agentLifecycleLog.Info("Updated stale .scion marker with current project ID",
-								"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "path", scionPath)
-							marker = updated
-						}
-					}
-				}
-				// Ensure external split storage directories exist.
-				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-					_ = os.MkdirAll(extPath, 0755)
-					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-				}
-				if s.config.Debug {
-					s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
-						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
-				}
-			}
-		} else if info, statErr := os.Stat(scionPath); statErr == nil && info.IsDir() {
-			// .scion is a directory (git project) — use file-based project-id
-			if in.ProjectID != "" {
-				existingID, readErr := config.ReadProjectID(scionPath)
-				shouldWrite := readErr != nil || existingID == ""
-				if !shouldWrite && existingID != in.ProjectID {
-					// Existing ID differs from hub's — overwrite only if the old
-					// external config dir was cleaned up (project deleted and
-					// recreated — miller79/scion#28). When the dir still exists
-					// this is a first-link scenario; preserve the local ID.
-					extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
-					shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(extDir)
-				}
-				if shouldWrite {
-					oldID := existingID
-					if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
-						s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
-							"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
-					} else {
-						if oldID != "" && oldID != in.ProjectID {
-							s.agentLifecycleLog.Info("Updated stale project-id with current project ID",
-								"agent_id", in.AgentID, "old_id", oldID, "new_id", in.ProjectID, "path", scionPath)
-						}
-						if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
-							_ = os.MkdirAll(extAgents, 0755)
-						}
-						if extConfig, err := config.GetGitProjectExternalConfigDir(scionPath); err == nil && extConfig != "" {
-							_ = os.MkdirAll(extConfig, 0755)
-						}
-						if s.config.Debug {
-							s.agentLifecycleLog.Debug("Initialized git project with split storage",
-								"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
-						}
-					}
-				}
-			}
-		} else if in.ProjectID != "" {
-			// .scion doesn't exist — create project dir and write a marker file
-			if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
-				s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
-					"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
-			} else {
-				marker := &config.ProjectMarker{
-					ProjectID:   in.ProjectID,
-					ProjectName: in.ProjectSlug,
-					ProjectSlug: in.ProjectSlug,
-				}
-				if wErr := config.WriteProjectMarker(scionPath, marker); wErr != nil {
-					s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
-						"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
-				} else {
-					if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-						_ = os.MkdirAll(extPath, 0755)
-						_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-					}
-					if s.config.Debug {
-						s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
-							"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
-					}
-				}
-			}
+		// The project's identity files and directories are written under
+		// the process-wide workspace lock on the project, so two Runtime
+		// Broker instances never write them concurrently. It is released
+		// before worktree provisioning takes it again.
+		if err := s.withWorkspaceLock(ctx, func() { s.recordHubProjectFiles(ctx, in) }, in.ProjectPath); err != nil {
+			return nil, fmt.Errorf("project workspace lock: %w", err)
 		}
 	}
 
@@ -401,9 +374,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// the broker's default: a broker can register more than one profile
 	// (e.g. both a "docker" and a "kubernetes" profile), and a dispatch's
 	// profile selects which one it runs on. mgr and dispatchRuntimeType are
-	// resolved exactly once here, via resolveManagerForOptsStrict (handlers.go) —
-	// the same function that ultimately selects the manager this function
-	// returns — and reused below instead of re-resolving, so within this one
+	// resolved exactly once here, via resolveExistingAgentManager
+	// (handlers.go; pinned to the found-on runtime on restart) — the same
+	// function that ultimately selects the manager this function returns — and reused below instead of re-resolving, so within this one
 	// buildStartContext call the GCP check and the manager it returns cannot
 	// disagree, and settings are loaded only once per call. (start/restart
 	// perform their own, later, second resolution after this function
@@ -437,7 +410,12 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		gcpIdentityProfile = in.Config.Profile
 	}
 	profileMode := profileLenient
-	if gcpIdentityProfile == "" && in.Operation != opCreate {
+	// A flat instance does no profile-based runtime classification here: it
+	// serves exactly one runtime target (resolveManagerForOptsStrict bypasses
+	// profile resolution for it), so profileMode stays lenient. The start and
+	// restart handlers' image-provenance integrity read
+	// (runtimeSelectionOpts) still runs for it.
+	if gcpIdentityProfile == "" && in.Operation != opCreate && !s.isFlat() {
 		profile, provisioned, err := classificationProfile(in)
 		if err != nil {
 			var pe *agent.ImageProvenanceError
@@ -457,11 +435,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
 	// Create and a start without a saved profile stay non-strict.
-	mgr, dispatchRuntimeType, err := s.resolveManagerForOptsStrict(api.StartOptions{
+	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
 		Profile:     gcpIdentityProfile,
-	}, profileMode, slog.LevelWarn)
+	}, profileMode, slog.LevelWarn, in.PinnedRuntime)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		return nil, err
@@ -471,30 +449,27 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// Default when no GCP identity config is provided at all: "block" on
 	// every runtime except Kubernetes, so agents cannot access the underlying
 	// compute identity via the GCE metadata server unless the hub explicitly
-	// sets "passthrough" or "assign". Kubernetes does not support "block"
-	// (ptone/scion#2328 phase 1), so an unconfigured Kubernetes dispatch
-	// defaults to "passthrough" instead — the Hub's own resolution ladder
+	// sets "passthrough" or "assign". An unconfigured Kubernetes dispatch
+	// defaults to "passthrough" instead (ptone/scion#2328 phase 1; block on
+	// Kubernetes must be chosen explicitly) — the Hub's own resolution ladder
 	// leaves the mode unset (rather than writing an explicit "block") for
 	// exactly this case, precisely so the runtime-appropriate default can be
 	// applied here. Shared with the auth preflight's own GCP-credential
 	// check (handlers.go's extractRequiredEnvKeys), via effectiveGCPMetadataMode,
 	// so the two agree on whether GCP credentials will be available.
 	gcpMetadataMode := effectiveGCPMetadataMode(isKubernetes, in.Config, in.ResolvedEnv)
-	// "block" is not offered on the Kubernetes runtime. The rejection applies
-	// to any "block" that actually resolved — an explicit agent-level
-	// request, a project or hub default that is itself explicitly "block"
-	// and arrives via resolvedEnv, or an existing agent's own stored
-	// GCPIdentity from before this ruling (an earlier hub or web UI version
-	// could write an explicit "block" for what the caller intended as
-	// "nothing configured"; that stored value is not migrated — see
-	// ptone/scion#2328). It does not apply to the runtime-aware default
-	// above: a dispatch that names no GCP identity at all already defaults
-	// to "passthrough" on Kubernetes, so "block" reaching this check on
-	// Kubernetes always means an explicit choice somewhere in the chain. The
-	// message below names both fixes — edit this agent's own mode, or change
-	// the project/hub default for agents created after this — since the
-	// caller cannot tell from here which one applies to them.
-	if sce := rejectKubernetesBlock(dispatchRuntimeType, gcpMetadataMode); sce != nil {
+	// "block" on the Kubernetes runtime (ptone/scion#4034) runs the pod as a
+	// zero-privilege ServiceAccount: the operator's block ServiceAccount, or
+	// the namespace's default one when none is configured, with the API
+	// token not mounted and a node selector for Workload Identity nodes. It
+	// applies to any "block" that actually resolved — an explicit
+	// agent-level request, a project or hub default that arrives via
+	// resolvedEnv, or an existing agent's own stored GCPIdentity. It is
+	// never downgraded to passthrough. The block env below (the in-pod
+	// metadata emulator in block mode) is kept as a second layer for
+	// clients that honour it.
+	blockIdentity, sce := s.resolveKubernetesBlockIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	if sce != nil {
 		return nil, sce
 	}
 
@@ -510,7 +485,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// assignIdentity.SAEmail/ProjectID carry the SA email and
 	// project ID forward to that switch, which sets them as informational
 	// env, since the passthrough case does not set them on its own.
-	assignIdentity, sce := s.resolveKubernetesAssignIdentity(in, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
+	assignIdentity, sce := s.resolveKubernetesAssignIdentity(ctx, in, mgr, isKubernetes, gcpMetadataMode, gcpIdentityProfile)
 	if sce != nil {
 		return nil, sce
 	}
@@ -717,11 +692,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		classifyBrokerEnv("SCION_CREATOR", api.EnvKindPlain)
 	}
 
-	// 7. Debug
-	if s.config.Debug {
-		env["SCION_DEBUG"] = "1"
-		classifyBrokerEnv("SCION_DEBUG", api.EnvKindPlain)
-	}
+	// 7. Debug: the broker's own debug setting is not propagated into agent
+	// environments (ptone/scion#4098). To debug an agent, set SCION_LOG_LEVEL
+	// explicitly (scion start --agent-log-level, hub env at user or project
+	// scope, or the agent's config env); it arrives through the request env
+	// merged above.
 
 	// 8. GCP identity metadata server configuration: write env vars for the
 	// mode resolved and validated earlier in this function, after the
@@ -883,6 +858,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// SCION_METADATA_MODE itself is — a later mapping change takes effect on
 	// the next start without touching scion-agent.json.
 	opts.ResolvedKubernetesServiceAccountName = resolvedKSAName
+	// Recomputed on every dispatch and never persisted, like the field
+	// above; see api.StartOptions.KubernetesBlockIdentity.
+	opts.KubernetesBlockIdentity = blockIdentity.Identity
 
 	if len(in.SharedDirs) > 0 {
 		opts.SharedDirs = in.SharedDirs
@@ -977,6 +955,19 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		opts.TemplateName = templateSlug
 	}
 
+	// --- Template identity on start and restart ---
+	if in.Operation != opCreate && opts.Template == "" {
+		if err := s.applyStartTemplateIdentity(ctx, in, &opts, hubConn, templateSlug); err != nil {
+			span.SetStatus(codes.Error, err.Error())
+			return nil, err
+		}
+	}
+
+	// --- Template env source on start and restart (ptone/scion#4524) ---
+	if in.Operation != opCreate && opts.Template == "" {
+		s.applyStartTemplateEnvSource(ctx, in, &opts, hubConn, templateSlug)
+	}
+
 	// --- Shared workspace mode (git-workspace hybrid) ---
 	// Deprecated: SCION_SHARED_WORKSPACE — superseded by SCION_WORKSPACE_MODE +
 	// SCION_WORKSPACE_GIT. Kept for compatibility during the transition period.
@@ -998,6 +989,56 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Worktree-per-agent mode, linked checkout on the workstation ---
+	// A worktree-per-agent dispatch for a linked project, sent by the
+	// co-located hub to a non-Kubernetes runtime, gets a worktree of the
+	// project's own checkout from ProvisionAgent's local worktree engine
+	// (<repo>/.scion/agents/<slug>/workspace): no clone, no base clone, and
+	// the user's local commits and branches are visible. GitClone and
+	// Workspace stay empty so ProvisionAgent takes that path. If the
+	// checkout fails verification the dispatch is refused rather than falling
+	// back to a clone; see resolveLinkedCheckout. Start and restart re-send
+	// the same workspace inputs and are routed the same way, so
+	// ProvisionAgent reuses the agent's worktree by branch; an agent whose
+	// workspace is a broker-managed worktree (its own or joined) or a clone
+	// keeps it (existingNonLocalWorkspace). Only workstation-mode servers
+	// route.
+	linkedCheckout := false
+	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+		decision := resolveLinkedCheckout(linkedCheckoutInput{
+			WorkspaceMode:                in.WorkspaceMode,
+			GitClone:                     in.Config.GitClone,
+			ProjectPath:                  in.ProjectPath,
+			ProjectPathFromContainer:     in.ProjectPathFromContainer,
+			HubGlobalProject:             in.HubGlobalProject,
+			Colocated:                    s.dispatchFromColocatedHub(ctx, in.HTTPRequest, hubConn),
+			RuntimeName:                  dispatchRuntimeType,
+			HasExistingNonLocalWorkspace: in.Operation != opCreate && existingNonLocalWorkspace(in),
+			WorkstationMode:              s.config.WorkstationMode,
+		})
+		switch {
+		case decision.Refusal != "":
+			span.SetStatus(codes.Error, decision.Refusal)
+			return nil, &startContextError{
+				Status:  http.StatusConflict,
+				Message: decision.Refusal,
+				Code:    ErrCodeLocalWorktreeRefused,
+				Details: map[string]interface{}{api.BrokerErrDetailReason: decision.Refusal},
+			}
+		case decision.Route:
+			linkedCheckout = true
+			opts.Workspace = ""
+			opts.GitClone = nil
+			s.agentLifecycleLog.Info("Worktree-per-agent: using a local worktree of the linked checkout",
+				"agent_id", in.AgentID, "repo_root", decision.RepoRoot)
+		default:
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Worktree-per-agent: linked checkout not used",
+					"agent_id", in.AgentID, "reason", decision.Reason)
+			}
+		}
+	}
+
 	// --- Worktree-per-agent mode ---
 	// When the hub sets WorkspaceMode to worktree-per-agent and the project
 	// is git-backed, provision a shared base clone + per-agent worktree on
@@ -1007,7 +1048,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
-	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
@@ -1017,7 +1058,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Git clone mode ---
-	if !worktreeProvisioned && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -1069,12 +1110,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// insufficient because shared-plain may or may not be git-backed.
 	//
 	// Priority:
-	//  1. worktreeProvisioned: host-side worktree was set up — always git.
+	//  1. worktreeProvisioned or linkedCheckout: host-side worktree was (or
+	//     will be) set up — always git.
 	//  2. opts.GitClone != nil: in-container clone configured — always git.
 	//  3. opts.Workspace on disk: shared-plain git workspace (check .git).
 	//  4. in.ResolvedEnv fallback: hub-injected on start/restart paths before
 	//     the on-disk workspace exists (e.g. clone-per-agent pre-clone).
-	isGitWorkspace := worktreeProvisioned || opts.GitClone != nil
+	isGitWorkspace := worktreeProvisioned || linkedCheckout || opts.GitClone != nil
 	if !isGitWorkspace && opts.Workspace != "" {
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
@@ -1097,10 +1139,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// --- Env + telemetry + secrets ---
 	opts.Env = env
 
-	if v, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
-		enabled := v == "true" || v == "1"
-		opts.TelemetryOverride = &enabled
-	}
+	opts.TelemetryOverride = resolveTelemetryOverride(in.telemetryPolicy(), env)
 
 	if in.NoAuth {
 		opts.ResolvedSecrets = nil
@@ -1157,6 +1196,11 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// Host credential files (workstation parity with local mode): decided
+	// here, per start, and gathered by the agent manager once the harness
+	// auth metadata is known (pkg/agent/run.go). Never persisted.
+	opts.HostCredentialFiles = s.colocatedHostCredentials(ctx, in.HTTPRequest, hubConn)
+
 	// --- Manager resolution ---
 	// mgr and dispatchRuntimeType were already resolved once, above, for the
 	// GCP identity check — reused here rather than calling
@@ -1174,10 +1218,18 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// re-run this same check after their own, later resolution.
 	downgradeUnverifiedHubDefaultPassthrough(env, envCls, gcpMetadataMode, requireLocalRuntime, dispatchRuntimeType)
 
+	var owned *ownedStart
+	if s.ownership != nil {
+		// Mirror every runtime object the start creates into the record;
+		// a mirroring failure stops further creates (Checkpoint) and is
+		// checked again when Start returns (completeOwnedStart).
+		owned = s.installOwnedStart(&opts, ownedProjectID, ownedAgentID)
+	}
 	sc := &startContext{
 		Opts:                        opts,
 		TemplateSlug:                templateSlug,
 		Manager:                     mgr,
+		ownedStart:                  owned,
 		RuntimeType:                 dispatchRuntimeType,
 		EnvClassifications:          envCls,
 		ProvisionedWorktreeRepoRoot: provisionedWorktreeRoot,
@@ -1185,6 +1237,10 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	if resolvedKSAName != "" {
 		sel := assignIdentity.Selection
 		sc.AssignSelection = &sel
+	}
+	if blockIdentity.Identity != nil {
+		sel := blockIdentity.Selection
+		sc.BlockSelection = &sel
 	}
 	return sc, nil
 }
@@ -1205,14 +1261,15 @@ var hubDefaultPassthroughRuntimeTypes = map[string]bool{
 // actually run under (resolvedRuntimeType, from resolveManagerForOpts), and
 // rewrites env to the same "block" bundle buildStartContext's own block/
 // assign case sets, if that runtime is not a local container runtime and not
-// Kubernetes. Kubernetes does not support "block" (ptone/scion#2328): a
-// Kubernetes resolution is left exactly as granted (passthrough) instead,
-// which is already the correct outcome by construction — it is the same
-// value the runtime-aware default (effectiveGCPMetadataMode) would have
-// produced had the hub left this agent's identity unset instead of granting
-// an unverified passthrough. Rewriting it to "block" here would both
-// contradict that default and immediately re-fail buildStartContext's own
-// earlier Kubernetes/"block" rejection on every subsequent start or restart.
+// Kubernetes. A Kubernetes resolution is left exactly as granted
+// (passthrough) instead, which is already the correct outcome by
+// construction — it is the same value the runtime-aware default
+// (effectiveGCPMetadataMode) would have produced had the hub left this
+// agent's identity unset instead of granting an unverified passthrough.
+// Rewriting it to "block" here would contradict that default, and would
+// produce a block env without the Kubernetes block pod settings
+// (resolveKubernetesBlockIdentity), which only buildStartContext's own
+// resolution applies.
 //
 // The hub's hub-default rung resolves an agent's runtime from the broker's
 // own registration-time data (RuntimeBroker.Profiles/DefaultProfile), which
@@ -1281,6 +1338,12 @@ type startContextError struct {
 	Message     string
 	IsHubError  bool
 	OriginalErr error
+	// Code is the error code written for a 4xx Status; empty means
+	// validation_error. Details, when set, go into the error body with it.
+	// Both let a caller such as the hub recognise a specific refusal
+	// without matching on Message.
+	Code    string
+	Details map[string]interface{}
 }
 
 func (e *startContextError) Error() string {
@@ -1306,8 +1369,8 @@ func isKubernetesRuntimeName(name string) bool {
 // (an explicit cfg.GCPIdentity, or a mode carried via resolvedEnv/cfg.Env —
 // the same two raw sources buildStartContext's own merged `env` map is later
 // built from). It mirrors buildStartContext's resolution without
-// buildStartContext's validation/rejection: callers that need the "block is
-// not offered on Kubernetes" check (ptone/scion#2328 phase 1) must still go
+// buildStartContext's validation and Kubernetes identity resolution: callers
+// that need the Kubernetes "block" or "assign" pod settings must still go
 // through buildStartContext itself. This helper only answers "what mode
 // would apply" — shared with the auth preflight's own GCP-credential check
 // (handlers.go's extractRequiredEnvKeys), which needs to know whether GCP
@@ -1348,7 +1411,8 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		// itself absent when the agent has no GCP identity configured, so
 		// that case reaches the runtime default below rather than this
 		// branch. A hub that predates that still sends "block" here, which
-		// Kubernetes refuses; it needs a hub upgrade. A hub old enough to
+		// Kubernetes runs as a block pod; it needs a hub upgrade to get the
+		// runtime default instead. A hub old enough to
 		// predate that write won't send the marker at all, and on such a hub
 		// this value could be whatever a stray stored env var or secret
 		// happened to contain rather than a real dispatch decision. Downgrade
@@ -1362,28 +1426,6 @@ func effectiveGCPMetadataMode(isKubernetesDispatch bool, cfg *CreateAgentConfig,
 		return raw
 	}
 	return mode
-}
-
-// rejectKubernetesBlock returns the actionable error for "block" on the
-// Kubernetes runtime (ptone/scion#2328) when metadataMode is explicitly
-// "block" and resolvedRuntimeType is a recognized Kubernetes spelling, or nil
-// otherwise. Shared by buildStartContext's own early check and by
-// startAgent/restartAgent's late recheck (handlers.go) against the second,
-// more specific manager resolution those two paths perform after a
-// saved-profile lookup buildStartContext cannot see — the same two-resolution
-// pattern recheckHubDefaultPassthrough already uses for the passthrough
-// downgrade, applied here so a profile that only resolves to Kubernetes after
-// that later lookup is rejected too, not just one visible to the early check.
-func rejectKubernetesBlock(resolvedRuntimeType, metadataMode string) *startContextError {
-	if metadataMode != store.GCPMetadataModeBlock || !isKubernetesRuntimeName(resolvedRuntimeType) {
-		return nil
-	}
-	return &startContextError{
-		Status: http.StatusBadRequest,
-		Message: fmt.Sprintf(
-			"GCP identity mode %q is not supported on the Kubernetes runtime; edit this agent's GCP identity mode to %q or %q, or change the project or hub default GCP identity mode for agents created after this",
-			store.GCPMetadataModeBlock, store.GCPMetadataModeAssign, store.GCPMetadataModePassthrough),
-	}
 }
 
 // redactCloneURL returns gc's clone URL with any userinfo removed, for
@@ -1623,11 +1665,15 @@ func (s *Server) tryProvisionWorktree(ctx context.Context, in startContextInputs
 		branch = in.AgentID
 	}
 
-	// Serialize same-project provisioning on this node to prevent concurrent
-	// ProvisionShared calls from racing on the shared base clone.
-	mu := s.projectProvisionMutex(in.ProjectID, in.ProjectPath)
-	mu.Lock()
-	defer mu.Unlock()
+	// Serialize same-project provisioning with every Runtime Broker server
+	// of this process (one host may run several instances) so concurrent
+	// ProvisionShared calls never race on the shared base clone. The lock
+	// is held through the partial-worktree cleanup below.
+	unlock, err := s.lockProjectWorkspace(ctx, result.ProjectRoot, in.ProjectPath)
+	if err != nil {
+		return false, "", fmt.Errorf("worktree-per-agent: %w", err)
+	}
+	defer unlock()
 
 	// The shared "worktrees" directory must be a real directory, not a
 	// symlink, before any provisioning is attempted against it: git (and
@@ -1829,15 +1875,14 @@ func resolveActualWorkspace(repoRoot, branch, fallbackWorktreePath, agentID stri
 	return regPath
 }
 
-// projectProvisionMutex returns the per-project mutex for serializing worktree
-// provisioning. Uses ProjectID as key, falling back to ProjectPath if empty.
-func (s *Server) projectProvisionMutex(projectID, projectPath string) *sync.Mutex {
-	key := projectID
-	if key == "" {
-		key = projectPath
+// lockProjectWorkspace takes the process-wide workspace lock on a project's
+// shared provisioning root (the worktree base and its base clone) and its
+// project path, by canonical path (WorkspaceLocks).
+func (s *Server) lockProjectWorkspace(ctx context.Context, projectRoot, projectPath string) (func(), error) {
+	if projectRoot == "" && projectPath == "" {
+		return func() {}, nil
 	}
-	actual, _ := s.projectProvisionMu.LoadOrStore(key, &sync.Mutex{})
-	return actual.(*sync.Mutex)
+	return s.locks().Lock(ctx, projectRoot, projectPath)
 }
 
 // worktreeProvisionInput holds the fields needed to decide whether to
@@ -1973,7 +2018,6 @@ func resolveWorktreeProvision(in worktreeProvisionInput) worktreeProvisionResult
 			ProjectID: in.ProjectID,
 			AgentID:   in.AgentID,
 			AgentName: agentName,
-			Locker:    nil,
 		},
 		WorktreePath: worktreePath,
 		ProjectRoot:  resolved.HostPath,
@@ -2176,4 +2220,327 @@ func ambiguousNonGitWorkspace(in startContextInputs, worktreeProvisioned bool) s
 	}
 	return "ambiguous workspace for hub-managed project " + in.ProjectSlug +
 		": the request has no workspace mode, workspace path or git clone; refusing to fall back to the shared project directory"
+}
+
+// recordHubProjectFiles records the hub project's identity in a hub-managed
+// project directory and creates its split storage directories. The caller
+// holds the workspace lock on in.ProjectPath.
+func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInputs) {
+	// A broker copy of a hub workspace (~/.scion/projects/<slug>)
+	// records the hub project ID as its identity; see
+	// recordHubProjectIdentity. Done before the checks below, which
+	// then find it matching.
+	s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
+
+	scionPath := filepath.Join(in.ProjectPath, config.DotScion)
+
+	if config.IsProjectMarkerFile(scionPath) {
+		// .scion is a marker file — project-id is already recorded.
+		if marker, err := config.ReadProjectMarker(scionPath); err == nil && marker.ProjectID != "" {
+			// Detect stale marker: hub's project ID differs and the old
+			// external config dir was cleaned up (project was deleted and
+			// recreated with the same name — miller79/scion#28).
+			// The global marker is only rewritten for the global project
+			// itself (see globalDirProjectConflict above).
+			if in.ProjectID != "" && marker.ProjectID != in.ProjectID && canRewriteProjectMarker(in.ProjectPath, in.ProjectID, in.HubGlobalProject) {
+				extPath, _ := marker.ExternalProjectPath()
+				if isStaleExternalDir(extPath) {
+					slug := marker.ProjectSlug
+					if in.ProjectSlug != "" {
+						slug = in.ProjectSlug
+					}
+					updated := &config.ProjectMarker{
+						ProjectID:   in.ProjectID,
+						ProjectName: slug,
+						ProjectSlug: slug,
+					}
+					if wErr := config.WriteProjectMarker(scionPath, updated); wErr != nil {
+						s.agentLifecycleLog.Warn("Failed to update stale .scion marker",
+							"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "error", wErr)
+					} else {
+						s.agentLifecycleLog.Info("Updated stale .scion marker with current project ID",
+							"agent_id", in.AgentID, "old_id", marker.ProjectID, "new_id", in.ProjectID, "path", scionPath)
+						marker = updated
+					}
+				}
+			}
+			// Ensure external split storage directories exist.
+			if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+				_ = os.MkdirAll(extPath, 0755)
+				_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+			}
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
+					"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
+			}
+		}
+	} else if info, statErr := os.Stat(scionPath); statErr == nil && info.IsDir() {
+		// .scion is a directory (git project) — use file-based project-id
+		if in.ProjectID != "" {
+			existingID, readErr := config.ReadProjectID(scionPath)
+			shouldWrite := readErr != nil || existingID == ""
+			if !shouldWrite && existingID != in.ProjectID {
+				// Existing ID differs from hub's — overwrite only if the old
+				// external config dir was cleaned up (project deleted and
+				// recreated — miller79/scion#28). When the dir still exists
+				// this is a first-link scenario; preserve the local ID.
+				extDir, extErr := config.GetGitProjectExternalConfigDir(scionPath)
+				shouldWrite = extErr != nil || extDir == "" || isStaleExternalDir(extDir)
+			}
+			if shouldWrite {
+				oldID := existingID
+				if wErr := config.WriteProjectID(scionPath, in.ProjectID); wErr != nil {
+					s.agentLifecycleLog.Warn("Failed to write project-id for hub-managed project",
+						"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+				} else {
+					if oldID != "" && oldID != in.ProjectID {
+						s.agentLifecycleLog.Info("Updated stale project-id with current project ID",
+							"agent_id", in.AgentID, "old_id", oldID, "new_id", in.ProjectID, "path", scionPath)
+					}
+					if extAgents, err := config.GetGitProjectExternalAgentsDir(scionPath); err == nil && extAgents != "" {
+						_ = os.MkdirAll(extAgents, 0755)
+					}
+					if extConfig, err := config.GetGitProjectExternalConfigDir(scionPath); err == nil && extConfig != "" {
+						_ = os.MkdirAll(extConfig, 0755)
+					}
+					if s.config.Debug {
+						s.agentLifecycleLog.Debug("Initialized git project with split storage",
+							"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
+					}
+				}
+			}
+		}
+	} else if in.ProjectID != "" {
+		// .scion doesn't exist — create project dir and write a marker file
+		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
+			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
+				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
+		} else {
+			marker := &config.ProjectMarker{
+				ProjectID:   in.ProjectID,
+				ProjectName: in.ProjectSlug,
+				ProjectSlug: in.ProjectSlug,
+			}
+			if wErr := config.WriteProjectMarker(scionPath, marker); wErr != nil {
+				s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
+					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+			} else {
+				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+					_ = os.MkdirAll(extPath, 0755)
+					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+				}
+				if s.config.Debug {
+					s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
+						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
+				}
+			}
+		}
+	}
+}
+
+// telemetryPolicy returns the telemetry policy for this dispatch: the start or
+// restart body's field, else the create config's. Nil = no policy.
+func (in startContextInputs) telemetryPolicy() *bool {
+	if in.TelemetryPolicy != nil {
+		return in.TelemetryPolicy
+	}
+	if in.Config != nil {
+		return in.Config.TelemetryPolicy
+	}
+	return nil
+}
+
+// resolveTelemetryOverride computes opts.TelemetryOverride, which Start
+// applies last, above every config tier. Precedence (decision E6,
+// ptone/scion#4218): the project's telemetry policy > the requester's
+// SCION_TELEMETRY_ENABLED env flag (--enable/--disable-telemetry in hosted
+// mode) > config (nil override).
+//
+// When a policy is set and env carries a contrary SCION_TELEMETRY_ENABLED,
+// the env entry is rewritten to the policy value too: Start only fills
+// telemetry env keys that are absent, so the requester's flag would
+// otherwise still reach sciontool in the container.
+func resolveTelemetryOverride(policy *bool, env map[string]string) *bool {
+	if policy != nil {
+		v := *policy
+		if _, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
+			env["SCION_TELEMETRY_ENABLED"] = strconv.FormatBool(v)
+		}
+		return &v
+	}
+	if v, ok := env["SCION_TELEMETRY_ENABLED"]; ok {
+		enabled := v == "true" || v == "1"
+		return &enabled
+	}
+	return nil
+}
+
+// colocatedHostCredentials reports whether this start may receive the host's
+// harness-declared credential files. All of these must hold:
+//   - the server is eligible (ServerConfig.HostCredentials: workstation mode
+//     with dev auth);
+//   - the request is bound to the hub co-located in this process, and that
+//     binding is not just a guess: when HMAC auth identified the sending hub
+//     it must be the co-located one, and with more than one hub connection
+//     the X-Scion-Hub-Connection header must name it (so the unauthenticated
+//     fallback in resolveHubConnection never picks it for a remote hub);
+//   - as defence in depth, the co-located hub endpoint is on a loopback host;
+//   - use_host_credentials, re-read from the global settings on every start
+//     so turning it off applies to the next start, is on (fails closed).
+func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if !s.config.HostCredentials || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return config.UseHostCredentials(globalDir)
+}
+
+// dispatchFromColocatedHub reports whether this dispatch is bound to the hub
+// co-located in this process, and that binding is not just a guess: when
+// HMAC auth identified the sending hub it must be the co-located one, and
+// with more than one hub connection the X-Scion-Hub-Connection header must
+// name it (so the unauthenticated fallback in resolveHubConnection never
+// picks it for a remote hub). As defence in depth, the co-located hub
+// endpoint must also be on a loopback host.
+func (s *Server) dispatchFromColocatedHub(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if hubConn == nil || !hubConn.IsColocated {
+		return false
+	}
+	authName := authenticatingHubConnFromContext(ctx)
+	if authName == "" && r != nil {
+		authName = authenticatingHubConnFromContext(r.Context())
+	}
+	if authName != "" && authName != hubConn.Name {
+		return false
+	}
+	headerName := ""
+	if r != nil {
+		headerName = r.Header.Get("X-Scion-Hub-Connection")
+	}
+	if headerName != hubConn.Name {
+		s.hubMu.RLock()
+		conns := len(s.hubConnections)
+		s.hubMu.RUnlock()
+		if conns != 1 {
+			return false
+		}
+	}
+	return isLoopbackEndpointURL(hubConn.HubEndpoint)
+}
+
+// isLoopbackEndpointURL reports whether endpoint is a URL whose host is
+// localhost or a loopback IP. An empty or unparsable endpoint, or one with
+// no host, is not loopback.
+func isLoopbackEndpointURL(endpoint string) bool {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	return isLoopbackHost(u.Hostname())
+}
+
+// applyStartTemplateEnvSource resolves the agent's Hub template on a start or
+// restart that leaves opts.Template unset (the agent's state survived), and
+// passes its local path in opts.TemplateEnvSource, which the agent manager
+// uses only to compute the template env fallback (ptone/scion#4524).
+//
+// The template is resolved live, as create does (hydrateTemplate): the Hub's
+// current content, reused from the cache when unchanged, so the template env
+// follows template updates. The request's TemplateHash is the hash recorded
+// at create, so a cache lookup by it would pin create-time content and make
+// the result depend on cache state; it is not used to short-cut resolution.
+//
+// opts.Template is never set here, so image, harness-config and agent config
+// resolution are unchanged. A hydration failure is logged and the start goes
+// on without template env (the agent manager warns that the env fallback is
+// not applied); it never fails the start.
+//
+// An older Hub sends no template identity: the template hash recorded at
+// provision (broker-side provenance) is then looked up in the template cache,
+// read-only, so such an agent gets the template version it was provisioned
+// from. A hit sets the env source; a miss leaves it unset (the agent manager
+// warns).
+func (s *Server) applyStartTemplateEnvSource(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) {
+	if in.TemplateID == "" && in.TemplateHash == "" {
+		if s.cache == nil {
+			return
+		}
+		hash := agent.ProvisionedTemplateHash(opts.ProjectPath, opts.Name, opts.SharedWorkspace, opts.HubProjectID)
+		if hash == "" {
+			return
+		}
+		if path, ok := s.cache.Get(hash); ok {
+			opts.TemplateEnvSource = path
+		}
+		return
+	}
+	if hubConn == nil {
+		return
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		s.agentLifecycleLog.Warn("Start: could not resolve the agent's Hub template; its env fallback is not applied",
+			"agent_id", in.AgentID, "template", templateSlug, "error", err)
+		return
+	}
+	opts.TemplateEnvSource = templatePath
+}
+
+// applyStartTemplateIdentity applies the agent's template identity on a start
+// or restart (ptone/scion#2157).
+//
+// Without a template identity (an older Hub, or an agent with no Hub
+// template) it returns at once, without looking at the filesystem.
+//
+// When the agent's broker-side state survived the stop, it does nothing:
+// nothing is hydrated and opts.Template stays unset (an explicit template
+// path would change how an existing agent's image and harness-config are
+// resolved), so the agent starts from its own state exactly as before.
+//
+// When the agent has to be provisioned again (its state directory is gone,
+// as on a runtime or broker that keeps nothing across a stop), the template
+// is hydrated the way create hydrates it, and opts.Template is set to the
+// hydrated path, so the recreated agent gets its own template instead of the
+// default one. A hydration failure fails the start with the same error create
+// returns. Without a Hub connection the start is left as before.
+func (s *Server) applyStartTemplateIdentity(ctx context.Context, in startContextInputs, opts *api.StartOptions, hubConn *HubConnection, templateSlug string) error {
+	if in.TemplateID == "" && in.TemplateHash == "" {
+		return nil
+	}
+	needsProvision, err := agent.AgentNeedsProvision(ctx, *opts)
+	if err != nil {
+		// Unknown: start from whatever state exists, as before.
+		s.agentLifecycleLog.Debug("Start: could not tell whether the agent needs provisioning; template identity not applied",
+			"agent_id", in.AgentID, "error", err)
+		return nil
+	}
+	if !needsProvision || hubConn == nil {
+		return nil
+	}
+	templatePath, err := s.hydrateTemplate(ctx, &CreateAgentConfig{
+		Template:     templateSlug,
+		TemplateID:   in.TemplateID,
+		TemplateHash: in.TemplateHash,
+	}, hubConn)
+	if err != nil {
+		return &startContextError{
+			Status:      http.StatusInternalServerError,
+			Message:     "Failed to hydrate template: " + err.Error(),
+			IsHubError:  true,
+			OriginalErr: err,
+		}
+	}
+	if templatePath != "" {
+		opts.Template = templatePath
+		s.agentLifecycleLog.Info("Start: agent state missing, provisioning from the agent's Hub template",
+			"agent_id", in.AgentID, "template", templateSlug)
+	}
+	return nil
 }

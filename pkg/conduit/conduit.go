@@ -73,6 +73,11 @@ const (
 	CloseRelayTimeout uint32 = 4504
 )
 
+// reasonDrainingRefusal is the StreamClose reason of a stream refused
+// because the session is draining: the relay_restart token (design
+// §3.3.1) with a detail.
+const reasonDrainingRefusal = "relay_restart: session draining"
+
 // CloseError is a stream or session termination carrying a close code.
 type CloseError struct {
 	Code   uint32
@@ -209,8 +214,10 @@ type LocalSession interface {
 	// ErrSessionClosed if the session already ended; Done reports when
 	// the close completed.
 	CloseWithCode(code uint32, reason string) error
-	// RefreshAuth sends AuthRefresh{credential, stream_id} (dialer side).
-	// The receiving side validates refreshes one at a time; if several
+	// RefreshAuth sends AuthRefresh{credential, stream_id}: from the
+	// dialer, a refreshed credential (stream_id 0); from the relay, the
+	// hub's renewal notice for one stream (stream_id set, no credential).
+	// The relay validates credential refreshes one at a time; if several
 	// arrive while one is being validated, only the latest is kept.
 	RefreshAuth(credential []byte, streamID uint32) error
 	// Stats returns scheduler and buffer counters.
@@ -227,6 +234,9 @@ type GoAwayOptions struct {
 	// ReconnectAfter hints the dialer how long to wait before dialing a
 	// replacement (default 0: immediately).
 	ReconnectAfter time.Duration
+	// CloseReason is the reason on the StreamClose (and the session
+	// close) sent at the drain deadline (default Reason).
+	CloseReason string
 }
 
 // Admitter is the relay-side hook (1d): it authenticates the principal,

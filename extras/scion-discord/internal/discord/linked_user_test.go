@@ -38,7 +38,8 @@ type linkedUserHub struct {
 	// "empty" returns none, and "error" returns a 500.
 	projects string
 
-	// fail maps "METHOD path" to an error answer for that request.
+	// fail maps "METHOD path" to an error answer for that request. A key
+	// of "METHOD path?scope=value" matches only requests with that scope.
 	fail map[string]hubFailure
 }
 
@@ -87,6 +88,9 @@ func (h *linkedUserHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 	projectsMode := h.projects
 	failure, failing := h.fail[r.Method+" "+r.URL.Path]
+	if scope := r.URL.Query().Get("scope"); !failing && scope != "" {
+		failure, failing = h.fail[r.Method+" "+r.URL.Path+"?scope="+scope]
+	}
 	h.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")

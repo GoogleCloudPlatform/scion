@@ -138,8 +138,8 @@ func hubDeleteFailure(agentName string, o hubDeleteOutcome, what string) error {
 			// admins only (ptone/scion#3122). Without them the outcome is
 			// still a failure, but which kind is unknown, so start may be
 			// blocked.
-			return fmt.Errorf("delete failed on the Hub; %s. Retry with 'scion delete %s', or force-delete it from the web UI. Starting the agent may stay blocked until a retry succeeds or force is used",
-				what, agentName)
+			return fmt.Errorf("delete failed on the Hub; %s. Retry with 'scion delete %s', or force it with 'scion delete --force %s'. Starting the agent may stay blocked until a retry succeeds or force is used",
+				what, agentName, agentName)
 		}
 		if msg != "" {
 			msg = ": " + msg
@@ -189,9 +189,14 @@ func hubDeletePendingReason(o hubDeleteOutcome) string {
 }
 
 // hubDeletePendingMessage is scion delete's notice for an accepted delete
-// whose completion could not be observed.
-func hubDeletePendingMessage(o hubDeleteOutcome) string {
-	return fmt.Sprintf("delete accepted; cannot observe completion; local worktree kept (%s)", hubDeletePendingReason(o))
+// whose completion could not be observed. kept names the local state that
+// was kept ("local worktree kept"), or is empty when there is none (a
+// target-hub profile).
+func hubDeletePendingMessage(o hubDeleteOutcome, kept string) string {
+	if kept == "" {
+		return fmt.Sprintf("delete accepted; cannot observe completion (%s)", hubDeletePendingReason(o))
+	}
+	return fmt.Sprintf("delete accepted; cannot observe completion; %s (%s)", kept, hubDeletePendingReason(o))
 }
 
 // hubRemovalPendingMessage is scion stop --rm's notice for the same case.

@@ -1,5 +1,14 @@
 import { describe, it, expect, vi, beforeAll, afterEach } from 'vitest';
 import { setPreferredTimeZone } from '../../utils/time.js';
+import type { ScionPageAdminServerConfig } from './admin-server-config.js';
+import {
+  isLayer0Key,
+  owningSection,
+  registrySchemaResponse,
+  unknownPayloadKeys,
+  valueAtPath,
+  type PayloadScope,
+} from './__fixtures__/settings-registry.js';
 
 // ── Shared mock data builders ──
 
@@ -58,7 +67,13 @@ const SCHEMA_RESPONSE = {
         'server.hub.soft_delete_retain_files',
       ],
     },
-    endpoints: { koanf_paths: ['server.hub.public_url', 'image_registry'] },
+    endpoints: {
+      koanf_paths: [
+        'server.hub.public_url',
+        'image_registry',
+        'server.hub.monitoring_dashboard_url',
+      ],
+    },
     agent_defaults: {
       koanf_paths: [
         'default_template',
@@ -97,6 +112,9 @@ const SCHEMA_RESPONSE = {
     },
     agent_secrets: {
       koanf_paths: ['agent_secrets.user_scope_only'],
+    },
+    gcp_iam: {
+      koanf_paths: ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'],
     },
   },
 };
@@ -225,8 +243,6 @@ function createFetchHandler(
 }
 
 // Import the component module once so the custom element is only registered once.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let ScionPageAdminServerConfig: any;
 
 async function createComponent(
   fetchHandler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>
@@ -261,8 +277,7 @@ describe('scion-page-admin-server-config', () => {
 
   beforeAll(async () => {
     vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
-    const mod = await import('./admin-server-config.js');
-    ScionPageAdminServerConfig = mod.ScionPageAdminServerConfig;
+    await import('./admin-server-config.js');
   });
 
   afterEach(() => {
@@ -695,12 +710,12 @@ describe('scion-page-admin-server-config', () => {
       base.server.storage.bucket = 'old-bucket';
       base.server.message_broker = { enabled: true, type: 'inprocess' };
       const payload = await capturePut(base, (el) => {
-        el.logFormat = '';
+        el.logLevel = '';
         el.storageBucket = '';
         el.messageBrokerEnabled = false;
       });
       const server = payload.server as Record<string, Record<string, unknown> | string>;
-      expect(server.log_format).toBe('');
+      expect(server.log_level).toBe('');
       expect(server.storage).toEqual({ bucket: '' });
       expect(server.message_broker).toEqual({ enabled: false });
     });
@@ -730,11 +745,86 @@ describe('scion-page-admin-server-config', () => {
       expect(server.native_chat).toEqual({ enabled: false });
     });
 
-    it('a hosted save never sends the file-only gcp_iam keys', async () => {
-      const payload = await capturePut(makeBaseConfig({ settings_tier: 'db' }), () => {});
+    it('a hosted save leaves out unchanged gcp_iam keys', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      base.server.hub.gcp_iam_deny_unknown_policy = 'fail-closed';
+      const payload = await capturePut(base, () => {});
       const hub = (payload.server as Record<string, Record<string, unknown>> | undefined)?.hub;
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_check_mode');
       expect(hub ?? {}).not.toHaveProperty('gcp_iam_deny_unknown_policy');
+    });
+
+    it('a hosted save sends a changed gcp_iam key in the Layer-1 payload', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const payload = await capturePut(base, (el) => {
+        el.hubGcpIamDenyUnknownPolicy = 'fail-closed';
+      });
+      const hub = (payload.server as Record<string, Record<string, unknown>>).hub;
+      expect(hub.gcp_iam_deny_unknown_policy).toBe('fail-closed');
+      expect(hub).not.toHaveProperty('gcp_iam_check_mode');
+    });
+
+    it('gcp_iam selects show the reported value and an env badge when env-pinned', async () => {
+      const base = makeBaseConfig({
+        settings_tier: 'db',
+        env_overrides: ['server.hub.gcp_iam_check_mode'],
+      }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'IAM Check Mode'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-select')?.getAttribute('value')).toBe('enforce');
+      expect(field.querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it('gcp_iam selects are read-only on a hosted hub without the gcp_iam section', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.hub.gcp_iam_check_mode = 'enforce';
+      const schema = JSON.parse(JSON.stringify(SCHEMA_RESPONSE));
+      delete schema.sections.gcp_iam;
+      element = await createComponent(createFetchHandler(base, { schemaResponse: schema }));
+      const labels = queryAll(element, 'label').filter((l) =>
+        ['IAM Check Mode', 'Deny Policy Fallback'].includes(l.textContent?.trim() ?? '')
+      );
+      expect(labels).toHaveLength(2);
+      for (const label of labels) {
+        const field = label.closest('.form-field')!;
+        expect(field.querySelector('sl-select')).toBeNull();
+        expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+          'deployment configuration'
+        );
+      }
+    });
+
+    it('GCP replication locations are read-only on a hosted hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db' }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      expect(label).toBeDefined();
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('us-east1');
+    });
+
+    it('GCP replication locations stay editable on a workstation hub', async () => {
+      const base = makeBaseConfig({ settings_tier: 'db', layer0_editable: true }) as any;
+      base.server.secrets = { backend: 'gcpsm', gcp_replication_locations: ['us-east1'] };
+      element = await createComponent(createFetchHandler(base));
+      const label = queryAll(element, 'label').find(
+        (l) => l.textContent?.trim() === 'GCP Replication Locations'
+      );
+      const field = label!.closest('.form-field')!;
+      expect(field.querySelector('sl-input')).not.toBeNull();
     });
 
     it('flag-managed workstation fields are read-only and not sent', async () => {
@@ -747,6 +837,101 @@ describe('scion-page-admin-server-config', () => {
       expect(server.auth?.dev_mode).toBeUndefined();
       expect(server.storage?.provider).toBeUndefined();
       expect(server.hub?.host).toBeUndefined();
+    });
+
+    // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
+    // every Layer-1 field the page shows must be sent explicitly when it is
+    // cleared: "" / [] / null / false, never left out.
+    it('a hosted save sends every cleared Layer-1 field explicitly', async () => {
+      // Every Layer-1 key the page edits, so none is read-only.
+      const sections = SCHEMA_RESPONSE.sections as Record<string, { koanf_paths: string[] }>;
+      const schema = {
+        sections: {
+          ...sections,
+          lifecycle: {
+            koanf_paths: [...sections.lifecycle.koanf_paths, 'server.hub.stalled_threshold'],
+          },
+          agent_defaults: {
+            koanf_paths: [
+              ...sections.agent_defaults.koanf_paths,
+              'default_model',
+              'default_thinking_level',
+              'default_runtime_broker',
+            ],
+          },
+          telemetry: {
+            koanf_paths: [...sections.telemetry.koanf_paths, 'telemetry.cloud.gcp_project_id'],
+          },
+          auto_expose_ports: { koanf_paths: ['auto_expose_ports.enabled'] },
+          quotas: { koanf_paths: ['quotas.enforce_broker_quotas'] },
+        },
+      };
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+          schemaResponse: schema,
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      const el = element as any;
+      el.defaultTemplate = '';
+      el.imageRegistry = '';
+      el.defaultMaxDuration = '';
+      el.defaultModelSelection = '';
+      el.defaultRuntimeBroker = '';
+      el.defaultTimezone = '';
+      el.defaultThinkingLevel = null;
+      el.hubPublicUrl = '';
+      el.hubAdminEmails = '';
+      el.hubSoftDeleteRetention = '';
+      el.hubSoftDeleteRetainFiles = false;
+      el.hubAutoSuspendStalled = false;
+      el.hubStalledThreshold = '';
+      el.authUserAccessMode = '';
+      el.authDefaultUserRole = '';
+      el.authAuthorizedDomains = '';
+      el.autoExposePortsEnabled = false;
+      el.enforceBrokerQuotas = false;
+      el.agentSecretsUserScopeOnly = false;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      const payload = captured! as Record<string, unknown>;
+      expect(payload).toMatchObject({
+        default_template: '',
+        image_registry: '',
+        default_max_duration: '',
+        default_model: '',
+        default_runtime_broker: '',
+        default_timezone: '',
+        default_thinking_level: null,
+        default_resources: null,
+        auto_expose_ports: { enabled: false },
+        quotas: { enforce_broker_quotas: false },
+        agent_secrets: { user_scope_only: false },
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.hub).toMatchObject({
+        public_url: '',
+        admin_emails: [],
+        soft_delete_retention: '',
+        soft_delete_retain_files: false,
+        auto_suspend_stalled: false,
+        stalled_threshold: '',
+      });
+      expect(server.auth).toMatchObject({
+        user_access_mode: '',
+        default_user_role: '',
+        authorized_domains: [],
+      });
+      const telemetry = payload.telemetry as Record<string, Record<string, unknown>>;
+      expect(telemetry.cloud).toHaveProperty('gcp_project_id', null);
     });
   });
 
@@ -1567,7 +1752,222 @@ describe('scion-page-admin-server-config', () => {
     });
   });
 
+  describe('unset values are sent as null (ptone/scion#3898)', () => {
+    // A DB-backed save keeps the stored value of a key the body leaves
+    // out, so an unset value must be sent as an explicit null to clear it.
+    const KEYS = [
+      'default_thinking_level',
+      'default_resources',
+      'telemetry.enabled',
+      'telemetry.cloud.enabled',
+    ];
+
+    it('buildLayer1Payload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultThinkingLevel = null;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+
+      el.defaultThinkingLevel = 30;
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', 30);
+    });
+
+    it('treats a loaded thinking level of 0 as unset', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', default_thinking_level: 0 }))
+      );
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      expect(el.defaultThinkingLevel).toBeNull();
+      expect(el.buildLayer1Payload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildFilePayload sends null for an unset thinking level, never 0', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.defaultThinkingLevel = null;
+      expect(el.buildFilePayload()).toHaveProperty('default_thinking_level', null);
+    });
+
+    it('buildLayer1Payload sends null default_resources when every resource field is empty', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.defaultResCpuReq = '';
+      el.defaultResMemReq = '';
+      el.defaultResCpuLim = '';
+      el.defaultResMemLim = '';
+      el.defaultResDisk = '';
+      expect(el.buildLayer1Payload()).toHaveProperty('default_resources', null);
+
+      el.defaultResCpuReq = '500m';
+      expect(el.buildLayer1Payload().default_resources).toEqual({
+        requests: { cpu: '500m', memory: undefined },
+      });
+    });
+
+    it('buildLayer1Payload sends null for an empty telemetry cloud GCP project ID', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      const el = element as any;
+      el.layer1Keys = new Set(KEYS);
+      el.telemetryCloudGcpProjectId = '';
+      const cloud = (el.buildLayer1Payload().telemetry as Record<string, unknown>).cloud as Record<
+        string,
+        unknown
+      >;
+      expect(cloud).toHaveProperty('gcp_project_id', null);
+    });
+  });
+
+  describe('telemetry.local is not edited (ptone/scion#4103)', () => {
+    // Nothing reads telemetry.local, so the page shows no controls for it.
+    // A DB-backed save merges key by key, so the omitted key keeps its stored
+    // value; a file-mode save replaces the whole telemetry object, so the
+    // stored value is echoed back unchanged.
+    const storedLocal = { enabled: true, file: '/tmp/t.jsonl', console: true };
+    const withLocal = (tier: string) =>
+      makeBaseConfig({
+        settings_tier: tier,
+        telemetry: {
+          enabled: true,
+          cloud: { enabled: false },
+          hub: { enabled: true },
+          local: storedLocal,
+        },
+      });
+
+    it('renders no Local Debug Output controls', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      expect(shadowText(element)).toContain('Report Interval');
+      expect(shadowText(element)).not.toContain('Local Debug Output');
+      expect(shadowText(element)).not.toContain('Enable Local Output');
+    });
+
+    it('buildLayer1Payload omits telemetry.local', async () => {
+      element = await createComponent(createFetchHandler(withLocal('db')));
+      const el = element as any;
+      el.layer1Keys = new Set([
+        'telemetry.enabled',
+        'telemetry.hub.enabled',
+        'telemetry.local.enabled',
+        'telemetry.local.file',
+        'telemetry.local.console',
+      ]);
+      const telemetry = el.buildLayer1Payload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+
+    it('buildFilePayload echoes the stored telemetry.local unchanged', async () => {
+      element = await createComponent(createFetchHandler(withLocal('file')));
+      const el = element as any;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry.local).toEqual(storedLocal);
+    });
+
+    it('buildFilePayload sends no telemetry.local when none is stored', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'file',
+            telemetry: { enabled: true, cloud: { enabled: false }, hub: { enabled: true } },
+          })
+        )
+      );
+      const el = element as any;
+      const telemetry = el.buildFilePayload().telemetry as Record<string, unknown>;
+      expect(telemetry).toHaveProperty('hub');
+      expect(telemetry).not.toHaveProperty('local');
+    });
+  });
+
+  describe('server.log_format is not edited (ptone/scion#4103)', () => {
+    // server.log_format is accepted but ignored; guard against the no-op
+    // Log Format control coming back.
+    it('renders no Log Format control', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(shadowText(element)).toContain('Log Level');
+      expect(shadowText(element)).not.toContain('Log Format');
+    });
+
+    it('DB-mode builders never send server.log_format', async () => {
+      // buildLayer1Payload carries no server leaves; on a workstation hub the
+      // server fields go through buildLayer0Candidate instead.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', layer0_editable: true }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const layer1Server = (el.buildLayer1Payload().server ?? {}) as Record<string, unknown>;
+      expect(layer1Server).not.toHaveProperty('log_format');
+      const server = el.buildLayer0Candidate().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+
+    it('buildFilePayload never sends server.log_format', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = 'debug';
+      const server = el.buildFilePayload().server as Record<string, unknown>;
+      expect(server).toHaveProperty('log_level', 'debug');
+      expect(server).not.toHaveProperty('log_format');
+    });
+  });
+
   // ── Cross-project messaging (D1) ──
+
+  describe('File mode server sections keep omitted fields (ptone/scion#2938)', () => {
+    // The file-mode PUT deep-merges each server section, so an omitted
+    // field keeps its stored value; a field the form shows must be sent as
+    // an explicit empty value to be cleared.
+    it('buildFilePayload sends cleared server fields as explicit empties', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.logLevel = '';
+      el.hubPort = 0;
+      el.hubHost = '';
+      el.hubPublicUrl = '';
+      el.brokerHost = '';
+      el.brokerPort = 0;
+      el.dbDriver = '';
+      el.dbUrl = '';
+      el.authDevToken = '';
+      el.storageBucket = '';
+      el.secretsBackend = '';
+      el.secretsGCPProjectId = '';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.log_level).toBe('');
+      expect(server.hub).toMatchObject({ port: 0, host: '', public_url: '' });
+      expect(server.broker).toMatchObject({ port: 0, host: '' });
+      expect(server.database).toEqual({ driver: '', url: '' });
+      expect(server.auth).toHaveProperty('dev_token', '');
+      expect(server.storage).toHaveProperty('bucket', '');
+      expect(server.secrets).toMatchObject({ backend: '', gcp_project_id: '' });
+    });
+
+    it('buildFilePayload leaves out masked credentials so the stored values are kept', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'file' }))
+      );
+      const el = element as any;
+      el.dbUrl = '********';
+      el.authDevToken = '********';
+
+      const server = (el.buildFilePayload() as Record<string, any>).server;
+      expect(server.database).not.toHaveProperty('url');
+      expect(server.auth).not.toHaveProperty('dev_token');
+    });
+  });
 
   describe('Cross-project messaging section', () => {
     it('renders cross-project messaging section in hub server tab', async () => {
@@ -1807,6 +2207,65 @@ describe('scion-page-admin-server-config', () => {
 
       // The switch itself must not render while the field is env-pinned.
       expect(agentSecretsSwitch(element)).toBeUndefined();
+    });
+  });
+
+  // ── Per-field env badges on map sections and the GCP IAM tab (ptone/scion#389) ──
+
+  describe('env badges on runtimes, profiles and GCP IAM fields', () => {
+    function envBadgeCount(el: HTMLElement): number {
+      return queryAll(el, '.env-badge').length;
+    }
+
+    it('renders no env badge when nothing is overridden', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    it('badges the runtimes and profiles sections from leaf env keys under them', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            env_overrides: ['runtimes.docker.host', 'profiles.local.runtime'],
+          })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(2);
+    });
+
+    it('does not badge a section from a key that only shares its name prefix', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({ settings_tier: 'db', env_overrides: ['profilesx.local.runtime'] })
+        )
+      );
+      expect(envBadgeCount(element)).toBe(0);
+    });
+
+    const gcpIamEnv = ['server.hub.gcp_iam_check_mode', 'server.hub.gcp_iam_deny_unknown_policy'];
+
+    it('badges the GCP IAM check mode and deny policy fields on a hosted DB hub', async () => {
+      // gcp_iam is Layer-1, so the selects stay editable and carry the env badge.
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ settings_tier: 'db', env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      expect(panel?.querySelectorAll('.env-badge').length).toBe(2);
+      // The selects stay editable: both render, and neither is env-pinned.
+      expect(panel?.querySelectorAll('sl-select').length).toBe(2);
+      expect(panel?.querySelectorAll('.read-only-badge').length).toBe(0);
+    });
+
+    it('shows the GCP IAM fields as env-pinned on a file-tier hub', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: gcpIamEnv }))
+      );
+      const panel = query(element, 'sl-tab-panel[name="gcp-identity"]');
+      const pinned = Array.from(panel?.querySelectorAll('.read-only-badge') ?? []).filter((b) =>
+        (b.textContent ?? '').includes('environment variable')
+      );
+      expect(pinned.length).toBe(2);
     });
   });
 
@@ -2594,5 +3053,1635 @@ describe('scion-page-admin-server-config', () => {
       expect(server.notification_channels).toEqual(plain.notification_channels);
       expect(server.oauth).toEqual(plain.oauth);
     });
+  });
+  describe('Monitoring Dashboard URL field (ptone/scion#3597)', () => {
+    const URL_A = 'https://console.cloud.google.com/monitoring/dashboards/builder/hub?project=p';
+
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find(
+        (l) => l.textContent?.trim() === 'Monitoring Dashboard URL'
+      );
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function type(el: HTMLElement, value: string): void {
+      const input = field(el).querySelector('sl-input') as HTMLInputElement;
+      input.value = value;
+      input.dispatchEvent(new Event('sl-input'));
+    }
+
+    async function savePayload(
+      config: Record<string, unknown>,
+      edit: (el: HTMLElement) => void | Promise<void>
+    ): Promise<Record<string, unknown>> {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            captured = body;
+            return { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+      await edit(element);
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(captured).not.toBeNull();
+      return captured!;
+    }
+
+    function hubOf(payload: Record<string, unknown>): Record<string, unknown> {
+      return ((payload.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+    }
+
+    function withUrl(tier: string, url?: string, extra: Record<string, unknown> = {}) {
+      const base = makeBaseConfig({ settings_tier: tier, ...extra }) as any;
+      if (url !== undefined) base.server.hub.monitoring_dashboard_url = url;
+      return base;
+    }
+
+    it('shows the loaded value in an editable field', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db', URL_A)));
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(URL_A);
+      expect(field(element).querySelector('.env-badge')).toBeNull();
+    });
+
+    it('shows the env badge when the key is overridden by environment', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withUrl('db', URL_A, { env_overrides: ['server.hub.monitoring_dashboard_url'] })
+        )
+      );
+      expect(field(element).querySelector('.env-badge')).not.toBeNull();
+    });
+
+    it.each(['db', 'file'])('an untouched form does not send the key (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier, URL_A), () => {});
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an unset key is not materialised on save (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => {
+        (el as any).hubPublicUrl = 'https://other.example.com';
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it.each(['db', 'file'])('an edited value is sent, trimmed (%s mode)', async (tier) => {
+      const payload = await savePayload(withUrl(tier), (el) => type(el, `  ${URL_A}  `));
+      expect(hubOf(payload).monitoring_dashboard_url).toBe(URL_A);
+    });
+
+    it('a cleared field is sent as "" so the setting is cleared', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => type(el, ''));
+      expect(hubOf(payload)).toHaveProperty('monitoring_dashboard_url', '');
+    });
+
+    it('an edit back to the loaded value is not sent', async () => {
+      const payload = await savePayload(withUrl('db', URL_A), (el) => {
+        type(el, 'https://x.example.com');
+        type(el, URL_A);
+      });
+      expect(hubOf(payload)).not.toHaveProperty('monitoring_dashboard_url');
+    });
+
+    it('hints when the value is not an http(s) URL', async () => {
+      element = await createComponent(createFetchHandler(withUrl('db')));
+      type(element, 'javascript:alert(1)');
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).not.toBeNull();
+      type(element, URL_A);
+      await (element as any).updateComplete;
+      expect(field(element).querySelector('.monitoring-url-invalid')).toBeNull();
+    });
+  });
+
+  // ── Public URL pinned state (ptone/scion#3905) ──
+
+  describe('Public URL field (ptone/scion#3905)', () => {
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Public URL');
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function withStatus(tier: string, status: Record<string, unknown>) {
+      return makeBaseConfig({ settings_tier: tier, public_url_status: status });
+    }
+
+    it.each([
+      ['db', 'SCION_SERVER_HUB_ENDPOINT'],
+      ['db', '--base-url'],
+      ['db', 'SCION_SERVER_BASE_URL'],
+    ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus(tier, { effective: 'https://env.example.com', source: 'env', pinned_by: pin })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(`Set by ${pin}`);
+      expect(f.querySelector('.read-only-value')?.textContent).toContain('https://env.example.com');
+      expect(f.querySelector('.public-url-in-effect')).toBeNull();
+    });
+
+    it('a pinned public URL is not sent on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', {
+            effective: 'https://env.example.com',
+            source: 'env',
+            pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubPublicUrl = 'https://other.example.com';
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('public_url');
+    });
+
+    it('is editable when not pinned and shows the value in effect and its source', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', { effective: 'https://db.example.com', source: 'database' })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')?.getAttribute('value')).toBe('https://hub.example.com');
+      expect(f.querySelector('.read-only-badge')).toBeNull();
+      const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
+      expect(hint).toContain('https://db.example.com');
+      expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+    });
+
+    it('is editable when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(field(element).querySelector('sl-input')).not.toBeNull();
+    });
+
+    const supersededPublicUrl = {
+      endpoints: [
+        { key: 'server.hub.public_url', source: 'server_env' },
+        { key: 'image_registry', source: 'yaml' },
+      ],
+    };
+
+    function panelText(el: HTMLElement): string {
+      return query(el, '.superseded-panel')?.textContent ?? '';
+    }
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeTruthy();
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    it('a pinned public URL is not listed as superseded by database settings', async () => {
+      // While a setting pins the public URL, the hub leaves it out of
+      // superseded_keys (computeSupersededKeys); the page shows the list
+      // as the hub sends it (ptone/scion#4707).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: {
+              effective: 'https://env.example.com',
+              source: 'env',
+              pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+            },
+            superseded_keys: { endpoints: [{ key: 'image_registry', source: 'yaml' }] },
+          })
+        )
+      );
+      expect(panelText(element)).not.toContain('Public URL');
+      expect(panelText(element)).toContain('Image Registry');
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+    });
+
+    it('an unpinned public URL the database value supersedes is listed', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: { effective: 'https://file.example.com', source: 'file' },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).toContain('Public URL');
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+    });
+
+    it('the Superseded badge goes away after the public URL is cleared', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://file.example.com', source: 'file' },
+        superseded_keys: { endpoints: [{ key: 'server.hub.public_url', source: 'yaml' }] },
+      }) as Record<string, any>;
+      cfg.server.hub.public_url = 'https://saved.example.com';
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: () => {
+            // After the clear the hub reports the bootstrap value in effect
+            // and nothing superseded.
+            delete cfg.superseded_keys;
+            cfg.server.hub.public_url = 'https://file.example.com';
+            return {
+              status: 200,
+              body: { reload: { applied_keys: [], pending_restart: ['server.hub.public_url'] } },
+            };
+          },
+        })
+      );
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+
+      (element as any).hubPublicUrl = '';
+      await (element as any).updateComplete;
+      await clickSave(element);
+
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+      expect(query(element, '.superseded-panel')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://file.example.com'
+      );
+    });
+
+    it('an echo save keeps the value in effect and reports no pending restart', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://hub.example.com', source: 'file' },
+      }) as Record<string, any>;
+      let sent: unknown;
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: (body) => {
+            sent = (body.server as Record<string, any> | undefined)?.hub?.public_url;
+            return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+          },
+        })
+      );
+      await clickSave(element);
+
+      expect(sent).toBe('https://hub.example.com');
+      expect(query(element, '.pending-restart')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://hub.example.com'
+      );
+    });
+  });
+
+  // ── Structured save errors at the field/section (ptone/scion#3923) ──
+
+  describe('Structured save errors shown at the field and section (ptone/scion#3923)', () => {
+    async function clickButton(el: HTMLElement, label: string): Promise<void> {
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    function fieldError(el: HTMLElement, key: string): string[] {
+      return queryAll(el, `[data-field-error="${key}"]`).map((e) =>
+        (e.textContent ?? '').replace(/\s+/g, ' ').trim()
+      );
+    }
+
+    /** Wraps createFetchHandler to answer PUT /api/v1/github-app. */
+    function withGitHubAppPut(
+      base: ReturnType<typeof createFetchHandler>,
+      result: { status: number; body: unknown },
+      onGet?: () => void,
+      onPut?: (body: Record<string, unknown>) => void
+    ) {
+      return (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/github-app')) {
+          if (init?.method === 'PUT') {
+            onPut?.(JSON.parse(init.body as string));
+            return Promise.resolve(
+              new Response(JSON.stringify(result.body), {
+                status: result.status,
+                headers: { 'Content-Type': 'application/json' },
+              })
+            );
+          }
+          onGet?.();
+        }
+        return base(url, init);
+      };
+    }
+
+    it("validation_failed with the hub's capitalized Path/Message shows the message at the field and a section summary", async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: {
+                endpoints: [{ Path: 'public_url', Message: 'must be an absolute URL' }],
+              },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(fieldError(element, 'server.hub.public_url')).toEqual(['must be an absolute URL']);
+      const summary = query(element, '[data-section-errors="endpoints"]');
+      expect(summary).not.toBeNull();
+      expect(summary!.textContent).toContain('server.hub.public_url');
+      expect(summary!.textContent).toContain('must be an absolute URL');
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('must be an absolute URL');
+      expect(top).not.toContain('[object Object]');
+    });
+
+    it('a nested validation_error with no field shows the message in the summary only', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: {
+                code: 'validation_error',
+                message: 'invalid default_timezone "Not/A/Zone": unknown time zone Not/A/Zone',
+              },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      const top = query(element, '.validation-errors')!.textContent ?? '';
+      expect(top).toContain('General');
+      expect(top).toContain('invalid default_timezone "Not/A/Zone"');
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+      expect(shadowText(element)).not.toContain('An unexpected error occurred');
+    });
+
+    it('revision_conflict shows the changed-since-loaded notice; Reload refetches and clears stale errors', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const base = createFetchHandler(config, {
+        putHandler: () => ({
+          status: 409,
+          body: {
+            error: 'revision_conflict',
+            message: 'One or more sections have been modified since the expected revision.',
+            applied: {},
+            conflicted: [{ section: 'endpoints', expected_revision: 2, current_revision: 3 }],
+          },
+        }),
+      });
+      let configGets = 0;
+      element = await createComponent((url, init) => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (path.endsWith('/api/v1/admin/server-config') && init?.method !== 'PUT') configGets++;
+        return base(url, init);
+      });
+
+      await clickButton(element, 'Save & Reload');
+
+      const banner = query(element, '.conflict-banner');
+      expect(banner).not.toBeNull();
+      expect(banner!.textContent).toContain('changed since you loaded');
+      expect(banner!.textContent).toContain('endpoints');
+
+      const getsBefore = configGets;
+      await clickButton(element, 'Reload');
+      expect(configGets).toBe(getsBefore + 1);
+      expect(query(element, '.conflict-banner')).toBeNull();
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('layer0_rejected names the deployment-managed key at its field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 422,
+            body: {
+              error: 'layer0_rejected',
+              message:
+                'Bootstrap settings are managed via settings.yaml / deployment tooling; restart required.',
+              keys: ['server.mode'],
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      const [msg] = fieldError(element, 'server.mode');
+      expect(msg).toContain('server.mode');
+      expect(msg).toContain('managed by deployment configuration and cannot be changed here');
+      expect(query(element, '.safety-net-notice')!.textContent).toContain('server.mode');
+    });
+
+    it('an unknown error keeps the generic message and adds the server message text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 500,
+            body: { error: { code: 'internal_error', message: 'Failed to update section "x"' } },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings: Failed to update section "x"'
+      );
+      expect(queryAll(element, '[data-field-error]')).toHaveLength(0);
+    });
+
+    it('a malformed error body (validation code, no usable entries) falls back to the generic message', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: { error: 'validation_failed', errors: { endpoints: [42] } },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(query(element, '.status-message.error')!.textContent?.trim()).toBe(
+        'Failed to save settings'
+      );
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('GitHub App card: a validation error shows inline at the field and in the card summary', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: {
+            error: {
+              code: 'validation_error',
+              message: 'must be a PEM-encoded key',
+              details: { field: 'private_key' },
+            },
+          },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(fieldError(element, 'server.github_app.private_key')).toEqual([
+        'must be a PEM-encoded key',
+      ]);
+      const summary = query(element, '[data-section-errors="github_app_card"]');
+      expect(summary!.textContent).toContain('must be a PEM-encoded key');
+    });
+
+    it('GitHub App card: revision_conflict offers Reload, which refetches the card', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      let appGets = 0;
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          {
+            status: 409,
+            body: { error: 'revision_conflict', message: 'changed', conflicted: [] },
+          },
+          () => appGets++
+        )
+      );
+
+      const el = element as any;
+      el.githubAppPrivateKey = '-----BEGIN RSA PRIVATE KEY-----';
+      el.githubAppWebhookSecret = 'whsec_typed';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      const notice = query(element, '[data-settings-conflict]');
+      expect(notice!.textContent).toContain('Settings changed since you loaded them');
+
+      const before = appGets;
+      (notice!.querySelector('[data-settings-reload]') as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (element as any).updateComplete;
+      expect(appGets).toBe(before + 1);
+      expect(query(element, '[data-settings-conflict]')).toBeNull();
+      // The typed secrets are not kept across Reload.
+      expect(el.githubAppPrivateKey).toBe('');
+      expect(el.githubAppWebhookSecret).toBe('');
+      const panel = query(element, 'sl-tab-panel[name="github-app"]') ?? element.shadowRoot!;
+      expect((panel.querySelector('sl-textarea') as any).value).toBe('');
+      expect((panel.querySelector('sl-input[type="password"]') as any).value).toBe('');
+    });
+
+    it('GitHub App card: the save payload is unchanged by the error handling', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const bodies: Record<string, unknown>[] = [];
+      element = await createComponent(
+        withGitHubAppPut(
+          createFetchHandler(config),
+          { status: 422, body: { error: 'layer0_rejected', keys: ['server.github_app.app_id'] } },
+          undefined,
+          (b) => bodies.push(b)
+        )
+      );
+      const el = element as any;
+      el.githubAppId = 42;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      el.githubAppWebhookSecret = 'whsec';
+      await el.updateComplete;
+
+      await clickButton(element, 'Save GitHub App Configuration');
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const expected = {
+        app_id: 42,
+        api_base_url: 'https://ghe.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/x/installations/new',
+        private_key: 'PEM',
+        webhook_secret: 'whsec',
+      };
+      expect(bodies).toEqual([expected, expected]);
+    });
+
+    it('main save: the exact payload is sent by a failed save and by the save that follows it', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const payloads: Record<string, unknown>[] = [];
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: (body) => {
+            payloads.push(body);
+            return payloads.length === 1
+              ? {
+                  status: 400,
+                  body: {
+                    error: 'validation_failed',
+                    errors: { endpoints: [{ Path: 'public_url', Message: 'bad' }] },
+                  },
+                }
+              : { status: 200, body: { reload: { applied: [] } } };
+          },
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+      await clickButton(element, 'Save & Reload');
+
+      // The exact body the main save sends for makeBaseConfig in the db tier.
+      const expected = {
+        default_template: 'gemini',
+        default_harness_config: '',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 0,
+        default_max_model_calls: 0,
+        default_max_duration: '',
+        default_resources: null,
+        default_timezone: '',
+        server: {
+          hub: {
+            public_url: 'https://hub.example.com',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: false,
+          },
+          auth: {
+            user_access_mode: 'open',
+            default_user_role: 'member',
+            authorized_domains: [],
+          },
+          // Empty GitHub App fields are echoed as explicit clears
+          // (ptone/scion#4416).
+          github_app: { app_id: 0, api_base_url: '', installation_url: '' },
+        },
+        telemetry: {
+          enabled: false,
+          cloud: {
+            enabled: false,
+            endpoint: '',
+            protocol: '',
+            provider: '',
+            gcp_project_id: null,
+            cloud_logging: false,
+          },
+          hub: { enabled: false, report_interval: '' },
+        },
+        agent_secrets: { user_scope_only: false },
+      };
+      expect(payloads).toEqual([expected, expected]);
+      expect(query(element, '.validation-errors')).toBeNull();
+    });
+
+    it('server message text containing markup renders as text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      const markup = '<img src=x onerror="window.__xss=1">';
+      element = await createComponent(
+        createFetchHandler(config, {
+          putHandler: () => ({
+            status: 400,
+            body: {
+              error: 'validation_failed',
+              errors: { endpoints: [{ Path: 'public_url', Message: markup }] },
+            },
+          }),
+        })
+      );
+
+      await clickButton(element, 'Save & Reload');
+
+      expect(element.shadowRoot!.querySelector('img')).toBeNull();
+      expect(fieldError(element, 'server.hub.public_url')).toEqual([markup]);
+    });
+
+    it('GitHub App card: layer0_rejected names the key and shows it at the field', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 422,
+          body: { error: 'layer0_rejected', keys: ['server.github_app.api_base_url'] },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      const notice = query(element, '[data-settings-layer0]');
+      expect(notice!.textContent).toContain('cannot be changed here');
+      expect(notice!.textContent).toContain('server.github_app.api_base_url');
+      expect(fieldError(element, 'server.github_app.api_base_url')[0]).toContain(
+        'managed by deployment configuration'
+      );
+    });
+
+    it('GitHub App card: an unknown error keeps the generic message plus the server text', async () => {
+      const config = makeBaseConfig({ settings_tier: 'db' });
+      element = await createComponent(
+        withGitHubAppPut(createFetchHandler(config), {
+          status: 500,
+          body: { error: { code: 'internal_error', message: 'failed to store private key' } },
+        })
+      );
+
+      await clickButton(element, 'Save GitHub App Configuration');
+
+      expect(shadowText(element)).toContain(
+        'Failed to save GitHub App configuration: failed to store private key'
+      );
+    });
+  });
+
+  describe('hub default service account and mapping state (ptone/scion#4391)', () => {
+    it('does not ask for or show a mapping state, and says why', async () => {
+      const saUrls: string[] = [];
+      const base = createFetchHandler(
+        makeBaseConfig({
+          default_gcp_identity_mode: 'assign',
+          default_gcp_identity_service_account_id: 'sa-1',
+        })
+      );
+      element = await createComponent((url, init) => {
+        const raw = typeof url === 'string' ? url : url instanceof URL ? url.href : url.url;
+        if (raw.includes('/gcp-service-accounts')) {
+          saUrls.push(raw);
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                items: [
+                  {
+                    id: 'sa-1',
+                    scope: 'hub',
+                    email: 'sa-1@example.com',
+                    displayName: '',
+                    verified: true,
+                  },
+                ],
+              }),
+              { status: 200, headers: { 'Content-Type': 'application/json' } }
+            )
+          );
+        }
+        return base(url, init);
+      });
+
+      expect(saUrls.length).toBeGreaterThan(0);
+      for (const raw of saUrls) {
+        const u = new URL(raw, 'http://hub.example.com');
+        expect(u.searchParams.has('assignStatus')).toBe(false);
+        expect(u.searchParams.has('profile')).toBe(false);
+      }
+
+      const field = queryAll(element, '.form-field').find(
+        (f) =>
+          f.querySelector('label')?.textContent?.trim() === 'Default GCP Identity Service Account'
+      );
+      expect(field).toBeDefined();
+      for (const o of Array.from(field!.querySelectorAll('sl-option'))) {
+        expect(o.hasAttribute('data-assign-state')).toBe(false);
+        expect(o.querySelector('.assign-status')).toBeNull();
+      }
+      const hint = (field!.querySelector('.hint')?.textContent ?? '').replace(/\s+/g, ' ');
+      expect(hint).toContain(
+        'applies to any project and runtime profile that has no default of its own, so no mapping state is shown here'
+      );
+    });
+  });
+
+  // ── Save payloads against the settings registry (ptone/scion#3924) ──
+  //
+  // For each payload builder: every field the page shows as editable is in
+  // the save payload, explicitly, when it is cleared ("omitted means keep"
+  // must never drop a clear), and every key the payload carries is one the
+  // server's settings registry knows. The registry comes from
+  // pkg/config/opsettings/testdata/web_registry_fixture.json (generated from
+  // registry.go; see __fixtures__/settings-registry.ts). The set of shown
+  // fields is taken from the render itself (every koanf key the page asks
+  // readOnlyReason about and renders editable), so a new field fails here
+  // until it is listed in CLEAR and sent by the builder.
+  describe('save payloads against the settings registry (ptone/scion#3924)', () => {
+    /** A GET with every field the page edits set, so each one renders and clearing it is a change. */
+    function makeFullConfig(overrides: Record<string, unknown>): Record<string, unknown> {
+      return {
+        schema_version: '1',
+        active_profile: 'default',
+        workspace_path: '/srv/workspace',
+        default_template: 'gemini',
+        default_harness_config: 'gemini',
+        image_registry: 'ghcr.io/test',
+        default_max_turns: 10,
+        default_max_model_calls: 20,
+        default_max_duration: '1h',
+        default_resources: {
+          requests: { cpu: '1', memory: '1Gi' },
+          limits: { cpu: '2', memory: '2Gi' },
+          disk: '10Gi',
+        },
+        default_model: 'large',
+        default_thinking_level: 2,
+        default_runtime_broker: 'broker-1',
+        default_timezone: 'Europe/Paris',
+        default_gcp_identity_mode: 'assign',
+        default_gcp_identity_service_account_id: 'sa-1',
+        server: {
+          mode: 'standalone',
+          log_level: 'info',
+          hub: {
+            port: 8080,
+            host: '0.0.0.0',
+            public_url: 'https://hub.example.com',
+            monitoring_dashboard_url: 'https://monitoring.example.com',
+            read_timeout: '30s',
+            write_timeout: '30s',
+            admin_emails: ['admin@example.com'],
+            soft_delete_retention: '72h',
+            soft_delete_retain_files: true,
+            auto_suspend_stalled: true,
+            stalled_threshold: '10m',
+            gcp_iam_check_mode: 'enforce',
+            gcp_iam_deny_unknown_policy: 'fail-closed',
+          },
+          broker: {
+            enabled: true,
+            port: 9090,
+            host: '0.0.0.0',
+            hub_endpoint: 'http://hub.internal',
+            container_hub_endpoint: 'http://hub.container',
+            broker_name: 'broker-a',
+            broker_nickname: 'nick',
+            auto_provide: true,
+          },
+          database: { driver: 'postgres', url: '********' },
+          auth: {
+            dev_mode: false,
+            dev_token: '********',
+            user_access_mode: 'invite',
+            default_user_role: 'admin',
+            authorized_domains: ['example.com'],
+          },
+          storage: { provider: 'gcs', bucket: 'bucket-a', local_path: '/data' },
+          secrets: {
+            backend: 'gcpsm',
+            gcp_project_id: 'secrets-project',
+            gcp_replication_locations: ['us-east1'],
+          },
+          message_broker: { enabled: true, type: 'inprocess' },
+          native_chat: { enabled: true },
+        },
+        telemetry: {
+          enabled: true,
+          cloud: {
+            enabled: true,
+            endpoint: 'otel.example.com:4317',
+            protocol: 'grpc',
+            provider: 'gcp',
+            gcp_project_id: 'telemetry-project',
+            cloud_logging: true,
+          },
+          hub: { enabled: true, report_interval: '30s' },
+        },
+        auto_expose_ports: { enabled: true },
+        quotas: { enforce_broker_quotas: true },
+        agent_secrets: { user_scope_only: true },
+        runtimes: { docker: { type: 'docker' } },
+        profiles: { default: { runtime: 'docker' } },
+        harness_configs: { gemini: { harness: 'gemini' } },
+        ...overrides,
+      };
+    }
+
+    /**
+     * How to clear each field the page can show, and the value a cleared
+     * field must be sent as. bodyPath is the PUT body path when it differs
+     * from the koanf key.
+     */
+    interface ClearSpec {
+      clear: (el: any) => void;
+      expected: unknown;
+      bodyPath?: string[];
+    }
+    const CLEAR: Record<string, ClearSpec> = {
+      // agent_defaults / endpoints
+      default_template: { clear: (el) => (el.defaultTemplate = ''), expected: '' },
+      default_harness_config: {
+        clear: (el) => {
+          el.harnessConfigSelection = '';
+          el.customHarnessConfig = '';
+        },
+        expected: '',
+      },
+      image_registry: { clear: (el) => (el.imageRegistry = ''), expected: '' },
+      default_max_turns: { clear: (el) => (el.defaultMaxTurns = 0), expected: 0 },
+      default_max_model_calls: { clear: (el) => (el.defaultMaxModelCalls = 0), expected: 0 },
+      default_max_duration: { clear: (el) => (el.defaultMaxDuration = ''), expected: '' },
+      default_resources: {
+        clear: (el) => {
+          el.defaultResCpuReq = '';
+          el.defaultResMemReq = '';
+          el.defaultResCpuLim = '';
+          el.defaultResMemLim = '';
+          el.defaultResDisk = '';
+        },
+        expected: null,
+      },
+      default_model: {
+        clear: (el) => {
+          el.defaultModelSelection = '';
+          el.defaultCustomModelId = '';
+        },
+        expected: '',
+      },
+      default_thinking_level: { clear: (el) => (el.defaultThinkingLevel = null), expected: null },
+      default_runtime_broker: { clear: (el) => (el.defaultRuntimeBroker = ''), expected: '' },
+      default_timezone: { clear: (el) => (el.defaultTimezone = ''), expected: '' },
+      default_gcp_identity_mode: { clear: (el) => (el.defaultGCPIdentityMode = ''), expected: '' },
+      default_gcp_identity_service_account_id: {
+        clear: (el) => (el.defaultGCPIdentitySAID = ''),
+        expected: '',
+      },
+      'server.hub.public_url': { clear: (el) => (el.hubPublicUrl = ''), expected: '' },
+      'server.hub.monitoring_dashboard_url': {
+        clear: (el) => {
+          el.hubMonitoringDashboardUrl = '';
+          el.monitoringDashboardUrlTouched = true;
+        },
+        expected: '',
+      },
+      // access
+      'server.hub.admin_emails': { clear: (el) => (el.hubAdminEmails = ''), expected: [] },
+      'server.auth.user_access_mode': { clear: (el) => (el.authUserAccessMode = ''), expected: '' },
+      'server.auth.default_user_role': {
+        clear: (el) => (el.authDefaultUserRole = ''),
+        expected: '',
+      },
+      'server.auth.authorized_domains': {
+        clear: (el) => (el.authAuthorizedDomains = ''),
+        expected: [],
+      },
+      // lifecycle
+      'server.hub.soft_delete_retention': {
+        clear: (el) => (el.hubSoftDeleteRetention = ''),
+        expected: '',
+      },
+      'server.hub.soft_delete_retain_files': {
+        clear: (el) => (el.hubSoftDeleteRetainFiles = false),
+        expected: false,
+      },
+      'server.hub.auto_suspend_stalled': {
+        clear: (el) => (el.hubAutoSuspendStalled = false),
+        expected: false,
+      },
+      'server.hub.stalled_threshold': {
+        clear: (el) => (el.hubStalledThreshold = ''),
+        expected: '',
+      },
+      // gcp_iam: selects with no empty option; "cleared" is the default.
+      'server.hub.gcp_iam_check_mode': {
+        clear: (el) => (el.hubGcpIamCheckMode = 'off'),
+        expected: 'off',
+      },
+      'server.hub.gcp_iam_deny_unknown_policy': {
+        clear: (el) => (el.hubGcpIamDenyUnknownPolicy = 'fail-open'),
+        expected: 'fail-open',
+      },
+      // auto_expose_ports / quotas / agent_secrets
+      'auto_expose_ports.enabled': {
+        clear: (el) => (el.autoExposePortsEnabled = false),
+        expected: false,
+      },
+      'quotas.enforce_broker_quotas': {
+        clear: (el) => (el.enforceBrokerQuotas = false),
+        expected: false,
+      },
+      'agent_secrets.user_scope_only': {
+        clear: (el) => (el.agentSecretsUserScopeOnly = false),
+        expected: false,
+      },
+      // telemetry
+      'telemetry.enabled': { clear: (el) => (el.telemetryEnabled = false), expected: false },
+      'telemetry.cloud.enabled': {
+        clear: (el) => (el.telemetryCloudEnabled = false),
+        expected: false,
+      },
+      'telemetry.cloud.endpoint': { clear: (el) => (el.telemetryCloudEndpoint = ''), expected: '' },
+      'telemetry.cloud.protocol': { clear: (el) => (el.telemetryCloudProtocol = ''), expected: '' },
+      'telemetry.cloud.provider': { clear: (el) => (el.telemetryCloudProvider = ''), expected: '' },
+      'telemetry.cloud.gcp_project_id': {
+        clear: (el) => (el.telemetryCloudGcpProjectId = ''),
+        expected: null,
+      },
+      'telemetry.cloud.cloud_logging': {
+        clear: (el) => (el.telemetryCloudCloudLogging = false),
+        expected: false,
+      },
+      'telemetry.hub.enabled': { clear: (el) => (el.telemetryHubEnabled = false), expected: false },
+      'telemetry.hub.report_interval': {
+        clear: (el) => (el.telemetryHubReportInterval = ''),
+        expected: '',
+      },
+      // map sections
+      runtimes: { clear: (el) => (el.runtimes = {}), expected: {} },
+      profiles: { clear: (el) => (el.profiles = {}), expected: {} },
+      harness_configs: { clear: (el) => (el.harnessConfigsMap = {}), expected: {} },
+      // Layer-0 and settings.yaml-only fields (editable on a workstation hub)
+      active_profile: { clear: (el) => (el.activeProfile = ''), expected: '' },
+      workspace_path: { clear: (el) => (el.workspacePath = ''), expected: '' },
+      'server.mode': { clear: (el) => (el.serverMode = ''), expected: '' },
+      'server.log_level': { clear: (el) => (el.logLevel = ''), expected: '' },
+      'server.hub.port': { clear: (el) => (el.hubPort = 0), expected: 0 },
+      'server.hub.host': { clear: (el) => (el.hubHost = ''), expected: '' },
+      'server.hub.read_timeout': { clear: (el) => (el.hubReadTimeout = ''), expected: '' },
+      'server.hub.write_timeout': { clear: (el) => (el.hubWriteTimeout = ''), expected: '' },
+      'server.broker.enabled': { clear: (el) => (el.brokerEnabled = false), expected: false },
+      'server.broker.port': { clear: (el) => (el.brokerPort = 0), expected: 0 },
+      'server.broker.host': { clear: (el) => (el.brokerHost = ''), expected: '' },
+      'server.broker.hub_endpoint': { clear: (el) => (el.brokerHubEndpoint = ''), expected: '' },
+      'server.broker.container_hub_endpoint': {
+        clear: (el) => (el.brokerContainerHubEndpoint = ''),
+        expected: '',
+      },
+      'server.broker.name': {
+        clear: (el) => (el.brokerName = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_name'],
+      },
+      'server.broker.nickname': {
+        clear: (el) => (el.brokerNickname = ''),
+        expected: '',
+        bodyPath: ['server', 'broker', 'broker_nickname'],
+      },
+      'server.broker.auto_provide': {
+        clear: (el) => (el.brokerAutoProvide = false),
+        expected: false,
+      },
+      'server.database.driver': { clear: (el) => (el.dbDriver = ''), expected: '' },
+      'server.database.url': { clear: (el) => (el.dbUrl = ''), expected: '' },
+      'server.auth.dev_mode': { clear: (el) => (el.authDevMode = false), expected: false },
+      'server.auth.dev_token': { clear: (el) => (el.authDevToken = ''), expected: '' },
+      'server.storage.provider': { clear: (el) => (el.storageProvider = ''), expected: '' },
+      'server.storage.bucket': { clear: (el) => (el.storageBucket = ''), expected: '' },
+      'server.storage.local_path': { clear: (el) => (el.storageLocalPath = ''), expected: '' },
+      'server.secrets.backend': { clear: (el) => (el.secretsBackend = ''), expected: '' },
+      'server.secrets.gcp_project_id': {
+        clear: (el) => (el.secretsGCPProjectId = ''),
+        expected: '',
+      },
+      'server.secrets.gcp_replication_locations': {
+        clear: (el) => (el.secretsGCPReplicationLocations = ''),
+        expected: [],
+      },
+      'server.message_broker.enabled': {
+        clear: (el) => (el.messageBrokerEnabled = false),
+        expected: false,
+      },
+      'server.message_broker.type': { clear: (el) => (el.messageBrokerType = ''), expected: '' },
+      'server.native_chat.enabled': {
+        clear: (el) => (el.nativeChatEnabled = false),
+        expected: false,
+      },
+    };
+
+    /**
+     * Fields on the GitHub App tab. They are saved by the tab's own button
+     * (PUT /api/v1/github-app), not by Save & Reload, so they are checked
+     * against that request.
+     */
+    const GITHUB_APP_CLEAR: Record<string, ClearSpec> = {
+      // PUT /api/v1/github-app reads null as "keep", so app_id clears as 0.
+      'server.github_app.app_id': { clear: (el) => (el.githubAppId = 0), expected: 0 },
+      'server.github_app.api_base_url': {
+        clear: (el) => (el.githubAppApiBaseUrl = ''),
+        expected: '',
+      },
+      'server.github_app.webhooks_enabled': {
+        clear: (el) => (el.githubAppWebhooksEnabled = false),
+        expected: false,
+      },
+      'server.github_app.installation_url': {
+        clear: (el) => (el.githubAppInstallationUrl = ''),
+        expected: '',
+      },
+    };
+
+    /**
+     * Known payload gaps: GitHub App fields left out of the save when
+     * cleared. The three reported on ptone/scion#3924 (app_id, api_base_url,
+     * installation_url) were fixed in ptone/scion#4416. The test asserts this
+     * exact list, so a new gap fails it.
+     */
+    const KNOWN_GITHUB_APP_GAPS: string[] = [];
+
+    const READ_ONLY_PROBE = 'readOnlyReason';
+
+    /**
+     * Renders the page and returns the koanf keys it shows as editable: the
+     * keys the render asks readOnlyReason about whose answer is null. All
+     * tab panels render at once, so one render covers every tab.
+     */
+    async function renderShownKeys(
+      config: Record<string, unknown>,
+      opts: {
+        putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown };
+      } = {}
+    ): Promise<{ el: any; shown: string[]; puts: Array<{ path: string; body: any }> }> {
+      const puts: Array<{ path: string; body: any }> = [];
+      const base = createFetchHandler(config, {
+        schemaResponse: registrySchemaResponse(),
+        ...(opts.putHandler ? { putHandler: opts.putHandler } : {}),
+      });
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        if (init?.method === 'PUT') {
+          puts.push({ path, body: JSON.parse(init.body as string) });
+          if (!path.includes('/api/v1/admin/server-config')) {
+            return Promise.resolve(new Response('{}', { status: 200 }));
+          }
+          return Promise.resolve(
+            new Response(JSON.stringify({ reload: { applied: [] } }), { status: 200 })
+          );
+        }
+        return base(url, init);
+      };
+      element = await createComponent(handler);
+      const el = element as any;
+      const proto = Object.getPrototypeOf(el);
+      const spy = vi.spyOn(proto, READ_ONLY_PROBE);
+      el.requestUpdate();
+      await el.updateComplete;
+      const shown = new Set<string>();
+      spy.mock.calls.forEach((call, i) => {
+        if (spy.mock.results[i]?.value === null) shown.add(call[0] as string);
+      });
+      spy.mockRestore();
+      return { el, shown: [...shown].sort(), puts };
+    }
+
+    async function clickSave(el: any, label: string): Promise<void> {
+      await el.updateComplete;
+      const btn = queryAll(el, 'sl-button').find((b) => b.textContent?.trim() === label);
+      expect(btn, `button "${label}"`).toBeDefined();
+      (btn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    }
+
+    /** Clears every shown field, saves, and checks the payload. */
+    async function checkClearedSave(
+      config: Record<string, unknown>,
+      scope: PayloadScope,
+      opts: { mutate?: (payload: Record<string, unknown>) => void } = {}
+    ): Promise<{ shown: string[]; payload: Record<string, unknown> }> {
+      const { el, shown, puts } = await renderShownKeys(config);
+      const mainShown = shown.filter((k) => !(k in GITHUB_APP_CLEAR));
+      expect(
+        mainShown.filter((k) => !(k in CLEAR)),
+        'shown fields with no CLEAR entry (list the field and send it from the builder)'
+      ).toEqual([]);
+      for (const key of mainShown) CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(put).toBeDefined();
+      const payload = put!.body as Record<string, unknown>;
+      opts.mutate?.(payload);
+
+      const notSent: string[] = [];
+      const wrongValue: string[] = [];
+      for (const key of mainShown) {
+        const spec = CLEAR[key]!;
+        const { present, value } = valueAtPath(payload, spec.bodyPath ?? key.split('.'));
+        if (!present) notSent.push(key);
+        else if (JSON.stringify(value) !== JSON.stringify(spec.expected))
+          wrongValue.push(`${key}=${JSON.stringify(value)}`);
+      }
+      expect(notSent, 'shown fields missing from the cleared save payload').toEqual([]);
+      expect(wrongValue, 'cleared fields not sent as their explicit empty value').toEqual([]);
+      expect(unknownPayloadKeys(payload, scope), 'payload keys not in the registry').toEqual([]);
+      return { shown, payload };
+    }
+
+    it('hosted (Layer-1) save: every shown field is sent when cleared, and every key is in the registry', async () => {
+      const { shown } = await checkClearedSave(makeFullConfig({ settings_tier: 'db' }), 'layer1');
+      // Hosted shows only registry keys as editable.
+      expect(shown.filter((k) => owningSection(k) === '')).toEqual([]);
+      expect(shown.length).toBeGreaterThan(30);
+    });
+
+    it('workstation save: every shown field is sent when cleared, and every key is a registry, Layer-0 or settings.yaml key', async () => {
+      const { shown } = await checkClearedSave(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true }),
+        'settings'
+      );
+      // The workstation form adds Layer-0 fields to the hosted set.
+      expect(shown.some((k) => isLayer0Key(k))).toBe(true);
+    });
+
+    it('workstation save with nothing changed sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(
+        makeFullConfig({ settings_tier: 'db', layer0_editable: true })
+      );
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('file-mode save sends only registry, Layer-0 or settings.yaml keys', async () => {
+      const { el, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'file' }));
+      await clickSave(el, 'Save & Reload');
+      const put = puts.find((p) => p.path.includes('/api/v1/admin/server-config'));
+      expect(unknownPayloadKeys(put!.body, 'settings')).toEqual([]);
+    });
+
+    it('GitHub App save: every shown field is sent when cleared (known gaps listed), and every key is in the registry', async () => {
+      const { el, shown, puts } = await renderShownKeys(makeFullConfig({ settings_tier: 'db' }));
+      // Loaded values, so clearing each one is a change.
+      el.githubAppId = 123;
+      el.githubAppApiBaseUrl = 'https://ghe.example.com/api/v3';
+      el.githubAppWebhooksEnabled = true;
+      el.githubAppInstallationUrl = 'https://github.com/apps/x/installations/new';
+      const ghShown = shown.filter((k) => k.startsWith('server.github_app.'));
+      expect(
+        ghShown.filter((k) => !(k in GITHUB_APP_CLEAR)),
+        'GitHub App fields with no GITHUB_APP_CLEAR entry'
+      ).toEqual([]);
+      expect(ghShown.length).toBeGreaterThan(0);
+      for (const key of ghShown) GITHUB_APP_CLEAR[key]!.clear(el);
+      await clickSave(el, 'Save GitHub App Configuration');
+      const put = puts.find((p) => p.path.includes('/api/v1/github-app'));
+      expect(put).toBeDefined();
+      const body = put!.body as Record<string, unknown>;
+
+      const notSent = ghShown.filter((k) => !(k.slice('server.github_app.'.length) in body));
+      expect(notSent.sort(), 'GitHub App fields dropped on clear').toEqual(KNOWN_GITHUB_APP_GAPS);
+      for (const key of ghShown.filter((k) => !notSent.includes(k))) {
+        expect(body[key.slice('server.github_app.'.length)], key).toEqual(
+          GITHUB_APP_CLEAR[key]!.expected
+        );
+      }
+      // Secrets (private_key, webhook_secret) go to the hub secret store,
+      // not settings; every other key is a server.github_app registry key.
+      const unknown = Object.keys(body)
+        .filter((k) => k !== 'private_key' && k !== 'webhook_secret')
+        .map((k) => `server.github_app.${k}`)
+        .filter((k) => owningSection(k) !== 'github_app');
+      expect(unknown).toEqual([]);
+    });
+  });
+  describe('GitHub App card sends explicit clears (ptone/scion#4416)', () => {
+    const LOADED = {
+      app_id: 123,
+      api_base_url: 'https://ghe.example.com/api/v3',
+      webhooks_enabled: true,
+      installation_url: 'https://github.com/apps/x/installations/new',
+    };
+
+    /** Ways the mock hub can fail a request. */
+    interface MockFailures {
+      /** GET /api/v1/admin/server-config answers 500. */
+      configGet?: boolean;
+      /** GET /api/v1/github-app answers 500, or throws (network error). */
+      githubAppGet?: 'status' | 'throw';
+      /** PUT /api/v1/github-app answers 500 and stores nothing. */
+      githubAppPut?: boolean;
+      /** A GET /api/v1/github-app after a PUT waits for this to settle. */
+      holdGetAfterPut?: Promise<void>;
+    }
+
+    const jsonResponse = (body: unknown, status = 200): Promise<Response> =>
+      Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+    /**
+     * A fetch handler whose GET /api/v1/github-app returns the stored
+     * config and whose PUT applies the sent non-secret keys to it, as the
+     * hub does (a sent "" or 0 replaces the stored value; an omitted key
+     * keeps it). The GET leaves out empty URLs, as the hub's omitempty does.
+     */
+    function statefulGitHubApp(
+      config: Record<string, unknown>,
+      fail: MockFailures = {}
+    ): {
+      handler: (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+      puts: Array<Record<string, unknown>>;
+      stored: Record<string, unknown>;
+    } {
+      const stored: Record<string, unknown> = { ...LOADED };
+      const puts: Array<Record<string, unknown>> = [];
+      const base = createFetchHandler(config);
+      const handler = (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+        const path = typeof url === 'string' ? url : url instanceof URL ? url.pathname : url.url;
+        const isPut = init?.method === 'PUT';
+        if (fail.configGet && !isPut && path.includes('/api/v1/admin/server-config')) {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        }
+        if (!path.endsWith('/api/v1/github-app')) return base(url, init);
+        if (isPut) {
+          const body = JSON.parse(init.body as string) as Record<string, unknown>;
+          puts.push(body);
+          if (fail.githubAppPut) return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+          for (const k of ['app_id', 'api_base_url', 'webhooks_enabled', 'installation_url']) {
+            if (k in body) stored[k] = body[k];
+          }
+        } else if (fail.holdGetAfterPut && puts.length > 0) {
+          return fail.holdGetAfterPut.then(storedResponse);
+        } else if (fail.githubAppGet === 'status') {
+          return jsonResponse({ error: 'internal', message: 'boom' }, 500);
+        } else if (fail.githubAppGet === 'throw') {
+          return Promise.reject(new TypeError('Failed to fetch'));
+        }
+        return storedResponse();
+      };
+      function storedResponse(): Promise<Response> {
+        const res: Record<string, unknown> = { ...stored, configured: true };
+        for (const k of ['api_base_url', 'installation_url']) {
+          if (!res[k]) delete res[k];
+        }
+        return jsonResponse(res);
+      }
+      return { handler, puts, stored };
+    }
+
+    /** The page members these tests drive. */
+    interface CardElement {
+      [state: string]: unknown;
+      handleSaveGitHubApp(): Promise<void>;
+      buildLayer1Payload(): { server?: { github_app?: Record<string, unknown> } };
+      buildFilePayload(): { server?: { github_app?: Record<string, unknown> } };
+    }
+
+    function saveButton(el: HTMLElement): HTMLElement {
+      const btn = query(el, 'sl-button[data-action="save-github-app"]');
+      expect(btn, 'card Save button').not.toBeNull();
+      return btn as HTMLElement;
+    }
+
+    const FIELDS = [
+      { state: 'githubAppId', key: 'app_id', cleared: 0 },
+      { state: 'githubAppApiBaseUrl', key: 'api_base_url', cleared: '' },
+      { state: 'githubAppInstallationUrl', key: 'installation_url', cleared: '' },
+    ] as const;
+
+    for (const field of FIELDS) {
+      it(`clearing ${field.key} sends ${JSON.stringify(field.cleared)}, the stored value is removed, and the other fields are unchanged`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' })
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el[field.state]).toEqual(LOADED[field.key]);
+
+        el[field.state] = field.cleared;
+        await el.handleSaveGitHubApp();
+
+        expect(puts).toHaveLength(1);
+        expect(puts[0]![field.key]).toBe(field.cleared);
+        expect(stored[field.key]).toBe(field.cleared);
+        // Untouched fields go back as loaded.
+        for (const other of FIELDS.filter((f) => f !== field)) {
+          expect(puts[0]![other.key], other.key).toEqual(LOADED[other.key]);
+        }
+        expect(puts[0]!.webhooks_enabled).toBe(true);
+        // Secrets are sent only when typed in.
+        expect('private_key' in puts[0]!).toBe(false);
+        expect('webhook_secret' in puts[0]!).toBe(false);
+        // The main save's echo carries the clear too.
+        const echo = el.buildLayer1Payload().server!.github_app!;
+        expect(echo[field.key]).toBe(field.cleared);
+      });
+    }
+
+    it('a set value is sent as entered', async () => {
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 456;
+      el.githubAppApiBaseUrl = 'https://ghe2.example.com/api/v3';
+      el.githubAppInstallationUrl = 'https://github.com/apps/y/installations/new';
+      el.githubAppPrivateKey = '  PEM  ';
+      await el.handleSaveGitHubApp();
+      expect(puts[0]).toEqual({
+        app_id: 456,
+        api_base_url: 'https://ghe2.example.com/api/v3',
+        webhooks_enabled: true,
+        installation_url: 'https://github.com/apps/y/installations/new',
+        private_key: 'PEM',
+      });
+    });
+
+    // A card that did not load holds defaults (app_id 0, empty URLs), not
+    // the stored config. Saving them would clear the stored App, so the
+    // card cannot be saved and the main save leaves github_app out.
+    const LOAD_FAILURES: Array<{ name: string; fail: MockFailures }> = [
+      { name: 'GET server-config answers 500', fail: { configGet: true } },
+      { name: 'GET github-app answers 500', fail: { githubAppGet: 'status' } },
+      { name: 'GET github-app throws', fail: { githubAppGet: 'throw' } },
+    ];
+
+    for (const { name, fail } of LOAD_FAILURES) {
+      it(`${name}: the card cannot be saved and sends no PUT`, async () => {
+        const { handler, puts, stored } = statefulGitHubApp(
+          makeBaseConfig({ settings_tier: 'db' }),
+          fail
+        );
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        expect(el.githubAppLoaded).toBe(false);
+        expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+        expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+
+        // Even a direct call (or a typed secret) sends nothing.
+        el.githubAppPrivateKey = 'PEM';
+        await el.handleSaveGitHubApp();
+        expect(puts).toEqual([]);
+        expect(stored).toEqual(LOADED);
+      });
+    }
+
+    for (const { name, fail } of LOAD_FAILURES.filter((f) => !f.fail.configGet)) {
+      for (const tier of ['db', 'file'] as const) {
+        it(`${name}: the ${tier} main save leaves github_app out`, async () => {
+          // The server-config GET carries a github_app block, so the
+          // payload would echo it if the card's load were not checked.
+          const base = makeBaseConfig({ settings_tier: tier });
+          const config = {
+            ...base,
+            server: { ...(base.server as Record<string, unknown>), github_app: { app_id: 123 } },
+          };
+          const { handler } = statefulGitHubApp(config, fail);
+          element = await createComponent(handler);
+          const el = element as unknown as CardElement;
+          const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+          expect(payload.server?.github_app).toBeUndefined();
+        });
+      }
+    }
+
+    it('a loaded card can be saved', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      expect((element as unknown as CardElement).githubAppLoaded).toBe(true);
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+    });
+
+    it('the reload after a card save does not show the "did not load" hint while in flight', async () => {
+      let release!: () => void;
+      const hold = new Promise<void>((resolve) => (release = resolve));
+      const { handler, puts } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        holdGetAfterPut: hold,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & { updateComplete: Promise<boolean> };
+      el.githubAppApiBaseUrl = '';
+      const saving = el.handleSaveGitHubApp();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      await el.updateComplete;
+      // The PUT is done and the reload GET is held.
+      expect(puts).toHaveLength(1);
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+
+      release();
+      await saving;
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(true);
+      expect(query(element, '[data-github-app-not-loaded]')).toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(false);
+    });
+
+    it('a reload that fails after a loaded card disables Save and shows the hint', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement & {
+        updateComplete: Promise<boolean>;
+        loadGitHubAppConfig(): Promise<void>;
+      };
+      expect(el.githubAppLoaded).toBe(true);
+      vi.mocked(fetch).mockImplementation(() => Promise.reject(new TypeError('Failed to fetch')));
+      await el.loadGitHubAppConfig();
+      await el.updateComplete;
+      expect(el.githubAppLoaded).toBe(false);
+      expect(query(element, '[data-github-app-not-loaded]')).not.toBeNull();
+      expect(saveButton(element).hasAttribute('disabled')).toBe(true);
+    });
+
+    it('main save with the card untouched echoes the loaded values', async () => {
+      const { handler } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }));
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    it('main save after a failed card save still echoes the loaded values', async () => {
+      const { handler, puts, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: 'db' }), {
+        githubAppPut: true,
+      });
+      element = await createComponent(handler);
+      const el = element as unknown as CardElement;
+      el.githubAppId = 0;
+      el.githubAppApiBaseUrl = '';
+      await el.handleSaveGitHubApp();
+      expect(puts).toHaveLength(1);
+      expect(stored).toEqual(LOADED);
+      expect(el.buildLayer1Payload().server!.github_app).toEqual(LOADED);
+    });
+
+    for (const tier of ['db', 'file'] as const) {
+      it(`${tier} mode main save echoes empty GitHub App fields as explicit clears`, async () => {
+        const { handler, stored } = statefulGitHubApp(makeBaseConfig({ settings_tier: tier }));
+        stored.app_id = 0;
+        stored.api_base_url = '';
+        stored.installation_url = '';
+        element = await createComponent(handler);
+        const el = element as unknown as CardElement;
+        const payload = tier === 'db' ? el.buildLayer1Payload() : el.buildFilePayload();
+        expect(payload.server!.github_app).toEqual({
+          app_id: 0,
+          api_base_url: '',
+          webhooks_enabled: true,
+          installation_url: '',
+        });
+      });
+    }
+  });
+});
+
+// ── Save report: keys applied now vs pending a restart (ptone/scion#3904) ──
+
+describe('save report', () => {
+  let element: HTMLElement | null = null;
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  async function saveWith(reload: Record<string, unknown>): Promise<HTMLElement> {
+    const el = await createComponent(
+      createFetchHandler(makeBaseConfig({ settings_tier: 'db' }), {
+        putHandler: () => ({ status: 200, body: { status: 'saved', reload } }),
+      })
+    );
+    const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(saveBtn).toBeDefined();
+    (saveBtn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+    return el;
+  }
+
+  it('shows "Saved; applies after restart" for keys pending a restart', async () => {
+    element = await saveWith({
+      applied: ['endpoints', 'lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.hub_name', 'server.hub.soft_delete_retention'],
+      pending_restart: ['server.hub.public_url'],
+    });
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain('server.hub.public_url');
+    expect(pending!.textContent).not.toContain('server.hub.hub_name');
+
+    const applied = query(element, '.reload-info .applied-keys');
+    expect(applied).not.toBeNull();
+    expect(applied!.textContent).toContain('server.hub.hub_name');
+    expect(applied!.textContent).toContain('server.hub.soft_delete_retention');
+
+    // The section-level line is replaced by the key-level lists.
+    expect(shadowText(element)).not.toContain('Reloaded:');
+  });
+
+  it('keeps the "Reloaded:" line for settings.yaml changes applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle', 'log_level'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+      file_applied: ['log_level'],
+    });
+    const lines = queryAll(element, '.reload-info .applied:not(.applied-keys)');
+    expect(lines.length).toBe(1);
+    expect(lines[0].textContent).toContain('Reloaded: log_level');
+    expect(lines[0].textContent).not.toContain('lifecycle');
+  });
+
+  it('shows the section-level line when the response has no key-level lists', async () => {
+    element = await saveWith({ applied: ['log_level'], requires_restart: [] });
+    expect(shadowText(element)).toContain('Reloaded: log_level');
+  });
+
+  it('shows no restart notice when every changed key applied live', async () => {
+    element = await saveWith({
+      applied: ['lifecycle'],
+      requires_restart: [],
+      applied_keys: ['server.hub.soft_delete_retention'],
+      pending_restart: [],
+    });
+    expect(query(element, '.reload-info .pending-restart')).toBeNull();
+    expect(query(element, '.reload-info .applied-keys')).not.toBeNull();
   });
 });

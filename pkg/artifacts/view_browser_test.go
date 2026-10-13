@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"html"
 	"image"
 	"image/color"
@@ -30,6 +32,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -63,6 +66,67 @@ func chromiumPath(t *testing.T) string {
 // sandbox and CSP checks are made by the browser either way.
 func dumpDOM(t *testing.T, chromium, url, ready string) string {
 	t.Helper()
+	// One overall limit per subtest, covering a retried browser start.
+	ctx, cancel := context.WithTimeout(context.Background(), browserProbeTimeout)
+	defer cancel()
+	dom, err := browserDOM(ctx, t.Logf, browserAttemptTimeout, func(ctx context.Context) (string, error) {
+		return runBrowser(ctx, chromium, url, ready)
+	})
+	if err != nil {
+		t.Fatalf("chromium: %v (DOM so far:\n%s)", err, dom)
+	}
+	return dom
+}
+
+// Browser start budget. chromedp starts a browser in two steps, each with a
+// timer of its own: it waits for the browser to print its DevTools address
+// (browserWSURLTimeout, failing with "websocket url timeout reached"), then
+// dials that address (browserDialTimeout, failing with "could not dial ...";
+// chromedp's own default is 10s, too short on a loaded CI runner).
+const (
+	browserWSURLTimeout = 60 * time.Second
+	browserDialTimeout  = 20 * time.Second
+	browserStartTimeout = browserWSURLTimeout + browserDialTimeout
+	// browserAttemptTimeout bounds one attempt: a browser start, then the
+	// page, whose probe reports within probeReportDeadline, with a margin.
+	browserAttemptTimeout = browserStartTimeout + probeReportDeadline + 10*time.Second
+	// browserProbeTimeout is the overall limit for one page load. It fits a
+	// failed start plus a full retry attempt.
+	browserProbeTimeout = browserStartTimeout + browserAttemptTimeout
+)
+
+// isBrowserStartError reports whether err is one of the errors chromedp
+// returns when a browser did not start in time (chromedp exports neither).
+func isBrowserStartError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "websocket url timeout reached") ||
+		strings.Contains(msg, "could not dial ")
+}
+
+// browserDOM runs run with a deadline of attempt, and runs it once more,
+// with a deadline of its own, only if the browser did not start in time,
+// as happens on a loaded CI runner, and ctx has not expired. Any other
+// error, such as a page that never reports its result, is returned as it is.
+func browserDOM(ctx context.Context, logf func(string, ...any), attempt time.Duration, run func(context.Context) (string, error)) (string, error) {
+	try := func() (string, error) {
+		actx, cancel := context.WithTimeout(ctx, attempt)
+		defer cancel()
+		return run(actx)
+	}
+	dom, err := try()
+	if isBrowserStartError(err) && ctx.Err() == nil {
+		logf("browser did not start in time (%v); starting it once more", err)
+		dom, err = try()
+	}
+	return dom, err
+}
+
+// runBrowser starts a browser of its own, loads url and returns the DOM
+// once ready is true.
+func runBrowser(ctx context.Context, chromium, url, ready string) (string, error) {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.ExecPath(chromium),
 		chromedp.Flag("headless", true),
@@ -72,24 +136,115 @@ func dumpDOM(t *testing.T, chromium, url, ready string) string {
 		chromedp.Flag("disable-site-isolation-trials", true),
 		chromedp.Flag("disable-features", "IsolateOrigins,site-per-process"),
 		// CI runners can be slow to start a browser.
-		chromedp.WSURLReadTimeout(60*time.Second),
+		chromedp.WSURLReadTimeout(browserWSURLTimeout),
 	)
-	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), opts...)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	defer allocCancel()
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	ctx, cancel = context.WithTimeout(ctx, 90*time.Second)
+	bctx, cancel := chromedp.NewContext(allocCtx,
+		chromedp.WithBrowserOption(chromedp.WithDialTimeout(browserDialTimeout)))
 	defer cancel()
 	var dom string
-	err := chromedp.Run(ctx,
+	err := chromedp.Run(bctx,
 		chromedp.Navigate(url),
 		chromedp.Poll(ready, nil, chromedp.WithPollingInterval(100*time.Millisecond)),
 		chromedp.OuterHTML("html", &dom, chromedp.ByQuery),
 	)
-	if err != nil {
-		t.Fatalf("chromium: %v (DOM so far:\n%s)", err, dom)
+	return dom, err
+}
+
+// TestBrowserDOMRetriesStartOnce: a browser that did not start in time is
+// started once more; other errors and a second start failure are returned.
+func TestBrowserDOMRetriesStartOnce(t *testing.T) {
+	wsURLTimeout := errors.New("websocket url timeout reached")
+	// The form seen on CI (GoogleCloudPlatform/scion job 115173695746).
+	dialTimeout := fmt.Errorf("could not dial %q: %w",
+		"ws://127.0.0.1:41235/devtools/browser/0b8c", context.DeadlineExceeded)
+	cases := []struct {
+		name    string
+		results []error
+		calls   int
+		wantErr bool
+	}{
+		{"websocket url timeout then success", []error{wsURLTimeout, nil}, 2, false},
+		{"dial timeout then success", []error{dialTimeout, nil}, 2, false},
+		{"start failure twice", []error{wsURLTimeout, dialTimeout}, 2, true},
+		{"other error is not retried", []error{errors.New("context deadline exceeded"), nil}, 1, true},
+		{"success", []error{nil}, 1, false},
 	}
-	return dom
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			dom, err := browserDOM(context.Background(), t.Logf, time.Minute, func(context.Context) (string, error) {
+				e := tc.results[calls]
+				calls++
+				if e != nil {
+					return "", e
+				}
+				return "<html></html>", nil
+			})
+			if calls != tc.calls {
+				t.Errorf("run called %d times, want %d", calls, tc.calls)
+			}
+			if (err != nil) != tc.wantErr || (err == nil && dom != "<html></html>") {
+				t.Errorf("got (%q, %v), want error %v", dom, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestBrowserDOMRetryHasItsOwnDeadline: a first start that uses up its whole
+// attempt deadline (a dial that times out, as on CI) does not leave the
+// retry with an expired or shortened context.
+func TestBrowserDOMRetryHasItsOwnDeadline(t *testing.T) {
+	const attempt = 50 * time.Millisecond
+	var first time.Time
+	calls := 0
+	dom, err := browserDOM(context.Background(), t.Logf, attempt, func(ctx context.Context) (string, error) {
+		calls++
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("attempt has no deadline")
+		}
+		if calls == 1 {
+			first = deadline
+			<-ctx.Done()
+			return "", fmt.Errorf("could not dial %q: %w", "ws://127.0.0.1:1/devtools/browser/x", ctx.Err())
+		}
+		if err := ctx.Err(); err != nil {
+			t.Errorf("retry started with a done context: %v", err)
+		}
+		if !deadline.After(first) {
+			t.Errorf("retry deadline %v is not after the first attempt's %v", deadline, first)
+		}
+		return "<html></html>", nil
+	})
+	if err != nil || dom != "<html></html>" || calls != 2 {
+		t.Fatalf("got (%q, %v) after %d calls, want the DOM after 2", dom, err, calls)
+	}
+}
+
+// TestBrowserDOMNoRetryAfterOverallDeadline: once the overall limit is
+// spent, a start failure is returned rather than retried.
+func TestBrowserDOMNoRetryAfterOverallDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	calls := 0
+	_, err := browserDOM(ctx, t.Logf, time.Minute, func(context.Context) (string, error) {
+		calls++
+		cancel()
+		return "", errors.New("websocket url timeout reached")
+	})
+	if err == nil || calls != 1 {
+		t.Fatalf("got %v after %d calls, want the start error after 1", err, calls)
+	}
+}
+
+// TestBrowserProbeTimeoutFitsRetry: an attempt leaves the page time to
+// report after the slowest start that still succeeds.
+func TestBrowserProbeTimeoutFitsRetry(t *testing.T) {
+	if browserAttemptTimeout < browserStartTimeout+probeReportDeadline {
+		t.Errorf("attempt %v < start %v + probe report deadline %v",
+			browserAttemptTimeout, browserStartTimeout, probeReportDeadline)
+	}
 }
 
 func onePixelPNG(t *testing.T) []byte {
@@ -132,7 +287,18 @@ try { r.popup = window.open('about:blank') ? 'opened' : 'blocked'; } catch (e) {
 try { if (parent !== self) { top.location.href = top.location.href + '#navigated'; } r.topNav = 'attempted'; } catch (e) { r.topNav = 'blocked'; }
 try { document.getElementById('form').submit(); } catch (e) {}
 fetch('../../../ARTIFACT_PATH').then(() => { r.fetch = 'allowed'; }, () => { r.fetch = 'blocked'; });
-setTimeout(() => {
+// Report once every expected violation has been seen, the fetch has
+// settled and every image has finished, or at the deadline, whichever
+// comes first. A loaded runner can deliver a report seconds late, so a
+// fixed wait would cut it off; a report that never comes still fails.
+const wantViolations = WANT_VIOLATIONS;
+const deadline = Date.now() + REPORT_DEADLINE_MS;
+const settled = () =>
+  wantViolations.every((d) => r.violations.includes(d)) &&
+  r.outsideViolation !== undefined && r.fetch !== undefined &&
+  Array.from(document.images).every((i) => i.complete);
+const report = () => {
+  if (!settled() && Date.now() < deadline) { setTimeout(report, 100); return; }
   r.local = document.getElementById('local').naturalWidth > 0 ? 'loaded' : 'failed';
   r.remote = document.getElementById('remote').naturalWidth > 0 ? 'loaded' : 'blocked';
   r.outsideView = document.getElementById('hubimg').naturalWidth > 0 ? 'loaded' : 'blocked';
@@ -141,8 +307,27 @@ setTimeout(() => {
   const s = JSON.stringify(r);
   document.documentElement.setAttribute('data-probe', s);
   if (parent !== self) parent.postMessage(s, '*');
-}, 500);
+};
+setTimeout(report, 100);
 </script></body></html>`
+
+// wantViolations are the CSP directives the probe page must report.
+var wantViolations = []string{"connect-src", "frame-src", "img-src", "object-src", "script-src-elem"}
+
+// probeReportDeadline bounds how long the probe page waits for the
+// expected reports before it reports what it has.
+const probeReportDeadline = 30 * time.Second
+
+// probePageFor returns probePage with its placeholders filled in.
+func probePageFor(artifactID string) []byte {
+	want, _ := json.Marshal(wantViolations)
+	page := strings.NewReplacer(
+		"ARTIFACT_PATH", artifactID,
+		"WANT_VIOLATIONS", string(want),
+		"REPORT_DEADLINE_MS", strconv.FormatInt(probeReportDeadline.Milliseconds(), 10),
+	).Replace(probePage)
+	return []byte(page)
+}
 
 // probeHost is the page that frames the view the way the web UI does.
 const probeHost = `<!doctype html><html><head><title>host-secret</title></head><body>
@@ -185,7 +370,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	f.svc.SetViewKey(testViewKey)
 	pngBytes := onePixelPNG(t)
 	site := bundle{
-		"index.html":    []byte(probePage),
+		"index.html":    probePageFor("ARTIFACT_PATH"),
 		"img/a.png":     pngBytes,
 		"css/s.css":     []byte("body { background-color: rgb(1, 2, 3); }"),
 		"js/app.js":     []byte("r.bundleScript = 'ran';"),
@@ -193,7 +378,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 	}
 	pub := f.publishBundle(agentA, "/api/v1/artifacts", site.manifest("index.html"), site)
 	// The probe fetches the artifact's metadata route relative to the view.
-	site["index.html"] = []byte(strings.Replace(probePage, "ARTIFACT_PATH", pub.Artifact.ID, 1))
+	site["index.html"] = probePageFor(pub.Artifact.ID)
 	pub = f.publishBundle(agentA, "/api/v1/artifacts", site.manifest("index.html"), site)
 	view, code := f.mintView(&agentA, pub.Artifact.ID, 1)
 	if code != http.StatusOK {
@@ -264,7 +449,7 @@ func TestViewSandboxBrowserProbe(t *testing.T) {
 			}
 		}
 		got := strings.Join(r.Violations, ",")
-		for _, d := range []string{"connect-src", "frame-src", "img-src", "object-src", "script-src-elem"} {
+		for _, d := range wantViolations {
 			if !strings.Contains(got, d) {
 				t.Errorf("no %s violation reported (got %q)", d, got)
 			}

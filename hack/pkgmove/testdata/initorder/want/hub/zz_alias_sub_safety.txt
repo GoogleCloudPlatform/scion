@@ -1,0 +1,20 @@
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 1. Findings: 5. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:15: example.com/fx/hub.Home is now example.com/fx/hub/sub.Home for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:18: example.com/fx/hub.ErrBad is now example.com/fx/hub/sub.ErrBad for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+== WARN: package-level var initialiser calls other packages ==
+  hub/move.go:9: home = ... calls os.Getenv: it now runs before every var initialiser and init() of hub, so state they set (environment, defaults, registries) is no longer visible to it, and its own effects happen earlier
+
+== WARN: staying var initialiser with side-effecting calls (moved initialisers now run before it) ==
+  hub/stay.go:6: setErr = ... calls os.Setenv
+
+== INFO: package-level var initialiser calls pure constructors only ==
+  hub/move.go:12: errBad = ... calls errors.New (allow-listed, with arguments that cannot run package code)

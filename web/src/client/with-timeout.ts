@@ -39,6 +39,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | und
       },
       (err: unknown) => {
         clearTimeout(timer);
+        // eslint-disable-next-line @typescript-eslint/no-unnecessary-type-assertion -- the type-only cast lets prefer-promise-reject-errors accept the unknown rejection value, which is forwarded unchanged.
         reject(err as Error);
       }
     );

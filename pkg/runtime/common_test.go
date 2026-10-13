@@ -20,7 +20,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -1131,21 +1130,10 @@ func TestWriteRuntimeDebugFile(t *testing.T) {
 func TestRunSimpleCommand_NoSecretsInDebugLog(t *testing.T) {
 	const sentinel = "FAKE-KEY-SENTINEL-not-a-real-credential"
 
-	// runtimeLog captured slog.Default() at package init, before any custom
-	// handler was installed (#1339). Its handler bridges to the stdlib log
-	// package. We capture that output here and lower the level gate so Debug
-	// lines reach the buffer.
+	// runtimeLog() resolves slog.Default() at each call (#1339), so install a
+	// debug-level handler that writes to a buffer.
 	var buf bytes.Buffer
-	origWriter := log.Writer()
-	origFlags := log.Flags()
-	log.SetOutput(&buf)
-	log.SetFlags(0) // drop date/time prefix for simpler assertions
-	t.Cleanup(func() {
-		log.SetOutput(origWriter)
-		log.SetFlags(origFlags)
-	})
-	origLevel := slog.SetLogLoggerLevel(slog.LevelDebug)
-	t.Cleanup(func() { slog.SetLogLoggerLevel(origLevel) })
+	setRuntimeLogHandler(t, slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
 
 	// --- Success path ---
 	// "echo" succeeds; its args include the sentinel via --env.
@@ -2791,5 +2779,41 @@ func TestParseDockerServerVersion(t *testing.T) {
 					tt.in, major, minor, ok, tt.wantMajor, tt.wantMinor, tt.wantOK)
 			}
 		})
+	}
+}
+
+// taskArgHarness passes the task as the last argument of its command.
+type taskArgHarness struct{ MockHarness }
+
+func (h *taskArgHarness) GetCommand(task string, _ bool, args []string) []string {
+	return append(append([]string{"harness"}, args...), task)
+}
+
+// TestQuotedTaskBytes checks that QuotedTaskBytes is the growth of the
+// tmux start command when the task is added, for plain and quote-heavy
+// tasks.
+func TestQuotedTaskBytes(t *testing.T) {
+	startCmd := func(task string) string {
+		line, ok := harnessCmdLine(RunConfig{Harness: &taskArgHarness{}, Task: task}, harnessCmdLineOptions{})
+		if !ok {
+			t.Fatal("harnessCmdLine: no command line")
+		}
+		return buildTmuxStartCmd(tmuxAgentWindowCmd("sh", line), tmuxAttachSession)
+	}
+	base := len(startCmd(""))
+	for _, task := range []string{
+		"x",
+		strings.Repeat("plain text ", 100),
+		"it's",
+		strings.Repeat("'", 500),
+		strings.Repeat("don't \"quote\" $me\\n ", 50),
+	} {
+		want := len(startCmd(task)) - base
+		if got := QuotedTaskBytes(task); got != want {
+			t.Errorf("QuotedTaskBytes(%.30q) = %d, want %d", task, got, want)
+		}
+	}
+	if got := QuotedTaskBytes("'"); got != 13 {
+		t.Errorf("QuotedTaskBytes(\"'\") = %d, want 13", got)
 	}
 }

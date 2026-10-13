@@ -19,7 +19,6 @@ package hub
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -321,21 +320,6 @@ func TestPhase4_ChatV2_DeniedMention_NoParticipant(t *testing.T) {
 		"the authorized mention recipient must become a participant")
 	require.False(t, hasParticipant(t, s, conv.ID, deniedAgent.ID),
 		"AC-11: a resolvable but authorization-denied mention must not become a participant")
-}
-
-// failingParticipantStore wraps a real store.Store and makes both
-// AddParticipant and EnsureParticipant always fail, to exercise AC-12: a
-// participant-row insert failure must never fail or alter the send response.
-type failingParticipantStore struct {
-	store.Store
-}
-
-func (s *failingParticipantStore) AddParticipant(_ context.Context, _ *store.ConversationParticipant) error {
-	return errors.New("injected AddParticipant failure")
-}
-
-func (s *failingParticipantStore) EnsureParticipant(_ context.Context, _ *store.ConversationParticipant) error {
-	return errors.New("injected EnsureParticipant failure")
 }
 
 // TestPhase4_ParticipantInsertFailure_DoesNotFailSend is AC-12: injecting a

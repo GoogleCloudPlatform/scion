@@ -46,7 +46,7 @@ func TestCreateProject_WorkspaceModeMatrix(t *testing.T) {
 		wantLabel string // "" = label absent
 		wantMode  store.WorkspaceSharingMode
 	}{
-		{name: "git/none", gitRemote: testGitRemote, wantCode: http.StatusCreated, wantMode: store.SharingModeSharedPlain},
+		{name: "git/none", gitRemote: testGitRemote, wantCode: http.StatusCreated, wantMode: store.SharingModeClonePerAgent},
 		// git/shared is covered by TestCreateProject_SharedWorkspace* (it clones).
 		{name: "git/shared raw conflict", gitRemote: testGitRemote, mode: "shared", rawLabel: strPtr("per-agent"), wantCode: http.StatusBadRequest},
 		{name: "git/per-agent", gitRemote: testGitRemote, mode: "per-agent", wantCode: http.StatusCreated, wantLabel: "per-agent", wantMode: store.SharingModeClonePerAgent},
@@ -64,7 +64,7 @@ func TestCreateProject_WorkspaceModeMatrix(t *testing.T) {
 		{name: "raw matches mode", mode: "per-agent", rawLabel: strPtr("per-agent"), wantCode: http.StatusCreated, wantLabel: "per-agent", wantMode: store.SharingModeEmptyPerAgent},
 		{name: "raw conflicts with mode", mode: "shared", rawLabel: strPtr("per-agent"), wantCode: http.StatusBadRequest},
 		{name: "raw without mode is stripped (non-git)", rawLabel: strPtr("per-agent"), wantCode: http.StatusCreated, wantMode: store.SharingModeSharedPlain},
-		{name: "raw without mode is stripped (git)", gitRemote: testGitRemote, rawLabel: strPtr("worktree-per-agent"), wantCode: http.StatusCreated, wantMode: store.SharingModeSharedPlain},
+		{name: "raw without mode is stripped (git)", gitRemote: testGitRemote, rawLabel: strPtr("worktree-per-agent"), wantCode: http.StatusCreated, wantMode: store.SharingModeClonePerAgent},
 	}
 
 	for _, tt := range tests {
@@ -323,19 +323,20 @@ func TestDeriveCloneWorkspaceMode(t *testing.T) {
 		wantMode   store.WorkspaceSharingMode
 	}{
 		{"no label", "", false, false, "", store.SharingModeSharedPlain},
-		{"no label + git override", "", false, true, "", store.SharingModeSharedPlain},
+		{"no label + git override", "", false, true, "", store.SharingModeClonePerAgent},
 		{"non-git shared", "shared", false, false, "shared", store.SharingModeSharedPlain},
 		{"non-git shared + git override", "shared", false, true, "shared", store.SharingModeSharedPlain},
 		{"non-git per-agent", "per-agent", false, false, "per-agent", store.SharingModeEmptyPerAgent},
 		{"non-git per-agent + git override", "per-agent", false, true, "per-agent", store.SharingModeClonePerAgent},
 		{"git worktree", "worktree-per-agent", true, true, "worktree-per-agent", store.SharingModeWorktreePerAgent},
 		{"worktree on non-git clone dropped", "worktree-per-agent", true, false, "", store.SharingModeSharedPlain},
-		{"unknown dropped", "bogus", false, true, "", store.SharingModeSharedPlain},
+		{"unknown dropped", "bogus", false, true, "", store.SharingModeClonePerAgent},
 		{"legacy canonical value normalised", "empty-per-agent", false, false, "per-agent", store.SharingModeEmptyPerAgent},
 		{"legacy canonical value + git override", "empty-per-agent", false, true, "per-agent", store.SharingModeClonePerAgent},
-		// On a git source the legacy label resolved to shared-plain, not
-		// empty-per-agent, so it must not become per-agent (clone-per-agent).
-		{"legacy canonical value on git source dropped", "empty-per-agent", true, true, "", store.SharingModeSharedPlain},
+		// On a git source the legacy label never meant empty-per-agent, so
+		// it is dropped; the git clone then resolves as an unlabelled git
+		// project (clone-per-agent).
+		{"legacy canonical value on git source dropped", "empty-per-agent", true, true, "", store.SharingModeClonePerAgent},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -71,6 +71,9 @@ type fakeHub struct {
 	keyHits     atomic.Int64
 	hellos      chan *conduitv1.Hello
 	sessions    chan core.LocalSession
+	// authRefreshes receives every AuthRefresh the agent sends; the hub
+	// accepts each.
+	authRefreshes chan *conduitv1.AuthRefresh
 }
 
 func newFakeHub(t *testing.T, keys ...grant.PublicKey) *fakeHub {
@@ -79,6 +82,8 @@ func newFakeHub(t *testing.T, keys ...grant.PublicKey) *fakeHub {
 		keys:     keys,
 		hellos:   make(chan *conduitv1.Hello, 16),
 		sessions: make(chan core.LocalSession, 16),
+
+		authRefreshes: make(chan *conduitv1.AuthRefresh, 16),
 	}
 	h.welcome = func(hello *conduitv1.Hello) *conduitv1.Welcome {
 		inc := hello.GetCapabilities().GetEndpointIncarnation()
@@ -134,7 +139,7 @@ func (h *fakeHub) serveConduit(w http.ResponseWriter, r *http.Request) {
 		}
 		return welcome(hello), nil
 	})
-	s, err := core.Accept(r.Context(), conn, core.Config{}, adm)
+	s, err := core.Accept(r.Context(), conn, core.Config{}, refreshingAdmitter{adm, h.authRefreshes})
 	if err != nil {
 		return
 	}
@@ -179,6 +184,18 @@ func (f admitFunc) Admit(ctx context.Context, h *conduitv1.Hello) (*conduitv1.We
 
 func (admitFunc) Refresh(context.Context, *conduitv1.AuthRefresh) error {
 	return core.Reject(core.CloseUnauthenticated, "unauthenticated")
+}
+
+// refreshingAdmitter admits with admitFunc and accepts every AuthRefresh,
+// reporting it on refreshes.
+type refreshingAdmitter struct {
+	admitFunc
+	refreshes chan<- *conduitv1.AuthRefresh
+}
+
+func (a refreshingAdmitter) Refresh(_ context.Context, ar *conduitv1.AuthRefresh) error {
+	a.refreshes <- ar
+	return nil
 }
 
 // noBackoff redials at once.

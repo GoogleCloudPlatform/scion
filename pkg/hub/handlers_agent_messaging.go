@@ -27,25 +27,28 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/githubapp"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"github.com/google/uuid"
 )
 
 // sanitizeCrossProjectObserver strips body and attachment content from an
 // observer StructuredMessage so that cross-project broker publications do not
 // leak payload to unrelated project members. Metadata keys unrelated to
-// attachments are preserved.
+// attachments and artifact references are preserved.
 func sanitizeCrossProjectObserver(msg *messages.StructuredMessage) {
 	msg.Msg = ""
 	msg.Attachments = nil
+	msg.ArtifactRefsAdmitted = false
 	if msg.Metadata != nil {
 		sanitized := make(map[string]string, len(msg.Metadata))
 		for k, v := range msg.Metadata {
-			if k != attachmentsMetadataKey {
+			if k != attachmentsMetadataKey && k != artifacts.MessageMetadataKey {
 				sanitized[k] = v
 			}
 		}
@@ -182,15 +185,31 @@ func outboundThreadGateApplies(channel string) bool {
 	return err == nil && surface == "native"
 }
 
+// outboundThreadSurface returns the conversation surface for an outbound
+// thread send (kind "group") on an external channel, matching the surface
+// the inbound path stores the same thread under. It returns "" for other
+// kinds, native channels and channels with no known surface, which keep
+// the default native surface.
+func outboundThreadSurface(kind, channel string) string {
+	if kind != "group" {
+		return ""
+	}
+	surface, err := messaging.ChannelToSurfaceStrict(channel)
+	if err != nil || surface == "native" {
+		return ""
+	}
+	return surface
+}
+
 // outboundThreadConversationState reports whether a free-text thread key
 // (extRef = "thread:<project>:<threadID>") names a conversation that
 // ResolveOrCreateConversationByKey would reuse rather than mint, and whether
 // that conversation is still visible:
 //
-//   - a live webchat topic for threadID (when tl is set): exists. A topic that
+//   - a live webchat topic for threadID in projectID (when tl is set): exists. A topic that
 //     has no conversation_id yet also counts; the resolver refuses to mint
 //     for it and reports its own error.
-//   - a soft-deleted webchat topic for threadID: deleted. This is stricter
+//   - a soft-deleted webchat topic for threadID in projectID: deleted. This is stricter
 //     than the resolver, which reuses a deleted topic's conversation.
 //   - otherwise, a native conversation whose external_ref is extRef: exists.
 //   - otherwise: missing.
@@ -204,17 +223,19 @@ func outboundThreadConversationState(
 	ctx context.Context,
 	cr messaging.ConversationReader,
 	tl messaging.TopicConversationLookup,
-	extRef, threadID string,
+	projectID, extRef, threadID string,
 ) (outboundThreadState, error) {
 	if tl != nil {
-		_, err := tl.GetTopicConversationID(ctx, threadID)
+		// Topics are looked up within the sender's project: a topic of
+		// another project is answered exactly like a missing one.
+		_, err := tl.GetTopicConversationIDInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadExists, nil
 		}
 		if !errors.Is(err, store.ErrNotFound) {
 			return outboundThreadMissing, fmt.Errorf("topic lookup: %w", err)
 		}
-		_, err = tl.GetTopicConversationIDIncludingDeleted(ctx, threadID)
+		_, err = tl.GetTopicConversationIDIncludingDeletedInProject(ctx, projectID, threadID)
 		if err == nil {
 			return outboundThreadDeleted, nil
 		}
@@ -423,7 +444,7 @@ func (s *Server) resolveOutboundRouting(
 		Attachments:    req.Attachments,
 		Channel:        req.Channel,
 		ThreadID:       req.ThreadID,
-		Metadata:       req.Metadata,
+		Metadata:       stripClientAttachmentRefs(req.Metadata),
 		ConversationID: req.ConversationID,
 	}
 	if err := messaging.ValidateLegacyMessage(validationMsg); err != nil {
@@ -538,8 +559,7 @@ func (s *Server) resolveOutboundRouting(
 					"auth_id", authID,
 					"error", err,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"authenticated sender is not a participant in the direct conversation", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "sender is not a participant of the direct conversation", authKind, authID)
 				return nil, err
 			}
 		case "group":
@@ -553,15 +573,20 @@ func (s *Server) resolveOutboundRouting(
 					"conv_project_id", conv.ProjectID,
 					"agent_project_id", agent.ProjectID,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"conversation does not belong to the agent's project", nil)
+				writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "group conversation is not in the sending agent's project", authKind, authID)
 				return nil, fmt.Errorf("project mismatch")
 			}
 
-			// Auto-register sender as participant (listing concern, non-fatal).
-			// Group conversation authorization is project-based, not participant-based,
-			// so this only ensures the conversation appears in the sender's listing.
-			if authKind, authID := authenticatedSender(ctx); authID != "" {
+			// The sender's message mode applies to group posts
+			// (group_message_mode.go).
+			decision, ok := s.checkAgentGroupPost(ctx, w, agent, conv.ID)
+			if !ok {
+				return nil, fmt.Errorf("group post refused: %s", decision.Reason)
+			}
+
+			// Auto-register sender as participant (listing concern, non-fatal)
+			// when its message mode allows joining by posting.
+			if authKind, authID := authenticatedSender(ctx); authID != "" && decision.MayJoin {
 				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 					ConversationID: req.ConversationID,
 					PrincipalKind:  authKind,
@@ -581,8 +606,7 @@ func (s *Server) resolveOutboundRouting(
 				"conversation_id", conv.ID,
 				"kind", conv.Kind,
 			)
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"unsupported conversation kind", nil)
+			writeConversationIDNotFound(ctx, w, "/api/v1/agents/"+agent.ID+"/outbound-message", "unsupported conversation kind", authKind, authID)
 			return nil, fmt.Errorf("unknown kind")
 		}
 
@@ -615,6 +639,12 @@ func (s *Server) resolveOutboundRouting(
 			s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 				"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
 		} else {
+			// The sender's message mode is checked before the thread
+			// conversation is resolved, so a refused post writes no row
+			// (group_message_mode.go).
+			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+				return nil, fmt.Errorf("group post refused by message mode")
+			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
 			wcs := s.webChatStore
@@ -631,7 +661,7 @@ func (s *Server) resolveOutboundRouting(
 				if wcs != nil {
 					tl = wcs
 				}
-				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, extRef, req.ThreadID)
+				state, stateErr := outboundThreadConversationState(ctx, s.store, tl, agent.ProjectID, extRef, req.ThreadID)
 				if stateErr != nil {
 					s.messageLog.Error("thread conversation lookup failed",
 						"thread_id", req.ThreadID, "agent_id", agent.ID, "error", stateErr)
@@ -657,6 +687,13 @@ func (s *Server) resolveOutboundRouting(
 			if wcs != nil {
 				keyOpts = append(keyOpts, messaging.WithKeyTopicLookup(wcs))
 			}
+			// A thread on an external channel is stored under that
+			// channel's surface, the same key the inbound path uses for
+			// replies on the thread, so both directions share one
+			// conversation.
+			if surface := outboundThreadSurface(kind, req.Channel); surface != "" {
+				keyOpts = append(keyOpts, messaging.WithSurface(surface))
+			}
 			// A25.6 F1/F3: register both DM principals as participants so
 			// the conversation is discoverable via `conversation list`.
 			keyOpts = append(keyOpts, messaging.WithParticipants(s.store))
@@ -671,6 +708,14 @@ func (s *Server) resolveOutboundRouting(
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			} else {
+				// A thread conversation is a group conversation: the
+				// sender's message mode applies (group_message_mode.go).
+				// Posting by thread key never registers the sender.
+				if convResult.Kind == "group" {
+					if decision, ok := s.checkAgentGroupPost(ctx, w, agent, convResult.ConversationID); !ok {
+						return nil, fmt.Errorf("group post refused: %s", decision.Reason)
+					}
+				}
 				if err := messaging.ValidateAttributed(convResult.ConversationID); err != nil {
 					if s.writeDenyEnabled() {
 						messaging.WriteDenialMetrics.Inc("outbound.validate")
@@ -1176,7 +1221,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			Type:           req.Type,
 			Urgent:         req.Urgent,
 			Attachments:    req.Attachments,
-			Metadata:       req.Metadata,
+			Metadata:       stripClientAttachmentRefs(req.Metadata),
 			ConversationID: result.ConversationID,
 			ConvResult:     result.ConvResult,
 			Asserted:       result.Asserted,
@@ -1185,6 +1230,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			ProjectID:      agent.ProjectID,
 			GroupID:        result.GroupID,
 			Wake:           req.Wake,
+			BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
 		})
 		if dmErr != nil {
 			WriteAgentDMError(w, dmErr)
@@ -1277,7 +1323,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Attachments:          req.Attachments,
 		Channel:              result.Channel,
 		ThreadID:             result.ThreadID,
-		Metadata:             req.Metadata,
+		Metadata:             stripClientAttachmentRefs(req.Metadata),
 		ConversationID:       result.ConversationID,
 		ConversationAsserted: result.Asserted,
 		Recipients:           result.Recipients,
@@ -1294,8 +1340,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		extRef := result.ConvResult.ExternalRef
 		storeMsg.ThreadID = extRef
 		structuredMsg.ThreadID = extRef
-		// Backfill req.ThreadID so the W6 DM notification guard fires
-		// on the non-broker path.
+		// Backfill req.ThreadID so later thread-key guards see the DM key.
 		req.ThreadID = extRef
 
 		// Default Channel to "web" only when no channel was determined
@@ -1318,6 +1363,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// Artifact references (ptone/scion#3222): keep only those the sending
+	// agent can read under its own request credential. The flag lets
+	// deliverToUser record them on the broker path.
+	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directUserRecipient(result, agent.ID))
+	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
+
 	// Process attachments.
 	attachmentRefs, attachmentWarnings := s.ingestAgentAttachments(ctx, agent.ProjectID, agent.ID, req.Attachments)
 	if encoded, ok := attachmentRefsMetadata(attachmentRefs); ok {
@@ -1327,7 +1380,7 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		structuredMsg.Metadata[attachmentsMetadataKey] = encoded
 	}
 
-	// W6-mention: human members @mentioned in an agent → group (thread)
+	// Human members @mentioned in an agent → group (thread)
 	// message, matched against the member list resolved above.
 	var mentionedHumans []string
 	if req.ThreadID != "" && !strings.HasPrefix(req.ThreadID, "dm:") && !strings.HasPrefix(req.ThreadID, "agent:") {
@@ -1335,6 +1388,59 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			mentionedHumans = mentionedHumanIDs(humanMembers, names, "")
 		}
 	}
+
+	// storeOutboundRow persists storeMsg, records its mentions, attachments
+	// and artifacts, and emits the SSE event. It does not dispatch to
+	// channel spokes. Every store and publish call uses storeCtx, so the
+	// caller decides whether request cancellation can cut it short.
+	storeOutboundRow := func(storeCtx context.Context) error {
+		if err := s.store.CreateMessage(storeCtx, storeMsg); err != nil {
+			return err
+		}
+		// Record mention rows before publish: clients refetch the thread
+		// list and its mention dots on the SSE event.
+		s.recordHumanMentions(storeCtx, req.ThreadID, storeMsg.ID, mentionedHumans)
+		// W7: Link before publishing so a client that refetches on the SSE
+		// event already sees the attachments.
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		linkAttachmentRefs(storeCtx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		recordedRefs := s.recordMessageArtifacts(storeCtx, storeMsg.ID, outboundArtifactRefs)
+		s.events.PublishUserMessage(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		s.fanOutThreadMessageToMembersAsync(storeCtx, storeMsg, attachmentRefs, recordedRefs)
+		return nil
+	}
+
+	// Thread membership: human project members an agent @mentions in a
+	// thread become members of it. Written before the message is stored
+	// and published on either path (the broker path stores and fans out in
+	// deliverToUser, after this), so the member fan-out includes them.
+	// Best effort, bounded, and not cut short by the request ending.
+	//
+	// A message naming the reserved inprocess channel is refused by the
+	// broker before anything is published, so it writes no members. A
+	// later store or broker failure (the 500, 502 and 503 answers below)
+	// can still leave the members written without the message; that window
+	// is accepted, since the agent could make the same members with a
+	// message that succeeds.
+	if len(mentionedHumans) > 0 && structuredMsg.Channel != eventbus.InProcessBusName {
+		m := threadMembership{
+			ProjectID:        agent.ProjectID,
+			ThreadKey:        req.ThreadID,
+			MentionedUserIDs: mentionedHumans,
+		}
+		if result.ConvResult != nil && result.ConvResult.Kind == "group" {
+			m.ConversationID = result.ConversationID
+		}
+		memberCtx, cancelMembers := context.WithTimeout(context.WithoutCancel(ctx), threadMembershipTimeout)
+		s.recordThreadMembers(memberCtx, m)
+		cancelMembers()
+	}
+
+	// recordLogged reports that the delivery path wrote this message's
+	// record to the message log ("user message delivered via broker").
+	recordLogged := false
 
 	// Dispatch based on delivery path.
 	switch result.DeliveryPath {
@@ -1345,7 +1451,16 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 			// notification path does: it is otherwise only created on agent
 			// lifecycle events.
 			persisting := bp.subscribeProjectUserMessages(agent.ProjectID)
+			recordLogged = persisting
 			err := bp.PublishUserMessage(ctx, agent.ProjectID, result.RecipientID, structuredMsg)
+			if errors.Is(err, eventbus.ErrReservedChannel) {
+				// Nothing was published or stored: the request named a
+				// channel the hub keeps for itself.
+				s.messageLog.Warn("Outbound message names a reserved channel",
+					"agent_id", agent.ID, "channel", structuredMsg.Channel)
+				ValidationError(w, fmt.Sprintf("channel %q is reserved for internal use", structuredMsg.Channel), nil)
+				return
+			}
 			if err != nil && persisting && !errors.Is(err, eventbus.ErrSubscriberBufferFull) && !inProcessPublishFailed(err) {
 				// The inprocess spoke queued the persisting deliverToUser, so
 				// the message is stored; only channel spoke delivery failed (a
@@ -1377,9 +1492,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 						"Message delivery failed: recipient is temporarily overloaded, retry later", nil)
 					return
 				}
+				// The cause stays in the log line above: it can carry a
+				// channel spoke's own error text.
 				writeError(w, http.StatusBadGateway, ErrCodeDeliveryFailed,
-					"Message delivery failed: "+err.Error(), nil)
+					"Message delivery failed", nil)
 				return
+			}
+			if !persisting {
+				// No persisting subscriber received the publish, so only
+				// the channel spokes have the message. Store the row and
+				// emit the SSE event here, as the notification path does,
+				// without dispatching to the spokes a second time. The
+				// spokes already delivered it, so a store failure is
+				// logged rather than reported back for a retry. The
+				// spokes already have the message, so a cancelled request
+				// must not stop the store and SSE event either.
+				if err := storeOutboundRow(context.WithoutCancel(ctx)); err != nil {
+					s.messageLog.Error("Failed to persist outbound message after broker publish",
+						"agent_id", agent.ID, "recipient_id", result.RecipientID,
+						"project_id", agent.ProjectID, "error", err)
+				}
 			}
 			s.messageLog.Info("Outbound message dispatched through broker",
 				"agent_id", agent.ID, "recipient_id", result.RecipientID, "project_id", agent.ProjectID)
@@ -1387,26 +1519,14 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 
 	case deliveryUserDirect:
 		// Direct path: persist, link attachments, publish SSE, dispatch to channels.
-		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+		if err := storeOutboundRow(ctx); err != nil {
 			s.messageLog.Error("Failed to persist outbound message", "error", err)
 			writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
 				"Failed to persist message", nil)
 			return
 		}
-		// Record mention rows before publish: clients refetch the thread
-		// list and its mention dots on the SSE event. Only this path
-		// persists storeMsg under this ID; the broker path stores its own
-		// row.
-		s.recordHumanMentions(ctx, req.ThreadID, storeMsg.ID, mentionedHumans)
-		// W7: Link before publishing so a client that refetches on the SSE
-		// event already sees the attachments.
-		s.mu.RLock()
-		wcs := s.webChatStore
-		cr := s.channelRegistry
-		s.mu.RUnlock()
-		linkAttachmentRefs(ctx, wcs, storeMsg.ID, attachmentRefs, s.messageLog)
+		cr := s.currentChannelRegistry()
 		delete(structuredMsg.Metadata, attachmentsMetadataKey) // strip internal transport key
-		s.events.PublishUserMessage(ctx, storeMsg, attachmentRefs)
 		if cr != nil && cr.Len() > 0 {
 			cr.Dispatch(ctx, structuredMsg)
 		}
@@ -1436,43 +1556,47 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		HumanMembers:       humanMembers,
 	})
 
-	// Fire notifications (both broker and non-broker paths).
-	// W6-mention: mention notifications for agent → group messages.
-	if len(mentionedHumans) > 0 && s.getChatNotifier() != nil {
-		senderName := agent.Name
-		if senderName == "" {
-			senderName = agent.Slug
-		}
-		go s.notifyHumanMentions(context.Background(), mentionedHumans, agent.ProjectID,
-			req.ThreadID, "", senderName, req.Msg)
+	// A group post that @mentions no agent goes to the conversation's
+	// default agent. The sender's agentGroupPostDecision already allowed
+	// the post in resolveOutboundRouting; wakeGroupDefaultAgent adds the
+	// pairwise check, the loop guard, and groupAgentJoinAllowed
+	// (group_message_mode.go).
+	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
+	var defaultAgentResult *messages.MentionResult
+	if isGroupPost {
+		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
+			Sender:          agent,
+			SenderIdent:     agentIdent,
+			Conv:            result.ConvResult,
+			Msg:             originalMsgForMentions,
+			Type:            req.Type,
+			MentionResults:  mentionResults,
+			ParentMessageID: storeMsg.ID,
+			Channel:         result.Channel,
+		})
 	}
 
-	// W6: DM notification for agent → human replies (non-broker path only).
-	if bp := s.GetMessageBrokerProxy(); bp == nil {
-		if cn := s.getChatNotifier(); cn != nil && req.ThreadID != "" && strings.HasPrefix(req.ThreadID, "dm:") && result.RecipientID != "" {
-			senderName := agent.Name
-			if senderName == "" {
-				senderName = agent.Slug
-			}
-			go cn.NotifyDMReceived(context.Background(), result.RecipientID, ChatMessageContext{
-				SenderID:        agent.ID,
-				SenderName:      senderName,
-				ConversationKey: req.ThreadID,
-				Preview:         req.Msg,
-				ProjectID:       agent.ProjectID,
-			})
-		}
-	}
-
+	// One message record per message: when the delivery path already
+	// wrote it, this line is a lifecycle entry; otherwise it is the record.
 	outboundLogAttrs := []any{
 		"agent_id", agent.ID,
 		"agent_name", agent.Name,
 		"project_id", agent.ProjectID,
-		"recipient_id", result.RecipientID,
-		"msg_type", req.Type,
 	}
-	if result.ConversationID != "" {
-		outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+	if recordLogged {
+		outboundLogAttrs = append(outboundLogAttrs,
+			logging.AttrLogKind, logging.LogKindEvent,
+			logging.AttrSender, structuredMsg.Sender,
+			logging.AttrSenderID, structuredMsg.SenderID,
+			logging.AttrRecipient, structuredMsg.Recipient,
+			logging.AttrRecipientID, result.RecipientID,
+			logging.AttrMsgType, req.Type,
+		)
+		if result.ConversationID != "" {
+			outboundLogAttrs = append(outboundLogAttrs, "conversation_id", result.ConversationID)
+		}
+	} else {
+		outboundLogAttrs = append(outboundLogAttrs, structuredMsg.LogAttrs()...)
 	}
 	s.logMessage("outbound message sent", outboundLogAttrs...)
 
@@ -1490,10 +1614,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
 	}
+	// Which agents a group post reached, and an explicit flag when none.
+	// Types that never reach an agent (outside mentionFanoutTypes) report
+	// neither.
+	if isGroupPost && mentionFanoutTypes[req.Type] {
+		if defaultAgentResult != nil {
+			respBody["default_agent_result"] = defaultAgentResult
+		}
+		if woken := wokenAgentSlugs(mentionResults, defaultAgentResult); len(woken) > 0 {
+			respBody["woken_agents"] = woken
+		} else {
+			respBody["no_agent_woken"] = true
+		}
+	}
 	// ptone/scion#3667: attachments the hub could not record. Additive: the
 	// message was still sent, and the status is unchanged.
 	if len(attachmentWarnings) > 0 {
 		respBody["attachment_warnings"] = attachmentWarnings
+	}
+	if outboundArtifactWarning != "" {
+		respBody["artifact_warning"] = outboundArtifactWarning
 	}
 	writeJSON(w, http.StatusOK, respBody)
 }
@@ -1536,6 +1676,12 @@ func (s *Server) handleAgentGitHubTokenRefresh(w http.ResponseWriter, r *http.Re
 	if agent.ProjectID == "" {
 		writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 			"agent has no project associated", nil)
+		return
+	}
+
+	// No external token for an agent that is not in good standing
+	// (ptone/scion#3433); a lookup fault refuses.
+	if s.agentStandingForbidden(ctx, w, agent.ID) {
 		return
 	}
 
@@ -1723,6 +1869,15 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// success, but never persisted, dispatched or published.
 	if req.StructuredMessage != nil && req.StructuredMessage.Type == messages.TypeAssistantReply {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "dropped"})
+		return
+	}
+
+	// External chat references name conversations owned by chat
+	// integrations, which authenticate as brokers. Any other caller is
+	// refused before anything is looked up or written.
+	if (req.Surface != "" || req.ExternalRef != "" || req.ParentRef != "") && GetBrokerIdentityFromContext(ctx) == nil {
+		logReferenceRefused(ctx, logging.RequestPath(r), "external chat reference from a caller that is not a chat integration", GetIdentityFromContext(ctx))
+		ValidationError(w, "surface and external_ref are set by chat integrations", nil)
 		return
 	}
 
@@ -1962,8 +2117,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		}
 	}
 
-	// Phase 11: Conversation resolution for broker plugins using the SDK path
-	// (e.g. Google Chat).  Same logic as handleBrokerInbound.
+	// Phase 11: Conversation resolution for chat integrations using the SDK
+	// path (e.g. Google Chat). Same logic as handleBrokerInbound. Only
+	// broker-authenticated callers reach this block with a surface or
+	// external_ref set (checked when the request is parsed).
 	if req.ExternalRef != "" && req.Surface == "" {
 		ValidationError(w, "external_ref requires surface to be set", nil)
 		return
@@ -1987,6 +2144,11 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		convResult, convErr := messaging.ResolveOrCreateConversationByKey(
 			ctx, s.store, s.messageLog, req.ExternalRef, "group", &agent.ProjectID, keyOpts...)
 		if convErr != nil {
+			if externalRefOfOtherProject(convErr) {
+				logReferenceRefused(ctx, logging.RequestPath(r), reasonExternalRefOfOtherProject, GetIdentityFromContext(ctx))
+				writeError(w, http.StatusConflict, ErrCodeConversationNotResolved, "conversation resolution failed", nil)
+				return
+			}
 			if s.writeDenyEnabled() {
 				messaging.WriteDenialMetrics.Inc("agent_msg.phase11")
 				s.messageLog.Error("conversation resolution failed", "error", convErr)
@@ -2047,6 +2209,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	deferDelivery := reincarnationInFlight(agent)
 
 	if req.Wake && !senderIsAgent && !deferDelivery {
+		// The response waits on the resume and the readiness wait: extend
+		// this request's write deadline to cover them (ptone/scion#4178).
+		s.extendWriteDeadlineForDMWake(ctx, w)
 		wakeResult, wakeErr := s.wakeAgentForDM(ctx, agent)
 		if wakeErr != nil {
 			WriteAgentDMError(w, wakeErr)
@@ -2125,6 +2290,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	// Persist to message store before delivery attempt. Set dispatch_state
 	// to "dispatched" (no new pending rows per delivery policy).
 	var persistedMsgID string
+	// artifactWarning reports artifact references not attached on the
+	// non-agent-sender path below (admitMessageArtifacts).
+	var artifactWarning string
 	// dispatchMsg (#2257, design auto-offload-large-dm §4.4) is the object
 	// actually rendered a second time and dispatched below; it defaults to
 	// today's structuredMsg (possibly nil) and is only replaced with an
@@ -2216,6 +2384,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// a conversation the mentioned agent already belongs to. Only the
 		// looked-up case is used to key a mention row's thread identity.
 		groupConvIsExistingReference := false
+		// threadPostSender is the agent sender's record, read once when it
+		// posts by thread key, for the message mode checks below.
+		var threadPostSender *store.Agent
 		if structuredMsg.ConversationID != "" {
 			// DEF-49 SECURITY: authorize the caller-supplied conversation_id
 			// against the authenticated sender before honouring it.
@@ -2269,8 +2440,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"auth_kind", authKind,
 						"error", err,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"authenticated sender is not a participant in the direct conversation", nil)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender is not a participant of the direct conversation", authKind, authID)
 					return
 				}
 			case "group":
@@ -2287,13 +2457,32 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 						"conv_project_id", conv.ProjectID,
 						"agent_project_id", agent.ProjectID,
 					)
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						"conversation does not belong to the agent's project", nil)
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "group conversation is not in the recipient agent's project", authKind, authID)
+					return
+				}
+				// The sender must be able to read the group conversation
+				// (an agent only within its own project), checked before
+				// any participant row is written.
+				if !s.senderCanReadGroup(ctx, *conv.ProjectID) {
+					writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "sender cannot read the group conversation's project", authKind, authID)
 					return
 				}
 
-				// Auto-register both sender and recipient as participants.
-				if authKind, authID := authenticatedSender(ctx); authID != "" {
+				// An agent sender's message mode applies to group posts
+				// (group_message_mode.go). A user sender is unchanged.
+				senderMayJoin := true
+				if authKind == "agent" {
+					decision, ok := s.checkInboundAgentGroupPost(ctx, w, authID, conv.ID)
+					if !ok {
+						return
+					}
+					senderMayJoin = decision.MayJoin
+				}
+
+				// Auto-register the sender (when its mode allows joining by
+				// posting) and the recipient (when the sender may add it) as
+				// participants.
+				if authKind, authID := authenticatedSender(ctx); authID != "" && senderMayJoin {
 					if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 						ConversationID: structuredMsg.ConversationID,
 						PrincipalKind:  authKind,
@@ -2308,7 +2497,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					}
 				}
 				// Also register the recipient agent.
-				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+				if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, GetIdentityFromContext(ctx), agent); !joinOK {
+					s.messageLog.Info("recipient not registered as group participant: message mode",
+						"conversation_id", structuredMsg.ConversationID,
+						"agent_id", agent.ID,
+						"reason", joinReason)
+				} else if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 					ConversationID: structuredMsg.ConversationID,
 					PrincipalKind:  "agent",
 					PrincipalID:    agent.ID,
@@ -2327,8 +2521,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					"conversation_id", conv.ID,
 					"kind", conv.Kind,
 				)
-				writeError(w, http.StatusForbidden, ErrCodeForbidden,
-					"unsupported conversation kind", nil)
+				writeConversationIDNotFound(ctx, w, logging.RequestPath(r), "unsupported conversation kind", authKind, authID)
 				return
 			}
 
@@ -2367,6 +2560,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
 			} else {
+				// An agent sender's message mode is checked before the
+				// thread conversation is resolved, so a refused post writes
+				// no row (group_message_mode.go).
+				if kind == "group" && authKind == "agent" {
+					sender, ok := s.loadGroupPostSender(ctx, w, authID)
+					if !ok {
+						return
+					}
+					threadPostSender = sender
+					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+						return
+					}
+				}
 				var keyOpts []messaging.ConversationByKeyOption
 				s.mu.RLock()
 				wcs := s.webChatStore
@@ -2412,6 +2618,23 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					return
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+			}
+		}
+		// A thread conversation is a group conversation: an agent
+		// sender's message mode applies (group_message_mode.go). Posting
+		// by thread key never registers the sender. The caller-supplied
+		// conversation_id branch above already decided this.
+		if convResult != nil && convResult.Kind == "group" && !groupConvIsExistingReference {
+			if threadPostSender != nil {
+				if _, ok := s.checkAgentGroupPost(ctx, w, threadPostSender, convResult.ConversationID); !ok {
+					return
+				}
+			} else if authKind, authID := authenticatedSender(ctx); authKind == "agent" {
+				// Defensive fallback: the pre-check above sets
+				// threadPostSender for every agent thread post.
+				if _, ok := s.checkInboundAgentGroupPost(ctx, w, authID, convResult.ConversationID); !ok {
+					return
+				}
 			}
 		}
 		if convResult != nil && convResult.Kind == "group" {
@@ -2489,6 +2712,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				ProjectID:      agent.ProjectID,
 				GroupID:        groupID,
 				Wake:           req.Wake,
+				BeforeWake:     func() { s.extendWriteDeadlineForDMWake(ctx, w) },
+				// "message received for delivery" above is the record.
+				RecordLogged: true,
 			})
 			if dmErr != nil {
 				WriteAgentDMError(w, dmErr)
@@ -2565,6 +2791,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				Deferred:       deferredNote,
 				// ptone/scion#3667: attachments the hub could not record.
 				AttachmentWarnings: dmResult.AttachmentWarnings,
+				ArtifactWarning:    dmResult.ArtifactWarning,
 			})
 			return
 		}
@@ -2572,12 +2799,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// #2257 P1 (design auto-offload-large-dm §4.2 item 1): strip
 		// hub-reserved offload metadata keys before persist/render/dispatch,
 		// so a client cannot spoof body_offloaded/body_chars/body_sha256.
-		structuredMsg.Metadata = messaging.StripReservedMetadata(structuredMsg.Metadata)
+		// admitMessageArtifacts performs that strip, then re-adds only the
+		// artifact references the sender can read under its own request
+		// credential (ptone/scion#3222).
+		var artifactRefs, recordedRefs []artifacts.MessageRef
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+			directAgentRecipient(agent, groupID))
+		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)
 		} else {
 			persistedMsgID = storeMsg.ID
+			recordedRefs = s.recordMessageArtifacts(ctx, storeMsg.ID, artifactRefs)
 		}
 		messaging.RecordStep(ctx, "message_persisted")
 		// B11/B13: only publish when persistence succeeded — publishing an
@@ -2586,7 +2820,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			// Publish SSE event so connected browser clients can update the
 			// per-agent conversation view in real time — mirrors the agent→user
 			// publish path in handleAgentOutboundMessage.
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, recordedRefs)
 			messaging.RecordStep(ctx, "sse_published")
 		}
 
@@ -2716,7 +2950,7 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 			retryCtx, retryCancel := context.WithTimeout(dispatchCtx, 30*time.Second)
 			defer retryCancel()
 
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, dispatchMsg.Msg, req.Interrupt, dispatchMsg); err != nil {
 				if persistedMsgID != "" {
 					if markErr := s.markFailed(ctx, persistedMsgID, err.Error()); markErr != nil {
 						s.messageLog.Error("Failed to mark message as failed", "id", persistedMsgID, "error", markErr)
@@ -2820,12 +3054,13 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
 		_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-			MessageID:      persistedMsgID,
-			Status:         "deferred",
-			Agent:          agent.Slug,
-			AgentPhase:     agent.Phase,
-			MentionResults: mentionResults,
-			Deferred:       deferredReason(agent),
+			MessageID:       persistedMsgID,
+			Status:          "deferred",
+			Agent:           agent.Slug,
+			AgentPhase:      agent.Phase,
+			MentionResults:  mentionResults,
+			Deferred:        deferredReason(agent),
+			ArtifactWarning: artifactWarning,
 		})
 		return
 	}
@@ -2833,11 +3068,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(MessageDeliveryResponse{
-		MessageID:      persistedMsgID,
-		Status:         deliveryStatus,
-		Agent:          agent.Slug,
-		AgentPhase:     agent.Phase,
-		MentionResults: mentionResults,
+		MessageID:       persistedMsgID,
+		Status:          deliveryStatus,
+		Agent:           agent.Slug,
+		AgentPhase:      agent.Phase,
+		MentionResults:  mentionResults,
+		ArtifactWarning: artifactWarning,
 	})
 }
 
@@ -2857,6 +3093,9 @@ type MessageDeliveryResponse struct {
 	// message (ptone/scion#3667). The message was still delivered without
 	// them. Omitted when every attachment was recorded.
 	AttachmentWarnings []AttachmentWarning `json:"attachment_warnings,omitempty"`
+	// ArtifactWarning is set when artifact references the request named
+	// were not attached (ptone/scion#3222).
+	ArtifactWarning string `json:"artifact_warning,omitempty"`
 }
 
 // GroupMessageRecipientResult represents the delivery status for one recipient in a group[] delivery.
@@ -2878,6 +3117,17 @@ type GroupMessageResponse struct {
 	// of Failed so a truthfully deferred recipient is not reported as a
 	// failure.
 	Deferred int `json:"deferred,omitempty"`
+}
+
+// logGroupMemberRecord writes the hub's message record for one group[]
+// member (see logMessageRecord for the rule).
+func (s *Server) logGroupMemberRecord(projectID, groupID, messageID string, persisted bool, msg *messages.StructuredMessage) {
+	attrs := []any{"project_id", projectID, "group_id", groupID}
+	if persisted {
+		attrs = append(attrs, "message_id", messageID)
+	}
+	attrs = append(attrs, msg.LogAttrs()...)
+	s.recordLog().Info("set message handed to member", attrs...)
 }
 
 // handleGroupMessage fans out a structured message to multiple recipients parsed from group[].
@@ -2916,21 +3166,21 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				return
 			}
 			if ref.ProjectSlug != "" {
-				// Explicit cross-project reference in a group context: resolve
-				// the slug to a project ID so the boundary check compares the
-				// same type (ID vs ID) on both sides.
+				// Project-qualified reference in a group context: resolve the
+				// slug to a project ID so the boundary check compares the same
+				// type (ID vs ID) on both sides. A reference to any project
+				// other than the anchor agent's gets the same answer as an
+				// unknown project; the reason is logged.
 				refProject, refErr := s.store.GetProjectBySlug(ctx, ref.ProjectSlug)
 				if refErr != nil || refProject == nil {
 					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
 						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
 					return
 				}
-				boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message")
-				if boundary != nil {
-					writeError(w, http.StatusForbidden, ErrCodeForbidden,
-						boundary.Reason, map[string]interface{}{
-							"code": string(boundary.Code),
-						})
+				if boundary := ValidateCrossProjectGroupBoundary(projectID, refProject.ID, "group message"); boundary != nil {
+					logReferenceRefused(ctx, logging.RequestPath(r), "group reference names another project: "+boundary.Reason, GetIdentityFromContext(ctx))
+					writeError(w, http.StatusBadRequest, ErrCodeInvalidRequest,
+						fmt.Sprintf("project %q not found", ref.ProjectSlug), nil)
 					return
 				}
 			}
@@ -3086,8 +3336,12 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 			} else {
 				persisted = true
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
+			// The hub's message record for this member, written before the
+			// outcome so deferred and failed members keep theirs; the
+			// summary line below is a lifecycle entry.
+			s.logGroupMemberRecord(projectID, groupID, storeMsg.ID, persisted, &agentMsg)
 
 			// Phase 9e: render the delivery envelope for group[] agent
 			// recipients. Gated on persistence success (matching the
@@ -3142,7 +3396,7 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				groupDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 			}
 			retryCtx, retryCancel := context.WithTimeout(groupDispatchCtx, 30*time.Second)
-			if err := dispatchWithBrokerRetry(retryCtx, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
+			if err := dispatchWithBrokerRetry(retryCtx, nil, dispatcher, agent, plainMessage, interrupt, &agentMsg); err != nil {
 				retryCancel()
 				if persisted {
 					if markErr := s.markFailed(ctx, storeMsg.ID, err.Error()); markErr != nil {
@@ -3289,12 +3543,15 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 				s.messageLog.Warn("DEF-3: conversation consistency mismatch (user-to-agent DM)",
 					"message_id", storeMsg.ID, "conversation_id", convID)
 			}
+			persisted := true
 			if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
+				persisted = false
 				s.messageLog.Error("Failed to persist set message", "recipient", recipStr, "error", err)
 			} else {
 				// B11/B13: only publish when persistence succeeded.
-				s.events.PublishUserMessage(ctx, storeMsg, nil)
+				s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 			}
+			s.logGroupMemberRecord(projectID, groupID, storeMsg.ID, persisted, &userMsg)
 
 			results[i] = GroupMessageRecipientResult{Recipient: recipStr, Status: "delivered"}
 			delivered++
@@ -3315,6 +3572,9 @@ func (s *Server) handleGroupMessage(w http.ResponseWriter, r *http.Request, anch
 	}
 
 	s.logMessage("set message dispatched",
+		logging.AttrLogKind, logging.LogKindEvent,
+		logging.AttrSender, msg.Sender,
+		logging.AttrRecipient, msg.Recipient,
 		"project_id", projectID,
 		"group_id", groupID,
 		"total", len(recipients),
@@ -3516,8 +3776,23 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 	}
 	runningAgents = authorizedAgents
 
-	// Log the broadcast
+	// Running agents that are still initializing are targeted like any
+	// other running agent: the broker buffers the message until the harness
+	// is ready. They are counted separately for the caller's information.
+	starting := 0
+	for i := range runningAgents {
+		if agentStillInitializing(&runningAgents[i]) {
+			starting++
+		}
+	}
+
+	// Log the broadcast. Each recipient gets its own record (broadcastDirect
+	// or the proxy's deliverToAgent), so the summary is a lifecycle entry;
+	// with no recipients it is the broadcast's one record.
 	logAttrs := []any{"project_id", projectID}
+	if len(runningAgents) > 0 {
+		logAttrs = append(logAttrs, logging.AttrLogKind, logging.LogKindEvent)
+	}
 	logAttrs = append(logAttrs, req.StructuredMessage.LogAttrs()...)
 	s.logMessage("broadcast message published", logAttrs...)
 
@@ -3542,7 +3817,7 @@ func (s *Server) handleProjectBroadcast(w http.ResponseWriter, r *http.Request, 
 		}
 	}
 
-	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown)
+	s.writeBroadcastResponse(w, targeted+skipped, targeted, skipped, skippedBreakdown, starting)
 }
 
 // BroadcastAcceptedResponse is the JSON response for a broadcast message.
@@ -3552,14 +3827,19 @@ type BroadcastAcceptedResponse struct {
 	Targeted         int            `json:"targeted"`
 	Skipped          int            `json:"skipped"`
 	SkippedBreakdown map[string]int `json:"skipped_breakdown,omitempty"`
+	// Starting counts the targeted agents that are still initializing: the
+	// message is delivered to them and held by the broker until their
+	// harness is ready. Included in Targeted.
+	Starting int `json:"starting,omitempty"`
 }
 
-func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, skipped int, skippedBreakdown map[string]int) {
+func (s *Server) writeBroadcastResponse(w http.ResponseWriter, total, targeted, skipped int, skippedBreakdown map[string]int, starting int) {
 	resp := BroadcastAcceptedResponse{
 		Status:   "accepted",
 		Total:    total,
 		Targeted: targeted,
 		Skipped:  skipped,
+		Starting: starting,
 	}
 	if len(skippedBreakdown) > 0 {
 		resp.SkippedBreakdown = skippedBreakdown
@@ -3617,9 +3897,16 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 		// Phase 9b(ii): render the delivery envelope for this broadcast
 		// recipient. ConvResult is nil — broadcasts deliberately skip
 		// conversation resolution (no conversation for broadcasts).
+		// The envelope's message_id names the stored row, so it is passed
+		// only when the row was written (ptone/scion#3881); an empty ID
+		// omits the key.
 		if s.writeDenyEnabled() {
+			renderID := ""
+			if persisted {
+				renderID = storeMsg.ID
+			}
 			agentMsg.DeliveryText = messaging.RenderDeliveryText(messaging.RenderDeliveryInput{
-				MessageID:  storeMsg.ID,
+				MessageID:  renderID,
 				ConvResult: nil,
 				Msg:        &agentMsg,
 				CreatedAt:  storeMsg.CreatedAt,
@@ -3635,7 +3922,7 @@ func (s *Server) broadcastDirect(w http.ResponseWriter, r *http.Request, project
 			broadcastDispatchCtx = withDispatchMessageID(ctx, storeMsg.ID)
 		}
 		retryCtx, retryCancel := context.WithTimeout(broadcastDispatchCtx, 30*time.Second)
-		dispatchErr := dispatchWithBrokerRetry(retryCtx, dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
+		dispatchErr := dispatchWithBrokerRetry(retryCtx, s.recordLog(), dispatcher, &agent, agentMsg.Msg, interrupt, &agentMsg)
 		retryCancel()
 
 		if dispatchErr != nil {
@@ -3698,6 +3985,7 @@ func (s *Server) publishBroadcastDeliveryFailed(ctx context.Context, targetAgent
 	if dispatcher == nil {
 		return
 	}
+	logMessageRecord(s.recordLog(), senderAgent, structuredMsg)
 	if err := dispatcher.DispatchAgentMessage(ctx, senderAgent, failMsg, false, structuredMsg); err != nil {
 		s.messageLog.Error("Failed to dispatch broadcast DELIVERY_FAILED notification",
 			"sender_id", msg.SenderID, "target_agent", targetAgent.Slug, "error", err)
@@ -3892,7 +4180,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		}
 		// B11/B13: only publish when persistence succeeded.
 		if persisted {
-			s.events.PublishUserMessage(ctx, storeMsg, nil)
+			s.events.PublishUserMessage(ctx, storeMsg, nil, nil)
 		}
 
 		// Phase 9b(ii): render the delivery envelope for this mention
@@ -3953,7 +4241,7 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 			mentionDispatchParent = withDispatchMessageID(aggregateCtx, storeMsg.ID)
 		}
 		dispatchCtx, cancel := context.WithTimeout(mentionDispatchParent, 10*time.Second)
-		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
+		if dispatchErr := dispatchWithBrokerRetry(dispatchCtx, s.recordLog(), dispatcher, mentionAgent, mentionMsg.Msg, false, mentionMsg); dispatchErr != nil {
 			cancel()
 			if aggregateCtx.Err() != nil {
 				results[i].Status = "timeout"
@@ -3974,8 +4262,15 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// F2b (design doc §3.3): the mention target was actually dispatched
 		// into a group conversation — record it as a participant. Best
 		// effort, never affects the response (AC-12).
+		// The sender must be allowed to add the mentioned agent under its
+		// message mode (group_message_mode.go).
 		if groupConversationID != "" {
-			s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+			if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, senderIdentity, mentionAgent); joinOK {
+				s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+			} else {
+				s.messageLog.Info("mention target not registered as group participant: message mode",
+					"conversation_id", groupConversationID, "agent_id", mentionAgent.ID, "reason", joinReason)
+			}
 		}
 	}
 
@@ -4041,15 +4336,17 @@ func (s *Server) validateChannelRegistered(w http.ResponseWriter, channel string
 			"cannot validate channel: message broker is not available", nil)
 		return false
 	}
+	// Match on the routing key FanOutEventBus.Publish uses (ChannelID,
+	// else Name), so a channel that passes here has a spoke to reach.
 	channels := bp.ListChannels()
 	for _, ch := range channels {
-		if ch.Name == channel {
+		if ch.RoutingKey() == channel {
 			return true
 		}
 	}
 	available := make([]string, len(channels))
 	for i, ch := range channels {
-		available[i] = ch.Name
+		available[i] = ch.RoutingKey()
 	}
 	if len(available) == 0 {
 		ValidationError(w, fmt.Sprintf("channel %q is not registered; no channels are currently available", channel), nil)

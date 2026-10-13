@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
@@ -48,6 +49,14 @@ type Template struct {
 	Name string
 }
 
+// TemplateList is the result of HubClient.ListTemplates.
+type TemplateList struct {
+	Templates []Template
+	// ProjectErr is set when the project's templates could not be loaded.
+	// Templates then holds the global templates only.
+	ProjectErr error
+}
+
 // CreateAgentRequest holds the parameters for creating a new agent via the hub.
 type CreateAgentRequest struct {
 	Name     string `json:"name"`
@@ -69,7 +78,10 @@ type HubClient interface {
 	// ListProjectsForUser lists the projects the linked user is a member of.
 	ListProjectsForUser(ctx context.Context, onBehalfOf string) ([]ProjectOption, error)
 	ListAgents(ctx context.Context, projectID, onBehalfOf string) ([]AgentInfo, error)
-	ListTemplates(ctx context.Context, projectID, onBehalfOf string) ([]Template, error)
+	// ListTemplates lists global templates merged with the project's
+	// templates. If only the project read fails, it returns the global
+	// templates with TemplateList.ProjectErr set and a nil error.
+	ListTemplates(ctx context.Context, projectID, onBehalfOf string) (TemplateList, error)
 
 	// CreateAgent POSTs /api/v1/projects/{projectId}/agents.
 	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
@@ -616,7 +628,7 @@ func (h *CommandHandler) completeAgents(ctx context.Context, projectID, typed, o
 // completeTemplates returns autocomplete choices for the "template" option,
 // filtered by the typed prefix.
 func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed, onBehalfOf string) []*discordgo.ApplicationCommandOptionChoice {
-	templates, err := h.hubClient.ListTemplates(ctx, projectID, onBehalfOf)
+	list, err := h.hubClient.ListTemplates(ctx, projectID, onBehalfOf)
 	if err != nil {
 		h.log.Debug("Failed to get templates for autocomplete", "error", err)
 		return nil
@@ -624,7 +636,7 @@ func (h *CommandHandler) completeTemplates(ctx context.Context, projectID, typed
 
 	prefix := strings.ToLower(typed)
 	var choices []*discordgo.ApplicationCommandOptionChoice
-	for _, t := range templates {
+	for _, t := range list.Templates {
 		label := t.Name
 		if label == "" {
 			label = t.Slug
@@ -877,7 +889,7 @@ func (h *CommandHandler) HandleAgents(s *discordgo.Session, i *discordgo.Interac
 		emoji := agentStatusEmoji(agent.Activity, agent.Phase)
 		label := agent.Slug
 		if agent.Activity != "" {
-			label += " -- " + agent.Activity
+			label += " -- " + state.Activity(agent.Activity).DisplayLabel()
 		}
 		if agent.Slug == link.DefaultAgent {
 			label += " (default)"
@@ -995,7 +1007,7 @@ func (h *CommandHandler) HandleStatus(s *discordgo.Session, i *discordgo.Interac
 	for _, agent := range agents {
 		if agent.Slug == agentSlug {
 			emoji := agentStatusEmoji(agent.Activity, agent.Phase)
-			activity := agent.Activity
+			activity := state.Activity(agent.Activity).DisplayLabel()
 			if activity == "" {
 				activity = "unknown"
 			}
@@ -1511,21 +1523,25 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 	// Step 0.6: Validate template (if provided).
 	templateName := getSubcommandOption(i, "template")
 	if templateName != "" {
-		templates, err := h.hubClient.ListTemplates(ctx, link.ProjectID, onBehalfOf)
+		list, err := h.hubClient.ListTemplates(ctx, link.ProjectID, onBehalfOf)
 		if err != nil {
 			h.log.Error("Failed to list templates for validation", "error", err, "project_id", link.ProjectID)
 			h.followup(s, i, hubErrorText(err, emailFromPrincipal(onBehalfOf), link.ProjectSlug, "Failed to verify template. Please try again."))
 			return
 		}
 		found := false
-		for _, t := range templates {
+		for _, t := range list.Templates {
 			if t.Slug == templateName || t.Name == templateName {
 				found = true
 				break
 			}
 		}
 		if !found {
-			h.followup(s, i, fmt.Sprintf("Template **%s** not found. Use autocomplete to pick from available templates, or omit the template to use the project default.", templateName))
+			reply := fmt.Sprintf("Template **%s** not found. Use autocomplete to pick from available templates, or omit the template to use the project default.", templateName)
+			if list.ProjectErr != nil {
+				reply += "\n\n" + projectTemplatesNote(list.ProjectErr)
+			}
+			h.followup(s, i, reply)
 			return
 		}
 	}
@@ -2048,6 +2064,8 @@ func resolveChannelLink(ctx context.Context, s *discordgo.Session, store Store, 
 func agentStatusEmoji(activity, phase string) string {
 	// Activity icons (priority)
 	switch strings.ToLower(activity) {
+	case "initializing":
+		return "\U0001f680" // rocket (shown as starting)
 	case "working":
 		return "⚙️" // gear
 	case "thinking":

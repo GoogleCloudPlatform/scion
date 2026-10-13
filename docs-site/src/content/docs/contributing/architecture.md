@@ -166,14 +166,14 @@ type Runtime interface {
 
 | Runtime | Platform | Selection |
 | :--- | :--- | :--- |
-| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present |
+| `AppleContainerRuntime` | macOS | Auto-detected when Apple `container` CLI is present and neither Podman nor Docker is available |
 | `DockerRuntime` | Linux / macOS / Windows | Default fallback; supports remote Docker hosts via `Host` config |
 | `PodmanRuntime` | Linux / macOS | Daemonless/Rootless alternative; supports remote/machine execution |
 | `KubernetesRuntime` | Any (via kubeconfig) | Runs agents as Kubernetes Pods; supports namespace isolation, resource specs, and workspace sync via `tar` snapshots |
 
 **Runtime selection** is handled by the `GetRuntime` factory function, which resolves the runtime based on:
 1. The active profile's `runtime` field in `settings.yaml`.
-2. OS-level auto-detection (macOS with `container` CLI &rarr; Apple; Linux &rarr; Podman if available, else Docker).
+2. OS-level auto-detection (macOS &rarr; Podman, else Docker, else Apple `container`; Linux &rarr; Podman if available, else Docker).
 3. Explicit override via CLI flags.
 
 ---
@@ -289,8 +289,8 @@ scion start <name> --task "..." --hub
 4. **Environment resolution**: The Hub merges environment variables and secrets from all applicable scopes (user → project → broker).
 5. **Template hydration**: The Hub resolves the template, attaches its content hash for broker-side caching.
 6. **Dispatch**: The Hub dispatches the creation request to the selected Runtime Broker via:
-   - **Direct HTTP** if the broker has a reachable endpoint.
-   - **Control Channel** (WebSocket tunnel) if the broker is behind a NAT/firewall.
+   - **Direct HTTP** if the Runtime Broker has a reachable endpoint.
+   - **Control Channel** (WebSocket connection) if the Runtime Broker is behind a NAT/firewall.
 7. **Broker execution**: The Runtime Broker provisions and starts the agent using the same `agent.Manager` and `runtime.Runtime` code path as Solo mode.
 8. **Status reporting**: The broker reports status back to the Hub via heartbeats and agent status updates.
 
@@ -399,11 +399,12 @@ The control channel uses a custom WebSocket protocol (`pkg/wsprotocol`) with the
 
 ### Broker Registration Flow
 
-1. A user with `broker.create` creates (or re-issues a token for) a broker record: `POST /api/v1/brokers`. The Hub returns a short-lived, single-use **join token**; its lifetime can be set with `joinTokenTtlSeconds` (300 to 86400 seconds, default 1 hour).
+1. A user with `broker.create` (signed in, or presenting a hub-boundary token with `broker:create`) creates (or re-issues a token for) a broker record: `POST /api/v1/brokers`. A new broker is owned by that user. The Hub returns a short-lived, single-use **join token**; its lifetime can be set with `joinTokenTtlSeconds` (300 to 86400 seconds, default 1 hour).
 2. The broker host redeems the join token for HMAC credentials: `POST /api/v1/brokers/join`. This endpoint takes no other credential. `scion runtime-broker register` runs steps 1 and 2 in one process; `scion hub brokers join-token create` and `scion runtime-broker join` run them on different machines.
 3. The token is consumed in the same transaction that stores the broker's secret.
 4. Broker stores credentials locally, one file per Hub connection (`~/.scion/hub-credentials/<name>.json`). A legacy `~/.scion/broker-credentials.json` is migrated into that directory on first use.
 5. Broker authenticates subsequent requests using HMAC-SHA256 signatures.
+6. The broker's owner associates it with projects (`POST /api/v1/projects/{id}/providers`); registration alone never does.
 
 ---
 

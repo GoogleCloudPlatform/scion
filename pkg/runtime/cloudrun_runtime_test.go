@@ -779,3 +779,139 @@ func TestCloudRunRuntime_IDRoundTrip(t *testing.T) {
 		t.Errorf("Stop/Delete target = %q, want %q", got, instanceName)
 	}
 }
+
+// The Cloud Run instance must mount the NFS share the broker provisions on
+// (workspace_storage.nfs.shares[0]). See ptone/scion#2979.
+func TestResolveCloudRunNFSTarget(t *testing.T) {
+	tests := []struct {
+		name                      string
+		runtimeServer, runtimeExp string
+		shareServer, shareExp     string
+		wantServer, wantExport    string
+		wantErr                   []string
+	}{
+		{name: "empty runtime values use the share", shareServer: "10.0.0.2", shareExp: "/scion",
+			wantServer: "10.0.0.2", wantExport: "/scion"},
+		{name: "matching values pass", runtimeServer: "10.0.0.2", runtimeExp: "/scion/",
+			shareServer: "10.0.0.2", shareExp: "/scion", wantServer: "10.0.0.2", wantExport: "/scion/"},
+		{name: "runtime values without a share are kept", runtimeServer: "10.0.0.2", runtimeExp: "/scion",
+			wantServer: "10.0.0.2", wantExport: "/scion"},
+		{name: "mismatched server is refused", runtimeServer: "10.0.0.3", runtimeExp: "/scion",
+			shareServer: "10.0.0.2", shareExp: "/scion",
+			wantErr: []string{"cloudrun.nfs_server", `"10.0.0.3"`, "server.workspace_storage.nfs.shares[0].server", `"10.0.0.2"`}},
+		{name: "mismatched export is refused", runtimeServer: "10.0.0.2", runtimeExp: "/other",
+			shareServer: "10.0.0.2", shareExp: "/scion",
+			wantErr: []string{"cloudrun.nfs_export", `"/other"`, "server.workspace_storage.nfs.shares[0].export", `"/scion"`}},
+		{name: "no server anywhere is refused",
+			wantErr: []string{"nfs_server must be non-empty"}},
+		{name: "no export anywhere is refused", runtimeServer: "10.0.0.2", shareServer: "10.0.0.2",
+			wantErr: []string{"nfs_export must be non-empty", "cloudrun.nfs_export", "server.workspace_storage.nfs.shares[0].export"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server, export, err := resolveCloudRunNFSTarget(tt.runtimeServer, tt.runtimeExp, tt.shareServer, tt.shareExp)
+			if len(tt.wantErr) > 0 {
+				if err == nil {
+					t.Fatalf("expected error, got server %q export %q", server, export)
+				}
+				for _, want := range tt.wantErr {
+					if !strings.Contains(err.Error(), want) {
+						t.Errorf("error %q does not contain %q", err, want)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if server != tt.wantServer || export != tt.wantExport {
+				t.Errorf("got server %q export %q, want %q %q", server, export, tt.wantServer, tt.wantExport)
+			}
+		})
+	}
+}
+
+func TestCloudRunProvisionNFSRefusesShareMismatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     config.CloudRunConfig
+		wantErr string
+	}{
+		{"server", config.CloudRunConfig{NFSServer: "10.0.0.3", NFSExport: "/scion"}, "cloudrun.nfs_server"},
+		{"export", config.CloudRunConfig{NFSServer: "10.0.0.2", NFSExport: "/other"}, "cloudrun.nfs_export"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			r := &CloudRunRuntime{config: &cfg}
+			_, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
+				WorkspaceBackendName: "nfs",
+				ProjectID:            "proj-123",
+				Workspace:            filepath.Join(t.TempDir(), "share1", "projects", "proj-123", "workspace"),
+				NFSShareServer:       "10.0.0.2",
+				NFSShareExport:       "/scion",
+			}, "agent-456", 1000, 1000)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) || !strings.Contains(err.Error(), "does not match") {
+				t.Fatalf("error = %v, want a %s mismatch error", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestCloudRunProvisionNFSDefaultsToShare(t *testing.T) {
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{ProjectID: "gcp-project", Location: "us-central1"}}
+	_, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
+		WorkspaceBackendName: "nfs",
+		ProjectID:            "proj-123",
+		NFSShareServer:       "10.0.0.2",
+		NFSShareExport:       "/share-export",
+	}, "agent-456", 1000, 1000)
+	// With no workspace host path provisioning stops after resolving the
+	// export paths, which must be under the share's export.
+	if err == nil || !strings.Contains(err.Error(), "RunConfig.Workspace is empty") ||
+		!strings.Contains(err.Error(), "/share-export/projects/proj-123/workspace") {
+		t.Fatalf("error = %v, want the empty-workspace error naming the share's export", err)
+	}
+}
+
+func TestCloudRunProvisionNFSIgnoresShareForOtherBackends(t *testing.T) {
+	r := &CloudRunRuntime{config: &config.CloudRunConfig{NFSServer: "10.0.0.3", NFSExport: "/other"}}
+	for _, backend := range []string{"", "local", "cloudrun-volume", "gke-shared-volume"} {
+		paths, err := r.provisionCloudRunNFS(context.Background(), RunConfig{
+			WorkspaceBackendName: backend,
+			ProjectID:            "proj-123",
+			NFSShareServer:       "10.0.0.2",
+			NFSShareExport:       "/scion",
+		}, "agent-456", 1000, 1000)
+		if err != nil || paths != nil {
+			t.Errorf("backend %q: got paths %v err %v, want nil, nil", backend, paths, err)
+		}
+	}
+}
+
+func TestBuildCloudRunInstanceMountsResolvedNFSServer(t *testing.T) {
+	rt, err := NewCloudRunRuntime(&config.CloudRunConfig{ProjectID: "test-project", Location: "us-central1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inst := rt.buildCloudRunInstance(RunConfig{
+		Image:  "test-image:latest",
+		Labels: map[string]string{"agent_id": "agent-1"},
+	}, 1000, 1000, &cloudRunNFSProvisionPaths{
+		server:              "10.0.0.2",
+		workspaceExportPath: "/scion/projects/p/workspace",
+		homeExportPath:      "/scion/projects/p/agents/a/home",
+		secretsExportPath:   "/scion/projects/p/agents/a/secrets",
+	})
+	var n int
+	for _, v := range inst.Volumes {
+		if nfs := v.GetNfs(); nfs != nil {
+			n++
+			if nfs.Server != "10.0.0.2" {
+				t.Errorf("volume %s mounts server %q, want the resolved 10.0.0.2", v.Name, nfs.Server)
+			}
+		}
+	}
+	if n != 3 {
+		t.Fatalf("got %d NFS volumes, want 3", n)
+	}
+}

@@ -65,6 +65,8 @@ for delivery to succeed.
 | Agent outbound reach | Agent `messageMode` set to `hub` | `project` | Existing managers, subject to the [grant guard](#hub-mode-grant-guard) below |
 | Receiving project | `crossProjectInbound` on the destination project | `none` | Active direct project owner or local, unscoped Hub administrator |
 
+`cross_project_messaging_enabled` also decides whether artifacts can be shared with, or moved to, another project (see [Grants](/scion/reference/artifacts/#grants)). Turning it off stops new cross-project artifact grants and moves; it does not revoke grants that already exist, which have to be removed one by one.
+
 The **receiving project's inbound policy** is directional:
 
 | Policy | Meaning |
@@ -158,6 +160,17 @@ delivery. All gates must pass:
 
 A `project`-mode sender cannot send cross-project messages, even to reply
 in an existing cross-project DM.
+
+### Agents in Group Conversations
+
+A group conversation has no single recipient, so the sender's mode alone
+decides agent posts to it. `project` and `hub` agents may post to any group
+conversation in their project, and posting to a conversation by ID adds them
+as participants. `lineage` and `branch` agents may post only to a group
+conversation they already belong to, and only a human allowed to message
+them (an ancestry user, a project owner, or a super-admin) can add them.
+`none` agents never post to group conversations, and agents or other users
+cannot add them. A refused post or add returns 403 `message_denied`.
 
 ### System to Agent
 

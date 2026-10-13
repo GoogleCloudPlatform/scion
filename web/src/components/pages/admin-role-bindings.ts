@@ -674,9 +674,7 @@ export class ScionPageAdminRoleBindings extends LitElement {
     void this.updateComplete.then(() => {
       const form = this.shadowRoot?.querySelector('scion-role-binding-assignment-form');
       if (form) {
-        type AssignmentForm =
-          import('../shared/role-binding-assignment-form.js').ScionRoleBindingAssignmentForm;
-        (form as AssignmentForm).reset();
+        form.reset();
       }
     });
   }

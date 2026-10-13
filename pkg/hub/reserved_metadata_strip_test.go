@@ -30,37 +30,6 @@ package hub
 
 import "testing"
 
-// stripSiteKey identifies one call site by (file, function), matching
-// effectCallSiteClassifications' own key shape.
-type stripSiteKey struct{ file, function string }
-
-// strippedSites lists every (file, function) that calls
-// messaging.StripReservedMetadata (directly, or via ExecuteAgentDM/a shared
-// helper) before rendering or dispatching to the site's recipient(s). This
-// is the P1+P2 site list from design §4.2 item 1 and §10 P1/P2.
-var strippedSites = map[stripSiteKey]bool{
-	// P1: the two ExecuteAgentDM-routed entry points, covering the outbound
-	// endpoint, the handleAgentMessage agent fork, and #2083's agent mention
-	// fan-out (fanOutAgentMentions reaches dispatch through ExecuteAgentDM,
-	// so it shares this AST entry rather than having its own).
-	{"agent_dm_operation.go", "ExecuteAgentDM"}: true,
-	// P1: the handleAgentMessage human/broker-sender branch.
-	{"handlers_agent_messaging.go", "handleAgentMessage"}: true,
-
-	// P2 (commit 2a): strip-only, no offload yet.
-	{"handlers_agent_messaging.go", "handleGroupMessage"}:            true,
-	{"handlers_agent_messaging.go", "broadcastDirect"}:               true,
-	{"handlers_agent_messaging.go", "processMentions"}:               true,
-	{"handlers_broker_inbound.go", "handleBrokerInbound"}:            true,
-	{"handlers_broker_inbound_routed.go", "dispatchRoutedRecipient"}: true,
-	// sendAgentRouted covers both the primary send and the mention
-	// fan-out loop in the same function — both call StripReservedMetadata
-	// explicitly (defence in depth for the mention copy, which already
-	// aliases the primary's stripped map).
-	{"handlers_chat_v2.go", "sendAgentRouted"}: true,
-	{"messagebroker.go", "deliverToAgent"}:     true,
-}
-
 // stripExemptions lists every (file, function) dispatch/render site that is
 // intentionally NOT in strippedSites, with the reason it is safe: the site
 // never forwards client- or plugin-supplied metadata at all.
@@ -69,10 +38,11 @@ var stripExemptions = map[stripSiteKey]string{
 	{"handlers_agent_messaging.go", "publishBroadcastDeliveryFailed"}: "hub-built delivery-failure notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryFailed"}:                     "hub-built delivery-failure notice to the original sender; no client metadata",
 	{"messagebroker.go", "publishDeliveryDeferred"}:                   "hub-built delivery-deferred notice to the original sender; no client metadata",
+	{"artifacts_review.go", "deliverArtifactReview"}:                  "hub-built review notice to the artifact's owner; messages.NewSystemMessage carries no client metadata",
 	{"notifications.go", "dispatchToAgent"}:                           "hub-built notification fan-out; no client metadata",
 	{"server.go", "messageEventHandler"}:                              "scheduled message; messages.NewSystemMessage carries no client metadata",
 	{"reconcile.go", "deliverMessage"}:                                "dead code: assigned at server.go but never invoked in production (msg_containment_callsite_test.go)",
-	{"notification_sweep.go", "RetryDispatch"}:                        "guarded retry of a previously authorized, hub-built notification dispatch; no client metadata",
+	{"notification_sweep.go", "retryDispatch"}:                        "guarded retry of a previously authorized, hub-built notification dispatch; no client metadata",
 }
 
 // TestReservedKeyStripCoverage requires every dispatchWithBrokerRetry /

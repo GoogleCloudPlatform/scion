@@ -32,25 +32,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// withDeliveryCredentialKinds replaces the delivery credential set for the
-// duration of a test. Callers must not use t.Parallel.
-func withDeliveryCredentialKinds(t *testing.T, kinds ...CredentialKind) {
-	t.Helper()
-	set := map[CredentialKind]struct{}{}
-	for _, k := range kinds {
-		set[k] = struct{}{}
-	}
-	deliveryCredentialKindsMu.Lock()
-	saved := deliveryCredentialKinds
-	deliveryCredentialKinds = set
-	deliveryCredentialKindsMu.Unlock()
-	t.Cleanup(func() {
-		deliveryCredentialKindsMu.Lock()
-		deliveryCredentialKinds = saved
-		deliveryCredentialKindsMu.Unlock()
-	})
-}
-
 // deliveryGateKindCases lists every credential kind the gate is evaluated
 // against, with whether the kind is a delivery credential. A kind joins
 // deliveryCredentialKinds, and gains a row here with delivery set to true,
@@ -151,17 +132,6 @@ func TestDeliveryGate_Predicate(t *testing.T) {
 	assert.False(t, deliveryCredentialAdmitted("secret.deliver", ActionDeliver, ""), "empty kind")
 }
 
-func deliveryGateRequest(identity Identity, kind CredentialKind, res Resource, perm string) AuthzRequest {
-	return AuthzRequest{
-		Principal:  principalContextForIdentity(identity),
-		Credential: CredentialContext{Kind: kind},
-		Resource:   res,
-		Action:     ActionDeliver,
-		Permission: perm,
-		Explain:    true,
-	}
-}
-
 func assertDeliveryGateDenied(t *testing.T, d Decision, msg string) {
 	t.Helper()
 	assert.False(t, d.Allowed, "%s: reason %q", msg, d.Reason)
@@ -171,30 +141,6 @@ func assertDeliveryGateDenied(t *testing.T, d Decision, msg string) {
 	assert.Empty(t, d.Provenance.Relationships, "%s: the gate precedes relationship evaluation", msg)
 	assert.Equal(t, []string{deliveryGateReason}, d.Provenance.DenyReasons, msg)
 	assert.NotEmpty(t, d.Provenance.Permission, "%s: explain output names the gated permission", msg)
-}
-
-// notAdmittedReasons are the deny reasons a request denied without ever
-// being admitted can carry: the two Decide's entry classification check
-// (ptone/scion#2123) produces for a supplied credential kind — one when the
-// kind does not match the identity's own derived kind, the other when the
-// kind is not recognized at all — plus deliveryGateReason, for a kind that
-// matches the identity but sits outside the delivery set and so denies at
-// the gate itself instead.
-var notAdmittedReasons = []string{
-	"credential kind does not match identity",
-	"unrecognized credential kind",
-	deliveryGateReason,
-}
-
-// assertRequestNotAdmitted asserts the request was denied, and that the
-// reason is one Decide can actually produce for it (notAdmittedReasons),
-// without pinning which of entry classification or the delivery gate denied
-// it. Both leave the request unadmitted, which is the invariant this
-// asserts.
-func assertRequestNotAdmitted(t *testing.T, d Decision, msg string) {
-	t.Helper()
-	assert.False(t, d.Allowed, "%s: reason %q", msg, d.Reason)
-	assert.Contains(t, notAdmittedReasons, d.Reason, "%s: unexpected deny reason %q", msg, d.Reason)
 }
 
 // A super-admin holding a hub-wide role binding is denied every deliver

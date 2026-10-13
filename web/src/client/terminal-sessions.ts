@@ -16,7 +16,7 @@
 
 import type { Agent } from '../shared/types.js';
 import { isTerminalAvailable } from '../shared/types.js';
-import { extractApiError } from './api.js';
+import { apiErrorMessageFromBody, extractApiError } from './api.js';
 import { TerminalMetadata } from './terminal-metadata.js';
 import { AGENT_STOPPED_CLOSE_REASON, classifyPtyClose, PTY_CLOSE } from './terminal-close-codes.js';
 
@@ -50,6 +50,7 @@ export type TerminalDisconnectReason =
   | 'agent-stopped' // SSE reported agent stopped (phase change)
   | 'agent-deleted' // SSE reported agent deleted
   | 'server-error' // 5xx or unclassified HTTP error
+  | 'attach-unsupported' // Preflight 503 runtime_attach_unsupported (no path to the terminal)
   | 'connect-error' // WebSocket onerror before open
   | null; // No disconnect (connected, loading, or clean close)
 
@@ -204,11 +205,49 @@ const CONNECT_ERROR_FALLBACK_MS = 1_000;
 /**
  * The Hub upgrades the socket before it knows whether the broker stream
  * opened, so a socket can go straight from onopen to a close code without
- * ever proving the stream is live. Bounds how long a *reconnect* attempt
- * waits for the first data frame before it counts as failed. Not applied to
- * the initial connect: see the onopen handler in attach().
+ * ever proving the stream is live. Bounds how long a reconnect attempt
+ * waits, after onopen, for the first data frame before it ends in
+ * 'disconnected'.
  */
 const FIRST_FRAME_TIMEOUT_MS = 10_000;
+/**
+ * The same bound for the initial connect, before the session has ever
+ * connected. Longer, because the Hub's OpenStream is fire-and-forget: time
+ * to first byte is the broker's exec plus `tmux attach-session`, and a cold
+ * sandbox exec or a loaded host can legitimately take well over 10s on the
+ * very first attach. Once a session has connected, the agent has shown it
+ * can serve within a normal window, so reconnects use FIRST_FRAME_TIMEOUT_MS.
+ */
+const INITIAL_FIRST_FRAME_TIMEOUT_MS = 60_000;
+/**
+ * Bounds how long any attempt waits for onopen once its socket is created.
+ * The preflight has already reached the Hub, and the upgrade does not wait
+ * for the broker stream, so a socket that has not opened by then is not
+ * going to.
+ */
+const OPEN_TIMEOUT_MS = 10_000;
+/**
+ * Upper bound of the full-jitter delay before the automatic reconnect after
+ * a 4503 close (a planned relay restart or drain). Many panes are closed
+ * together in that case; a delay drawn uniformly from [0, this] spreads
+ * their redials instead of sending them all at once. Matches the relay's
+ * default GoAway.reconnect_after_ms.
+ */
+export const PROMPT_RECONNECT_MAX_DELAY_MS = 5_000;
+/**
+ * Error code of a preflight 503 that means the hub has no path to the
+ * agent's terminal (mirrors wsprotocol.ErrCodeRuntimeAttachUnsupported).
+ */
+const ATTACH_UNSUPPORTED_ERROR_CODE = 'runtime_attach_unsupported';
+/** Shown for a no-path preflight 503 whose body carries no message. */
+const NO_PATH_MESSAGE =
+  'Attach is not supported for this agent: its runtime has no attach, and the agent has no session that serves a terminal.';
+
+/** Injectable dependencies for tests. */
+export interface TerminalRegistryOptions {
+  /** Returns a number in [0, 1), like Math.random. */
+  readonly random?: () => number;
+}
 
 /** Document-local registry. Browser ownership and UI selection belong to the coordinator. */
 export class TerminalSessionRegistry {
@@ -218,8 +257,10 @@ export class TerminalSessionRegistry {
   private readonly accountId: string;
   readonly metadata: TerminalMetadata;
   private disposed = false;
+  private readonly random: () => number;
 
-  constructor(scope: TerminalScope) {
+  constructor(scope: TerminalScope, options: TerminalRegistryOptions = {}) {
+    this.random = options.random ?? Math.random;
     const url = new URL(scope.hubUrl);
     if (
       !['http:', 'https:'].includes(url.protocol) ||
@@ -268,7 +309,8 @@ export class TerminalSessionRegistry {
         }
       },
       (agent) => this.metadata.seed(id, agent),
-      deferConnect
+      deferConnect,
+      this.random
     );
     this.sessions.set(id, session);
     this.metadata.retain(id);
@@ -331,8 +373,12 @@ class Session implements TerminalSession {
    * Reset per attempt.
    */
   private attemptReachedOpen = false;
-  /** Bounds how long an opened socket may go without a first data frame. */
-  private firstFrameTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The current attempt's connect guard: OPEN_TIMEOUT_MS until onopen, then
+   * INITIAL_FIRST_FRAME_TIMEOUT_MS (initial connect) or FIRST_FRAME_TIMEOUT_MS
+   * (reconnect) until the first data frame.
+   */
+  private connectGuardTimer: ReturnType<typeof setTimeout> | null = null;
   /**
    * This session owes exactly one automatic reconnect attempt on the next
    * foregrounding. A session property rather than a function of the last
@@ -359,6 +405,13 @@ class Session implements TerminalSession {
   private currentAttemptManual = true;
   /** The only background timer this session runs: FAILED -> DISCONNECTED after 2 min. */
   private backgroundResetTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Pending full-jitter delay before the owed automatic attempt after a
+   * 4503 close. While it runs, no automatic attempt starts.
+   */
+  private reconnectDelayTimer: ReturnType<typeof setTimeout> | null = null;
+  /** The `reconnecting` value subscribers saw at the last notification. */
+  private notifiedReconnecting = false;
 
   /** Application heartbeat (liveness only; never drives retries directly). */
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
@@ -373,7 +426,8 @@ class Session implements TerminalSession {
     private readonly initialize: TerminalResourceInitializer,
     private readonly remove: () => void,
     private readonly seedMetadata: (agent: Agent) => void,
-    deferConnect = false
+    deferConnect = false,
+    private readonly random: () => number = Math.random
   ) {
     this.snapshot = {
       key,
@@ -393,8 +447,13 @@ class Session implements TerminalSession {
     return this.snapshot;
   }
 
+  /**
+   * True while an attempt is in flight, and also while the full-jitter wait
+   * before the automatic attempt after a 4503 close is running, so the pane
+   * shows "Reconnecting..." from the close through the redial.
+   */
   get reconnecting(): boolean {
-    return this.pending !== null;
+    return this.pending !== null || this.reconnectDelayTimer !== null;
   }
 
   subscribe(listener: (state: TerminalSessionState) => void): () => void {
@@ -407,7 +466,19 @@ class Session implements TerminalSession {
 
   private update(patch: Partial<TerminalSessionState>): void {
     this.snapshot = { ...this.snapshot, ...patch };
+    this.notifiedReconnecting = this.reconnecting;
     for (const listener of this.listeners) listener(this.snapshot);
+  }
+
+  /**
+   * Notifies subscribers when `reconnecting` (which reads `pending` and the
+   * jitter timer, not the snapshot) has changed since they were last
+   * notified. Connection and disconnect reason only change through
+   * update(), which always notifies.
+   */
+  private notifyIfReconnectingChanged(): void {
+    if (this.state.connection === 'closed') return;
+    if (this.reconnecting !== this.notifiedReconnecting) this.update({});
   }
 
   connect(): Promise<void> {
@@ -427,8 +498,9 @@ class Session implements TerminalSession {
     this.controller?.abort();
     this.releaseSocket();
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     this.clearBackgroundResetTimer();
+    this.clearReconnectDelayTimer();
     this.attemptReachedOpen = false;
     // Consume the seen-down observation: it authorized at most this one
     // attempt (manual or automatic). A subsequent stale/duplicate "running"
@@ -453,7 +525,8 @@ class Session implements TerminalSession {
       reconnectFailedManual: false,
     });
     void attempt.finally(() => {
-      if (this.pending === attempt) this.pending = null;
+      const wasPending = this.pending === attempt;
+      if (wasPending) this.pending = null;
       // Attempts that settle synchronously (agent fetch/preflight failure, thrown
       // error, agent-unavailable) never reach a socket, so onclose never fires.
       // Attempts that reach a socket are judged later, by onopen/onclose.
@@ -466,16 +539,28 @@ class Session implements TerminalSession {
       // it already disarms itself (autoArmed = false) and re-arms only via
       // noteAgentAvailable(), so it must not also set reconnectFailed, which
       // would block that re-arm until a manual click or the 2-min reset.
+      // Likewise a preflight that says there is no path to the terminal
+      // ('attach-unsupported') is a final answer, shown with the hub's
+      // message, not a failed reconnect.
       if (
         !controller.signal.aborted &&
         this.state.generation === generation &&
         wasEverConnected &&
+        this.state.disconnectReason !== 'attach-unsupported' &&
         (this.state.connection === 'disconnected' ||
           (this.state.connection === 'unavailable' &&
             !AGENT_UNAVAILABLE_REASONS.has(this.state.disconnectReason)))
       ) {
         this.markReconnectFailed();
       }
+      // `reconnecting` reads `pending`, which only just cleared. An attempt
+      // that settled without a socket (refused, unavailable, or an error)
+      // must tell subscribers, or they stay on "reconnecting". An attempt
+      // that handed off to a socket ('connecting') does not: the socket's
+      // own events (data, close, error) notify next, and the pane already
+      // treats 'connecting' as an attempt, so a repeat notification would
+      // only duplicate the 'connecting' state.
+      if (wasPending && this.state.connection !== 'connecting') this.notifyIfReconnectingChanged();
     });
     return attempt;
   }
@@ -485,8 +570,9 @@ class Session implements TerminalSession {
     // Close existing socket if any — the agent is no longer reachable.
     this.releaseSocket();
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     this.clearBackgroundResetTimer();
+    this.clearReconnectDelayTimer();
     this.controller?.abort();
     // Not armed until a fresh noteAgentAvailable() call re-arms it.
     this.autoArmed = false;
@@ -548,9 +634,35 @@ class Session implements TerminalSession {
 
   /** Runs the single owed attempt, if this session is armed and frontmost. */
   private maybeAutoAttempt(): void {
+    if (this.reconnectDelayTimer) return; // the jitter delay calls back when it ends
     if (!this.frontmost || !this.everConnected || this.pending) return;
     if (this.state.reconnectFailed || !this.autoArmed) return;
     void this.startAttempt(false);
+  }
+
+  /**
+   * After a 4503 close: waits a delay drawn uniformly from
+   * [0, PROMPT_RECONNECT_MAX_DELAY_MS], then runs the owed attempt (if the
+   * pane is still armed and frontmost by then). A manual reconnect, close
+   * or markUnavailable cancels the delay.
+   */
+  private scheduleJitteredAutoAttempt(): void {
+    this.clearReconnectDelayTimer();
+    const delay = Math.floor(this.random() * (PROMPT_RECONNECT_MAX_DELAY_MS + 1));
+    this.reconnectDelayTimer = setTimeout(() => {
+      this.reconnectDelayTimer = null;
+      this.maybeAutoAttempt();
+      // No attempt started (for example a background pane): `reconnecting`
+      // is false again.
+      this.notifyIfReconnectingChanged();
+    }, delay);
+    // `reconnecting` is now true.
+    this.notifyIfReconnectingChanged();
+  }
+
+  private clearReconnectDelayTimer(): void {
+    if (this.reconnectDelayTimer) clearTimeout(this.reconnectDelayTimer);
+    this.reconnectDelayTimer = null;
   }
 
   /** An attempt (automatic or manual) failed. Block further auto-attempts. */
@@ -632,7 +744,15 @@ class Session implements TerminalSession {
       const preflight = await fetch(`${endpoint}/pty`, { credentials: 'include', signal });
       if (!current()) return;
       if (!preflight.ok) {
-        const reason = classifyHttpStatus(preflight.status);
+        const body = await readJsonBody(preflight);
+        if (!current()) return;
+        // A 503 whose code says the hub has no path to the agent's terminal
+        // (the broker's runtime has no attach and the agent has no session
+        // serving one) is final: show it, and do not arm a retry. Other
+        // 503s keep the retriable server-error handling.
+        const noPath =
+          preflight.status === 503 && apiErrorCode(body) === ATTACH_UNSUPPORTED_ERROR_CODE;
+        const reason = noPath ? 'attach-unsupported' : classifyHttpStatus(preflight.status);
         const message =
           preflight.status === 403
             ? 'You do not have permission to attach to this agent.'
@@ -640,11 +760,10 @@ class Session implements TerminalSession {
               ? 'Authentication required to access this terminal.'
               : preflight.status === 404
                 ? 'Agent not found.'
-                : await extractApiError(
-                    preflight,
-                    `Terminal connection failed: ${preflight.statusText}`
-                  );
-        if (!current()) return;
+                : (apiErrorMessageFromBody(body) ??
+                  (noPath
+                    ? NO_PATH_MESSAGE
+                    : `Terminal connection failed: ${preflight.statusText}`));
         this.autoArmed = isRetryableReason(reason);
         this.update({ connection: 'disconnected', disconnectReason: reason, error: message });
         return;
@@ -680,7 +799,7 @@ class Session implements TerminalSession {
       // bounded guard so a silently dead stream cannot hang in
       // "Reconnecting..." forever.
       const confirmAttemptLive = (): void => {
-        this.clearFirstFrameGuard();
+        this.clearConnectGuard();
         this.attemptReachedOpen = true;
         this.everConnected = true;
         this.autoArmed = false;
@@ -695,20 +814,19 @@ class Session implements TerminalSession {
         });
         this.startHeartbeat(socket, live);
       };
+      // Every attempt, the initial connect included, is bounded twice: by
+      // OPEN_TIMEOUT_MS until onopen, then until the first data frame, by
+      // INITIAL_FIRST_FRAME_TIMEOUT_MS before the session has ever connected
+      // and by FIRST_FRAME_TIMEOUT_MS after. Either one ending leaves
+      // 'connecting' for 'disconnected', where the pane offers Retry.
+      this.armConnectGuard(socket, live, OPEN_TIMEOUT_MS);
       socket.onopen = (): void => {
         if (!live()) return;
-        // The 10s guard bounds reconnect attempts only, not the initial
-        // connect. The Hub's OpenStream is fire-and-forget, so time to first
-        // byte is the broker's exec plus `tmux attach-session`; a cold
-        // sandbox exec or a loaded host can legitimately take longer than
-        // 10s on the very first attach, and today's behavior accepts that.
-        // Once a session has connected at least once, subsequent attempts
-        // (automatic or manual) are bounded, since by then the agent has
-        // already proven it can serve within a normal window. The initial
-        // connect still waits for the first data frame (this is what fixes
-        // the accept-then-close loop for every attempt), it just never
-        // times out doing so.
-        if (this.everConnected) this.armFirstFrameGuard(socket, live);
+        this.armConnectGuard(
+          socket,
+          live,
+          this.everConnected ? FIRST_FRAME_TIMEOUT_MS : INITIAL_FIRST_FRAME_TIMEOUT_MS
+        );
       };
       socket.onmessage = (event: MessageEvent): void => {
         if (!live() || typeof event.data !== 'string') return;
@@ -731,7 +849,7 @@ class Session implements TerminalSession {
         if (!live()) return;
         this.socket = null;
         this.stopHeartbeat();
-        this.clearFirstFrameGuard();
+        this.clearConnectGuard();
         const reason = closeReasonFor(event.code, event.reason);
         // If this attempt's socket never proved live and we had connected
         // before, this was itself a failed reconnect attempt, not a fresh
@@ -767,6 +885,8 @@ class Session implements TerminalSession {
         });
         if (reason === 'network') {
           if (wasFailedAttempt) this.markReconnectFailed();
+          else if (event.code === PTY_CLOSE.UPSTREAM_UNAVAILABLE)
+            this.scheduleJitteredAutoAttempt();
           else this.maybeAutoAttempt();
         }
       };
@@ -779,7 +899,7 @@ class Session implements TerminalSession {
           if (!live() || this.socket !== socket) return;
           this.socket = null;
           this.stopHeartbeat();
-          this.clearFirstFrameGuard();
+          this.clearConnectGuard();
           try {
             socket.close();
           } catch {
@@ -847,27 +967,29 @@ class Session implements TerminalSession {
     this.heartbeatCheckTimer = null;
   }
 
-  /** Starts the bounded wait for the first data frame after onopen. */
-  private armFirstFrameGuard(socket: WebSocket, live: () => boolean): void {
-    this.clearFirstFrameGuard();
-    this.firstFrameTimer = setTimeout(() => {
-      this.firstFrameTimer = null;
+  /** (Re)starts the bounded wait for the attempt's next connect step. */
+  private armConnectGuard(socket: WebSocket, live: () => boolean, timeoutMs: number): void {
+    this.clearConnectGuard();
+    this.connectGuardTimer = setTimeout(() => {
+      this.connectGuardTimer = null;
       if (!live() || this.socket !== socket) return;
-      this.handleFirstFrameTimeout(socket);
-    }, FIRST_FRAME_TIMEOUT_MS);
+      this.handleConnectTimeout(socket);
+    }, timeoutMs);
   }
 
-  private clearFirstFrameGuard(): void {
-    if (this.firstFrameTimer) clearTimeout(this.firstFrameTimer);
-    this.firstFrameTimer = null;
+  private clearConnectGuard(): void {
+    if (this.connectGuardTimer) clearTimeout(this.connectGuardTimer);
+    this.connectGuardTimer = null;
   }
 
   /**
-   * No data arrived within the guard window after opening: treat this as a
-   * failed/dead attempt instead of hanging in "Reconnecting..." forever, and
-   * instead of silently redialing forever.
+   * The socket did not open, or opened but sent no data, within its guard
+   * window: end the attempt instead of hanging in 'connecting' forever, and
+   * instead of silently redialing forever. The socket is closed with its
+   * handlers detached first, so a late open, message or close cannot change
+   * the state afterward.
    */
-  private handleFirstFrameTimeout(socket: WebSocket): void {
+  private handleConnectTimeout(socket: WebSocket): void {
     if (this.socket !== socket) return;
     this.socket = null;
     this.stopHeartbeat();
@@ -886,20 +1008,18 @@ class Session implements TerminalSession {
       disconnectReason: 'network',
       error: 'No response from the terminal stream.',
     });
-    // This guard only ever arms when everConnected is already true (onopen
-    // only calls armFirstFrameGuard for that case), and attemptReachedOpen
-    // is still false here (the first data frame would have cleared the
-    // guard before it could fire). Unlike onclose and the onerror fallback,
-    // which can also see an established socket die, this guard only fires
-    // during a reconnect attempt that never produced data, so it always
-    // marks the attempt failed.
-    this.markReconnectFailed();
+    // attemptReachedOpen is still false here (the first data frame clears
+    // the guard before it can fire), so this attempt never produced data. A
+    // reconnect that times out is a failed attempt, same as onclose's
+    // wasFailedAttempt. An initial connect is not a reconnect: it stays in
+    // plain 'disconnected', as an initial connect closed by the network does.
+    if (this.everConnected) this.markReconnectFailed();
   }
 
   /** No response to ping: go straight to disconnected without waiting for onclose. */
   private handleDeadSocket(socket: WebSocket): void {
     this.stopHeartbeat();
-    this.clearFirstFrameGuard();
+    this.clearConnectGuard();
     if (this.socket !== socket) return;
     this.socket = null;
     try {
@@ -961,8 +1081,9 @@ class Session implements TerminalSession {
       });
     this.controller?.abort();
     attempt(() => this.stopHeartbeat());
-    attempt(() => this.clearFirstFrameGuard());
+    attempt(() => this.clearConnectGuard());
     attempt(() => this.clearBackgroundResetTimer());
+    attempt(() => this.clearReconnectDelayTimer());
     attempt(() => this.releaseSocket());
     attempt(() => this.releaseResources());
     attempt(() => this.remove());
@@ -1020,6 +1141,24 @@ function closeReasonFor(code: number, reason: string | undefined): TerminalDisco
     }
   }
   return 'network';
+}
+
+/** Parses a response body as JSON, or undefined when it is not JSON. */
+async function readJsonBody(res: Response): Promise<unknown> {
+  try {
+    return await res.json();
+  } catch {
+    return undefined;
+  }
+}
+
+/** The machine-readable error.code of a hub API error body, if any. */
+function apiErrorCode(body: unknown): string | undefined {
+  if (body === null || typeof body !== 'object') return undefined;
+  const error = (body as { error?: unknown }).error;
+  if (error === null || typeof error !== 'object') return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /** Whether an HTTP-classified disconnect reason is retriable. */

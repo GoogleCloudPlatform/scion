@@ -177,6 +177,101 @@ export function summarizeScenario(scenario, results) {
   };
 }
 
+/**
+ * expectedFirstPageCount is how many cards or rows the first page of a
+ * paged project grid or list must render: one full page, or every agent
+ * when there are fewer. `total` is the pager's total when known (a number);
+ * otherwise the seeded agent count is used. A missing or non-positive page
+ * size (no pager rendered) means the view is not paged, so every agent is
+ * expected, as before paging existed.
+ */
+export function expectedFirstPageCount(pageSize, agentCount, total) {
+  const all = typeof total === 'number' && total >= 0 ? total : agentCount;
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return all;
+  return Math.min(pageSize, all);
+}
+
+/** pageCountFor is the number of pages a paged view has for `total` items. */
+export function pageCountFor(pageSize, total) {
+  if (!(typeof pageSize === 'number' && pageSize > 0)) return null;
+  if (!(typeof total === 'number' && total >= 0)) return null;
+  return Math.max(1, Math.ceil(total / pageSize));
+}
+
+/**
+ * mapWithConcurrency maps items through fn with at most `limit` calls in
+ * flight at once, preserving input order in the result.
+ */
+export async function mapWithConcurrency(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i], i);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
+/**
+ * walkEndReason classifies a pager whose Next is disabled: `no-next-page`
+ * when it is on the last page its total implies (or the total is unknown,
+ * zero or capped, so no later page can be shown to exist), and
+ * `next-unavailable-before-last-page` when its own total says more pages
+ * exist, i.e. the walk ended early. Returns null while Next is available
+ * or with no pager.
+ */
+export function walkEndReason(pager) {
+  if (!pager || pager.hasNext) return null;
+  const total = typeof pager.total === 'number' && pager.total > 0 ? pager.total : null;
+  const knownPages = pageCountFor(pager.pageSize, total);
+  if (knownPages != null && pager.pageIndex + 1 < knownPages) {
+    return 'next-unavailable-before-last-page';
+  }
+  return 'no-next-page';
+}
+
+/**
+ * summarizePageChanges reports page-change latency (Next clicked to the
+ * next page rendered) over every completed change of every populated run.
+ * A change that did not complete within its timeout is counted in
+ * pageChangeFailureCount and excluded from the timing stats.
+ */
+export function summarizePageChanges(results) {
+  const changes = [];
+  let attempted = 0;
+  for (const r of results) {
+    if (r.outcome !== 'populated' || !Array.isArray(r.pageChanges)) continue;
+    for (const c of r.pageChanges) {
+      attempted++;
+      if (c.ok) changes.push(c.ms);
+    }
+  }
+  const mm = minMax(changes);
+  // Runs whose walk ended with Next disabled before the last page the
+  // pager's total implies: a product-side early stop, counted on its own so
+  // it is not hidden behind an all-completed change count.
+  const earlyStops = results.filter(
+    (r) => r.pageChangesStopReason === 'next-unavailable-before-last-page'
+  ).length;
+  const sizes = [...new Set(results.map((r) => r.pageSize).filter((n) => n != null))];
+  const counts = [...new Set(results.map((r) => r.pageCount).filter((n) => n != null))];
+  return {
+    pageSize: sizes.length === 1 ? sizes[0] : sizes.length === 0 ? null : sizes,
+    pageCount: counts.length === 1 ? counts[0] : counts.length === 0 ? null : counts,
+    pageChangeAttemptCount: attempted,
+    pageChangeSuccessCount: changes.length,
+    pageChangeFailureCount: attempted - changes.length,
+    pageWalkEarlyStopCount: earlyStops,
+    medianPageChangeMs: median(changes),
+    minPageChangeMs: mm.min,
+    maxPageChangeMs: mm.max,
+    stddevPageChangeMs: stddev(changes),
+  };
+}
+
 // ---- test-login session (mirrors web/e2e/harness/auth.ts) -----------------
 
 export const USER_TOKEN_ISSUER = 'scion-hub';
@@ -411,4 +506,234 @@ export function summarizeBurstScenario(results) {
     fullySettledRunCount: validResults.filter((r) => !r.timedOut && r.trackedCount > 0).length,
     fullyRestoredRunCount: results.filter((r) => r.restoreFullyConfirmed).length,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Readiness marks (web/src/client/readiness-marks.ts). The web client writes
+// these User Timing marks only when the hub's profiling readiness_marks
+// setting is on. Keep the names in step with READINESS_MARKS there.
+
+export const READINESS_MARK_PREFIX = 'scion:ready:';
+
+export const READINESS_MARK_NAMES = {
+  agentsData: 'scion:ready:agents-data',
+  rowsGrid: 'scion:ready:rows-grid',
+  rowsList: 'scion:ready:rows-list',
+  graph: 'scion:ready:graph',
+};
+
+/**
+ * The marks a populated run of a scenario must have written when the
+ * setting is on: the data mark plus the view's own mark. An unknown
+ * scenario expects none.
+ */
+export function expectedReadinessMarks(scenarioKey) {
+  const { agentsData, rowsGrid, rowsList, graph } = READINESS_MARK_NAMES;
+  switch (scenarioKey) {
+    case 'project-grid':
+      return [agentsData, rowsGrid];
+    case 'project-list':
+      return [agentsData, rowsList];
+    case 'project-graph-embedded':
+    case 'standalone-graph':
+      return [agentsData, graph];
+    default:
+      return [];
+  }
+}
+
+/**
+ * Reduces User Timing entries ({name, startTime}) to the readiness marks,
+ * as name -> ms since navigation start (one decimal). Other marks are
+ * ignored; a repeated name keeps its first entry.
+ */
+export function readinessMarksFrom(entries) {
+  const out = {};
+  for (const e of entries || []) {
+    if (typeof e?.name !== 'string' || !e.name.startsWith(READINESS_MARK_PREFIX)) continue;
+    if (e.name in out) continue;
+    out[e.name] = Math.round(e.startTime * 10) / 10;
+  }
+  return out;
+}
+
+/**
+ * Checks a run's marks. With the setting expected on, `missing` lists the
+ * expected marks not found. With it expected off, `unexpected` lists every
+ * readiness mark found, since off must write none.
+ */
+export function checkReadinessMarks(found, expected, expectOn) {
+  const names = Object.keys(found || {});
+  return expectOn
+    ? { missing: expected.filter((n) => !names.includes(n)), unexpected: [] }
+    : { missing: [], unexpected: names };
+}
+
+/**
+ * Summarizes the readiness marks of a scenario's populated runs: per mark,
+ * how many runs wrote it and median/min/max ms (overall, cold and warm),
+ * plus how many populated runs missed an expected mark or wrote one while
+ * the setting was expected off.
+ */
+export function summarizeReadinessMarks(results) {
+  const populated = results.filter((r) => r.outcome === 'populated');
+  const byName = {};
+  for (const r of populated) {
+    for (const [name, ms] of Object.entries(r.readinessMarks || {})) {
+      (byName[name] ||= []).push({ ms, cold: r.cold });
+    }
+  }
+  const marks = {};
+  for (const name of Object.keys(byName).sort()) {
+    const all = byName[name].map((x) => x.ms);
+    const mm = minMax(all);
+    marks[name] = {
+      count: all.length,
+      medianMs: median(all),
+      minMs: mm.min,
+      maxMs: mm.max,
+      medianMsCold: median(byName[name].filter((x) => x.cold).map((x) => x.ms)),
+      medianMsWarm: median(byName[name].filter((x) => !x.cold).map((x) => x.ms)),
+    };
+  }
+  return {
+    readinessMarks: marks,
+    readinessMarksMissingRunCount: populated.filter(
+      (r) => (r.readinessMarksMissing || []).length > 0
+    ).length,
+    readinessMarksUnexpectedRunCount: populated.filter(
+      (r) => (r.readinessMarksUnexpected || []).length > 0
+    ).length,
+  };
+}
+
+// ---- wall-clock median-ratio budgets ---------------------------------------
+//
+// Used by median-ratio.mjs; see perf/bench/README.md "Wall-clock budgets".
+
+/** Defaults for the median-ratio check, documented in perf/bench/README.md. */
+export const MEDIAN_RATIO_DEFAULTS = Object.freeze({
+  // Fail when a metric's median exceeds its baseline median by more than this.
+  ratio: 1.25,
+  // Fewer timed (post-warm-up) samples than this is an error, not a pass.
+  minTrials: 10,
+});
+
+/**
+ * wallClockSamples extracts the timed samples per metric from an apibench
+ * report and/or a large-project-bench report.
+ *
+ * - apibench: `api:<scenario name>` -> totalMs of each successful attempt.
+ *   apibench's own --warmup requests are discarded before the report.
+ * - large-project-bench: `browser:<scenario key>` -> navToPopulatedMs of
+ *   each warm, populated run. The first (cold, fresh-context) run of each
+ *   scenario is the warm-up and is not counted.
+ *
+ * Failed or unpopulated attempts are not samples; they reduce the count,
+ * which the minTrials check catches.
+ */
+export function wallClockSamples({ api = null, browser = null } = {}) {
+  const out = {};
+  for (const sc of api?.scenarios || []) {
+    out[`api:${sc.name}`] = (sc.attempts || []).filter((a) => a.success).map((a) => a.totalMs);
+  }
+  for (const [key, sc] of Object.entries(browser?.scenarios || {})) {
+    out[`browser:${key}`] = (sc.runs || [])
+      .filter((r) => !r.cold && r.outcome === 'populated' && r.navToPopulatedMs != null)
+      .map((r) => r.navToPopulatedMs);
+  }
+  return out;
+}
+
+/**
+ * checkMedianRatioOptions throws on an unusable ratio or trial minimum, so
+ * a typo (for example "1,25", which is NaN) cannot turn the check into a
+ * pass. Undefined values are allowed (the defaults apply).
+ */
+export function checkMedianRatioOptions({ ratio, minTrials } = {}) {
+  if (ratio !== undefined && !(Number.isFinite(ratio) && ratio > 0)) {
+    throw new Error(`ratio must be a finite number above 0, got ${ratio}`);
+  }
+  if (minTrials !== undefined && !(Number.isInteger(minTrials) && minTrials >= 1)) {
+    throw new Error(`minimum trials must be an integer of at least 1, got ${minTrials}`);
+  }
+}
+
+/**
+ * compareMedianRatio compares each baseline metric's current median with
+ * its stored baseline median. A metric fails when its ratio is above
+ * `ratio`, or when it has fewer than `minTrials` samples or none at all.
+ * Metrics present only in the current samples are reported as `new` and do
+ * not fail. Returns { ok, rows }.
+ *
+ * Throws (a setup error, not a result) when the ratio or trial minimum is
+ * unusable, when the baseline has no metrics (it would pass vacuously), or
+ * when the baseline came from a smoke run and opts.smoke is not set.
+ */
+export function compareMedianRatio(samples, baseline, opts = {}) {
+  const ratio = opts.ratio ?? baseline.ratio ?? MEDIAN_RATIO_DEFAULTS.ratio;
+  const minTrials = opts.minTrials ?? baseline.minTrials ?? MEDIAN_RATIO_DEFAULTS.minTrials;
+  checkMedianRatioOptions({ ratio, minTrials });
+  if (!baseline.metrics || Object.keys(baseline.metrics).length === 0) {
+    throw new Error('the baseline has no metrics');
+  }
+  if (baseline.smoke && !opts.smoke) {
+    throw new Error('the baseline is from a smoke run; a check needs a full baseline');
+  }
+  const rows = [];
+  for (const [metric, b] of Object.entries(baseline.metrics)) {
+    const xs = samples[metric] || [];
+    const current = median(xs);
+    const row = { metric, trials: xs.length, baselineMedianMs: b.medianMs, medianMs: current };
+    if (xs.length < minTrials) {
+      row.status = 'insufficient';
+    } else {
+      row.ratio = current / b.medianMs;
+      row.status = row.ratio > ratio ? 'over' : 'ok';
+    }
+    rows.push(row);
+  }
+  for (const metric of Object.keys(samples)) {
+    if (!(metric in baseline.metrics)) {
+      rows.push({
+        metric,
+        trials: samples[metric].length,
+        medianMs: median(samples[metric]),
+        status: 'new',
+      });
+    }
+  }
+  return { ok: rows.every((r) => r.status === 'ok' || r.status === 'new'), ratio, minTrials, rows };
+}
+
+/**
+ * buildWallClockBaseline turns samples into a baseline file body. Every
+ * metric must have at least minTrials samples. `meta` is copied in as is
+ * (commit, runner description, date); no host names belong in it.
+ *
+ * A trial minimum below the default is refused unless opts.smoke is set;
+ * a smoke baseline is marked `smoke: true`, and compareMedianRatio refuses
+ * it for a real check, so smoke settings cannot become the stored policy.
+ */
+export function buildWallClockBaseline(samples, meta = {}, opts = {}) {
+  const ratio = opts.ratio ?? MEDIAN_RATIO_DEFAULTS.ratio;
+  const minTrials = opts.minTrials ?? MEDIAN_RATIO_DEFAULTS.minTrials;
+  checkMedianRatioOptions({ ratio, minTrials });
+  if (minTrials < MEDIAN_RATIO_DEFAULTS.minTrials && !opts.smoke) {
+    throw new Error(
+      `minimum trials ${minTrials} is below the default ${MEDIAN_RATIO_DEFAULTS.minTrials}; ` +
+        'only a smoke run (--smoke) may write such a baseline'
+    );
+  }
+  if (Object.keys(samples).length === 0) {
+    throw new Error('no samples: the reports had no scenarios');
+  }
+  const metrics = {};
+  for (const [metric, xs] of Object.entries(samples)) {
+    if (xs.length < minTrials) {
+      throw new Error(`${metric}: ${xs.length} timed samples, need at least ${minTrials}`);
+    }
+    metrics[metric] = { medianMs: median(xs), trials: xs.length };
+  }
+  return { ...meta, ...(opts.smoke ? { smoke: true } : {}), ratio, minTrials, metrics };
 }

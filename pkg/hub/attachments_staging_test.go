@@ -37,15 +37,6 @@ func (a *attachmentStaging) hostDir() string {
 	return filepath.Join(a.sharedDir, filepath.FromSlash(a.relDir))
 }
 
-// writeTempFile writes content to a new file under t.TempDir() and returns its path.
-func writeTempFile(t *testing.T, name, content string) string {
-	t.Helper()
-	dir := t.TempDir()
-	p := filepath.Join(dir, name)
-	require.NoError(t, os.WriteFile(p, []byte(content), 0o644))
-	return p
-}
-
 func TestNewAttachmentStaging_Paths(t *testing.T) {
 	st := newAttachmentStaging("/home/scion/.scion/project-configs/proj__abcd1234/shared-dirs/scratchpad", false)
 	require.NotNil(t, st)

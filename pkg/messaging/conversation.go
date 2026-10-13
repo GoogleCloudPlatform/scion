@@ -37,15 +37,21 @@ type ConversationUpserter interface {
 // into ResolveOrCreateThreadConversation, it enables the function to resolve
 // native topic threads via the existing dual-write link instead of minting
 // a shadow conversation row.
+//
+// Both lookups are scoped to a project: a topic of another project answers
+// store.ErrNotFound, exactly like a topic that does not exist.
 type TopicConversationLookup interface {
-	GetTopicConversationID(ctx context.Context, topicID string) (string, error)
-	// GetTopicConversationIDIncludingDeleted returns the conversation_id for a
-	// webchat topic regardless of its deletion state.
+	// GetTopicConversationIDInProject returns the conversation_id of a live
+	// webchat topic of projectID.
+	GetTopicConversationIDInProject(ctx context.Context, projectID, topicID string) (string, error)
+	// GetTopicConversationIDIncludingDeletedInProject returns the
+	// conversation_id for a webchat topic of projectID regardless of its
+	// deletion state.
 	//
 	// Soft-deletion is not declassification. A tombstoned native topic is still
 	// a native topic for the purpose of "should I mint." Deletion hides a topic
 	// from users; it must not make the mint guard forget the topic was ours.
-	GetTopicConversationIDIncludingDeleted(ctx context.Context, topicID string) (string, error)
+	GetTopicConversationIDIncludingDeletedInProject(ctx context.Context, projectID, topicID string) (string, error)
 }
 
 // ConversationReader is the minimal interface for read-only conversation
@@ -546,8 +552,9 @@ func ResolveThreadConversationForRead(
 	if cfg.topicLookup != nil && kind == "group" && strings.HasPrefix(extRef, "thread:") {
 		parts := strings.SplitN(extRef, ":", 3)
 		if len(parts) == 3 {
+			// The topic is looked up within the key's project (parts[1]).
 			topicThreadID := parts[2]
-			convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeleted(ctx, topicThreadID)
+			convID, lookupErr := cfg.topicLookup.GetTopicConversationIDIncludingDeletedInProject(ctx, parts[1], topicThreadID)
 			if lookupErr == nil && convID != "" {
 				log.Debug("read-switch: conversation resolved via topic lookup (DEF-100)",
 					"external_ref", extRef, "conversation_id", convID)

@@ -1,0 +1,37 @@
+pkgmove plan: example.com/fx/hub -> example.com/fx/hub/sub (package sub)
+
+Files (2):
+  git mv hub/move.go hub/sub/move.go
+  git mv hub/move_ptr.go hub/sub/move_ptr.go
+
+Renames (0):
+
+Alias entries (2):
+  var   DefaultHook = sub.DefaultHook
+  var   IsDefault = sub.IsDefault
+
+Alias files (1):
+  hub/zz_alias_sub.go (14 lines)
+
+Reference rewrites in remaining files (vars and func values) (0):
+
+Remaining source files edited (0):
+
+pkgmove safety report: example.com/fx/hub -> example.com/fx/hub/sub
+Files moved: 2. Findings: 2. Errors: 0.
+
+Why this matters: a moved package is initialised before the package that
+imports it, so init() functions and package-level var initialisers in the moved
+files now run before every initialiser of the source package. Review each
+ERROR/HIGH/WARN item below before merging.
+
+== WARN: func name seen through its value changes (runtime.FuncForPC, stack traces) ==
+  hub/move.go:3: example.com/fx/hub.DefaultHook is now example.com/fx/hub/sub.DefaultHook for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+  hub/move.go:5: example.com/fx/hub.IsDefault is now example.com/fx/hub/sub.IsDefault for runtime.FuncForPC(reflect.ValueOf(f).Pointer()).Name() and panic traces
+
+safety report written to hub/zz_alias_sub_safety.txt
+
+sanity: go list example.com/fx/hub example.com/fx/hub/sub
+sanity: go list OK
+sanity: type-checking both packages (with in-package tests)
+sanity: type-check OK

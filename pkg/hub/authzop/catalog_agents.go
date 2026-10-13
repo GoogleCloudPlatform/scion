@@ -30,11 +30,19 @@ var agentOperations = []OperationSpec{
 		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
 		ResourceResolver: "project-from-body",
 		BasePermission:   "agent.create",
-		Effects:          []SecurityEffect{EffectCreateResource},
+		Effects:          []SecurityEffect{EffectCreateResource, EffectGrantAuthority},
 		DelegationKind:   DelegationNonAmplification,
 		DelegationDescription: "Actor must hold the role and scopes delegated to the new agent (CanDelegate non-amplification); " +
 			"an agent actor is also evaluated against the delegation ceiling of its live delegation chain for agent.create on the target project",
 		AuthorityEval: AuthorityEvalNone,
+		// commitAgentCreate writes the agent row, its delegation edge and
+		// this record in one transaction.
+		AuditObligation: &AuditObligation{
+			EventType:     "agent_delegation",
+			ContextFields: []string{"actor_id"},
+			AfterFields:   []string{"agent_id", "can_delegate_result"},
+			Atomic:        true,
+		},
 		// conflict: the user or agent the agent belongs to no longer exists
 		// (deleted while the create ran), or its slug's identity key is taken.
 		DenialCodes: []DenialCode{DenialForbidden, DenialConflict},
@@ -42,6 +50,7 @@ var agentOperations = []OperationSpec{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_ExplicitRoleAboveParentDenied"},
 			{Package: "pkg/hub", Function: "TestAgentCreate_RequiresLiveDelegator"},
+			{Package: "pkg/hub", Function: "TestCreateAuditFailureRollsBack"},
 		},
 		Bearer: AdmitOn(BearerTargetProjectBody, BearerBoundaryProject, BearerBoundaryHub),
 	},
@@ -178,6 +187,24 @@ var agentOperations = []OperationSpec{
 		Bearer:           AdmitOn(BearerTargetAgentRecord, BearerBoundaryProject, BearerBoundaryHub),
 	},
 	{
+		ID:          "agent.hold.lift",
+		Domain:      "agent",
+		Description: "Lift the holds of a suspended agent whose owners are admitted to its project again (hub admin)",
+		EntryPoints: []EntryPoint{
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/hold/lift", Method: "POST"},
+		},
+		Principals:       []PrincipalKind{PrincipalUser},
+		Credentials:      []CredentialKind{CredentialSessionJWT},
+		ResourceResolver: "agent-from-url",
+		BasePermission:   "agent.update",
+		Effects:          []SecurityEffect{EffectUpdateResource},
+		DelegationKind:   DelegationNone,
+		AuthorityEval:    AuthorityEvalNone,
+		DenialCodes:      []DenialCode{DenialForbidden},
+		TestRefs:         []TestRef{{Package: "pkg/hub", Function: "TestAgentSubRoute_CatalogDrift"}, {Package: "pkg/hub", Function: "TestAgentHoldLift"}},
+		Bearer:           SessionOnly(ReasonGovernancePending),
+	},
+	{
 		ID:          "agent.lifecycle.reincarnate",
 		Domain:      "agent",
 		Description: "Reincarnate an agent",
@@ -207,8 +234,10 @@ var agentOperations = []OperationSpec{
 		EntryPoints: []EntryPoint{
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "GET"},
 		},
-		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent},
-		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT},
+		// An agent delegated credential is admitted here behind
+		// hub.agent_delegation (agentDelegationAdmittedRoutes in pkg/hub).
+		Principals:       []PrincipalKind{PrincipalUser, PrincipalAgent, PrincipalAgentDelegated},
+		Credentials:      []CredentialKind{CredentialSessionJWT, CredentialScopedUAT, CredentialAgentJWT, CredentialDelegatedAgent},
 		ResourceResolver: "agent-from-url",
 		BasePermission:   "agent.read",
 		Effects:          []SecurityEffect{EffectReadOne},

@@ -31,6 +31,8 @@ const (
 	FieldImage = "image"
 	// FieldConfig holds the string denoting the config field in the database.
 	FieldConfig = "config"
+	// FieldAgentConfig holds the string denoting the agent_config field in the database.
+	FieldAgentConfig = "agent_config"
 	// FieldContentHash holds the string denoting the content_hash field in the database.
 	FieldContentHash = "content_hash"
 	// FieldScope holds the string denoting the scope field in the database.
@@ -45,6 +47,8 @@ const (
 	FieldStorageBucket = "storage_bucket"
 	// FieldStoragePath holds the string denoting the storage_path field in the database.
 	FieldStoragePath = "storage_path"
+	// FieldLayout holds the string denoting the layout field in the database.
+	FieldLayout = "layout"
 	// FieldFiles holds the string denoting the files field in the database.
 	FieldFiles = "files"
 	// FieldBaseTemplate holds the string denoting the base_template field in the database.
@@ -78,6 +82,7 @@ var Columns = []string{
 	FieldDefaultHarnessConfig,
 	FieldImage,
 	FieldConfig,
+	FieldAgentConfig,
 	FieldContentHash,
 	FieldScope,
 	FieldScopeID,
@@ -85,6 +90,7 @@ var Columns = []string{
 	FieldStorageURI,
 	FieldStorageBucket,
 	FieldStoragePath,
+	FieldLayout,
 	FieldFiles,
 	FieldBaseTemplate,
 	FieldStatus,
@@ -113,6 +119,8 @@ var (
 	SlugValidator func(string) error
 	// DefaultScope holds the default value on creation for the "scope" field.
 	DefaultScope string
+	// DefaultLayout holds the default value on creation for the "layout" field.
+	DefaultLayout string
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -198,6 +206,11 @@ func ByConfig(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldConfig, opts...).ToFunc()
 }
 
+// ByAgentConfig orders the results by the agent_config field.
+func ByAgentConfig(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldAgentConfig, opts...).ToFunc()
+}
+
 // ByContentHash orders the results by the content_hash field.
 func ByContentHash(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldContentHash, opts...).ToFunc()
@@ -231,6 +244,11 @@ func ByStorageBucket(opts ...sql.OrderTermOption) OrderOption {
 // ByStoragePath orders the results by the storage_path field.
 func ByStoragePath(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldStoragePath, opts...).ToFunc()
+}
+
+// ByLayout orders the results by the layout field.
+func ByLayout(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldLayout, opts...).ToFunc()
 }
 
 // ByFiles orders the results by the files field.

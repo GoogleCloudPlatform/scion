@@ -22,8 +22,14 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import type { ArtifactResponse } from '../../client/artifacts.js';
+import type {
+  ArtifactResponse,
+  ArtifactVersion,
+  DiscardedVersion,
+} from '../../client/artifacts.js';
 import type { ScionPageArtifactDetail } from './artifact-detail.js';
+import { resetPrincipalNames } from '../../client/principal-names.js';
+import { requestBodyText, requestUrl } from '../../client/__fixtures__/request-url.js';
 
 const ID = '5f1c2d3e-0000-4000-8000-000000000001';
 
@@ -52,6 +58,7 @@ function artifact(path: string, mediaType: string): ArtifactResponse {
       state: 'ready',
       files: [{ path, size: 5, sha256: 'ab', mediaType }],
     },
+    canPublish: true,
   };
 }
 
@@ -60,7 +67,31 @@ interface MockOptions {
   fileStatus?: number;
   /** Status of the owner-agent lookup (default 404). */
   agentStatus?: number;
+  /** Versions listed by GET .../versions (default: meta's version). */
+  versions?: ArtifactVersion[];
+  /** crossProjectSharing in GET .../grants (default: off). */
+  crossProjectSharing?: boolean;
+  /** Discarded versions listed by GET .../versions (default: none). */
+  discarded?: DiscardedVersion[];
+  /**
+   * Version list pages by their before= value ('' for the first page);
+   * when set, it replaces versions and discarded.
+   */
+  versionPages?: Record<
+    string,
+    { versions: ArtifactVersion[]; discarded: DiscardedVersion[]; nextBefore?: number }
+  >;
+  /** Version list pages held back until their promise resolves, by before= value. */
+  versionPageGates?: Record<string, Promise<void>>;
+  /** expiresAt of a minted view (default: far in the future). */
+  viewExpiresAt?: string;
+  /** Answers POST/PUT requests other than the view mint. */
+  write?: (method: string, url: string) => Response;
+  /** File body at the time of the read (overrides body). */
+  bodyFn?: () => string;
 }
+
+const VIEW_URL = `/api/v1/artifacts/view/${ID}.1.9999999999.c2lnbmF0dXJl/`;
 
 /** Mocks fetch: metadata answers meta (or 404 when null), file reads answer body. */
 function mockFetch(
@@ -71,20 +102,56 @@ function mockFetch(
   const urls: string[] = [];
   vi.stubGlobal(
     'fetch',
-    vi.fn((input: RequestInfo | URL) => {
-      const url = String(input);
-      urls.push(url);
+    vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = requestUrl(input);
+      const method = init?.method ?? 'GET';
+      urls.push(method === 'GET' ? url : `${method} ${url}`);
+      if (method !== 'GET' && !url.endsWith('/view')) {
+        return Promise.resolve(
+          opts.write ? opts.write(method, url) : new Response(null, { status: 500 })
+        );
+      }
+      if (url.endsWith('/grants')) {
+        const grants = { grants: [], crossProjectSharing: !!opts.crossProjectSharing };
+        return Promise.resolve(new Response(JSON.stringify(grants), { status: 200 }));
+      }
       if (url.startsWith('/api/v1/agents/')) {
         const status = opts.agentStatus ?? 404;
         return Promise.resolve(
           new Response('{"error":{"code":"forbidden","message":"denied"}}', { status })
         );
       }
+      if (url.endsWith('/view')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              url: VIEW_URL,
+              expiresAt: opts.viewExpiresAt ?? '2999-01-01T00:00:00Z',
+            }),
+            {
+              status: 200,
+            }
+          )
+        );
+      }
+      if (/\/versions(\?|$)/.test(url)) {
+        const versions = opts.versions ?? (meta?.version ? [{ ...meta.version, files: [] }] : []);
+        if (opts.versionPages) {
+          const before = /[?&]before=(\d+)/.exec(url)?.[1] ?? '';
+          const page = opts.versionPages[before] ?? { versions: [], discarded: [] };
+          const gate = opts.versionPageGates?.[before] ?? Promise.resolve();
+          return gate.then(() => new Response(JSON.stringify(page), { status: 200 }));
+        }
+        const discarded = opts.discarded ?? [];
+        return Promise.resolve(
+          new Response(JSON.stringify({ versions, discarded }), { status: 200 })
+        );
+      }
       if (url.includes('/files/')) {
         const status = opts.fileStatus ?? 200;
         return Promise.resolve(
           status === 200
-            ? new Response(body, { status })
+            ? new Response(opts.bodyFn ? opts.bodyFn() : body, { status })
             : new Response('{"error":{"code":"internal","message":"boom"}}', { status })
         );
       }
@@ -104,10 +171,13 @@ function mockFetch(
   return urls;
 }
 
-async function mount(flag: boolean): Promise<ScionPageArtifactDetail> {
+async function mount(
+  flag: boolean,
+  path = `/projects/p-1/artifacts/${ID}`
+): Promise<ScionPageArtifactDetail> {
   window.__SCION_FEATURES__ = { 'hub.artifacts': flag };
   const el = document.createElement('scion-page-artifact-detail') as ScionPageArtifactDetail;
-  el.pageData = { path: `/projects/p-1/artifacts/${ID}` } as ScionPageArtifactDetail['pageData'];
+  el.pageData = { path } as ScionPageArtifactDetail['pageData'];
   document.body.appendChild(el);
   for (let i = 0; i < 20; i++) {
     await new Promise((r) => setTimeout(r, 0));
@@ -118,6 +188,11 @@ async function mount(flag: boolean): Promise<ScionPageArtifactDetail> {
 
 describe('artifact page', () => {
   beforeAll(async () => {
+    // Frames are checked by their attributes; nothing should load them.
+    const hd = (
+      window as unknown as { happyDOM?: { settings: { disableIframePageLoading: boolean } } }
+    ).happyDOM;
+    if (hd) hd.settings.disableIframePageLoading = true;
     await import('./artifact-detail.js');
   }, 30_000);
 
@@ -125,6 +200,7 @@ describe('artifact page', () => {
     document.body.innerHTML = '';
     vi.unstubAllGlobals();
     delete window.__SCION_FEATURES__;
+    resetPrincipalNames();
   });
 
   it('shows nothing but a 404 when the experiment is off', async () => {
@@ -137,13 +213,13 @@ describe('artifact page', () => {
   it('renders markdown, fetching the bytes through the hub', async () => {
     const urls = mockFetch(artifact('design.md', 'text/markdown'), '# Hello');
     const el = await mount(true);
-    const preview = el.shadowRoot!.querySelector('scion-markdown-preview') as
+    const preview = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as
       | (HTMLElement & { content: string })
       | null;
     expect(preview).not.toBeNull();
     expect(preview!.content).toBe('# Hello');
     expect(urls).toContain(`/api/v1/artifacts/${ID}/versions/1/files/design.md?stream=1`);
-    expect(el.shadowRoot!.querySelector('h1')!.textContent).toBe('Design');
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Design');
   });
 
   it('renders text read-only in the code editor', async () => {
@@ -165,12 +241,80 @@ describe('artifact page', () => {
     expect(urls.some((u) => u.includes('/files/'))).toBe(false);
   });
 
-  it('offers HTML only as a download', async () => {
+  it('renders HTML in a sandboxed frame under a view capability, marked as untrusted', async () => {
     const urls = mockFetch(artifact('page.html', 'text/html'));
     const el = await mount(true);
-    expect(el.shadowRoot!.querySelector('iframe')).toBeNull();
-    expect(el.shadowRoot!.querySelector('.download-state')).not.toBeNull();
+    const frame = el.shadowRoot!.querySelector('.untrusted iframe')!;
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(frame.getAttribute('src')).toBe(VIEW_URL);
+    expect(frame.getAttribute('referrerpolicy')).toBe('no-referrer');
+    expect(el.shadowRoot!.querySelector('.untrusted-bar')!.textContent).toContain('runs sandboxed');
+    expect(urls).toContain(`POST /api/v1/artifacts/${ID}/versions/1/view`);
     expect(urls.some((u) => u.includes('/files/'))).toBe(false);
+    const open = Array.from(el.shadowRoot!.querySelectorAll('.entry-bar sl-button')).find((b) =>
+      b.textContent!.includes('Open in new tab')
+    )!;
+    expect(open.getAttribute('href')).toBe(VIEW_URL);
+    expect(open.getAttribute('rel')).toBe('noopener noreferrer');
+  });
+
+  it('offers Move… only while cross-project sharing is on, and opens the moved artifact', async () => {
+    const moveButton = (el: ScionPageArtifactDetail): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Move…')
+      ) as HTMLElement | undefined;
+
+    // Without canManage: no Move…, and the grants are never requested, even
+    // while cross-project sharing is on.
+    const urls = mockFetch(artifact('notes.md', 'text/markdown'), '# Hello', {
+      crossProjectSharing: true,
+    });
+    let el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-move-dialog')).toBeNull();
+    expect(urls.filter((u) => u.endsWith('/grants'))).toEqual([]);
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    // The hub refuses every move while cross-project sharing is off.
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    expect(moveButton(el)).toBeUndefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true }, '# Hello', {
+      crossProjectSharing: true,
+    });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-move-dialog') as HTMLElement & {
+      open: boolean;
+      homeDeleted: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.homeDeleted).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    moveButton(el)!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    const paths: string[] = [];
+    const onNav = (e: Event): void => {
+      paths.push((e as CustomEvent<{ path: string }>).detail.path);
+    };
+    document.addEventListener('nav-click', onNav);
+    try {
+      const moved = { ...artifact('notes.md', 'text/markdown').artifact, scopeRef: 'p-2' };
+      dialog.dispatchEvent(
+        new CustomEvent('artifact-moved', { detail: moved, bubbles: true, composed: true })
+      );
+      await el.updateComplete;
+    } finally {
+      document.removeEventListener('nav-click', onNav);
+    }
+    expect(paths).toEqual([`/projects/p-2/artifacts/${ID}`]);
+    expect(dialog.open).toBe(false);
   });
 
   it('shows 404 when the hub answers 404', async () => {
@@ -188,11 +332,11 @@ describe('artifact page', () => {
     expect(btn.hasAttribute('download')).toBe(false);
     document.body.innerHTML = '';
 
-    mockFetch(artifact('dir/page.html', 'text/html'));
+    mockFetch(artifact('dir/report.pdf', 'application/pdf'));
     el = await mount(true);
     btn = el.shadowRoot!.querySelector('.entry-bar sl-button')!;
     expect(btn.textContent).toContain('Download');
-    expect(btn.getAttribute('download')).toBe('page.html');
+    expect(btn.getAttribute('download')).toBe('report.pdf');
     expect(btn.hasAttribute('target')).toBe(false);
   });
 
@@ -235,7 +379,7 @@ describe('artifact page', () => {
     try {
       const el = await mount(true);
       expect(urls).toContain('/api/v1/agents/agent-1');
-      expect(el.shadowRoot!.querySelector('scion-markdown-preview')).not.toBeNull();
+      expect(el.shadowRoot!.querySelector('scion-artifact-markdown-frame')).not.toBeNull();
       expect(denied).not.toHaveBeenCalled();
     } finally {
       window.removeEventListener('scion:access-denied', denied);
@@ -243,51 +387,1661 @@ describe('artifact page', () => {
   });
 
   it("links back to the artifact's own project, not the one in the URL", async () => {
+    // The back link is the shared scion-back-link in the header's back slot.
+    const backHref = (page: Element): string | null => {
+      const link = page.shadowRoot!.querySelector(
+        'scion-detail-header > scion-back-link[slot="back"]'
+      );
+      expect(link?.textContent?.trim()).toBe('Project');
+      return link!.getAttribute('href');
+    };
     mockFetch(artifact('design.md', 'text/markdown'));
     const el = await mount(true); // URL project is p-1; scopeRef is p-1 too
-    expect(el.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe('/projects/p-1');
+    expect(backHref(el)).toBe('/projects/p-1');
     document.body.innerHTML = '';
 
     const meta = artifact('design.md', 'text/markdown');
     meta.artifact.scopeRef = 'home-project';
     mockFetch(meta);
     const el2 = await mount(true);
-    expect(el2.shadowRoot!.querySelector('a.back-link')!.getAttribute('href')).toBe(
-      '/projects/home-project'
-    );
+    expect(backHref(el2)).toBe('/projects/home-project');
   });
 
-  it('shows only images the hub serves in the markdown preview', async () => {
+  it('renders markdown in a sandboxed frame that loads images from the version only', async () => {
+    const meta = artifact('docs/design.md', 'text/markdown');
+    meta.version!.files.push(
+      { path: 'docs/img/b.png', size: 3, sha256: 'cd', mediaType: 'image/png' },
+      {
+        path: `_remote/${'a'.repeat(64)}`,
+        size: 3,
+        sha256: 'ef',
+        mediaType: 'image/png',
+        origin: 'remote',
+        sourceUrl: 'https://img.example/chart.png',
+        fetchStatus: 'ok',
+      }
+    );
     mockFetch(
-      artifact('design.md', 'text/markdown'),
+      meta,
       [
-        '![remote](https://elsewhere.example/p.png)',
-        '![protocol-relative](//elsewhere.example/q.png)',
-        '![local](/api/v1/artifacts/x/files/a.png)',
+        '![chart](https://img.example/chart.png)',
+        '![elsewhere](https://elsewhere.example/p.png)',
         '![relative](img/b.png)',
-        '![inline](data:image/png;base64,AAAA)',
-        '<img src="https://elsewhere.example/raw.png">',
       ].join('\n\n')
     );
     const el = await mount(true);
-    const preview = el.shadowRoot!.querySelector('scion-markdown-preview') as HTMLElement & {
+    const frameEl = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
       updateComplete: Promise<unknown>;
     };
-    expect(preview.hasAttribute('same-origin-images')).toBe(true);
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 0));
-      await preview.updateComplete;
+      await frameEl.updateComplete;
     }
-    const srcs = Array.from(preview.shadowRoot!.querySelectorAll('img')).map((i) =>
-      i.getAttribute('src')
+    const iframe = frameEl.shadowRoot!.querySelector('iframe')!;
+    expect(iframe.getAttribute('sandbox')).not.toContain('allow-scripts');
+    const doc = iframe.srcdoc;
+    expect(doc).toContain(
+      `content="default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'"`
     );
-    expect(srcs).toEqual([
-      '/api/v1/artifacts/x/files/a.png',
-      'img/b.png',
-      'data:image/png;base64,AAAA',
+    expect(doc).toContain(
+      `src="/api/v1/artifacts/${ID}/versions/1/files/_remote/${'a'.repeat(64)}?stream=1"`
+    );
+    expect(doc).toContain(`src="/api/v1/artifacts/${ID}/versions/1/files/docs/img/b.png?stream=1"`);
+    expect(doc).toContain('Image not fetched: elsewhere');
+    expect(doc).not.toContain('elsewhere.example');
+  });
+
+  it('shows the version in the URL, and offers Edit only on the current version', async () => {
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 3;
+    const urls = mockFetch(meta, '# Old');
+    const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
+    expect(urls[0]).toBe(`/api/v1/artifacts/${ID}/versions/1`);
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
+    );
+    expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
+    expect(labels.some((l) => l.includes('Edit'))).toBe(false);
+    document.body.innerHTML = '';
+
+    mockFetch(artifact('design.md', 'text/markdown'), '# Now');
+    const cur = await mount(true);
+    const curLabels = Array.from(cur.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
+    );
+    expect(curLabels.some((l) => l.includes('Version v1 (current)'))).toBe(true);
+    expect(curLabels.some((l) => l.includes('Edit'))).toBe(true);
+  });
+
+  it('lists the version files without the remote image rows', async () => {
+    const meta = artifact('index.md', 'text/markdown');
+    meta.version!.files.push(
+      { path: 'img/a.png', size: 2048, sha256: 'cd', mediaType: 'image/png' },
+      {
+        path: `_remote/${'a'.repeat(64)}`,
+        size: 3,
+        sha256: 'ef',
+        mediaType: 'image/png',
+        origin: 'remote',
+        sourceUrl: 'https://img.example/x.png',
+        fetchStatus: 'failed',
+      }
+    );
+    mockFetch(meta);
+    const el = await mount(true);
+    const rows = Array.from(el.shadowRoot!.querySelectorAll('sl-tab-panel[name="files"] tbody tr'));
+    expect(
+      rows.map((r) => r.querySelector('.file-path')!.textContent!.replace(/\s+/g, ' ').trim())
+    ).toEqual(['index.md entry', 'img/a.png']);
+    const summary = el.shadowRoot!.querySelector(
+      'sl-tab-panel[name="files"] .summary'
+    )!.textContent!;
+    expect(summary).toContain('could not be fetched: 1');
+  });
+
+  it('lists versions in History and offers a new version when there is only one', async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect(panel.querySelectorAll('tbody tr')).toHaveLength(1);
+    const single = panel.querySelector('.single-version')!;
+    expect(single.textContent).toContain('Only one version so far.');
+    expect(single.textContent).toContain('Upload new version');
+    expect(single.textContent).not.toContain('scion artifact');
+  });
+
+  it('hides Edit, Review and Upload new version for a reader who cannot publish', async () => {
+    for (const canPublish of [false, undefined]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      mockFetch(meta, '# Doc');
+      const el = await mount(true);
+      const labels = Array.from(el.shadowRoot!.querySelectorAll('sl-button')).map((b) =>
+        b.textContent!.trim()
+      );
+      expect(labels.some((l) => l.includes('Version v1'))).toBe(true);
+      for (const hidden of ['Edit', 'Review', 'Upload new version']) {
+        expect(labels.some((l) => l.includes(hidden))).toBe(false);
+      }
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelector('.single-version')!.textContent).toContain(
+        'Only one version so far.'
+      );
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('offers a review-only caller Review, and not Edit or Upload new version', async () => {
+    const meta = { ...artifact('design.md', 'text/markdown'), canPublish: false, canReview: true };
+    mockFetch(meta, '# Doc');
+    const el = await mount(true);
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect((panel.textContent ?? '').includes('Upload new version')).toBe(false);
+    // Review opens Review mode with its Save review action.
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    expect(button(el, '.edit-footer sl-button', 'Save review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    // A text entry cannot be reviewed, so a review-only caller gets neither.
+    mockFetch({ ...artifact('notes.txt', 'text/plain'), canPublish: false, canReview: true }, 'hi');
+    const txt = await mount(true);
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeUndefined();
+  });
+
+  it('offers Upload new version below a longer history only to a publisher', async () => {
+    const versions: ArtifactVersion[] = [2, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    for (const canPublish of [true, false]) {
+      const meta = { ...artifact('design.md', 'text/markdown'), canPublish };
+      meta.artifact.currentSeq = 2;
+      meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+      mockFetch(meta, '# Doc', { versions });
+      const el = await mount(true);
+      const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+      expect(panel.querySelectorAll('tbody tr')).toHaveLength(2);
+      expect(panel.querySelector('.more') !== null).toBe(canPublish);
+      expect((panel.textContent ?? '').includes('Upload new version')).toBe(canPublish);
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('lists discarded versions between ready ones in History, collapsed, without actions', async () => {
+    const versions: ArtifactVersion[] = [4, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    const discarded: DiscardedVersion[] = [
+      { seq: 3, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+      { seq: 2, state: 'failed', reason: 'unmarked_changes', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 4;
+    meta.version = { ...meta.version!, seq: 4, ref: `scion://artifact/${ID}@4` };
+    mockFetch(meta, '# Doc', { versions, discarded });
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('v4');
+    expect(rows[1].classList.contains('discarded-group')).toBe(true);
+    expect((rows[1].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v3 · 2 discarded');
+    expect(rows[1].querySelector('sl-icon-button')).toBeNull();
+    expect(rows[2].textContent).toContain('v1');
+
+    // Details expands the group to each version's reason; no actions.
+    (rows[1].querySelector('sl-button') as HTMLElement).click();
+    await el.updateComplete;
+    const expanded = Array.from(panel.querySelectorAll('tbody tr.discarded-version'));
+    expect(expanded).toHaveLength(2);
+    expect(expanded[0].textContent).toContain('v3');
+    expect(expanded[0].textContent).toContain('the review was of an older version');
+    expect(expanded[1].textContent).toContain('the review changed text outside its marks');
+    for (const r of expanded) expect(r.querySelector('sl-icon-button')).toBeNull();
+  });
+
+  it('keeps reading version pages until a ready version arrives', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'unmarked_changes',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [], discarded: [gone(5), gone(4)], nextBefore: 4 },
+        '4': { versions: [], discarded: [gone(3), gone(2)], nextBefore: 2 },
+        '2': { versions: [ready(1)], discarded: [], nextBefore: 0 },
+      },
+    });
+    const el = await mount(true);
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=4`,
+      `/api/v1/artifacts/${ID}/versions?before=2`,
     ]);
-    const text = preview.shadowRoot!.textContent ?? '';
-    expect(text).toContain('remote');
-    expect(text).toContain('protocol-relative');
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(2);
+    expect((rows[0].textContent ?? '').replace(/\s+/g, ' ')).toContain('v2–v5 · discarded');
+    expect(rows[1].textContent).toContain('v1');
+  });
+
+  it('stops after a few extra pages of only discarded versions and keeps Load more', async () => {
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    const pages: NonNullable<MockOptions['versionPages']> = {};
+    // Seven pages of two discarded versions each: 16-15, 14-13, ... 4-3.
+    for (let i = 0, top = 16; i < 7; i++, top -= 2) {
+      pages[i === 0 ? '' : String(top + 1)] = {
+        versions: [],
+        discarded: [gone(top), gone(top - 1)],
+        nextBefore: top - 1,
+      };
+    }
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 1;
+    const urls = mockFetch(meta, '# Doc', { versionPages: pages });
+    const el = await mount(true);
+    for (let i = 0; i < 10; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    const listed = urls.filter((u) => /\/versions(\?|$)/.test(u));
+    expect(listed).toHaveLength(6);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    expect(panel.querySelector('.more sl-button')?.textContent).toContain('Load more');
+  });
+
+  it('ignores Load more while version pages are still being read', async () => {
+    const ready = (seq: number): ArtifactVersion => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    });
+    const gone = (seq: number): DiscardedVersion => ({
+      seq,
+      state: 'failed',
+      reason: 'expired',
+      createdAt: '2026-10-05T12:00:00Z',
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 9;
+    meta.version = { ...meta.version!, seq: 9, ref: `scion://artifact/${ID}@9` };
+    const urls = mockFetch(meta, '# Doc', {
+      versionPages: {
+        '': { versions: [ready(9)], discarded: [], nextBefore: 9 },
+        '9': { versions: [], discarded: [gone(8), gone(7)], nextBefore: 7 },
+        '7': { versions: [ready(6)], discarded: [], nextBefore: 0 },
+      },
+      versionPageGates: { '7': held },
+    });
+    const el = await mount(true);
+    const panel = el.shadowRoot!.querySelector('sl-tab-panel[name="history"]')!;
+    const more = (): HTMLElement => panel.querySelector('.more sl-button') as HTMLElement;
+    more().click();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    // The second page held only discarded versions; the third is held back.
+    expect(more().hasAttribute('disabled')).toBe(true);
+    more().click();
+    more().click();
+    release();
+    for (let i = 0; i < 5; i++) {
+      await Promise.resolve();
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => /\/versions(\?|$)/.test(u))).toEqual([
+      `/api/v1/artifacts/${ID}/versions`,
+      `/api/v1/artifacts/${ID}/versions?before=9`,
+      `/api/v1/artifacts/${ID}/versions?before=7`,
+    ]);
+    const rows = Array.from(panel.querySelectorAll('tbody tr'));
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('v9');
+    expect(rows[2].textContent).toContain('v6');
+  });
+
+  describe('expanded discarded-version groups', () => {
+    const gapVersions = (): ArtifactVersion[] =>
+      [4, 1].map((seq) => ({
+        seq,
+        ref: `scion://artifact/${ID}@${seq}`,
+        kind: 'publish',
+        entryPath: 'design.md',
+        totalBytes: 5,
+        fileCount: 1,
+        createdAt: '2026-10-05T12:00:00Z',
+        state: 'ready',
+        files: [],
+      }));
+    const gapDiscarded: DiscardedVersion[] = [
+      { seq: 3, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+      { seq: 2, state: 'failed', reason: 'stale_review', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const gapMeta = (): ArtifactResponse => {
+      const meta = artifact('design.md', 'text/markdown');
+      meta.artifact.currentSeq = 4;
+      meta.version = { ...meta.version!, seq: 4, ref: `scion://artifact/${ID}@4` };
+      return meta;
+    };
+    const settle = async (el: ScionPageArtifactDetail): Promise<void> => {
+      for (let i = 0; i < 20; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    const expanded = (el: ScionPageArtifactDetail): number =>
+      el.shadowRoot!.querySelectorAll('sl-tab-panel[name="history"] tr.discarded-version').length;
+    const expand = async (el: ScionPageArtifactDetail): Promise<void> => {
+      const group = el.shadowRoot!.querySelector(
+        'sl-tab-panel[name="history"] tr.discarded-group'
+      )!;
+      (group.querySelector('sl-button') as HTMLElement).click();
+      await el.updateComplete;
+    };
+
+    it('collapses them when the page reloads itself after a publish', async () => {
+      window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      (el as unknown as { showCurrentVersion(): void }).showCurrentVersion();
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('collapses them when the page reloads for a stale review', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const el = await mount(true);
+      await expand(el);
+      expect(expanded(el)).toBe(2);
+      await (el as unknown as { reloadForReview(t: string): Promise<void> }).reloadForReview('x');
+      await settle(el);
+      expect(el.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(el)).toBe(0);
+    });
+
+    it('starts collapsed when the router mounts the page again for a navigation', async () => {
+      mockFetch(gapMeta(), '# Doc', { versions: gapVersions(), discarded: gapDiscarded });
+      const a = await mount(true);
+      await expand(a);
+      expect(expanded(a)).toBe(2);
+      document.body.innerHTML = '';
+      const b = await mount(true);
+      expect(b.shadowRoot!.querySelector('tr.discarded-group')).not.toBeNull();
+      expect(expanded(b)).toBe(0);
+    });
+  });
+
+  it('names the reason of a single discarded version in its row', async () => {
+    const versions: ArtifactVersion[] = [3, 1].map((seq) => ({
+      seq,
+      ref: `scion://artifact/${ID}@${seq}`,
+      kind: 'publish',
+      entryPath: 'design.md',
+      totalBytes: 5,
+      fileCount: 1,
+      createdAt: '2026-10-05T12:00:00Z',
+      state: 'ready',
+      files: [],
+    }));
+    const discarded: DiscardedVersion[] = [
+      { seq: 2, state: 'failed', reason: 'expired', createdAt: '2026-10-05T12:00:00Z' },
+    ];
+    const meta = artifact('design.md', 'text/markdown');
+    meta.artifact.currentSeq = 3;
+    meta.version = { ...meta.version!, seq: 3, ref: `scion://artifact/${ID}@3` };
+    mockFetch(meta, '# Doc', { versions, discarded });
+    const el = await mount(true);
+    const group = el.shadowRoot!.querySelector('sl-tab-panel[name="history"] tr.discarded-group')!;
+    expect((group.textContent ?? '').replace(/\s+/g, ' ')).toContain(
+      'v2 · discarded: the upload was not finished in time'
+    );
+  });
+
+  it('shows the new version in place after publishing an edit from the current URL', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('design.md', 'text/markdown');
+    const urls = mockFetch(meta, '# Old', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          meta.artifact.currentSeq = 2;
+          meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+          return new Response(JSON.stringify(meta), { status: 200 });
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['design.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    const editBtn = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find(
+      (b) => b.textContent!.includes('Edit')
+    ) as HTMLElement;
+    editBtn.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: '# New' } })
+    );
+    await el.updateComplete;
+    const publish = Array.from(el.shadowRoot!.querySelectorAll('.edit-footer sl-button')).find(
+      (b) => b.textContent!.includes('Publish new version')
+    ) as HTMLElement;
+    publish.click();
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => u === `/api/v1/artifacts/${ID}`)).toHaveLength(2);
+    expect(
+      el.shadowRoot!.querySelector('scion-code-editor[readonly]') ??
+        el.shadowRoot!.querySelector('scion-artifact-markdown-frame')
+    ).not.toBeNull();
+    const labels = Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).map(
+      (b) => b.textContent!.trim()
+    );
+    expect(labels.some((l) => l.includes('Version v2 (current)'))).toBe(true);
+  });
+
+  it('resumes the pending version when an edit is published again after a failed upload', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('design.md', 'text/markdown');
+    let putStatus = 500;
+    const urls = mockFetch(meta, '# Old', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) return new Response(JSON.stringify(meta), { status: 200 });
+        if (method === 'PUT') {
+          return putStatus === 204
+            ? new Response(null, { status: 204 })
+            : new Response('{"error":{"code":"internal","message":"boom"}}', { status: putStatus });
+        }
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['design.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    (
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Edit')
+      ) as HTMLElement
+    ).click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: '# New' } })
+    );
+    await el.updateComplete;
+    const clickPublish = async (): Promise<void> => {
+      (
+        Array.from(el.shadowRoot!.querySelectorAll('.edit-footer sl-button')).find((b) =>
+          b.textContent!.includes('Publish new version')
+        ) as HTMLElement
+      ).click();
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+    await clickPublish();
+    expect(el.shadowRoot!.querySelector('sl-alert[variant="danger"]')!.textContent).toContain(
+      'Publish again to retry'
+    );
+    putStatus = 204;
+    await clickPublish();
+    expect(urls.filter((u) => u === `POST /api/v1/artifacts/${ID}/versions`)).toHaveLength(1);
+    expect(urls.filter((u) => u.startsWith('PUT '))).toHaveLength(2);
+    expect(urls).toContain(`POST /api/v1/artifacts/${ID}/versions/2/finalize`);
+  });
+
+  it('says when the HTML view has expired and mints a new one on Reload view', async () => {
+    const urls = mockFetch(artifact('page.html', 'text/html'), '', {
+      viewExpiresAt: '2000-01-01T00:00:00Z',
+    });
+    const el = await mount(true);
+    const alert = el.shadowRoot!.querySelector('sl-alert.expired')!;
+    expect(alert.textContent).toContain('This view has expired.');
+    expect(
+      Array.from(el.shadowRoot!.querySelectorAll('.entry-bar sl-button')).some((b) =>
+        b.textContent!.includes('Open in new tab')
+      )
+    ).toBe(false);
+    (alert.querySelector('sl-button') as HTMLElement).click();
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+    expect(urls.filter((u) => u === `POST /api/v1/artifacts/${ID}/versions/1/view`)).toHaveLength(
+      2
+    );
+  });
+
+  it('gives the markdown frame no referrer and single-file versions a download in History', async () => {
+    mockFetch(artifact('design.md', 'text/markdown'));
+    const el = await mount(true);
+    const frameEl = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      updateComplete: Promise<unknown>;
+    };
+    await frameEl.updateComplete;
+    expect(frameEl.shadowRoot!.querySelector('iframe')!.getAttribute('referrerpolicy')).toBe(
+      'no-referrer'
+    );
+    const dl = el.shadowRoot!.querySelector(
+      'sl-tab-panel[name="history"] sl-icon-button[name="download"]'
+    )!;
+    expect(dl.getAttribute('href')).toBe(`/api/v1/artifacts/${ID}/versions/1/files/design.md`);
+    expect(dl.getAttribute('download')).toBe('design.md');
+  });
+
+  it('shows the owner and publishers by name', async () => {
+    const meta = artifact('page.html', 'text/html');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    meta.version!.createdByKind = 'user';
+    meta.version!.createdByRef = 'u-9';
+    vi.stubGlobal('fetch', vi.fn());
+    mockFetch(meta);
+    const inner = globalThis.fetch as unknown as (
+      i: RequestInfo | URL,
+      n?: RequestInit
+    ) => Promise<Response>;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        const url = requestUrl(input);
+        if (url === '/api/v1/agents/agent-1') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ name: 'metrics-agent' }), { status: 200 })
+          );
+        }
+        if (url === '/api/v1/users/u-9') {
+          return Promise.resolve(
+            new Response(JSON.stringify({ displayName: 'Jane Doe' }), { status: 200 })
+          );
+        }
+        return inner(input, init);
+      })
+    );
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.meta')!.textContent).toContain(
+      'Owner: metrics-agent (agent)'
+    );
+    expect(el.shadowRoot!.querySelector('.untrusted-bar')!.textContent).toContain(
+      'Content published by metrics-agent (agent)'
+    );
+    const history = el.shadowRoot!.querySelector('sl-tab-panel[name="history"] tbody tr')!;
+    expect(history.textContent).toContain('Jane Doe');
+  });
+
+  it('forgets the HTML view timer when the page reloads', async () => {
+    const soon = new Date(Date.now() + 60_000).toISOString();
+    mockFetch(artifact('page.html', 'text/html'), '', { viewExpiresAt: soon });
+    const el = await mount(true);
+    const priv = el as unknown as {
+      viewTimer: ReturnType<typeof setTimeout> | null;
+      viewExpired: boolean;
+      load(): Promise<void>;
+    };
+    expect(priv.viewTimer).not.toBeNull();
+    mockFetch(artifact('design.md', 'text/markdown'));
+    await priv.load();
+    expect(priv.viewTimer).toBeNull();
+    expect(priv.viewExpired).toBe(false);
+  });
+
+  it('keeps the newer result when an earlier load answers last', async () => {
+    mockFetch(artifact('a.png', 'image/png'));
+    const el = await mount(true);
+    const priv = el as unknown as { load(): Promise<void>; loading: boolean };
+    const meta = (title: string): ArtifactResponse => {
+      const m = artifact('a.png', 'image/png');
+      m.artifact.title = title;
+      return m;
+    };
+    // Each GET of the artifact waits until the test releases it.
+    const release: ((m: ArtifactResponse) => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL) => {
+        if (requestUrl(input) === `/api/v1/artifacts/${ID}`) {
+          return new Promise<Response>((resolve) => {
+            release.push((m) => resolve(new Response(JSON.stringify(m), { status: 200 })));
+          });
+        }
+        return Promise.resolve(new Response(JSON.stringify({ versions: [] }), { status: 200 }));
+      })
+    );
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 0));
+        await el.updateComplete;
+      }
+    };
+
+    // The earlier load answers first, while the newer one is still waiting:
+    // it must not end the loading state or show its data.
+    const olderFirst = priv.load();
+    const newerSecond = priv.load();
+    await settle();
+    release[0](meta('Older'));
+    await olderFirst;
+    await settle();
+    expect(priv.loading).toBe(true);
+    release[1](meta('Newer'));
+    await newerSecond;
+    await settle();
+    expect(priv.loading).toBe(false);
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newer');
+
+    // The earlier load answers last: the newer result and state stay.
+    const olderLast = priv.load();
+    const newerFirst = priv.load();
+    await settle();
+    release[3](meta('Newest'));
+    await newerFirst;
+    await settle();
+    expect(priv.loading).toBe(false);
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
+    release[2](meta('Stale'));
+    await olderLast;
+    await settle();
+    expect(priv.loading).toBe(false);
+    expect(el.shadowRoot!.querySelector('scion-detail-header')!.heading).toBe('Newest');
+  });
+
+  it('keeps the newer view when an earlier mint answers last', async () => {
+    mockFetch(artifact('page.html', 'text/html'));
+    const el = await mount(true);
+    const priv = el as unknown as {
+      loadView(seq: number): Promise<void>;
+      view: { url: string } | null;
+    };
+    let releaseOlder: (() => void) | null = null;
+    let mints = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(() => {
+        mints++;
+        const body = (url: string): Response =>
+          new Response(JSON.stringify({ url, expiresAt: '2999-01-01T00:00:00Z' }), { status: 200 });
+        if (mints === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseOlder = (): void => resolve(body('/older/'));
+          });
+        }
+        return Promise.resolve(body('/newer/'));
+      })
+    );
+    const first = priv.loadView(1);
+    await priv.loadView(1);
+    releaseOlder!();
+    await first;
+    expect(priv.view!.url).toBe('/newer/');
+  });
+
+  it('offers Share only to who may manage the artifact, and opens the Share dialog', async () => {
+    mockFetch(artifact('notes.md', 'text/markdown'));
+    let el = await mount(true);
+    const shareButton = (): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes('Share')
+      ) as HTMLElement | undefined;
+    expect(shareButton()).toBeUndefined();
+    expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog')).toBeNull();
+    document.body.innerHTML = '';
+
+    mockFetch({ ...artifact('notes.md', 'text/markdown'), canManage: true });
+    el = await mount(true);
+    const dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as HTMLElement & {
+      open: boolean;
+      artifact: { id: string };
+    };
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact.id).toBe(ID);
+    shareButton()!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+
+    // A saved expiry shows on the page's artifact; closing hides the dialog.
+    dialog.dispatchEvent(
+      new CustomEvent('artifact-changed', {
+        detail: {
+          ...artifact('notes.md', 'text/markdown').artifact,
+          expiresAt: '2026-12-01T00:00:00Z',
+        },
+      })
+    );
+    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
+    expect(dialog.artifact).toMatchObject({ expiresAt: '2026-12-01T00:00:00Z' });
+  });
+
+  it('offers Grant review access, the Share dialog in review mode, to who may grant review but not manage', async () => {
+    const meta = (extra: Partial<ArtifactResponse>): ArtifactResponse => {
+      const m = { ...artifact('notes.md', 'text/markdown'), ...extra };
+      m.artifact = { ...m.artifact, ownerKind: 'agent', ownerRef: 'agent-1' };
+      return m;
+    };
+    const actionButton = (el: ScionPageArtifactDetail, text: string): HTMLElement | undefined =>
+      Array.from(el.shadowRoot!.querySelectorAll('.header-actions sl-button')).find((b) =>
+        b.textContent!.includes(text)
+      ) as HTMLElement | undefined;
+    type Dialog = HTMLElement & { open: boolean; mode: string; artifact: { id: string } };
+
+    // canGrantReview without canManage: Grant review access, not Share.
+    mockFetch(meta({ canGrantReview: true }));
+    let el = await mount(true);
+    expect(actionButton(el, 'Share')).toBeUndefined();
+    const grant = actionButton(el, 'Grant review access');
+    expect(grant).toBeDefined();
+    let dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
+    expect(dialog.mode).toBe('review');
+    expect(dialog.artifact.id).toBe(ID);
+    expect(dialog.open).toBe(false);
+    grant!.click();
+    await el.updateComplete;
+    expect(dialog.open).toBe(true);
+    dialog.dispatchEvent(new CustomEvent('artifact-share-closed'));
+    await el.updateComplete;
+    expect(dialog.open).toBe(false);
+    document.body.innerHTML = '';
+
+    // canManage wins: Share with the full dialog, never both actions.
+    mockFetch(meta({ canManage: true, canGrantReview: true }));
+    el = await mount(true);
+    expect(actionButton(el, 'Share')).toBeDefined();
+    expect(actionButton(el, 'Grant review access')).toBeUndefined();
+    dialog = el.shadowRoot!.querySelector('scion-artifact-share-dialog') as Dialog;
+    expect(dialog.mode).toBe('share');
+    document.body.innerHTML = '';
+
+    // Neither: no action and no dialog.
+    for (const canGrantReview of [false, undefined]) {
+      mockFetch(meta({ canGrantReview }));
+      el = await mount(true);
+      expect(actionButton(el, 'Grant review access')).toBeUndefined();
+      expect(actionButton(el, 'Share')).toBeUndefined();
+      expect(el.shadowRoot!.querySelector('scion-artifact-share-dialog')).toBeNull();
+      document.body.innerHTML = '';
+    }
+  });
+
+  /** A review version (current) of a markdown artifact owned by an agent. */
+  function reviewMeta(): ArtifactResponse {
+    const meta = artifact('plan.md', 'text/markdown');
+    meta.artifact.ownerKind = 'agent';
+    meta.artifact.ownerRef = 'agent-1';
+    meta.artifact.currentSeq = 2;
+    meta.version = {
+      ...meta.version!,
+      seq: 2,
+      ref: `scion://artifact/${ID}@2`,
+      kind: 'review',
+      createdByKind: 'user',
+      createdByRef: 'u-2',
+    };
+    return meta;
+  }
+  const MARKED = 'We {~~ship~>launch~~} in Q3.{>>date?<<}\n';
+
+  function buttons(el: ScionPageArtifactDetail, sel: string): HTMLElement[] {
+    return Array.from(el.shadowRoot!.querySelectorAll(sel));
+  }
+  function button(el: ScionPageArtifactDetail, sel: string, text: string): HTMLElement | undefined {
+    return buttons(el, sel).find((b) => b.textContent!.includes(text));
+  }
+  async function settle(el: ScionPageArtifactDetail, n = 30): Promise<void> {
+    for (let i = 0; i < n; i++) {
+      await new Promise((r) => setTimeout(r, 0));
+      await el.updateComplete;
+    }
+  }
+
+  it('shows a current review as pending, with its marks and a Marks / Clean / Accepted switch', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const badge = el.shadowRoot!.querySelector('scion-detail-header > sl-badge');
+    expect(badge?.textContent).toContain('Review pending');
+    const banner = el.shadowRoot!.querySelector('sl-alert.review-banner');
+    expect(banner?.textContent).toContain('1 comment and 1 suggestion on v1');
+    expect(banner?.textContent).toContain('was notified');
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('marks');
+    const toggle = el.shadowRoot!.querySelector('sl-radio-group.critic-toggle') as HTMLElement & {
+      value: string;
+    };
+    expect(toggle).not.toBeNull();
+    toggle.value = 'clean';
+    toggle.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(frame.critic).toBe('clean');
+  });
+
+  it('shows no review state for a published version and offers Review for markdown only', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-banner')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-radio-group.critic-toggle')).toBeNull();
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      critic: string;
+    };
+    expect(frame.critic).toBe('off');
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeDefined();
+    document.body.innerHTML = '';
+    vi.unstubAllGlobals();
+    mockFetch(artifact('notes.txt', 'text/plain'), 'hello');
+    const txt = await mount(true);
+    expect(button(txt, '.header-actions sl-button', 'Edit')).toBeDefined();
+    expect(button(txt, '.header-actions sl-button', 'Review')).toBeUndefined();
+  });
+
+  it('saves a review of marks only as a version of kind review', async () => {
+    window.history.replaceState({}, '', `/projects/p-1/artifacts/${ID}`);
+    const meta = artifact('plan.md', 'text/markdown');
+    const bodies: string[] = [];
+    const finalizeBodies: string[] = [];
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          return new Response(JSON.stringify(meta), { status: 200 });
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const realFetch = globalThis.fetch;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/versions'))
+          bodies.push(requestBodyText(init.body));
+        if (init?.method === 'POST' && requestUrl(input).endsWith('/finalize'))
+          finalizeBodies.push(requestBodyText(init.body));
+        return realFetch(input, init);
+      })
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // While reviewing, Edit and Review are hidden.
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    const save = (): HTMLElement & { disabled: boolean } =>
+      button(el, '.edit-footer sl-button', 'Save review') as HTMLElement & { disabled: boolean };
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // Empty state: the hint replaces the counts and the preview margin
+    // shows the placeholder.
+    expect(el.shadowRoot!.querySelector('.review-toolbar .counts')!.textContent).toContain(
+      'Select text and choose Comment or Suggest.'
+    );
+    const reviewFrame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { sideNote: string; noteAuthor: string; sideNoteEmpty: boolean };
+    expect(reviewFrame.sideNote).toBe('No comments or suggestions yet.');
+    expect(reviewFrame.sideNoteEmpty).toBe(true);
+    expect(reviewFrame.noteAuthor).toBe('You');
+    const editor = el.shadowRoot!.querySelector('scion-code-editor.review-editor')!;
+    // An edit outside marks is flagged and cannot be saved.
+    editor.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We ship in Q4.{>>x<<}\n' } })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    expect(
+      buttons(el, 'sl-alert').some((a) => a.textContent!.includes('Text outside marks has changed'))
+    ).toBe(true);
+    editor.dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
+    await settle(el);
+    expect(bodies).toHaveLength(1);
+    expect(JSON.parse(bodies[0]!).kind).toBe('review');
+    // The review names the version it was made against.
+    expect(finalizeBodies.map((b) => JSON.parse(b) as { base: number })).toEqual([{ base: 1 }]);
+    expect(urls.some((u) => u.startsWith('PUT ') && u.includes('/versions/2/files/plan.md'))).toBe(
+      true
+    );
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
+  });
+
+  it('explains a review the hub refused for unmarked changes', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: (method, url) => {
+        if (url.endsWith('/finalize')) {
+          return new Response(
+            JSON.stringify({
+              error: {
+                code: 'unmarked_changes',
+                message: 'x',
+                details: { files: [{ path: 'plan.md', change: 'modified', hunks: [{ line: 1 }] }] },
+              },
+            }),
+            { status: 422 }
+          );
+        }
+        if (method === 'PUT') return new Response(null, { status: 204 });
+        return new Response(
+          JSON.stringify({
+            artifact: meta.artifact,
+            version: { seq: 2 },
+            upload: { required: ['plan.md'] },
+          }),
+          { status: 201 }
+        );
+      },
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const alert = buttons(el, 'sl-alert').find((a) =>
+      a.textContent!.includes('outside marks: plan.md (line 1)')
+    );
+    expect(alert).toBeDefined();
+    expect(alert!.textContent).not.toContain('Publish again');
+    expect(alert!.textContent).not.toContain('Edit');
+  });
+  /** Mocks a review flow whose finalize answers with status and body. */
+  function reviewWrites(meta: ArtifactResponse, finalize: () => Response, creates: string[]) {
+    return (method: string, url: string): Response => {
+      if (url.endsWith('/finalize')) return finalize();
+      if (method === 'PUT') return new Response(null, { status: 204 });
+      creates.push(url);
+      return new Response(
+        JSON.stringify({
+          artifact: meta.artifact,
+          version: { seq: 2 + creates.length - 1 },
+          upload: { required: ['plan.md'] },
+        }),
+        { status: 201 }
+      );
+    };
+  }
+
+  it('restarts a stale review from the current text and keeps the discarded text read-only', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let text = 'We ship in Q3.\n';
+    // Meanwhile another reviewer's review (v2) became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\n';
+    const urls = mockFetch(meta, '', {
+      bodyFn: () => text,
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const editor = (): HTMLElement & { content: string } =>
+      el.shadowRoot!.querySelector('scion-code-editor.review-editor') as HTMLElement & {
+        content: string;
+      };
+    editor().dispatchEvent(new CustomEvent('content-changed', { detail: { content: MARKED } }));
+    await el.updateComplete;
+    const metaLoads = (): number => urls.filter((u) => u === `/api/v1/artifacts/${ID}`).length;
+    const before = metaLoads();
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const alert = buttons(el, 'sl-alert').find((a) => a.textContent!.includes('was not saved'));
+    expect(alert).toBeDefined();
+    expect(alert!.textContent).toContain('newer version');
+    expect(alert!.textContent).not.toContain('Edit');
+    expect(metaLoads()).toBe(before + 1);
+    // The buffer is the new current text, with the other reviewer's marks;
+    // the discarded text is shown read-only.
+    expect(editor().content).toBe(othersReview);
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    const save = (): HTMLElement => button(el, '.edit-footer sl-button', 'Save review')!;
+    expect(save().hasAttribute('disabled')).toBe(true);
+    // New marks on the current text can be saved, as a new version.
+    editor().dispatchEvent(
+      new CustomEvent('content-changed', {
+        detail: { content: 'We {~~ship~>launch~~} in Q3.{>>someone else<<}\n' },
+      })
+    );
+    await el.updateComplete;
+    expect(save().hasAttribute('disabled')).toBe(false);
+    save().click();
+    await settle(el);
+    expect(creates).toHaveLength(2);
+  });
+
+  it('leaves Review mode with a notice when the current version cannot be reviewed after a stale review', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            entryPath: 'plan.txt',
+            files: [{ path: 'plan.txt', size: 5, sha256: 'cd', mediaType: 'text/plain' }],
+          };
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'cannot be reviewed here'
+    );
+    // The discarded text stays readable, with Copy, outside Review mode.
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('leaves Review mode saying so when the reload after a stale review shows the caller can no longer publish', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          // A newer version is current and the caller's write access is gone.
+          meta.artifact.currentSeq = 2;
+          meta.version = { ...meta.version!, seq: 2, ref: `scion://artifact/${ID}@2` };
+          meta.canPublish = false;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            { status: 409 }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent!;
+    expect(notice).toContain('you can no longer publish versions of this artifact');
+    expect(notice).not.toContain('newer version');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    // Edit and Review are gone with the right to publish.
+    expect(button(el, '.header-actions sl-button', 'Edit')).toBeUndefined();
+    expect(button(el, '.header-actions sl-button', 'Review')).toBeUndefined();
+  });
+
+  it('keeps the discarded text and says so when the reload after a stale review fails', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let fileStatus = 200;
+    const urls = mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          fileStatus = 500;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      fileStatus !== 200 && requestUrl(input).includes('/files/')
+        ? Promise.resolve(
+            new Response('{"error":{"code":"internal","message":"boom"}}', { status: 500 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(urls.length).toBeGreaterThan(0);
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+    const notice = el.shadowRoot!.querySelector('sl-alert.review-notice')!;
+    expect(notice.textContent).toContain('could not be loaded');
+    expect(notice.textContent).not.toContain('newer version was published');
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(el.shadowRoot!.querySelector('.error-state')).not.toBeNull();
+  });
+
+  it('shows the margin placeholder only while the review has no marks at all', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { sideNote: string };
+    expect(frame.sideNote).toBe('No comments or suggestions yet.');
+    // A suggestion without any comment: no placeholder.
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We {~~ship~>launch~~} in Q3.\n' } })
+    );
+    await new Promise((r) => setTimeout(r, 300));
+    await el.updateComplete;
+    expect(frame.sideNote).toBe('');
+  });
+
+  it('clears the pending preview update on Cancel', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    const cleared = vi.spyOn(globalThis, 'clearTimeout');
+    button(el, '.edit-footer sl-button', 'Cancel')!.click();
+    await el.updateComplete;
+    expect(cleared).toHaveBeenCalled();
+    cleared.mockRestore();
+    expect(el.shadowRoot!.querySelector('.review-editor')).toBeNull();
+  });
+
+  it('shows Review pending while the current version is a review, also on an older version', async () => {
+    const meta = reviewMeta();
+    const old = {
+      ...meta,
+      version: { ...meta.version!, seq: 1, kind: 'publish', ref: `scion://artifact/${ID}@1` },
+    };
+    mockFetch(old, 'We ship in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true, `/projects/p-1/artifacts/${ID}/v/1`);
+    expect(el.shadowRoot!.querySelector('scion-detail-header > sl-badge')?.textContent).toContain(
+      'Review pending'
+    );
+  });
+
+  it('does not claim the owner was notified of its own review', async () => {
+    const meta = reviewMeta();
+    meta.version!.createdByKind = 'agent';
+    meta.version!.createdByRef = 'agent-1';
+    mockFetch(meta, MARKED);
+    const el = await mount(true);
+    const banner = el.shadowRoot!.querySelector('sl-alert.review-banner')!;
+    expect(banner.textContent).toContain('Review pending');
+    expect(banner.textContent).not.toContain('was notified');
+  });
+
+  it('labels a review with its base, its notes with the reviewer, and Clean with a side note', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    expect(el.shadowRoot!.querySelector('.entry-bar')!.textContent).toContain('review of v1');
+    const frame = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+      noteAuthor: string;
+      sideNote: string;
+    };
+    expect(frame.noteAuthor).not.toBe('');
+    expect(frame.sideNote).toBe('');
+    const toggle = el.shadowRoot!.querySelector('sl-radio-group.critic-toggle') as HTMLElement & {
+      value: string;
+    };
+    toggle.value = 'clean';
+    toggle.dispatchEvent(new Event('sl-change'));
+    await el.updateComplete;
+    expect(frame.sideNote).toBe(
+      'Clean: all marks rejected. Matches the version under review (v1).'
+    );
+  });
+
+  it('shows the kind of each version in History, with the review note', async () => {
+    const meta = reviewMeta();
+    mockFetch(meta, MARKED, {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const heads = buttons(el, 'th').map((th) => th.textContent!.trim());
+    expect(heads).toContain('Kind');
+    const kinds = buttons(el, 'sl-badge.kind-review, sl-badge.kind-publish').map(
+      (b) => b.className
+    );
+    expect(kinds).toEqual(['kind-review', 'kind-publish']);
+    expect(
+      el.shadowRoot!.querySelector('.history-note')!.textContent!.replace(/\s+/g, ' ')
+    ).toContain('Publishing after a review resolves it and clears the badge.');
+  });
+
+  it('lays notes out in a margin from 1100px on the page and from 1400px in the Review pane', async () => {
+    for (const width of [1000, 1200, 1500]) {
+      vi.stubGlobal('matchMedia', (q: string) => ({
+        matches: Number(/min-width: (\d+)px/.exec(q)?.[1] ?? Infinity) <= width,
+        addEventListener: (): void => {},
+        removeEventListener: (): void => {},
+      }));
+      mockFetch(reviewMeta(), MARKED);
+      const el = await mount(true);
+      const page = el.shadowRoot!.querySelector('scion-artifact-markdown-frame') as HTMLElement & {
+        marginNotes: boolean;
+      };
+      expect(page.marginNotes, `page at ${width}`).toBe(width >= 1100);
+      button(el, '.header-actions sl-button', 'Review')!.click();
+      await el.updateComplete;
+      const pane = el.shadowRoot!.querySelector(
+        '.review-panes scion-artifact-markdown-frame'
+      ) as HTMLElement & { marginNotes: boolean };
+      expect(pane.marginNotes, `review pane at ${width}`).toBe(width >= 1400);
+      document.body.innerHTML = '';
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('updates the Review preview after typing pauses, the counts at once', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    const frame = el.shadowRoot!.querySelector(
+      '.review-panes scion-artifact-markdown-frame'
+    ) as HTMLElement & { content: string };
+    expect(
+      el.shadowRoot!.querySelector('.review-toolbar .counts')!.textContent!.replace(/\s+/g, ' ')
+    ).toContain('1 suggestion · 1 comment');
+    expect(frame.content).toBe('We ship in Q3.\n');
+    await new Promise((r) => setTimeout(r, 300));
+    await el.updateComplete;
+    expect(frame.content).toBe(MARKED);
+  });
+
+  it('applies toolbar marks to plain text and refuses a selection inside a mark', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      getSelection: () => { from: number; to: number; text: string } | null;
+      replaceRange: (...args: unknown[]) => void;
+    };
+    const replaced: unknown[][] = [];
+    editor.replaceRange = (...args: unknown[]): void => {
+      replaced.push(args);
+    };
+    editor.getSelection = (): { from: number; to: number; text: string } => ({
+      from: 3,
+      to: 7,
+      text: 'ship',
+    });
+    button(el, '.review-toolbar sl-button', 'Comment')!.click();
+    await el.updateComplete;
+    expect(replaced).toEqual([[3, 7, '{==ship==}{>>comment<<}', 16, 23]]);
+    // Inside an existing mark: refused with a hint, nothing inserted.
+    editor.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: 'We {--ship--} in Q3.\n' } })
+    );
+    await el.updateComplete;
+    editor.getSelection = (): { from: number; to: number; text: string } => ({
+      from: 6,
+      to: 10,
+      text: 'ship',
+    });
+    button(el, '.review-toolbar sl-button', 'Suggest')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(1);
+    expect(el.shadowRoot!.querySelector('.review-toolbar .hint')!.textContent).toContain(
+      'inside or across a mark'
+    );
+  });
+
+  /** The Review editor with its selection and replace stubbed. */
+  function stubEditor(el: ScionPageArtifactDetail): {
+    editor: HTMLElement & { content: string };
+    replaced: unknown[][];
+    select: (from: number, to: number) => void;
+  } {
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+      getSelection: () => { from: number; to: number; text: string };
+      replaceRange: (...args: unknown[]) => void;
+      getContent: () => string;
+    };
+    const replaced: unknown[][] = [];
+    editor.replaceRange = (...args: unknown[]): void => {
+      replaced.push(args);
+    };
+    const select = (from: number, to: number): void => {
+      editor.getSelection = () => ({ from, to, text: editor.getContent().slice(from, to) });
+    };
+    return { editor, replaced, select };
+  }
+
+  it('reviews a CRLF file in LF form, so toolbar offsets match the editor', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship.\r\nLine two Q3.\r\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    expect(editor.content).toBe('We ship.\nLine two Q3.\n');
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+    const at = editor.content.indexOf('Q3');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Comment')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(1);
+  });
+
+  it('refuses a mark an opener would swallow in a CRLF file', async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), '{\r\n{\r\n{++-');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    const at = editor.content.indexOf('++');
+    select(at, at + 2);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+    expect(el.shadowRoot!.querySelector('.review-toolbar .hint')!.textContent).toContain(
+      'unclosed'
+    );
+  });
+
+  it("checks toolbar actions against the editor's content", async () => {
+    mockFetch(artifact('plan.md', 'text/markdown'), 'We ship in Q3.\n');
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    const { editor, replaced, select } = stubEditor(el);
+    // The editor holds text whose change event has not reached the page.
+    editor.content = '{\n{\n{++-';
+    select(5, 7);
+    button(el, '.review-toolbar sl-button', 'Insert')!.click();
+    await el.updateComplete;
+    expect(replaced).toHaveLength(0);
+  });
+
+  it('keeps the discarded text and Copy above the not-found page when the reload after a stale review answers 404', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let gone = false;
+    mockFetch(meta, 'We ship in Q3.\n', {
+      write: reviewWrites(
+        meta,
+        () => {
+          gone = true;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const inner = globalThis.fetch;
+    vi.stubGlobal('fetch', (input: RequestInfo | URL, init?: RequestInit) =>
+      gone && requestUrl(input) === `/api/v1/artifacts/${ID}` && (init?.method ?? 'GET') === 'GET'
+        ? Promise.resolve(
+            new Response('{"error":{"code":"not_found","message":"not found"}}', { status: 404 })
+          )
+        : inner(input, init)
+    );
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    expect(el.shadowRoot!.querySelector('scion-page-404')).not.toBeNull();
+    expect(el.shadowRoot!.querySelector('sl-alert.review-notice')!.textContent).toContain(
+      'could not be loaded'
+    );
+    expect(el.shadowRoot!.querySelector('.discarded-review pre')!.textContent).toBe(MARKED);
+    expect(button(el, '.discarded-review sl-button', 'Copy')).toBeDefined();
+  });
+
+  it('does not offer to save an unchanged review of a CRLF review version', async () => {
+    mockFetch(reviewMeta(), MARKED.replace(/\n/g, '\r\n'));
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    // The marks are there and only marks differ from the baseline, but
+    // nothing was changed: Save stays disabled.
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
+
+  it('restarts a stale review on a CRLF current version in LF form, with Save disabled', async () => {
+    const meta = artifact('plan.md', 'text/markdown');
+    const creates: string[] = [];
+    let text = 'We ship in Q3.\n';
+    // Another reviewer's review, stored with CRLF line endings, became current.
+    const othersReview = 'We ship in Q3.{>>someone else<<}\r\nOwners: docs.\r\n';
+    mockFetch(meta, '', {
+      bodyFn: () => text,
+      write: reviewWrites(
+        meta,
+        () => {
+          meta.artifact.currentSeq = 2;
+          meta.version = {
+            ...meta.version!,
+            seq: 2,
+            kind: 'review',
+            ref: `scion://artifact/${ID}@2`,
+          };
+          text = othersReview;
+          return new Response(
+            JSON.stringify({ error: { code: 'stale_review', message: 'stale' } }),
+            {
+              status: 409,
+            }
+          );
+        },
+        creates
+      ),
+    });
+    const el = await mount(true);
+    button(el, '.header-actions sl-button', 'Review')!.click();
+    await el.updateComplete;
+    el.shadowRoot!.querySelector('scion-code-editor.review-editor')!.dispatchEvent(
+      new CustomEvent('content-changed', { detail: { content: MARKED } })
+    );
+    await el.updateComplete;
+    button(el, '.edit-footer sl-button', 'Save review')!.click();
+    await settle(el);
+    const editor = el.shadowRoot!.querySelector(
+      'scion-code-editor.review-editor'
+    ) as HTMLElement & {
+      content: string;
+    };
+    expect(editor.content).toBe(othersReview.replace(/\r\n/g, '\n'));
+    expect(button(el, '.edit-footer sl-button', 'Save review')!.hasAttribute('disabled')).toBe(
+      true
+    );
+  });
+
+  it('describes the marks of a pending review by kind, leaving out kinds it has none of', async () => {
+    const { describeMarks } = await import('./artifact-detail.js');
+    expect(describeMarks({ comments: 2, suggestions: 3, highlights: 0 })).toBe(
+      '2 comments and 3 suggestions'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 1 })).toBe('1 highlight');
+    expect(describeMarks({ comments: 1, suggestions: 1, highlights: 2 })).toBe(
+      '1 comment, 1 suggestion and 2 highlights'
+    );
+    expect(describeMarks({ comments: 0, suggestions: 0, highlights: 0 })).toBe('marks');
+    // In the banner: a review with only a highlight.
+    const meta = reviewMeta();
+    mockFetch(meta, 'We {==ship==} in Q3.\n', {
+      versions: [
+        { ...meta.version!, files: [] },
+        { ...meta.version!, seq: 1, kind: 'publish', files: [] },
+      ],
+    });
+    const el = await mount(true);
+    const banner = el
+      .shadowRoot!.querySelector('sl-alert.review-banner')!
+      .textContent!.replace(/\s+/g, ' ');
+    expect(banner).toContain('left 1 highlight on v1');
+    expect(banner).not.toContain('0 comments');
   });
 });

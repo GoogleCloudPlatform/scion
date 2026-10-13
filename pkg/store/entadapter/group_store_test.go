@@ -846,6 +846,105 @@ func TestGetEffectiveGroups(t *testing.T) {
 	assert.True(t, found[c.ID], "expected group C")
 }
 
+// addChildGroup makes child a member group of parent via the store's own
+// AddGroupMember path (which does not itself reject cycles; the hub checks
+// WouldCreateCycle before calling it).
+func addChildGroup(t *testing.T, gs *GroupStore, parent, child *store.Group) {
+	t.Helper()
+	require.NoError(t, gs.AddGroupMember(context.Background(), &store.GroupMember{
+		GroupID: parent.ID, MemberType: store.GroupMemberTypeGroup, MemberID: child.ID, Role: store.GroupMemberRoleMember,
+	}))
+}
+
+// TestGetParentGroups covers the recursive ancestor walk: no parents, a
+// direct parent, transitive ancestors, and siblings/descendants that must not
+// appear (ptone/scion#1585).
+func TestGetParentGroups(t *testing.T) {
+	gs := newTestGroupStore(t)
+	ctx := context.Background()
+
+	// A contains B, B contains C, C contains D. S is an unrelated sibling of B
+	// under A.
+	a := &store.Group{ID: uuid.New().String(), Name: "A", Slug: "par-a"}
+	b := &store.Group{ID: uuid.New().String(), Name: "B", Slug: "par-b"}
+	c := &store.Group{ID: uuid.New().String(), Name: "C", Slug: "par-c"}
+	d := &store.Group{ID: uuid.New().String(), Name: "D", Slug: "par-d"}
+	s := &store.Group{ID: uuid.New().String(), Name: "S", Slug: "par-s"}
+	for _, g := range []*store.Group{a, b, c, d, s} {
+		require.NoError(t, gs.CreateGroup(ctx, g))
+	}
+	addChildGroup(t, gs, a, b)
+	addChildGroup(t, gs, b, c)
+	addChildGroup(t, gs, c, d)
+	addChildGroup(t, gs, a, s)
+
+	parents, err := gs.GetParentGroups(ctx, a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, parents, "a root group has no parents")
+
+	parents, err = gs.GetParentGroups(ctx, b.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{a.ID}, parents, "single-level parent")
+
+	parents, err = gs.GetParentGroups(ctx, d.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{a.ID, b.ID, c.ID}, parents, "transitive ancestors, without descendants or siblings")
+
+	parents, err = gs.GetParentGroups(ctx, uuid.New().String())
+	require.NoError(t, err)
+	assert.Empty(t, parents, "an unknown group has no parents")
+
+	_, err = gs.GetParentGroups(ctx, "not-a-uuid")
+	assert.Error(t, err)
+}
+
+// TestGetParentGroups_ExcludesSelfOnCycle pins the self-exclusion filter: when
+// the child-group graph contains a cycle through the queried group (or a
+// self-edge), the walk reaches the group itself, which must not be reported
+// as its own parent. The recursive UNION also has to terminate on the cycle.
+func TestGetParentGroups_ExcludesSelfOnCycle(t *testing.T) {
+	gs := newTestGroupStore(t)
+	ctx := context.Background()
+
+	// A contains B, B contains C, C contains A: a three-group cycle.
+	a := &store.Group{ID: uuid.New().String(), Name: "A", Slug: "cyc-a"}
+	b := &store.Group{ID: uuid.New().String(), Name: "B", Slug: "cyc-b"}
+	c := &store.Group{ID: uuid.New().String(), Name: "C", Slug: "cyc-c"}
+	for _, g := range []*store.Group{a, b, c} {
+		require.NoError(t, gs.CreateGroup(ctx, g))
+	}
+	addChildGroup(t, gs, a, b)
+	addChildGroup(t, gs, b, c)
+	addChildGroup(t, gs, c, a)
+
+	for _, tc := range []struct {
+		group *store.Group
+		want  []string
+	}{
+		{a, []string{b.ID, c.ID}},
+		{b, []string{a.ID, c.ID}},
+		{c, []string{a.ID, b.ID}},
+	} {
+		parents, err := gs.GetParentGroups(ctx, tc.group.ID)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, tc.want, parents, "parents of %s", tc.group.Name)
+	}
+
+	// A self-edge: the group is its own direct parent in the edge table, but
+	// GetParentGroups still excludes it.
+	self := &store.Group{ID: uuid.New().String(), Name: "Self", Slug: "cyc-self"}
+	require.NoError(t, gs.CreateGroup(ctx, self))
+	addChildGroup(t, gs, self, self)
+
+	direct, err := gs.GetDirectParentGroupIDs(ctx, self.ID)
+	require.NoError(t, err)
+	require.Equal(t, []string{self.ID}, direct, "precondition: the self-edge exists")
+
+	parents, err := gs.GetParentGroups(ctx, self.ID)
+	require.NoError(t, err)
+	assert.Empty(t, parents)
+}
+
 func TestGetEffectiveGroupsNoMemberships(t *testing.T) {
 	gs := newTestGroupStore(t)
 	ctx := context.Background()

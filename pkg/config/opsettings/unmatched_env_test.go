@@ -90,10 +90,15 @@ func TestFindUnmatchedSettingsEnv_FlagsWithoutHint(t *testing.T) {
 		"SCION_SEED_SERVER_HUB_PORT", // Layer-0: seed values only seed Layer-1
 		"SCION_SERVER_ENV",           // binds in VersionedSettings, never read
 		"SCION_SERVER_LOG_FORMAT",
-		// No SEED spelling maps to auto_expose_ports.enabled (no snake-case
-		// mapping for autoexposeports); seed it from settings.yaml.
+		"SCION_SERVER_LOGFORMAT", // server.log_format is accepted but not read
+		// Underscored spelling splits into auto.expose.ports.enabled; the
+		// accepted spelling is SCION_SEED_AUTOEXPOSEPORTS_ENABLED.
 		"SCION_SEED_AUTO_EXPOSE_PORTS_ENABLED",
 		"SCION_SEED_SERVER_HUB_IMAGEREGISTRY", // image_registry is top-level
+		// trusted_issuers is a list of objects, so no single env string can
+		// set it (ptone/scion#3836).
+		"SCION_SERVER_FEDERATION_TRUSTEDISSUERS",
+		"SCION_SEED_SERVER_FEDERATION_TRUSTEDISSUERS",
 	}
 	var environ []string
 	for _, n := range names {
@@ -126,6 +131,16 @@ func TestFindUnmatchedSettingsEnv_AcceptsValidNames(t *testing.T) {
 		"SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE=x",
 		"SCION_SEED_TELEMETRY_ENABLED=x",
 		"SCION_SEED_IMAGEREGISTRY=x",
+		"SCION_SEED_AUTOEXPOSEPORTS_ENABLED=x",
+		"SCION_SERVER_AUTOEXPOSEPORTS_ENABLED=x",
+		// ptone/scion#3836: federation, project_defaults, harness_configs.
+		"SCION_SERVER_FEDERATION_ENABLED=x",
+		"SCION_SEED_SERVER_FEDERATION_REFRESHINTERVAL=x",
+		"SCION_SEED_SERVER_FEDERATION_DEBOUNCEINTERVAL=x",
+		"SCION_SERVER_PROJECTDEFAULTS_DEFAULTSCRATCHPAD=x",
+		"SCION_SEED_PROJECTDEFAULTS_DEFAULTSCRATCHPAD=x",
+		"SCION_SERVER_HARNESSCONFIGS=x",
+		"SCION_SEED_HARNESSCONFIGS=x",
 		// Unrelated prefixes are ignored entirely.
 		"SCION_PROJECT=x",
 		"HOME=/tmp",
@@ -221,8 +236,8 @@ func TestSeedImageRegistry_ReachesBootstrap(t *testing.T) {
 }
 
 // TestFindUnmatchedSettingsEnv_LogLevelNote checks the LOG_LEVEL warning
-// does not overstate SCION_LOG_LEVEL: the hint names the reload-only
-// setting spelling and the note gives the boot-time controls.
+// names the setting spelling and says that SCION_LOG_LEVEL and --debug take
+// precedence over it.
 func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
 	u, ok := unmatchedByName([]string{"SCION_SERVER_LOG_LEVEL=debug"})["SCION_SERVER_LOG_LEVEL"]
 	if !ok {
@@ -231,7 +246,7 @@ func TestFindUnmatchedSettingsEnv_LogLevelNote(t *testing.T) {
 	if u.Suggestion != "SCION_SERVER_LOGLEVEL" {
 		t.Errorf("suggestion = %q, want SCION_SERVER_LOGLEVEL", u.Suggestion)
 	}
-	for _, want := range []string{"no boot-time override", "file-mode reload", "--debug", "SCION_LOG_LEVEL=debug"} {
+	for _, want := range []string{"server.log_level", "startup", "file-mode reload", "SCION_LOG_LEVEL", "--debug"} {
 		if !strings.Contains(u.Note, want) {
 			t.Errorf("note %q lacks %q", u.Note, want)
 		}

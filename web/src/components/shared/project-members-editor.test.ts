@@ -297,12 +297,12 @@ type Route = (url: string, init?: RequestInit) => Response | undefined;
 
 /** Routes apiFetch by URL and method; unmatched requests fail the test. */
 function routeApi(...routes: Route[]): void {
-  vi.mocked(apiFetch).mockImplementation(async (url: string, init?: RequestInit) => {
+  vi.mocked(apiFetch).mockImplementation((url: string, init?: RequestInit) => {
     for (const r of routes) {
       const res = r(url, init);
-      if (res) return res;
+      if (res) return Promise.resolve(res);
     }
-    throw new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`);
+    return Promise.reject(new Error(`unexpected request ${init?.method ?? 'GET'} ${url}`));
   });
 }
 
@@ -1157,8 +1157,9 @@ describe('409 membership_changed', () => {
     el.openAddDialog();
     el.onPrincipalChange({ principalType: 'user', principalId: 'u-erin', displayLabel: 'Erin' });
     expect(el.dialogMode).toBe('add');
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.groups = [ALICE, ERIN];
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(
       changed('principal_roles_changed', ['r-member', 'r-msg'])
@@ -1204,8 +1205,9 @@ describe('409 membership_changed', () => {
     el.dlgBuiltIn = NO_PROJECT_ROLE;
     el.toggleCustomRole('r-msg', true);
     const daveNow = group('user', 'u-dave', [R_ADMIN], 'Dave Member');
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.groups = ALL_GROUPS.map((g) => (g === DAVE ? daveNow : g));
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed('principal_roles_changed', ['r-admin']));
     await el.handleSave();
@@ -1222,9 +1224,10 @@ describe('409 membership_changed', () => {
     el.onPrincipalChange({ principalType: 'user', principalId: 'u-new', displayLabel: 'New' });
     expect(el.dlgBuiltIn).toBe('r-admin');
     el.toggleCustomRole('r-msg', true);
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.capabilities = ADMIN_CAPS;
       el.assignableRoles = ADMIN_CATALOG;
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
     await el.handleSave();
@@ -1245,9 +1248,10 @@ describe('409 membership_changed', () => {
     el.openEditDialog(ERIN);
     el.dlgBuiltIn = 'r-admin';
     el.toggleCustomRole('r-ops', true);
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.capabilities = ADMIN_CAPS;
       el.assignableRoles = ADMIN_CATALOG;
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
     await el.handleSave();
@@ -1347,9 +1351,10 @@ describe('409 membership_changed', () => {
     const el = makeEditor(OWNER_CAPS);
     el.openEditDialog(DAVE);
     el.dlgBuiltIn = 'r-admin';
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.capabilities = MEMBER_CAPS;
       el.assignableRoles = [];
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed('actor_authority_changed', []));
     await el.handleSave();
@@ -1483,8 +1488,9 @@ describe('automatic switch to Edit follows the row rules', () => {
     const el = makeEditor(ADMIN_CAPS, { catalog: ADMIN_CATALOG });
     el.openEditDialog(DAVE);
     const daveNow = group('user', 'u-dave', [R_ADMIN], 'Dave Member');
-    el.loadData = vi.fn(async () => {
+    el.loadData = vi.fn(() => {
       el.groups = ALL_GROUPS.map((g) => (g === DAVE ? daveNow : g));
+      return Promise.resolve();
     });
     vi.mocked(apiFetch).mockResolvedValueOnce(changed409(['r-admin']));
     await el.handleSave();
@@ -1764,7 +1770,7 @@ describe('row delete', () => {
   it('group principals use …/principals/group/{encoded id} for Add, Edit and row delete', async () => {
     const team = group('group', 'g/ops team', [R_MEMBER], 'Ops');
     const el = makeEditor(OWNER_CAPS, { groups: [...ALL_GROUPS, team] });
-    vi.mocked(apiFetch).mockImplementation(async () => jsonResponse(200, {}));
+    vi.mocked(apiFetch).mockImplementation(() => Promise.resolve(jsonResponse(200, {})));
 
     el.openAddDialog();
     el.onPrincipalTypeChange('group');

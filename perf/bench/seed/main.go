@@ -36,7 +36,7 @@
 //
 // Seeding is direct-to-store (bypassing HTTP) for speed at N=500+, following
 // the pattern already used by pkg/hub's own SQLite-backed tests
-// (pkg/hub/teststore_test.go, pkg/store/storetest/domains.go). One known
+// (pkg/hub/teststore_sqlite_helpers_test.go, pkg/store/storetest/domains.go). One known
 // consequence of that shortcut, called out in pkg/hub/handlers_test.go: it
 // does not create delegation-edge rows the way the real agent-create HTTP
 // path does. That is fine for the agent-list/graph endpoints this harness

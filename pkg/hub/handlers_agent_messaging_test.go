@@ -19,10 +19,8 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -34,7 +32,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/eventbus"
-	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1566,64 +1563,6 @@ func TestDEF49_DivergenceMismatch_AuthorizedButWrongAgent(t *testing.T) {
 // AC-D-9: One positive test proving the legitimate scion message @agent path
 // still works (expected GREEN on both main and after the fix).
 
-// def49Setup creates a project, two agents (attacker and target), a user
-// (the legitimate sender, DevUserID), and a dispatcher so the handler
-// doesn't fail with 503. It returns everything needed to exercise the
-// caller-supplied conversation_id authorization path.
-func def49Setup(t *testing.T) (srv *Server, s store.Store, projectID string, targetAgent *store.Agent, userID string) {
-	t.Helper()
-	srv, s = testServer(t)
-	ctx := context.Background()
-
-	projectID = tid("def49-project")
-	if err := s.CreateProject(ctx, &store.Project{
-		ID:   projectID,
-		Name: "def49-project",
-		Slug: "def49-project",
-	}); err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-	brokerID := tid("def49-broker")
-	if err := s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
-		ID:     brokerID,
-		Name:   "def49-broker",
-		Slug:   "def49-broker",
-		Status: store.BrokerStatusOnline,
-	}); err != nil {
-		t.Fatalf("CreateRuntimeBroker: %v", err)
-	}
-	if err := s.AddProjectProvider(ctx, &store.ProjectProvider{
-		ProjectID:  projectID,
-		BrokerID:   brokerID,
-		BrokerName: "def49-broker",
-		Status:     store.BrokerStatusOnline,
-	}); err != nil {
-		t.Fatalf("AddProjectProvider: %v", err)
-	}
-
-	targetAgent = &store.Agent{
-		ID:              tid("def49-target-agent"),
-		Name:            "def49-target-agent",
-		Slug:            "def49-target-agent",
-		ProjectID:       projectID,
-		RuntimeBrokerID: brokerID,
-		Phase:           "running",
-	}
-	if err := s.CreateAgent(ctx, targetAgent); err != nil {
-		t.Fatalf("CreateAgent (target): %v", err)
-	}
-
-	userID = DevUserID
-	_ = s.CreateUser(ctx, &store.User{
-		ID:          userID,
-		Email:       "dev@localhost",
-		DisplayName: "Development User",
-	})
-
-	srv.SetDispatcher(&recordingDispatcher{})
-	return srv, s, projectID, targetAgent, userID
-}
-
 // TestDEF49_NonMembership_DirectConversation verifies that an authenticated
 // user cannot attribute a message to a direct conversation whose DM key
 // does not name them (AC-D-8 facet a, AC-INGRESS-1 violation).
@@ -1680,8 +1619,9 @@ func TestDEF49_NonMembership_DirectConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (a): expected 403 Forbidden for non-member "+
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (a): expected the unknown-conversation answer (400) for non-member "+
 			"direct conversation attribution, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
@@ -1771,9 +1711,10 @@ func TestDEF49_CrossProject_GroupConversation(t *testing.T) {
 			},
 		})
 
-	if rec.Code != http.StatusForbidden {
-		t.Errorf("DEF-49 facet (c): expected 403 Forbidden for cross-project "+
-			"group conversation attribution, got %d: %s",
+	// Answered exactly as an unknown conversation_id.
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+		t.Errorf("DEF-49 facet (c): expected the unknown-conversation answer (400) for a group "+
+			"conversation of another project, got %d: %s",
 			rec.Code, rec.Body.String())
 	}
 }
@@ -1885,8 +1826,8 @@ func TestDEF49_GroupConversation_UnsetProjectID(t *testing.T) {
 					},
 				})
 
-			if rec.Code != http.StatusForbidden {
-				t.Errorf("expected 403 for conversation with unset project ID (%s), got %d: %s",
+			if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "caller-supplied conversation_id does not exist") {
+				t.Errorf("expected the unknown-conversation answer (400) for conversation with unset project ID (%s), got %d: %s",
 					tc.name, rec.Code, rec.Body.String())
 			}
 		})
@@ -2118,8 +2059,6 @@ func TestPhase9e_PreResolvedConversation_EnrichesKindSurfaceDisplayName(t *testi
 	}
 }
 
-func strPtr(s string) *string { return &s }
-
 // ---------------------------------------------------------------------------
 // Native-chat DM sync: agent→user outbound message side-effects
 // ---------------------------------------------------------------------------
@@ -2137,19 +2076,10 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Limit to a single connection so all goroutines share the same in-memory
-	// database (each `:memory:` connection gets its own empty DB otherwise).
-	db.SetMaxOpenConns(1)
-	// Use t.Cleanup instead of defer so that db.Close runs after the W6
-	// notification goroutine (go cn.NotifyDMReceived) has finished — the
-	// backfill now populates req.ThreadID, which makes the non-broker
-	// notification path fire.
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
+	// runs after any background work the send started has finished.
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
 	}
@@ -2248,11 +2178,6 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	require.Equal(t, "web", storedMsg.Channel)
 	require.True(t, strings.HasPrefix(storedMsg.ThreadID, "dm:"),
 		"ThreadID must start with 'dm:' for SSE DM fan-out")
-
-	// Allow the W6 notification goroutine (go cn.NotifyDMReceived) to
-	// complete before t.Cleanup closes the database. The goroutine checks
-	// IsConversationMuted which hits the WebChatStore's SQLite DB.
-	time.Sleep(100 * time.Millisecond)
 }
 
 // TestHandleAgentOutboundMessage_DMSyncBrokerPath verifies that when the broker
@@ -2264,16 +2189,12 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	ctx := context.Background()
 
 	// Set up a WebChatStore.
-	db, err := sql.Open("sqlite3", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	// Register db.Close as a t.Cleanup BEFORE proxy.Stop so that LIFO
-	// ordering guarantees proxy.Stop runs first — draining in-flight
-	// deliverToUser callbacks (including TouchDMActivity) before the
-	// database handle is closed.
-	t.Cleanup(func() { _ = db.Close() })
-	wcs := NewWebChatStore(db, "sqlite3")
+	// openTestMemorySQLite registers db.Close as a t.Cleanup BEFORE
+	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
+	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
+	// before the database handle is closed.
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -2378,21 +2299,6 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	}
 	require.True(t, userFound, "expected webchat_dm row for user with key %s", expectedKey)
 }
-
-// alwaysDropUserBus is an eventbus.EventBus whose Publish always reports a
-// subscriber-buffer-full drop, simulating InProcessEventBus.Publish when a
-// project's user-message subscriber is saturated (ptone/scion#2311).
-type alwaysDropUserBus struct{}
-
-func (alwaysDropUserBus) Publish(context.Context, string, *messages.StructuredMessage) error {
-	return eventbus.ErrSubscriberBufferFull
-}
-
-func (alwaysDropUserBus) Subscribe(string, eventbus.EventHandler) (eventbus.Subscription, error) {
-	return nullSub{}, nil
-}
-
-func (alwaysDropUserBus) Close() error { return nil }
 
 // TestHandleAgentOutboundMessage_BrokerDropReturnsServiceUnavailable is a
 // regression test for ptone/scion#2311: when the broker's user-message
@@ -3296,41 +3202,6 @@ func TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_AgentSender(t *t
 	}
 	require.True(t, agentFound,
 		"AC-11/G3: the primary agent dispatched into a thread-derived group (agent sender / ExecuteAgentDM fork) must become a participant")
-}
-
-// stubManagedAgentBackend is a minimal managedagent.ManagedAgentBackend used
-// to exercise the managed-runtime dispatch path (handlers_managed_agents.go)
-// without touching real cloud config or the network. getManagedBackend
-// returns managedBackendInst immediately when it's already non-nil, before
-// any config/API-key loading — swapping that unexported package-level var
-// from within this package's own test file is an *existing* seam, not a new
-// production one (review round 3 finding #2).
-type stubManagedAgentBackend struct{}
-
-func (stubManagedAgentBackend) Name() string { return "stub" }
-
-func (stubManagedAgentBackend) CreateAgent(ctx context.Context, cfg managedagent.CreateAgentConfig) (string, error) {
-	return "stub-cloud-agent", nil
-}
-
-func (stubManagedAgentBackend) DeleteAgent(ctx context.Context, cloudAgentID string) error {
-	return nil
-}
-
-func (stubManagedAgentBackend) CreateInteraction(ctx context.Context, req managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
-	return &managedagent.InteractionHandle{InteractionID: "stub-interaction"}, nil
-}
-
-func (stubManagedAgentBackend) GetInteraction(ctx context.Context, interactionID string) (*managedagent.InteractionState, error) {
-	return &managedagent.InteractionState{InteractionID: interactionID}, nil
-}
-
-func (stubManagedAgentBackend) CancelInteraction(ctx context.Context, interactionID string) error {
-	return nil
-}
-
-func (stubManagedAgentBackend) StreamInteraction(ctx context.Context, interactionID string, lastEventID string) (io.ReadCloser, error) {
-	return nil, fmt.Errorf("stubManagedAgentBackend: streaming not supported")
 }
 
 // TestAgentMessage_ThreadDerivedGroup_PrimaryAgentRegistered_ManagedRuntime is

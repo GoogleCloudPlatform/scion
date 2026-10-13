@@ -40,6 +40,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/provision"
 	stagedsecrets "github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 )
 
 // Well-known secret name and env var for GCP telemetry credentials.
@@ -112,25 +113,121 @@ func buildNoAuthCmdLine(noAuthMsg, noAuthCmd string) string {
 	return "exec bash"
 }
 
+// harnessCmdLineOptions holds per-runtime choices for harnessCmdLine. The
+// zero value builds the plain harness command line.
+type harnessCmdLineOptions struct {
+	// FreshStartOnFailedResume makes a resume fall back to a fresh start of
+	// the harness when the resume attempt exits non-zero within
+	// resumeFallbackWindowSeconds (see resumeFallbackCmdLine). Set it only
+	// where the agent home, and so the harness's saved session, does not
+	// survive a restart: the Kubernetes runtime with a pod-local home.
+	// Where the home persists, a fast failure has another cause (network,
+	// auth) and must not silently drop the conversation.
+	FreshStartOnFailedResume bool
+}
+
+// resumeFallbackWindowSeconds bounds how soon a failed resume attempt must
+// exit for FreshStartOnFailedResume to start the harness fresh. A harness
+// with no session to resume exits within a few seconds; a resumed session
+// that fails later is not restarted fresh.
+const resumeFallbackWindowSeconds = 30
+
+// resumeFallbackNotice is printed to stderr before the fresh start.
+const resumeFallbackNotice = "scion: no resumable session; starting fresh"
+
 // harnessCmdLine builds the shell command line that runs the harness (or
 // the no-auth shell), from the fields shared by every runtime's entrypoint
 // builder: NoAuth/NoAuthMessage/NoAuthCommand, or Harness.GetCommand with
 // Task/Resume/CommandArgs. It returns ok=false when neither is configured;
 // callers decide how to handle that case, since it differs by runtime
 // (error out, or fall back to a placeholder command).
-func harnessCmdLine(cfg RunConfig) (cmdLine string, ok bool) {
+func harnessCmdLine(cfg RunConfig, opts harnessCmdLineOptions) (cmdLine string, ok bool) {
 	if cfg.NoAuth {
 		return buildNoAuthCmdLine(cfg.NoAuthMessage, cfg.NoAuthCommand), true
 	}
 	if cfg.Harness != nil {
 		harnessArgs := cfg.Harness.GetCommand(cfg.Task, cfg.Resume, cfg.CommandArgs)
-		quotedArgs := make([]string, 0, len(harnessArgs))
-		for _, a := range harnessArgs {
-			quotedArgs = append(quotedArgs, shellQuote(a))
+		if cfg.Resume && opts.FreshStartOnFailedResume {
+			freshArgs := cfg.Harness.GetCommand(cfg.Task, false, cfg.CommandArgs)
+			if !slices.Equal(harnessArgs, freshArgs) {
+				return resumeFallbackCmdLine(harnessArgs, freshArgs), true
+			}
 		}
-		return strings.Join(quotedArgs, " "), true
+		return quotedArgsLine(harnessArgs, nil), true
 	}
 	return "", false
+}
+
+// quotedArgsLine shell-quotes each argument and joins them with spaces. An
+// argument that is a key of refs is replaced by its value, a quoted shell
+// variable reference that expands to the argument as one word.
+func quotedArgsLine(args []string, refs map[string]string) string {
+	quotedArgs := make([]string, 0, len(args))
+	for _, a := range args {
+		if ref, ok := refs[a]; ok {
+			quotedArgs = append(quotedArgs, ref)
+			continue
+		}
+		quotedArgs = append(quotedArgs, shellQuote(a))
+	}
+	return strings.Join(quotedArgs, " ")
+}
+
+// resumeFallbackSharedArgMinBytes is the shortest argument common to the
+// resume and fresh commands that resumeFallbackCmdLine stores in a shell
+// variable. A shorter one is written in both commands, since a variable
+// costs about as many bytes as it saves.
+const resumeFallbackSharedArgMinBytes = 24
+
+// resumeFallbackCmdLine runs resumeArgs and, when they exit with a status
+// from 1 to 127 within resumeFallbackWindowSeconds, prints
+// resumeFallbackNotice and runs freshArgs.
+//
+// A status of 128 or more means the harness was killed by a signal (a
+// stop, suspend or pod delete), which never starts the fresh run; if the
+// shell itself is signalled it dies and runs nothing further. The line's
+// exit status is that of the last harness run, so tmuxAgentWindowCmd
+// records the real code.
+//
+// freshArgs is the harness's own non-resume command, so the fallback drops
+// exactly the resume flag that harness adds, plus any prompt GetCommand
+// adds only on resume, and carries the same task: on a wake that is no
+// task, never the original prompt.
+//
+// Each argument of at least resumeFallbackSharedArgMinBytes that both
+// commands contain (the task, an inline system prompt) is assigned once to
+// a shell variable, scion_a0, scion_a1 and so on, that both commands
+// reference as "$scion_aN": one word, never re-split. The line is
+// therefore longer than the plain command line by a fixed few hundred
+// bytes plus a few dozen per shared or short argument, not by a second
+// copy of the long ones, which keeps it under tmux's command length limit
+// whenever the plain line is (see QuotedTaskBytes and InlineTaskMaxBytes).
+func resumeFallbackCmdLine(resumeArgs, freshArgs []string) string {
+	inResume := make(map[string]bool, len(resumeArgs))
+	for _, a := range resumeArgs {
+		inResume[a] = true
+	}
+	refs := map[string]string{}
+	var assigns strings.Builder
+	for _, a := range freshArgs {
+		if _, done := refs[a]; done || len(a) < resumeFallbackSharedArgMinBytes || !inResume[a] {
+			continue
+		}
+		name := fmt.Sprintf("scion_a%d", len(refs))
+		refs[a] = `"$` + name + `"`
+		fmt.Fprintf(&assigns, "%s=%s; ", name, shellQuote(a))
+	}
+	return fmt.Sprintf(
+		`%sscion_start=$(date +%%s); %s; scion_rc=$?; `+
+			`if [ "$scion_rc" -gt 0 ] && [ "$scion_rc" -lt 128 ] && `+
+			`[ $(( $(date +%%s) - scion_start )) -lt %d ]; `+
+			`then printf '%%s\n' %s >&2; %s; else (exit "$scion_rc"); fi`,
+		assigns.String(),
+		quotedArgsLine(resumeArgs, refs),
+		resumeFallbackWindowSeconds,
+		shellQuote(resumeFallbackNotice),
+		quotedArgsLine(freshArgs, refs),
+	)
 }
 
 // tmuxAgentWindowCmd wraps cmdLine so the harness's real exit code is
@@ -143,6 +240,14 @@ func harnessCmdLine(cfg RunConfig) (cmdLine string, ok bool) {
 // depending on what the runtime guarantees is resolvable for argv[0]).
 func tmuxAgentWindowCmd(shellPath, cmdLine string) string {
 	return shellPath + " -c " + shellQuote(cmdLine+"; echo $? > "+state.HarnessExitCodeFile)
+}
+
+// QuotedTaskBytes is the number of bytes task adds to the tmux command
+// that starts the harness. The harness command line quotes each argument
+// for the shell (harnessCmdLine) and tmuxAgentWindowCmd quotes that line
+// again, so every single quote in task grows to 13 bytes.
+func QuotedTaskBytes(task string) int {
+	return len(shellQuote(shellQuote(task))) - len(shellQuote(shellQuote("")))
 }
 
 // tmuxSessionEnd selects how buildTmuxStartCmd keeps the tmux session's
@@ -464,10 +569,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// UID/GID (default 1000:1000) so files written by agents on different nodes
 	// have consistent ownership on the shared filesystem. The local backend
 	// continues to use the broker's host UID/GID (today's behavior, unchanged).
-	uid, gid := os.Getuid(), os.Getgid()
-	if config.WorkspaceBackendName == "nfs" {
-		uid, gid = nfsOwnerIDs(config.NFSUID, config.NFSGID)
-	}
+	uid, gid := AdvertisedHostOwnerIDs(config.WorkspaceBackendName, config.NFSUID, config.NFSGID)
 	addEnv("SCION_HOST_UID", fmt.Sprintf("%d", uid))
 	addEnv("SCION_HOST_GID", fmt.Sprintf("%d", gid))
 
@@ -625,7 +727,7 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 	// directly into the sh -c used by the tmux agent window. This avoids
 	// the double-sh-c wrapping that previously caused the no-auth command
 	// to be injected as terminal input instead of running standalone.
-	cmdLine, ok := harnessCmdLine(config)
+	cmdLine, ok := harnessCmdLine(config, harnessCmdLineOptions{})
 	if !ok {
 		return nil, fmt.Errorf("no harness provided")
 	}
@@ -645,6 +747,13 @@ func buildCommonRunArgs(config RunConfig) ([]string, error) {
 		// Must be added before the image name — Docker/Podman require all
 		// flags before the image argument.
 		addArg("-e", fmt.Sprintf("SCION_START_CMD=%s", tmuxCmd))
+	}
+
+	// The template env fallback (ptone/scion#4524) is the LAST env step:
+	// only keys no source above emitted, never a suppressed key. Docker
+	// keeps the last -e for a key, so nothing may be added after this.
+	for _, e := range FallbackEnvEntries(config.FallbackEnv, config.SuppressedFallbackKeys, envKeysOfArgs(args)) {
+		addArg("-e", e)
 	}
 
 	args = append(args, config.Image)
@@ -970,8 +1079,16 @@ func appendContainerResourceArgs(args []string, resources *api.ResourceSpec) ([]
 	return args, nil
 }
 
-// runtimeLog is the structured logger for runtime command execution.
-var runtimeLog = slog.Default().With(slog.String("subsystem", "runtime"))
+// runtimeLog returns the structured logger for the runtime subsystem.
+//
+// It resolves slog.Default() at each call rather than once at package init:
+// a package-level logger would capture the init-time handler, so a later
+// slog.SetDefault (logging setup, --debug, SCION_LOG_LEVEL) would never reach
+// runtime log lines, and those lines would lose their structured attributes
+// (#1339).
+func runtimeLog() *slog.Logger {
+	return logging.Subsystem("runtime")
+}
 
 // isExitError reports whether err (possibly wrapped by runSimpleCommand's
 // fmt.Errorf) contains an *exec.ExitError, meaning the command executed but
@@ -1006,7 +1123,7 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 	// Log the command name and argument count only — never the argument values.
 	// On this tier, secrets travel in argv (--env KEY=VALUE), so logging the
 	// full command string would write credentials to logs.  See #127 / P5.
-	runtimeLog.Debug("Executing command", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing command", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
 	out, err := cmd.CombinedOutput()
@@ -1015,7 +1132,7 @@ func runSimpleCommand(ctx context.Context, command string, args ...string) (stri
 		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
-	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
 }
 
@@ -1031,10 +1148,10 @@ func logCommandFailure(ctx context.Context, command string, argc int, elapsed ti
 		// No "output" key at all — matches this function's doc comment
 		// ("omitted"), not a placeholder value that would still need its own
 		// audit for leaking anything.
-		runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
+		runtimeLog().Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed)
 		return
 	}
-	runtimeLog.Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
+	runtimeLog().Debug("Command failed", "cmd", command, "argc", argc, "duration", elapsed, "output", strings.TrimSpace(string(out)))
 }
 
 // runSimpleCommandWithStdin is runSimpleCommand's counterpart for callers
@@ -1044,7 +1161,7 @@ func logCommandFailure(ctx context.Context, command string, argc int, elapsed ti
 func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command string, args ...string) (string, error) {
 	// Log the command name and argument count only — see runSimpleCommand
 	// comment above. The stdin payload is never logged.
-	runtimeLog.Debug("Executing command with stdin", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing command with stdin", "cmd", command, "argc", len(args))
 	start := time.Now()
 	cmd := exec.CommandContext(ctx, command, args...)
 	cmd.Stdin = stdin
@@ -1054,7 +1171,7 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 		logCommandFailure(ctx, command, len(args), elapsed, out)
 		return string(out), fmt.Errorf("%s failed: %w", command, err)
 	}
-	runtimeLog.Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
+	runtimeLog().Debug("Command completed", "cmd", command, "argc", len(args), "duration", elapsed)
 	return strings.TrimSpace(string(out)), nil
 }
 
@@ -1071,46 +1188,108 @@ func runSimpleCommandWithStdin(ctx context.Context, stdin io.Reader, command str
 // (already cancelled) caller context, since the caller has already given up
 // and this cleanup must still be allowed to run.
 //
+// runID is the cancelled create's scion.run_id label. When it is set, only
+// containers carrying that label are removed, found by listing; the name is
+// not used, so a container another run has since created under the same
+// name is left alone (ptone/scion#2550). If the listing fails or finds
+// nothing, nothing is removed. Without a run ID (a RunConfig built outside
+// pkg/agent) the container is removed by name, as before run IDs existed.
+//
 // The Apple "container" CLI's "rm" does not support "-f" and fails if the
 // container is still running (see AppleContainerRuntime.Delete), so for that
 // runtime we kill first, then retry a plain "rm" a few times — kill is
 // asynchronous and the container may not be immediately ready for removal.
 // Docker/Podman support "rm -f" directly.
-func rollbackCancelledCreate(command, containerName string) {
-	if containerName == "" {
+func rollbackCancelledCreate(command, containerName, runID string) {
+	if containerName == "" && runID == "" {
 		return
 	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if filepath.Base(command) == "container" {
-		_, _ = runSimpleCommand(cleanupCtx, command, "kill", containerName)
+	apple := filepath.Base(command) == "container"
 
-		var out string
-		var err error
-		for attempt := 0; attempt < 5; attempt++ {
-			out, err = runSimpleCommand(cleanupCtx, command, "rm", containerName)
-			if err == nil {
-				return
-			}
-			select {
-			case <-cleanupCtx.Done():
-				runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", cleanupCtx.Err(), "output", strings.TrimSpace(out))
-				return
-			case <-time.After(100 * time.Millisecond):
+	targets := []string{containerName}
+	if runID != "" {
+		ids, err := containersWithRunID(cleanupCtx, command, apple, runID)
+		if err != nil {
+			runtimeLog().Warn("Failed to roll back cancelled create: could not list the run's containers; nothing removed",
+				"cmd", command, "container", containerName, "run_id", runID, "error", err)
+			return
+		}
+		if len(ids) == 0 {
+			runtimeLog().Debug("Cancelled create left no container of its run", "cmd", command, "container", containerName, "run_id", runID)
+			return
+		}
+		targets = ids
+	}
+
+	for _, target := range targets {
+		if apple {
+			appleKillAndRemove(cleanupCtx, command, target)
+			continue
+		}
+		if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", target); err != nil {
+			runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", target, "run_id", runID, "error", err, "output", strings.TrimSpace(out))
+		}
+	}
+}
+
+// containersWithRunID lists every container (running or not) labelled with
+// scion.run_id=runID and returns their IDs: engine IDs on Docker and Podman,
+// container names on Apple.
+func containersWithRunID(ctx context.Context, command string, apple bool, runID string) ([]string, error) {
+	if apple {
+		raw, err := appleListContainers(ctx, command)
+		if err != nil {
+			return nil, err
+		}
+		var ids []string
+		for _, c := range raw {
+			if c.Configuration.Labels[api.LabelRunID] == runID && c.Configuration.ID != "" {
+				ids = append(ids, c.Configuration.ID)
 			}
 		}
-		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
-		return
+		return ids, nil
 	}
-	if out, err := runSimpleCommand(cleanupCtx, command, "rm", "-f", containerName); err != nil {
-		runtimeLog.Warn("Failed to roll back cancelled create", "cmd", command, "container", containerName, "error", err, "output", strings.TrimSpace(out))
+	out, err := runSimpleCommand(ctx, command, "ps", "-a", "-q", "--no-trunc", "--filter", "label="+api.LabelRunID+"="+runID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s", err, strings.TrimSpace(out))
 	}
+	var ids []string
+	for _, line := range strings.Split(out, "\n") {
+		if id := strings.TrimSpace(line); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// appleKillAndRemove kills and removes the Apple container id, retrying the
+// rm a few times since kill is asynchronous. Failures are logged.
+func appleKillAndRemove(ctx context.Context, command, id string) {
+	_, _ = runSimpleCommand(ctx, command, "kill", id)
+
+	var out string
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		out, err = runSimpleCommand(ctx, command, "rm", id)
+		if err == nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", ctx.Err(), "output", strings.TrimSpace(out))
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	runtimeLog().Warn("Failed to roll back cancelled create", "cmd", command, "container", id, "error", err, "output", strings.TrimSpace(out))
 }
 
 func runInteractiveCommand(command string, args ...string) error {
 	// Log command name and argument count only — see runSimpleCommand comment
 	// and #127 / P5 for rationale.
-	runtimeLog.Debug("Executing interactive command", "cmd", command, "argc", len(args))
+	runtimeLog().Debug("Executing interactive command", "cmd", command, "argc", len(args))
 	cmd := exec.Command(command, args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -1138,7 +1317,7 @@ func WriteRuntimeDebugFile(config RunConfig, command string, args []string) {
 	fmt.Fprintf(&buf, " [%d args redacted — may contain credentials, see #127]\n", len(args))
 
 	if err := os.WriteFile(debugPath, []byte(buf.String()), 0644); err != nil {
-		runtimeLog.Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
+		runtimeLog().Debug("Failed to write runtime debug file", "path", debugPath, "error", err)
 	}
 }
 
@@ -1249,12 +1428,12 @@ func DockerSupportsHostGateway(ctx context.Context, command string) bool {
 	defer cancel()
 	out, err := runSimpleCommand(probeCtx, command, "version", "--format", "{{.Server.Version}}")
 	if err != nil {
-		runtimeLog.Debug("Unable to probe Docker server version for host-gateway support", "error", err)
+		runtimeLog().Debug("Unable to probe Docker server version for host-gateway support", "error", err)
 		return true
 	}
 	major, minor, ok := parseDockerServerVersion(strings.TrimSpace(out))
 	if !ok {
-		runtimeLog.Debug("Unable to parse Docker server version for host-gateway support", "version", out)
+		runtimeLog().Debug("Unable to parse Docker server version for host-gateway support", "version", out)
 		return true
 	}
 	// host-gateway requires Docker Engine >= 20.10.
@@ -1616,6 +1795,20 @@ func ExitCodeFromContainerStatus(status string) (int, bool) {
 	return code, true
 }
 
+// AdvertisedHostOwnerIDs returns the uid and gid the runtime advertises
+// to an agent container as SCION_HOST_UID and SCION_HOST_GID, which
+// sciontool init realigns the container's scion user (and so the harness)
+// to: the agent runtime process's own ids for every workspace backend but
+// nfs, and the stable NFS owner ids (nfsOwnerIDs) for nfs. Container
+// runtimes and the agent home ownership repair both use it, so the two
+// never disagree.
+func AdvertisedHostOwnerIDs(workspaceBackendName string, nfsUID, nfsGID int) (int, int) {
+	if workspaceBackendName == "nfs" {
+		return nfsOwnerIDs(nfsUID, nfsGID)
+	}
+	return os.Getuid(), os.Getgid()
+}
+
 // nfsOwnerIDs returns the stable uid and gid for an NFS workspace: each
 // id as configured, or the default 1000 when it is 0 (unset).
 func nfsOwnerIDs(uid, gid int) (int, int) {
@@ -1662,7 +1855,7 @@ func appendSharedDirGroupArgs(args []string, config RunConfig, runtimeName strin
 		return args
 	}
 	if !supported {
-		runtimeLog.Warn("shared dir groups are not supported on this runtime; the agent starts without them "+
+		runtimeLog().Warn("shared dir groups are not supported on this runtime; the agent starts without them "+
 			"and may be unable to modify files other agents create in its nfs shared dirs",
 			"runtime", runtimeName, "gids", groups)
 		return args

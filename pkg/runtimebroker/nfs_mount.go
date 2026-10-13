@@ -441,6 +441,31 @@ func (r *NFSMountReconciler) HealthCheckString() string {
 	return "unhealthy: " + strings.Join(unhealthy, "; ")
 }
 
+// HealthCheckCodes is HealthCheckString with per-share codes only
+// ("<shareID>: unhealthy" or "<shareID>: not reconciled"), never the mount
+// messages, which can name local paths. A flat Runtime Broker instance
+// serves it in its unauthenticated health (P2.2); the messages stay in the
+// logs.
+func (r *NFSMountReconciler) HealthCheckCodes() string {
+	if r.IsHealthy() {
+		return "healthy"
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var unhealthy []string
+	for _, share := range r.cfg.Shares {
+		status, ok := r.statuses[share.ID]
+		if !ok {
+			unhealthy = append(unhealthy, share.ID+": not reconciled")
+		} else if !status.Healthy {
+			unhealthy = append(unhealthy, share.ID+": unhealthy")
+		}
+	}
+	return "unhealthy: " + strings.Join(unhealthy, "; ")
+}
+
 // EnsureShareMounted is called before each NFS-backed dispatch to a
 // local-container runtime to verify the share for a given share ID is still
 // mounted. It re-reconciles the share, mounting it when MountsShares is true.

@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"maps"
@@ -37,379 +38,11 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// reincarnateTestDispatcher is a fake AgentDispatcher recording every call the
-// reincarnation worker makes, with optional injected failures per step.
-type reincarnateTestDispatcher struct {
-	mu sync.Mutex
-
-	stopCalls        int
-	reprovisionCalls int
-	startCalls       int
-	lastStartTask    string
-	lastStartResume  *bool
-
-	stopErr        error
-	reprovisionErr error
-	startErr       error
-
-	// reprovisionImage, when non-empty, simulates the broker echoing back a
-	// resolved container image on a successful reprovision response — as the
-	// real HTTP dispatcher's applyBrokerResponse does by mutating
-	// agent.AppliedConfig.Image in place (design §3.4 Amendment A11.1(b)).
-	reprovisionImage string
-
-	// startImage, when non-empty, simulates the broker echoing back a
-	// resolved container image on a successful start response.
-	startImage string
-
-	// imageRegistry is the registry the fake reports through ImageRegistry(),
-	// as the HTTP dispatcher reports the registry it rewrites images to.
-	imageRegistry string
-
-	// reprovisionEcho and startEcho, when set, run on a successful dispatch
-	// against the dispatched agent's AppliedConfig, simulating the broker
-	// echo applyBrokerAgentConfig writes in place (HarnessConfig,
-	// HarnessAuth, Image, Profile).
-	reprovisionEcho func(cfg *store.AgentAppliedConfig)
-	startEcho       func(cfg *store.AgentAppliedConfig)
-
-	// rerenderErr is returned by every reprovision call after the first:
-	// the worker's best-effort re-render of the previous config
-	// (ptone/scion#1935). reprovisionErr applies to the first call only.
-	// Move dispatch (agentMoveDispatcher): calls record the broker each
-	// went to; errors make that call fail.
-	moveProvisionCalls   []string // "<brokerID>|<expected workspace>"
-	moveProvisionErr     error
-	localOnlyDeleteCalls []string // "<brokerID>|<runID>"
-	localOnlyDeleteErr   map[string]error
-	startBrokers         []string
-	// runStore, when set, makes DispatchAgentStart mint and record a run
-	// on the row first, like the real dispatcher's beginRun, and record
-	// startPlacement (when set), like a target's start report.
-	runStore       store.Store
-	startPlacement string
-	// stopHook, when set, runs inside DispatchAgentStop.
-	stopHook func()
-
-	rerenderErr error
-	// rerenderEcho, when set, runs on a successful re-render against the
-	// dispatched AppliedConfig, simulating the broker's echo.
-	rerenderEcho func(cfg *store.AgentAppliedConfig)
-	// reprovisionConfigs snapshots the AppliedConfig of every reprovision
-	// dispatch, in call order, as the worker sent it.
-	reprovisionConfigs []store.AgentAppliedConfig
-}
-
-// reprovisionSnapshot returns the reprovision call count and a copy of the
-// dispatched configs.
-func (d *reincarnateTestDispatcher) reprovisionSnapshot() (int, []store.AgentAppliedConfig) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.reprovisionCalls, append([]store.AgentAppliedConfig(nil), d.reprovisionConfigs...)
-}
-
-func (d *reincarnateTestDispatcher) ImageRegistry() string {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.imageRegistry
-}
-
-func newReincarnateTestDispatcher() *reincarnateTestDispatcher {
-	return &reincarnateTestDispatcher{}
-}
-
-func (d *reincarnateTestDispatcher) DispatchAgentCreate(context.Context, *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentProvision(context.Context, *store.Agent) error {
-	return nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentReprovision(_ context.Context, agent *store.Agent) error {
-	d.mu.Lock()
-	d.reprovisionCalls++
-	if agent.AppliedConfig != nil {
-		d.reprovisionConfigs = append(d.reprovisionConfigs, *agent.AppliedConfig)
-	}
-	err := d.reprovisionErr
-	image := d.reprovisionImage
-	echo := d.reprovisionEcho
-	if d.reprovisionCalls > 1 {
-		err, image, echo = d.rerenderErr, "", d.rerenderEcho
-	}
-	d.mu.Unlock()
-	if err == nil && image != "" && agent.AppliedConfig != nil {
-		agent.AppliedConfig.Image = image
-	}
-	if err == nil && echo != nil && agent.AppliedConfig != nil {
-		echo(agent.AppliedConfig)
-	}
-	return err
-}
-func (d *reincarnateTestDispatcher) DispatchAgentProvisionForMove(_ context.Context, agent *store.Agent, expect string) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.moveProvisionCalls = append(d.moveProvisionCalls, agent.RuntimeBrokerID+"|"+expect)
-	return d.moveProvisionErr
-}
-func (d *reincarnateTestDispatcher) DispatchAgentDeleteLocalOnly(_ context.Context, agent *store.Agent) error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	d.localOnlyDeleteCalls = append(d.localOnlyDeleteCalls, agent.RuntimeBrokerID+"|"+agent.RunID)
-	return d.localOnlyDeleteErr[agent.RuntimeBrokerID]
-}
-func (d *reincarnateTestDispatcher) moveSnapshot() (provisions, localDeletes, startBrokers []string) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return append([]string(nil), d.moveProvisionCalls...), append([]string(nil), d.localOnlyDeleteCalls...), append([]string(nil), d.startBrokers...)
-}
-func (d *reincarnateTestDispatcher) DispatchAgentStart(ctx context.Context, agent *store.Agent, task string, resume bool) error {
-	d.mu.Lock()
-	if d.runStore != nil {
-		runID := fmt.Sprintf("run-%s-%d", agent.RuntimeBrokerID, len(d.startBrokers)+1)
-		if _, err := d.runStore.SetAgentRunID(ctx, agent.ID, runID, nil); err == nil {
-			agent.RunID = runID
-		}
-		if d.startPlacement != "" {
-			_ = d.runStore.SetAgentWorkspacePlacement(ctx, agent.ID, d.startPlacement)
-		}
-	}
-	d.startBrokers = append(d.startBrokers, agent.RuntimeBrokerID)
-	d.startCalls++
-	d.lastStartTask = task
-	d.lastStartResume = &resume
-	err := d.startErr
-	image := d.startImage
-	echo := d.startEcho
-	d.mu.Unlock()
-	if err == nil && image != "" && agent.AppliedConfig != nil {
-		agent.AppliedConfig.Image = image
-	}
-	if err == nil && echo != nil && agent.AppliedConfig != nil {
-		echo(agent.AppliedConfig)
-	}
-	return err
-}
-func (d *reincarnateTestDispatcher) DispatchAgentStop(_ context.Context, _ *store.Agent) error {
-	d.mu.Lock()
-	d.stopCalls++
-	err := d.stopErr
-	hook := d.stopHook
-	d.mu.Unlock()
-	if hook != nil {
-		hook()
-	}
-	return err
-}
-func (d *reincarnateTestDispatcher) DispatchAgentRestart(context.Context, *store.Agent) error {
-	return nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentResetAuth(context.Context, *store.Agent) error {
-	return nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentDelete(context.Context, *store.Agent, bool, bool, bool, time.Time) error {
-	return nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentMessage(context.Context, *store.Agent, string, bool, *messages.StructuredMessage) error {
-	return nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentLogs(context.Context, *store.Agent, int) (string, error) {
-	return "", nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentExec(context.Context, *store.Agent, []string, int) (string, int, error) {
-	return "", 0, nil
-}
-func (d *reincarnateTestDispatcher) DispatchCheckAgentPrompt(context.Context, *store.Agent) (bool, error) {
-	return false, nil
-}
-func (d *reincarnateTestDispatcher) DispatchAgentCreateWithGather(context.Context, *store.Agent) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-func (d *reincarnateTestDispatcher) DispatchFinalizeEnv(context.Context, *store.Agent, map[string]string) (*CreateDispatchResult, error) {
-	return nil, nil
-}
-
-// waitForReincarnationSettled polls the store until the agent's most recent
-// AgentReincarnation record reaches a terminal state (completed or failed) —
-// the LAST write the worker makes on either path — or fails the test after
-// timeout. The worker runs in a detached background goroutine (design §3.1),
-// so tests synchronize on persisted store state, the actual observable
-// outcome, rather than on dispatcher call timing: the failure path's
-// UpdateAgent/UpdateAgentReincarnation calls happen strictly after
-// DispatchAgentStart returns its error, so signaling on the dispatcher call
-// itself would race the worker's own post-dispatch bookkeeping.
-// waitForReincarnationSettled waits until BOTH the record and the agent row
-// have reached a terminal, consistent state (design §3.4 Amendment A8.3): the
-// record must be completed/failed, the agent's reincarnation_state must be
-// back to ""/failed, and — for a completed record specifically — the agent's
-// Generation must have reached rec.ToGeneration. Waiting on the record alone
-// is not enough: the A6 CAS ordering always advances the record BEFORE the
-// matching agent-row write (see tryAdvanceReincarnation's callers), so a
-// caller that reads the agent row right after this returned could still
-// observe it mid-transition — for example still "starting" a moment after
-// the record already reads "completed". This raced several tests
-// intermittently before the two waits were tied together.
-func waitForReincarnationSettled(t *testing.T, s store.Store, agentID string) *store.AgentReincarnation {
-	t.Helper()
-	ctx := context.Background()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		list, err := s.ListAgentReincarnations(ctx, agentID)
-		require.NoError(t, err)
-		if len(list) > 0 {
-			rec := list[0]
-			switch rec.State {
-			case store.AgentReincarnationStateCompleted, store.AgentReincarnationStateFailed:
-				agent, err := s.GetAgent(ctx, agentID)
-				require.NoError(t, err)
-				agentSettled := agent.ReincarnationState == store.ReincarnationStateNone || agent.ReincarnationState == store.ReincarnationStateFailed
-				generationSettled := rec.State != store.AgentReincarnationStateCompleted || agent.Generation >= rec.ToGeneration
-				if agentSettled && generationSettled {
-					return rec
-				}
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for reincarnation to settle for agent %s", agentID)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// setupReincarnateTestServer creates a project, an online broker with the
-// reprovision capability, and wires the given dispatcher.
-func setupReincarnateTestServer(t *testing.T, disp AgentDispatcher) (*Server, store.Store, *store.Project, *store.RuntimeBroker) {
-	t.Helper()
-	srv, s := testServer(t)
-	ctx := context.Background()
-
-	project := &store.Project{
-		ID:   tid("reincarnate-project-" + t.Name()),
-		Name: "Reincarnate Test Project",
-		Slug: "reincarnate-test-project-" + tidSlugSafe(t.Name()),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-
-	broker := &store.RuntimeBroker{
-		ID:           tid("reincarnate-broker-" + t.Name()),
-		Name:         "Reincarnate Test Broker",
-		Slug:         "reincarnate-test-broker-" + tidSlugSafe(t.Name()),
-		Status:       store.BrokerStatusOnline,
-		Capabilities: &store.BrokerCapabilities{Reprovision: true},
-	}
-	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
-
-	provider := &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   broker.ID,
-		BrokerName: broker.Name,
-		Status:     store.BrokerStatusOnline,
-	}
-	require.NoError(t, s.AddProjectProvider(ctx, provider))
-	project.DefaultRuntimeBrokerID = broker.ID
-	require.NoError(t, s.UpdateProject(ctx, project))
-
-	srv.SetDispatcher(disp)
-	return srv, s, project, broker
-}
-
-// tidSlugSafe returns a lowercase, slug-safe fragment derived from a test
-// name (which may contain "/" from subtests).
-func tidSlugSafe(name string) string {
-	out := make([]byte, 0, len(name))
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		switch {
-		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-			out = append(out, c)
-		case c >= 'A' && c <= 'Z':
-			out = append(out, c-'A'+'a')
-		default:
-			out = append(out, '-')
-		}
-	}
-	return string(out)
-}
-
-// newReincarnateTestAgent creates a fully-formed agent (with CreateInputs, as
-// the create path would leave it) ready for a reincarnate test.
-func newReincarnateTestAgent(t *testing.T, s store.Store, project *store.Project, broker *store.RuntimeBroker, mutate func(a *store.Agent)) *store.Agent {
-	t.Helper()
-	ctx := context.Background()
-
-	a := &store.Agent{
-		ID:              tid("reincarnate-agent-" + t.Name()),
-		Slug:            "reincarnate-agent-" + tidSlugSafe(t.Name()),
-		Name:            "Reincarnate Test Agent",
-		Template:        "",
-		ProjectID:       project.ID,
-		RuntimeBrokerID: broker.ID,
-		Phase:           "running",
-		CreatedBy:       tid("user-creator"),
-		OwnerID:         tid("user-creator"),
-		Ancestry:        []string{tid("user-creator")},
-		MessageMode:     "project",
-		Labels:          map[string]string{"team": "platform"},
-		AppliedConfig: &store.AgentAppliedConfig{
-			Image:       "old-image:v1",
-			HarnessAuth: "api-key",
-			CreatorName: "user-creator",
-			AgentRole:   "baseline",
-			Workspace:   "/tmp/reincarnate-workspace",
-			// GitClone: clone-per-agent, the only workspace mode Phase 1
-			// supports (design §3.4 Amendment A2); a test that wants the
-			// non-clone-per-agent rejection path sets this to nil explicitly.
-			GitClone: &api.GitCloneConfig{URL: "https://example.com/reincarnate-test-repo.git"},
-			CreateInputs: &store.AgentCreateInputs{
-				Workspace: "/tmp/reincarnate-workspace",
-			},
-		},
-	}
-	if mutate != nil {
-		mutate(a)
-	}
-	require.NoError(t, s.CreateAgent(ctx, a))
-	return a
-}
-
-func agentIdentityFor(agentID, projectID string, scopes ...AgentTokenScope) AgentIdentity {
-	return &agentIdentityWrapper{&AgentTokenClaims{
-		Claims:    jwt.Claims{Subject: agentID},
-		ProjectID: projectID,
-		Scopes:    scopes,
-	}}
-}
-
-// delegatingRequesterFor returns an agent identity for requesterID that may
-// reincarnate a baseline agent in projectID: the lifecycle scope plus every
-// scope of the baseline role, which re-recording the target's authority
-// under the requester requires (CanDelegate).
-func delegatingRequesterFor(requesterID, projectID string) AgentIdentity {
-	return agentIdentityFor(requesterID, projectID, append(ScopesForRole(AgentRoleBaseline), ScopeAgentLifecycle)...)
-}
-
-func reincarnateRequest(t *testing.T, agentID string, identity Identity, body interface{}) *http.Request {
-	t.Helper()
-	var bodyBytes []byte
-	if body != nil {
-		var err error
-		bodyBytes, err = json.Marshal(body)
-		require.NoError(t, err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agentID+"/reincarnate", bytes.NewReader(bodyBytes))
-	req.Header.Set("Content-Type", "application/json")
-	if identity != nil {
-		req = req.WithContext(contextWithIdentity(req.Context(), identity))
-	}
-	return req
-}
 
 // =============================================================================
 // Authorization (design §3.8, decision D2)
@@ -1348,7 +981,8 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 		a.Template = template.Slug
 		a.AppliedConfig.TemplateHash = "old-template-hash"
-		// No explicit image in CreateInputs -> template image applies fresh.
+		// No explicit image in CreateInputs, and the template image is an
+		// environment key the hub no longer copies (ptone/scion#4222).
 	})
 	beforeVersion := agent.StateVersion
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1365,7 +999,7 @@ func TestReincarnateAgent_DryRun_ShowsDiffAndWritesNothing(t *testing.T) {
 	assert.Equal(t, "old-template-hash", resp.Plan.Template.Old)
 	assert.Equal(t, "new-template-hash", resp.Plan.Template.New)
 	assert.Equal(t, "old-image:v1", resp.Plan.Image.Old)
-	assert.Equal(t, "template-image:v2", resp.Plan.Image.New)
+	assert.Empty(t, resp.Plan.Image.New, "a template image is not copied into the agent config (ptone/scion#4222)")
 
 	// Nothing changed: state_version, generation, reincarnation_state, and
 	// the reincarnation history are all exactly as before.
@@ -1470,12 +1104,12 @@ func TestReincarnateAgent_PlanFillsImageFromHarnessConfig(t *testing.T) {
 		"the plan must fall back to the harness config's image when neither an explicit image nor a template supplied one")
 }
 
-// TestReincarnateAgent_TemplateImageBeatsHarnessConfig proves the
-// harness-config image fallback (A11.1a) never outranks a template image:
-// the broker's own precedence is explicit inline, then template, then
-// harness config (pkg/agent/provision.go), so a template image must win here
-// even though a harness config with a different image is also in play.
-func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
+// TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown: a template
+// image is an environment key the hub no longer copies into the agent
+// config (ptone/scion#4222, ptone/scion#4524), so the plan shows the
+// harness-config image fallback (A11.1a) even when the template row has an
+// image.
+func TestReincarnateAgent_TemplateImageIgnoredHarnessConfigShown(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
 
@@ -1509,8 +1143,7 @@ func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 		a.AppliedConfig.HarnessConfig = hc.Slug
 		// HarnessConfig is explicit-only (design §3.3 Amendment A1), driven by
 		// CreateInputs.HarnessConfig — record what the requester actually asked
-		// for, so it outranks the template for HarnessConfigID resolution while
-		// still losing to the template for Image.
+		// for, so it outranks the template for HarnessConfigID resolution.
 		a.AppliedConfig.CreateInputs = &store.AgentCreateInputs{HarnessConfig: hc.Slug}
 	})
 	self := agentIdentityFor(agent.ID, project.ID)
@@ -1522,8 +1155,8 @@ func TestReincarnateAgent_TemplateImageBeatsHarnessConfig(t *testing.T) {
 
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "template-image:v1", resp.Plan.Image.New,
-		"a template image must beat the harness-config fallback")
+	assert.Equal(t, "harness-config-image:v1", resp.Plan.Image.New,
+		"a template image is ignored; the harness-config fallback shows")
 }
 
 // TestReincarnateAgent_PlanUsesSettingsImageOverHarnessConfig pins
@@ -2106,7 +1739,7 @@ func TestReincarnateAgent_StartEchoPersistedAtCompletion(t *testing.T) {
 // rewrites images with at send time.
 func TestDispatchImageRegistry_ReadsTheHTTPDispatcher(t *testing.T) {
 	d := &HTTPAgentDispatcher{}
-	d.SetImageRegistry("ghcr.io/test-org")
+	d.SetImageRegistryProvider(func() string { return "ghcr.io/test-org" })
 	assert.Equal(t, "ghcr.io/test-org", dispatchImageRegistry(d))
 	assert.Equal(t, "", dispatchImageRegistry(nil), "a dispatcher that does not rewrite images reports no registry")
 }
@@ -2207,10 +1840,12 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	var resp ReincarnateAgentResponse
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	// The plan's env diff must show TEMPLATE_ENV_KEY changing v1 -> v2 (via
-	// the "changed" key name), and AGENT_SPECIFIC_KEY surviving untouched
+	// The plan's env diff must show TEMPLATE_ENV_KEY removed: the legacy
+	// residue is dropped, and the hub no longer copies the template's env
+	// into the agent config (ptone/scion#4222); the template's own file
+	// supplies it on the broker. AGENT_SPECIFIC_KEY survives untouched
 	// (absent from added/removed/changed).
-	assert.Contains(t, resp.Plan.EnvKeys.Changed, "TEMPLATE_ENV_KEY")
+	assert.Contains(t, resp.Plan.EnvKeys.Removed, "TEMPLATE_ENV_KEY")
 	assert.NotContains(t, resp.Plan.EnvKeys.Changed, "AGENT_SPECIFIC_KEY")
 	assert.NotContains(t, resp.Plan.EnvKeys.Removed, "AGENT_SPECIFIC_KEY")
 
@@ -2219,26 +1854,26 @@ func TestReincarnateAgent_LegacyAgent_TemplateEnvV1ToV2(t *testing.T) {
 	for _, w := range resp.Plan.Warnings {
 		// The old value ("v1") must NEVER appear in the plan — it
 		// came from a legacy agent's live env, indistinguishable from a
-		// genuine per-agent secret that happens to share this key name. Only
-		// the template's own new value is safe to surface.
-		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY", `new="v2"`) {
-			assert.NotContains(t, w, `old="v1"`, "the old value must be masked, never shown in the plan")
+		// genuine per-agent secret that happens to share this key name. The
+		// template's value is not shown either: the hub no longer supplies it.
+		if containsAll(w, "dropped", "TEMPLATE_ENV_KEY") {
+			assert.NotContains(t, w, "v1", "the old value must be masked, never shown in the plan")
+			assert.NotContains(t, w, "v2", "the template value is not part of the plan")
 			foundDroppedWarning = true
 		}
 		if containsAll(w, "kept", "AGENT_SPECIFIC_KEY") {
 			foundKeptWarning = true
 		}
 	}
-	assert.True(t, foundDroppedWarning, "expected a warning naming TEMPLATE_ENV_KEY's old/new values, got %v", resp.Plan.Warnings)
+	assert.True(t, foundDroppedWarning, "expected a warning naming dropped TEMPLATE_ENV_KEY, got %v", resp.Plan.Warnings)
 	assert.True(t, foundKeptWarning, "expected a warning flagging AGENT_SPECIFIC_KEY as kept-but-uncertain, got %v", resp.Plan.Warnings)
 }
 
 // TestReincarnateAgent_FreshConfigDoesNotAliasEnv proves design §3.3 A1
 // addendum 2 rule 3: the reincarnate builder's fresh AppliedConfig.Env and
-// InlineConfig.Env must be separate maps, so a template env default that
-// resolveDerivedConfig merges into AppliedConfig.Env does not silently also
-// appear in the new generation's InlineConfig.Env (which is dispatched to
-// the broker as part of the persisted config, not just as resolved env).
+// InlineConfig.Env must be separate maps, so a value later merged into
+// AppliedConfig.Env does not silently also appear in the new generation's
+// InlineConfig.Env. The template's env reaches neither (ptone/scion#4222).
 func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 	disp := newReincarnateTestDispatcher()
 	srv, s, project, broker := setupReincarnateTestServer(t, disp)
@@ -2269,10 +1904,11 @@ func TestReincarnateAgent_FreshConfigDoesNotAliasEnv(t *testing.T) {
 	fresh, _, err := srv.buildFreshAppliedConfig(context.Background(), agent, project, "")
 	require.NoError(t, err)
 
-	require.Contains(t, fresh.Env, "TEMPLATE_DEFAULT_KEY", "template env default must reach AppliedConfig.Env")
+	assert.NotContains(t, fresh.Env, "TEMPLATE_DEFAULT_KEY", "template env is not copied into AppliedConfig.Env (ptone/scion#4222)")
+	require.Equal(t, "explicit-value", fresh.Env["EXPLICIT_KEY"])
 	require.NotNil(t, fresh.InlineConfig)
 	assert.NotContains(t, fresh.InlineConfig.Env, "TEMPLATE_DEFAULT_KEY",
-		"template env default must NOT leak into the new generation's InlineConfig.Env (no aliasing in the fresh config)")
+		"template env must NOT appear in the new generation's InlineConfig.Env")
 	assert.Equal(t, "explicit-value", fresh.InlineConfig.Env["EXPLICIT_KEY"])
 
 	// Mutating AppliedConfig.Env after the fact must not reach InlineConfig.Env.
@@ -2490,25 +2126,6 @@ func TestReincarnateAgent_FailReincarnationConflictDoesNotWedgeAgent(t *testing.
 	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h2"}), agent.ID)
 	assert.NotEqual(t, http.StatusConflict, rec.Code,
 		"agent must not be wedged after a failed reincarnation whose write hit one conflict; got %d %s", rec.Code, rec.Body.String())
-}
-
-// blockingStopDispatcher blocks the first Stop call until released, so a
-// test can pause a worker mid-flight and run a sweep concurrently.
-type blockingStopDispatcher struct {
-	*reincarnateTestDispatcher
-	once    sync.Once
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (d *blockingStopDispatcher) DispatchAgentStop(ctx context.Context, a *store.Agent) error {
-	first := false
-	d.once.Do(func() { first = true })
-	if first {
-		close(d.entered)
-		<-d.release
-	}
-	return d.reincarnateTestDispatcher.DispatchAgentStop(ctx, a)
 }
 
 // TestReincarnateAgent_BootSweepDoesNotAdmitSecondWorkerWhileFirstInFlight is
@@ -3386,6 +3003,38 @@ func TestReincarnateAgent_StartFailure_RerendersPreviousConfig(t *testing.T) {
 	assert.NotContains(t, final.AppliedConfig.Task, "[SCION REINCARNATION]")
 }
 
+// TestReincarnateAgent_SecretResolutionError_FailsAndRerenders: a secret
+// resolution error on the start leg fails the reincarnation as a start that
+// did not happen: the previous config is re-rendered and restored on the
+// row, and the recorded error and agent message carry the fixed message
+// only, with no secret name or backend detail.
+func TestReincarnateAgent_SecretResolutionError_FailsAndRerenders(t *testing.T) {
+	disp := newReincarnateTestDispatcher()
+	disp.startErr = &secretResolutionError{Verb: "started", Err: errors.New(fakeResolveBackendError + " FAKE_CREDS")}
+	srv, s, project, broker := setupReincarnateTestServer(t, disp)
+	agent := newReincarnateTestAgent(t, s, project, broker, nil)
+	self := agentIdentityFor(agent.ID, project.ID)
+
+	rec := httptest.NewRecorder()
+	srv.handleReincarnateAgent(rec, reincarnateRequest(t, agent.ID, self, ReincarnateAgentRequest{Handoff: "h"}), agent.ID)
+	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
+	r := waitForReincarnationSettled(t, s, agent.ID)
+	require.Equal(t, store.AgentReincarnationStateFailed, r.State)
+	assert.Contains(t, r.Error, "start failed: agent secrets could not be resolved; the agent was not started")
+	assertNoSecretResolutionDetail(t, r.Error, "the reincarnation error")
+
+	calls, cfgs := disp.reprovisionSnapshot()
+	require.Equal(t, 2, calls, "one reprovision, one re-render of the previous config")
+	require.NotNil(t, r.PreviousAppliedConfig)
+	assert.Equal(t, *r.PreviousAppliedConfig, cfgs[1])
+
+	final, err := s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, final.Generation)
+	assert.Equal(t, "old-image:v1", final.AppliedConfig.Image, "a successful re-render restores previous on the row")
+	assertNoSecretResolutionDetail(t, final.Message, "the agent message")
+}
+
 // TestReincarnateAgent_RerenderFailure_KeepsOriginalError covers
 // ptone/scion#1935 option (c) when the re-render itself fails: no panic, one
 // re-render attempt only (no retry loop), the reincarnation still fails with
@@ -3430,6 +3079,7 @@ func definitiveStartErr() error {
 func TestReincarnationStartLeftNoContainer(t *testing.T) {
 	assert.True(t, reincarnationStartLeftNoContainer(definitiveStartErr()), "a broker refusal is definitive")
 	assert.True(t, reincarnationStartLeftNoContainer(fmt.Errorf("wrap: %w", errStartBrokerNotConnected)), "a request that never reached the broker is definitive")
+	assert.True(t, reincarnationStartLeftNoContainer(&secretResolutionError{Verb: "started", Err: errors.New("fake")}), "a secret resolution error stops before the broker is called")
 	assert.False(t, reincarnationStartLeftNoContainer(fmt.Errorf("request timeout after 2m0s")), "a timeout is ambiguous")
 	assert.False(t, reincarnationStartLeftNoContainer(&brokerStatusError{StatusCode: http.StatusGatewayTimeout, Body: "gateway timeout"}), "a proxy error is ambiguous")
 	assert.False(t, reincarnationStartLeftNoContainer(brokerEnvelope(t, http.StatusInternalServerError, "runtime_error", startAttempted("run-1"))),
@@ -3845,7 +3495,9 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 			a.Template = template.Slug
 			a.AppliedConfig.TemplateHash = "old-template-hash"
-			// No explicit image in CreateInputs -> template image applies fresh.
+			// No image either side: the template image is an environment
+			// key the hub no longer copies (ptone/scion#4222).
+			a.AppliedConfig.Image = ""
 		})
 		self := agentIdentityFor(agent.ID, project.ID)
 
@@ -3861,7 +3513,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		assert.Equal(t, "error", final.Phase)
 
 		assert.Contains(t, final.AppliedConfig.Task,
-			"Changes: template old-template-hash->new-template-hash, image old-image:v1->template-image:v2\n",
+			"Changes: template old-template-hash->new-template-hash\n",
 			"the Changes: line must reflect the actual old->new diff, not a self-diff or swapped arguments")
 
 		// Amendment A26.5 O1: pin the by-construction property Amendment
@@ -3904,7 +3556,7 @@ func TestReincarnateAgent_ChangesLineWiring(t *testing.T) {
 		agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
 			a.Template = template.Slug
 			a.AppliedConfig.TemplateHash = "same-template-hash"
-			a.AppliedConfig.Image = "old-image:v1"
+			a.AppliedConfig.Image = ""
 		})
 		self := agentIdentityFor(agent.ID, project.ID)
 
@@ -4154,7 +3806,7 @@ func TestSweepStaleReincarnations_MarksNonTerminalFailed(t *testing.T) {
 		AgentID:        agent.ID,
 		FromGeneration: 1,
 		ToGeneration:   2,
-		State:          store.AgentReincarnationStatePending,
+		State:          store.AgentReincarnationStateProvisioning,
 	}))
 
 	// A future cutoff treats every existing row as stale, without needing an
@@ -5475,7 +5127,7 @@ func TestReincarnateAgent_AC2b_ProjectDefaultModelBeatsTemplate(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "template-hash-ac2b",
-		Config:      &store.TemplateConfig{Model: "template-model"},
+		AgentConfig: &api.ScionConfig{Model: "template-model"},
 	}
 	require.NoError(t, s.CreateTemplate(context.Background(), template))
 
@@ -5764,7 +5416,7 @@ func TestReincarnateAgent_AC2b_Matrix_CreateAndReincarnateAgree(t *testing.T) {
 					ContentHash:          "matrix-template-hash",
 					Scope:                store.TemplateScopeGlobal,
 					Status:               store.TemplateStatusActive,
-					Config:               &store.TemplateConfig{Model: tc.templateModel},
+					AgentConfig:          &api.ScionConfig{Model: tc.templateModel},
 				}
 				require.NoError(t, s.CreateTemplate(ctx, template))
 				templateSlug = template.Slug

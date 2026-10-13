@@ -21,10 +21,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/go-jose/go-jose/v4/jwt"
@@ -55,53 +53,6 @@ import (
 // versions, list, resolve, download) for user- and project-scoped skills,
 // plus a hub-scoped control and an agent-scope check.
 // ============================================================================
-
-// setupSkillScopeTest builds on setupSkillAuthzTest, adding carol: a hub
-// member who is neither the resource owner nor a member of alice's project.
-// Carol is the principal the pre-fix bug affected — unlike bob (not a hub
-// member at all), carol's denial can only come from the scope boundary
-// itself, not from missing hub membership.
-func setupSkillScopeTest(t *testing.T) (srv *Server, s store.Store, alice, carol *store.User, project *store.Project) {
-	t.Helper()
-	srv, s, alice, _, project = setupSkillAuthzTest(t)
-	carol = createNamedTestUser(t, s, "skillscope-carol", store.UserRoleMember)
-	ensureHubMembership(context.Background(), s, carol.ID)
-	return srv, s, alice, carol, project
-}
-
-// createSkillScopeAdmin creates a user with an explicit hub-admin role
-// binding. hub-admin (not just User.Role=="admin") is what actually grants
-// authority under the AK1 kernel; see TestGlobalSkillCreate_HubAdminStillAllowed
-// for the same pattern.
-func createSkillScopeAdmin(t *testing.T, s store.Store, namePrefix string) *store.User {
-	t.Helper()
-	admin := createNamedTestUser(t, s, namePrefix, store.UserRoleMember)
-	rd, err := s.GetRoleDefinitionByName(context.Background(), store.SystemRoleHubAdmin, store.RoleScopeSystem)
-	require.NoError(t, err, "hub-admin role should have been seeded")
-	_, err = s.CreateRoleBinding(context.Background(), &store.RoleBinding{
-		RoleDefinitionID: rd.ID,
-		PrincipalType:    store.RoleBindingPrincipalUser,
-		PrincipalID:      admin.ID,
-		ScopeType:        store.RoleScopeSystem,
-		ScopeID:          "",
-		CreatedBy:        "test",
-	})
-	require.NoError(t, err)
-	return admin
-}
-
-func createPublishedSkillVersion(t *testing.T, s store.Store, skillID string) *store.SkillVersion {
-	t.Helper()
-	sv := &store.SkillVersion{
-		ID:      api.NewUUID(),
-		SkillID: skillID,
-		Version: "1.0.0",
-		Status:  store.SkillVersionStatusPublished,
-		Created: time.Now(),
-	}
-	require.NoError(t, s.CreateSkillVersion(context.Background(), sv))
-	return sv
-}
 
 // ----------------------------------------------------------------------
 // User-scoped skills: readable only by the owning user and hub admins.

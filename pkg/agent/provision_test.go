@@ -128,14 +128,17 @@ harness_configs:
 		t.Fatalf("ProvisionAgent failed: %v", err)
 	}
 
-	// Priority (user requested): Global (lowest) -> Project -> Template (highest)
-	// So OVERRIDE_VAR should be "tpl-override"
-
+	// Priority: Global (lowest) -> Project. Template env is a separate,
+	// lowest-precedence fill layer applied at Start (ptone/scion#4524): it is
+	// never merged into the agent config or persisted, so TPL_VAR is absent
+	// and the project value wins OVERRIDE_VAR.
 	expectedEnv := map[string]string{
 		"GLOBAL_VAR":   "global-val",
 		"PROJECT_VAR":  "project-val",
-		"TPL_VAR":      "tpl-val",
-		"OVERRIDE_VAR": "tpl-override",
+		"OVERRIDE_VAR": "project-override",
+	}
+	if v, ok := cfg.Env["TPL_VAR"]; ok {
+		t.Errorf("template env TPL_VAR=%q reached the agent config", v)
 	}
 
 	for k, v := range expectedEnv {
@@ -161,6 +164,9 @@ harness_configs:
 		if persistedCfg.Env[k] != v {
 			t.Errorf("persisted: expected env[%s] = %q, got %q", k, v, persistedCfg.Env[k])
 		}
+	}
+	if v, ok := persistedCfg.Env["TPL_VAR"]; ok {
+		t.Errorf("template env TPL_VAR=%q persisted in scion-agent.json", v)
 	}
 }
 
@@ -201,10 +207,12 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantImage:     "example.com/settings-pinned:v1",
 		},
 		{
-			name:          "explicit template image still outranks settings",
+			// ptone/scion#4524: a template's image is an ignored
+			// environment key.
+			name:          "template image is ignored; settings applies",
 			settingsImage: "example.com/settings-pinned:v1",
 			templateImage: "example.com/template-pinned:v2",
-			wantImage:     "example.com/template-pinned:v2",
+			wantImage:     "example.com/settings-pinned:v1",
 		},
 		{
 			name:           "settings image_pull_policy applies with no template override",
@@ -213,11 +221,13 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantPolicy:     "Always",
 		},
 		{
-			name:           "explicit template imagePullPolicy still outranks settings",
+			// ptone/scion#4524: a template's kubernetes block is an
+			// ignored environment key.
+			name:           "template imagePullPolicy is ignored; settings applies",
 			settingsPolicy: "Always",
 			templatePolicy: "Never",
 			wantImage:      "test-image:latest",
-			wantPolicy:     "Never",
+			wantPolicy:     "Always",
 		},
 		{
 			name:                  "profile harness_overrides outranks the base settings entry",
@@ -229,18 +239,19 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			wantPolicy:            "Always",
 		},
 		{
-			// ptone/scion#1799: the explicit profile override wins at Start
-			// (and in the provision-only response, withProvisionedImage), but
-			// is never baked into the persisted scion-agent.json, which a
-			// later Start falls back to; see
-			// TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot.
-			name:                 "explicit profile harness_overrides image is not baked into the persisted config",
+			// ptone/scion#4524: a template's image and pull policy are
+			// ignored environment keys, so they no longer stand between
+			// the profile override and the persisted config; the result is
+			// the same as the profile-outranks case above. (Start ranks
+			// the override itself; see
+			// TestStart_RemovedProfilePinDoesNotLingerInTemplateSnapshot.)
+			name:                 "template image and policy are ignored under a profile override",
 			settingsImage:        "example.com/settings-pinned:v1",
 			profileOverrideImage: "example.com/profile-pinned:v3",
 			templateImage:        "example.com/template-pinned:v2",
 			templatePolicy:       "Never",
-			wantImage:            "example.com/template-pinned:v2",
-			wantPolicy:           "Never",
+			wantImage:            "example.com/profile-pinned:v3",
+			wantPolicy:           "",
 		},
 	}
 
@@ -329,9 +340,11 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 				t.Errorf("cfg.Kubernetes.ImagePullPolicy = %q, want %q", gotPolicy, tt.wantPolicy)
 			}
 
-			// The "created" response (ProvisionOnly dispatch path) reads the
-			// persisted scion-agent.json directly, so the same values must
-			// round-trip through disk.
+			// The image and pull policy are environment values: returned for
+			// the "created" response above, but never persisted to
+			// scion-agent.json, where they would outrank a later settings
+			// change (ptone/scion#4561). This test has no inline config, so
+			// nothing is persisted.
 			agentScionJSON := filepath.Join(projectScionDir, "agents", agentName, "scion-agent.json")
 			data, err := os.ReadFile(agentScionJSON)
 			if err != nil {
@@ -341,15 +354,11 @@ func TestProvisionAgent_ImageAndPullPolicyPrecedence(t *testing.T) {
 			if err := json.Unmarshal(data, &persisted); err != nil {
 				t.Fatal(err)
 			}
-			if persisted.Image != tt.wantImage {
-				t.Errorf("persisted image = %q, want %q", persisted.Image, tt.wantImage)
+			if persisted.Image != "" {
+				t.Errorf("persisted image = %q, want none", persisted.Image)
 			}
-			persistedPolicy := ""
 			if persisted.Kubernetes != nil {
-				persistedPolicy = persisted.Kubernetes.ImagePullPolicy
-			}
-			if persistedPolicy != tt.wantPolicy {
-				t.Errorf("persisted imagePullPolicy = %q, want %q", persistedPolicy, tt.wantPolicy)
+				t.Errorf("persisted kubernetes = %+v, want none", persisted.Kubernetes)
 			}
 		})
 	}
@@ -886,11 +895,14 @@ auth_selectedType: vertex-ai
 	if cfg.Harness != "claude" {
 		t.Errorf("expected harness 'claude', got %q", cfg.Harness)
 	}
-	if cfg.Env["TPL_VAR"] != "tpl-val" {
-		t.Errorf("expected env[TPL_VAR] = 'tpl-val', got %q", cfg.Env["TPL_VAR"])
+	// The YAML template's env parses (it is the template env layer Start
+	// applies as a fill), and is not merged into the agent config
+	// (ptone/scion#4524).
+	if env := templateChainEnv([]*config.Template{{Name: "yaml-test-tpl", Path: tplDir}}); env["TPL_VAR"] != "tpl-val" || env["GOOGLE_CLOUD_PROJECT"] != "my-project" {
+		t.Errorf("template env from YAML = %v, want TPL_VAR and GOOGLE_CLOUD_PROJECT", env)
 	}
-	if cfg.Env["GOOGLE_CLOUD_PROJECT"] != "my-project" {
-		t.Errorf("expected env[GOOGLE_CLOUD_PROJECT] = 'my-project', got %q", cfg.Env["GOOGLE_CLOUD_PROJECT"])
+	if v, ok := cfg.Env["TPL_VAR"]; ok {
+		t.Errorf("template env TPL_VAR=%q reached the agent config", v)
 	}
 	if cfg.AuthSelectedType != "vertex-ai" {
 		t.Errorf("expected auth_selectedType = 'vertex-ai', got %q", cfg.AuthSelectedType)
@@ -912,8 +924,8 @@ auth_selectedType: vertex-ai
 	if persistedCfg.Harness != "claude" {
 		t.Errorf("persisted: expected harness 'claude', got %q", persistedCfg.Harness)
 	}
-	if persistedCfg.Env["TPL_VAR"] != "tpl-val" {
-		t.Errorf("persisted: expected env[TPL_VAR] = 'tpl-val', got %q", persistedCfg.Env["TPL_VAR"])
+	if v, ok := persistedCfg.Env["TPL_VAR"]; ok {
+		t.Errorf("persisted: template env TPL_VAR=%q in scion-agent.json", v)
 	}
 }
 
@@ -940,7 +952,7 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	_ = os.MkdirAll(globalTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(globalTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "project-harness",
-		"env": {"SOURCE": "global"}
+		"model": "global-model"
 	}`), 0644)
 
 	// Create a project with its own version of the same template
@@ -950,7 +962,7 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	_ = os.MkdirAll(projectTplDir, 0755)
 	_ = os.WriteFile(filepath.Join(projectTplDir, "scion-agent.json"), []byte(`{
 		"default_harness_config": "project-harness",
-		"env": {"SOURCE": "project"}
+		"model": "project-model"
 	}`), 0644)
 
 	// Provision agent using projectPath — the project template should be used
@@ -964,8 +976,8 @@ func TestProvisionAgentUsesProjectTemplate(t *testing.T) {
 	if cfg.Harness != "project-harness" {
 		t.Errorf("expected harness 'project-harness' (from harness-config), got %q", cfg.Harness)
 	}
-	if cfg.Env["SOURCE"] != "project" {
-		t.Errorf("expected env[SOURCE] = 'project', got %q", cfg.Env["SOURCE"])
+	if cfg.Model != "project-model" {
+		t.Errorf("expected model 'project-model' (from the project template), got %q", cfg.Model)
 	}
 }
 
@@ -4105,5 +4117,102 @@ func TestProvisionAgent_InlineConfigSuppliedRepoRootIsInert(t *testing.T) {
 	agentDir := config.GetAgentDir(projectScionDir, agentName, false)
 	if got := readProvisionedWorktreeRepoRoot(agentDir); got != "" {
 		t.Fatalf("inline-config-supplied repo root persisted into state: %q (want empty)", got)
+	}
+}
+
+// TestGetAgent_ResolutionFailureLeavesNothingBehind verifies that when a
+// start of an agent with no agent directory fails template or harness-config
+// resolution, ProvisionAgent has not yet created the agent directory, the
+// workspace worktree or its branch (ptone/scion#3135).
+func TestGetAgent_ResolutionFailureLeavesNothingBehind(t *testing.T) {
+	t.Setenv("SCION_HOST_UID", "") // Clear container context for worktree ops
+
+	cases := []struct {
+		name          string
+		template      string
+		harnessConfig string
+	}{
+		{name: "unknown harness-config", harnessConfig: "no-such-harness-config"},
+		{name: "unknown template", template: "no-such-template"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+
+			t.Chdir(tmpDir)
+			t.Setenv("HOME", tmpDir)
+
+			projectDir := filepath.Join(tmpDir, "project")
+			_ = os.MkdirAll(projectDir, 0755)
+			git := func(args ...string) string {
+				t.Helper()
+				cmd := exec.Command("git", args...)
+				cmd.Dir = projectDir
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					t.Fatalf("git %v failed: %v\n%s", args, err, out)
+				}
+				return string(out)
+			}
+			git("init")
+			git("config", "user.email", "test@example.com")
+			git("config", "user.name", "Test")
+			git("commit", "--allow-empty", "-m", "initial")
+
+			scionDir := filepath.Join(projectDir, ".scion")
+			_ = os.MkdirAll(filepath.Join(scionDir, "templates"), 0755)
+			globalScionDir := filepath.Join(tmpDir, ".scion")
+			_ = os.MkdirAll(filepath.Join(globalScionDir, "templates"), 0755)
+			seedTestHarnessConfig(t, globalScionDir, "generic", "generic")
+			tplDir := filepath.Join(globalScionDir, "templates", "default")
+			_ = os.MkdirAll(tplDir, 0755)
+			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config":"generic"}`), 0644)
+			_ = os.WriteFile(filepath.Join(projectDir, ".gitignore"), []byte(".scion/agents/\n"), 0644)
+
+			agentName := "failed-agent"
+			agentDir := filepath.Join(scionDir, "agents", agentName)
+			worktreesBefore := git("worktree", "list", "--porcelain")
+			branchesBefore := git("branch", "--list")
+
+			_, _, _, _, err := GetAgent(context.Background(), agentName, tc.template, "", tc.harnessConfig, scionDir, "", "", "", "")
+			if err == nil {
+				t.Fatal("expected GetAgent to fail resolution")
+			}
+
+			if _, statErr := os.Lstat(agentDir); !os.IsNotExist(statErr) {
+				t.Errorf("agent dir %s exists after a resolution failure (stat err: %v)", agentDir, statErr)
+			}
+			if got := git("worktree", "list", "--porcelain"); got != worktreesBefore {
+				t.Errorf("worktree list changed after a resolution failure:\nbefore:\n%s\nafter:\n%s", worktreesBefore, got)
+			}
+			if got := git("branch", "--list"); got != branchesBefore {
+				t.Errorf("branches changed after a resolution failure:\nbefore:\n%s\nafter:\n%s", branchesBefore, got)
+			}
+		})
+	}
+}
+
+func TestPlatformSkillsHubEnabled(t *testing.T) {
+	enabled, disabled := true, false
+	brokerCtx := api.ContextWithBrokerMode(context.Background())
+	tests := []struct {
+		name     string
+		ctx      context.Context
+		settings *config.VersionedSettings
+		want     bool
+	}{
+		{name: "broker mode, no settings", ctx: brokerCtx, settings: nil, want: true},
+		{name: "broker mode, hub.enabled=false", ctx: brokerCtx, settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Enabled: &disabled}}, want: true},
+		{name: "local, endpoint configured", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Endpoint: "http://127.0.0.1:8080"}}, want: true},
+		{name: "local, endpoint with hub.enabled=false", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Endpoint: "http://127.0.0.1:8080", Enabled: &disabled}}, want: true},
+		{name: "local, hub.enabled=true without endpoint", ctx: context.Background(), settings: &config.VersionedSettings{Hub: &config.V1HubClientConfig{Enabled: &enabled}}, want: false},
+		{name: "local, no settings", ctx: context.Background(), settings: nil, want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := platformSkillsHubEnabled(tc.ctx, tc.settings); got != tc.want {
+				t.Errorf("platformSkillsHubEnabled = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }
