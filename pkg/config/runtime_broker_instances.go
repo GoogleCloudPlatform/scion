@@ -384,9 +384,11 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 	if !ok {
 		return fmt.Errorf("server.broker.instances must be a list")
 	}
+	// A present null is refused too: the schema types these fields as
+	// strings, with no null, while the decoder would store "" (unset).
 	checkStrings := func(path string, m map[string]interface{}, keys ...string) error {
 		for _, k := range keys {
-			if v, present := m[k]; present && v != nil {
+			if v, present := m[k]; present {
 				if _, isString := v.(string); !isString {
 					return fmt.Errorf("%s.%s must be a string", path, k)
 				}
@@ -408,7 +410,7 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 			if !ok {
 				return fmt.Errorf("%s.runtime_target must be a mapping", p)
 			}
-			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace",
+			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace", "kubeconfig",
 				"kubernetes_block_service_account",
 				"shared_dir_storage_class", "shared_dir_size", "priority_class_name",
 				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
@@ -428,11 +430,26 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 					return fmt.Errorf("%s.runtime_target.safe_to_evict must be true, false or null", p)
 				}
 			}
+			// The two mapping fields must be mappings when present: the
+			// schema types them as objects, with no null, while the
+			// decoder would store a nil map (unset).
+			for _, k := range []string{"kubernetes_service_account_mappings", "shared_dir_storage_backends"} {
+				if v, present := tm[k]; present {
+					if _, isMap := v.(map[string]interface{}); !isMap {
+						return fmt.Errorf("%s.runtime_target.%s must be a mapping", p, k)
+					}
+				}
+			}
 			// The decoder would also turn a number or bool into a string
-			// map value; the schema requires strings.
+			// map value; the schema requires strings. The error names the
+			// value as kubernetes_service_account_mappings[<email>], as the
+			// validator does, because the email's own dots would make a
+			// dotted path ambiguous.
 			if m, ok := tm["kubernetes_service_account_mappings"].(map[string]interface{}); ok {
-				if err := checkStrings(p+".runtime_target.kubernetes_service_account_mappings", m, rawMapKeys(m)...); err != nil {
-					return err
+				for _, gsa := range rawMapKeys(m) {
+					if _, isString := m[gsa].(string); !isString {
+						return fmt.Errorf("%s.runtime_target.kubernetes_service_account_mappings[%s] must be a string", p, gsa)
+					}
 				}
 			}
 		}
@@ -667,7 +684,7 @@ func validateInstanceAgentDefaults(path string, d *V1InstanceAgentDefaults) []Va
 	}
 	if err := agentDefaultsSchema.Validate(inst); err != nil {
 		for _, e := range extractValidationErrors(err) {
-			e.Path = path + settingsPathSuffix(e.Path)
+			e.Path = path + settingsPathSuffix(inst, e.Path)
 			errs = append(errs, e)
 		}
 	}
@@ -677,17 +694,30 @@ func validateInstanceAgentDefaults(path string, d *V1InstanceAgentDefaults) []Va
 // settingsPathSuffix turns a JSON pointer without its leading "/" (for
 // example "harness_overrides/claude/volumes/0/type") into the settings path
 // style the loader's other errors use (".harness_overrides.claude.volumes[0].type").
-func settingsPathSuffix(pointer string) string {
+// doc is the decoded JSON document the pointer points into. Only an index
+// into a list is bracketed; a map key made of digits stays a dotted segment
+// (".env.123"), so the path names the key as written.
+func settingsPathSuffix(doc interface{}, pointer string) string {
 	if pointer == "" {
 		return ""
 	}
 	var b strings.Builder
+	cur := doc
 	for _, seg := range strings.Split(pointer, "/") {
 		seg = strings.ReplaceAll(strings.ReplaceAll(seg, "~1", "/"), "~0", "~")
-		if _, err := strconv.Atoi(seg); err == nil {
+		switch c := cur.(type) {
+		case []interface{}:
 			b.WriteString("[" + seg + "]")
-		} else {
+			cur = nil
+			if i, err := strconv.Atoi(seg); err == nil && i >= 0 && i < len(c) {
+				cur = c[i]
+			}
+		case map[string]interface{}:
 			b.WriteString("." + seg)
+			cur = c[seg]
+		default:
+			b.WriteString("." + seg)
+			cur = nil
 		}
 	}
 	return b.String()
