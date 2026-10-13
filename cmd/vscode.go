@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -374,7 +375,7 @@ func vscodeHubLabel(p vscodePaths, hub *sshHubTarget) (string, error) {
 		// the vscode file; name both places.
 		preferred, fallback := sshHubLabelCandidates(u)
 		return "", tunnelclient.Errorf(tunnelclient.ExitError, "hub labels %q and %q are both used by other hubs in %s or %s; remove the other hub's entries to use this hub",
-			preferred, fallback, sshPaths{home: p.home}.includeDir(), p.sshConfig())
+			preferred, fallback, sshPaths(p).includeDir(), p.sshConfig())
 	}
 	return label, nil
 }
@@ -619,7 +620,7 @@ func stripJSONComments(data []byte) []byte {
 				j--
 			}
 			if j >= 0 && out[j] == ',' {
-				out = append(out[:j], out[j+1:]...)
+				out = slices.Delete(out, j, j+1)
 			}
 			out = append(out, c)
 		default:

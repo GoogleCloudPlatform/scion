@@ -609,6 +609,17 @@ func TestStripJSONComments(t *testing.T) {
 			assert.JSONEq(t, tc.want, string(stripJSONComments([]byte(tc.in))))
 		})
 	}
+	// A trailing comma is removed byte for byte: at the end of what was
+	// written so far, and before the whitespace that follows it.
+	for _, tc := range []struct{ name, in, want string }{
+		{"comma at the end", "[1,]", "[1]"},
+		{"comma before whitespace", "{\"a\": 1,\n  }", "{\"a\": 1\n  }"},
+		{"two levels", "[[1, ], {\"b\": 2,\t}, ]", "[[1 ], {\"b\": 2\t} ]"},
+	} {
+		t.Run(tc.name+" (exact bytes)", func(t *testing.T) {
+			assert.Equal(t, tc.want, string(stripJSONComments([]byte(tc.in))))
+		})
+	}
 }
 
 // Two hubs whose hosts share a first DNS label get distinct labels, so
