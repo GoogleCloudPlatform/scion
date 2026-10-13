@@ -61,6 +61,11 @@ var stopCmd = &cobra.Command{
 		return getAgentNames(cmd, args, toComplete)
 	},
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// A target-hub profile refuses the flags that need local state
+		// (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
 		if stopAll {
 			hubCtx, err := CheckHubAvailability(projectPath)
 			if err != nil {
