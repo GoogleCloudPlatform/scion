@@ -111,7 +111,7 @@ func apply(t *testing.T, ctx context.Context, s *AgentStore, id string, su store
 func TestAgentHalted_HeartbeatPreemptedHalts(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
-	id := newHaltAgent(t, ctx, s, projectID, "ea", defaultHaltRow())
+	id := newHaltAgent(t, ctx, s, projectID, "preempt-report", defaultHaltRow())
 
 	res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", intp(143)))
 	assert.Equal(t, store.AgentStatusResult{Halted: true, HaltedFrom: "stopped"}, res)
@@ -204,6 +204,9 @@ func TestAgentHalted_NoHalt(t *testing.T) {
 	}{
 		{"clean stop then evicted exit 0", stopped(func(r *haltRow) { r.exitCode = intp(0) }), heartbeat("stopped", "evicted", intp(0)), "stopped"},
 		{"clean stop, no code, then evicted exit 0", stopped(nil), heartbeat("", "evicted", intp(0)), "stopped"},
+		// The runtime's own exit 0 blocks the later upgrade even over a
+		// non-zero code already on the row: the row's code is not read.
+		{"crash code on the row, then preempted with exit 0", stopped(func(r *haltRow) { r.phase, r.exitCode = "error", intp(137) }), heartbeat("", "preempted", intp(0)), "error"},
 		{"intent stopped", running(func(r *haltRow) { r.intent = store.RunIntentStopped }), heartbeat("stopped", "preempted", nil), "stopped"},
 		{"no intent recorded", running(func(r *haltRow) { r.intent = "" }), heartbeat("stopped", "preempted", nil), "stopped"},
 		{"no evidence", running(nil), heartbeat("stopped", "", intp(0)), "stopped"},
@@ -238,7 +241,7 @@ func TestAgentHalted_Runtimes(t *testing.T) {
 			s, projectID := newTestAgentStore(t)
 			r := defaultHaltRow()
 			r.runtime = rt
-			id := newHaltAgent(t, ctx, s, projectID, "h5", r)
+			id := newHaltAgent(t, ctx, s, projectID, "untrusted-runtime", r)
 			res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", nil))
 			assert.False(t, res.Halted)
 			got, err := s.GetAgent(ctx, id)
@@ -252,7 +255,7 @@ func TestAgentHalted_Runtimes(t *testing.T) {
 			s, projectID := newTestAgentStore(t)
 			r := defaultHaltRow()
 			r.runtime = rt
-			id := newHaltAgent(t, ctx, s, projectID, "h5ok", r)
+			id := newHaltAgent(t, ctx, s, projectID, "trusted-runtime", r)
 			assert.True(t, apply(t, ctx, s, id, heartbeat("stopped", "preempted", nil)).Halted)
 		})
 	}
@@ -265,7 +268,7 @@ func TestAgentHalted_StartClaimBlocks(t *testing.T) {
 	s, projectID := newTestAgentStore(t)
 	r := defaultHaltRow()
 	r.claimID = "claim-1"
-	id := newHaltAgent(t, ctx, s, projectID, "h3", r)
+	id := newHaltAgent(t, ctx, s, projectID, "claim-held", r)
 
 	res := apply(t, ctx, s, id, heartbeat("stopped", "preempted", nil))
 	assert.False(t, res.Halted)
@@ -287,7 +290,7 @@ func TestAgentHalted_StartClaimBlocks(t *testing.T) {
 	// halted by a same-run reason that arrives after the release.
 	r2 := defaultHaltRow()
 	r2.claimID = "claim-2"
-	id2 := newHaltAgent(t, ctx, s, projectID, "h3b", r2)
+	id2 := newHaltAgent(t, ctx, s, projectID, "claim-held-plain-stop", r2)
 	res = apply(t, ctx, s, id2, selfReport("stopped", ""))
 	assert.False(t, res.Halted)
 	clearClaim(t, ctx, s, id2)

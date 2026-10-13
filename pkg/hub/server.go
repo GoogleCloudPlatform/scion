@@ -1673,7 +1673,7 @@ type Server struct {
 	commandBus             CommandBus              // Inter-node dispatch signal bus (nil-safe; nil = no-op)
 	notificationDispatcher *NotificationDispatcher // Notification dispatcher for agent status events
 	lifecycleHookEvaluator *LifecycleHookEvaluator // Lifecycle hook evaluator for agent phase transitions
-	haltedDispatches       sync.WaitGroup          // In-flight halt notifications and hooks (onAgentHalted)
+	haltedDispatches       sync.WaitGroup          // Test handle: in-flight onAgentHalted dispatches; not drained on shutdown
 
 	// delegationAdoptionCommitHook, when set, runs after authorization and
 	// before the delegation-adoption commit transaction. Tests use it to

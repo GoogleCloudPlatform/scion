@@ -166,7 +166,7 @@ func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
 	// outcome at once, with no grace wait, as for the error phase.
 	setLifecycleTimings(t, 0, 0, 200*time.Millisecond)
 	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
-		"d-1": {ID: "d-1", State: store.DispatchStateFailed, Error: "broker refused the start"},
+		"d-1": {ID: "d-1", State: store.DispatchStateDone},
 	}}
 	ch := make(chan Event, 8)
 	go func() {
@@ -176,6 +176,24 @@ func TestWaitForLifecycleOutcome_HaltedPhaseWithFinishedRow(t *testing.T) {
 	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, ds, "d-1", "start", isStartTerminal)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "agent entered halted phase during start")
+}
+
+func TestWaitForLifecycleOutcome_HaltedPhaseWithFailedRow(t *testing.T) {
+	// The executor failed the dispatch row: the row's own failure wins over
+	// the halted phase, as for the error phase.
+	setLifecycleTimings(t, 0, 0, 200*time.Millisecond)
+	ds := &fakeDispatchStore{dispatches: map[string]*store.BrokerDispatch{
+		"d-1": {ID: "d-1", State: store.DispatchStateFailed, Error: "broker refused the start"},
+	}}
+	ch := make(chan Event, 8)
+	go func() {
+		sendStatus(ch, "halted", "", nil)
+	}()
+
+	err := waitForLifecycleOutcome(context.Background(), ch, func() {}, ds, "d-1", "start", isStartTerminal)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "broker refused the start")
+	assert.NotContains(t, err.Error(), "halted phase")
 }
 
 func TestWaitForLifecycleOutcome_RollingReset(t *testing.T) {

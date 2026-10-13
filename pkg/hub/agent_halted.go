@@ -58,8 +58,9 @@ const haltedDispatchTimeout = 5 * time.Minute
 // agent's delivery retries for up to 30s, which must not hold up the
 // heartbeat or status report that halted the agent. Delivery is
 // at-most-once, as for the bus. The returned channel is closed when they
-// are done (at once when there is nothing to run); s.haltedDispatches
-// tracks them too.
+// are done (at once when there is nothing to run). s.haltedDispatches
+// counts them as a test handle only: shutdown does not wait for it, and
+// each dispatch is bounded by haltedDispatchTimeout.
 func (s *Server) onAgentHalted(ctx context.Context, agent *store.Agent, haltedFrom string) <-chan struct{} {
 	done := make(chan struct{})
 	if agent == nil {
