@@ -185,8 +185,9 @@ const (
 // permission set is the bound role's permissions for a role binding, the
 // defined permissions for a custom role, and every role permission held
 // by the group closure for a group membership (a group membership grant
-// carries no scope, so the project-scope exemption never applies to it). A kind or permission read error denies. Each refusal
-// is written to the test admin audit sink (class delegation).
+// carries no scope, so the project-scope exemption never applies to it).
+// A kind or permission read error denies. Each refusal is written to the
+// test admin audit sink (class delegation).
 //
 // Agent delegations are not checked here, and neither decide step 0c (it
 // never fires on an agent principal) nor the delegation-time ceiling

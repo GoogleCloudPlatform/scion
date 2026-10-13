@@ -1463,3 +1463,42 @@ func TestTestAdminPolicy_DelegationGrantManagementHTTP(t *testing.T) {
 	rec = doRequestAsUser(t, srv, projectAdmin, http.MethodGet, path(otherHub), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, "a human project admin does not reach a hub-bounded grant: %s", rec.Body.String())
 }
+
+// Review N5 (ti-a2-rev-2): a group membership carries no grant scope, so
+// the project-scope exemption never applies to it. A test admin adding a
+// user to a group that holds project-admin on a project is refused by the
+// test-admin policy (both kinds); a human super-admin adds the member.
+func TestTestAdminPolicy_GroupWithProjectRoleRefused(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-gpr-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-gpr-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	owner := taUser(t, s, "tsa-gpr-owner", store.SystemRoleHubMember)
+	projectID := tid("tsa-gpr-project")
+	taProject(t, s, projectID, owner.ID)
+	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	group := tiGroupWithSystemRole(t, s, "tsa-gpr-group-"+generateID()[:6], "", issuer.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: adminRD.ID, PrincipalType: store.RoleBindingPrincipalGroup,
+		PrincipalID: group.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+	require.NoError(t, err)
+	path := "/api/v1/groups/" + group.ID + "/members"
+
+	for who, k := range kinds {
+		u := taUser(t, s, "tsa-gpr-user-"+who, store.SystemRoleHubMember)
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, path, map[string]any{"memberType": "user", "memberId": u.ID, "role": "member"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s adds a member to a group holding project-admin: %s", who, rec.Body.String())
+		d := srv.authzService.refuseTestAdminDeniedGrant(ctx, tsaIdentity(t, s, k.Identity.ID), GrantDescriptor{Type: GrantTypeGroupMembership,
+			GroupID: group.ID, GranteeType: "user", GranteeID: u.ID})
+		if assert.NotNil(t, d, who) {
+			assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: %s", who, d.Reason)
+		}
+	}
+	human := taUser(t, s, "tsa-gpr-human-member", store.SystemRoleHubMember)
+	rec := doRequestWithToken(t, srv, taTokenFor(t, srv, issuer), http.MethodPost, path, map[string]any{"memberType": "user", "memberId": human.ID, "role": "member"})
+	assert.Less(t, rec.Code, 300, "human super-admin adds the member: %s", rec.Body.String())
+}
