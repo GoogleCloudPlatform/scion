@@ -177,10 +177,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: build-test
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -627,6 +627,12 @@ jobs:
       - name: Build Binary
         run: make build
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   sqlite-nonhub-tests:
     name: SQLite Tests (non-hub)
     runs-on: ubuntu-latest
@@ -638,10 +644,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: sqlite-nonhub
 
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
@@ -673,6 +679,12 @@ jobs:
         if: ${{ !cancelled() }}
         run: make test-cmd-sqlite
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The pkg/hub package's tests, split into build-tag shards
   # (hack/hubshard/README.md). A shard's test binary compiles with about
   # half the memory of the whole package's (about 6 GiB instead of 12), and
@@ -700,15 +712,15 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-plan
 
       - name: List the pkg/hub shards
         id: plan
         run: |
-          shards=$(go run ./hack/hubshard -shards)
+          shards=$(./hack/hubshard/hubshard.sh -shards)
           echo "shards=$(echo "$shards" | jq -cs .)" >> "$GITHUB_OUTPUT"
           echo "count=$(echo "$shards" | wc -l | tr -d ' ')" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards: $(echo "$shards" | tr '\n' ' ')"
@@ -731,6 +743,12 @@ jobs:
           echo "integration_shards=$json" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards with integration Postgres tests: $json"
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
     needs: hub-shard-plan
@@ -752,11 +770,15 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -764,10 +786,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-${{ matrix.shard }}
 
       # SQLite-enabled (no build tag besides the shard's). The Postgres
       # variables are not set here, so the Postgres tests skip, as they did
@@ -794,6 +816,16 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: make vet-hub-shard SHARD="$SHARD"
 
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why). Here, just before the
+      # one step that uses Postgres, so that a failure to tune it does not
+      # skip the SQLite and no_sqlite shard tests above.
+      - name: Tune CI Postgres
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/postgres-ci-tune
+        with:
+          container: ${{ job.services.postgres.id }}
+
       # The default-tag pkg/hub Postgres tests that live in this shard: the
       # web chat store tests (own SQL, read SCION_TEST_POSTGRES_DSN) and the
       # conduit stream re-check tests. Every listed test must pass and none
@@ -806,6 +838,12 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-hub-postgres-default SHARD="$SHARD"
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   # The -tags integration pkg/hub Postgres tests (project delete lock
   # order, two-replica scheduled send, membership loss and test identity
@@ -835,22 +873,35 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          container: ${{ job.services.postgres.id }}
+
+      - name: Setup Go
+        # Restores its shard's cache (pkg/hub's dependencies); saves none,
+        # to keep the repo cache budget for the hub-shard jobs.
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: hub-shard-${{ matrix.shard }}
 
       - name: Run pkg/hub shard integration Postgres tests
         env:
@@ -924,22 +975,33 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          container: ${{ job.services.postgres.id }}
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: t1-entadapter
 
       # The splitter's own tests (bash only, a second).
       - name: Test the test splitter (hack/testpart.sh)
@@ -966,6 +1028,12 @@ jobs:
           fi
           make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:
     name: T1 Launch Store PostgreSQL Tests (other packages)
@@ -983,22 +1051,33 @@ jobs:
           POSTGRES_DB: postgres
         ports:
           - 5432:5432
+        # --tmpfs: the data directory in RAM (CI only). The path is PGDATA
+        # of the postgres image up to 17; 18+ moved it to
+        # /var/lib/postgresql/18/docker, so change it with the image tag.
         options: >-
           --health-cmd pg_isready
           --health-interval 5s
           --health-timeout 5s
           --health-retries 5
+          --tmpfs /var/lib/postgresql/data
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           persist-credentials: false
 
-      - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      # CI-only: no fsync, no synchronous commit, no full-page writes
+      # (throwaway database; see the action for why).
+      - name: Tune CI Postgres
+        uses: ./.github/actions/postgres-ci-tune
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          container: ${{ job.services.postgres.id }}
+
+      - name: Setup Go
+        id: go
+        uses: ./.github/actions/setup-go-cache
+        with:
+          workload: t1-others
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness), the
@@ -1032,6 +1111,12 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
 
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The single, stable check name for T1 (the name the old single job had,
   # so a required check keeps working; matrix job names include the matrix
   # values). It fails unless every entadapter part and the other-packages
@@ -1064,10 +1149,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: workstation-smoke
 
       # End-to-end check of the workstation hub path with the default build
       # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
@@ -1078,6 +1163,12 @@ jobs:
       # stops it.
       - name: Run workstation smoke test
         run: ./hack/workstation-smoke.sh
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   lint:
     name: golangci-lint
@@ -1090,10 +1181,10 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: lint
 
       - name: golangci-lint
         # Bound golangci-lint memory so type-checking the module (pkg/hub in
@@ -1105,6 +1196,12 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: '--new-from-merge-base=origin/main'
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   shellcheck:
     name: shellcheck
@@ -1248,10 +1345,30 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: ent-check
+
+      # Fails when go mod tidy would change go.mod or go.sum (ptone/scion#4799),
+      # for example when tidy would drop go.sum lines that the ent generator
+      # needs. Runs before the ent check: go tool ent runs read-only, so a
+      # missing go.sum entry makes go generate fail (ent-check exit 3), and this
+      # step names that problem first. It writes no files. tidy-check exits 3
+      # when go mod tidy itself failed and 1 when the module is not tidy; make
+      # collapses both to exit 2, so the step tells them apart by the target's
+      # "(not drift)" line.
+      - name: Check go.mod and go.sum are tidy
+        run: |
+          set -o pipefail
+          if ! make tidy-check 2>&1 | tee "$RUNNER_TEMP/tidy-check.log"; then
+            if grep -qF 'go mod tidy -diff failed (not drift)' "$RUNNER_TEMP/tidy-check.log"; then
+              echo "::error title=go mod tidy failed (not drift)::go mod tidy -diff failed, so tidiness was NOT checked. The error (module download or resolution) is in the step log above."
+            else
+              echo "::error title=go.mod/go.sum not tidy::go mod tidy would change go.mod or go.sum. Run 'go mod tidy' and commit the result."
+            fi
+            exit 1
+          fi
 
       # Regenerates pkg/ent from pkg/ent/schema and fails on any diff or new
       # untracked file under pkg/ent, or any go.mod/go.sum change
@@ -1260,19 +1377,26 @@ jobs:
       # Test step: generation downloads ent's codegen dependencies.
       - name: Check ent generated code is up to date
         #
-        # ent-check exits 3 when go generate itself failed (schema compile or
-        # module download error) and 1 on drift. make collapses both to exit
-        # 2, so the step tells them apart by the target's "(not drift)" line.
+        # ent-check exits 3 when go generate itself failed (schema compile,
+        # module download error, or a missing go.sum entry) and 1 on drift.
+        # make collapses both to exit 2, so the step tells them apart by the
+        # target's "(not drift)" line.
         run: |
           set -o pipefail
           if ! make ent-check 2>&1 | tee "$RUNNER_TEMP/ent-check.log"; then
             if grep -qF 'go generate ./pkg/ent failed (not drift)' "$RUNNER_TEMP/ent-check.log"; then
-              echo "::error title=ent generation failed (not drift)::go generate ./pkg/ent failed, so drift was NOT checked. The generator error (schema compile or module download) is in the step log above."
+              echo "::error title=ent generation failed (not drift)::go generate ./pkg/ent failed, so drift was NOT checked. The generator error (schema compile, module download, or a missing go.sum entry: run 'make tidy-check') is in the step log above."
             else
               echo "::error title=ent generated code drift::pkg/ent does not match pkg/ent/schema. Run 'go generate ./pkg/ent' and commit the result."
             fi
             exit 1
           fi
+
+      - name: Save Go cache
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   single-node-vm-deploy-tests:
     name: single-node-vm deploy.sh test harness

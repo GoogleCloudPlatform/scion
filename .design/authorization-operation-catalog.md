@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 202
+**Operations:** 205
 
 ## Table of Contents
 
@@ -86,6 +86,11 @@
 - [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+- [project.threadgroup.list](#projectthreadgrouplist) — List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+- [project.threadgroup.read](#projectthreadgroupread) — Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+- [inbox.threadgroup.create](#inboxthreadgroupcreate) — Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+- [inbox.threadgroup.update](#inboxthreadgroupupdate) — Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+- [inbox.threadgroup.delete](#inboxthreadgroupdelete) — Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
 - [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 - [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
 - [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
@@ -158,12 +163,10 @@
 - [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
 - [hub.githubapp.update](#hubgithubappupdate) — Create, update and delete GitHub App installations, discover installations and sync permissions
 - [hub.githubapp.config.update](#hubgithubappconfigupdate) — Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
-- [quota.read](#quotaread) — Read limit definitions, entitlements, and usage. The route guard checks quota.read on the hub-scoped quota target
-- [quota.create](#quotacreate) — Create limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:create
-- [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update
-- [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
-- [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
-- [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [quota.read](#quotaread) — Read limit definitions, entitlements, and usage
+- [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
+- [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
+- [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
 - [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
@@ -3182,6 +3185,180 @@
 
 ---
 
+## project.threadgroup.list
+
+**Domain:** project
+
+**Description:** List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_query`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-query
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_OtherProjectAgentForbidden`
+
+---
+
+## project.threadgroup.read
+
+**Domain:** project
+
+**Description:** Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_NonMemberUserForbidden`
+
+---
+
+## inbox.threadgroup.create
+
+**Domain:** inbox
+
+**Description:** Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+
+---
+
+## inbox.threadgroup.update
+
+**Domain:** inbox
+
+**Description:** Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/thread-groups/{id}` |
+| http_route | POST | `/api/v1/thread-groups/{id}/threads` |
+| http_route | DELETE | `/api/v1/thread-groups/{id}/threads/{conversationId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_AddThreadValidation`
+
+---
+
+## inbox.threadgroup.delete
+
+**Domain:** inbox
+
+**Description:** Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.threadgroup.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** thread_group_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+
+---
+
 ## agent.message.target.resolve
 
 **Domain:** agent.message
@@ -5829,7 +6006,7 @@
 
 **Domain:** quota
 
-**Description:** Read limit definitions, entitlements, and usage. The route guard checks quota.read on the hub-scoped quota target
+**Description:** Read limit definitions, entitlements, and usage
 
 ### Entry Points
 
@@ -5837,16 +6014,13 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/limits` |
 | http_route | GET | `/api/v1/admin/limits/{id}` |
-| http_route | GET | `/api/v1/admin/limits/{id}/entitlements` |
 | http_route | GET | `/api/v1/admin/entitlements/{id}` |
 | http_route | GET | `/api/v1/admin/usage` |
 | http_route | GET | `/api/v1/admin/usage/{limit}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.read`
 
@@ -5858,7 +6032,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -5866,7 +6040,7 @@
 
 **Domain:** quota
 
-**Description:** Create limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:create
+**Description:** Create limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -5877,9 +6051,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.create`
 
@@ -5891,7 +6063,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -5899,7 +6071,7 @@
 
 **Domain:** quota
 
-**Description:** Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update
+**Description:** Update limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -5907,44 +6079,11 @@
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/limits/{id}` |
 | http_route | PUT | `/api/v1/admin/entitlements/{id}` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `quota.update`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
-
----
-
-## quota.brokersettings.update
-
-**Domain:** quota
-
-**Description:** Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
 | http_route | PUT | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.update`
 
@@ -5956,8 +6095,7 @@
 
 ### Tests
 
-- `pkg/hub:TestBrokerSettingsPut_RequiresQuotaUpdateEvenWithoutChanges`
-- `pkg/hub:TestBrokerSettingsPut_EachChangedKeyIsAuthorized`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -5965,7 +6103,7 @@
 
 **Domain:** quota
 
-**Description:** Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
+**Description:** Delete limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -5976,9 +6114,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.delete`
 
@@ -5997,41 +6133,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
-
----
-
-## quota.usage.self.read
-
-**Domain:** quota
-
-**Description:** Read the caller's own quota usage: each limit's effective value and active count for the caller only
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/usage/me` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestUsageMe_ReturnsOnlyTheHolder`)
-
-**Resource Resolver:** none
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestUsageMe_ReturnsOnlyTheHolder`
-
-### Exemptions
-
-- **authentication_only:** Returns only the caller's own usage; carries no other user's records (scope: caller's own quota usage only) — waives: `base_permission`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 

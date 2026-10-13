@@ -60,11 +60,13 @@ import {
   rendererFor,
   type ArtifactFile,
   type ArtifactResponse,
+  type ViewResponse,
 } from '../../../client/artifacts.js';
 import { principalLabel, principalName, projectName } from '../../../client/principal-names.js';
 import '../code-editor.js';
 import '../markdown-preview.js';
 import '../artifact-markdown-frame.js';
+import { renderUntrustedViewFrame, untrustedViewFrameStyles } from '../untrusted-view-frame.js';
 
 /** An attachment target, addressed by its opaque attachment ID. */
 export interface AttachmentPreviewTarget {
@@ -143,6 +145,12 @@ interface ArtifactInfo {
    * which keeps every image on the hub; these are the frame's inputs.
    */
   markdown?: { id: string; seq: number; files: ArtifactFile[] };
+  /**
+   * Set for an HTML entry. Artifact HTML is rendered only through a view
+   * minted for the version, in the artifact page's own untrusted view frame
+   * (shared/untrusted-view-frame.ts); its bytes are never fetched here.
+   */
+  htmlView?: { url: string; remoteImages: boolean };
 }
 
 /** Image MIME types rendered inline (mirrors chat-message.ts's IMAGE_MIMES). */
@@ -687,6 +695,10 @@ export class ScionChatFilePreview extends LitElement {
         homeProject: data.artifact.scopeRef,
       };
       const renderer = rendererFor(entry.mediaType);
+      if (renderer === 'html') {
+        await this.loadArtifactView(data, version.seq, artifact, base, gen, controller);
+        return;
+      }
       if (
         renderer === 'download' ||
         (renderer !== 'image' && entry.size > TEXT_PREVIEW_MAX_BYTES)
@@ -750,6 +762,76 @@ export class ScionChatFilePreview extends LitElement {
       if (gen !== this.generation || controller.signal.aborted) return;
       this.loadState = { ...base, status: 'error', error: 'Failed to load artifact.' };
     }
+  }
+
+  /**
+   * Loads an HTML entry the way the artifact page does: mints a view for
+   * the version under the viewer's own session and shows its URL in the
+   * sandboxed frame. The entry's bytes are not fetched, and the text size
+   * cap does not apply (the page renders any size). A refused or missing
+   * version is the same "unavailable" state as every other path.
+   */
+  private async loadArtifactView(
+    data: ArtifactResponse,
+    seq: number,
+    artifact: ArtifactInfo,
+    base: LoadState,
+    gen: number,
+    controller: AbortController
+  ): Promise<void> {
+    const viewUrl = `/api/v1/artifacts/${encodeURIComponent(data.artifact.id)}/versions/${seq}/view`;
+    const res = await apiFetch(viewUrl, { method: 'POST', signal: controller.signal });
+    if (gen !== this.generation) return;
+    if (res.status === 403 || res.status === 404) {
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: ARTIFACT_UNAVAILABLE_MESSAGE,
+        unavailable: true,
+      };
+      return;
+    }
+    if (!res.ok) {
+      this.loadState = {
+        ...base,
+        status: 'error',
+        error: await extractApiError(res, `Could not open the view (HTTP ${res.status})`),
+        artifact,
+      };
+      return;
+    }
+    const view = (await res.json()) as ViewResponse;
+    if (gen !== this.generation) return;
+    this.loadState = {
+      ...base,
+      status: 'ready',
+      artifact: {
+        ...artifact,
+        htmlView: { url: view.url, remoteImages: view.remoteImages === true },
+      },
+    };
+  }
+
+  /**
+   * An HTML entry: the untrusted view frame the artifact page renders
+   * (renderUntrustedViewFrame), under the same remote-images notice.
+   */
+  private renderArtifactHtml(info: ArtifactInfo, view: NonNullable<ArtifactInfo['htmlView']>) {
+    const owner = principalLabel(
+      info.ownerKind,
+      info.ownerRef,
+      this.artifactNames.owner,
+      this.currentUserId
+    );
+    return html`
+      ${view.remoteImages
+        ? html`<sl-alert class="notice" variant="warning" open>
+            <sl-icon slot="icon" name="exclamation-triangle"></sl-icon>
+            Remote images are not loaded in HTML artifacts; include them in the bundle.
+          </sl-alert>`
+        : nothing}
+      ${renderUntrustedViewFrame({ url: view.url, title: info.title, owner })}
+    `;
   }
 
   /**
@@ -915,6 +997,9 @@ export class ScionChatFilePreview extends LitElement {
         .content=${state.content ?? ''}
       ></scion-markdown-preview>`;
     }
+    if (state.artifact?.htmlView) {
+      return this.renderArtifactHtml(state.artifact, state.artifact.htmlView);
+    }
     const md = state.artifact?.markdown;
     if (md) {
       return html`<scion-artifact-markdown-frame
@@ -1054,75 +1139,84 @@ export class ScionChatFilePreview extends LitElement {
     `;
   }
 
-  static override styles = css`
-    :host {
-      display: contents;
-    }
-    /* One dialog serves both a path preview (code/markdown panel) and an
+  static override styles = [
+    untrustedViewFrameStyles,
+    css`
+      :host {
+        display: contents;
+      }
+      /* One dialog serves both a path preview (code/markdown panel) and an
      * attachment preview (full-height image), so its width policy must be
      * generous enough for either content type. */
-    .file-preview-dialog::part(panel) {
-      width: min(90vw, 900px);
-      /* The app frame's height, not the viewport's: it shrinks with the
+      .file-preview-dialog::part(panel) {
+        width: min(90vw, 900px);
+        /* The app frame's height, not the viewport's: it shrinks with the
          iOS keyboard and the browser toolbar (see client/viewport.ts). */
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
-    }
-    .file-preview-dialog::part(body) {
-      padding: 0;
-      overflow: auto;
-    }
-    .file-preview-placeholder {
-      padding: 2rem;
-      text-align: center;
-      color: var(--scion-text-muted, #64748b);
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    .file-preview-placeholder.error {
-      color: var(--sl-color-danger-600, #dc2626);
-    }
-    .console-fallback-link {
-      color: var(--sl-color-primary-600, #2563eb);
-      font-size: var(--chat-fs-base, 0.875rem);
-    }
-    .file-preview-image {
-      display: block;
-      margin: 0 auto;
-      max-width: 100%;
-      max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
-      object-fit: contain;
-    }
-    .artifact-label {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .version-badge {
-      font-size: 0.6875rem;
-      font-weight: 500;
-      padding: 0.0625rem 0.5rem;
-      border: 1px solid var(--scion-border, #e2e8f0);
-      border-radius: 999px;
-      background: var(--scion-bg-subtle, #f1f5f9);
-      color: var(--scion-text-muted, #475569);
-    }
-    .footer {
-      display: flex;
-      gap: 0.5rem;
-      align-items: center;
-      width: 100%;
-    }
-    .footer .path {
-      flex: 1;
-      font-size: var(--chat-fs-base, 0.875rem);
-      color: var(--scion-text-muted, #64748b);
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-    }
-  `;
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.85);
+      }
+      .file-preview-dialog::part(body) {
+        padding: 0;
+        overflow: auto;
+      }
+      .file-preview-placeholder {
+        padding: 2rem;
+        text-align: center;
+        color: var(--scion-text-muted, #64748b);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.75rem;
+      }
+      .file-preview-placeholder.error {
+        color: var(--sl-color-danger-600, #dc2626);
+      }
+      .console-fallback-link {
+        color: var(--sl-color-primary-600, #2563eb);
+        font-size: var(--chat-fs-base, 0.875rem);
+      }
+      .file-preview-image {
+        display: block;
+        margin: 0 auto;
+        max-width: 100%;
+        max-height: calc(var(--scion-app-height, 100dvh) * 0.75);
+        object-fit: contain;
+      }
+      .notice {
+        margin: 0.5rem;
+      }
+      .untrusted {
+        --untrusted-frame-height: calc(var(--scion-app-height, 100dvh) * 0.65);
+      }
+      .artifact-label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .version-badge {
+        font-size: 0.6875rem;
+        font-weight: 500;
+        padding: 0.0625rem 0.5rem;
+        border: 1px solid var(--scion-border, #e2e8f0);
+        border-radius: 999px;
+        background: var(--scion-bg-subtle, #f1f5f9);
+        color: var(--scion-text-muted, #475569);
+      }
+      .footer {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        width: 100%;
+      }
+      .footer .path {
+        flex: 1;
+        font-size: var(--chat-fs-base, 0.875rem);
+        color: var(--scion-text-muted, #64748b);
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    `,
+  ];
 }
 
 declare global {

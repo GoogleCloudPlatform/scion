@@ -34,7 +34,7 @@ import (
 // Each fixture case lives under pkg/harness/testdata/bundle_contract/<harness>/<case>/
 // and contains:
 //   - input.json: {"auth_candidates": {...}, "harness_config": {...}, "mcp_servers": {...}}
-//   - want.json:  {"exit_code": N, "resolved_auth": {...}, "env": {...}}
+//   - want.json:  {"exit_code": N, "resolved_auth": {...}, "env": {...}, "env_absent": [...]}
 //
 // Optional files in the fixture dir:
 //   - secrets/<NAME>: staged as secrets/<NAME> in the bundle
@@ -104,6 +104,8 @@ type fixtureWant struct {
 	ExitCode     int                    `json:"exit_code"`
 	ResolvedAuth map[string]interface{} `json:"resolved_auth"`
 	Env          map[string]interface{} `json:"env"`
+	// EnvAbsent lists keys that must not appear in env.json.
+	EnvAbsent []string `json:"env_absent"`
 }
 
 func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
@@ -303,6 +305,16 @@ func runBundleContractCase(t *testing.T, python, hname, caseDir string) {
 		envPath := filepath.Join(bundleDir, "outputs", "env.json")
 		gotEnv := readJSONFile(t, envPath)
 		assertJSONSubset(t, "env.json", want.Env, gotEnv)
+	}
+
+	// Check keys that env.json must leave out.
+	if len(want.EnvAbsent) > 0 {
+		gotEnv := readJSONFile(t, filepath.Join(bundleDir, "outputs", "env.json"))
+		for _, k := range want.EnvAbsent {
+			if v, ok := gotEnv[k]; ok {
+				t.Errorf("env.json: key %q present (value %v), want absent", k, v)
+			}
+		}
 	}
 }
 

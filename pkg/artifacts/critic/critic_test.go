@@ -314,6 +314,62 @@ func TestDiff(t *testing.T) {
 	}
 }
 
+// TestDiffWhitespaceAndFinalNewline: each hunk says whether its sides
+// differ only in whitespace, and the hunk holding the last line says when
+// only one text ends with a newline (ptone/scion#4578).
+func TestDiffWhitespaceAndFinalNewline(t *testing.T) {
+	type flags struct {
+		line int
+		ws   bool
+		fn   string
+	}
+	for _, c := range []struct {
+		name          string
+		parent, clean string
+		want          []flags
+	}{
+		{"trailing spaces", "a\nfoo\nb\n", "a\nfoo  \nb\n", []flags{{2, true, ""}}},
+		{"blank line added", "a\nb\n", "a\n\nb\n", []flags{{2, true, ""}}},
+		{"tab for spaces", "a\n  x\n", "a\n\tx\n", []flags{{2, true, ""}}},
+		{"word change", "a\nb\n", "a\nB\n", []flags{{2, false, ""}}},
+		{"word added at the end", "a\nb\n", "a\nb c\n", []flags{{2, false, ""}}},
+		{"final newline removed", "a\nend\n", "a\nend", []flags{{2, true, FinalNewlineRemoved}}},
+		{"final newline added", "a\nend", "a\nend\n", []flags{{2, true, FinalNewlineAdded}}},
+		{"final newline removed with an insertion", "a\nb\n", "a\nx\nb", []flags{{2, false, FinalNewlineRemoved}}},
+		{"newline only on the last hunk", "a\nb\nc\nd\n", "a\nB\nc\nd", []flags{{2, false, ""}, {4, true, FinalNewlineRemoved}}},
+	} {
+		h := Diff([]byte(c.parent), []byte(c.clean))
+		var got []flags
+		for _, x := range h {
+			got = append(got, flags{x.Line, x.WhitespaceOnly, x.FinalNewline})
+		}
+		if len(got) != len(c.want) || (len(got) > 0 && !equalFlags(got, c.want)) {
+			t.Errorf("%s: hunks %+v, want %+v", c.name, got, c.want)
+		}
+	}
+	// The flags reach the JSON of the 422 details, and are absent when unset.
+	b, err := json.Marshal(Diff([]byte("a\nb\n"), []byte("a\nb  ")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"whitespace_only":true`) || !strings.Contains(string(b), `"final_newline":"removed"`) {
+		t.Errorf("JSON %s", b)
+	}
+	b, _ = json.Marshal(Diff([]byte("a\n"), []byte("b\n")))
+	if strings.Contains(string(b), "whitespace_only") || strings.Contains(string(b), "final_newline") {
+		t.Errorf("unset flags in JSON %s", b)
+	}
+}
+
+func equalFlags[T comparable](a, b []T) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // TestDiffBounds defends MaxHunks and MaxExcerptBytes: removing either
 // check makes this fail.
 func TestDiffBounds(t *testing.T) {
