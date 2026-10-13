@@ -6831,12 +6831,12 @@ var nfsCleanupAttemptHook func(attempt int)
 // Project IDs can be reused (re-linking the same checkout brings the same ID
 // back), so immediately before each attempt the cleanup checks that no agent
 // of the project that this broker did not already know when the delete
-// arrived is in use (newProjectAgentsInUse; a listing error counts as in
+// arrived is in use (newProjectAgentsInUseReason; a listing error counts as in
 // use; on a flat Runtime Broker instance, another instance of the host with
-// live agents in the project counts too) and otherwise keeps the tree,
-// logged at Info. The deleted project's
-// own agents, still terminating, do not block it; a removal that fails
-// because they are still writing is retried after nfsProjectCleanupRetryDelay. A
+// live agents in the project, or that cannot say, counts too) and otherwise
+// keeps the tree, logged at Info with the reason. The deleted project's own
+// agents, still terminating, do not block it; a removal that fails because
+// they are still writing is retried after nfsProjectCleanupRetryDelay. A
 // missing tree is success; a final failure is logged for an operator, never
 // returned.
 func (s *Server) startNFSProjectTreeCleanup(reqCtx context.Context, slug, projectID string) {
@@ -6866,11 +6866,13 @@ func (s *Server) startNFSProjectTreeCleanup(reqCtx context.Context, slug, projec
 		defer s.nfsCleanupWG.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
+		keptBecause := ""
 		stillDeleted := func(ctx context.Context, attempt int) bool {
 			if hook != nil {
 				hook(attempt)
 			}
-			inUse, err := s.newProjectAgentsInUse(ctx, projectID, deleting)
+			inUse, reason, err := s.newProjectAgentsInUseReason(ctx, projectID, deleting)
+			keptBecause = reason
 			if err != nil {
 				s.agentLifecycleLog.Info("NFS workspace tree cleanup: could not list the project's agents; keeping the tree",
 					"slug", slug, "project_id", projectID, "attempt", attempt, "error", err)
@@ -6880,8 +6882,8 @@ func (s *Server) startNFSProjectTreeCleanup(reqCtx context.Context, slug, projec
 		err := scionrt.CleanupNFSProjectRetry(ctx, nfs, projectID, retryDelay, stillDeleted)
 		switch {
 		case errors.Is(err, scionrt.ErrNFSCleanupSkipped):
-			s.agentLifecycleLog.Info("NFS workspace tree kept: a new agent of the project is in use on this broker",
-				"slug", slug, "project_id", projectID)
+			s.agentLifecycleLog.Info("NFS workspace tree kept: the project is in use",
+				"slug", slug, "project_id", projectID, "reason", keptBecause)
 		case err != nil:
 			s.agentLifecycleLog.Error("project's NFS workspace tree was not removed after project delete; an operator must remove it",
 				"slug", slug, "project_id", projectID, "error", err)

@@ -740,9 +740,8 @@ func TestNotificationDispatcher_BrokerUsedForUserNotification(t *testing.T) {
 	// as a fallback for deployments without broker plugins.
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -784,9 +783,8 @@ func TestNotificationDispatcher_FallbackToChannelWhenNoBroker(t *testing.T) {
 	// No broker proxy set — should fall back to channel registry
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -824,9 +822,8 @@ func TestNotificationDispatcher_ChannelDispatchOnUserNotification(t *testing.T) 
 	// Set up a recording channel via the registry
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()
@@ -852,9 +849,8 @@ func TestNotificationDispatcher_NoChannelDispatchForAgentSubscriber(t *testing.T
 	// Set up a recording channel — should NOT receive anything for agent subscribers
 	ch := &recordingChannel{name: "test-channel"}
 	env.nd.channelRegistryFn = staticChannelRegistry(&ChannelRegistry{
-		channels: []NotificationChannel{ch},
-		configs:  []ChannelConfig{{Type: "test-channel"}},
-		log:      slog.Default(),
+		entries: []channelEntry{{channel: ch, config: ChannelConfig{Type: "test-channel"}}},
+		log:     slog.Default(),
 	})
 
 	env.nd.Start()

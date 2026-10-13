@@ -36,6 +36,8 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 	insecure := false
 	tlsEnabled := true
 	caFile := "/etc/ssl/certs/custom-root.pem"
+	certFile := "/etc/ssl/certs/client.pem"
+	keyFile := "/etc/ssl/private/client-key.pem"
 	hubEnabled := true
 	localEnabled := true
 	console := false
@@ -53,6 +55,8 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 				Enabled:            &tlsEnabled,
 				InsecureSkipVerify: &insecure,
 				CAFile:             caFile,
+				CertFile:           certFile,
+				KeyFile:            keyFile,
 			},
 			Batch: &V1TelemetryBatchConfig{
 				MaxSize: 512,
@@ -115,6 +119,12 @@ func TestConvertV1TelemetryToAPI_Full(t *testing.T) {
 	}
 	if result.Cloud.TLS.CAFile != caFile {
 		t.Errorf("Cloud.TLS.CAFile = %q, want %q", result.Cloud.TLS.CAFile, caFile)
+	}
+	if result.Cloud.TLS.CertFile != certFile {
+		t.Errorf("Cloud.TLS.CertFile = %q, want %q", result.Cloud.TLS.CertFile, certFile)
+	}
+	if result.Cloud.TLS.KeyFile != keyFile {
+		t.Errorf("Cloud.TLS.KeyFile = %q, want %q", result.Cloud.TLS.KeyFile, keyFile)
 	}
 	if result.Cloud.Batch == nil {
 		t.Fatal("Cloud.Batch is nil")
@@ -233,6 +243,8 @@ func TestTelemetryConfigToEnv_Full(t *testing.T) {
 			TLS: &api.TelemetryTLS{
 				InsecureSkipVerify: &insecure,
 				CAFile:             caFile,
+				CertFile:           "/etc/ssl/certs/client.pem",
+				KeyFile:            "/etc/ssl/private/client-key.pem",
 			},
 			Batch: &api.TelemetryBatch{
 				MaxSize: 256,
@@ -275,6 +287,8 @@ func TestTelemetryConfigToEnv_Full(t *testing.T) {
 		"SCION_OTEL_PROTOCOL":                  "grpc",
 		"SCION_OTEL_SKIP_TLS_VERIFY":           "false",
 		"SCION_OTEL_CA_FILE":                   "/etc/ssl/certs/custom-root.pem",
+		"SCION_OTEL_CERT_FILE":                 "/etc/ssl/certs/client.pem",
+		"SCION_OTEL_KEY_FILE":                  "/etc/ssl/private/client-key.pem",
 		"SCION_TELEMETRY_CLOUD_BATCH_MAX_SIZE": "256",
 		"SCION_TELEMETRY_CLOUD_BATCH_TIMEOUT":  "10s",
 		"SCION_TELEMETRY_CLOUD_PROVIDER":       "gcp",

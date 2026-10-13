@@ -369,11 +369,12 @@ type ServerConfig struct {
 	// create or authenticate user accounts for this identity. Empty when no
 	// transport service account is configured.
 	PlatformAuthSA string
-	// EnableTestIdentities turns on hub-issued test identities
-	// (--enable-test-identities): POST/GET /api/v1/test-identities and POST
-	// /api/v1/test-identities/{id}/token. Off by default. While it is off
-	// those routes return 404 and every test-fixture user is refused at
-	// authentication. It is a startup-only switch, never a runtime setting.
+	// EnableTestIdentities turns on hub-issued test identities: POST/GET
+	// /api/v1/test-identities and POST /api/v1/test-identities/{id}/token.
+	// cmd sets it from the resolved --test-mode level (true for member and
+	// above; see TestMode). Off by default. While it is off those routes
+	// return 404 and every test-fixture user is refused at authentication.
+	// It is a startup-only switch, never a runtime setting.
 	EnableTestIdentities bool
 	// TestIdentityWebSessionKey is the hub-local test identity web session
 	// key cmd read from the test infrastructure marker at startup (WS1,
@@ -392,12 +393,17 @@ type ServerConfig struct {
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.
 	TestIdentityWorkloadValidator GoogleCredentialValidator
-	// TestAdminGate is the validated test admin tier gate
-	// (--enable-test-admin-identities, ptone/scion#4240 phase A0). cmd's
-	// validateTestAdminIdentities builds it; New re-checks it, verifies
-	// every signing-key class is hub-local, and captures it into an
-	// immutable value. The zero value leaves the tier off.
+	// TestAdminGate is the validated test admin tier gate (--test-mode=admin,
+	// ptone/scion#4240 phase A0). cmd's resolveTestMode builds it; New
+	// re-checks it, verifies every signing-key class is hub-local, and
+	// captures it into an immutable value. The zero value leaves the tier
+	// off.
 	TestAdminGate TestAdminGateConfig
+	// TestMode is the resolved --test-mode level and the preconditions
+	// that admitted it (test_mode.go). New refuses a configuration whose
+	// EnableTestIdentities and TestAdminGate differ from what the level
+	// grants. The zero value is off.
+	TestMode TestModeConfig
 	// WebSessionKeySource is the signingKeySource label of the web session
 	// cookie key, set by cmd from the same session secret it passes to
 	// NewWebServer: "generated" (no shared secret: a random per-process
@@ -1810,6 +1816,10 @@ type Server struct {
 	// only this value.
 	testAdminGate testAdminGate
 
+	// testMode is the immutable resolved --test-mode level captured by New
+	// (test_mode.go).
+	testMode testModeState
+
 	// testAdminIssuance is the state of admin-kind test identity issuance
 	// (handlers_test_admin_identities.go).
 	testAdminIssuance testAdminIssuanceState
@@ -2156,11 +2166,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	// The test-identity expiry and feature checks run in the auth
 	// middleware's per-request user-row block, which needs a user store.
 	if cfg.EnableTestIdentities && s == nil {
-		return nil, fmt.Errorf("--enable-test-identities requires a user store; none is configured")
+		return nil, fmt.Errorf("--test-mode requires a user store; none is configured")
 	}
 	// The test admin tier gate is re-checked here (cmd validated it first)
 	// so a Server can never be built with an inconsistent gate.
 	if err := validateTestAdminGateConfig(cfg, s != nil); err != nil {
+		return nil, err
+	}
+	// The switches must be exactly what the resolved --test-mode grants,
+	// and the member preconditions it carries must hold.
+	if err := ValidateTestModeConfig(cfg); err != nil {
 		return nil, err
 	}
 	// Workload issuer allowlist and issuer audience (X2): refuse a
@@ -2530,8 +2545,22 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	}
 	srv.testAdminAudit = newTestAdminAuditSink(testAdminAuditOutput)
 	srv.testAdminGate = newTestAdminGate(cfg.TestAdminGate)
-	if srv.testAdminGate.on() {
+	testModeCfg := cfg.TestMode
+	if cfg.TestAdminGate.requested() {
+		// verifyTestAdminSigningKeys passed above.
+		testModeCfg.Preconditions = append(append([]string(nil), testModeCfg.Preconditions...), TestModePreconditionSigningKeysHubLocal)
+	}
+	srv.testMode = newTestModeState(testModeCfg)
+	// One startup line through the test admin audit sink for any level but
+	// off: the gate-start banner for the admin levels (it carries the level
+	// and preconditions too), the test-mode line for member.
+	switch {
+	case srv.testAdminGate.on():
 		if err := srv.emitTestAdminGateStart(); err != nil {
+			return nil, err
+		}
+	case srv.testMode.level != TestModeOff:
+		if err := srv.emitTestModeStart(); err != nil {
 			return nil, err
 		}
 	}
@@ -4848,8 +4877,14 @@ func (s *Server) autoSuspendStalledAgent(ctx context.Context, dispatcher AgentDi
 	return true
 }
 
+// scheduledEventRetention is how long non-pending scheduled events are kept
+// after they complete (fired_at, or created when never fired) before the
+// soft-delete-purge job deletes them.
+const scheduledEventRetention = 7 * 24 * time.Hour
+
 // purgeHandler returns a recurring handler function that permanently removes
-// soft-deleted agents that have exceeded the retention period.
+// soft-deleted agents that have exceeded the retention period, and
+// non-pending scheduled events older than scheduledEventRetention.
 func (s *Server) purgeHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Purge soft-deleted agents. The retention is read per tick, so a
@@ -4870,18 +4905,16 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 			}
 		}
 
-		// Purge old scheduled events (non-pending, older than 7 days). This
-		// keeps its startup gate: it runs only on a hub started with a
-		// soft-delete retention, as when the whole job was registered
-		// only then.
-		if s.startupLayer1.SoftDeleteRetention > 0 {
-			eventCutoff := time.Now().Add(-7 * 24 * time.Hour)
-			purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
-			if err != nil {
-				slog.Error("Scheduler: scheduled event purge failed", "error", err)
-			} else if purgedEvents > 0 {
-				slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
-			}
+		// Purge scheduled events that are no longer pending (failed
+		// included) and completed more than scheduledEventRetention ago, on
+		// every tick, whatever the soft-delete retention (ptone/scion#4517).
+		// Completion is fired_at, or created for an event never fired.
+		eventCutoff := time.Now().Add(-scheduledEventRetention)
+		purgedEvents, err := s.store.PurgeOldScheduledEvents(ctx, eventCutoff)
+		if err != nil {
+			slog.Error("Scheduler: scheduled event purge failed", "error", err)
+		} else if purgedEvents > 0 {
+			slog.Info("Scheduler: purged old scheduled events", "count", purgedEvents)
 		}
 	}
 }
@@ -5969,14 +6002,14 @@ func (s *Server) registerSchedulerHandlers() {
 	s.registerMembershipStandingReconciler()
 
 	// Test identity expiry reaper (ptone/scion#4240): only with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	s.registerTestIdentityReaper()
 
 	s.scheduler.RegisterRecurringSingleton("agent-heartbeat-timeout", 5, store.LockAgentHeartbeatTimeout, s.agentHeartbeatTimeoutHandler())
 	s.scheduler.RegisterRecurringSingleton("agent-stalled-detection", 5, store.LockAgentStalledDetection, s.agentStalledDetectionHandler())
 	// Registered whatever the startup retention: soft_delete_retention is
 	// applied live, and the handler skips the agent purge while it is 0.
-	// The scheduled-event purge inside it keeps its startup gate.
+	// The scheduled-event purge inside it always runs.
 	s.scheduler.RegisterRecurringSingleton("soft-delete-purge", 60, store.LockSoftDeletePurge, s.purgeHandler())
 	s.scheduler.RegisterEventHandler("message", s.messageEventHandler())
 	s.scheduler.RegisterEventHandler("dispatch_agent", s.dispatchAgentEventHandler())
@@ -6781,6 +6814,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/conversations", s.guarded("/api/v1/conversations", s.handleListConversations))
 	s.mux.HandleFunc("/api/v1/conversations/", s.guarded("/api/v1/conversations/", s.handleConversationRoutes))
 	s.mux.HandleFunc("/api/v1/conversations/resolve", s.guarded("/api/v1/conversations/resolve", s.handleConversationResolve))
+	// Project-scoped chat thread groups (ptone/scion#4424): 404 while the
+	// hub.chat_thread_groups experiment is off (threadGroupsGate).
+	s.mux.HandleFunc("/api/v1/thread-groups", s.guarded("/api/v1/thread-groups", s.threadGroupsGate(s.handleThreadGroups)))
+	s.mux.HandleFunc("/api/v1/thread-groups/", s.guarded("/api/v1/thread-groups/", s.threadGroupsGate(s.handleThreadGroupRoutes)))
 
 	// Cross-project messaging endpoints (Phase 3)
 	s.mux.HandleFunc("/api/v1/messaging/capabilities", s.guarded("/api/v1/messaging/capabilities", s.handleMessagingCapabilities))
@@ -6844,7 +6881,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/v1/github-app/sync-permissions", s.guarded("POST /api/v1/github-app/sync-permissions", s.handleGitHubAppSyncPermissions))
 
 	// Hub test identities (ptone/scion#4240). Always registered; each
-	// handler returns 404 unless --enable-test-identities is set.
+	// handler returns 404 unless --test-mode is member or above.
 	// The gate runs before the route guard, so a hub without the flag
 	// answers 404 to every caller, whatever its permissions.
 	s.mux.HandleFunc("POST /api/v1/test-identities", s.testIdentitiesGate(s.guarded("POST /api/v1/test-identities", s.handleCreateTestIdentity)))
