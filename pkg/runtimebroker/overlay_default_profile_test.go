@@ -134,8 +134,12 @@ func TestOverlayProfiles_SavedProfileWinsOverUnresolvableDefault(t *testing.T) {
 // agent last ran on the default runtime (ptone/scion#3907).
 func TestOverlayProfiles_MissingSavedProfileFailsWithoutFallback(t *testing.T) {
 	for _, recorded := range []string{"", "docker"} {
+		label := recorded
+		if label == "" {
+			label = "none"
+		}
 		for _, op := range overlayDispatches() {
-			t.Run("recorded="+recorded+"/"+op.name, func(t *testing.T) {
+			t.Run("recorded="+label+"/"+op.name, func(t *testing.T) {
 				f := newLifecycleFixture(t)
 				installStoredProfilesOverlay(t)
 				const name = "vanished-profile-agent"

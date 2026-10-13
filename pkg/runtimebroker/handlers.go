@@ -6274,7 +6274,9 @@ const (
 	profileLenient profileResolution = iota
 	// profileStrict is for an existing agent's saved profile
 	// (agent-info.json): errSavedProfileUnresolved, unless the agent's
-	// recorded runtime (AgentInfo.Runtime) is the default runtime.
+	// recorded runtime (AgentInfo.Runtime) is the default runtime, except
+	// for a profile missing from the hub's stored profiles, which never
+	// falls back.
 	profileStrict
 	// profileStrictProvisioned is for the profile recorded in an agent's
 	// broker-side image provenance: errSavedProfileUnresolved, with no
@@ -6334,7 +6336,10 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // errSavedProfileUnresolved instead of the broker's default manager. Under
 // profileStrict only, when the agent's recorded runtime (AgentInfo.Runtime)
 // is the default runtime, the default is used instead
-// (savedProfileUnresolved) and logged at fallbackLevel. With
+// (savedProfileUnresolved) and logged at fallbackLevel, except for a
+// profile missing from the hub's stored profiles
+// (*config.StoredProfileNotFoundError), which always returns
+// errSavedProfileUnresolved. With
 // profileLenient those cases fall back to the default, as for a fresh start.
 // In every mode, a dispatch with no profile whose default profile cannot be
 // resolved against the Hub's stored profiles (*config.ActiveProfileError)
