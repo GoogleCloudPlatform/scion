@@ -146,7 +146,8 @@ func TestVisitorAgents_ListAndReadProjected(t *testing.T) {
 }
 
 // A member's list and read responses are unchanged: the full agent record,
-// not the visitor view.
+// not the visitor view. An owner's send response carries no conversation
+// fields.
 func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	populated := f.populatedAgent(t)
@@ -160,6 +161,13 @@ func TestVisitorAgents_MemberResponsesUnchanged(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), `"id":"`+populated.ID+`"`)
 	assert.Contains(t, rec.Body.String(), "private-template")
+
+	rec = doRequestAsUser(t, f.srv, f.owner, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("owner"))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var sent map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
+	assert.NotContains(t, sent, "conversation_id")
+	assert.NotContains(t, sent, "conversation_key")
 
 	// The visitor-only routes answer 404 for a member.
 	for _, path := range []string{"/api/v1/users/me/visitor-grants", "/api/v1/users/me/visitor-dms"} {
@@ -364,9 +372,9 @@ func TestVisitorAgents_OwnGrantsOnly(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"slug":"foreign"`)
 }
 
-// A visitor finds its DM with the agent from its own DM list and reads the
-// history with the key it got. The DM list never shows another visitor's
-// or a local user's DM.
+// A visitor finds its DM with the agent from the send response alone, and
+// from its own DM list, and reads the history with the key it got. The DM
+// list never shows another visitor's or a local user's DM.
 func TestVisitorAgents_FindAndReadOwnDM(t *testing.T) {
 	f := newVisitorMessagingFixture(t)
 	aliceID, alice := f.visitor(t, "sub-alice", "alice@corp.example")
@@ -374,10 +382,23 @@ func TestVisitorAgents_FindAndReadOwnDM(t *testing.T) {
 	aliceDM, err := messages.DMConversationKey("agent", f.agent.ID, "user", aliceID)
 	require.NoError(t, err)
 
+	// From the send response.
 	rec := f.do(t, alice, http.MethodPost, f.projectMessagePath(f.agent.Slug), visitorTextBody("alice to agent"))
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var sent MessageDeliveryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &sent))
+	assert.Equal(t, aliceDM, sent.ConversationKey)
+	require.NotEmpty(t, sent.ConversationID)
 	conv, err := f.st.GetConversationByExternalRef(context.Background(), "native", aliceDM)
 	require.NoError(t, err)
+	assert.Equal(t, conv.ID, sent.ConversationID)
+
+	rec = f.do(t, alice, http.MethodGet, chatDMPath(sent.ConversationKey, "messages"), nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var history chatHistoryResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &history))
+	require.Len(t, history.Messages, 1)
+	assert.Equal(t, "alice to agent", history.Messages[0].Msg)
 
 	// Bob and the owner write to the same agent; their DMs are not alice's.
 	rec = f.do(t, bob, http.MethodPost, agentMessagePath(f.agent.ID), visitorTextBody("bob to agent"))
@@ -470,5 +491,25 @@ func TestVisitorSubRoutes_AgentListAndReadShapes(t *testing.T) {
 	// Every admitted sub-route names a check.
 	for _, sub := range visitorAdmittedSubRoutes {
 		assert.NotEqual(t, visitorAccessNone, sub.Access, "%s %s%s", sub.Method, sub.Pattern, sub.SubPath)
+	}
+}
+
+// Only a visitor sender gets the conversation fields in the send response.
+func TestVisitorDeliveryConversation_VisitorOnly(t *testing.T) {
+	agent := &store.Agent{ID: tid("delivery-agent")}
+	visitor := NewVisitorIdentity(tid("delivery-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
+	id, key := visitorDeliveryConversation(visitor, agent, "conv-1")
+	assert.Equal(t, "conv-1", id)
+	assert.Equal(t, "dm:agent:"+agent.ID+":user:"+visitor.ID(), key)
+
+	for name, identity := range map[string]Identity{
+		"local user":        NewDevUser(DevUserConfig{}),
+		"federated user":    NewFederatedUserIdentity(visitorTestUserIssuer, "sub", "u@corp.com", "U", "viewer", nil),
+		"no identity":       nil,
+		"typed nil visitor": (*VisitorIdentity)(nil),
+	} {
+		id, key := visitorDeliveryConversation(identity, agent, "conv-1")
+		assert.Empty(t, id, name)
+		assert.Empty(t, key, name)
 	}
 }
