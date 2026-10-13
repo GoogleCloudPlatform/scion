@@ -42,6 +42,14 @@ export type ResourceKind = 'template' | 'harness-config';
 /** How many refreshes "Refresh All from Source" runs at the same time. */
 export const REFRESH_ALL_CONCURRENCY = 4;
 
+/** Per-item state of a Refresh All run. */
+type RefreshStatus = 'pending' | 'running' | 'success' | 'warning' | 'error';
+
+/** The warnings a reimport response may carry; absent on older hubs. */
+interface ReimportWarnings {
+  warnings?: Array<{ name: string; reason: string }> | null;
+}
+
 /**
  * Runs fn over items with at most limit calls in flight, and returns the
  * results in item order.
@@ -130,8 +138,9 @@ export class ScionResourceList extends LitElement {
   @state() private deleteFiles = true;
 
   @state() private _refreshAllRunning = false;
-  @state() private _itemRefreshStatus: Map<string, 'pending' | 'running' | 'success' | 'error'> =
-    new Map();
+  @state() private _itemRefreshStatus: Map<string, RefreshStatus> = new Map();
+  /** Warning text per item from its last refresh; shown as the row icon's tooltip. */
+  private _itemRefreshWarnings: Map<string, string> = new Map();
 
   private _statusClearTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -369,6 +378,9 @@ export class ScionResourceList extends LitElement {
     }
     .refresh-status .refresh-error {
       color: var(--sl-color-danger-600, #dc2626);
+    }
+    .refresh-status .refresh-warning {
+      color: var(--sl-color-warning-600, #d97706);
     }
     .refresh-status .refresh-pending {
       color: var(--sl-color-neutral-400, #94a3b8);
@@ -622,6 +634,7 @@ export class ScionResourceList extends LitElement {
       this._statusClearTimer = undefined;
     }
     this._itemRefreshStatus.clear();
+    this._itemRefreshWarnings.clear();
 
     this._refreshAllRunning = true;
 
@@ -645,13 +658,25 @@ export class ScionResourceList extends LitElement {
           const errMsg = await extractApiError(response, `HTTP ${response.status}`);
           throw new Error(errMsg);
         }
-        this._itemRefreshStatus.set(item.id, 'success');
+        // A harness-config refresh can succeed with warnings (e.g. unknown
+        // top-level config.yaml keys this hub ignored). Older hubs send none.
+        const body = (await response.json().catch(() => null)) as ReimportWarnings | null;
+        const warnings = body?.warnings ?? [];
+        if (warnings.length > 0) {
+          this._itemRefreshWarnings.set(
+            item.id,
+            warnings.map((w) => `${w.name}: ${w.reason}`).join('\n')
+          );
+          this._itemRefreshStatus.set(item.id, 'warning');
+        } else {
+          this._itemRefreshStatus.set(item.id, 'success');
+        }
         this.requestUpdate();
-        return { id: item.id, name: item.name, success: true };
+        return { id: item.id, name: item.name, success: true, warned: warnings.length > 0 };
       } catch (err) {
         this._itemRefreshStatus.set(item.id, 'error');
         this.requestUpdate();
-        return { id: item.id, name: item.name, success: false, error: err };
+        return { id: item.id, name: item.name, success: false, warned: false, error: err };
       }
     });
 
@@ -659,9 +684,12 @@ export class ScionResourceList extends LitElement {
 
     // Show summary toast
     const succeeded = results.filter((r) => r.success).length;
+    const warned = results.filter((r) => r.success && r.warned).length;
     const failed = refreshable.length - succeeded;
     const noun = this.kindLabel;
-    if (failed === 0) {
+    if (failed === 0 && warned > 0) {
+      showToast(`Refreshed ${succeeded}, ${warned} with warnings`, 'warning');
+    } else if (failed === 0) {
       showToast(
         `Refreshed ${succeeded} ${noun}${succeeded !== 1 ? 's' : ''} successfully`,
         'success'
@@ -674,8 +702,11 @@ export class ScionResourceList extends LitElement {
     await this._reloadBackground();
 
     // Clear status indicators after delay
+    // Warning rows stay until the next refresh so their tooltip can be read.
     this._statusClearTimer = setTimeout(() => {
-      this._itemRefreshStatus.clear();
+      for (const [id, status] of this._itemRefreshStatus) {
+        if (status !== 'warning') this._itemRefreshStatus.delete(id);
+      }
       this.requestUpdate();
       this._statusClearTimer = undefined;
     }, 3000);
@@ -779,6 +810,16 @@ export class ScionResourceList extends LitElement {
             aria-label="Refresh successful"
           ></sl-icon
         ></span>`;
+      case 'warning': {
+        const text = this._itemRefreshWarnings.get(item.id) ?? '';
+        return html`<span class="refresh-status" title=${text}
+          ><sl-icon
+            class="refresh-warning"
+            name="exclamation-triangle"
+            aria-label="Refreshed with warnings"
+          ></sl-icon
+        ></span>`;
+      }
       case 'error':
         return html`<span class="refresh-status"
           ><sl-icon class="refresh-error" name="x-circle" aria-label="Refresh failed"></sl-icon
