@@ -161,9 +161,15 @@ func LoadHarnessConfigDir(dirPath string) (*HarnessConfigDir, error) {
 		return nil, fmt.Errorf("failed to parse config.yaml: %w", err)
 	}
 
-	// The schema cannot express ordering; enforce it here so a bad thinking
-	// map fails at load like any other schema error.
+	// The schema cannot express ordering or duration ranges; enforce them
+	// here so a bad block fails at load like any other schema error.
 	if err := entry.Thinking.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+	if err := entry.Ready.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config.yaml: %w", err)
+	}
+	if err := entry.Delivery.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config.yaml: %w", err)
 	}
 

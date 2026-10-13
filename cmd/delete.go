@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -741,19 +740,12 @@ func deleteAgentLocal(agentName string) error {
 	}
 
 	if !containerFound {
-		// Check if agent definition exists on the filesystem
-		agentDirExists := false
-		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			if _, err := os.Stat(filepath.Join(projectDir, "agents", agentName)); err == nil {
-				agentDirExists = true
-			}
-		}
-		if !agentDirExists {
-			if globalDir, err := config.GetGlobalAgentsDir(); err == nil {
-				if _, err := os.Stat(filepath.Join(globalDir, agentName)); err == nil {
-					agentDirExists = true
-				}
-			}
+		// Check if an agent directory exists on the filesystem, in any
+		// state-directory layout DeleteAgentFiles removes (including an
+		// external one, and a directory kept by stale-directory cleanup).
+		agentDirExists, err := agent.LocalAgentDirExists(agentName, projectPath)
+		if err != nil {
+			return err
 		}
 		if !agentDirExists {
 			return fmt.Errorf("agent '%s' not found", agentName)

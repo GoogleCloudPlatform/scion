@@ -111,17 +111,30 @@ func (l *WorkspaceLocks) registerWorkspaceUser(s *Server, u *workspaceUser) {
 // service has live agents in the project. A server whose answer cannot be
 // read counts as using it.
 func (l *WorkspaceLocks) projectInUseByOthers(self *Server, projectID string) bool {
+	used, unreadable := l.projectUseByOthers(self, projectID)
+	return used || unreadable
+}
+
+// projectUseByOthers reports, for the servers other than self sharing this
+// service, whether one has live agents in the project (used) and whether
+// one's answer cannot be read (unreadable). It stops at the first server
+// with live agents, so unreadable then covers only the servers read before
+// it.
+func (l *WorkspaceLocks) projectUseByOthers(self *Server, projectID string) (used, unreadable bool) {
 	l.usersMu.Lock()
 	defer l.usersMu.Unlock()
 	for s, u := range l.users {
 		if s == self || u.projectInUse == nil {
 			continue
 		}
-		if used, err := u.projectInUse(projectID); err != nil || used {
-			return true
+		inUse, err := u.projectInUse(projectID)
+		if err != nil {
+			unreadable = true
+		} else if inUse {
+			return true, unreadable
 		}
 	}
-	return false
+	return false, unreadable
 }
 
 // ErrOwnershipSlugReservedElsewhere is a slug another Runtime Broker
