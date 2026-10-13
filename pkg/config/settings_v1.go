@@ -3021,16 +3021,22 @@ func (e *HarnessConfigEntry) ResolvedReady() ReadySpec {
 		return DefaultReadySpec(ReadyStrategyDelay)
 	}
 	r := e.Ready
-	strategy, err := r.strategy()
-	if err != nil {
-		warnResolveFallback(e.Harness, err)
+	strategy, strategyErr := r.strategy()
+	if strategyErr != nil {
+		warnResolveFallback(e.Harness, strategyErr)
 	}
 	spec := DefaultReadySpec(strategy)
+	var err error
 	if spec.Settle, err = r.settle(strategy); err != nil {
 		warnResolveFallback(e.Harness, err)
 	}
-	if spec.Timeout, err = r.timeout(strategy); err != nil {
-		warnResolveFallback(e.Harness, err)
+	// After a strategy fallback the timeout check would describe a strategy
+	// the author never wrote, so keep the fallback's default timeout and rely
+	// on the strategy warning alone.
+	if strategyErr == nil {
+		if spec.Timeout, err = r.timeout(strategy); err != nil {
+			warnResolveFallback(e.Harness, err)
+		}
 	}
 	return spec
 }

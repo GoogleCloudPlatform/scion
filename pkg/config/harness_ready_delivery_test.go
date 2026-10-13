@@ -199,6 +199,26 @@ func TestResolvedDelivery_InvalidFieldFallsBack(t *testing.T) {
 	}
 }
 
+// TestResolvedReady_StrategyFallbackWarnsOnce checks that an invalid strategy
+// produces only the strategy warning, not a second warning about a timeout
+// under the fallback strategy the author never wrote.
+func TestResolvedReady_StrategyFallbackWarnsOnce(t *testing.T) {
+	const harness = "warn-once-strategy-fallback"
+	entry := &HarnessConfigEntry{Harness: harness, Ready: &HarnessReadyConfig{Strategy: "pane", Timeout: "30s"}}
+	entry.ResolvedReady()
+
+	var warnings []string
+	resolveWarned.Range(func(k, _ any) bool {
+		if rest, ok := strings.CutPrefix(k.(string), harness+"\x00"); ok {
+			warnings = append(warnings, rest)
+		}
+		return true
+	})
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "ready.strategy must be") {
+		t.Fatalf("warnings for %s = %q, want only the ready.strategy warning", harness, warnings)
+	}
+}
+
 func TestResolvedReady_DefaultsPerStrategy(t *testing.T) {
 	delayDefault := ReadySpec{Strategy: "delay", Settle: 8 * time.Second}
 	hookDefault := ReadySpec{Strategy: "hook", Settle: 1500 * time.Millisecond, Timeout: 90 * time.Second}
@@ -208,17 +228,18 @@ func TestResolvedReady_DefaultsPerStrategy(t *testing.T) {
 		entry *HarnessConfigEntry
 		want  ReadySpec
 	}{
-		"nil entry":        {nilEntry, delayDefault},
-		"nil block":        {&HarnessConfigEntry{Harness: "x"}, delayDefault},
-		"empty block":      {&HarnessConfigEntry{Ready: &HarnessReadyConfig{}}, delayDefault},
-		"delay":            {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay"}}, delayDefault},
-		"hook":             {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook"}}, hookDefault},
-		"hook explicit":    {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Settle: "2s", Timeout: "30s"}}, ReadySpec{Strategy: "hook", Settle: 2 * time.Second, Timeout: 30 * time.Second}},
-		"delay explicit":   {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay", Settle: "3s"}}, ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
-		"unknown strategy": {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "pane", Settle: "500ms"}}, ReadySpec{Strategy: "delay", Settle: 500 * time.Millisecond}},
-		"bad settle hook":  {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Settle: "2m"}}, hookDefault},
-		"bad timeout hook": {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Timeout: "1s"}}, hookDefault},
-		"delay + timeout":  {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay", Timeout: "30s"}}, delayDefault},
+		"nil entry":                  {nilEntry, delayDefault},
+		"nil block":                  {&HarnessConfigEntry{Harness: "x"}, delayDefault},
+		"empty block":                {&HarnessConfigEntry{Ready: &HarnessReadyConfig{}}, delayDefault},
+		"delay":                      {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay"}}, delayDefault},
+		"hook":                       {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook"}}, hookDefault},
+		"hook explicit":              {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Settle: "2s", Timeout: "30s"}}, ReadySpec{Strategy: "hook", Settle: 2 * time.Second, Timeout: 30 * time.Second}},
+		"delay explicit":             {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay", Settle: "3s"}}, ReadySpec{Strategy: "delay", Settle: 3 * time.Second}},
+		"unknown strategy":           {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "pane", Settle: "500ms"}}, ReadySpec{Strategy: "delay", Settle: 500 * time.Millisecond}},
+		"bad settle hook":            {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Settle: "2m"}}, hookDefault},
+		"bad timeout hook":           {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "hook", Timeout: "1s"}}, hookDefault},
+		"delay + timeout":            {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "delay", Timeout: "30s"}}, delayDefault},
+		"unknown strategy + timeout": {&HarnessConfigEntry{Ready: &HarnessReadyConfig{Strategy: "pane", Timeout: "30s"}}, delayDefault},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
