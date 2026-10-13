@@ -739,7 +739,7 @@ func TestHandleAdminExperiments_ReviewOverdueField(t *testing.T) {
 	overdue.ReviewBy = "2020-01-01"
 	fresh := testExperiment("web.fresh_thing", true, experiments.LayerWeb)
 	fresh.ReviewBy = "2099-01-01"
-	reg, err := experiments.NewRegistry([]experiments.Experiment{overdue, fresh}, nil)
+	reg, err := experiments.NewRegistry(append([]experiments.Experiment{overdue, fresh}, routeRegistrationExperiments(t)...), nil)
 	if err != nil {
 		t.Fatalf("NewRegistry: %v", err)
 	}
