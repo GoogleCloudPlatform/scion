@@ -2509,6 +2509,11 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to resolve project path: %w", err)
 	}
+	// Do not link the global project from a git repository that is not a
+	// scion project.
+	if err := hubsync.RefuseGlobalFallbackLink(isGlobal, gp != ""); err != nil {
+		return err
+	}
 
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
@@ -2730,12 +2735,26 @@ func runHubLink(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Always record the hub project ID in this project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file.
+	if err := config.UpdateSetting(resolvedPath, "hub.projectId", effectiveHubProjectID, isGlobal); err != nil {
+		return fmt.Errorf("failed to save hub project ID: %w", err)
+	}
+
 	// Enable Hub integration and mark as linked for this project
 	if err := config.UpdateSetting(resolvedPath, "hub.enabled", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to enable hub: %w", err)
 	}
 	if err := config.UpdateSetting(resolvedPath, "hub.linked", "true", isGlobal); err != nil {
 		return fmt.Errorf("failed to save linked state: %w", err)
+	}
+	if !isGlobal {
+		// A git project records its repo root, so that project discovery
+		// can tell its config from an orphaned one.
+		if err := config.RecordGitWorkspace(resolvedPath); err != nil {
+			_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to record the workspace path: %v\n", err)
+		}
 	}
 
 	// Record the link in the hub list: the project resolves to this hub
