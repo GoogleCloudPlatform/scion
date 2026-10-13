@@ -2762,6 +2762,30 @@ class TestAgentPluginsReconcile(unittest.TestCase):
         self.assertIn("time budget reached; 2 plugin(s) deferred to next start", warn.call_args[0][0])
         self.assertEqual(set(self.env.state()), {"a"})
 
+    def test_budget_defers_removals(self):
+        self.env.stage({"a": "d1", "b": "d1"})
+        inst = _FakeInstaller()
+        sh.reconcile_agent_plugins(self.env.ctx, inst)
+        self.env.unstage()
+        inst.calls.clear()
+        ticks = iter([0.0, 1.0, 25.0, 26.0, 27.0])
+        with mock.patch.object(self.env.ctx, "warn") as warn:
+            sh.reconcile_agent_plugins(self.env.ctx, inst, budget_s=20.0, clock=lambda: next(ticks))
+        self.assertEqual([c for c in inst.calls if c[0] == "uninstall"], [("uninstall", "a")])
+        self.assertIn("time budget reached; 1 removal(s) deferred to next start", warn.call_args[0][0])
+        self.assertEqual(set(self.env.state()), {"b"})
+
+    def test_cli_timeout_capped_to_deadline(self):
+        inst = _FakeInstaller()
+        self.assertEqual(inst.cli_timeout(15.0), 15.0)
+        now = [100.0]
+        inst.clock = lambda: now[0]
+        inst.deadline = 112.0
+        self.assertEqual(inst.cli_timeout(15.0), 12.0)
+        self.assertEqual(inst.cli_timeout(10.0), 10.0)
+        now[0] = 130.0
+        self.assertEqual(inst.cli_timeout(15.0), 1.0)
+
     def test_corrupt_state_file_treated_as_empty(self):
         self.env.stage({"a": "d1"})
         d = os.path.join(self.env.home, ".scion", "agent-plugins")

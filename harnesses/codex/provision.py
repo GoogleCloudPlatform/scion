@@ -578,7 +578,7 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         return {**os.environ, "CODEX_HOME": self.codex_home}
 
     def _run(self, *args: str, timeout: float = scion_harness.AGENT_PLUGIN_CLI_TIMEOUT):
-        return scion_harness.run_cli(["codex", *args], timeout=timeout, env=self._env())
+        return scion_harness.run_cli(["codex", *args], timeout=self.cli_timeout(timeout), env=self._env())
 
     @staticmethod
     def key(name: str) -> str:
@@ -602,15 +602,30 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
             ],
         })
 
-    def marketplace_registered(self) -> bool:
+    def _config(self) -> dict[str, Any]:
+        """~/.codex/config.toml parsed, or {} when absent or unreadable."""
         path = os.path.join(self.codex_home, "config.toml")
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
         except (OSError, tomllib.TOMLDecodeError):
-            return False
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def marketplace_registered(self, data: dict[str, Any] | None = None) -> bool:
+        if data is None:
+            data = self._config()
         markets = data.get("marketplaces")
         return isinstance(markets, dict) and CODEX_PLUGIN_MARKETPLACE in markets
+
+    def plugin_enabled(self, name: str, data: dict[str, Any] | None = None) -> bool:
+        """config.toml holds [plugins."<name>@scion-agent-plugins"] enabled =
+        true, the entry `codex plugin add` writes."""
+        if data is None:
+            data = self._config()
+        plugins = data.get("plugins")
+        entry = plugins.get(self.key(name)) if isinstance(plugins, dict) else None
+        return isinstance(entry, dict) and entry.get("enabled") is True
 
     def prepare(self, desired: list[scion_harness.AgentPlugin]) -> None:
         # codex refuses to run when CODEX_HOME does not exist ("failed to
@@ -640,8 +655,17 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         except json.JSONDecodeError:
             installed = None
         if not isinstance(installed, str) or not installed:
+            # codex 0.162.1 reports installedPath (.../cache/<market>/<name>/
+            # <version>); fall back to the plugin's cache dir.
             guess = os.path.join(self.codex_home, "plugins", "cache", CODEX_PLUGIN_MARKETPLACE, plugin.name)
-            installed = guess if os.path.isdir(guess) else ""
+            if os.path.isdir(guess):
+                installed = guess
+            else:
+                installed = ""
+                self.ctx.warn(
+                    f"agent plugin {plugin.name}: codex plugin add reported no installedPath; "
+                    "presence is checked through config.toml only"
+                )
         return {"key": key, "installed_path": installed}
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
@@ -655,8 +679,16 @@ class CodexPluginInstaller(scion_harness.PluginInstaller):
         raise scion_harness.cli_failure("codex plugin remove", proc)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
+        """The install still exists and is still registered. A re-provision
+        recopies the harness-config home/ tree, which resets
+        ~/.codex/config.toml and drops the marketplace source and the
+        plugin's enabled entry while the cache dir survives; the plugin is
+        then reinstalled. Reads config.toml only; no CLI call."""
         path = native_ref.get("installed_path")
-        return isinstance(path, str) and bool(path) and os.path.isdir(path)
+        if isinstance(path, str) and path and not os.path.isdir(path):
+            return False
+        data = self._config()
+        return self.marketplace_registered(data) and self.plugin_enabled(name, data)
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:

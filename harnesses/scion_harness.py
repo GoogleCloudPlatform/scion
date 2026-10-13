@@ -2076,6 +2076,17 @@ class PluginInstaller:
     harness: str = ""
     cli: str = ""
     min_version: tuple[int, int, int] = (0, 0, 0)
+    # Set by reconcile_agent_plugins: the end of the plugin time budget on
+    # its clock. Installers pass cli_timeout(...) to run_cli so a hanging CLI
+    # cannot carry the provisioner past its (fatal) timeout.
+    deadline: float | None = None
+    clock: Callable[[], float] = staticmethod(time.monotonic)
+
+    def cli_timeout(self, default: float) -> float:
+        """default, capped to the time left before the deadline (at least 1s)."""
+        if self.deadline is None:
+            return default
+        return max(1.0, min(default, self.deadline - self.clock()))
 
     def detect_version(self) -> tuple[int, int, int] | None:
         raise NotImplementedError
@@ -2330,6 +2341,10 @@ def reconcile_agent_plugins(
 
     Steady state (every desired plugin recorded with the same digest and
     still present, nothing extra recorded) makes no CLI call at all.
+
+    budget_s bounds the whole plugin phase: no removal or install starts
+    after it, and the installer caps each CLI call to the time left
+    (PluginInstaller.cli_timeout).
     """
     try:
         _reconcile_agent_plugins(ctx, installer, budget_s, clock)
@@ -2344,6 +2359,8 @@ def _reconcile_agent_plugins(
     clock: Callable[[], float],
 ) -> None:
     start = clock()
+    installer.deadline = start + budget_s
+    installer.clock = clock
     harness = installer.harness or ctx.harness_name
     try:
         desired = read_agent_plugins(ctx)
@@ -2399,7 +2416,13 @@ def _reconcile_agent_plugins(
             skipped.append({"name": p.name, "reason": f"preparation failed: {exc}"})
         pending = []
 
-    for name in extra:
+    for i, name in enumerate(extra):
+        if clock() - start > budget_s:
+            rest = extra[i:]
+            ctx.warn(f"agent plugins: time budget reached; {len(rest)} removal(s) deferred to next start")
+            for n in rest:
+                skipped.append({"name": n, "reason": "time budget reached (removal deferred)"})
+            break
         rec = state[name]
         ref = rec.get("native_ref")
         try:
