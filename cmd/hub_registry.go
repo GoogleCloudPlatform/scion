@@ -23,6 +23,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
@@ -69,7 +70,13 @@ var hubListCmd = &cobra.Command{
 	Long: `List the hubs in the hub list, marking the current hub.
 
 AUTH shows how the CLI would authenticate to each hub, from local state
-only. --check also checks whether each hub responds.`,
+only. The dev token belongs to the local workstation server, so it counts
+only for a hub on a loopback address.
+
+--check also checks whether each hub responds (REACHABLE) and whether it
+accepts the CLI's credential for it (VERIFIED: yes, no, or - when it was
+not checked). Each hub is sent only its own credential: its login, or the
+dev token for a loopback hub. Other tokens are never sent.`,
 	Args: cobra.NoArgs,
 	RunE: runHubList,
 }
@@ -97,7 +104,7 @@ without logging in; --logout removes it too.`,
 
 func init() {
 	hubAddCmd.Flags().BoolVar(&hubAddUse, "use", false, "Also make the hub the current hub")
-	hubListCmd.Flags().BoolVar(&hubListCheck, "check", false, "Check whether each hub responds")
+	hubListCmd.Flags().BoolVar(&hubListCheck, "check", false, "Check whether each hub responds and accepts the CLI's credential")
 	hubRemoveCmd.Flags().BoolVar(&hubRemoveLogout, "logout", false, "Also remove the stored login for the hub")
 	for _, c := range []*cobra.Command{hubAddCmd, hubRenameCmd, hubRemoveCmd} {
 		c.Flags().BoolVar(&hubRegistryForce, "force", false, "Replace an unreadable ~/.scion/context.yaml")
@@ -162,9 +169,50 @@ func hubAuthLabel(info authInfo) string {
 }
 
 // hubAuthFor computes, from local state only, how the CLI authenticates to
-// endpoint.
+// endpoint. A dev token is valid only on the workstation server that wrote
+// it, which listens on a loopback address, so for any other hub it does not
+// count and the hub has no credential.
 func hubAuthFor(endpoint string) authInfo {
-	return getAuthInfo(&config.Settings{}, endpoint)
+	info := getAuthInfo(&config.Settings{}, endpoint)
+	if info.IsDevAuth && !isLocalhostEndpoint(endpoint) {
+		return authInfo{Method: "none", MethodType: "none"}
+	}
+	return info
+}
+
+// hubAuthToken returns the credential 'hub list --check' sends to the hub at
+// endpoint to verify info: the hub's own login, or the dev token for a
+// loopback hub. Any other token is not tied to a hub and is never sent, so
+// then it returns "".
+func hubAuthToken(endpoint string, info authInfo) string {
+	switch {
+	case info.MethodType == "oauth" && info.OAuthCreds != nil:
+		return info.OAuthCreds.AccessToken
+	case info.MethodType == "devauth" && isLocalhostEndpoint(endpoint):
+		return apiclient.ResolveDevToken()
+	}
+	return ""
+}
+
+// hubAccepts asks the hub at endpoint, with an authenticated identity call
+// within hubHealthTimeout, whether it accepts token. ok reports whether the
+// hub answered: a hub that rejects the token (401) answers with accepted
+// false, while any other failure is not an answer.
+var hubAccepts = func(endpoint, token string) (accepted, ok bool) {
+	client, err := hubclient.New(endpoint, hubclient.WithTimeout(hubHealthTimeout), hubclient.WithBearerToken(token))
+	if err != nil {
+		return false, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubHealthTimeout)
+	defer cancel()
+	_, err = client.Auth().Me(ctx)
+	switch {
+	case err == nil:
+		return true, true
+	case apiclient.IsUnauthorizedError(err):
+		return false, true
+	}
+	return false, false
 }
 
 // hubAddJSON is the JSON result of 'hub add'.
@@ -229,6 +277,9 @@ type hubListJSON struct {
 	Endpoint  string      `json:"endpoint"`
 	Auth      useAuthJSON `json:"auth"`
 	Reachable *bool       `json:"reachable,omitempty"`
+	// Verified is whether the hub accepted the CLI's credential; it is
+	// omitted when that was not checked.
+	Verified *bool `json:"verified,omitempty"`
 }
 
 func runHubList(cmd *cobra.Command, args []string) error {
@@ -243,14 +294,26 @@ func hubList(out, stderr io.Writer, check bool) error {
 	names := c.HubNames()
 
 	var reachable []bool
+	var verified []*bool
 	if check {
 		reachable = make([]bool, len(names))
+		verified = make([]*bool, len(names))
 		var wg sync.WaitGroup
 		for i, name := range names {
 			wg.Add(1)
 			go func(i int, endpoint string) {
 				defer wg.Done()
 				reachable[i] = hubResponds(endpoint) == nil
+				if !reachable[i] {
+					return
+				}
+				token := hubAuthToken(endpoint, hubAuthFor(endpoint))
+				if token == "" {
+					return
+				}
+				if accepted, ok := hubAccepts(endpoint, token); ok {
+					verified[i] = &accepted
+				}
 			}(i, c.Hubs[name].Endpoint)
 		}
 		wg.Wait()
@@ -269,6 +332,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 		if check {
 			r := reachable[i]
 			row.Reachable = &r
+			row.Verified = verified[i]
 		}
 		rows = append(rows, row)
 	}
@@ -282,7 +346,7 @@ func hubList(out, stderr io.Writer, check bool) error {
 	w := tabwriter.NewWriter(out, 0, 0, 2, ' ', 0)
 	header := "CURRENT\tNAME\tENDPOINT\tAUTH"
 	if check {
-		header += "\tREACHABLE"
+		header += "\tREACHABLE\tVERIFIED"
 	}
 	_, _ = fmt.Fprintln(w, header)
 	for _, row := range rows {
@@ -292,11 +356,20 @@ func hubList(out, stderr io.Writer, check bool) error {
 		}
 		line := fmt.Sprintf("%s\t%s\t%s\t%s", mark, row.Name, row.Endpoint, hubAuthLabel(hubAuthFor(row.Endpoint)))
 		if check {
-			line += "\t" + yesNo(*row.Reachable)
+			line += "\t" + yesNo(*row.Reachable) + "\t" + verifiedLabel(row.Verified)
 		}
 		_, _ = fmt.Fprintln(w, line)
 	}
 	return w.Flush()
+}
+
+// verifiedLabel is the VERIFIED column of 'hub list --check': "yes" or "no"
+// when the hub answered, "-" when the credential was not checked.
+func verifiedLabel(v *bool) string {
+	if v == nil {
+		return "-"
+	}
+	return yesNo(*v)
 }
 
 func yesNo(b bool) string {
