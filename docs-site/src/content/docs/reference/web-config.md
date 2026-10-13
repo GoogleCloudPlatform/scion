@@ -13,7 +13,7 @@ The Web Dashboard is a client-side SPA served by the Go server, which also handl
 | :--- | :--- | :--- |
 | `--enable-web` | `false` | Enable the web dashboard. |
 | `--web-port` | `8080` | The HTTP port the web UI listens on. |
-| `--session-secret` | | **(Deprecated — use the `SESSION_SECRET` environment variable instead.)** Secret key for signing session cookies. **Must be set in production.** Passing secrets via CLI flags exposes them in `/proc/pid/cmdline` and `ps(1)` output; use the environment variable or a systemd `EnvironmentFile` for secure delivery. |
+| `--session-secret` | | **(Deprecated — use the `SCION_SERVER_SESSION_SECRET` environment variable instead.)** Secret key for signing session cookies. **Must be set in production.** Passing secrets via CLI flags exposes them in `/proc/pid/cmdline` and `ps(1)` output; use the environment variable or a systemd `EnvironmentFile` for secure delivery. |
 
 ## Environment Variables
 
@@ -21,7 +21,8 @@ The Web Dashboard is a client-side SPA served by the Go server, which also handl
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
-| `SESSION_SECRET` | | Secret key for signing session cookies. **Preferred over `--session-secret`** — environment variables are not visible in process listings. Deliver via systemd `EnvironmentFile` or a secrets manager. |
+| `SCION_SERVER_SESSION_SECRET` | | Secret key for signing session cookies and hub tokens. **Preferred over `--session-secret`** — environment variables are not visible in process listings. Deliver via systemd `EnvironmentFile` or a secrets manager. |
+| `SESSION_SECRET` | | **Deprecated.** Read only when `SCION_SERVER_SESSION_SECRET` is unset, with a startup warning. Use `SCION_SERVER_SESSION_SECRET` instead. |
 
 ### Authentication
 
@@ -78,4 +79,4 @@ localStorage.setItem('scion:feature:web.native_chat', 'false');
 The Go server includes a pre-configured Content Security Policy (CSP) that allows the Hub itself and Google Fonts. Shoelace and its icons are served from the web bundle, not a CDN. Images may also load from `blob:` URLs, which chat uses for image previews. HSTS is automatically enabled in production with a 1-year max-age.
 
 ## Deployment
-The Web Dashboard is served by the same Go binary as the Hub API. In production, enable it with `--enable-web` and ensure the `SESSION_SECRET` environment variable and the OAuth provider variables are configured. Avoid passing the session secret via the `--session-secret` CLI flag, as CLI arguments are visible to other local users via `/proc/pid/cmdline`.
+The Web Dashboard is served by the same Go binary as the Hub API. In production, enable it with `--enable-web` and ensure the `SCION_SERVER_SESSION_SECRET` environment variable and the OAuth provider variables are configured. Avoid passing the session secret via the `--session-secret` CLI flag, as CLI arguments are visible to other local users via `/proc/pid/cmdline`.

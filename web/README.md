@@ -119,8 +119,7 @@ scion server start --enable-hub --enable-web \
 For production deployments, the Go binary embeds the client assets at build time. No `--web-assets-dir` flag is needed:
 
 ```bash
-scion server start --enable-hub --enable-web \
-  --session-secret "$SESSION_SECRET" \
+SCION_SERVER_SESSION_SECRET="<secret>" scion server start --enable-hub --enable-web \
   --base-url https://scion.example.com
 ```
 

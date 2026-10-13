@@ -21,12 +21,12 @@ The Hub is part of the main `scion` binary. You can start it using the `server s
 ```bash
 # Start the Hub, Web Dashboard, and a local Runtime Broker
 
-SESSION_SECRET=\${SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
+SCION_SERVER_SESSION_SECRET=\${SCION_SERVER_SESSION_SECRET} scion --global server start --foreground --production --enable-hub --enable-runtime-broker --enable-web --runtime-broker-port 9800 --web-port 8080 --storage-bucket \${SCION_HUB_STORAGE_BUCKET} --auto-provide
 
 ```
 
 :::caution[Session Secret Security]
-Pass the session secret via the `SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
+Pass the session secret via the `SCION_SERVER_SESSION_SECRET` environment variable (e.g., through a systemd `EnvironmentFile`), **not** via the `--session-secret` CLI flag. CLI arguments are visible to any local user via `ps(1)` and `/proc/pid/cmdline`.
 :::
 
 :::note[Debug logging]

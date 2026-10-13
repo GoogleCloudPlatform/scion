@@ -275,12 +275,12 @@ Environment variables for the Hub process, stored at
 `/home/scion/.scion/hub.env`:
 
 ```bash
-SESSION_SECRET=<randomly-generated-base64>
+SCION_SERVER_SESSION_SECRET=<randomly-generated-base64>
 SCION_GCP_PROJECT_ID=<your-project-id>
 GOOGLE_CLOUD_PROJECT=<your-project-id>
 ```
 
-The `SESSION_SECRET` is generated once during initial deployment and preserved
+The `SCION_SERVER_SESSION_SECRET` is generated once during initial deployment and preserved
 on subsequent runs.
 
 ### Hub-scoped agent env vars
@@ -613,7 +613,7 @@ and turn them off again once you're done diagnosing.
 
 The script is idempotent. Re-running it will:
 - Skip creating the VM and service account if they already exist
-- Preserve the existing `hub.env` (and its `SESSION_SECRET`)
+- Preserve the existing `hub.env` (and its `SCION_SERVER_SESSION_SECRET`)
 - Seed the hub-scoped `GOOGLE_CLOUD_*` env vars only if they are absent (admin edits are preserved)
 - Overwrite `settings.yaml` with the current configuration
 - Re-deploy the Cloud Run proxy (converges to the same state)

@@ -36,7 +36,7 @@ GOOGLE_CLIENT_ID=your-client-id
 GOOGLE_CLIENT_SECRET=your-client-secret
 GITHUB_CLIENT_ID=your-client-id
 GITHUB_CLIENT_SECRET=your-client-secret
-SESSION_SECRET=a-long-random-string
+SCION_SERVER_SESSION_SECRET=a-long-random-string
 ```
 
 Or export them directly:
@@ -66,8 +66,8 @@ scion server start --enable-web --enable-hub --web-port 8080 --session-secret "y
 Or with environment variables from hub.env:
 
 ```bash
-source ~/.scion/hub.env
-scion server start --enable-web --enable-hub --web-port 8080 --session-secret "$SESSION_SECRET"
+set -a; source ~/.scion/hub.env; set +a
+scion server start --enable-web --enable-hub --web-port 8080
 ```
 
 ## 4. Testing the Flow
@@ -82,5 +82,5 @@ scion server start --enable-web --enable-hub --web-port 8080 --session-secret "$
 
 - **Redirect URI Mismatch**: Ensure the redirect URI in your provider's console matches exactly: `http://localhost:8080/auth/callback/<provider>`.
 - **Port Conflict**: If you change the web port, update your redirect URIs accordingly.
-- **Session Secret**: For a consistent experience across restarts, always set `--session-secret` or `SESSION_SECRET`.
+- **Session Secret**: For a consistent experience across restarts, always set `SCION_SERVER_SESSION_SECRET` (or `--session-secret`).
 - **Authorized Domains**: If you set authorized domains and your login email doesn't match, you'll see an error message.
