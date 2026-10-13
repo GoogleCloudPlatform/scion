@@ -795,7 +795,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// provisioned, and recorded only after provisioning succeeds.
 	var sdChange *pendingSharedDirBackendChange
 	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
-		c, err := prepareSharedDirBackendChange(projectDir, agentDir, opts)
+		c, err := prepareSharedDirBackendChange(ctx, projectDir, agentDir, opts)
 		if err != nil {
 			return nil, err
 		}

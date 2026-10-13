@@ -155,25 +155,41 @@ type ResolvedHomeStorage struct {
 // runtime entry, else server.home_storage, else the default (local, pod),
 // through ResolveProfileValue. It reads settings only: whether the value
 // applies to a dispatch (the runtime type, the shared-dir share, an agent's
-// record) is decided by the caller. Call it only on global settings.
+// record) is decided by the caller. Call it only on global settings. On a
+// flat instance view (ForFlatInstance) the instance's runtime_target
+// home_storage_backend and home_storage_leaf take the place of the profile
+// and runtime entry, and no profile is consulted.
 func (vs *VersionedSettings) ResolveHomeStorage(profileName string) ResolvedHomeStorage {
 	out := ResolvedHomeStorage{Backend: HomeStorageBackendLocal, Leaf: HomeStorageLeafPod}
 	var global *V1HomeStorageConfig
 	if vs != nil && vs.Server != nil {
 		global = vs.Server.HomeStorage
 	}
-	backend, src := ResolveProfileValue(vs, profileName, "home_storage_backend",
-		func(p V1ProfileConfig) string { return p.HomeStorageBackend },
-		func(r V1RuntimeConfig) string { return r.HomeStorageBackend })
+	var backend, src, leaf, lsrc string
+	if vs != nil && vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; unset falls through to server.home_storage.
+		t := vs.flat.Target
+		if t.HomeStorageBackend != "" {
+			backend, src = t.HomeStorageBackend, vs.flat.path("runtime_target.home_storage_backend")
+		}
+		if t.HomeStorageLeaf != "" {
+			leaf, lsrc = t.HomeStorageLeaf, vs.flat.path("runtime_target.home_storage_leaf")
+		}
+	} else {
+		backend, src = ResolveProfileValue(vs, profileName, "home_storage_backend",
+			func(p V1ProfileConfig) string { return p.HomeStorageBackend },
+			func(r V1RuntimeConfig) string { return r.HomeStorageBackend })
+		leaf, lsrc = ResolveProfileValue(vs, profileName, "home_storage_leaf",
+			func(p V1ProfileConfig) string { return p.HomeStorageLeaf },
+			func(r V1RuntimeConfig) string { return r.HomeStorageLeaf })
+	}
 	if backend == "" && global != nil && global.Backend != "" {
 		backend, src = global.Backend, HomeStorageBackendGlobalSource
 	}
 	if backend != "" {
 		out.Backend, out.BackendSource = backend, src
 	}
-	leaf, lsrc := ResolveProfileValue(vs, profileName, "home_storage_leaf",
-		func(p V1ProfileConfig) string { return p.HomeStorageLeaf },
-		func(r V1RuntimeConfig) string { return r.HomeStorageLeaf })
 	if leaf == "" && global != nil && global.Leaf != "" {
 		leaf, lsrc = global.Leaf, HomeStorageLeafGlobalSource
 	}

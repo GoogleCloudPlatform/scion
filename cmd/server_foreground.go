@@ -3393,7 +3393,12 @@ func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string
 
 // logSharedDirStorageOverridesStartup logs one line per profile whose
 // shared-dir storage backend comes from a profile or runtime entry
-// shared_dir_storage_backend override, and a warning per invalid override.
+// shared_dir_storage_backend override, one per flat Runtime Broker
+// instance whose backend comes from its runtime_target, and a warning per
+// invalid override and per instance whose backend differs from the one
+// plugins resolve (config.VersionedSettings.FlatInstanceSharedDirStorageReport).
+// An instance that selects nfs without a complete nfs block is refused when
+// the instances are loaded (config.LoadRuntimeBrokerInstances).
 // It checks configuration only and never touches the filesystem: an nfs
 // override whose export is not mounted on this host is reported when an
 // agent using it starts, not here, so a missing mount never affects startup
@@ -3452,6 +3457,16 @@ func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func
 			}
 			logf("shared_dir_storage for profile %s, shared dir %s: backend=%s (from %s)", name, dir, backend, source)
 		}
+	}
+	// Flat Runtime Broker instances: their runtime_target overrides, and a
+	// warning for each instance whose backend differs from the one plugins
+	// resolve from the global settings.
+	lines, warnings := gs.FlatInstanceSharedDirStorageReport()
+	for _, w := range warnings {
+		logf("Warning: %s", w)
+	}
+	for _, line := range lines {
+		logf("%s", line)
 	}
 }
 

@@ -40,6 +40,8 @@ func NewFlatInstancePolicy(inst V1RuntimeBrokerInstanceConfig) *FlatInstancePoli
 		// (TestNewFlatInstancePolicy_CopiesEveryReferenceField enforces it).
 		p.Target = *inst.RuntimeTarget
 		p.Target.KubernetesServiceAccountMappings = copyStringMap(inst.RuntimeTarget.KubernetesServiceAccountMappings)
+		p.Target.SharedDirStorageBackends = copyStringMap(inst.RuntimeTarget.SharedDirStorageBackends)
+		p.Target.SafeToEvict = copyBoolPtr(inst.RuntimeTarget.SafeToEvict)
 	}
 	return p
 }

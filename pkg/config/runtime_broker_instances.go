@@ -26,6 +26,7 @@ import (
 	"strings"
 
 	yamlv3 "gopkg.in/yaml.v3"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 )
@@ -95,16 +96,27 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 		case RuntimeTargetTypeDocker:
 			for _, f := range []struct{ field, v string }{{"context", t.Context}, {"namespace", t.Namespace}, {"kubeconfig", t.Kubeconfig},
 				{"kubernetes_block_service_account", t.KubernetesBlockServiceAccount},
-				{"shared_dir_storage_class", t.SharedDirStorageClass}, {"shared_dir_size", t.SharedDirSize}} {
+				{"shared_dir_storage_class", t.SharedDirStorageClass}, {"shared_dir_size", t.SharedDirSize},
+				{"priority_class_name", t.PriorityClassName},
+				{"home_storage_backend", t.HomeStorageBackend}, {"home_storage_leaf", t.HomeStorageLeaf}} {
 				if field, v := f.field, f.v; v != "" {
 					errs = append(errs, ValidationError{Path: p + ".runtime_target." + field,
 						Message: "field not valid for runtime target type docker"})
 				}
 			}
-			if len(t.KubernetesServiceAccountMappings) > 0 {
-				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubernetes_service_account_mappings",
-					Message: "field not valid for runtime target type docker"})
+			// gke false and an absent safe_to_evict are unset; any other
+			// value of them is refused, as for the string fields above.
+			for _, f := range []struct {
+				field string
+				set   bool
+			}{{"kubernetes_service_account_mappings", len(t.KubernetesServiceAccountMappings) > 0},
+				{"gke", t.GKE}, {"safe_to_evict", t.SafeToEvict != nil}} {
+				if f.set {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target." + f.field,
+						Message: "field not valid for runtime target type docker"})
+				}
 			}
+			errs = append(errs, validateInstanceSharedDirBackends(p, t)...)
 		case RuntimeTargetTypeKubernetes:
 			if t.Kubeconfig != "" && !validInstanceKubeconfigPath(t.Kubeconfig) {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.kubeconfig",
@@ -121,12 +133,40 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			if err := ValidateSharedDirSize(t.SharedDirSize); err != nil {
 				errs = append(errs, ValidationError{Path: p + ".runtime_target.shared_dir_size", Message: err.Error()})
 			}
+			if t.PriorityClassName != "" {
+				if verrs := validation.IsDNS1123Subdomain(t.PriorityClassName); len(verrs) > 0 {
+					errs = append(errs, ValidationError{Path: p + ".runtime_target.priority_class_name",
+						Message: fmt.Sprintf("%q is not a valid Kubernetes PriorityClass name: %s", t.PriorityClassName, strings.Join(verrs, "; "))})
+				}
+			}
+			if err := checkHomeStorageBackend(t.HomeStorageBackend); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.home_storage_backend", Message: err.Error()})
+			}
+			if err := checkHomeStorageLeaf(t.HomeStorageLeaf); err != nil {
+				errs = append(errs, ValidationError{Path: p + ".runtime_target.home_storage_leaf", Message: err.Error()})
+			}
+			errs = append(errs, validateInstanceSharedDirBackends(p, t)...)
 		default:
 			errs = append(errs, ValidationError{Path: p + ".runtime_target.type",
 				Message: fmt.Sprintf("unsupported runtime target type %q (supported: docker, kubernetes)", t.Type)})
 		}
 	}
 	sort.SliceStable(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
+	return errs
+}
+
+// validateInstanceSharedDirBackends checks an instance's
+// shared_dir_storage_backend and shared_dir_storage_backends values with
+// the rules for runtime and profile entries, by checking them as one
+// unnamed runtime entry and renaming the error paths. Whether "nfs" has a
+// complete server.shared_dir_storage.nfs block is checked where that block
+// is read (RuntimeBrokerInstanceNFSErrors).
+func validateInstanceSharedDirBackends(p string, t *V1RuntimeTargetConfig) []ValidationError {
+	errs := ValidateSharedDirStorageBackendValues(map[string]V1RuntimeConfig{"": {
+		SharedDirStorageBackend: t.SharedDirStorageBackend, SharedDirStorageBackends: t.SharedDirStorageBackends}}, nil)
+	for i := range errs {
+		errs[i].Path = p + ".runtime_target" + strings.TrimPrefix(errs[i].Path, "runtimes.")
+	}
 	return errs
 }
 
@@ -173,6 +213,50 @@ func RuntimeBrokerInstanceSharedDirSizes(instances []V1RuntimeBrokerInstanceConf
 			errs = append(errs, ValidationError{Path: fmt.Sprintf("server.broker.instances[%d].runtime_target.shared_dir_size", i), Message: err.Error()})
 		}
 	}
+	return errs
+}
+
+// RuntimeBrokerInstanceNFSErrors reports every instance runtime_target
+// value that selects "nfs" (shared_dir_storage_backend, a
+// shared_dir_storage_backends entry, or home_storage_backend) while
+// sharedDir, the server.shared_dir_storage block of the same settings
+// file, has no complete nfs block. Both NFS shared dirs and an NFS home
+// use that block, so an incomplete one refuses the instance when it is
+// loaded rather than failing its agents' first starts. Results are sorted
+// by path.
+func RuntimeBrokerInstanceNFSErrors(instances []V1RuntimeBrokerInstanceConfig, sharedDir *V1SharedDirStorageConfig) []ValidationError {
+	nfs := &V1SharedDirStorageConfig{Backend: "nfs"}
+	if sharedDir != nil {
+		nfs.NFS = sharedDir.NFS
+	}
+	blockErr := nfs.Validate()
+	if blockErr == nil {
+		return nil
+	}
+	var errs []ValidationError
+	add := func(path string) {
+		errs = append(errs, ValidationError{Path: path,
+			Message: "selects \"nfs\", which needs a complete server.shared_dir_storage.nfs block (" + blockErr.Error() + ")"})
+	}
+	for i, inst := range instances {
+		t := inst.RuntimeTarget
+		if t == nil {
+			continue
+		}
+		p := fmt.Sprintf("server.broker.instances[%d].runtime_target", i)
+		if t.SharedDirStorageBackend == "nfs" {
+			add(p + ".shared_dir_storage_backend")
+		}
+		for dir, backend := range t.SharedDirStorageBackends {
+			if backend == "nfs" {
+				add(p + ".shared_dir_storage_backends." + dir)
+			}
+		}
+		if t.HomeStorageBackend == HomeStorageBackendNFS {
+			add(p + ".home_storage_backend")
+		}
+	}
+	sort.Slice(errs, func(a, b int) bool { return errs[a].Path < errs[b].Path })
 	return errs
 }
 
@@ -253,7 +337,36 @@ func LoadRuntimeBrokerInstances(configPath string) ([]V1RuntimeBrokerInstanceCon
 	if errs := ValidateRuntimeBrokerInstances(instances); len(errs) > 0 {
 		return nil, joinValidationErrors(errs)
 	}
+	if err := checkInstanceNFS(instances, raw["shared_dir_storage"]); err != nil {
+		return nil, err
+	}
 	return instances, nil
+}
+
+// checkInstanceNFS refuses instances that select nfs while sdRaw, the raw
+// server.shared_dir_storage section of the same file, has no complete nfs
+// block (RuntimeBrokerInstanceNFSErrors).
+func checkInstanceNFS(instances []V1RuntimeBrokerInstanceConfig, sdRaw interface{}) error {
+	var sd *V1SharedDirStorageConfig
+	var decodeErr error
+	if sdRaw != nil {
+		data, err := yamlv3.Marshal(sdRaw)
+		if err == nil {
+			sd = &V1SharedDirStorageConfig{}
+			err = yamlv3.Unmarshal(data, sd)
+		}
+		if err != nil {
+			sd, decodeErr = nil, err
+		}
+	}
+	errs := RuntimeBrokerInstanceNFSErrors(instances, sd)
+	if len(errs) == 0 {
+		return nil
+	}
+	if decodeErr != nil {
+		return fmt.Errorf("server.shared_dir_storage: %w; %w", decodeErr, joinValidationErrors(errs))
+	}
+	return joinValidationErrors(errs)
 }
 
 // checkInstanceScalarsAreStrings rejects non-string scalars where the schema
@@ -289,7 +402,8 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 				return fmt.Errorf("%s.runtime_target must be a mapping", p)
 			}
 			if err := checkStrings(p+".runtime_target", tm, "type", "display_name", "context", "namespace",
-				"shared_dir_storage_class", "shared_dir_size"); err != nil {
+				"shared_dir_storage_class", "shared_dir_size", "priority_class_name",
+				"shared_dir_storage_backend", "home_storage_backend", "home_storage_leaf"); err != nil {
 				return err
 			}
 		}
@@ -304,12 +418,9 @@ func checkInstanceScalarsAreStrings(instRaw interface{}) error {
 // it, so a key is never accepted without its effect. A change that wires a
 // key removes it here, adds the Go field and adds it to the JSON schema.
 var (
-	reservedInstanceKeys      = []string{"agent_defaults"}
-	reservedRuntimeTargetKeys = []string{
-		"gke", "priority_class_name", "safe_to_evict",
-		"shared_dir_storage_backend", "shared_dir_storage_backends",
-		"home_storage_backend", "home_storage_leaf",
-	}
+	reservedInstanceKeys = []string{"agent_defaults"}
+	// Every frozen runtime_target key is wired.
+	reservedRuntimeTargetKeys []string
 )
 
 // knownYAMLKeys returns the yaml keys of struct type v's fields.
@@ -423,6 +534,13 @@ func v1InstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []RuntimeBrokerInst
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
+				GKE:                              i.RuntimeTarget.GKE,
+				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
+				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
+				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
+				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
+				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
 			}
 		}
 		out = append(out, o)
@@ -449,6 +567,13 @@ func globalInstancesToV1(in []RuntimeBrokerInstanceConfig) []V1RuntimeBrokerInst
 				KubernetesServiceAccountMappings: copyStringMap(i.RuntimeTarget.KubernetesServiceAccountMappings),
 				SharedDirStorageClass:            i.RuntimeTarget.SharedDirStorageClass,
 				SharedDirSize:                    i.RuntimeTarget.SharedDirSize,
+				GKE:                              i.RuntimeTarget.GKE,
+				PriorityClassName:                i.RuntimeTarget.PriorityClassName,
+				SafeToEvict:                      copyBoolPtr(i.RuntimeTarget.SafeToEvict),
+				SharedDirStorageBackend:          i.RuntimeTarget.SharedDirStorageBackend,
+				SharedDirStorageBackends:         copyStringMap(i.RuntimeTarget.SharedDirStorageBackends),
+				HomeStorageBackend:               i.RuntimeTarget.HomeStorageBackend,
+				HomeStorageLeaf:                  i.RuntimeTarget.HomeStorageLeaf,
 			}
 		}
 		out = append(out, o)
@@ -464,6 +589,16 @@ func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []Runtim
 }
 
 // copyStringMap returns a copy of m (nil for an empty map).
+// copyBoolPtr returns a new pointer to *b, or nil, so a tri-state value is
+// never shared between two copies of a config.
+func copyBoolPtr(b *bool) *bool {
+	if b == nil {
+		return nil
+	}
+	v := *b
+	return &v
+}
+
 func copyStringMap(m map[string]string) map[string]string {
 	if len(m) == 0 {
 		return nil
@@ -473,4 +608,62 @@ func copyStringMap(m map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+// FlatInstanceSharedDirStorageReport describes the shared-dir storage
+// backend policy of each flat Runtime Broker instance in vs
+// (server.broker.instances), for the startup log. lines has one entry per
+// instance whose backend comes from its runtime_target and one per shared
+// dir its shared_dir_storage_backends names. warnings has one entry per
+// instance whose backend for some dir differs from what the global
+// settings resolve with no profile, which is how plugins resolve a shared
+// dir's host path (runtime.ResolveSharedDirHostPath): a plugin would then
+// use a different directory from the one the instance's agents mount.
+// Call it on global settings.
+func (vs *VersionedSettings) FlatInstanceSharedDirStorageReport() (lines, warnings []string) {
+	if vs == nil || vs.Server == nil || vs.Server.Broker == nil {
+		return nil, nil
+	}
+	label := func(backend string) string {
+		if backend == "nfs" {
+			return "nfs"
+		}
+		return "local"
+	}
+	globalBackend, _, _ := vs.ResolveSharedDirStorageBackend("", "")
+	for _, inst := range vs.Server.Broker.Instances {
+		t := inst.RuntimeTarget
+		if t == nil {
+			continue
+		}
+		view := vs.ForFlatInstance(NewFlatInstancePolicy(inst))
+		var differs []string
+		if t.SharedDirStorageBackend != "" {
+			lines = append(lines, fmt.Sprintf("shared_dir_storage for instance %s: backend=%s (from %s)",
+				inst.Key, label(t.SharedDirStorageBackend), view.flat.path("runtime_target.shared_dir_storage_backend")))
+		}
+		// Dirs no per-dir entry names: the instance's single value, else
+		// the global backend, against the plugins' resolution.
+		if single, _, _ := view.ResolveSharedDirStorageBackend("", ""); label(single) != label(globalBackend) {
+			differs = append(differs, fmt.Sprintf("shared dirs without a per-dir entry: %s here, %s for plugins", label(single), label(globalBackend)))
+		}
+		dirs := make([]string, 0, len(t.SharedDirStorageBackends))
+		for dir := range t.SharedDirStorageBackends {
+			dirs = append(dirs, dir)
+		}
+		sort.Strings(dirs)
+		for _, dir := range dirs {
+			backend, source, _ := view.ResolveSharedDirStorageBackend("", dir)
+			lines = append(lines, fmt.Sprintf("shared_dir_storage for instance %s, shared dir %s: backend=%s (from %s)",
+				inst.Key, dir, label(backend), source))
+			if plugin, _, _ := vs.ResolveSharedDirStorageBackend("", dir); label(plugin) != label(backend) {
+				differs = append(differs, fmt.Sprintf("shared dir %s: %s here, %s for plugins", dir, label(backend), label(plugin)))
+			}
+		}
+		if len(differs) > 0 {
+			warnings = append(warnings, fmt.Sprintf("server.broker.instances[%s]: the instance's shared-dir storage backend differs from the one plugins resolve from the global settings (%s); a plugin would use a different directory from the one this instance's agents mount. Set the same backend in the global settings file to keep them in agreement",
+				inst.Key, strings.Join(differs, "; ")))
+		}
+	}
+	return lines, warnings
 }

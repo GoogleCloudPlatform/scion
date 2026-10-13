@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -171,9 +172,9 @@ type homeStorageInput struct {
 	// ExperimentOn reports whether the hub sent experiments.K8sNFSHome as
 	// enabled with this dispatch.
 	ExperimentOn bool
-	// LoadSettings returns the global settings with the hub overlay
-	// (config.LoadGlobalSettingsWithOverlay). It is called only for
-	// Kubernetes starts that need the settings.
+	// LoadSettings returns the global settings with the hub overlay, as the
+	// request's view (config.LoadGlobalSettingsWithOverlayFor). It is called
+	// only for Kubernetes starts that need the settings.
 	LoadSettings func() (*config.VersionedSettings, error)
 }
 
@@ -412,12 +413,14 @@ var errHomeStorageNotConfigured = errors.New("global settings could not be loade
 
 // loadHomeStorageSettings is homeStorageInput.LoadSettings for agent
 // starts: the global settings with the hub overlay, never a project's
-// settings. A file that does not load fails the start only when it
-// mentions home storage (the raw-bytes check the shared-dir storage start
-// uses); otherwise it returns errHomeStorageNotConfigured, so a broken
-// settings file that never configured this feature does not stop agents.
-func loadHomeStorageSettings() (*config.VersionedSettings, error) {
-	gs, _, err := config.LoadGlobalSettingsWithOverlay()
+// settings, as the view of the request ctx (a flat Runtime Broker
+// instance's policy replaces the profile tier). A file that does not load
+// fails the start only when it mentions home storage (the raw-bytes check
+// the shared-dir storage start uses); otherwise it returns
+// errHomeStorageNotConfigured, so a broken settings file that never
+// configured this feature does not stop agents.
+func loadHomeStorageSettings(ctx context.Context) (*config.VersionedSettings, error) {
+	gs, _, err := config.LoadGlobalSettingsWithOverlayFor(ctx)
 	if err != nil {
 		if config.GlobalSettingsMentions("home_storage") {
 			return nil, err
