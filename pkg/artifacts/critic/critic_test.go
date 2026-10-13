@@ -332,6 +332,7 @@ func TestDiffWhitespaceAndFinalNewline(t *testing.T) {
 		{"blank line added", "a\nb\n", "a\n\nb\n", []flags{{2, true, ""}}},
 		{"tab for spaces", "a\n  x\n", "a\n\tx\n", []flags{{2, true, ""}}},
 		{"word change", "a\nb\n", "a\nB\n", []flags{{2, false, ""}}},
+		{"word added at the end", "a\nb\n", "a\nb c\n", []flags{{2, false, ""}}},
 		{"final newline removed", "a\nend\n", "a\nend", []flags{{2, true, FinalNewlineRemoved}}},
 		{"final newline added", "a\nend", "a\nend\n", []flags{{2, true, FinalNewlineAdded}}},
 		{"final newline removed with an insertion", "a\nb\n", "a\nx\nb", []flags{{2, false, FinalNewlineRemoved}}},
