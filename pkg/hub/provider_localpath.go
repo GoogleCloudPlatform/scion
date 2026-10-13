@@ -46,14 +46,21 @@ func linkedProjectScionDir(localPath string) string {
 
 // linkedProjectInitDir returns the .scion directory the hub initializes for
 // an embedded broker's provider local path, and false when the path must not
-// be initialized: a path that isBrokerGlobalDirPath matches is the machine's
-// global scion directory (or a home directory that resolves to it), which
-// global init sets up, not linked-project init.
+// be initialized: the machine's global scion directory, or a home directory
+// whose .scion is that directory, is set up by global init, not by
+// linked-project init. Paths isBrokerGlobalDirPath matches are skipped, and,
+// because the embedded broker shares the hub's filesystem, so are this
+// process's own global directory (config.GetGlobalDir) and its parent, which
+// covers a home outside the shapes that check recognizes.
 func linkedProjectInitDir(localPath string) (string, bool) {
 	if isBrokerGlobalDirPath(localPath) {
 		return "", false
 	}
-	return linkedProjectScionDir(localPath), true
+	scionDir := linkedProjectScionDir(localPath)
+	if globalDir, err := config.GetGlobalDir(); err == nil && scionDir == filepath.Clean(globalDir) {
+		return "", false
+	}
+	return scionDir, true
 }
 
 // globalProjectSlug is the slug of a broker's global project: the CLI

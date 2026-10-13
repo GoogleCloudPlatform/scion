@@ -172,3 +172,25 @@ func TestProviderLocalPath_EmbeddedRegisterGlobalDirIsNotInitialized(t *testing.
 	assert.Equal(t, brokerGlobalDir, provider.LocalPath)
 	assert.Empty(t, *inits, "the broker's global directory is not initialized as a linked project")
 }
+
+// The embedded broker shares the hub's filesystem, so its own global
+// directory is skipped even when its home is outside the /root, /home and
+// /Users shapes that isBrokerGlobalDirPath recognizes.
+func TestLinkedProjectInitDir_SkipsOwnGlobalDir(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "var", "lib", "svc")
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	require.False(t, isBrokerGlobalDirPath(home), "the home must be outside the recognized shapes")
+
+	for _, path := range []string{home, home + "/", filepath.Join(home, ".scion"), filepath.Join(home, ".scion") + "/"} {
+		dir, ok := linkedProjectInitDir(path)
+		assert.False(t, ok, "path %q is this process's global directory and is not initialized", path)
+		assert.Empty(t, dir, "path %q", path)
+	}
+	repo := filepath.Join(home, "repo")
+	for _, path := range []string{repo, filepath.Join(repo, ".scion")} {
+		dir, ok := linkedProjectInitDir(path)
+		assert.True(t, ok, "path %q", path)
+		assert.Equal(t, filepath.Join(repo, ".scion"), dir, "path %q", path)
+	}
+}
