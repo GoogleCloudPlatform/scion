@@ -1,0 +1,96 @@
+# Sets up Go and restores this workload's Go module and build cache
+# (ptone/scion#4251, option F phase 1). Pair it with
+# ./.github/actions/save-go-cache as the job's last step.
+#
+# Why not setup-go's own cache: it keys every job on go.sum alone, and saves
+# only on a key miss, so whichever job finished first after a go.sum change
+# (often a tiny one) saved the cache every job then restored, and no job
+# ever saved a useful one. Here:
+# - every workload (a fixed string per job, e.g. build-test or
+#   hub-shard-3) has its own key, so it restores what its own builds made;
+# - the key ends in the UTC date, so the first main run of each day saves a
+#   fresh cache, and later runs that day hit it;
+# - restore-keys fall back to the same workload's newest cache (same go.sum
+#   first, then any), so the first run of a day starts from yesterday's;
+# - only pushes to main save (save-go-cache), so PRs restore main's caches
+#   and write none.
+#
+#   - name: Setup Go
+#     id: go
+#     uses: ./.github/actions/setup-go-cache
+#     with:
+#       workload: build-test
+#   ...
+#   - name: Save Go cache
+#     if: ${{ !cancelled() }}
+#     uses: ./.github/actions/save-go-cache
+#     with:
+#       key: ${{ steps.go.outputs.cache-key }}
+#       cache-hit: ${{ steps.go.outputs.cache-hit }}
+name: Setup Go with a per-workload cache
+description: actions/setup-go without its cache, plus a restore of this workload's Go module and build cache.
+inputs:
+  workload:
+    description: The cache's workload name, fixed per job (and per matrix value where the builds differ).
+    required: true
+  go-version-file:
+    description: Passed to actions/setup-go.
+    required: false
+    default: go.mod
+outputs:
+  go-version:
+    description: The installed Go version (from actions/setup-go).
+    value: ${{ steps.setup.outputs.go-version }}
+  cache-key:
+    description: The primary cache key, for save-go-cache.
+    value: ${{ steps.key.outputs.key }}
+  cache-hit:
+    description: '"true" when the primary key was restored exactly.'
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Setup Go
+      id: setup
+      uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+      with:
+        go-version-file: ${{ inputs.go-version-file }}
+        cache: false
+
+    - name: Compute the Go cache key
+      id: key
+      shell: bash
+      env:
+        GO_VERSION: ${{ steps.setup.outputs.go-version }}
+        WORKLOAD: ${{ inputs.workload }}
+        GO_SUM_HASH: ${{ hashFiles('go.sum') }}
+      run: |
+        set -euo pipefail
+        prefix="go-${RUNNER_OS}-${RUNNER_ARCH}-${GO_VERSION}-${WORKLOAD}-"
+        {
+          echo "prefix=${prefix}"
+          echo "key=${prefix}${GO_SUM_HASH}-$(date -u +%Y%m%d)"
+          echo "gocache=$(go env GOCACHE)"
+          echo "gomodcache=$(go env GOMODCACHE)"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore the Go cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        # save-go-cache must list the same paths, in the same order.
+        path: |
+          ${{ steps.key.outputs.gomodcache }}
+          ${{ steps.key.outputs.gocache }}
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: |
+          ${{ steps.key.outputs.prefix }}${{ hashFiles('go.sum') }}-
+          ${{ steps.key.outputs.prefix }}
+
+    # Build cache entries this job uses or writes get a newer mtime than this
+    # stamp (Go refreshes an entry's mtime on use once it is an hour old);
+    # save-go-cache drops the rest, so a saved cache holds only what its
+    # workload used, and does not grow from day to day.
+    - name: Mark the Go cache restore time
+      shell: bash
+      run: touch "$RUNNER_TEMP/go-cache-restored.stamp"

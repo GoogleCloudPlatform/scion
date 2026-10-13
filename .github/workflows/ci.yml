@@ -177,10 +177,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: build-test
 
       - name: Setup Node
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
@@ -627,6 +627,13 @@ jobs:
       - name: Build Binary
         run: make build
 
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   sqlite-nonhub-tests:
     name: SQLite Tests (non-hub)
     runs-on: ubuntu-latest
@@ -638,10 +645,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: sqlite-nonhub
 
       # `make test-fast-ci` (Build & Test, above) uses -tags no_sqlite, which
       # leaves out every test file that carries `//go:build !no_sqlite`
@@ -673,6 +680,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: make test-cmd-sqlite
 
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The pkg/hub package's tests, split into build-tag shards
   # (hack/hubshard/README.md). A shard's test binary compiles with about
   # half the memory of the whole package's (about 6 GiB instead of 12), and
@@ -700,10 +714,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-plan
 
       - name: List the pkg/hub shards
         id: plan
@@ -730,6 +744,13 @@ jobs:
           fi
           echo "integration_shards=$json" >> "$GITHUB_OUTPUT"
           echo "pkg/hub shards with integration Postgres tests: $json"
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   hub-shard:
     name: pkg/hub shard ${{ matrix.shard }}/${{ needs.hub-shard-plan.outputs.count }}
@@ -764,10 +785,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-${{ matrix.shard }}
 
       # SQLite-enabled (no build tag besides the shard's). The Postgres
       # variables are not set here, so the Postgres tests skip, as they did
@@ -806,6 +827,13 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
           SCION_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-hub-postgres-default SHARD="$SHARD"
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   # The -tags integration pkg/hub Postgres tests (project delete lock
   # order, two-replica scheduled send, membership loss and test identity
@@ -847,10 +875,12 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        # Restores its shard's cache (pkg/hub's dependencies); saves none,
+        # to keep the repo cache budget for the hub-shard jobs.
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: hub-shard-${{ matrix.shard }}
 
       - name: Run pkg/hub shard integration Postgres tests
         env:
@@ -936,10 +966,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: t1-entadapter
 
       # The splitter's own tests (bash only, a second).
       - name: Test the test splitter (hack/testpart.sh)
@@ -965,6 +995,13 @@ jobs:
             exit 1
           fi
           make test-store-postgres-entadapter ENTADAPTER_PART="$PART" ENTADAPTER_PARTS="$PARTS"
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   # The T1 Postgres packages other than pkg/store/entadapter.
   launch-store-postgres-others:
@@ -995,10 +1032,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: t1-others
 
       # design t1-async-create-v11.md §6, "Postgres in CI": runs
       # pkg/store/integrationtest (the existing Postgres-only harness), the
@@ -1032,6 +1069,13 @@ jobs:
           SCION_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
         run: make test-tz-contract
 
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
+
   # The single, stable check name for T1 (the name the old single job had,
   # so a required check keeps working; matrix job names include the matrix
   # values). It fails unless every entadapter part and the other-packages
@@ -1064,10 +1108,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: workstation-smoke
 
       # End-to-end check of the workstation hub path with the default build
       # tags (SQLite on; `make test-fast` uses no_sqlite): in a temp HOME and
@@ -1078,6 +1122,13 @@ jobs:
       # stops it.
       - name: Run workstation smoke test
         run: ./hack/workstation-smoke.sh
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   lint:
     name: golangci-lint
@@ -1090,10 +1141,10 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: lint
 
       - name: golangci-lint
         # Bound golangci-lint memory so type-checking the module (pkg/hub in
@@ -1105,6 +1156,13 @@ jobs:
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           args: '--new-from-merge-base=origin/main'
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   shellcheck:
     name: shellcheck
@@ -1248,10 +1306,10 @@ jobs:
           persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        id: go
+        uses: ./.github/actions/setup-go-cache
         with:
-          go-version-file: 'go.mod'
-          cache: true
+          workload: ent-check
 
       # Regenerates pkg/ent from pkg/ent/schema and fails on any diff or new
       # untracked file under pkg/ent, or any go.mod/go.sum change
@@ -1273,6 +1331,13 @@ jobs:
             fi
             exit 1
           fi
+
+      - name: Save Go cache
+        if: ${{ !cancelled() }}
+        uses: ./.github/actions/save-go-cache
+        with:
+          key: ${{ steps.go.outputs.cache-key }}
+          cache-hit: ${{ steps.go.outputs.cache-hit }}
 
   single-node-vm-deploy-tests:
     name: single-node-vm deploy.sh test harness
