@@ -76,7 +76,9 @@ Commands:
   scion conversation group add <group> <conv-ref>    Add a thread to a thread group
   scion conversation group remove <group> <conv-ref> Remove a thread from a thread group
 
-` + threadGroupRefHelp,
+A <group> is a thread group ID, or a group name resolved within the project
+given by the subcommand's --project <id> (defaulting to the current project).
+An unknown or ambiguous name is an error.`,
 }
 
 var conversationGroupListCmd = &cobra.Command{

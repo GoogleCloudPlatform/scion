@@ -265,19 +265,32 @@ func TestConversationGroupCommandTree(t *testing.T) {
 	assert.Equal(t, []string{"add", "create", "delete", "get", "list", "remove", "rename"}, names)
 
 	flagsOf := map[*cobra.Command][]string{
-		conversationGroupListCmd:   {"project", "json"},
-		conversationGroupGetCmd:    {"project", "json"},
-		conversationGroupCreateCmd: {"project", "json"},
-		conversationGroupRenameCmd: {"project"},
-		conversationGroupDeleteCmd: {"project", "yes"},
-		conversationGroupAddCmd:    {"project"},
-		conversationGroupRemoveCmd: {"project"},
+		conversationGroupListCmd:   {"json"},
+		conversationGroupGetCmd:    {"json"},
+		conversationGroupCreateCmd: {"json"},
+		conversationGroupDeleteCmd: {"yes"},
 		conversationCreateCmd:      {"group"},
 	}
 	for c, flags := range flagsOf {
 		for _, f := range flags {
 			assert.NotNil(t, c.Flags().Lookup(f), "%s should have --%s", c.CommandPath(), f)
 		}
+	}
+
+	// Every group subcommand has its own local --project <id> bound to
+	// convGroupProject. LocalFlags leaves out the inherited root -g/--project,
+	// and the root flag has the shorthand g, so this cannot pass on the
+	// root flag.
+	t.Cleanup(func() { convGroupProject = "" })
+	for _, c := range []*cobra.Command{conversationGroupListCmd, conversationGroupGetCmd, conversationGroupCreateCmd,
+		conversationGroupRenameCmd, conversationGroupDeleteCmd, conversationGroupAddCmd, conversationGroupRemoveCmd} {
+		f := c.LocalFlags().Lookup("project")
+		require.NotNil(t, f, "%s needs a local --project", c.Name())
+		assert.Empty(t, f.Shorthand, "%s --project must be the local ID flag, not the root -g", c.Name())
+		require.NoError(t, c.Flags().Set("project", "pid-"+c.Name()))
+		assert.Equal(t, "pid-"+c.Name(), convGroupProject, "%s --project must bind convGroupProject", c.Name())
+		require.NoError(t, f.Value.Set(""))
+		f.Changed = false
 	}
 	for _, c := range []*cobra.Command{conversationGroupRenameCmd, conversationGroupAddCmd, conversationGroupRemoveCmd} {
 		assert.Error(t, c.Args(c, []string{"one"}), "%s needs two args", c.Name())
