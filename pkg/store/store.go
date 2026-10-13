@@ -235,6 +235,19 @@ type Store interface {
 	// is not linked, or when the linked row is not UserKindFederated.
 	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
 
+	// LinkPendingFederatedUser is first contact for a pending federated
+	// account: in one transaction it links (issuer, subject) to the
+	// account userID, as LinkFederatedIdentity does, and sets the
+	// account's status to UserStatusActive. The account must be
+	// UserKindFederated, in UserStatusPending, not linked yet, with
+	// HomeIssuer equal to the normalized issuer and FederatedEmail equal
+	// to the normalized email (ErrInvalidInput otherwise). A pair already
+	// linked to any account returns ErrAlreadyExists, as does the later
+	// of two concurrent first contacts for one account, so a caller can
+	// re-read with GetFederatedUserBySubject. It returns the updated
+	// account. It is safe to call on the store passed to WithTx.
+	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
+
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
 	// provenance stamp has fixture_root_id == rootID (ptone/scion#4240,
@@ -3296,6 +3309,18 @@ type RoleStore interface {
 	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
 	// on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// ListVisitorRoleBindings returns the project-visitor bindings at the
+	// scope of projectID (the bindings CreateVisitorRoleBinding wrote),
+	// oldest first. Bindings of any other role are not returned.
+	ListVisitorRoleBindings(ctx context.Context, projectID string) ([]*RoleBinding, error)
+
+	// UpdateVisitorRoleBindingWindow replaces the NotBefore and ExpiresAt
+	// of the project-visitor binding id (nil clears a bound) and returns
+	// the updated binding. A binding of any other role returns
+	// ErrVisitorBindingRefused; a missing binding returns ErrNotFound. It
+	// is safe to call on the store passed to WithTx.
+	UpdateVisitorRoleBindingWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.

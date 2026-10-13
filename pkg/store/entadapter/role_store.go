@@ -532,6 +532,88 @@ func (r *RoleStore) CreateVisitorRoleBinding(ctx context.Context, rb *store.Role
 	return r.createRoleBinding(ctx, rb, true)
 }
 
+// visitorRoleDefinition returns the seeded project-visitor role definition
+// (see isVisitorRole).
+func (r *RoleStore) visitorRoleDefinition(ctx context.Context) (*ent.RoleDefinition, error) {
+	rd, err := r.client.RoleDefinition.Query().
+		Where(
+			roledefinition.NameEQ(store.ProjectRoleVisitor),
+			roledefinition.ScopeTypeEQ(roledefinition.ScopeTypeProject),
+		).
+		Only(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolving the project-visitor role: %w", mapError(err))
+	}
+	if !isVisitorRole(rd) {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	return rd, nil
+}
+
+// ListVisitorRoleBindings returns the project-visitor bindings of a
+// project (see store.Store.ListVisitorRoleBindings).
+func (r *RoleStore) ListVisitorRoleBindings(ctx context.Context, projectID string) ([]*store.RoleBinding, error) {
+	if projectID == "" {
+		return nil, fmt.Errorf("%w: a project ID is required", store.ErrInvalidInput)
+	}
+	rd, err := r.visitorRoleDefinition(ctx)
+	if err != nil {
+		return nil, err
+	}
+	rbs, err := r.client.RoleBinding.Query().
+		Where(
+			rolebinding.RoleDefinitionIDEQ(rd.ID),
+			rolebinding.ScopeTypeEQ(rolebinding.ScopeTypeProject),
+			rolebinding.ScopeIDEQ(projectID),
+		).
+		Order(ent.Asc(rolebinding.FieldCreated), ent.Asc(rolebinding.FieldID)).
+		All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.RoleBinding, len(rbs))
+	for i, rb := range rbs {
+		out[i] = entRoleBindingToStore(rb)
+	}
+	return out, nil
+}
+
+// UpdateVisitorRoleBindingWindow replaces the window of a project-visitor
+// binding (see store.Store.UpdateVisitorRoleBindingWindow).
+func (r *RoleStore) UpdateVisitorRoleBindingWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*store.RoleBinding, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return nil, err
+	}
+	rd, err := r.visitorRoleDefinition(ctx)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := r.client.RoleBinding.Get(ctx, uid)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	if existing.RoleDefinitionID == nil || *existing.RoleDefinitionID != rd.ID {
+		return nil, store.ErrVisitorBindingRefused
+	}
+	update := r.client.RoleBinding.UpdateOneID(uid)
+	if notBefore != nil {
+		update.SetNotBefore(*notBefore)
+	} else {
+		update.ClearNotBefore()
+	}
+	if expiresAt != nil {
+		update.SetExpiresAt(*expiresAt)
+	} else {
+		update.ClearExpiresAt()
+	}
+	updated, err := update.Save(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	return entRoleBindingToStore(updated), nil
+}
+
 // isVisitorRole reports whether rd is the seeded project-visitor role: a
 // system role of that name, at project scope, that does not confer
 // membership. A custom role of the same name is not.
