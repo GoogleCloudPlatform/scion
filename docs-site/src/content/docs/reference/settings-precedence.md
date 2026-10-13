@@ -29,6 +29,17 @@ answers backwards. The clearest instance:
 > rule that is stated backwards; it is a rule that **has no truth value**, because there is no
 > single thing to rank. See [Resources interleave](#resources-interleaves-and-cannot-be-given-one-rank).
 
+### `Changed in this release` — templates no longer set environment keys (**breaking**)
+
+A template's `image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes` keys, and its
+`env` entries whose name starts with `SCION_`, are now ignored with a warning. Every row on this
+page that names a *template* tier for one of these keys no longer receives a value from the
+template. A template's other `env` entries form their own layer below every other env source:
+each is set only when nothing else sets that variable, never for the harness-config's credential
+variables, and with literal values. Move environment values to settings, a profile, the
+harness-config or the Hub defaults. See
+[Environment keys are ignored](/scion/local/templates/#environment-keys-are-ignored).
+
 ## How to read the tables
 
 Every row that makes a claim about behaviour carries a status marker, defined once here:
@@ -455,6 +466,9 @@ auth detection instead of arriving too late to matter.
 **Local (non-broker) mode is unchanged.** This reordering applies to hub-dispatched agents only.
 Do not read it as a global reordering.
 
+Template env has since moved below every other source in both modes; see
+[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking).
+
 ### `Changed in this release` — `profiles.<name>.env` retired (**breaking**)
 
 **Retired.** `profiles.<name>.env` no longer injects environment variables. Environment variables
@@ -704,6 +718,9 @@ harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest, beats ev
    See "The rank of hub agent_defaults depends on the hub's storage mode" below.
 ```
 
+The `template resources` rung is now empty: a template's `resources` is ignored with a warning
+(see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
+
 **One file, three ranks, and the top one outranks the template.** A reader handed
 "`runtime_broker` is lowest" as one uniform rule gets two of these three backwards.
 
@@ -783,6 +800,10 @@ through their own chain, defined in `ProvisionAgent`'s harness-config merge
 | | the template chain's own `image` — re-read from disk on every `Start`, or, if the template can no longer be resolved, the template's own value recorded at provision | the template chain's own `kubernetes.imagePullPolicy`, same rule |
 | | Hub settings `harness_configs.<name>.image`, re-resolved on every `Start` | Hub settings `harness_configs.<name>.image_pull_policy` (with a profile `image_pull_policy` whose override sets no image outranking it), likewise |
 | Lowest | the harness-config file's own `config.yaml` `image`, re-read on every `Start` | the harness-config file's own `image_pull_policy`, likewise |
+
+The template tier no longer receives a value: a template's `image` and `kubernetes` keys are
+ignored with a warning (see
+[templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
 
 Only an *explicit* profile override moves above the template; the plain `harness_configs.<name>`
 defaults stay below it. A profile's `image_pull_policy` moves up only together with a profile

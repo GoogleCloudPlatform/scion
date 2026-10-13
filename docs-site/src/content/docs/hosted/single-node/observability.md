@@ -99,7 +99,7 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Individual agents can further override these via their `scion-agent.yaml`; a template's `telemetry` block is ignored with a warning.
 
 ```yaml
 # In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)

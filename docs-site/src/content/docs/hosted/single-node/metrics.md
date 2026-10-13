@@ -16,7 +16,7 @@ Scion provides built-in telemetry collection via `sciontool`, which runs as the 
 
 ## Configuration
 
-Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-template and per-agent overrides). Environment variables provide the highest-priority override.
+Telemetry is configured through `settings.yaml` (for global and project-level defaults) and `scion-agent.yaml` (for per-agent overrides; a template's `telemetry` block is ignored with a warning). Environment variables provide the highest-priority override.
 
 ### Configuration Hierarchy
 
@@ -24,15 +24,14 @@ Telemetry settings resolve across scopes using **last-write-wins** semantics:
 
 1.  **Global settings** (`~/.scion/settings.yaml`) — Organization-wide defaults.
 2.  **Project settings** (`.scion/settings.yaml`) — Project-level overrides.
-3.  **Template config** (`scion-agent.yaml` in template) — Role-specific overrides.
-4.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
-5.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
+3.  **Agent config** (`scion-agent.yaml` in agent home) — Per-agent overrides.
+4.  **Environment variables** (`SCION_TELEMETRY_*`, `SCION_OTEL_*`) — Highest priority.
 
 At each scope, only the fields you specify are overridden; unset fields inherit from the previous scope.
 
 ### Settings File Configuration
 
-The `telemetry` block can appear in any `settings.yaml` (global or project) or `scion-agent.yaml` (template or agent):
+The `telemetry` block can appear in any `settings.yaml` (global or project) or an agent's `scion-agent.yaml`:
 
 ```yaml
 # In settings.yaml or scion-agent.yaml
