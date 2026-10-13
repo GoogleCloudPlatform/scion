@@ -212,8 +212,9 @@ func (nd *NotificationDispatcher) revertClaim(ctx context.Context, notificationI
 }
 
 // RetryDispatch re-attempts delivery of an existing undispatched notification.
-// It is the shared code path for both the periodic sweep backstop and the
-// broker-connect fast-path hook.
+// It is an exported wrapper over retryDispatch, used by tests; the periodic
+// sweep backstop and the broker-connect drain call retryBatch, which calls
+// retryDispatch directly.
 //
 // Claim-first semantics: ClaimNotificationForDispatch (CAS on dispatched=false)
 // is called before delivery to prevent double-dispatch when the sweep and hook
