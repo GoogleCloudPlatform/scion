@@ -447,6 +447,11 @@ type Server struct {
 	// policy, snapshotted when the server is built (flat_k8s_identity.go).
 	flatK8sIdentity flatKubernetesIdentityPolicy
 
+	// flatPolicy is a flat instance's settings policy (its runtime_target
+	// defaults), snapshotted when the server is built and attached to
+	// every request it serves (flat_instance.go).
+	flatPolicy *config.FlatInstancePolicy
+
 	// NFS mount reconciler (nil when backend != "nfs")
 	nfsMountReconciler *NFSMountReconciler
 	// nfsHostOwned is set when nfsMountReconciler is the host mounter's:
@@ -557,6 +562,7 @@ func New(cfg ServerConfig, mgr agent.Manager, rt scionrt.Runtime) *Server {
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		srv.flatK8sIdentity = newFlatKubernetesIdentityPolicy(fi)
+		srv.flatPolicy = config.NewFlatInstancePolicy(fi.Instance)
 	}
 	if fi := srv.flatInstance(); fi != nil {
 		// Fail closed: without an exact absence check a deleted agent's

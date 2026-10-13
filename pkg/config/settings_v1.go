@@ -183,10 +183,22 @@ func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (stora
 // returns the settings key the size came from
 // ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
 // an error about the value can name where it is set. sizeKey is empty when
-// size is empty.
+// size is empty. On a flat instance view (ForFlatInstance) the values come
+// from the instance's runtime_target instead, and sizeKey is
+// "server.broker.instances[KEY].runtime_target.shared_dir_size".
 func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
 	if vs == nil {
 		return "", "", ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; no profile is consulted. There is no
+		// lower settings rung, so unset means the runtime default.
+		t := vs.flat.Target
+		if t.SharedDirSize != "" {
+			sizeKey = vs.flat.path("runtime_target.shared_dir_size")
+		}
+		return t.SharedDirStorageClass, t.SharedDirSize, sizeKey
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -1247,6 +1259,12 @@ type VersionedSettings struct {
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	// HubConnections holds named Hub connections for a Runtime Broker.
 	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
+
+	// flat is the flat Runtime Broker instance policy of a view returned by
+	// ForFlatInstance; nil on loaded settings. The resolvers' flat branches
+	// read it in place of the profile and runtime-entry tier. It is never
+	// serialized.
+	flat *FlatInstancePolicy
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1747,6 +1765,14 @@ type V1RuntimeTargetConfig struct {
 	// descriptor or the persisted target identity. Kubernetes only.
 	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// SharedDirStorageClass and SharedDirSize are this Kubernetes
+	// instance's defaults for the ReadWriteMany PVCs backing project shared
+	// dirs: the flat counterparts of the runtime entry and profile settings
+	// of the same name, at the same rung (a template's or agent's
+	// kubernetes block wins over them). Local operator policy: never part
+	// of the persisted target identity. Kubernetes only.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 }
 
 // V1DatabaseConfig holds database settings.
