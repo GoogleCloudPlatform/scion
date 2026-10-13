@@ -29,10 +29,12 @@ import (
 )
 
 // heartbeatOnlyCapabilities are the capabilities a heartbeat adds to the
-// static set; they are neither registered nor stored. The heartbeat's value
-// for them is pinned in pkg/runtimebroker
-// (TestHeartbeatCapabilities_StaticSetPlusTemplateTiers).
-var heartbeatOnlyCapabilities = map[string]bool{"TemplateTiers": true}
+// static set that the hub does not store. TemplateTiers is not one: the
+// heartbeat adds it to the static set (pinned in pkg/runtimebroker,
+// TestHeartbeatCapabilities_StaticSetPlusTemplateTiers), and the hub stores
+// it from the heartbeat (store.BrokerCapabilities.TemplateTiers,
+// ptone/scion#4222). Registration leaves it false, the static set's value.
+var heartbeatOnlyCapabilities = map[string]bool{}
 
 // TestCapabilities_RegistrationMatchesHeartbeat: what a broker registers
 // (the embedded registrations' stored capabilities and the capability names
