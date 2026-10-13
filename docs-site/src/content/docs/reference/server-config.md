@@ -202,6 +202,8 @@ Until the production gates of the separate relay are met, it runs on development
 | `hub_internal_url` | string | | Base URL (`http(s)://host:port`) of the hub internal API the relay calls for admission, RPCs and re-checks. Any hub replica serves it, so it may be a load-balanced internal address; it must be reachable only inside the cluster or VPC. Layer 0; restart required. Env: `SCION_SERVER_RELAY_HUBINTERNALURL` (or `SCION_SERVER_RELAY_HUB_INTERNAL_URL`). |
 | `public_url` | string | | The relay's own public URL, recorded as its `relay_instances.public_endpoint`. A user authenticated by Google IAP is admitted through a relay only with the hub's own IAP configuration (`auth.proxy.iap` with its audience, Google's issuer and key endpoint), so clients must reach the hub's IAP backend; trusted-proxy identity headers are never accepted from a relay. Layer 0; restart required. Env: `SCION_SERVER_RELAY_PUBLICURL` (or `SCION_SERVER_RELAY_PUBLIC_URL`). |
 
+**Relay database access.** A relay reads its own configuration file, never the hub's, and connects with the `database.url` in it. Give the relay a relay-scoped, least-privilege database role: it reads and writes the conduit registry tables (`relay_instances`, `conduit_sessions` and `conduit_principal_epochs`), reads the `experiments` row of the hub settings table to follow `hub.conduit`, and on PostgreSQL listens for the hub's conduit revocation events. It needs nothing else, and never reads token, credential or secret tables. At startup the relay logs the configuration files it loaded and its database driver, never the connection string or its credentials.
+
 ### Broker Settings (`server.broker`)
 
 Controls the Runtime Broker service.

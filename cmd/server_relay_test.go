@@ -15,8 +15,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 
@@ -124,5 +127,26 @@ func TestRelayRoleNeverReadsTheSessionSecret(t *testing.T) {
 	require.NoError(t, err)
 	for _, forbidden := range []string{`sessionSecretValue`, `webSessionSecret`, `SESSION_SECRET`, `SharedSecret`, `SharedSigningSecret`} {
 		assert.NotRegexp(t, regexp.MustCompile(regexp.QuoteMeta(forbidden)), string(src), forbidden)
+	}
+}
+
+// TestRelayStartupLogNamesConfigNotDSN: the relay's startup log names the
+// configuration file it loaded and its database driver, never the
+// connection string or its credentials.
+func TestRelayStartupLogNamesConfigNotDSN(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "server.yaml")
+	require.NoError(t, os.WriteFile(file, []byte("hub:\n  port: 18443\n"), 0o600))
+	t.Setenv("HOME", t.TempDir()) // no global settings
+	cfg := relayRoleTestConfig()
+	cfg.Database.Driver = "postgres"
+	cfg.Database.URL = "postgres://relay_role:relay-db-password@db.internal:5432/scion?sslmode=require"
+	var buf bytes.Buffer
+	logRelayStartup(slog.New(slog.NewTextHandler(&buf, nil)), cfg, file)
+	out := buf.String()
+	assert.Contains(t, out, "server.yaml")
+	assert.Contains(t, out, "database_driver=postgres")
+	for _, leaked := range []string{"relay-db-password", "relay_role", "db.internal", "postgres://"} {
+		assert.NotContains(t, out, leaked)
 	}
 }

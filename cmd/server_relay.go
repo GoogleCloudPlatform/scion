@@ -85,6 +85,13 @@ func validateRelayRoleConfig(cfg *config.GlobalConfig) error {
 	return nil
 }
 
+// logRelayStartup names the configuration files the relay loaded and its
+// database driver. The relay reads only its own configuration; the
+// connection string and its credentials are never logged.
+func logRelayStartup(log *slog.Logger, cfg *config.GlobalConfig, configPath string) {
+	log.Info("Conduit relay role starting", "config_files", config.ServerConfigFiles(configPath), "database_driver", cfg.Database.Driver)
+}
+
 // relayDatabaseOptions is the relay's database connection input.
 func relayDatabaseOptions(cfg *config.GlobalConfig) relaydb.Options {
 	return relaydb.Options{
@@ -155,6 +162,7 @@ func runRelayRole(ctx context.Context, cfg *config.GlobalConfig) error {
 	if err := validateRelayRoleConfig(cfg); err != nil {
 		return err
 	}
+	logRelayStartup(slog.Default(), cfg, serverConfigPath)
 	db, err := openRelayDB(ctx, relayDatabaseOptions(cfg))
 	if err != nil {
 		return err
