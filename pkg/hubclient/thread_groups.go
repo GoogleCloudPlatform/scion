@@ -200,11 +200,13 @@ func (s *threadGroupService) List(ctx context.Context, projectID string) ([]Thre
 	if err != nil {
 		return nil, err
 	}
-	result, err := apiclient.DecodeResponse[threadGroupListResponse](resp)
+	// The hub always answers the list with a body, so DecodeRequired: a
+	// 204 or empty body is an error, never a silent empty list.
+	result, err := apiclient.DecodeRequired[threadGroupListResponse](resp)
 	if err != nil {
 		return nil, collectionErr(err)
 	}
-	if result == nil || result.ThreadGroups == nil {
+	if result.ThreadGroups == nil {
 		return []ThreadGroup{}, nil
 	}
 	for i := range result.ThreadGroups {
