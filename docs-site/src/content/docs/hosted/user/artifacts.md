@@ -190,7 +190,7 @@ Apply or answer the marks, then publish the resolved text as the next version wi
 
 ## Share an artifact
 
-Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own.
+Sharing is for **users only**: the artifact's owner, or a user it gave *Can manage*. Agents cannot share artifacts, including their own, so nobody can share an artifact owned by an agent beyond its home project (see [What agents cannot do](#what-agents-cannot-do)).
 
 On the artifact's page, **Share** opens a dialog with three parts.
 
@@ -232,7 +232,7 @@ Because an agent cannot share its own artifacts, it cannot choose who reviews it
 
 They see **Grant review access** on the artifact page instead of **Share**. Search for a user and choose **Add** to give them *Can review*: they can then publish reviews, and nothing else.
 
-Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It cannot be given to someone who already holds a grant of their own on the artifact (*Can view*, *Can edit* or *Can manage*); the request is refused. Ask the owner or a *Can manage* user to change that grant to *Can edit* instead, which includes review.
+Review access does not give read access. The person must already be able to read the artifact, through its home project or a grant to one of their projects; if that access ends, so does review. It is refused for someone who already holds a grant of their own on the artifact; check that grant, because *Can edit* and *Can manage* already include review.
 
 ## Attach artifacts in chat
 
@@ -253,7 +253,7 @@ scion message @reviewer "Design ready for review." --artifact scion://artifact/5
 Keep in mind:
 
 - The Hub keeps only references that you can read, and drops the others with a warning.
-- When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; share the artifact with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
+- When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; ask whoever manages the artifact to share it with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
 - Some messages do not carry artifact references, among them group (`group[...]`) and broadcast messages, @-mention copies, and messages that arrive through chat plugins. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
 
 ## Expiry, moving and deleting
@@ -275,13 +275,13 @@ Agents use the same `scion artifact` command, but in agent mode:
 - **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
-When an agent's work needs sharing beyond the project, or needs a reviewer from outside it, ask the user who started the agent; on an agent-owned artifact they can use **Grant review access**.
+An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share.
 
 ## Troubleshooting
 
 ### "Not found" for an artifact
 
-A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask the owner to share it with you or your project.
+A `404` means that the artifact does not exist **or** that you cannot read it. The Hub gives the same answer for both, by design, so it does not reveal whether an artifact exists. Check the reference, then ask whoever manages the artifact (its owner, or a user with *Can manage*) to share it with you or your project. An artifact owned by an agent cannot be shared beyond its home project; see [What agents cannot do](#what-agents-cannot-do).
 
 ### `missing_scope` when an agent publishes
 
@@ -300,7 +300,7 @@ While `hub.artifacts` is off:
 - **CLI:** every artifact request answers `404`. `scion artifact publish` adds a hint that the experiment may be off; `get` lists it among the possible causes.
 - **Check.** Inside an agent, `scion whoami --full` lists the experiments that are on now. A Hub admin turns the experiment on under **Admin → Server Config → Experiments** (see [Experiments](/scion/reference/experiments/)).
 
-If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every artifact command in the CLI, answers `404` (ptone/scion#4932). Ask a Hub admin to check the Hub's `artifacts` settings.
+If the experiment is on but artifacts are disabled in the Hub's settings, the web controls still appear, but every artifact request behind them, and every `scion artifact` command, answers `404` (ptone/scion#4932). Messages sent with `--artifact` lose their references, with a warning. Ask a Hub admin to check the Hub's `artifacts` settings.
 
 ### A review is refused
 
