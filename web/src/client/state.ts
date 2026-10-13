@@ -440,6 +440,7 @@ export type StateEventType =
   | 'notification-created'
   | 'chat-message-received'
   | 'chat-topic-updated'
+  | 'chat-thread-group-updated'
   | 'chat-presence-updated'
   | 'chat-typing-received'
   | 'chat-read-state-updated'
@@ -897,6 +898,9 @@ export class StateManager extends EventTarget {
           this.notifyWithData('chat-message-received', chatDetail);
         } else if (chatEventType === 'topic') {
           this.notifyWithData('chat-topic-updated', chatDetail);
+        } else if (chatEventType === 'thread_group') {
+          // Project thread groups (ptone/scion#4424): {action, group}.
+          this.notifyWithData('chat-thread-group-updated', chatDetail);
         } else if (chatEventType === 'presence') {
           this.notifyWithData('chat-presence-updated', chatDetail);
         } else if (chatEventType === 'typing') {

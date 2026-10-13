@@ -34,6 +34,27 @@ function emit(sm: StateManager, subject: string, data: unknown): void {
   });
 }
 
+describe('StateManager project chat subjects', () => {
+  it('routes project.{id}.chat.thread_group to chat-thread-group-updated (ptone/scion#4424)', () => {
+    const sm = new StateManager();
+    const groups = vi.fn();
+    const topic = vi.fn();
+    const message = vi.fn();
+    sm.addEventListener('chat-thread-group-updated', groups);
+    sm.addEventListener('chat-topic-updated', topic);
+    sm.addEventListener('chat-message-received', message);
+
+    const group = { id: 'g1', projectId: 'p1', name: 'Release', threads: [] };
+    emit(sm, 'project.p1.chat.thread_group', { action: 'created', group });
+
+    expect(topic).not.toHaveBeenCalled();
+    expect(message).not.toHaveBeenCalled();
+    expect(groups).toHaveBeenCalledTimes(1);
+    const detail = (groups.mock.calls[0]?.[0] as CustomEvent).detail as { data: unknown };
+    expect(detail.data).toEqual({ projectId: 'p1', action: 'created', group });
+  });
+});
+
 describe('StateManager user-scoped chat subjects', () => {
   it('routes user.{id}.chat.typing to chat-typing-received', () => {
     const sm = new StateManager();

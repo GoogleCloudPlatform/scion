@@ -804,3 +804,153 @@ describe('space rail — a new selection re-decides the override (N6, intended b
     expect(el.autoExpandedGroupId).toBe('g-shared');
   });
 });
+
+/**
+ * With project thread groups on (ptone/scion#4424, `hub.chat_thread_groups`),
+ * collapse state stays local and per user, but groups load per space with
+ * its threads instead of with the preferences. Pruning must not mistake an
+ * unloaded space's groups for stale ones, and must keep the hidden personal
+ * groups' entries so turning the flag off restores them; the deep-link
+ * auto-expand must wait for the selected thread's space's groups.
+ */
+describe('space rail — collapse with project thread groups', () => {
+  const FLAG_KEY = 'scion:feature:hub.chat_thread_groups';
+
+  /** Two spaces; p-a has project group g-proj, personal group g-personal is hidden. */
+  function serveProjectGroups(threadGroupsFor: Record<string, unknown[]>): void {
+    apiFetchMock.mockImplementation((path: string) => {
+      if (path === '/api/v1/chat/spaces') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ spaces: [space('p-a', 'Alpha'), space('p-b', 'Bravo')] }), {
+            status: 200,
+          })
+        );
+      }
+      if (path.startsWith('/api/v1/chat/spaces/')) {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threads: [
+                {
+                  id: 'thread-1',
+                  name: 'one',
+                  isGeneral: false,
+                  pinned: false,
+                  hasUnread: false,
+                  hasUnreadMention: false,
+                },
+              ],
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      if (path === '/api/v1/chat/user-prefs') {
+        return Promise.resolve(
+          new Response(
+            JSON.stringify({
+              threadGroups: JSON.stringify({
+                'p-a': [{ id: 'g-personal', name: 'Mine', threadIds: [] }],
+              }),
+            }),
+            { status: 200 }
+          )
+        );
+      }
+      if (path.startsWith('/api/v1/thread-groups?projectId=')) {
+        const projectId = path.slice('/api/v1/thread-groups?projectId='.length);
+        return Promise.resolve(
+          new Response(JSON.stringify({ threadGroups: threadGroupsFor[projectId] ?? [] }), {
+            status: 200,
+          })
+        );
+      }
+      return Promise.resolve(new Response('{}', { status: 200 }));
+    });
+  }
+
+  const projectGroup = {
+    id: 'g-proj',
+    projectId: 'p-a',
+    name: 'Shared',
+    threads: [{ conversationId: 'conv-1', threadId: 'thread-1', name: 'one' }],
+  };
+
+  async function flush(el: any): Promise<void> {
+    for (let i = 0; i < 8; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await el.updateComplete;
+    }
+  }
+
+  beforeEach(() => {
+    localStorage.setItem(FLAG_KEY, 'true');
+  });
+
+  it("does not prune while a space's project groups have not loaded", async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-proj', 'g-other-space']));
+    serveProjectGroups({ 'p-a': [projectGroup] });
+
+    const el = mount();
+    await el.reload();
+    await flush(el);
+
+    // Spaces start collapsed, so no space's groups have loaded.
+    expect(el.collapsedGroups.has('g-proj')).toBe(true);
+    expect(el.collapsedGroups.has('g-other-space')).toBe(true);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]');
+    expect(stored).toEqual(expect.arrayContaining(['g-proj', 'g-other-space']));
+  });
+
+  it('prunes once every space has its groups, keeping live project and hidden personal ids', async () => {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(['g-proj', 'g-personal', 'stale-group']));
+    serveProjectGroups({ 'p-a': [projectGroup] });
+
+    const el = mount();
+    await el.reload();
+    el.collapsedSpaces = new Set();
+    await flush(el);
+    expect(el.projectGroups.has('p-a')).toBe(true);
+    expect(el.projectGroups.has('p-b')).toBe(true);
+
+    await el.reload();
+    await flush(el);
+
+    expect([...el.collapsedGroups].sort()).toEqual(['g-personal', 'g-proj']);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]') as string[];
+    expect(stored.sort()).toEqual(['g-personal', 'g-proj']);
+  });
+
+  it('collapses a project group locally, without any request', async () => {
+    serveProjectGroups({ 'p-a': [projectGroup] });
+    const el = mount();
+    await el.reload();
+    const before = apiFetchMock.mock.calls.length;
+
+    el.toggleGroupCollapse('g-proj');
+
+    expect(el.collapsedGroups.has('g-proj')).toBe(true);
+    expect(JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '[]')).toContain('g-proj');
+    expect(apiFetchMock.mock.calls.length).toBe(before);
+  });
+
+  it("auto-expands a deep-linked thread's project group once that space's groups load", async () => {
+    localStorage.setItem(`${STORAGE_KEY}:user-1`, JSON.stringify(['g-proj']));
+    serveProjectGroups({ 'p-a': [projectGroup] });
+
+    const el = document.createElement('scion-chat-space-rail') as any;
+    el.selectedKey = 'thread-1';
+    el.selectedProjectId = 'p-a';
+    el.currentUserId = 'user-1';
+    const loaded = waitForRailLoaded(el);
+    document.body.appendChild(el);
+    await loaded;
+    // Preferences are in, the space's groups not yet: no decision recorded.
+    expect(el._autoExpandComputedForKey).not.toBe('thread-1');
+
+    await flush(el);
+
+    expect(el.autoExpandedGroupId).toBe('g-proj');
+    expect(el.collapsedGroups.has('g-proj')).toBe(true);
+  });
+});

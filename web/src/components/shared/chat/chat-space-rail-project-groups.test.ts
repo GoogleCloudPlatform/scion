@@ -1,0 +1,623 @@
+/**
+ * Copyright 2026 Google LLC
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+/**
+ * Tests for project thread groups in the space rail (ptone/scion#4424,
+ * design section 5 and section 8 phase 4), behind the
+ * `hub.chat_thread_groups` experiment.
+ *
+ * A small in-memory hub answers the rail's requests: the spaces and thread
+ * lists, per-user preferences, and the `/api/v1/thread-groups` resource
+ * (list, create, rename, delete, add and remove a thread). Each phase 4
+ * acceptance item has its own test:
+ *   - flag off: the rail uses personal groups and never calls the new API;
+ *   - flag on: a group created by another user or an agent shows without a
+ *     reload (the `chat.thread_group` event);
+ *   - drag-into-group, rename and delete persist on the hub;
+ *   - one user's reorder does not change another user's order;
+ *   - migrated groups keep their top-level positions (5a rule 6);
+ *   - turning the flag off restores the personal groups.
+ */
+
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest';
+import { apiFetch } from '../../../client/api.js';
+import { chatSpacesLoad } from '../../../client/chat-list-cache.js';
+import { requestBodyText } from '../../../client/__fixtures__/request-url.js';
+import { showToast } from '../../../utils/toast.js';
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+
+vi.mock('../../../client/api.js', () => ({
+  apiFetch: vi.fn(),
+}));
+vi.mock('../../../utils/toast.js', () => ({ showToast: vi.fn() }));
+
+const apiFetchMock = vi.mocked(apiFetch);
+const showToastMock = vi.mocked(showToast);
+
+const FLAG_KEY = 'scion:feature:hub.chat_thread_groups';
+const P = 'p-a';
+
+interface HubThread {
+  conversationId: string;
+  threadId: string;
+  name: string;
+}
+
+interface HubGroup {
+  id: string;
+  projectId: string;
+  name: string;
+  createdBy: string;
+  createdByKind: 'user' | 'agent';
+  threads: HubThread[];
+}
+
+/** The fake hub's state. `user` is whose preferences the next request reads. */
+interface FakeHub {
+  user: string;
+  prefs: Record<string, Record<string, string>>;
+  groups: HubGroup[];
+  nextId: number;
+  /** Answer the next request matching `method path-prefix` with this status. */
+  failNext: { method: string; prefix: string; status: number } | null;
+}
+
+let hub: FakeHub;
+
+const THREADS = [
+  { id: 't1', name: 'alpha' },
+  { id: 't2', name: 'bravo' },
+  { id: 't3', name: 'charlie' },
+  { id: 't4', name: 'delta' },
+].map((t) => ({
+  ...t,
+  isGeneral: false,
+  pinned: false,
+  muted: false,
+  hasUnread: false,
+  hasUnreadMention: false,
+}));
+
+function hubThread(threadId: string): HubThread {
+  const t = THREADS.find((x) => x.id === threadId)!;
+  return { conversationId: `conv-${threadId}`, threadId, name: t.name };
+}
+
+function hubGroup(id: string, name: string, threadIds: string[], kind: 'user' | 'agent' = 'user') {
+  return {
+    id,
+    projectId: P,
+    name,
+    createdBy: kind === 'user' ? 'user-b' : 'agent-1',
+    createdByKind: kind,
+    threads: threadIds.map(hubThread),
+  } satisfies HubGroup;
+}
+
+/** The wire shape of a group (what the API and the SSE event carry). */
+function wire(g: HubGroup): Record<string, unknown> {
+  return {
+    ...g,
+    createdAt: '2026-10-13T00:00:00Z',
+    updatedAt: '2026-10-13T00:00:00Z',
+    threads: g.threads.map((t) => ({ ...t, addedBy: 'user-b', addedAt: '2026-10-13T00:00:00Z' })),
+  };
+}
+
+function json(body: unknown, status = 200): Promise<Response> {
+  return Promise.resolve(new Response(JSON.stringify(body), { status }));
+}
+
+function serveHub(): void {
+  apiFetchMock.mockImplementation((path: string, init?: RequestInit) => {
+    const method = init?.method ?? 'GET';
+    const fail = hub.failNext;
+    if (fail && fail.method === method && path.startsWith(fail.prefix)) {
+      hub.failNext = null;
+      return json({ error: { message: 'refused' } }, fail.status);
+    }
+    if (path === '/api/v1/chat/spaces') {
+      return json({
+        spaces: [
+          {
+            projectId: P,
+            projectName: 'Alpha',
+            projectSlug: 'alpha',
+            unreadCount: 0,
+            hasUnreadMention: false,
+          },
+        ],
+      });
+    }
+    if (path.startsWith('/api/v1/chat/spaces/')) return json({ threads: THREADS });
+    if (path === '/api/v1/chat/user-prefs') {
+      if (method === 'PUT') {
+        const body = JSON.parse(requestBodyText(init!.body)) as Record<string, string>;
+        hub.prefs[hub.user] = body;
+      }
+      return json(hub.prefs[hub.user] ?? {});
+    }
+    if (path === `/api/v1/thread-groups?projectId=${P}`) {
+      return json({ threadGroups: hub.groups.map(wire) });
+    }
+    if (path === '/api/v1/thread-groups' && method === 'POST') {
+      const body = JSON.parse(requestBodyText(init!.body)) as { projectId: string; name: string };
+      const key = body.name.trim().toLowerCase();
+      if (hub.groups.some((g) => g.name.trim().toLowerCase() === key)) {
+        return json({ error: { message: 'conflict' } }, 409);
+      }
+      const g = hubGroup(`srv-${hub.nextId++}`, body.name, []);
+      hub.groups.push(g);
+      return json(wire(g), 201);
+    }
+    const threadsMatch = /^\/api\/v1\/thread-groups\/([^/]+)\/threads(?:\/([^/]+))?$/.exec(path);
+    if (threadsMatch) {
+      const g = hub.groups.find((x) => x.id === decodeURIComponent(threadsMatch[1]!));
+      if (!g) return json({ error: { message: 'not found' } }, 404);
+      if (method === 'POST') {
+        const { threadId } = JSON.parse(requestBodyText(init!.body)) as { threadId: string };
+        for (const other of hub.groups) {
+          other.threads = other.threads.filter((t) => t.threadId !== threadId);
+        }
+        g.threads.push(hubThread(threadId));
+        return json(wire(g));
+      }
+      if (method === 'DELETE') {
+        const conv = decodeURIComponent(threadsMatch[2] ?? '');
+        g.threads = g.threads.filter((t) => t.conversationId !== conv);
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+    }
+    const groupMatch = /^\/api\/v1\/thread-groups\/([^/?]+)$/.exec(path);
+    if (groupMatch) {
+      const id = decodeURIComponent(groupMatch[1]!);
+      const g = hub.groups.find((x) => x.id === id);
+      if (!g) return json({ error: { message: 'not found' } }, 404);
+      if (method === 'PATCH') {
+        const { name } = JSON.parse(requestBodyText(init!.body)) as { name: string };
+        const key = name.trim().toLowerCase();
+        if (hub.groups.some((x) => x.id !== id && x.name.trim().toLowerCase() === key)) {
+          return json({ error: { message: 'conflict' } }, 409);
+        }
+        g.name = name;
+        return json(wire(g));
+      }
+      if (method === 'DELETE') {
+        hub.groups = hub.groups.filter((x) => x.id !== id);
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+    }
+    return json({});
+  });
+}
+
+/** Requests the rail made, as "METHOD path". */
+function requests(): string[] {
+  return apiFetchMock.mock.calls.map(
+    (c: any[]) => `${(c[1] as RequestInit | undefined)?.method ?? 'GET'} ${c[0] as string}`
+  );
+}
+
+function threadGroupRequests(): string[] {
+  return requests().filter((r) => r.includes('/api/v1/thread-groups'));
+}
+
+/** The bodies of every user-prefs PUT so far. */
+function prefsPuts(): Record<string, string>[] {
+  return apiFetchMock.mock.calls
+    .filter((c: any[]) => c[0] === '/api/v1/chat/user-prefs' && c[1]?.method === 'PUT')
+    .map((c: any[]) => JSON.parse(requestBodyText(c[1].body)) as Record<string, string>);
+}
+
+/** Let pending fetches and renders finish. */
+async function settle(el: any): Promise<void> {
+  for (let i = 0; i < 8; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await el.updateComplete;
+  }
+}
+
+/** Mount a rail as `user` with space p-a open, and wait for its threads (and groups). */
+async function mountAs(user: string): Promise<any> {
+  hub.user = user;
+  chatSpacesLoad.invalidate();
+  const el = document.createElement('scion-chat-space-rail') as any;
+  el.currentUserId = user;
+  el.selectedProjectId = P;
+  document.body.appendChild(el);
+  await settle(el);
+  expect(el.threadsBySpace.has(P)).toBe(true);
+  return el;
+}
+
+/** Group names in the order rendered. */
+function renderedGroupNames(el: any): string[] {
+  return Array.from(el.shadowRoot.querySelectorAll('.thread-group-header .group-name')).map(
+    (n) => (n as HTMLElement).textContent?.trim() ?? ''
+  );
+}
+
+/** The space's groups as {name: threadIds}. */
+function groupsOf(el: any): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const g of el.getGroups(P)) out[g.name] = [...g.threadIds];
+  return out;
+}
+
+/** The space's top-level display order, with group IDs shown by name. */
+function topLevel(el: any): string[] {
+  const names = new Map<string, string>(el.getGroups(P).map((g: any) => [g.id, `[${g.name}]`]));
+  return el.currentTopLevelOrder(P).map((id: string) => names.get(id) ?? id);
+}
+
+function personalPrefs(threadGroups: unknown, threadOrder?: Record<string, string[]>) {
+  return {
+    spaceSortMode: 'alpha',
+    threadSortMode: 'alpha',
+    spaceOrder: '',
+    threadOrder: JSON.stringify(threadOrder ?? {}),
+    threadGroups: JSON.stringify(threadGroups),
+  };
+}
+
+beforeAll(async () => {
+  await import('./chat-space-rail.js');
+});
+
+beforeEach(() => {
+  hub = { user: 'user-a', prefs: {}, groups: [], nextId: 1, failNext: null };
+  serveHub();
+});
+
+afterEach(() => {
+  vi.clearAllMocks();
+  document.body.innerHTML = '';
+  localStorage.clear();
+});
+
+describe('project thread groups — flag off', () => {
+  it('keeps personal groups and never calls the thread-groups API', async () => {
+    hub.prefs['user-a'] = personalPrefs({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }] });
+    hub.groups = [hubGroup('srv-x', 'Shared', ['t2'])];
+
+    const el = await mountAs('user-a');
+
+    expect(renderedGroupNames(el)).toEqual(['Mine']);
+    expect(groupsOf(el)).toEqual({ Mine: ['t1'] });
+
+    // Edits still go to the personal document.
+    await el.moveThreadToGroup('t3', 'g-personal', P);
+    await el.renameGroup('g-personal', 'Mine 2', P);
+    expect(threadGroupRequests()).toEqual([]);
+    const lastPut = prefsPuts().at(-1)!;
+    expect(JSON.parse(lastPut.threadGroups)).toEqual({
+      [P]: [{ id: 'g-personal', name: 'Mine 2', threadIds: ['t1', 't3'] }],
+    });
+  });
+
+  it('ignores chat.thread_group events', async () => {
+    const el = await mountAs('user-a');
+    el.applyThreadGroupEvent(P, 'created', wire(hubGroup('srv-1', 'Shared', ['t1'])));
+    await el.updateComplete;
+    expect(renderedGroupNames(el)).toEqual([]);
+  });
+});
+
+describe('project thread groups — flag on', () => {
+  beforeEach(() => {
+    localStorage.setItem(FLAG_KEY, 'true');
+  });
+
+  it('loads the project groups with the space and hides personal groups', async () => {
+    const personal = { [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1'] }] };
+    hub.prefs['user-a'] = personalPrefs(personal);
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2', 't3'])];
+
+    const el = await mountAs('user-a');
+
+    expect(requests()).toContain(`GET /api/v1/thread-groups?projectId=${P}`);
+    expect(renderedGroupNames(el)).toEqual(['Shared']);
+    expect(groupsOf(el)).toEqual({ Shared: ['t2', 't3'] });
+    // Personal groups are hidden, not deleted.
+    expect(el.prefs.threadGroups).toEqual(personal);
+  });
+
+  it('shows a group that another user or an agent creates, without a reload', async () => {
+    const el = await mountAs('user-a');
+    const before = requests().length;
+
+    el.applyThreadGroupEvent(P, 'created', wire(hubGroup('srv-9', 'From B', ['t1'])));
+    el.applyThreadGroupEvent(P, 'created', wire(hubGroup('srv-10', 'From agent', ['t2'], 'agent')));
+    await el.updateComplete;
+
+    expect(renderedGroupNames(el).sort()).toEqual(['From B', 'From agent']);
+    expect(groupsOf(el)).toEqual({ 'From B': ['t1'], 'From agent': ['t2'] });
+    // Applied from the event payload: no refetch.
+    expect(requests().length).toBe(before);
+  });
+
+  it('reconciles updates and deletes from events, one group per thread', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1', 't2']), hubGroup('srv-2', 'Two', [])];
+    const el = await mountAs('user-a');
+
+    // Another user moved t1 into Two: Two's event arrives before One's.
+    el.applyThreadGroupEvent(P, 'updated', wire(hubGroup('srv-2', 'Two', ['t1'])));
+    await el.updateComplete;
+    expect(groupsOf(el)).toEqual({ One: ['t2'], Two: ['t1'] });
+
+    el.applyThreadGroupEvent(P, 'updated', wire(hubGroup('srv-1', 'Renamed', ['t2'])));
+    el.applyThreadGroupEvent(P, 'deleted', wire(hubGroup('srv-2', 'Two', ['t1'])));
+    // A late update for the deleted group does not bring it back.
+    el.applyThreadGroupEvent(P, 'updated', wire(hubGroup('srv-2', 'Two', ['t1'])));
+    await el.updateComplete;
+    expect(groupsOf(el)).toEqual({ Renamed: ['t2'] });
+    expect(renderedGroupNames(el)).toEqual(['Renamed']);
+  });
+
+  it('ignores an event whose group belongs to another project', async () => {
+    const el = await mountAs('user-a');
+    el.applyThreadGroupEvent(P, 'created', { ...wire(hubGroup('srv-1', 'X', ['t1'])), projectId: 'p-z' });
+    await el.updateComplete;
+    expect(groupsOf(el)).toEqual({});
+  });
+
+  it('drag-into-group persists on the hub, not in personal prefs', async () => {
+    const personalDoc = JSON.stringify({ [P]: [{ id: 'g-personal', name: 'Mine', threadIds: [] }] });
+    hub.prefs['user-a'] = { ...personalPrefs({}), threadGroups: personalDoc };
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+
+    // Drop t3 onto the group header.
+    el.draggingThreadId = 't3';
+    await el.handleGroupDrop({ preventDefault: vi.fn() }, 'srv-1', P);
+    await settle(el);
+
+    expect(threadGroupRequests()).toContain('POST /api/v1/thread-groups/srv-1/threads');
+    expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3']);
+    expect(groupsOf(el)).toEqual({ Shared: ['t1', 't3'] });
+
+    // Drop t4 onto a member row: filed on the hub, and the drop position is
+    // this user's order, saved in their prefs. The personal groups document
+    // goes back byte for byte (the hub's migration marker stays set).
+    el.draggingThreadId = 't4';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
+    await settle(el);
+    expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3', 't4']);
+    const put = prefsPuts().at(-1)!;
+    expect(put.threadGroups).toBe(personalDoc);
+    const order = JSON.parse(put.threadOrder)[P] as string[];
+    // Members follow the group's ID, t4 where it was dropped (before t1).
+    expect(order.slice(order.indexOf('srv-1'), order.indexOf('srv-1') + 4)).toEqual([
+      'srv-1',
+      't4',
+      't1',
+      't3',
+    ]);
+  });
+
+  it('removing a thread from a group calls the hub with its conversation ID', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't2'])];
+    const el = await mountAs('user-a');
+
+    await el.removeThreadFromGroup('t1', P);
+    await settle(el);
+
+    expect(threadGroupRequests()).toContain('DELETE /api/v1/thread-groups/srv-1/threads/conv-t1');
+    expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t2']);
+    expect(groupsOf(el)).toEqual({ Shared: ['t2'] });
+  });
+
+  it('creates a group on the hub and files the thread into it', async () => {
+    const el = await mountAs('user-a');
+
+    await el.createGroup(P, 'Release', 't2');
+    await settle(el);
+
+    expect(threadGroupRequests()).toEqual(
+      expect.arrayContaining(['POST /api/v1/thread-groups', 'POST /api/v1/thread-groups/srv-1/threads'])
+    );
+    expect(hub.groups.map((g) => [g.name, g.threads.map((t) => t.threadId)])).toEqual([
+      ['Release', ['t2']],
+    ]);
+    expect(groupsOf(el)).toEqual({ Release: ['t2'] });
+    // No personal group was written.
+    for (const put of prefsPuts()) expect(put.threadGroups).not.toContain('Release');
+  });
+
+  it('reports a duplicate name on create and creates nothing', async () => {
+    hub.groups = [hubGroup('srv-1', 'Release', [])];
+    const el = await mountAs('user-a');
+
+    await el.createGroup(P, 'release');
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith(
+      'A group with that name already exists in this space',
+      'warning'
+    );
+    expect(Object.keys(groupsOf(el))).toEqual(['Release']);
+  });
+
+  it('rename persists on the hub; a conflict is reported and undone', async () => {
+    hub.groups = [hubGroup('srv-1', 'One', ['t1']), hubGroup('srv-2', 'Two', [])];
+    const el = await mountAs('user-a');
+
+    await el.renameGroup('srv-1', 'Uno', P);
+    await settle(el);
+    expect(threadGroupRequests()).toContain('PATCH /api/v1/thread-groups/srv-1');
+    expect(hub.groups[0]!.name).toBe('Uno');
+    expect(renderedGroupNames(el).sort()).toEqual(['Two', 'Uno']);
+
+    await el.renameGroup('srv-1', 'two', P);
+    await settle(el);
+    expect(showToastMock).toHaveBeenCalledWith(
+      'A group with that name already exists in this space',
+      'warning'
+    );
+    // The optimistic rename is undone by the reload of the hub's groups.
+    expect(hub.groups[0]!.name).toBe('Uno');
+    expect(renderedGroupNames(el).sort()).toEqual(['Two', 'Uno']);
+  });
+
+  it('delete persists on the hub; the threads stay, ungrouped, where the group was', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2', 't3'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+    expect(topLevel(el)).toEqual(['t1', '[Shared]', 't4']);
+
+    await el.deleteGroup('srv-1', P);
+    await settle(el);
+
+    expect(threadGroupRequests()).toContain('DELETE /api/v1/thread-groups/srv-1');
+    expect(hub.groups).toEqual([]);
+    expect(groupsOf(el)).toEqual({});
+    expect(topLevel(el)).toEqual(['t1', 't2', 't3', 't4']);
+  });
+
+  it('a failed edit is reported and the hub state comes back', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+
+    hub.failNext = { method: 'DELETE', prefix: '/api/v1/thread-groups/srv-1', status: 403 };
+    await el.deleteGroup('srv-1', P);
+    await settle(el);
+
+    expect(showToastMock).toHaveBeenCalledWith('Couldn’t delete the group', 'warning');
+    expect(groupsOf(el)).toEqual({ Shared: ['t1'] });
+    // And a later event for it applies again.
+    el.applyThreadGroupEvent(P, 'updated', wire(hubGroup('srv-1', 'Shared', ['t1', 't2'])));
+    expect(groupsOf(el)).toEqual({ Shared: ['t1', 't2'] });
+  });
+
+  it('a groups list read before an edit landed does not undo it', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+
+    // A stale list (from before the edit) arrives after the edit started.
+    const stale = { ok: true, seq: el._groupsMutationSeq.get(P) ?? 0, groups: [] };
+    const editing = el.renameGroup('srv-1', 'Renamed', P);
+    el.commitProjectGroups(P, stale);
+    await editing;
+    await settle(el);
+
+    expect(groupsOf(el)).toEqual({ Renamed: ['t1'] });
+  });
+
+  it("one user's reorder does not change another user's order", async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't2', 't3'])];
+    hub.prefs['user-b'] = personalPrefs({});
+    const railB = await mountAs('user-b');
+    const orderB = railB.currentGroupThreadOrder(P, 'srv-1');
+    const topB = topLevel(railB);
+    expect(orderB).toEqual(['t1', 't2', 't3']); // alpha
+
+    const railA = await mountAs('user-a');
+    // A drags t3 above t1 inside the group, and moves t4 below the group.
+    railA.draggingThreadId = 't3';
+    await railA.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
+    await settle(railA);
+    await railA.moveThread('t4', P, 1);
+    await settle(railA);
+    expect(railA.currentGroupThreadOrder(P, 'srv-1')).toEqual(['t3', 't1', 't2']);
+    expect(topLevel(railA)).toEqual(['[Shared]', 't4']);
+
+    // The order went only to A's own prefs; the hub groups are untouched.
+    expect(threadGroupRequests().filter((r) => !r.startsWith('GET '))).toEqual([]);
+    expect(hub.prefs['user-b']!.threadOrder).toBe('{}');
+    // B's rail, reloading, still shows B's order.
+    hub.user = 'user-b';
+    await railB.reload();
+    await settle(railB);
+    expect(railB.currentGroupThreadOrder(P, 'srv-1')).toEqual(orderB);
+    expect(topLevel(railB)).toEqual(topB);
+  });
+
+  it('migrated groups keep their top-level positions (5a rule 6)', async () => {
+    // The migration put the project group ID right after the personal one.
+    const personal = { [P]: [{ id: 'g-personal', name: 'Release', threadIds: ['t2'] }] };
+    hub.prefs['user-a'] = personalPrefs(personal, {
+      [P]: ['t3', 'g-personal', 'srv-1', 't1', 't4'],
+    });
+    hub.groups = [hubGroup('srv-1', 'Release', ['t2'])];
+    const el = await mountAs('user-a');
+
+    expect(topLevel(el)).toEqual(['t3', '[Release]', 't1', 't4']);
+
+    // A flag-on reorder keeps the hidden personal ID where it was.
+    el.draggingThreadId = 't4';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't3', P);
+    await settle(el);
+    expect(topLevel(el)).toEqual(['t4', 't3', '[Release]', 't1']);
+    const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
+    expect(order).toEqual(['t4', 't3', 'g-personal', 'srv-1', 't2', 't1']);
+  });
+
+  it('turning the flag off restores the personal groups exactly', async () => {
+    const personal = { [P]: [{ id: 'g-personal', name: 'Mine', threadIds: ['t1', 't4'] }] };
+    const personalDoc = JSON.stringify(personal);
+    hub.prefs['user-a'] = {
+      ...personalPrefs({}, { [P]: ['t3', 'g-personal', 'srv-1', 't2'] }),
+      threadGroups: personalDoc,
+    };
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    const el = await mountAs('user-a');
+    expect(renderedGroupNames(el)).toEqual(['Shared']);
+
+    // Flag-on edits and reorders never touch the personal document.
+    await el.moveThreadToGroup('t1', 'srv-1', P);
+    await el.moveThread('t3', P, 1);
+    await settle(el);
+    expect(prefsPuts().length).toBeGreaterThan(0);
+    for (const put of prefsPuts()) expect(put.threadGroups).toBe(personalDoc);
+
+    localStorage.setItem(FLAG_KEY, 'false');
+    el.requestUpdate();
+    await settle(el);
+
+    expect(renderedGroupNames(el)).toEqual(['Mine']);
+    expect(groupsOf(el)).toEqual({ Mine: ['t1', 't4'] });
+    expect(el.prefs.threadGroups).toEqual(personal);
+    // The personal group is back at its own position.
+    expect(topLevel(el)[0]).toBe('[Mine]');
+  });
+
+  it('loads the groups once the flag turns on after the threads loaded', async () => {
+    localStorage.setItem(FLAG_KEY, 'false');
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    const el = await mountAs('user-a');
+    expect(threadGroupRequests()).toEqual([]);
+
+    localStorage.setItem(FLAG_KEY, 'true');
+    el.requestUpdate();
+    await settle(el);
+
+    expect(threadGroupRequests()).toEqual([`GET /api/v1/thread-groups?projectId=${P}`]);
+    expect(renderedGroupNames(el)).toEqual(['Shared']);
+  });
+
+  it('a failed groups load shows the threads ungrouped and retries on the next reload', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1'])];
+    hub.failNext = { method: 'GET', prefix: '/api/v1/thread-groups', status: 500 };
+    const el = await mountAs('user-a');
+    expect(renderedGroupNames(el)).toEqual([]);
+    expect(threadGroupRequests()).toHaveLength(1);
+
+    await el.reload();
+    await settle(el);
+    expect(renderedGroupNames(el)).toEqual(['Shared']);
+  });
+});
