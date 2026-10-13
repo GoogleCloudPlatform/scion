@@ -255,14 +255,15 @@ func TestStageSymlinkInsideBundleWarns(t *testing.T) {
 	}
 }
 
-// The committed smoke fixture (harnesses/testdata/agent-plugins/scion-smoke)
-// stages with no diagnostics: both MCP servers valid, one skill.
+// The committed smoke fixture (testdata/scion-smoke, used by the live
+// harness smoke tests) stages with no diagnostics: both MCP servers valid,
+// one skill.
 func TestStageSmokeFixture(t *testing.T) {
 	home := t.TempDir()
 	res, err := Stage(context.Background(), StageRequest{
 		Chain: []TemplateSource{{
 			Name: "smoke-tpl",
-			Dir:  filepath.Join("..", "..", "harnesses", "testdata", "agent-plugins"),
+			Dir:  "testdata",
 			Refs: []api.AgentPluginReference{{Path: "scion-smoke"}},
 		}},
 		AgentHome: home,
