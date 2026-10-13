@@ -315,3 +315,30 @@ func TestFormatForDelivery_WithAttachments(t *testing.T) {
 		t.Error("missing attachment in output")
 	}
 }
+
+// The legacy renderer forwards the hub-set visitor sender keys
+// (ptone/scion#4603).
+func TestFormatForDelivery_ForwardsVisitorSenderKeys(t *testing.T) {
+	msg := &StructuredMessage{
+		Version:   Version,
+		Timestamp: "2026-10-13T10:00:00Z",
+		Sender:    "user:alice@corp.example",
+		Recipient: "agent:dev",
+		Msg:       "hi",
+		Type:      TypeInstruction,
+		Metadata: map[string]string{
+			MetadataSenderVisitor: "true",
+			MetadataSenderIssuer:  "issuer.example",
+			"telegram_chat_id":    "123",
+		},
+	}
+	result := FormatForDelivery(msg)
+	for _, want := range []string{`"sender_visitor": "true"`, `"sender_issuer": "issuer.example"`} {
+		if !strings.Contains(result, want) {
+			t.Errorf("delivery lacks %s:\n%s", want, result)
+		}
+	}
+	if strings.Contains(result, "telegram_chat_id") {
+		t.Errorf("a key outside the allowlist was forwarded:\n%s", result)
+	}
+}

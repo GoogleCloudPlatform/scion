@@ -291,9 +291,11 @@ func (s *Server) authorizeAgentMessage(
 		}
 	}
 
-	// Branch by sender type.
+	// Branch by sender type. A visitor (a project visitor's federated
+	// account, VisitorIdentity) is a user sender: its project-visitor grant
+	// carries agent.message, and the target's message mode applies.
 	switch senderIdentity.Type() {
-	case "user", "dev", "federated_user":
+	case "user", "dev", "federated_user", "visitor":
 		allowed, reason := s.authorizeUserToAgent(ctx, senderIdentity, targetAgent)
 		return allowed, reason, nil
 	case "agent":

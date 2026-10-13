@@ -58,11 +58,18 @@ var offloadMetadataKeys = map[string]bool{
 // sets artifact references only through its admission step, which runs
 // after this strip, so a value from any other source never reaches an
 // agent.
+//
+// The visitor sender keys (messages.MetadataSenderVisitor and
+// messages.MetadataSenderIssuer, ptone/scion#4603) are reserved too: the hub
+// sets them on a visitor's message after this strip, so a value from any
+// other source never reaches an agent.
 var reservedMetadataKeys = map[string]bool{
-	MetaBodyOffloaded:            true,
-	MetaBodyChars:                true,
-	MetaBodySHA256:               true,
-	artifacts.MessageMetadataKey: true,
+	MetaBodyOffloaded:              true,
+	MetaBodyChars:                  true,
+	MetaBodySHA256:                 true,
+	artifacts.MessageMetadataKey:   true,
+	messages.MetadataSenderVisitor: true,
+	messages.MetadataSenderIssuer:  true,
 }
 
 // DefaultPreviewBudgetBytes is the compiled default preview byte budget
@@ -144,9 +151,10 @@ func Qualifies(persistedBody string, plain bool, p OffloadPolicy) bool {
 }
 
 // StripReservedMetadata returns md unchanged if it has none of the
-// hub-reserved keys (the three offload keys and the artifact reference
-// key). Otherwise it returns a NEW map without them. It never
-// mutates md, so it is safe on aliased maps. Callers assign the result:
+// hub-reserved keys (the three offload keys, the artifact reference key
+// and the visitor sender keys). Otherwise it returns a NEW map without
+// them. It never mutates md, so it is safe on aliased maps. Callers
+// assign the result:
 // sm.Metadata = messaging.StripReservedMetadata(sm.Metadata).
 func StripReservedMetadata(md map[string]string) map[string]string {
 	return stripMetadataKeys(md, reservedMetadataKeys)

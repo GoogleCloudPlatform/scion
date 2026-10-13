@@ -254,10 +254,15 @@ type visitorRouteMethod struct {
 // pairs that admit a visitor (RouteMetadata.VisitorMethods). Listing any
 // other method on any route fails
 // TestRouteGuard_AdmitsVisitorOnlyOnListedMethods until the pair is added
-// here.
+// here. On a subtree pattern the pair admits only the sub-paths pinned in
+// expectedVisitorSubRoutes (federation_visitor_messaging_test.go).
 var expectedVisitorRouteMethods = []visitorRouteMethod{
 	{"/api/v1/auth/me", http.MethodGet}, // own profile, read-only
 	{"/api/v1/auth/me", http.MethodHead},
+	{"/api/v1/projects/", http.MethodPost},           // send a message to an agent
+	{"/api/v1/agents/", http.MethodPost},             // send a message to an agent
+	{"/api/v1/chat/conversations/", http.MethodGet},  // own DM history and read marker
+	{"/api/v1/chat/conversations/", http.MethodPost}, // own DM read marker
 }
 
 // visitorRefusedProfileRoutes are the profile write routes reachable by a
@@ -331,7 +336,8 @@ func assertVisitorRefusal(t *testing.T, rec *httptest.ResponseRecorder, label st
 // table equal to the registered set) and method refuses a visitor before
 // the handler, with one response, unless the pair is in
 // expectedVisitorRouteMethods; the pairs the routes list in VisitorMethods
-// are exactly that set.
+// are exactly that set. A listed pair on a subtree pattern still refuses
+// the request here, whose path is no admitted sub-path.
 func TestRouteGuard_AdmitsVisitorOnlyOnListedMethods(t *testing.T) {
 	srv, _ := testServer(t)
 	visitor := NewVisitorIdentity(tid("guard-visitor"), visitorTestUserIssuer, "sub", "v@corp.com", "V")
@@ -353,7 +359,7 @@ func TestRouteGuard_AdmitsVisitorOnlyOnListedMethods(t *testing.T) {
 		for _, method := range visitorRouteMethods(pattern) {
 			label := method + " " + pattern
 			rec, called := serveGuardedAs(srv, meta, method, visitor)
-			if allowed[visitorRouteMethod{pattern, method}] {
+			if allowed[visitorRouteMethod{pattern, method}] && !routePatternIsSubtree(pattern) {
 				assert.True(t, called, "%s: the handler must run for a visitor", label)
 				assert.Equal(t, http.StatusOK, rec.Code, "%s", label)
 				continue

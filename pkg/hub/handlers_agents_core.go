@@ -5195,6 +5195,12 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		targetAgent, err := s.store.GetAgent(r.Context(), id)
 		if err != nil {
+			// A visitor gets the one refusal for an unknown agent too
+			// (admitVisitorSubRoute already refused it before here).
+			if isVisitorIdentity(identity) && errors.Is(err, store.ErrNotFound) {
+				writeVisitorRefusal(w)
+				return
+			}
 			writeErrorFromErr(w, err, "")
 			return
 		}
@@ -5212,6 +5218,11 @@ func (s *Server) handleAgentAction(w http.ResponseWriter, r *http.Request, id, a
 
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, targetAgent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to reason-based mapping (user path).

@@ -291,11 +291,7 @@ func (s *Server) resolveOutboundRouting(
 			u, err := s.store.GetUser(ctx, identifier)
 			if err == nil {
 				recipientID = u.ID
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			} else if errors.Is(err, store.ErrNotFound) {
 				writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
 					fmt.Sprintf("user:%s is not a valid addressee. No user exists with that ID.", identifier), nil)
@@ -363,11 +359,7 @@ func (s *Server) resolveOutboundRouting(
 		if err == nil {
 			recipientID = u.ID
 			if recipient == "" {
-				name := u.Email
-				if name == "" {
-					name = u.ID
-				}
-				recipient = "user:" + name
+				recipient = "user:" + userAddressName(u)
 			}
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusBadRequest, ErrCodeAddrUnknown,
@@ -1838,6 +1830,16 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 	}
 	messaging.RecordStep(ctx, "request_parsed")
 
+	// A project visitor sends a direct text message only
+	// (visitorMessageRequestRefusal); every other field is refused before
+	// anything is looked up or written.
+	if visitor, ok := GetIdentityFromContext(ctx).(*VisitorIdentity); ok && visitor != nil {
+		if field := visitorMessageRequestRefusal(&req, visitor.ID(), id); field != "" {
+			ValidationError(w, field+" is not available to visitors", map[string]interface{}{"field": field})
+			return
+		}
+	}
+
 	// The retired end-of-turn assistant-reply type is dropped here too, as
 	// in handleAgentOutboundMessage: accepted with 200 so a caller sees
 	// success, but never persisted, dispatched or published.
@@ -2780,6 +2782,10 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
 			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
+		// A project visitor's message carries the hub-set visitor sender
+		// metadata (the strip above removed any client value), so the
+		// envelope rendered below shows the agent who sent it.
+		structuredMsg.Metadata = stampVisitorSender(structuredMsg.Metadata, GetIdentityFromContext(ctx))
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
 			s.messageLog.Error("Failed to persist message", "error", err)

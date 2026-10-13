@@ -2795,6 +2795,16 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// historyChannel limits the page to the web chat's channel. A project
+	// visitor (ptone/scion#4603) reads its own DM with an agent through the
+	// hub API, never the web chat, and the DM is admitted only as its own
+	// (admitVisitorSubRoute), so its page lists every message of the
+	// conversation, whatever channel each message came from.
+	historyChannel := "web"
+	if isVisitorIdentity(GetIdentityFromContext(ctx)) {
+		historyChannel = ""
+	}
+
 	// Phase 8 read-switch: when ConversationReadSwitch is ON, resolve the
 	// conversation and query by ConversationID instead of Channel+ThreadID.
 	// G3: fallback to channel+thread is REMOVED. Unresolved conversations
@@ -2846,7 +2856,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			// to messages from Discord, telegram, etc. that share the same
 			// conversation_id. Widening is not recoverable; narrowing is.
 			filter = store.MessageFilter{
-				Channel:        "web",
+				Channel:        historyChannel,
 				ConversationID: convResult.ConversationID,
 			}
 			historyConvID = convResult.ConversationID
@@ -2872,7 +2882,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 		}
 	} else {
 		filter = store.MessageFilter{
-			Channel:  "web",
+			Channel:  historyChannel,
 			ThreadID: key,
 		}
 	}
@@ -2900,7 +2910,7 @@ func (s *Server) handleConversationHistory(w http.ResponseWriter, r *http.Reques
 			}
 			return
 		}
-		if anchor.Channel != filter.Channel ||
+		if (filter.Channel != "" && anchor.Channel != filter.Channel) ||
 			(filter.ConversationID != "" && anchor.ConversationID != filter.ConversationID) ||
 			(filter.ThreadID != "" && anchor.ThreadID != filter.ThreadID) {
 			NotFound(w, "Message")

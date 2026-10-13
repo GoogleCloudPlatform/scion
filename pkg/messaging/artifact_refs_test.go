@@ -118,3 +118,47 @@ func TestRenderDeliveryText_ArtifactHints(t *testing.T) {
 		t.Errorf("plain delivery = %q", plain)
 	}
 }
+
+// The visitor sender keys are hub-reserved: StripReservedMetadata removes
+// them, so only the hub sets them, after the strip (ptone/scion#4603).
+func TestStripReservedMetadata_StripsVisitorSenderKeys(t *testing.T) {
+	md := map[string]string{
+		"foo":                          "bar",
+		messages.MetadataSenderVisitor: "true",
+		messages.MetadataSenderIssuer:  "issuer.example",
+	}
+	out := StripReservedMetadata(md)
+	for _, k := range []string{messages.MetadataSenderVisitor, messages.MetadataSenderIssuer} {
+		if _, ok := out[k]; ok {
+			t.Errorf("%s survived the strip: %v", k, out)
+		}
+	}
+	if out["foo"] != "bar" {
+		t.Errorf("unrelated key lost: %v", out)
+	}
+	if md[messages.MetadataSenderVisitor] != "true" {
+		t.Errorf("input mutated: %v", md)
+	}
+}
+
+// The new envelope shows the visitor sender keys: they are not internal
+// keys.
+func TestRenderDeliveryText_KeepsVisitorSenderKeys(t *testing.T) {
+	text := RenderDeliveryText(RenderDeliveryInput{
+		MessageID: "5f1c2d3e-0000-4000-8000-0000000000c1",
+		Msg: &messages.StructuredMessage{
+			Version: messages.Version, Timestamp: "2026-10-13T10:00:00Z",
+			Sender: "user:alice@corp.example", Recipient: "agent:dev",
+			Msg: "hi", Type: messages.TypeInstruction,
+			Metadata: map[string]string{
+				messages.MetadataSenderVisitor: "true",
+				messages.MetadataSenderIssuer:  "issuer.example",
+			},
+		},
+	})
+	for _, want := range []string{`"from": "user:alice@corp.example"`, `"sender_visitor": "true"`, `"sender_issuer": "issuer.example"`} {
+		if !strings.Contains(text, want) {
+			t.Errorf("envelope lacks %s:\n%s", want, text)
+		}
+	}
+}

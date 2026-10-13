@@ -2951,6 +2951,12 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		if err == store.ErrNotFound {
 			agent, err = s.store.GetAgent(ctx, agentID)
+			if (err != nil || agent.ProjectID != projectID) && isVisitorIdentity(GetIdentityFromContext(ctx)) {
+				// A visitor gets the one refusal for an unknown agent too
+				// (admitVisitorSubRoute already refused it before here).
+				writeVisitorRefusal(w)
+				return
+			}
 			if err != nil {
 				writeError(w, http.StatusNotFound, ErrCodeAgentNotFound,
 					fmt.Sprintf("Agent %q not found in project", agentID),
@@ -3002,6 +3008,11 @@ func (s *Server) handleProjectAgentAction(w http.ResponseWriter, r *http.Request
 		isSystemPlane := false
 		allowed, reason, decision := s.authorizeAgentMessage(r.Context(), identity, agent, isSystemPlane)
 		messaging.RecordStep(r.Context(), "message_authorized")
+		if !allowed && isVisitorIdentity(identity) {
+			// A visitor's refusal names no reason or message mode.
+			writeVisitorRefusal(w)
+			return
+		}
 		if !allowed {
 			// Use typed denial code from the decision (agent path) or
 			// fall back to generic forbidden code (user path).
