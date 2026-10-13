@@ -74,6 +74,14 @@ func (RoleBinding) Fields() []ent.Field {
 		field.String("membership_kind").
 			Optional().
 			Nillable(),
+		// source_rule_id is set only on a project-visitor binding created
+		// by a project visitor rule (ProjectVisitorRule): removing the
+		// rule deletes every binding carrying its ID. NULL on every other
+		// binding, including a visitor grant by email.
+		field.UUID("source_rule_id", uuid.UUID{}).
+			Optional().
+			Nillable().
+			Immutable(),
 	}
 }
 
@@ -86,6 +94,8 @@ func (RoleBinding) Indexes() []ent.Index {
 		index.Fields("role_definition_id"),
 		// Find all bindings for a scope (e.g. a project)
 		index.Fields("scope_type", "scope_id"),
+		// Find the bindings a project visitor rule created
+		index.Fields("source_rule_id"),
 		// Prevent duplicate bindings (lifecycle fields are NOT part of the unique
 		// constraint — the same (role, principal, scope) tuple must be unique
 		// regardless of activation windows).
