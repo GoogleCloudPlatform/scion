@@ -1497,6 +1497,12 @@ func lockoutSystemBinding(t *testing.T, s store.Store, roleName, name string) *s
 
 // lockoutSuspendDevUser keeps the dev user's own super-admin binding out of
 // the system-scope admin count. The request still runs as the dev user.
+// The fixture isolates the lockout guards: the authorization decision
+// reads the dev user as active, so the request reaches the guards, while
+// the guards' transaction reads the stored suspended row. A suspended actor
+// is refused before the guards;
+// TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused pins
+// that.
 func lockoutSuspendDevUser(t *testing.T, srv *Server, s store.Store) {
 	t.Helper()
 	ctx := context.Background()
@@ -1504,6 +1510,30 @@ func lockoutSuspendDevUser(t *testing.T, srv *Server, s store.Store) {
 	srv.ensureSuperAdminBinding(ctx, dev.ID)
 	dev.Status = store.UserStatusSuspended
 	require.NoError(t, s.UpdateUser(ctx, dev))
+	authzSeesUserActive(t, srv, dev.ID)
+}
+
+// TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused sets up
+// the state of TestConstraintAdminLockout_RoleBindingDeleteSystem without a
+// stub: the suspended dev user's own stored row is what authorization
+// reads. The account-status check refuses both deletes with 403, before
+// the lockout guard (no 204, no 409), and both bindings are kept.
+func TestConstraintAdminLockout_RoleBindingDeleteSuspendedActorRefused(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	dev := getDevUser(t, srv, s)
+	srv.ensureSuperAdminBinding(ctx, dev.ID)
+	dev.Status = store.UserStatusSuspended
+	require.NoError(t, s.UpdateUser(ctx, dev))
+	a := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-susp-a")
+	b := lockoutSystemBinding(t, s, store.SystemRoleHubAdmin, "lockout-rb-susp-b")
+
+	for _, id := range []string{a.ID, b.ID} {
+		rec := doRequest(t, srv, http.MethodDelete, "/api/v1/admin/role-bindings/"+id, nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+		assert.Equal(t, ErrCodeForbidden, decodeErrorCode(t, rec.Body.Bytes()))
+		requireBindingExists(t, s, id, true)
+	}
 }
 
 // DELETE /admin/role-bindings/{id}, system scope, non-super-admin role.
