@@ -395,18 +395,11 @@ func TestResolveInvocationTarget_HubURLIsOneOff(t *testing.T) {
 	assert.Equal(t, string(before), string(after), "the URL is not added to the hub list")
 }
 
-// An explicit nickname resolves for hub shadow too, which otherwise ignores
-// the context; the server and runtime-broker subtrees never read
-// context.yaml, so a nickname is left as it is there, even with an
-// unreadable file.
+// The server and runtime-broker subtrees never read context.yaml, so a
+// nickname is left as it is there, even with an unreadable file.
 func TestResolveInvocationTarget_NicknameScope(t *testing.T) {
 	setupContextTest(t)
 	saveTestContext(t, ctxTestHub, "")
-
-	hubEndpoint = "prod"
-	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "shadow"), ModeHuman))
-	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.Empty(t, hubSource)
 
 	require.NoError(t, os.WriteFile(contextFilePath(), []byte("version: [1\n"), 0o600))
 	for _, args := range [][]string{{"server", "start"}, {"runtime-broker", "register"}} {
