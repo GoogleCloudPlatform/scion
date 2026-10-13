@@ -654,18 +654,6 @@ func TestConduitTunnel_LocalSessionHasRenewalSender(t *testing.T) {
 	roundTrip(t, st, "after notice")
 }
 
-// soleTrackedStream returns the only stream a tracks.
-func soleTrackedStream(t *testing.T, a *conduitStreamAuthz) *conduitUserStream {
-	t.Helper()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	require.Len(t, a.streams, 1)
-	for st := range a.streams {
-		return st
-	}
-	return nil
-}
-
 // TestConduitTunnel_SharedSession: two tunnels to two agents share one
 // user session; revoking one leaves the other open and the session up.
 func TestConduitTunnel_SharedSession(t *testing.T) {

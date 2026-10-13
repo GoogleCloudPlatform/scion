@@ -973,3 +973,50 @@ func (p *listenGapPublisher) reconnect() {
 		go fn()
 	}
 }
+
+// streamCalls wraps a tracked stream's Close and Renew to record calls.
+// It must run before the stream is next checked.
+type streamCalls struct {
+	mu     sync.Mutex
+	closes []uint32
+	renews []error
+}
+
+func watchStream(st *conduitUserStream) *streamCalls {
+	c := &streamCalls{}
+	closeFn, renewFn := st.Close, st.Renew
+	st.Close = func(code uint32, reason string) {
+		c.mu.Lock()
+		c.closes = append(c.closes, code)
+		c.mu.Unlock()
+		closeFn(code, reason)
+	}
+	if renewFn != nil {
+		st.Renew = func() error {
+			err := renewFn()
+			c.mu.Lock()
+			c.renews = append(c.renews, err)
+			c.mu.Unlock()
+			return err
+		}
+	}
+	return c
+}
+
+func (c *streamCalls) snapshot() (closes []uint32, renews []error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]uint32(nil), c.closes...), append([]error(nil), c.renews...)
+}
+
+// soleTrackedStream returns the only stream a tracks.
+func soleTrackedStream(t *testing.T, a *conduitStreamAuthz) *conduitUserStream {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	require.Len(t, a.streams, 1)
+	for st := range a.streams {
+		return st
+	}
+	return nil
+}
