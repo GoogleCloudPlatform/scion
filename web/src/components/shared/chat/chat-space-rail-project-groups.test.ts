@@ -1100,4 +1100,45 @@ describe('project thread groups — flag on', () => {
       'warning'
     );
   });
+
+  it('a thread filed from the menu joins after the members the group has when the hub answers', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t2'])];
+    hub.prefs['user-a'] = personalPrefs({}, { [P]: ['t1', 'srv-1', 't2', 't3', 't4'] });
+    const el = await mountAs('user-a');
+
+    hub.holdNext = { method: 'POST', prefix: '/api/v1/thread-groups/srv-1/threads' };
+    const filing = el.moveThreadToGroup('t4', 'srv-1', P);
+    await settle(el);
+    // During the round trip another user files t3 into the group.
+    hub.groups[0]!.threads.push(hubThread('t3'));
+    el.applyThreadGroupEvent(P, 'updated', wire(hub.groups[0]!));
+    release();
+    await filing;
+    await settle(el);
+
+    // t4 goes after the group's last member as the hub answered (t3), not
+    // after the last member it had when the file started (t2).
+    const order = JSON.parse(prefsPuts().at(-1)!.threadOrder)[P] as string[];
+    expect(order).toEqual(['t1', 'srv-1', 't2', 't3', 't4']);
+    expect(el.currentGroupThreadOrder(P, 'srv-1')).toEqual(['t2', 't3', 't4']);
+  });
+
+  it('a remove that had to look up the conversation ID applies to the groups it read', async () => {
+    hub.groups = [hubGroup('srv-1', 'Shared', ['t1', 't2']), hubGroup('srv-2', 'Two', [])];
+    hub.groups[0]!.threads[0]!.conversationId = '';
+    const el = await mountAs('user-a');
+
+    // The hub now knows t1's conversation, and has changed since the rail read it.
+    hub.groups[0]!.threads[0]!.conversationId = 'conv-t1';
+    hub.groups[0]!.threads.push(hubThread('t3'));
+    hub.groups[1]!.name = 'Zwei';
+
+    el.draggingThreadId = 't1';
+    await el.handleThreadDrop({ preventDefault: vi.fn() }, 't4', P);
+    await settle(el);
+
+    expect(threadGroupRequests()).toContain('DELETE /api/v1/thread-groups/srv-1/threads/conv-t1');
+    // The fresh state minus t1, not the drag-time snapshot.
+    expect(groupsOf(el)).toEqual({ Shared: ['t2', 't3'], Zwei: [] });
+  });
 });

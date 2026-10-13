@@ -2574,10 +2574,6 @@ export class ScionChatSpaceRail extends LitElement {
         }
         return g;
       });
-      const baseTopLevel = this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId);
-      const topLevelOrder = targetGroup
-        ? baseTopLevel
-        : this.insertAdjacent(baseTopLevel, sourceId, targetThreadId);
       if (this.projectGroupsEnabled()) {
         // The membership change goes to the hub, and the drop shows at once
         // (`updatedGroups`, optimistically). The drop position is this
@@ -2603,6 +2599,10 @@ export class ScionChatSpaceRail extends LitElement {
         if (accepted) await this.saveDropPosition(projectId, sourceId, targetThreadId);
         return;
       }
+      const baseTopLevel = this.currentTopLevelOrder(projectId).filter((id) => id !== sourceId);
+      const topLevelOrder = targetGroup
+        ? baseTopLevel
+        : this.insertAdjacent(baseTopLevel, sourceId, targetThreadId);
       await this.saveThreadOrder(projectId, topLevelOrder, updatedGroups);
       return;
     }
@@ -3494,8 +3494,8 @@ export class ScionChatSpaceRail extends LitElement {
       this._deletedProjectGroupIds.delete(groupId);
       return;
     }
-    if (!(await this.freshPrefsForOrder())) return;
     if (!this.hasExplicitOrder(projectId)) return;
+    if (!(await this.freshPrefsForOrder())) return;
     const order = [...(this.prefs.threadOrder?.[projectId] ?? [])];
     const idx = order.indexOf(groupId);
     if (idx === -1) return;
