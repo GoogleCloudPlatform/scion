@@ -41,6 +41,10 @@ import (
 // import.
 var forbiddenRelayImport = regexp.MustCompile(`^pkg/(store|ent|hub)(/|$)`)
 
+// dbDriverImport matches the external database driver and client paths no
+// relay path may import (relaydb excepted).
+var dbDriverImport = regexp.MustCompile(`^(database/sql(/|$)|github\.com/jackc/pgx|github\.com/lib/pq(/|$)|entgo\.io/|modernc\.org/sqlite(/|$)|github\.com/mattn/go-sqlite3(/|$)|github\.com/glebarez/(go-)?sqlite(/|$)|github\.com/ncruces/go-sqlite3(/|$))`)
+
 // relayDBPath is the relay's database opener.
 const relayDBPath = "pkg/store/relaydb"
 
@@ -49,7 +53,7 @@ const relayDBPath = "pkg/store/relaydb"
 const relayCmdFile = "cmd/server_relay.go"
 
 // relayRoots are the relay packages whose module-local imports are walked.
-var relayRoots = []string{"pkg/conduit/relayrole", "pkg/conduit/relayrole/relayserver"}
+var relayRoots = []string{"pkg/conduit/relayrole", "pkg/conduit/relayrole/relayserver", "pkg/conduit/relay"}
 
 // relayDBImports are the only module-local packages relaydb may import:
 // the registry store adapter, the one ent entity it reads (hub settings),
@@ -80,9 +84,10 @@ var relayDBSelectors = map[string]bool{
 
 // importScan is a module's import graph, read from source.
 type importScan struct {
-	root   string // module root directory
-	module string // module path
-	cache  map[string][]string
+	root   string              // module root directory
+	module string              // module path
+	cache  map[string][]string // module-local imports
+	ext    map[string][]string // imports outside the module
 }
 
 func newImportScan(t *testing.T, root string) *importScan {
@@ -95,7 +100,7 @@ func newImportScan(t *testing.T, root string) *importScan {
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		if mod, ok := strings.CutPrefix(strings.TrimSpace(sc.Text()), "module "); ok {
-			return &importScan{root: root, module: strings.TrimSpace(mod), cache: map[string][]string{}}
+			return &importScan{root: root, module: strings.TrimSpace(mod), cache: map[string][]string{}, ext: map[string][]string{}}
 		}
 	}
 	t.Fatal("go.mod has no module line")
@@ -137,7 +142,7 @@ func (s *importScan) pkgImports(t *testing.T, rel string) []string {
 	if err != nil {
 		t.Fatalf("package %s: %v", rel, err)
 	}
-	seen := map[string]bool{}
+	seen, external := map[string]bool{}, map[string]bool{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
 			continue
@@ -149,9 +154,15 @@ func (s *importScan) pkgImports(t *testing.T, rel string) []string {
 		for _, imp := range imps {
 			if l, ok := s.local(imp); ok {
 				seen[l] = true
+			} else {
+				external[imp] = true
 			}
 		}
 	}
+	for imp := range external {
+		s.ext[rel] = append(s.ext[rel], imp)
+	}
+	sort.Strings(s.ext[rel])
 	out := make([]string, 0, len(seen))
 	for p := range seen {
 		out = append(out, p)
@@ -162,7 +173,8 @@ func (s *importScan) pkgImports(t *testing.T, rel string) []string {
 }
 
 // forbiddenReach walks the module-local imports from roots and returns, for
-// every forbidden package reached, the import chain that reaches it.
+// every forbidden package reached and every database driver imported on
+// the way, the import chain that reaches it.
 func (s *importScan) forbiddenReach(t *testing.T, roots ...string) []string {
 	t.Helper()
 	parent := map[string]string{}
@@ -191,6 +203,15 @@ func (s *importScan) forbiddenReach(t *testing.T, roots ...string) []string {
 				queue = append(queue, q)
 			}
 		}
+		for _, imp := range s.ext[p] {
+			if dbDriverImport.MatchString(imp) {
+				chain := []string{imp, p}
+				for q := parent[p]; q != ""; q = parent[q] {
+					chain = append(chain, q)
+				}
+				bad = append(bad, strings.Join(chain, " <- "))
+			}
+		}
 	}
 	sort.Strings(bad)
 	return bad
@@ -210,6 +231,9 @@ func (s *importScan) cmdViolations(t *testing.T) []string {
 		l, ok := s.local(imp)
 		switch {
 		case !ok:
+			if dbDriverImport.MatchString(imp) {
+				bad = append(bad, relayCmdFile+" imports "+imp)
+			}
 		case l == relayDBPath:
 		case forbiddenRelayImport.MatchString(l):
 			bad = append(bad, relayCmdFile+" imports "+l)
@@ -269,6 +293,7 @@ func (s *importScan) relayDBImporters(t *testing.T) []string {
 // allowed imports and selectors, and only the experiments settings row.
 func (s *importScan) relayDBViolations(t *testing.T) []string {
 	t.Helper()
+	entFields := s.entClientFields(t)
 	dir := filepath.Join(s.root, relayDBPath)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -284,9 +309,9 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Every settings query is filtered to the experiments section: as
-		// many SectionEQ(experimentsSection) filters as HubSetting uses.
-		settingUses, sectionFilters := 0, 0
+		// Every HubSetting use is the exact experiments query chain.
+		var settingSels []*ast.SelectorExpr
+		inQuery := map[*ast.SelectorExpr]bool{}
 		names := map[string]string{} // local name -> module-relative path
 		for _, im := range f.Imports {
 			p, _ := strconv.Unquote(im.Path.Value)
@@ -311,8 +336,10 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 					bad = append(bad, fmt.Sprintf("%s LISTENs on %s (only ConduitChannel)", e.Name(), listensOn(n.Args[1])))
 				}
 				// The settings query names only the experiments section.
+				if hs := experimentsQuery(n, names); hs != nil {
+					inQuery[hs] = true
+				}
 				if sel, ok := n.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "SectionEQ" {
-					sectionFilters++
 					if len(n.Args) != 1 || !isIdent(n.Args[0], "experimentsSection") {
 						bad = append(bad, fmt.Sprintf("%s queries a settings section other than experimentsSection", e.Name()))
 					}
@@ -329,18 +356,16 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 					}
 				}
 			case *ast.SelectorExpr:
-				if n.Sel.Name == "HubSetting" {
-					settingUses++
-				}
-				if inner, ok := n.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "HubSetting" && n.Sel.Name != "Query" {
-					bad = append(bad, fmt.Sprintf("%s calls HubSetting.%s (only Query)", e.Name(), n.Sel.Name))
+				// HubSetting is the only ent.Client field used, whatever
+				// the receiver.
+				switch {
+				case n.Sel.Name == "HubSetting":
+					settingSels = append(settingSels, n)
+				case entFields[n.Sel.Name]:
+					bad = append(bad, fmt.Sprintf("%s uses the ent.Client field %s", e.Name(), n.Sel.Name))
 				}
 				id, ok := n.X.(*ast.Ident)
 				if !ok {
-					// client.HubSetting is the only entity client used.
-					if sel, ok := n.X.(*ast.SelectorExpr); ok && sel.Sel.Name == "client" && n.Sel.Name != "HubSetting" {
-						bad = append(bad, fmt.Sprintf("%s uses the %s entity", e.Name(), n.Sel.Name))
-					}
 					return true
 				}
 				if l, ok := names[id.Name]; ok && strings.HasPrefix(l, "pkg/") && (strings.HasPrefix(l, "pkg/ent") || strings.HasPrefix(l, "pkg/store")) {
@@ -365,11 +390,79 @@ func (s *importScan) relayDBViolations(t *testing.T) []string {
 			}
 			return true
 		})
-		if settingUses != sectionFilters {
-			bad = append(bad, fmt.Sprintf("%s: %d settings queries, %d filtered to the experiments section", e.Name(), settingUses, sectionFilters))
+		for _, sel := range settingSels {
+			if !inQuery[sel] {
+				bad = append(bad, fmt.Sprintf("%s uses HubSetting outside X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection))", e.Name()))
+			}
 		}
 	}
 	return bad
+}
+
+// entClientFields returns the field names of ent.Client (pkg/ent/client.go):
+// one entity client per field, plus Schema.
+func (s *importScan) entClientFields(t *testing.T) map[string]bool {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(s.root, "pkg/ent/client.go"), nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]bool{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		ts, ok := n.(*ast.TypeSpec)
+		if !ok || ts.Name.Name != "Client" {
+			return true
+		}
+		st, ok := ts.Type.(*ast.StructType)
+		if !ok {
+			return false
+		}
+		for _, fld := range st.Fields.List {
+			for _, name := range fld.Names {
+				out[name.Name] = true
+			}
+		}
+		return false
+	})
+	if len(out) == 0 {
+		t.Fatal("no ent.Client fields found")
+	}
+	return out
+}
+
+// experimentsQuery returns the HubSetting selector of call when call is
+// exactly X.HubSetting.Query().Where(hubsetting.SectionEQ(experimentsSection)),
+// else nil.
+func experimentsQuery(call *ast.CallExpr, names map[string]string) *ast.SelectorExpr {
+	where, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || where.Sel.Name != "Where" || len(call.Args) != 1 {
+		return nil
+	}
+	queryCall, ok := where.X.(*ast.CallExpr)
+	if !ok || len(queryCall.Args) != 0 {
+		return nil
+	}
+	query, ok := queryCall.Fun.(*ast.SelectorExpr)
+	if !ok || query.Sel.Name != "Query" {
+		return nil
+	}
+	hs, ok := query.X.(*ast.SelectorExpr)
+	if !ok || hs.Sel.Name != "HubSetting" {
+		return nil
+	}
+	filter, ok := call.Args[0].(*ast.CallExpr)
+	if !ok || len(filter.Args) != 1 || !isIdent(filter.Args[0], "experimentsSection") {
+		return nil
+	}
+	eq, ok := filter.Fun.(*ast.SelectorExpr)
+	if !ok || eq.Sel.Name != "SectionEQ" {
+		return nil
+	}
+	pkg, ok := eq.X.(*ast.Ident)
+	if !ok || names[pkg.Name] != "pkg/ent/hubsetting" {
+		return nil
+	}
+	return hs
 }
 
 // listensOn returns what a LISTEN statement expression names: "" when e is
@@ -493,6 +586,7 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		"pkg/conduit/relay/c.go":                 "package relay\n",
 		"cmd/server_relay.go":                    "package cmd\nimport (\n_ \"example.com/m/pkg/store/relaydb\"\n_ \"example.com/m/pkg/conduit/relayrole/relayserver\"\n)\n",
 		"pkg/store/relaydb/d.go":                 "package relaydb\nimport _ \"example.com/m/pkg/store/entadapter\"\nfunc f() { _ = entadapter.NewConduitRegistryStore }\n",
+		"pkg/ent/client.go":                      "package ent\ntype Client struct {\n\tconfig\n\tSchema *int\n\tHubSetting *HubSettingClient\n\tUser *UserClient\n\tUserAccessToken *UserAccessTokenClient\n}\n",
 	}
 	with := func(extra map[string]string) map[string]string {
 		m := map[string]string{}
@@ -529,6 +623,21 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 			files: map[string]string{"pkg/conduit/relay/c.go": "package relay\nimport _ \"example.com/m/pkg/store\"\n"},
 			check: func(s *importScan) []string { return s.forbiddenReach(t, relayRoots...) },
 		},
+		"relayserver imports pgx directly": {
+			files: map[string]string{"pkg/conduit/relayrole/relayserver/p.go": "package relayserver\nimport _ \"github.com/jackc/pgx/v5\"\n"},
+			check: func(s *importScan) []string { return s.forbiddenReach(t, relayRoots...) },
+		},
+		"relay reaches database/sql transitively": {
+			files: map[string]string{
+				"pkg/conduit/relay/c.go": "package relay\nimport _ \"example.com/m/pkg/util/dbutil\"\n",
+				"pkg/util/dbutil/u.go":   "package dbutil\nimport _ \"database/sql\"\n",
+			},
+			check: func(s *importScan) []string { return s.forbiddenReach(t, relayRoots...) },
+		},
+		"cmd imports a sqlite driver": {
+			files: map[string]string{"cmd/server_relay.go": "package cmd\nimport _ \"modernc.org/sqlite\"\n"},
+			check: func(s *importScan) []string { return s.cmdViolations(t) },
+		},
 		"relayserver imports pkg/ent": {
 			files: map[string]string{"pkg/conduit/relayrole/relayserver/e.go": "package relayserver\nimport _ \"example.com/m/pkg/ent\"\n"},
 			check: func(s *importScan) []string { return s.forbiddenReach(t, relayRoots...) },
@@ -555,6 +664,18 @@ func TestRelayImportCheckCatchesViolations(t *testing.T) {
 		},
 		"relaydb reads another settings section": {
 			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport \"example.com/m/pkg/ent/hubsetting\"\nfunc g() { _ = hubsetting.SectionEQ(\"server\") }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb uses another entity through a local variable": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport \"example.com/m/pkg/ent\"\nfunc g() { var c *ent.Client; _ = c.UserAccessToken }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb uses another entity through a parameter": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport \"example.com/m/pkg/ent\"\nfunc g(db *ent.Client) { _ = db.User.Query() }\n"},
+			check: func(s *importScan) []string { return s.relayDBViolations(t) },
+		},
+		"relaydb queries settings without the section filter": {
+			files: map[string]string{"pkg/store/relaydb/f.go": "package relaydb\nimport \"example.com/m/pkg/ent/hubsetting\"\nfunc g(c *x) { _ = c.HubSetting.Query().Where(hubsetting.UpdatedByEQ(experimentsSection)) }\n"},
 			check: func(s *importScan) []string { return s.relayDBViolations(t) },
 		},
 		"relaydb reads every settings section": {

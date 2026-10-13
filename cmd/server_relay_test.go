@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"testing"
 
+	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -119,15 +120,37 @@ func TestRelayServerConfigReadsRelaySettings(t *testing.T) {
 	assert.Equal(t, "relay.db", opts.DSN)
 }
 
-// TestRelayRoleNeverReadsTheSessionSecret: the relay composition root reads
-// no session secret spelling and passes none to the relay-peer
-// authenticator.
+// TestRelayRoleNeverReadsTheSessionSecret: the relay composition root
+// names no session secret accessor, flag or environment spelling
+// (resolveSessionSecret, sessionSecretValue, webSessionSecret,
+// SCION_SERVER_SESSION_SECRET, SESSION_SECRET, ...) and passes none to the
+// relay-peer authenticator.
 func TestRelayRoleNeverReadsTheSessionSecret(t *testing.T) {
 	src, err := os.ReadFile("server_relay.go")
 	require.NoError(t, err)
-	for _, forbidden := range []string{`sessionSecretValue`, `webSessionSecret`, `SESSION_SECRET`, `SharedSecret`, `SharedSigningSecret`} {
-		assert.NotRegexp(t, regexp.MustCompile(regexp.QuoteMeta(forbidden)), string(src), forbidden)
+	assert.Empty(t, relaySessionSecretMentions(string(src)))
+}
+
+// relaySessionSecretMentions returns the session secret mentions in src.
+func relaySessionSecretMentions(src string) []string {
+	return regexp.MustCompile(`(?i)session_?secret|SharedSecret|SharedSigningSecret`).FindAllString(src, -1)
+}
+
+// TestRelaySessionSecretCheckCatchesMentions: the check catches each kind
+// of mention.
+func TestRelaySessionSecretCheckCatchesMentions(t *testing.T) {
+	for _, src := range []string{
+		"_ = resolveSessionSecret()",
+		"_ = sessionSecretValue()",
+		"_ = webSessionSecret",
+		`os.Getenv("SCION_SERVER_SESSION_SECRET")`,
+		`os.Getenv("SESSION_SECRET")`,
+		"opts.SharedSecret = s",
+		"cfg.SharedSigningSecret",
+	} {
+		assert.NotEmpty(t, relaySessionSecretMentions(src), src)
 	}
+	assert.Empty(t, relaySessionSecretMentions("// it never reads the session secret"))
 }
 
 // TestRelayStartupLogNamesConfigNotDSN: the relay's startup log names the
@@ -148,5 +171,29 @@ func TestRelayStartupLogNamesConfigNotDSN(t *testing.T) {
 	assert.Contains(t, out, "database_driver=postgres")
 	for _, leaked := range []string{"relay-db-password", "relay_role", "db.internal", "postgres://"} {
 		assert.NotContains(t, out, leaked)
+	}
+}
+
+// TestRelayRoleRefusesOtherComponents: --role relay refuses --enable-hub,
+// --enable-runtime-broker and --enable-web.
+func TestRelayRoleRefusesOtherComponents(t *testing.T) {
+	newFlags := func() *pflag.FlagSet {
+		f := pflag.NewFlagSet("server start", pflag.ContinueOnError)
+		var hub, broker, web bool
+		f.BoolVar(&hub, "enable-hub", false, "")
+		f.BoolVar(&broker, "enable-runtime-broker", false, "")
+		f.BoolVar(&web, "enable-web", false, "")
+		return f
+	}
+	require.NoError(t, validateRelayRoleFlags(newFlags()))
+	f := newFlags()
+	require.NoError(t, f.Parse([]string{"--enable-hub=false"}))
+	require.NoError(t, validateRelayRoleFlags(f), "an explicit false is allowed")
+	for _, name := range relayRoleExcludedFlags {
+		f := newFlags()
+		require.NoError(t, f.Parse([]string{"--" + name}))
+		err := validateRelayRoleFlags(f)
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), "--"+name)
 	}
 }
