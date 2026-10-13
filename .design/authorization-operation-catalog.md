@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 205
+**Operations:** 217
 
 ## Table of Contents
 
@@ -18,14 +18,26 @@
 - [agent.read](#agentread) — Read a single agent's metadata by ID
 - [agent.list](#agentlist) — List agents within the caller's authorized project scope
 - [agent.update](#agentupdate) — Update agent configuration or metadata
+- [agent.status.update](#agentstatusupdate) — Report an agent's status: the agent itself, or a user who may update the agent
+- [agent.workspace.read](#agentworkspaceread) — Read an agent's workspace sync status
+- [agent.workspace.sync](#agentworkspacesync) — Sync an agent's workspace from or to the agent
+- [agent.logs.read](#agentlogsread) — Read an agent's runtime logs and Cloud Logging entries
+- [agent.messages.read](#agentmessagesread) — Read an agent's message history and message logs
+- [agent.metrics.read](#agentmetricsread) — Read an agent's aggregate session metrics
+- [agent.lifecycle.keys](#agentlifecyclekeys) — Send keystrokes to an agent's session
+- [agent.action.message](#agentactionmessage) — Send a message to an agent through its message action
 - [agent.attach](#agentattach) — Attach to an agent session via WebSocket
 - [agent.portaccess](#agentportaccess) — Access forwarded ports on an agent
-- [agent.stopall](#agentstopall) — Stop all running agents in a project
+- [agent.port.list](#agentportlist) — List an agent's exposed ports
+- [agent.port.register](#agentportregister) — Register, delete or clear an agent's exposed ports
+- [agent.port.tunnel](#agentporttunnel) — Open the calling agent's own port tunnel
 - [agent.setmessagemode](#agentsetmessagemode) — Change an agent's message mode
 - [agent.token.refresh](#agenttokenrefresh) — Refresh the calling agent's own hub token
 - [agent.outbound.message](#agentoutboundmessage) — Deliver an outbound message from the calling agent
 - [agent.metrics.report](#agentmetricsreport) — Report runtime metrics for the calling agent
 - [agent.secrets.access](#agentsecretsaccess) — List, read and write the secrets available to the calling agent: its project's and its creating user's
+- [agent.stopall](#agentstopall) — Stop all running agents on the hub
+- [agent.stopall.project](#agentstopallproject) — Stop all running agents in a project
 - [project.membership.add](#projectmembershipadd) — Add a member to a project with a specified role
 - [project.membership.update](#projectmembershipupdate) — Change a project member's role
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
@@ -225,6 +237,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | POST | `/api/v1/agents` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents` |
 
 **Principals:** `user`, `agent`
 
@@ -272,6 +285,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | DELETE | `/api/v1/agents/{id}` |
+| http_route | DELETE | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`, `agent`
 
@@ -548,6 +562,7 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/agents/{id}` |
+| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`, `agent`, `agent_delegated`
 
@@ -633,10 +648,48 @@
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | PATCH | `/api/v1/agents/{id}` |
+| http_route | PATCH | `/api/v1/projects/{projectId}/agents/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentUpdateToken_PassthroughGateStillApplies`
+- `pkg/hub:TestAgentUpdateToken_ServiceAccountAssignRequiresAssignSelector`
+
+---
+
+## agent.status.update
+
+**Domain:** agent
+
+**Description:** Report an agent's status: the agent itself, or a user who may update the agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/status` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/status` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.update`
 
@@ -648,7 +701,256 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestAgentSubRoute_CatalogDrift`
+
+---
+
+## agent.workspace.read
+
+**Domain:** agent
+
+**Description:** Read an agent's workspace sync status
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/workspace` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.workspace.sync
+
+**Domain:** agent
+
+**Description:** Sync an agent's workspace from or to the agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/workspace/sync-from` |
+| http_route | POST | `/api/v1/agents/{id}/workspace/sync-to` |
+| http_route | POST | `/api/v1/agents/{id}/workspace/sync-to/finalize` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.update`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.logs.read
+
+**Domain:** agent
+
+**Description:** Read an agent's runtime logs and Cloud Logging entries
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/logs` |
+| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/logs` |
+| http_route | GET | `/api/v1/agents/{id}/cloud-logs` |
+| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/cloud-logs` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.messages.read
+
+**Domain:** agent
+
+**Description:** Read an agent's message history and message logs
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/messages` |
+| http_route | GET | `/api/v1/agents/{id}/message-logs` |
+| http_route | GET | `/api/v1/projects/{projectId}/agents/{id}/message-logs` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.metrics.read
+
+**Domain:** agent
+
+**Description:** Read an agent's aggregate session metrics
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/agents/{id}/metrics/summary` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.lifecycle.keys
+
+**Domain:** agent
+
+**Description:** Send keystrokes to an agent's session
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/keys` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/keys` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.action.message
+
+**Domain:** agent
+
+**Description:** Send a message to an agent through its message action
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/message` |
+| http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/message` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.message`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `agent.message.send`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** message_id, target_agent_id
+- **Atomic:** No
+- **Non-Atomic Justification:** Message dispatch is fire-and-forget; audit recorded before dispatch
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** message ID
+- **Retry:** no retry for user-sent messages
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
 
 ---
 
@@ -694,7 +996,6 @@
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | GET | `/api/v1/agents/{id}/ports` |
 | http_route | GET | `/api/v1/agents/{id}/ports/{port}/proxy` |
 | http_route | POST | `/api/v1/agents/{id}/ports/{port}/proxy` |
 | http_route | PUT | `/api/v1/agents/{id}/ports/{port}/proxy` |
@@ -704,6 +1005,8 @@
 **Principals:** `user`, `agent`
 
 **Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.port_access`
 
@@ -719,25 +1022,92 @@
 
 ---
 
-## agent.stopall
+## agent.port.list
 
 **Domain:** agent
 
-**Description:** Stop all running agents in a project
+**Description:** List an agent's exposed ports
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
-| http_route | POST | `/api/v1/agents/stop-all` |
+| http_route | GET | `/api/v1/agents/{id}/ports` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
 
-**Base Permission:** `agent.stop_all`
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
-**Resource Resolver:** project-from-url
+**Base Permission:** `agent.read`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestBearerDispositionMatrix_CatalogEntryPoints`
+
+---
+
+## agent.port.register
+
+**Domain:** agent
+
+**Description:** Register, delete or clear an agent's exposed ports
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/{id}/ports` |
+| http_route | DELETE | `/api/v1/agents/{id}/ports/{port}` |
+| http_route | DELETE | `/api/v1/agents/{id}/ports` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.port_access`
+
+**Resource Resolver:** agent-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestPortRegistration_UsesAgentRecordTarget`
+- `pkg/hub:TestPortManageToken_RequiresSelectorBoundaryAndHubLevelHolder`
+
+---
+
+## agent.port.tunnel
+
+**Domain:** agent
+
+**Description:** Open the calling agent's own port tunnel
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| websocket | GET | `/api/v1/agents/{id}/ports/tunnel` |
+
+**Principals:** `agent`
+
+**Credentials:** `agent_jwt`
+
+**Bearer:** `non_user` (pinned by `TestPortTunnel_OnlyTheAgentItself`)
+
+**Resource Resolver:** agent-self
 
 **Effects:** `update-resource`
 
@@ -745,7 +1115,11 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestPortTunnel_OnlyTheAgentItself`
+
+### Exemptions
+
+- **internal_only:** Only the agent itself opens its port tunnel, with its own agent JWT and the port-forward scope; every user is refused (scope: agent self access) — waives: `base_permission`
 
 ---
 
@@ -762,9 +1136,11 @@
 | http_route | POST | `/api/v1/agents/{id}/set_message_mode` |
 | http_route | POST | `/api/v1/projects/{projectId}/agents/{id}/set_message_mode` |
 
-**Principals:** `user`
+**Principals:** `user`, `agent`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
 
 **Base Permission:** `agent.set_message_mode`
 
@@ -777,6 +1153,7 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestSetMessageModeToken_ProjectAdminDenialStillApplies`
 
 ---
 
@@ -924,6 +1301,71 @@
 ### Exemptions
 
 - **internal_only:** The agent authenticates with its own agent JWT, whose subject must match the agent ID in the path; no user permission applies; the project and user scope IDs come from the token (scope: agent self access) — waives: `base_permission`
+
+---
+
+## agent.stopall
+
+**Domain:** agent
+
+**Description:** Stop all running agents on the hub
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/agents/stop-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+
+**Base Permission:** `agent.stop_all`
+
+**Resource Resolver:** hub-scoped
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary`
+
+---
+
+## agent.stopall.project
+
+**Domain:** agent
+
+**Description:** Stop all running agents in a project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{projectId}/agents/stop-all` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.stop_all`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestStopAllHubForm_RequiresStopAllSelectorAndHubBoundary`
 
 ---
 
