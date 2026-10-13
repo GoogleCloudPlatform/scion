@@ -84,8 +84,7 @@ func (p portForwarding) run(ctx context.Context) {
 // newPortForwarding wires portForwarding to the hub client; getenv reads
 // the agent environment (os.Getenv outside tests). ptyUser is the agent
 // user that PTY streams' tmux clients run as; ssh is the conduit SSH
-// server (prepareConduitSSH), nil when there is none; policy is the
-// operator's conduit policy (conduitPolicy).
+// server (prepareConduitSSH), nil when there is none.
 func newPortForwarding(c *hub.Client, disableConduit bool, ptyUser conduit.PTYUser, ssh *sshd.Config, policy localpolicy.Policy, getenv func(string) string) portForwarding {
 	return portForwarding{
 		getenv:         getenv,
@@ -220,9 +219,9 @@ var conduitSSHFirstReportWait = 5 * time.Second
 // prepareConduitSSH builds the conduit SSH server's configuration and
 // makes the first attempt to report its host key, before the harness
 // starts. It returns nil, building and reporting nothing, unless enabled
-// (conduit not disabled), the hub serves conduit and policy allows ssh.
-// The caller checks
-// that a hub client is configured and port forwarding is not disabled.
+// (conduit not disabled), the hub serves conduit and policy allows ssh;
+// the caller checks that a hub client is configured and port forwarding
+// is not disabled.
 // A first report that does not succeed within conduitSSHFirstReportWait
 // continues in the background (reportSSHHostKey). The first host key
 // reported for a run is kept; a repeat of the same key succeeds.
@@ -285,9 +284,7 @@ func sshMaxChannels(getenv func(string) string) int {
 	return n
 }
 
-// conduitPolicy reads the operator's conduit policy that the hub sent in
-// localpolicy.EnvPolicy. A value it cannot understand disables ssh and
-// every port and socket destination (localpolicy.ParsePolicy).
+// conduitPolicy reads localpolicy.EnvPolicy, failing closed on a bad value.
 func conduitPolicy(getenv func(string) string) localpolicy.Policy {
 	p, err := localpolicy.ParsePolicy(getenv(localpolicy.EnvPolicy))
 	if err != nil {

@@ -18,9 +18,6 @@
 // direct-tcpip channels, and a socket deny-list beside it for the SSH
 // server's direct-streamlocal channels. Keeping them in one place means
 // the stream kinds cannot apply different lists.
-//
-// Policy adds the operator's restrictions, which the hub sends to the
-// agent in EnvPolicy, on top of the fixed reserved lists.
 package localpolicy
 
 import (
@@ -52,9 +49,7 @@ func IsReservedPort(port int) bool { return slices.Contains(ReservedPorts, port)
 func IsReservedSocket(path string) bool { return slices.Contains(ReservedSockets, path) }
 
 // EnvPolicy carries the operator's conduit policy as JSON (PolicyDoc). The
-// hub owns the variable: it sets it on dispatch when the policy restricts
-// anything and removes any other value, so its absence means no operator
-// restriction.
+// hub sets or removes it on every dispatch, so absence means no restriction.
 const EnvPolicy = "SCION_CONDUIT_POLICY"
 
 // PolicyDoc is the JSON form of EnvPolicy.
@@ -64,24 +59,16 @@ type PolicyDoc struct {
 	DenySockets []string `json:"deny_sockets,omitempty"`
 }
 
-// Policy is the operator's restriction of what conduit streams may reach
-// in this agent. The zero value restricts nothing beyond the reserved
-// lists.
+// Policy is the operator's conduit restriction; the zero value adds nothing.
 type Policy struct {
-	// SSHDisabled means the agent serves no ssh streams.
 	SSHDisabled bool
 	denyPorts   []int
 	denySockets []string
-	// denyAll refuses every port and socket destination. It is set when
-	// EnvPolicy cannot be understood.
-	denyAll bool
+	denyAll     bool
 }
 
-// ParsePolicy reads the value of EnvPolicy. An empty value is the zero
-// Policy. A value that is not a valid PolicyDoc (including one with
-// fields this sciontool does not know, which a newer hub may send) yields
-// a Policy that disables ssh and denies every destination, together with
-// the error: an operator restriction is never dropped silently.
+// ParsePolicy reads EnvPolicy. An invalid value, including one with unknown
+// fields, fails closed: ssh is disabled and every destination denied.
 func ParsePolicy(raw string) (Policy, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Policy{}, nil
@@ -132,9 +119,8 @@ func (p Policy) PortDenied(port int) bool {
 	return p.denyAll || IsReservedPort(port) || slices.Contains(p.denyPorts, port)
 }
 
-// SocketDenied reports whether path (clean and absolute) is reserved or
-// denied by p: equal to a denied entry or below it. It compares paths as
-// written; SocketDeniedOnDisk also follows symbolic links.
+// SocketDenied reports whether path is reserved, or equal to or below a
+// denied entry, comparing paths as written.
 func (p Policy) SocketDenied(path string) bool {
 	if p.denyAll || IsReservedSocket(path) {
 		return true
@@ -142,13 +128,9 @@ func (p Policy) SocketDenied(path string) bool {
 	return underAny(path, p.denySockets)
 }
 
-// SocketDeniedOnDisk is SocketDenied applied to path and to the path its
-// symbolic links resolve to, against the denied entries as written and as
-// resolved, so neither a link in the request (/tmp/l -> /run/x.sock) nor
-// one in an entry (/var/run -> /run) lets an alias through. A path that
-// cannot be resolved for a reason other than not existing is denied.
-// Resolution happens before the connection is made, so a link swapped in
-// between is not seen; the policy guards forwarding, not a shell.
+// SocketDeniedOnDisk is SocketDenied with symbolic links resolved in both
+// path and entries; a path that fails to resolve, other than not existing,
+// is denied. A link swapped in after the check is not seen.
 func (p Policy) SocketDeniedOnDisk(path string) bool {
 	if p.SocketDenied(path) {
 		return true

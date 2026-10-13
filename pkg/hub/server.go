@@ -125,17 +125,11 @@ type ServerConfig struct {
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
 	ConduitTCPAllowedPorts []int
-	// ConduitSSHDisabled refuses ssh streams to agents and tells agents
-	// not to serve them (server.hub.conduit.disable_ssh).
+	// ConduitSSHDisabled is server.hub.conduit.disable_ssh.
 	ConduitSSHDisabled bool
-	// ConduitDenyPorts are agent-local ports no tunnel may reach
-	// (server.hub.conduit.deny_ports). The hub refuses tcp grants and port
-	// proxy requests to them, ahead of exposed and allow-listed ports;
-	// agents also refuse them for SSH forwarding.
+	// ConduitDenyPorts is server.hub.conduit.deny_ports.
 	ConduitDenyPorts []int
-	// ConduitDenySockets are agent-local Unix socket paths SSH forwarding
-	// may not reach (server.hub.conduit.deny_sockets). Only agents can
-	// enforce them; the hub passes them on.
+	// ConduitDenySockets is server.hub.conduit.deny_sockets; only agents enforce it.
 	ConduitDenySockets []string
 	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
 	// is published before it signs (default 15m). It must be at least the

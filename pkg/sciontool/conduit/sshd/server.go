@@ -107,9 +107,8 @@ type Config struct {
 	// seam; default: the helper at HelperPath). It is only ever called
 	// with a path that passed the profile.
 	DialUnix func(ctx context.Context, path string) (net.Conn, error)
-	// Policy is the operator's restriction of forwarding destinations,
-	// applied after the reserved lists. It does not restrict sessions: a
-	// shell or exec can reach any local service itself.
+	// Policy restricts forwarding destinations only; a shell or exec can
+	// reach any local service itself.
 	Policy localpolicy.Policy
 }
 

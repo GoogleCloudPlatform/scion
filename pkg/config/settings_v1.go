@@ -1648,15 +1648,11 @@ type V1ServerHubConduitConfig struct {
 	// grant may target besides the agent's exposed ports. The reserved
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcp_allowed_ports,omitempty" yaml:"tcp_allowed_ports,omitempty" koanf:"tcp_allowed_ports"`
-	// DisableSSH turns off the agents' embedded SSH server (shell, exec,
-	// sftp and SSH forwarding); other conduit streams keep working.
-	// Default false.
+	// DisableSSH turns off the agents' SSH server; other streams still work.
 	DisableSSH bool `json:"disable_ssh,omitempty" yaml:"disable_ssh,omitempty" koanf:"disable_ssh"`
-	// DenyPorts lists agent-local ports no tunnel may reach (TCP streams,
-	// the port proxy and SSH direct-tcpip), whatever is exposed or allowed.
+	// DenyPorts are agent-local ports no tunnel may reach, even if allowed.
 	DenyPorts []int `json:"deny_ports,omitempty" yaml:"deny_ports,omitempty" koanf:"deny_ports"`
-	// DenySockets lists agent-local Unix socket paths, or directories
-	// whose sockets, SSH direct-streamlocal may not reach.
+	// DenySockets are Unix socket paths or directories SSH forwarding may not reach.
 	DenySockets []string `json:"deny_sockets,omitempty" yaml:"deny_sockets,omitempty" koanf:"deny_sockets"`
 	// InternalListen is the host:port of the internal relay API listener.
 	// It must be reachable only inside the cluster/VPC. TLS on the

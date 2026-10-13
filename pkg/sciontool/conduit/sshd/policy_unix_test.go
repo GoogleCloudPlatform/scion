@@ -39,8 +39,6 @@ func policyConfig(t *testing.T, raw string) *Config {
 	return cfg
 }
 
-// TestDirectTCPIPPolicy: a port on the operator deny-list is refused as
-// prohibited without a dial; other loopback ports are still forwarded.
 func TestDirectTCPIPPolicy(t *testing.T) {
 	allowed, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -75,10 +73,7 @@ func TestDirectTCPIPPolicy(t *testing.T) {
 	}
 }
 
-// TestStreamlocalPolicy: a denied socket, a socket below a denied
-// directory, a symbolic link to a denied socket, a path through a linked
-// directory, and a socket named by an entry that is itself written through
-// a link are refused as prohibited; a socket elsewhere is forwarded.
+// TestStreamlocalPolicy: covers paths below entries and links in either side.
 func TestStreamlocalPolicy(t *testing.T) {
 	dir := shortTempDir(t)
 	listen := func(path string) {

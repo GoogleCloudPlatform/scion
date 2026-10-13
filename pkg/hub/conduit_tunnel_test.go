@@ -54,8 +54,7 @@ type tunnelFixture struct {
 	// dials receives the agent-side end of every tcp connection a
 	// sciontool agent of this fixture dialed (it echoes).
 	dials chan net.Conn
-	// agentPolicy is the operator policy agents started by startAgent
-	// apply.
+	// agentPolicy is applied by agents that startAgent starts.
 	agentPolicy localpolicy.Policy
 }
 

@@ -42,9 +42,7 @@ func TestReservedSocketsEmpty(t *testing.T) {
 	}
 }
 
-// TestParsePolicy: an empty value restricts nothing; a valid document is
-// applied as given; anything else disables ssh and denies every
-// destination, and is reported.
+// TestParsePolicy: an invalid value fails closed and is reported.
 func TestParsePolicy(t *testing.T) {
 	for _, raw := range []string{"", "  "} {
 		p, err := ParsePolicy(raw)

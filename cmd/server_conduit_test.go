@@ -614,8 +614,6 @@ func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
 	}
 }
 
-// TestBuildHubServerConfig_ConduitPolicy: disable_ssh, deny_ports and
-// deny_sockets reach hub.ServerConfig unchanged; unset restricts nothing.
 func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
 	cfg := config.DefaultGlobalConfig()
 	sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)

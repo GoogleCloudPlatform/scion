@@ -193,9 +193,7 @@ func TestAgentPortProxyNoTunnelReturns503(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
 
-// TestAgentPortProxyDeniedPortReturns403: a port on
-// server.hub.conduit.deny_ports is refused before any proxy path is chosen,
-// including the port-forward tunnel, whose agent end applies no policy.
+// TestAgentPortProxyDeniedPortReturns403: covers the port-forward tunnel path.
 func TestAgentPortProxyDeniedPortReturns403(t *testing.T) {
 	srv, s := testServer(t)
 	srv.config.ConduitDenyPorts = []int{3000}

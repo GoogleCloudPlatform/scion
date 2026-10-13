@@ -90,16 +90,12 @@ type HubConduitConfig struct {
 	// grant may target besides the agent's exposed ports. The reserved
 	// ports (9810, 18380) are always refused. Empty: exposed ports only.
 	TCPAllowedPorts []int `json:"tcpAllowedPorts,omitempty" yaml:"tcpAllowedPorts,omitempty" koanf:"tcpAllowedPorts"`
-	// DisableSSH turns off the agents' embedded SSH server (shell, exec,
-	// sftp and SSH forwarding) while the rest of conduit keeps working.
-	// The hub refuses ssh streams and tells agents not to serve them.
+	// DisableSSH turns off the agents' SSH server; other streams still work.
 	DisableSSH bool `json:"disableSsh,omitempty" yaml:"disableSsh,omitempty" koanf:"disableSsh"`
-	// DenyPorts lists agent-local ports no tunnel may reach: TCP streams,
-	// the port proxy and SSH direct-tcpip. It wins over exposed ports and
-	// TCPAllowedPorts.
+	// DenyPorts are agent-local ports no tunnel may reach; they win over
+	// exposed ports and TCPAllowedPorts.
 	DenyPorts []int `json:"denyPorts,omitempty" yaml:"denyPorts,omitempty" koanf:"denyPorts"`
-	// DenySockets lists agent-local Unix socket paths, or directories
-	// whose sockets, SSH direct-streamlocal must not reach.
+	// DenySockets are Unix socket paths or directories SSH forwarding may not reach.
 	DenySockets []string `json:"denySockets,omitempty" yaml:"denySockets,omitempty" koanf:"denySockets"`
 	// InternalListen is the host:port of the internal relay API listener
 	// ("" = none). It must be reachable only inside the cluster/VPC; TLS
@@ -327,8 +323,7 @@ func (c HubConduitConfig) PeerAuthMode() string {
 }
 
 // ConduitSocketPathValid reports whether p is usable as a deny_sockets
-// entry. Commas are refused because the env var form of the setting is
-// comma-separated.
+// entry; commas are refused as the env var form is comma-separated.
 func ConduitSocketPathValid(p string) bool {
 	return p != "" && path.IsAbs(p) && path.Clean(p) == p &&
 		!strings.ContainsAny(p, ",\x00")

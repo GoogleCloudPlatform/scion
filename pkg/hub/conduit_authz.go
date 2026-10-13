@@ -138,9 +138,8 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	return nil
 }
 
-// authorizeConduitStreamKind refuses a stream kind the operator turned
-// off: ssh with server.hub.conduit.disable_ssh. Agents refuse it too, but
-// one started before the setting changed may still serve it.
+// authorizeConduitStreamKind refuses ssh under disable_ssh: an agent started
+// before the setting changed may still serve it.
 func (s *Server) authorizeConduitStreamKind(kind string) error {
 	if kind == grant.StreamKindSSH && s.config.ConduitSSHDisabled {
 		return fmt.Errorf("%w: ssh is disabled by server.hub.conduit.disable_ssh", errConduitForbidden)
@@ -148,10 +147,8 @@ func (s *Server) authorizeConduitStreamKind(kind string) error {
 	return nil
 }
 
-// conduitAgentPolicy returns the operator's conduit policy as agents
-// read it (localpolicy.EnvPolicy), or "" when it restricts nothing.
-// Agents enforce the socket deny-list and SSH forwarding, which the hub
-// cannot see inside an ssh stream.
+// conduitAgentPolicy returns the localpolicy.EnvPolicy value, or "" when
+// nothing is restricted.
 func (s *Server) conduitAgentPolicy() string {
 	doc := localpolicy.PolicyDoc{
 		DisableSSH:  s.config.ConduitSSHDisabled,

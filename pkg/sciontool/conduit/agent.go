@@ -156,10 +156,7 @@ type Options struct {
 	// §3.8). When nil the agent neither advertises nor serves the ssh
 	// kind. New validates it.
 	SSH *sshd.Config
-	// Policy is the operator's restriction of stream destinations
-	// (localpolicy.EnvPolicy). With SSHDisabled, SSH is ignored;
-	// otherwise New sets SSH.Policy to it, so SSH forwarding applies the
-	// same policy as the TCP stream kind.
+	// Policy is the operator's conduit policy; New also applies it to SSH.
 	Policy localpolicy.Policy
 	// OnSession is called after each admitted session's grant keys are
 	// installed. Optional.

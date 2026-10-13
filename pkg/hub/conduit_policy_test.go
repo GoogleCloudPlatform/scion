@@ -30,9 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMintConduitGrant_SSHDisabled: with server.hub.conduit.disable_ssh
-// the hub mints no ssh grant, even for a user with attach and port access;
-// other kinds are unaffected.
+// TestMintConduitGrant_SSHDisabled: other stream kinds are unaffected.
 func TestMintConduitGrant_SSHDisabled(t *testing.T) {
 	f := newConduitFixture(t)
 	_, _, err := f.mint(f.owner, grant.StreamHeader{Kind: grant.StreamKindSSH})
@@ -47,8 +45,6 @@ func TestMintConduitGrant_SSHDisabled(t *testing.T) {
 	assert.NoError(t, err, "pty")
 }
 
-// TestAuthorizeConduitUserStream_SSHDisabled: the user-stream decision
-// (tunnel admission and every re-check) refuses ssh while it is disabled.
 func TestAuthorizeConduitUserStream_SSHDisabled(t *testing.T) {
 	f := newConduitFixture(t)
 	f.srv.config.ConduitSSHDisabled = true
@@ -59,8 +55,7 @@ func TestAuthorizeConduitUserStream_SSHDisabled(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden)
 }
 
-// TestAuthorizeConduitTCPTarget_DenyPorts: a denied port is refused even
-// when it is exposed or on the allow-list.
+// TestAuthorizeConduitTCPTarget_DenyPorts: deny wins over exposed and allowed.
 func TestAuthorizeConduitTCPTarget_DenyPorts(t *testing.T) {
 	f := newConduitFixture(t) // the agent exposes 3000
 	f.srv.config.ConduitTCPAllowedPorts = []int{8080, 8462}
@@ -77,8 +72,7 @@ func TestAuthorizeConduitTCPTarget_DenyPorts(t *testing.T) {
 	assert.ErrorIs(t, err, errConduitForbidden, "mint to a denied exposed port")
 }
 
-// TestConduitAgentPolicy: nothing is sent when nothing is restricted;
-// otherwise the value is the document sciontool parses back.
+// TestConduitAgentPolicy: the value round-trips through ParsePolicy.
 func TestConduitAgentPolicy(t *testing.T) {
 	s := &Server{}
 	assert.Empty(t, s.conduitAgentPolicy())
@@ -94,8 +88,6 @@ func TestConduitAgentPolicy(t *testing.T) {
 	assert.True(t, p.SocketDenied("/run/private/a.sock"))
 }
 
-// TestApplyAgentConduitPolicyOwnsTheVariable: a value from config or
-// storage env never survives; the hub sets its own or removes it.
 func TestApplyAgentConduitPolicyOwnsTheVariable(t *testing.T) {
 	for _, tt := range []struct{ name, policy string }{
 		{name: "forged value removed"},
@@ -117,8 +109,7 @@ func TestApplyAgentConduitPolicyOwnsTheVariable(t *testing.T) {
 	}
 }
 
-// TestDispatchConduitPolicyEnv: the policy reaches the agent on create,
-// start and restart, replacing a value the agent's own env carries.
+// TestDispatchConduitPolicyEnv: covers create, start and restart.
 func TestDispatchConduitPolicyEnv(t *testing.T) {
 	const policy = `{"deny_ports":[8462]}`
 	paths := []struct {
@@ -175,10 +166,7 @@ func TestDispatchConduitPolicyEnv(t *testing.T) {
 	}
 }
 
-// TestConduitTunnel_OperatorPolicy: through the hub's tunnel endpoint,
-// a hub-side policy refuses ssh and a denied exposed port with 403
-// before any agent dial, and an agent-side deny-list refuses a port the
-// hub allows (also 403, from the agent's 4403), without a dial.
+// TestConduitTunnel_OperatorPolicy: hub- and agent-side refusals both give 403.
 func TestConduitTunnel_OperatorPolicy(t *testing.T) {
 	t.Run("hub", func(t *testing.T) {
 		tf := newTunnelFixture(t)

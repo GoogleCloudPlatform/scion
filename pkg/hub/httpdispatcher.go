@@ -242,8 +242,7 @@ type HTTPAgentDispatcher struct {
 	// change broker or agent behaviour, read once on every create, start
 	// and restart dispatch. Nil provider = none sent.
 	dispatchExperimentsProvider func() []string
-	// conduitPolicyProvider returns the agent conduit policy value
-	// (applyAgentConduitPolicy), "" for none.
+	// conduitPolicyProvider returns the agent conduit policy value, "" for none.
 	conduitPolicyProvider func() string
 }
 
@@ -365,11 +364,8 @@ func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, d
 	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
-// applyAgentConduitPolicy sets localpolicy.EnvPolicy to policy, the
-// operator's conduit policy as the hub serializes it, or removes it when
-// policy is empty. The hub owns the variable: a value from config or
-// storage env is replaced or dropped, so a project or template cannot
-// relax the operator's policy.
+// applyAgentConduitPolicy sets or removes localpolicy.EnvPolicy. The hub
+// owns the variable so a project or template cannot relax the policy.
 func applyAgentConduitPolicy(env map[string]string, cls *map[string]api.EnvKind, policy string) {
 	if policy == "" {
 		delete(env, localpolicy.EnvPolicy)
@@ -473,9 +469,7 @@ func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string)
 	d.dispatchExperimentsProvider = fn
 }
 
-// SetConduitPolicyProvider registers the accessor for the agent conduit
-// policy value sent with each create, start and restart dispatch
-// (applyAgentConduitPolicy).
+// SetConduitPolicyProvider sets the source of the agent conduit policy.
 func (d *HTTPAgentDispatcher) SetConduitPolicyProvider(fn func() string) {
 	d.conduitPolicyProvider = fn
 }

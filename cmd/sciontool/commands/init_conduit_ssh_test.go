@@ -444,9 +444,7 @@ func TestRunInit_ReportsSSHHostKeyBeforeHarnessStarts(t *testing.T) {
 	}
 }
 
-// TestConduitPolicyEnv: no policy restricts nothing; a valid one is
-// applied; one that cannot be understood disables ssh and every
-// destination.
+// TestConduitPolicyEnv: an unparsable policy fails closed.
 func TestConduitPolicyEnv(t *testing.T) {
 	for _, tt := range []struct {
 		name, raw   string

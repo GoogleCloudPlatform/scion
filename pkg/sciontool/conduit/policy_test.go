@@ -34,8 +34,7 @@ func mustPolicy(t *testing.T, raw string) localpolicy.Policy {
 	return p
 }
 
-// TestAgentTCPPolicyDeniedPort: a port on the operator deny-list is
-// refused with 4403 before any dial, though the grant allows it.
+// TestAgentTCPPolicyDeniedPort: refused with 4403 before any dial.
 func TestAgentTCPPolicyDeniedPort(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)
@@ -51,8 +50,6 @@ func TestAgentTCPPolicyDeniedPort(t *testing.T) {
 	wantRefusal(t, err, core.CloseForbidden, reasonForbidden)
 }
 
-// TestAgentSSHDisabledByPolicy: with ssh disabled by the policy, a
-// configured SSH server is neither advertised nor served.
 func TestAgentSSHDisabledByPolicy(t *testing.T) {
 	key := newTestKey(t, "k1")
 	h := newFakeHub(t, key.public)
@@ -69,8 +66,6 @@ func TestAgentSSHDisabledByPolicy(t *testing.T) {
 	wantRefusal(t, err, core.CloseProtocolError, reasonUnsupportedKind)
 }
 
-// TestAgentSSHGetsPolicy: New hands the agent's policy to the SSH server,
-// so its forwarding applies the same deny-list as the TCP stream kind.
 func TestAgentSSHGetsPolicy(t *testing.T) {
 	ssh := testSSHConfig(t)
 	_, err := New(Options{
