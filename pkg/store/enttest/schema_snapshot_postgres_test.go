@@ -92,7 +92,8 @@ func TestSchemaSnapshot_MatchesAutoMigrate(t *testing.T) {
 	if err := adminDB.QueryRowContext(ctx,
 		`SELECT indexname FROM pg_indexes i
 		 WHERE schemaname = $1
-		   AND NOT EXISTS (SELECT 1 FROM pg_constraint c WHERE c.conname = i.indexname AND c.connamespace = $1::regnamespace)
+		   AND NOT EXISTS (SELECT 1 FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
+		                   WHERE c.conname = i.indexname AND n.nspname = i.schemaname)
 		 ORDER BY indexname LIMIT 1`, snapSchema).Scan(&index); err != nil {
 		t.Fatalf("finding an index to drop: %v", err)
 	}
@@ -365,20 +366,22 @@ func recordAutoMigrate(t *testing.T, dsn string) string {
 }
 
 // catalogQueries describe a schema's objects. Each query takes the schema name
-// as $1 and returns text columns; every row becomes one fact.
+// as $1 and returns text columns; every row becomes one fact. Every
+// non-text column concatenated with a literal is cast to text explicitly:
+// Postgres cannot resolve unknown || "char" (SQLSTATE 42725).
 var catalogQueries = map[string]string{
 	"relation": `
-		SELECT c.relname, 'kind=' || c.relkind, 'persistence=' || c.relpersistence
+		SELECT c.relname, 'kind=' || c.relkind::text, 'persistence=' || c.relpersistence::text
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1`,
 	"column": `
 		SELECT c.relname, a.attnum::text, a.attname,
 		       format_type(a.atttypid, a.atttypmod),
-		       'notnull=' || a.attnotnull,
+		       'notnull=' || a.attnotnull::text,
 		       'default=' || COALESCE(pg_get_expr(d.adbin, d.adrelid), ''),
-		       'identity=' || a.attidentity,
-		       'generated=' || a.attgenerated,
-		       'collation=' || COALESCE(co.collname, '')
+		       'identity=' || a.attidentity::text,
+		       'generated=' || a.attgenerated::text,
+		       'collation=' || COALESCE(co.collname::text, '')
 		FROM pg_attribute a
 		JOIN pg_class c ON c.oid = a.attrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -386,10 +389,10 @@ var catalogQueries = map[string]string{
 		LEFT JOIN pg_collation co ON co.oid = a.attcollation AND a.attcollation <> 0
 		WHERE n.nspname = $1 AND a.attnum > 0 AND NOT a.attisdropped`,
 	"constraint": `
-		SELECT c.relname, con.conname, 'type=' || con.contype,
+		SELECT c.relname, con.conname, 'type=' || con.contype::text,
 		       pg_get_constraintdef(con.oid),
-		       'deferrable=' || con.condeferrable, 'deferred=' || con.condeferred,
-		       'validated=' || con.convalidated
+		       'deferrable=' || con.condeferrable::text, 'deferred=' || con.condeferred::text,
+		       'validated=' || con.convalidated::text
 		FROM pg_constraint con
 		JOIN pg_class c ON c.oid = con.conrelid
 		JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -398,7 +401,7 @@ var catalogQueries = map[string]string{
 		SELECT tablename, indexname, indexdef FROM pg_indexes WHERE schemaname = $1`,
 	"sequence": `
 		SELECT sequencename, data_type::text, start_value::text, min_value::text,
-		       max_value::text, increment_by::text, 'cycle=' || cycle, cache_size::text
+		       max_value::text, increment_by::text, 'cycle=' || cycle::text, cache_size::text
 		FROM pg_sequences WHERE schemaname = $1`,
 	"comment": `
 		SELECT c.relname, COALESCE(a.attname, ''), d.description
@@ -408,7 +411,7 @@ var catalogQueries = map[string]string{
 		LEFT JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = d.objsubid AND d.objsubid > 0
 		WHERE n.nspname = $1`,
 	"type": `
-		SELECT t.typname, 'type=' || t.typtype,
+		SELECT t.typname, 'type=' || t.typtype::text,
 		       COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder) FROM pg_enum e WHERE e.enumtypid = t.oid), ''),
 		       COALESCE(format_type(t.typbasetype, t.typtypmod), '')
 		FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
