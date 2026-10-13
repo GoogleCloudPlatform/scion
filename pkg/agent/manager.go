@@ -247,10 +247,10 @@ func pasteBufferArgv(target, bufName string) []string {
 	return []string{"tmux", "paste-buffer", "-t", target, "-p", "-d", "-b", bufName}
 }
 
-// sendKeyArgv builds the argv that sends one tmux key to the agent's
-// session. deliverImmediate uses it for interrupt and submit keys.
-func sendKeyArgv(key string) []string {
-	return []string{"tmux", "send-keys", "-t", "scion:0", key}
+// sendKeyArgv builds the argv that sends one tmux key to target.
+// deliverImmediate uses it for interrupt and submit keys.
+func sendKeyArgv(target, key string) []string {
+	return []string{"tmux", "send-keys", "-t", target, key}
 }
 
 func NewManager(rt runtime.Runtime) Manager {
@@ -1409,11 +1409,11 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
 			for _, key := range seq {
-				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
+				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
 			}
 		} else {
 			key := h.GetInterruptKey()
-			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
+			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
 		}
 	}
 
@@ -1427,7 +1427,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	submitSteps := func() []deliveryStep {
 		out := make([]deliveryStep, 0, len(ds.SubmitKeys))
 		for _, key := range ds.SubmitKeys {
-			out = append(out, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
+			out = append(out, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(keysTarget, key)})
 		}
 		return out
 	}
@@ -1458,7 +1458,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 		// since "-d" does not run when paste-buffer itself fails.
 		bufName = nextMsgBufferName()
 		steps = append(steps, deliveryStep{kind: stepLoadBuffer, argv: loadBufferArgv(bufName)})
-		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv("scion:0", bufName)})
+		steps = append(steps, deliveryStep{kind: stepPasteBuffer, argv: pasteBufferArgv(keysTarget, bufName)})
 		steps = append(steps, submitSteps()...)
 	}
 
@@ -1518,7 +1518,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 			case <-time.After(ds.ExtraSubmitDelay):
 			}
 			for _, key := range ds.SubmitKeys {
-				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, sendKeyArgv(key)); err != nil {
+				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, sendKeyArgv(keysTarget, key)); err != nil {
 					return &PartialDeliveryError{Err: fmt.Errorf("failed to send %s to agent '%s': %w", key, agent.Name, err)}
 				}
 			}
