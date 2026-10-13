@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
 // fakeRenewalGrants is a conduitRenewalGrants test double.
@@ -39,6 +40,13 @@ type fakeRenewalGrants struct {
 	until     time.Time
 	verified  []conduitRenewalBinding
 	minted    []conduitRenewalMint
+}
+
+// set changes the double's behaviour under its lock.
+func (f *fakeRenewalGrants) set(change func(g *fakeRenewalGrants)) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(f)
 }
 
 func (f *fakeRenewalGrants) VerifyForRecheck(_ context.Context, latest []byte, b conduitRenewalBinding) (conduitRecheckClaims, error) {
@@ -111,8 +119,10 @@ func TestRelayStreamRecheck(t *testing.T) {
 	})
 
 	t.Run("grant does not verify (inputs do not match its claims): 4401", func(t *testing.T) {
-		g.verifyErr = fmt.Errorf("%w: stream id mismatch", errConduitRenewalRefused)
-		defer func() { g.verifyErr = nil }()
+		g.set(func(g *fakeRenewalGrants) {
+			g.verifyErr = fmt.Errorf("%w: stream id mismatch", errConduitRenewalRefused)
+		})
+		defer g.set(func(g *fakeRenewalGrants) { g.verifyErr = nil })
 		res := streamRecheck(t, f.hub, item)
 		assert.True(t, res[0].Close)
 		assert.Equal(t, uint32(4401), res[0].CloseCode)
@@ -121,8 +131,8 @@ func TestRelayStreamRecheck(t *testing.T) {
 	t.Run("grant names another principal: 4401", func(t *testing.T) {
 		other := allowed
 		other.UserID = cf.stranger.ID()
-		g.claims = other
-		defer func() { g.claims = allowed }()
+		g.set(func(g *fakeRenewalGrants) { g.claims = other })
+		defer g.set(func(g *fakeRenewalGrants) { g.claims = allowed })
 		res := streamRecheck(t, f.hub, item)
 		assert.True(t, res[0].Close)
 		assert.Equal(t, uint32(4401), res[0].CloseCode)
@@ -131,19 +141,48 @@ func TestRelayStreamRecheck(t *testing.T) {
 	t.Run("permission no longer held: 4401", func(t *testing.T) {
 		denied := allowed
 		denied.Params = map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "9999"}
-		g.claims = denied
-		defer func() { g.claims = allowed }()
+		g.set(func(g *fakeRenewalGrants) { g.claims = denied })
+		defer g.set(func(g *fakeRenewalGrants) { g.claims = allowed })
 		res := streamRecheck(t, f.hub, item)
 		assert.True(t, res[0].Close, "a port no longer authorized")
 		assert.Equal(t, uint32(4401), res[0].CloseCode)
 	})
 
 	t.Run("verify cannot evaluate: unavailable", func(t *testing.T) {
-		g.verifyErr = errConduitRenewalUnavailable
-		defer func() { g.verifyErr = nil }()
+		g.set(func(g *fakeRenewalGrants) { g.verifyErr = errConduitRenewalUnavailable })
+		defer g.set(func(g *fakeRenewalGrants) { g.verifyErr = nil })
 		res := streamRecheck(t, f.hub, item)
 		assert.False(t, res[0].Renew)
 		assert.False(t, res[0].Close)
+	})
+
+	t.Run("mint refused: 4401", func(t *testing.T) {
+		g.set(func(g *fakeRenewalGrants) { g.mintErr = fmt.Errorf("%w: interval", errConduitRenewalRefused) })
+		defer g.set(func(g *fakeRenewalGrants) { g.mintErr = nil })
+		res := streamRecheck(t, f.hub, item)
+		assert.True(t, res[0].Close)
+		assert.Equal(t, uint32(4401), res[0].CloseCode)
+	})
+
+	t.Run("mint unavailable: undecided", func(t *testing.T) {
+		g.set(func(g *fakeRenewalGrants) { g.mintErr = errConduitRenewalUnavailable })
+		defer g.set(func(g *fakeRenewalGrants) { g.mintErr = nil })
+		res := streamRecheck(t, f.hub, item)
+		assert.False(t, res[0].Renew)
+		assert.False(t, res[0].Close)
+	})
+
+	t.Run("access token revoked: 4401", func(t *testing.T) {
+		key, row, err := cf.srv.uatService.CreateToken(rs4MintContext(cf.owner.ID()), cf.owner.ID(), "relay", cf.agent.ProjectID, []string{store.UATScopeAgentPortAccess}, nil)
+		require.NoError(t, err)
+		uat := f.mustAdmit(t, bearer(key), "user-uat")
+		it := item
+		it.UserSessionID, it.AdmissionToken = "user-uat", uat.AdmissionToken
+		require.True(t, streamRecheck(t, f.hub, it)[0].Renew, "renews before the revocation")
+		require.NoError(t, cf.store.RevokeUserAccessToken(context.Background(), row.ID))
+		res := streamRecheck(t, f.hub, it)
+		assert.True(t, res[0].Close)
+		assert.Equal(t, uint32(4401), res[0].CloseCode)
 	})
 
 	t.Run("a bad user session token: 4401", func(t *testing.T) {
@@ -151,5 +190,21 @@ func TestRelayStreamRecheck(t *testing.T) {
 		bad.AdmissionToken = tamper(adm.AdmissionToken)
 		res := streamRecheck(t, f.hub, bad)
 		assert.True(t, res[0].Close)
+	})
+
+	t.Run("agent deleted: 4404", func(t *testing.T) {
+		require.NoError(t, cf.store.DeleteAgent(context.Background(), cf.agent.ID))
+		res := streamRecheck(t, f.hub, item)
+		assert.True(t, res[0].Close)
+		assert.Equal(t, relay.CloseTargetNotFound, res[0].CloseCode)
+	})
+
+	// The user's state is read before the agent: refused with 4401 even
+	// now the agent is gone.
+	t.Run("user suspended: 4401", func(t *testing.T) {
+		setUserStatus(t, cf.store, cf.owner.ID(), store.UserStatusSuspended)
+		res := streamRecheck(t, f.hub, item)
+		assert.True(t, res[0].Close)
+		assert.Equal(t, uint32(4401), res[0].CloseCode)
 	})
 }

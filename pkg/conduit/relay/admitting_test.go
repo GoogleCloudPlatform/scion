@@ -18,6 +18,7 @@ package relay_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -78,5 +79,26 @@ func TestSetAdmitting(t *testing.T) {
 	}
 	if _, _, err := p.a.Dial(ctx, "a", relaytest.AgentHello(agentID, "L1", "", "pty"), echoConfig()); err != nil {
 		t.Fatalf("a session after resuming: %v", err)
+	}
+}
+
+// TestSetAdmitting_Concurrent: concurrent admission changes leave the relay
+// row's draining flag matching the relay's final admission state.
+func TestSetAdmitting_Concurrent(t *testing.T) {
+	p := newPair(t, echoConfig())
+	r := p.a.Relay
+	for iter := 0; iter < 20; iter++ {
+		var wg sync.WaitGroup
+		for i := 0; i < 8; i++ {
+			wg.Add(1)
+			go func(admitting bool) {
+				defer wg.Done()
+				r.SetAdmitting(admitting)
+			}(i%2 == 0)
+		}
+		wg.Wait()
+		if got, want := relayRow(t, p.w, "relay-a").Draining, !r.Admitting(); got != want {
+			t.Fatalf("iteration %d: row draining %v, relay admitting %v", iter, got, r.Admitting())
+		}
 	}
 }

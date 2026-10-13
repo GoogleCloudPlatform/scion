@@ -234,6 +234,10 @@ type Relay struct {
 	log *slog.Logger
 	clk clock.Clock
 
+	// admitMu serializes SetAdmitting so the relay row's draining flag is
+	// written in the order the admission changes were made.
+	admitMu sync.Mutex
+
 	mu    sync.Mutex
 	state relayState
 	// paused refuses new admissions while the relay keeps running
@@ -1247,9 +1251,11 @@ func (r *Relay) Admitting() bool {
 // sessions end by their drain deadline. Resuming admits again and clears
 // the row's draining flag. It is a no-op when nothing changes.
 func (r *Relay) SetAdmitting(admitting bool) {
+	r.admitMu.Lock()
 	r.mu.Lock()
 	if r.paused == !admitting || r.state != stateServing || r.killed {
 		r.mu.Unlock()
+		r.admitMu.Unlock()
 		return
 	}
 	r.paused = !admitting
@@ -1265,6 +1271,7 @@ func (r *Relay) SetAdmitting(admitting bool) {
 		r.log.Warn("Conduit: updating the relay row's draining flag failed", "admitting", admitting, "error", err)
 	}
 	cancel()
+	r.admitMu.Unlock()
 	if admitting {
 		r.log.Info("Conduit relay admission resumed")
 		return
