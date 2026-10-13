@@ -53,16 +53,18 @@ func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
 //
 // It is an allow-list of the runtime implementations the PTY path is known
 // to serve, so a runtime added later reports false until it is added here:
-//   - docker and podman: "<name> exec -it ... tmux attach-session" under a
-//     local PTY (startDockerExec);
+//   - docker, podman and the Apple container runtime: "<name> exec -it ...
+//     tmux attach-session" under a local PTY (startDockerExec), the same
+//     command each runtime's own Attach runs;
 //   - kubernetes: the client-go SPDY exec bridged to the WebSocket
 //     (runK8sExec);
 //   - cloudrun-sandbox: the sandbox binary's exec under a local PTY
 //     (startCloudRunSandboxExec).
 //
-// Everything else reports false, including a nil rt, cloudrun (its
-// instances are reached through the Cloud Run exec connector, which the PTY
-// path does not use) and substrate (no attach primitive: the direct-connect
+// Everything else reports false, including a nil rt, a degraded
+// *ErrorRuntime placeholder, cloudrun (its instances are reached through
+// the Cloud Run exec connector, which the PTY path does not use) and
+// substrate (no attach primitive: the direct-connect
 // handler refuses it with a 501 before the WebSocket upgrade, and the
 // control-channel handler closes the stream before starting an exec
 // session). The type check is on the runtime implementation itself, so
@@ -70,7 +72,10 @@ func StaticCapabilities(rt scionrt.Runtime) *hubclient.BrokerCapabilities {
 // runtime they construct.
 func webPTYSupported(rt scionrt.Runtime) bool {
 	switch rt.(type) {
-	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.KubernetesRuntime, *scionrt.CloudRunSandboxRuntime:
+	case *scionrt.DockerRuntime, *scionrt.PodmanRuntime, *scionrt.AppleContainerRuntime,
+		*scionrt.KubernetesRuntime, *scionrt.CloudRunSandboxRuntime:
+		// None of these opts out of attach today; the check keeps the
+		// answer right in case a listed runtime later does.
 		return scionrt.HasAttachSupport(rt)
 	default:
 		return false

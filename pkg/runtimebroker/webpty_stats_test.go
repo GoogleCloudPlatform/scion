@@ -31,11 +31,11 @@ import (
 // at registration and on every heartbeat (StaticCapabilities and the
 // StaticCapabilityNames registration list), and GET /api/v1/info. The two
 // must agree, and must follow what the PTY attach path is known to serve:
-// docker and podman through "<name> exec -it", kubernetes through the
-// client-go exec, cloudrun-sandbox through the sandbox binary. Every other
-// runtime reports false: cloudrun (no exec primitive on the PTY path),
-// substrate (opts out of attach), the Apple container runtime (not on the
-// allow-list), a runtime this broker does not know, and no runtime at all.
+// docker, podman and the Apple container runtime through "<name> exec -it",
+// kubernetes through the client-go exec, cloudrun-sandbox through the
+// sandbox binary. Every other runtime reports false: cloudrun (no exec
+// primitive on the PTY path), substrate (opts out of attach), a runtime
+// this broker does not know, and no runtime at all.
 func TestWebPTYCapability_PerRuntime(t *testing.T) {
 	tests := []struct {
 		name string
@@ -44,7 +44,7 @@ func TestWebPTYCapability_PerRuntime(t *testing.T) {
 	}{
 		{"docker", runtime.NewDockerRuntime(), true},
 		{"podman", &runtime.PodmanRuntime{}, true},
-		{"container", &runtime.AppleContainerRuntime{}, false},
+		{"container", &runtime.AppleContainerRuntime{}, true},
 		{"kubernetes", &runtime.KubernetesRuntime{}, true},
 		{"cloudrun-sandbox", &runtime.CloudRunSandboxRuntime{}, true},
 		{"cloudrun", &runtime.CloudRunRuntime{}, false},
