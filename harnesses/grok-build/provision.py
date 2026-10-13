@@ -180,13 +180,12 @@ def _configure_vertex_ai(
     env["GOOGLE_CLOUD_PROJECT"] = project
 
     # Region is optional — when empty, use the global multi-region endpoint.
-    region = ""
-    for key in ("GOOGLE_CLOUD_REGION", "CLOUD_ML_REGION", "GOOGLE_CLOUD_LOCATION"):
-        val = _read_token(ctx, key)
-        if val:
-            region = val
-            env[key] = val
-            break
+    # Shared precedence: LOCATION > REGION > CLOUD_ML_REGION (ptone/scion#4719).
+    region_key, region = scion_harness.resolve_vertex_location(
+        lambda k: _read_token(ctx, k), warn_fn=ctx.warn,
+    )
+    if region_key:
+        env[region_key] = region
 
     # Normalize "global" to empty — the global Vertex AI endpoint uses the
     # plain hostname (aiplatform.googleapis.com), not a region-prefixed one.

@@ -184,8 +184,15 @@ type ServerConfig struct {
 	AgentRunScope AgentRunScope
 	// BrokerAuthConfig holds configuration for Runtime Broker HMAC authentication.
 	BrokerAuthConfig BrokerAuthConfig
-	// HubEndpoint is the public endpoint URL for this Hub (used in broker join responses).
+	// HubEndpoint is the operator endpoint URL for this Hub: resolved at
+	// startup from the environment, startup flags and settings.yaml, never
+	// from the settings database.
 	HubEndpoint string
+	// HubEndpoints, when set, holds the operator and public endpoints the
+	// caller resolved at startup (ResolveHubEndpoints), including a
+	// server.hub.public_url saved in the settings database. When nil, both
+	// are HubEndpoint. hubEndpointUses decides which one each use gets.
+	HubEndpoints *HubEndpoints
 	// AgentEndpoint optionally overrides HubEndpoint for the sole purpose of
 	// the SCION_HUB_ENDPOINT value injected into dispatched agents (see
 	// HTTPAgentDispatcher.SetAgentEndpoint). Every other use of HubEndpoint
@@ -2466,7 +2473,7 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 	if cfg.OIDCConfig.Enabled {
 		oidcIssuerURL := cfg.OIDCConfig.IssuerURL
 		if oidcIssuerURL == "" {
-			oidcIssuerURL = cfg.HubEndpoint
+			oidcIssuerURL = hubEndpointsFromConfig(cfg).For(HubEndpointForOIDCIssuer)
 		}
 		if oidcIssuerURL == "" {
 			return nil, fmt.Errorf("OIDC is enabled but no issuer URL configured (set oidc.issuer_url or hub.endpoint)")
@@ -2833,6 +2840,9 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		// hub.agent_delegation is off.
 		DelegatedAgentAuth: srv.authenticateDelegatedAgentCredential,
 
+		// Federated visitors: a verified user token linked to an active
+		// federated account; off while federation.project_visitors is off.
+		ResolveFederatedVisitor: srv.resolveFederatedVisitor,
 		// Workload-bound issuer delegations (test identities phase X2).
 		WorkloadIssuer: srv.workloadIssuer,
 	}
@@ -4474,10 +4484,10 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	}
 
 	// Set Hub endpoint if configured
-	if s.config.HubEndpoint != "" {
-		dispatcher.SetHubEndpoint(s.config.HubEndpoint)
+	if agentHubEndpoint := s.HubEndpointFor(HubEndpointForAgents); agentHubEndpoint != "" {
+		dispatcher.SetHubEndpoint(agentHubEndpoint)
 		if s.config.Debug {
-			slog.Debug("Dispatcher hub endpoint configured", "endpoint", s.config.HubEndpoint)
+			slog.Debug("Dispatcher hub endpoint configured", "endpoint", agentHubEndpoint)
 		}
 	} else if s.config.Debug {
 		slog.Warn("No hub.endpoint configured - agents won't know how to reach Hub")
@@ -4493,7 +4503,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	if s.config.AgentEndpoint != "" {
 		dispatcher.SetAgentEndpoint(s.config.AgentEndpoint)
 		slog.Info("server.hub.agent_endpoint is set: agents on every broker attached to this Hub, including remote brokers, will report to this URL instead of the hub's regular endpoint",
-			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.config.HubEndpoint)
+			"agent_endpoint", s.config.AgentEndpoint, "hub_endpoint", s.HubEndpointFor(HubEndpointForAgents))
 	}
 
 	// Set Hub name so agent log entries carry the hub label.

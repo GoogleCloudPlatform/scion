@@ -1400,8 +1400,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			s.agentLifecycleLog.Warn("async launch requested for a runtime that does not support async launch; falling back to synchronous create",
 				"agent_id", req.ID, "name", req.Name, "runtime", sc.RuntimeType)
 		default:
-			ownedHandoff = true // runLaunch completes the ownership mirror
-			s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, attempt, markAttemptFailed, span, createStart)
+			// runLaunch completes the ownership mirror only for an accepted
+			// launch; a refused one leaves it to the deferred release.
+			ownedHandoff = s.beginAsyncLaunch(w, r, ctx, req, opts, sc.Manager, sc.ownedStart, attempt, markAttemptFailed, span, createStart)
 			return
 		}
 	}
@@ -2612,39 +2613,47 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 
-	// If this is a soft-delete, mark agent-info.json with deleted status
-	// before cleanup -- unless that file is another run's. The state before
-	// the mark is kept so a runtime run mismatch or runtime delete failure
-	// below can undo it.
-	var preMark agent.AgentDeleteState
-	var preMarkOK bool
-	if softDelete && projectPath != "" && !filesOfOtherRun {
-		preMark, preMarkOK = agent.GetAgentDeleteState(target.name, projectPath)
-		// Phase and deletedAt are written in one locked update (#4681).
-		var deletedAt time.Time
-		if deletedAtStr := query.Get("deletedAt"); deletedAtStr != "" {
-			if t, err := time.Parse(time.RFC3339, deletedAtStr); err == nil {
-				deletedAt = t
-			}
-		}
-		if err := agent.MarkAgentSoftDeleted(target.name, projectPath, deletedAt); err != nil {
-			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", err)
-		}
-	}
-
 	s.agentLifecycleLog.Debug("Agent delete: resolved target",
 		"agent_id", id, "project_id", agentProjectID, "run_id", runID,
 		"container_id", target.containerID, "target_run_id", target.runID)
 	_, err = target.mgr.DeleteTarget(ctx, target.name, deleteRunRef(target, runID), filesToDelete, projectPath, removeBranch)
+	// A soft delete marks agent-info.json deleted only once the runtime
+	// entry is gone (ptone/scion#4766): some runtimes do not let the host
+	// write files in the container, so the host never writes the file while
+	// the container may run. The mark is written only on a positive signal
+	// that the runtime entry is gone: no error, or a file-cleanup failure
+	// (agent.ErrAgentFilesDelete, returned only after a successful runtime
+	// delete). Any other error (the runtime delete failed, found another
+	// run, or anything else) writes no mark, and neither do files that are
+	// another run's. The agent-files lock
+	// taken above (lockAgentFiles, also taken by start) is held from before
+	// DeleteTarget through this write, so no start of the agent can come in
+	// between and have its files marked.
+	runtimeDeleted := err == nil || errors.Is(err, agent.ErrAgentFilesDelete)
+	if runtimeDeleted && softDelete && projectPath != "" && !filesOfOtherRun {
+		// Phase and deletedAt are written in one locked update (#4681).
+		var deletedAt time.Time
+		if deletedAtStr := query.Get("deletedAt"); deletedAtStr != "" {
+			if t, perr := time.Parse(time.RFC3339, deletedAtStr); perr == nil {
+				deletedAt = t
+			}
+		}
+		// After the runtime delete the mark is advisory: the hub's agent
+		// row records the soft delete, and the mark only feeds local
+		// display. A failed mark (unparseable agent-info.json, a read-only
+		// home, a full disk) may not clear on a retry, so it is logged and
+		// does not change the delete response.
+		if markErr := markAgentSoftDeleted(target.name, projectPath, deletedAt); markErr != nil {
+			s.agentLifecycleLog.Warn("Failed to mark agent as deleted in agent-info.json", "agent_id", id, "error", markErr)
+		}
+	}
 	if errors.Is(err, scionrt.ErrRunMismatch) {
 		// The runtime found the name held by another run when it came to
 		// delete (the entry was replaced after resolveDeleteTarget listed
 		// it) and deleted nothing. Answer as for errDeleteTargetRunMismatch:
 		// 404, with no file or leftover-object cleanup, since those now
-		// belong to the newer run. A soft-delete mark written above is
-		// undone, since agent-info.json now describes the newer run.
+		// belong to the newer run. No soft-delete mark was written.
 		span.SetStatus(codes.Error, err.Error())
-		s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
 		// A delete naming no run answers the plain 404, as before.
 		if runID == "" {
 			s.agentLifecycleLog.Info("Agent delete: runtime entry belongs to another run; leaving it untouched",
@@ -2681,13 +2690,11 @@ func (s *Server) deleteAgentFenced(w http.ResponseWriter, r *http.Request, id, p
 		return
 	}
 	if err != nil {
-		// The runtime delete call itself failed, so the entry may still be
-		// there: undo a soft-delete mark (the hub retries or reports the
-		// failure). A file-cleanup failure after a successful runtime
-		// delete keeps the mark, since the pod is gone.
-		if errors.Is(err, agent.ErrRuntimeDelete) {
-			s.undoSoftDeleteMark(target.name, projectPath, preMark, preMarkOK, "agent_id", id, "project_id", projectID, "run_id", runID)
-		}
+		// The delete failed. Unless only the file cleanup failed after a
+		// successful runtime delete (agent.ErrAgentFilesDelete, for which
+		// the soft-delete mark was attempted, since the pod is gone), the
+		// entry may still be there and no mark was written; the hub
+		// retries or reports the failure.
 		s.writeRuntimeOpError(w, ctx, "delete agent", err, "agent_id", id, "project_id", projectID)
 		return
 	}
@@ -2990,12 +2997,11 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
@@ -4051,12 +4057,11 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	}
 
 	// A flat instance's ownership mirror installed by buildStartContext is
-	// released when this request ends unless Start consumed it or the async
-	// launch took it over (ptone/scion#3274).
+	// released when this request ends unless Start consumed it
+	// (ptone/scion#3274).
 	var sc *startContext
-	ownedHandoff := false
 	defer func() {
-		if sc != nil && !ownedHandoff {
+		if sc != nil {
 			s.releaseOwnedStart(sc.Opts.RunID)
 		}
 	}()
@@ -7150,18 +7155,10 @@ func otherRunContainerID(cands []agentCandidate, runID string) string {
 	return current
 }
 
-// undoSoftDeleteMark restores agent-info.json's Phase and DeletedAt to
-// their values before a soft-delete mark (preMark), after a delete that
-// removed nothing. It is a no-op when there was no snapshot (ok false) or
-// the file no longer shows our mark (see agent.RestoreAgentDeleteState).
-func (s *Server) undoSoftDeleteMark(agentName, projectPath string, preMark agent.AgentDeleteState, ok bool, logArgs ...any) {
-	if !ok {
-		return
-	}
-	if err := agent.RestoreAgentDeleteState(agentName, projectPath, preMark); err != nil {
-		s.agentLifecycleLog.Warn("Agent delete: could not undo the soft-delete mark", append(logArgs, "error", err)...)
-	}
-}
+// markAgentSoftDeleted writes the soft-delete mark to agent-info.json; a
+// variable so tests can observe the write. Tests that
+// replace it must not call t.Parallel, since every Server shares it.
+var markAgentSoftDeleted = agent.MarkAgentSoftDeleted
 
 // deleteRunRef is the RunRef a resolved delete passes to the runtime: the
 // entry's own run label, or, for a legacy entry with no run label, the run

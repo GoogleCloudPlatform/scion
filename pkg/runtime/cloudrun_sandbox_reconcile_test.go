@@ -54,9 +54,7 @@ func TestSandboxReconcile_ProbeOutcomes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var logs bytes.Buffer
-			prevLog := runtimeLog
-			runtimeLog = slog.New(slog.NewTextHandler(&logs, nil))
-			t.Cleanup(func() { runtimeLog = prevLog })
+			setRuntimeLogHandler(t, slog.NewTextHandler(&logs, nil))
 
 			bin := writeMockBin(t, tc.script)
 			statePath := filepath.Join(t.TempDir(), "state.json")

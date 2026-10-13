@@ -297,8 +297,14 @@ func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService 
 func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockProdHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
 func (m *mockProdHubClient) Messaging() hubclient.MessagingService              { return nil }
+func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
+	return nil
+}
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
+}
+func (m *mockProdHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
+	return nil, nil
 }
 func (m *mockProdHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil
