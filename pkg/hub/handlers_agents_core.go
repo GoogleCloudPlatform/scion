@@ -4024,8 +4024,9 @@ func (s *Server) getAgent(w http.ResponseWriter, r *http.Request, id string) {
 		isSelf = agentIdent.ID() == agent.ID
 	}
 	// CO1: agent.read carries no AgentScopes mapping, so an agent identity is
-	// denied reading any *other* agent here, except an agent it directly
-	// launched in its project (authz_launcher_read.go). An agent reading its
+	// denied reading any *other* agent here, except an agent it launched,
+	// directly or through its descendants, in its project
+	// (authz_launcher_read.go). An agent reading its
 	// own record is exempt, matching getProjectAgent's self-read contract (see
 	// TestReadEndpoint_ProjectScopedAgents_WithReadScope_Allowed): this is the
 	// route the in-container CLI uses for `scion whoami --full` (GetSelf), and
@@ -4407,13 +4408,14 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 				warnings = append(warnings, configEnvTZIgnoredWarning)
 			}
 		}
+		// canViewAgentEnv is the same attach-equivalent-access gate the GET
+		// response's Env redaction uses (ResponseView). A caller who fails
+		// it never saw the live Env to begin with, so their request's env
+		// map cannot be trusted to list every key that still exists live --
+		// see recordExplicitEdits' env-removal gate. It also gates the env
+		// removals below (removedConfigEntries, nextClearedFields).
+		canAttachEnv := canViewAgentEnv(ctx, s, agent)
 		if agent.AppliedConfig.CreateInputs != nil {
-			// canViewAgentEnv is the same attach-equivalent-access gate the
-			// GET response's Env redaction uses (ResponseView). A caller who
-			// fails it never saw the live Env to begin with, so their
-			// request's env map cannot be trusted to list every key that
-			// still exists live -- see recordExplicitEdits' env-removal gate.
-			canAttachEnv := canViewAgentEnv(ctx, s, agent)
 			recordExplicitEdits(agent.AppliedConfig.CreateInputs, &old, cfg, presentConfigKeys,
 				dispatchImageRegistry(s.GetDispatcher()), canAttachEnv)
 		}
@@ -4464,7 +4466,11 @@ func (s *Server) applyAgentUpdate(w http.ResponseWriter, r *http.Request, agent 
 		// as taking effect at the next reincarnation is the key reported
 		// held for it.
 		provision, cleared := reincarnateOnlyConfigEdits(rawFields, cfg, old.InlineConfig)
-		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canViewAgentEnv(ctx, s, agent))
+		removed := removedConfigEntries(old.InlineConfig, cfg, presentConfigKeys, canAttachEnv)
+		// The broker's start-time merge keeps a previous value the inline
+		// config leaves empty; the cleared paths it sends with each start
+		// let the broker remove them (ptone/scion#3906).
+		merged.ClearedFields = nextClearedFields(old.InlineConfig, cfg, rawFields, cleared, canAttachEnv)
 		warnings = append(warnings, reincarnateOnlyEditWarnings(provision, cleared)...)
 		warnings = append(warnings, removedEntriesWarnings(removed)...)
 		configApplied, configHeldForReincarnate = configEditDisposition(rawFields, cfg, old.InlineConfig, provision, cleared, removed)
@@ -5477,8 +5483,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 				"unable to verify credential status", nil)
 			return
 		case credErr == nil && cred.RevokedAt != nil:
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",
@@ -5493,8 +5498,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 		cred, legacy, credErr := evaluateAgentCredentialStatus(r.Context(), s.store, agentIdent.TokenID())
 		switch {
 		case errors.Is(credErr, errAgentCredentialRevoked):
-			writeError(w, http.StatusForbidden, ErrCodeForbidden,
-				"token has been revoked", nil)
+			refuseAgentToken(r.Context(), w, s.authConfig.Logger, agentTokenCauseRefreshRevoked, "agent_id", id)
 			return
 		case credErr != nil:
 			slog.Error("Token refresh: credential status lookup failed",
@@ -5553,8 +5557,7 @@ func (s *Server) handleAgentTokenRefresh(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		slog.Error("Token refresh: token not issued", "agent_id", id, "error", err)
-		writeError(w, http.StatusInternalServerError, ErrCodeInternalError,
-			"failed to generate refreshed token", nil)
+		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, agentTokenRecordFailedMessage, nil)
 		return
 	}
 

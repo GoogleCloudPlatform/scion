@@ -44,6 +44,69 @@ import (
 // "sciontool" entrypoint baked in — to be rebuilt rather than reused as-is.
 const substrateServeEntrypointVersion = "substrate-serve/v2"
 
+// substrateServePort is the TCP port substrate-serve listens on inside the
+// actor: the --addr flag's default (":80") in
+// cmd/sciontool/commands/substrate_serve.go. buildActorTemplate's Command
+// passes no --addr, so the control server always binds this port, which is
+// also the port the inbound router targets by default.
+const substrateServePort = 80
+
+// substrateWakeupProbeTimeoutSeconds is how long Substrate keeps polling the
+// wakeup probe before it fails the wakeup and moves the actor to
+// ACTOR_STATE_CRASHED. Substrate's own default is 30s. 120s is deliberately
+// conservative:
+//
+//   - On a cold boot (the golden actor, or any actor started without a
+//     snapshot), substrate-serve runs the rootfs fixup and the self-binary
+//     integrity check synchronously before it starts listening (see
+//     runSubstrateServe). On a slow or busy worker that, plus process start,
+//     can approach 30s, and a false failure there fails the whole template.
+//   - On a restore, the listener is part of the checkpointed memory, so the
+//     first poll normally answers and this bound is never approached.
+//   - A broken image (for example a sciontool without substrate-serve, which
+//     exits at once) still fails within two minutes: inside
+//     defaultTemplateReadyTimeout (10m) for the golden actor, and inside
+//     defaultHealthzTimeout (5m), the client-side wait that runs after
+//     ResumeActor returns.
+const substrateWakeupProbeTimeoutSeconds = 120
+
+// substrateWakeupProbe returns the wakeup probe for the agent container: GET
+// substrateHealthzPath on substrateServePort. healthz needs no auth and
+// always answers 200 once the control server is up, whatever lifecycle state
+// it reports (pkg/sciontool/substrate's HealthzResponse), so the probe
+// passes on both a fresh golden boot ("awaiting-bootstrap") and a resumed,
+// bootstrapped actor ("running" or "init-failed"). It gates each wakeup on
+// substrate-serve actually serving: the probe is polled on every wakeup,
+// including a cold boot, and a miss within the timeout crashes the actor
+// (ateapi.proto, ContainerWakeupProbe). The golden actor's cold boot is
+// gated the same way, so an image whose entrypoint exits fails template
+// creation rather than producing a golden that cannot be restored.
+// Substrate's API guide further states that when every container declares
+// a probe, the golden snapshot is taken once the probe has answered,
+// instead of after a fixed warm-up delay.
+//
+// A fresh value on every call, so no caller can mutate a shared probe and
+// change what substrateTemplateName hashes without changing its input.
+func substrateWakeupProbe() *ateapipb.ContainerWakeupProbe {
+	return &ateapipb.ContainerWakeupProbe{
+		HttpGet: &ateapipb.HTTPGetAction{
+			Path: substrateHealthzPath,
+			Port: substrateServePort,
+		},
+		TimeoutSeconds: substrateWakeupProbeTimeoutSeconds,
+	}
+}
+
+// substrateWakeupProbeCacheKey renders the wakeup probe into a stable string
+// for substrateTemplateName's hash input, from the same value
+// buildActorTemplate sets, so a change to the probe's path, port or timeout
+// always produces a new template name.
+func substrateWakeupProbeCacheKey() string {
+	p := substrateWakeupProbe()
+	return fmt.Sprintf("wakeup(path=%s,port=%d,timeout=%d)",
+		p.GetHttpGet().GetPath(), p.GetHttpGet().GetPort(), p.GetTimeoutSeconds())
+}
+
 // substrateContainerCapabilitiesAdd lists the Linux capabilities
 // buildActorTemplate grants on top of Substrate's default set. It is
 // substratecaps.Names() — the single source of truth shared with
@@ -79,7 +142,8 @@ const templateReadyPollInterval = 5 * time.Second
 // the nil pointer as "" while buildActorTemplate substitutes a real default
 // would let a change to that default silently reuse the old golden
 // template), the hardcoded snapshot scope, the container's added
-// capabilities, the entrypoint version, and the conditional
+// capabilities, the entrypoint version, the container's wakeup probe,
+// and the conditional
 // egress_trust_bundle input (appended only when non-empty) — every
 // template-content input listed in substrate-runtime.md §3. All of these
 // are template content, so changing any of them in settings — or in this
@@ -95,7 +159,7 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, reso
 	// hash.Hash.Write never returns an error (see the hash.Hash doc
 	// comment), so the error from Fprintf is deliberately discarded rather
 	// than checked.
-	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%s",
+	_, _ = fmt.Fprintf(h, "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s",
 		imageDigest,
 		sc.SandboxClass,
 		sc.SandboxConfigName,
@@ -105,9 +169,10 @@ func substrateTemplateName(imageDigest string, sc config.V1SubstrateConfig, reso
 		"DATA", // on_pause/on_commit scope, hardcoded
 		strings.Join(substrateContainerCapabilitiesAdd, ","),
 		substrateServeEntrypointVersion,
+		substrateWakeupProbeCacheKey(),
 	)
 	// EgressTrustBundle is appended as its own hash-input segment ONLY when
-	// set, rather than always written as a 10th "%s" field (which would be
+	// set, rather than always written as an extra "%s" field (which would be
 	// "" on every existing plain install and still change the hash from
 	// what it was before this field existed). This is deliberate: an unset
 	// EgressTrustBundle must keep producing the exact template name it
@@ -325,6 +390,11 @@ func buildActorTemplate(atespace, templateName, imageDigest string, sc config.V1
 					},
 				},
 				Resources: &ateapipb.Resources{Limits: limits},
+				// Gates every wakeup, including the golden actor's first
+				// boot, on substrate-serve answering healthz. See
+				// substrateWakeupProbe for what it checks and
+				// substrateWakeupProbeTimeoutSeconds for the timing.
+				WakeupProbe: substrateWakeupProbe(),
 			},
 		},
 		Volumes: append([]*ateapipb.Volume{

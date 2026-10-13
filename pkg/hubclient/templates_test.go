@@ -185,3 +185,16 @@ func TestTemplate_SourceURLRoundTrip(t *testing.T) {
 		t.Errorf("SourceURL not decoded: %q", tmpl.SourceURL)
 	}
 }
+
+// Template.AgentConfig decodes the Hub's read-only agentConfig snapshot
+// (ptone/scion#4223); a legacy "config" member is ignored.
+func TestTemplate_AgentConfigDecodes(t *testing.T) {
+	var tmpl Template
+	data := `{"id":"t1","name":"t","agentConfig":{"model":"opus","message_mode":"lineage"},"config":{"model":"row"}}`
+	if err := json.Unmarshal([]byte(data), &tmpl); err != nil {
+		t.Fatalf("Unmarshal failed: %v", err)
+	}
+	if tmpl.AgentConfig == nil || tmpl.AgentConfig.Model != "opus" || tmpl.AgentConfig.MessageMode != "lineage" {
+		t.Errorf("AgentConfig = %+v, want model opus, message_mode lineage", tmpl.AgentConfig)
+	}
+}
