@@ -174,8 +174,8 @@ type retiredConfig struct {
 	gen           *configGen
 	sendQueue     *SendQueue
 	store         Store
-	// pollDone is closed when the poll loop the reconfigure stopped has
-	// exited. Configure waits for it after releasing b.mu.
+	// pollDone is closed when the poll loop a switch to webhook mode
+	// stopped has exited. Configure waits for it after releasing b.mu.
 	pollDone <-chan struct{}
 	// prev is closed when the previous retirement has finished; done is
 	// closed when this one has.
@@ -557,11 +557,15 @@ func (b *TelegramBrokerV2) configureLocked(config map[string]string) (*retiredCo
 		b.webhookServer = nil
 	}
 
-	// Switch inbound delivery: webhook mode stops the poll loop, and poll
-	// mode starts one for the existing subscriptions (startPolling does
-	// nothing if a loop already runs).
+	// Switch inbound delivery: stop the running poll loop, which polls with
+	// the previous client. Webhook mode waits for it to exit (Configure
+	// does so after releasing b.mu). Poll mode starts a new loop with the
+	// new client for the existing subscriptions; the new loop waits for the
+	// old one to exit before it polls, so Configure need not wait for a
+	// running handler.
+	pollDone := b.stopPollingLocked()
 	if inboundMode == "webhook" {
-		retired.pollDone = b.stopPollingLocked()
+		retired.pollDone = pollDone
 	} else if len(b.subs) > 0 {
 		b.startPolling()
 	}
@@ -1979,8 +1983,8 @@ func (b *TelegramBrokerV2) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
-// startPolling starts the poll loop unless one runs or the broker is in
-// webhook mode. Must be called with b.mu held.
+// startPolling starts the poll loop with the current API client unless one
+// runs or the broker is in webhook mode. Must be called with b.mu held.
 func (b *TelegramBrokerV2) startPolling() {
 	if b.inboundMode == "webhook" {
 		return // webhook mode handles inbound via HTTP
@@ -1995,7 +1999,7 @@ func (b *TelegramBrokerV2) startPolling() {
 	b.pollCancel = cancel
 	b.pollDone = done
 
-	go b.pollLoop(ctx, prev, done)
+	go b.pollLoop(ctx, b.api, prev, done)
 	b.log.Info("Telegram v2 polling started")
 }
 
@@ -2023,9 +2027,11 @@ func (b *TelegramBrokerV2) stopPolling() {
 	}
 }
 
-// pollLoop long-polls Telegram until ctx is cancelled, then closes done. It
-// first waits for the previous loop (prev) to exit.
-func (b *TelegramBrokerV2) pollLoop(ctx context.Context, prev <-chan struct{}, done chan struct{}) {
+// pollLoop long-polls Telegram through api until ctx is cancelled, then
+// closes done. It first waits for the previous loop (prev) to exit. The loop
+// keeps the client it was started with: a reconfigure replaces b.api under
+// b.mu and restarts the loop.
+func (b *TelegramBrokerV2) pollLoop(ctx context.Context, api *TelegramAPIClient, prev <-chan struct{}, done chan struct{}) {
 	defer close(done)
 	if prev != nil {
 		<-prev
@@ -2038,7 +2044,7 @@ func (b *TelegramBrokerV2) pollLoop(ctx context.Context, prev <-chan struct{}, d
 		default:
 		}
 
-		updates, err := b.getUpdatesV2(ctx, b.lastOffset+1, longPollTimeout)
+		updates, err := b.getUpdatesV2(ctx, api, b.lastOffset+1, longPollTimeout)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -2072,7 +2078,7 @@ func (b *TelegramBrokerV2) handlePolledUpdate(ctx context.Context, update Update
 
 // getUpdatesV2 calls GetUpdates with both "message" and "callback_query"
 // in allowed_updates, extending the v1 behavior.
-func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeout int) ([]Update, error) {
+func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, api *TelegramAPIClient, offset int64, timeout int) ([]Update, error) {
 	body := getUpdatesRequest{
 		Offset:         offset,
 		Timeout:        timeout,
@@ -2084,15 +2090,15 @@ func (b *TelegramBrokerV2) getUpdatesV2(ctx context.Context, offset int64, timeo
 		return nil, fmt.Errorf("marshal getUpdates request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", b.api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", api.methodURL("getUpdates"), bytes.NewReader(jsonBody))
 	if err != nil {
 		return nil, fmt.Errorf("create getUpdates request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := b.api.pollClient.Do(req)
+	resp, err := api.pollClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getUpdates request failed: %w", b.api.redactToken(err))
+		return nil, fmt.Errorf("getUpdates request failed: %w", api.redactToken(err))
 	}
 	defer resp.Body.Close()
 
