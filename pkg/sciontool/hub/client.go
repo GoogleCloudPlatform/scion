@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2523,6 +2524,59 @@ func (c *Client) GetSelf(ctx context.Context) (*AgentSelf, error) {
 	}
 
 	return &result, nil
+}
+
+// GetExperiments fetches the hub's experiment map, read live from GET
+// /api/v1/experiments: every registered web-layer experiment and whether it
+// is on now (this includes server-checked ones such as hub.artifacts). It
+// returns the enabled names, sorted. Unlike SCION_HUB_EXPERIMENTS, which is
+// fixed at start and lists only the experiments dispatched to the agent,
+// the answer is current (ptone/scion#4573).
+func (c *Client) GetExperiments(ctx context.Context) ([]string, error) {
+	if !c.IsConfigured() {
+		return nil, fmt.Errorf("hub client not configured")
+	}
+
+	endpoint := strings.TrimSuffix(c.hubURL, "/") + "/api/v1/experiments"
+
+	c.tokenMu.RLock()
+	currentToken := c.token
+	c.tokenMu.RUnlock()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	c.setAgentAuth(req.Header, currentToken)
+
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to send request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, fmt.Errorf("hub returned error %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Experiments map[string]bool `json:"experiments"`
+	}
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %w", err)
+	}
+	enabled := []string{}
+	for name, on := range result.Experiments {
+		if on {
+			enabled = append(enabled, name)
+		}
+	}
+	sort.Strings(enabled)
+	return enabled, nil
 }
 
 // --- Agent secret fetch (P2d, #127) ---

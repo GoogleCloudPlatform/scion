@@ -1157,7 +1157,7 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if token := readDevTokenFile(globalDir); token != "" {
 			fmt.Println()
 			fmt.Println("Developer token (for CLI authentication):")
-			fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
+			fmt.Printf("  %s\n", devTokenExportHint(devTokenFilePath("", globalDir)))
 		}
 	}
 	fmt.Println()

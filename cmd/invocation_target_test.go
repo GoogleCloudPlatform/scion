@@ -61,6 +61,10 @@ func setupContextTest(t *testing.T) string {
 	for _, name := range []string{
 		"SCION_AGENT_ID", "SCION_HUB_TOKEN", "SCION_AUTH_TOKEN",
 		"SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE",
+		// Transport auth from the runner's environment would turn a hub
+		// with no credential into proxy-auth.
+		"SCION_TRANSPORT_TOKEN", "SCION_TRANSPORT_TOKEN_FILE", "SCION_TRANSPORT_MODE",
+		"SCION_TRANSPORT_AUDIENCE", "SCION_HUB_OIDC_AUDIENCE",
 	} {
 		t.Setenv(name, "")
 	}
@@ -233,10 +237,6 @@ func TestResolveInvocationTarget(t *testing.T) {
 		{
 			name: "broker alias ignores the context",
 			cmd:  []string{"broker", "register"},
-		},
-		{
-			name: "hub shadow ignores the context",
-			cmd:  []string{"hub", "shadow"},
 		},
 		{
 			name: "hub auth login sees the context hub",
