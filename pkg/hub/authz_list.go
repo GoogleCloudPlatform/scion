@@ -346,7 +346,9 @@ func (a *AuthzService) loadRoleDefinitions(ctx context.Context, roleDefIDs []str
 
 	result := make(map[string]*RolePermissions, len(defs))
 	for _, rd := range defs {
-		result[rd.ID] = NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
+		rp := NewRolePermissions(rd.ID, rd.Name, rd.ScopeType, rd.Permissions)
+		rp.ConfersMembership = rd.ConfersProjectMembership()
+		result[rd.ID] = rp
 	}
 	return result, nil
 }

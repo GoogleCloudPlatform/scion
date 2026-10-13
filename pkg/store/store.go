@@ -1650,6 +1650,15 @@ type TemplateStore interface {
 	// but no longer matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
+	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
+	// template id, and only while the stored row has no snapshot and still
+	// matches expected (one conditional UPDATE). No other column changes,
+	// Updated included. It reports whether a row was written: false with a
+	// nil error means the row already has a snapshot, its content or layout
+	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// backfill rows committed before the snapshot existed (ptone/scion#4222).
+	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
+
 	// DeleteTemplate removes a template by ID.
 	// Returns ErrNotFound if the template doesn't exist.
 	DeleteTemplate(ctx context.Context, id string) error
@@ -3308,7 +3317,22 @@ type RoleStore interface {
 	//   - PrincipalType must be one of user/agent/group
 	//   - super-admin and project-owner bindings are direct-user-only
 	//   - Duplicate (role, principal, scope) is rejected
+	//   - A federated account (UserKindFederated) is refused
+	//     (ErrFederatedAccountRefused)
+	//   - A role that does not confer membership (project-visitor) is
+	//     refused (ErrNonMembershipRoleRefused); see CreateVisitorRoleBinding
 	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// CreateVisitorRoleBinding creates a visitor grant: a binding of the
+	// seeded project-visitor role (system, ConfersMembership false), at
+	// project scope (non-empty ScopeID), to a user principal whose account
+	// is UserKindFederated. Anything else is refused with
+	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
+	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
+	// be empty, in which case the project-visitor role is resolved by
+	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
+	// on the store passed to WithTx.
+	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
@@ -3359,13 +3383,17 @@ type RoleStore interface {
 
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
+	// The project membership reads (this, ListProjectMembers and
+	// IsProjectMember) count only active bindings of roles that confer
+	// membership (RoleDefinition.ConfersProjectMembership): a visitor is
+	// not a member.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)
 
 	// ListProjectMembers returns all members of a project via role bindings.
 	ListProjectMembers(ctx context.Context, projectID string) ([]*ProjectMembership, error)
 
-	// IsProjectMember returns true if the user has any project-scoped role binding
-	// for the given project.
+	// IsProjectMember returns true if the user has any active project-scoped
+	// role binding for the given project of a role that confers membership.
 	IsProjectMember(ctx context.Context, projectID, userID string) (bool, error)
 }
 
