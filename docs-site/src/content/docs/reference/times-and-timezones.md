@@ -101,7 +101,7 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
 
 A pin is the agent's explicit timezone. It is set in three ways:
 
-- **At create.** A `TZ` value in the create request's `config.env`, in a Hub-resolved template, or in the Hub harness config becomes the pin.
+- **At create.** A `TZ` value in the create request's `config.env` or in the Hub harness config becomes the pin. A template cannot set `TZ` for a Hub-dispatched agent.
 - **Later, by API.** `PATCH /api/v1/agents/:id` with `explicitTimezone`:
   - an IANA name pins the agent; an invalid name, or `Local`, returns `400`;
   - `""` unpins it, and the agent follows steps 2-5 from then on.
@@ -133,11 +133,11 @@ See [Scheduling](/scion/hosted/user/scheduling/#recurring-schedules).
 Without a Hub there is no `TZ` chain, no Hub default timezone and no display preference.
 
 - **Agent `TZ`** comes only from the `env` you give the agent:
-  - a template's `env`;
   - the harness-config `env` in `settings.yaml`, including a profile's `harness_overrides` entry for that harness config;
-  - an inline config passed with `scion create --config`.
+  - an inline config passed with `scion create --config`;
+  - a template's `env`, the lowest-precedence fallback: it is used only when no other source sets `TZ`, and only for local agents.
 
-  An empty `TZ: ""` in a template or an inline config passes your machine's `TZ` through. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over a template or inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when a template or inline config sets one, and the container uses the image default (UTC). With no `TZ` in any of them, the container uses the image default (UTC).
+  An empty `TZ: ""` in an inline config passes your machine's `TZ` through. An empty template `TZ` is skipped with a warning. A `TZ` in a `settings.yaml` harness-config entry (or a profile's `harness_overrides`) takes precedence over an inline-config `TZ`. If it is empty, `TZ` is omitted with a warning, even when an inline config sets one; a non-empty template `TZ` then still fills it. With no `TZ` in any of them, the container uses the image default (UTC).
 - **CLI display** uses your local zone, with `--tz` and `--utc` as above.
 
 A Hub-created agent that is later started with a local `scion start` uses the `TZ` saved in its `scion-agent.json` again.
