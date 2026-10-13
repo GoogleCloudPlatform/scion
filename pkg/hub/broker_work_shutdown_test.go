@@ -343,3 +343,23 @@ func TestStartHTTPStopDrain_IsTrackedWork(t *testing.T) {
 	_, marked := srv.httpDrains.Load(brokerID)
 	assert.False(t, marked, "the drain clears its in-flight marker when it ends")
 }
+
+// TestDrainUndispatchedNotifications_ClaimsNothingOnceShutdownBegins covers
+// the notification half of "drains stop claiming once shutdown begins"
+// (ptone/scion#4869) on the shared retryBatch loop: once broker work
+// admission is closed, the broker-connect drain must attempt no delivery
+// and leave the notification undispatched for the next connect.
+func TestDrainUndispatchedNotifications_ClaimsNothingOnceShutdownBegins(t *testing.T) {
+	env := setupNotificationTest(t)
+	d := &brokerDeferringDispatcher{}
+	nd := NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return d }, slog.Default())
+	srv := &Server{store: env.store, agentLifecycleLog: slog.Default(), notificationDispatcher: nd}
+
+	id := createUndispatchedNotification(t, env, env.sub, 2*time.Minute)
+
+	srv.brokerWork.closeAdmission()
+	srv.drainUndispatchedNotifications(context.Background(), env.subscriber.RuntimeBrokerID)
+
+	assert.Equal(t, 0, d.callsFor(env.subscriber.ID), "the drain must claim nothing once shutdown has begun")
+	assert.False(t, notificationDispatched(t, env, id), "the notification stays pending for the next connect")
+}
