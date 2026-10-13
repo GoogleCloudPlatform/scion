@@ -155,8 +155,10 @@ var perfBudgets = []perfBudget{
 		// Store calls: per-request sender standing (upstream #3101).
 		name: "agent by id",
 		path: func(f *perfBudgetFixture) string { return "/api/v1/agents/" + f.agentIDs[10] },
-		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871);
-		// ptone/scion#4222 added the config.message_mode editability row (14029 -> 14175).
+		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (d28338a).
 		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
 	},
 	{
@@ -165,8 +167,10 @@ var perfBudgets = []perfBudget{
 		path: func(f *perfBudgetFixture) string {
 			return "/api/v1/projects/" + f.project.ID + "/agents/" + f.agentIDs[10]
 		},
-		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871);
-		// ptone/scion#4222 added the config.message_mode editability row (14029 -> 14175).
+		// Bytes: upstream #3070 added agent editability to the single-agent GET (main ca19871).
+		// 14175 is the value CI measured with ptone/scion#4222 merged on main: about 117 bytes
+		// are its new config.message_mode editability row, the rest is main's own drift
+		// since the 14029 baseline (d28338a).
 		baseline: perfBudgetCounts{authzStoreCalls: 15, decisions: 10, dbReads: 0, bytes: 14175},
 	},
 }
