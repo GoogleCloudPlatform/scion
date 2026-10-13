@@ -445,7 +445,7 @@ func TestUseMultiHub_NotLoggedIn(t *testing.T) {
 	// Not found on the logged-in hub: the error names the skipped hub and
 	// its login command.
 	_, _, err = runScion(t, "use", "nope")
-	require.EqualError(t, err, "project 'nope' not found on the hubs searched (prod); it may be on the hubs that could not be searched (staging: not logged in)\n\n"+
+	require.EqualError(t, err, "project 'nope' not found on the hubs searched (prod); it may be on the hub that could not be searched (staging: not logged in)\n\n"+
 		"Log in with: scion hub auth login --hub staging")
 }
 
@@ -988,7 +988,7 @@ func TestUseMultiHub_NotFoundNamesRefusedHub(t *testing.T) {
 	staging.setProjects()
 
 	want := "project 'foo' not found on the hubs searched (staging); " +
-		"it may be on the hubs that could not be searched (prod: login refused)\n\n" +
+		"it may be on the hub that could not be searched (prod: login refused)\n\n" +
 		"Log in with: scion hub auth login --hub prod"
 	for _, args := range [][]string{{"use", "foo"}, {"use", "foo", "--refresh"}} {
 		_, _, err := runScion(t, args...)
@@ -1057,9 +1057,11 @@ func TestSortUseCandidates(t *testing.T) {
 	assert.Equal(t, []useMatch{{Hub: a, ID: "9"}, {Hub: b, ID: "1"}, {Hub: b, ID: "2"}, {Hub: bare, ID: "1"}}, got)
 }
 
-// hubGlobalProject is a hub's built-in global project.
+// hubGlobalProject is a hub's built-in global project, with the labels the
+// hub gives it.
 func hubGlobalProject(id string) hubclient.Project {
-	return hubclient.Project{ID: id, Slug: "global", Name: "Global", Labels: map[string]string{"scion.io/global": "true"}}
+	return hubclient.Project{ID: id, Slug: "global", Name: "Global",
+		Labels: map[string]string{"scion.io/system": "true", "scion.io/global": "true"}}
 }
 
 // A hub's global project is not a project 'scion use' selects, and it is
@@ -1084,4 +1086,85 @@ func TestUseMultiHub_HubGlobalProjectExcluded(t *testing.T) {
 	assert.Positive(t, prod.gets.Load(), "the known entry was checked")
 	assert.Empty(t, readTestContext(t).Projects, "the known entry is dropped")
 	assert.Empty(t, readTestContext(t).CurrentHub, "nothing is selected")
+}
+
+// A link entry for a hub's global project, which 'scion hub link' records
+// for the global directory, is kept when 'scion use' finds that project
+// unselectable; only the selection fails.
+func TestUseMultiHub_HubGlobalProjectLinkEntryKept(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	prod.setProjects(hubGlobalProject("p-global"))
+	link := config.KnownProject{Hub: "prod", ID: "p-global", Slug: "global", Name: "Global", Source: config.KnownProjectSourceLink}
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.SetLinkEntry("prod", link, "/home/alice/.scion", time.Now())
+	}))
+
+	_, _, err := runScion(t, "use", "global")
+	require.EqualError(t, err, "project 'global' not found on hubs: prod, staging")
+	assert.Positive(t, prod.gets.Load(), "the link entry was checked")
+	var kept []config.KnownProject
+	for _, p := range readTestContext(t).Projects {
+		kept = append(kept, config.KnownProject{Hub: p.Hub, ID: p.ID, Slug: p.Slug, Name: p.Name, Source: p.Source})
+	}
+	assert.Equal(t, []config.KnownProject{link}, kept, "the link entry is kept")
+	assert.Empty(t, readTestContext(t).CurrentHub, "nothing is selected")
+}
+
+// Only a project with both labels the hub gives its global project is
+// left out: a project that carries one of them is an ordinary project.
+func TestIsHubGlobalProject(t *testing.T) {
+	for _, tc := range []struct {
+		labels map[string]string
+		want   bool
+	}{
+		{map[string]string{"scion.io/system": "true", "scion.io/global": "true"}, true},
+		{map[string]string{"scion.io/global": "true"}, false},
+		{map[string]string{"scion.io/system": "true"}, false},
+		{map[string]string{"scion.io/system": "true", "scion.io/global": "false"}, false},
+		{nil, false},
+	} {
+		assert.Equal(t, tc.want, isHubGlobalProject(hubclient.Project{Labels: tc.labels}), "%v", tc.labels)
+	}
+}
+
+// A known project whose hub refuses the login is selected, with a hint
+// that says so.
+func TestUseMultiHub_KnownProjectHubRefusesLogin(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.refuse.Store(true)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+		return nil
+	}))
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
+		"Hub 'prod' refused the login. Run: scion hub auth login --hub prod\n", stdout)
+	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
+	assert.Zero(t, staging.calls())
+}
+
+// The not-found error names one hub that could not be searched in the
+// singular and several in the plural, whatever the reason.
+func TestUseMultiHub_NotFoundSkippedHubsWording(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects()
+	staging.srv.Close()
+
+	_, _, err := runScion(t, "use", "foo")
+	require.Error(t, err)
+	want := "project 'foo' not found on the hubs searched (prod); it may be on the hub that could not be searched (staging: unreachable: "
+	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
+
+	dev := newFakeProjectHub(t, hubclient.Project{ID: "d-foo", Slug: "foo", Name: "Foo"})
+	dev.refuse.Store(true)
+	storeTestLogin(t, dev.URL())
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("dev", dev.URL())
+	}))
+	_, _, err = runScion(t, "use", "foo")
+	require.Error(t, err)
+	want = "project 'foo' not found on the hubs searched (prod); it may be on the hubs that could not be searched (dev: login refused; staging: unreachable: "
+	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
+	assert.True(t, strings.HasSuffix(err.Error(), "\n\nLog in with: scion hub auth login --hub dev"), err.Error())
 }

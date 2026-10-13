@@ -149,6 +149,9 @@ type useLookup struct {
 	found map[string][]config.KnownProject
 	// dropped are known entries (hub, ID) that their hub reported gone.
 	dropped [][2]string
+	// droppedUnlinked are known entries (hub, ID) to drop except for
+	// their link entries: entries for a hub's global project.
+	droppedUnlinked [][2]string
 	// notLoggedIn are hubs skipped for want of a usable credential, and
 	// hubs that refused the credential sent.
 	notLoggedIn []useHub
@@ -217,13 +220,15 @@ func (l *useLookup) remember(hub useHub, projects ...hubclient.Project) {
 	}
 }
 
-// isHubGlobalProject reports whether p is a hub's built-in global project.
-// Every hub has one, so it is left out of the projects across hubs: of the
-// known-project list, of 'scion project list' and of the projects 'scion
-// use' can select. The global project on this machine is a directory and
-// is not affected.
+// isHubGlobalProject reports whether p is a hub's built-in global project,
+// which the hub creates with both the system and the global label. Every
+// hub has one, so it is left out of the projects across hubs: of the
+// projects 'scion use' can select and records, and of the listings
+// 'scion project list --refresh' records. A link entry for it, recorded by
+// 'scion hub link' from the global directory, is kept. The global project
+// on this machine is a directory and is not affected.
 func isHubGlobalProject(p hubclient.Project) bool {
-	return p.Labels[store.LabelGlobalProject] == "true"
+	return p.Labels[store.LabelSystemProject] == "true" && p.Labels[store.LabelGlobalProject] == "true"
 }
 
 // withoutHubGlobalProjects returns projects without the hub's global
@@ -255,6 +260,7 @@ const (
 // fills in the hub's current slug and name.
 func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	notLoggedIn := fmt.Sprintf("Not logged in to hub '%s'. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
+	refused := fmt.Sprintf("Hub '%s' refused the login. Run: scion hub auth login --hub %s", m.Hub.label(), m.Hub.label())
 	// The hub comes from the known list, not from the user: the full
 	// credential chain only for the chosen or effective hub.
 	fanOut := l.fanOut(m.Hub)
@@ -270,9 +276,11 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 	p, err := client.Projects().Get(ctx, m.ID)
 	switch {
 	case err == nil && isHubGlobalProject(*p):
-		// An entry recorded before the hub's global project was left out
-		// of the known list.
-		l.dropped = append(l.dropped, [2]string{m.Hub.Name, m.ID})
+		// Not selectable. An entry recorded before the hub's global
+		// project was left out of the known list is dropped, but not a
+		// link entry: 'scion hub link' records one for the global
+		// directory.
+		l.droppedUnlinked = append(l.droppedUnlinked, [2]string{m.Hub.Name, m.ID})
 		return useGone, ""
 	case err == nil:
 		m.Slug, m.Name = p.Slug, p.Name
@@ -282,23 +290,16 @@ func (l *useLookup) verify(m *useMatch) (useVerdict, string) {
 		l.dropped = append(l.dropped, [2]string{m.Hub.Name, m.ID})
 		return useGone, ""
 	case apiclient.IsUnauthorizedError(err):
-		return useUnchecked, notLoggedIn
+		return useUnchecked, refused
 	default:
 		return useUnchecked, fmt.Sprintf("Warning: could not check project '%s' on hub '%s': %v", m.shown(), m.Hub.label(), hubclient.HintProxyError(err))
 	}
 }
 
 // lookupOn looks the reference up on one hub. A reference that matches
-// nothing is no error; several projects with the name are all returned.
-// The hub's global project is never returned. In a fan-out the hub gets
-// only a credential bound to it (see hubClientFor).
+// nothing is no error; several projects with the name are all returned. In
+// a fan-out the hub gets only a credential bound to it (see hubClientFor).
 func (l *useLookup) lookupOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
-	projects, err := l.lookupAllOn(hub, fanOut)
-	return withoutHubGlobalProjects(projects), err
-}
-
-// lookupAllOn is lookupOn with the hub's global project included.
-func (l *useLookup) lookupAllOn(hub useHub, fanOut bool) ([]hubclient.Project, error) {
 	client, err := hubClientFor(l.settings, hub.Endpoint, fanOut)
 	if err != nil {
 		return nil, err
@@ -329,8 +330,9 @@ func (l *useLookup) lookupAllOn(hub useHub, fanOut bool) ([]hubclient.Project, e
 // search looks the reference up on hubs in parallel, each within
 // useHubTimeout. Hubs without a usable credential are skipped and not
 // contacted; for a hub that is neither chosen nor effective (see
-// useLookup.fanOut), that is a hub without a credential bound to it. It
-// returns the matches in the order of hubs.
+// useLookup.fanOut), that is a hub without a credential bound to it. A
+// hub's global project is never a match. It returns the matches in the
+// order of hubs.
 func (l *useLookup) search(hubs []useHub) []useMatch {
 	type result struct {
 		projects []hubclient.Project
@@ -348,7 +350,8 @@ func (l *useLookup) search(hubs []useHub) []useMatch {
 		wg.Add(1)
 		go func(i int, h useHub, fanOut bool) {
 			defer wg.Done()
-			results[i].projects, results[i].err = l.lookupOn(h, fanOut)
+			projects, err := l.lookupOn(h, fanOut)
+			results[i].projects, results[i].err = withoutHubGlobalProjects(projects), err
 		}(i, h, fanOut)
 	}
 	wg.Wait()
@@ -408,8 +411,12 @@ func (l *useLookup) notFoundError() error {
 	var b strings.Builder
 	switch skipped := l.skipped(); {
 	case len(names) > 0 && skipped != "":
-		fmt.Fprintf(&b, "project '%s' not found on the hubs searched (%s); it may be on the hubs that could not be searched (%s)",
-			l.ref, strings.Join(names, ", "), skipped)
+		what := "the hubs that could not be searched"
+		if len(l.notLoggedIn)+len(l.failed) == 1 {
+			what = "the hub that could not be searched"
+		}
+		fmt.Fprintf(&b, "project '%s' not found on the hubs searched (%s); it may be on %s (%s)",
+			l.ref, strings.Join(names, ", "), what, skipped)
 	case len(names) > 0:
 		fmt.Fprintf(&b, "project '%s' not found on hubs: %s", l.ref, strings.Join(names, ", "))
 	default:
@@ -430,6 +437,18 @@ func (l *useLookup) apply(c *config.CLIContext) {
 	for _, d := range l.dropped {
 		c.DropKnownProject(d[0], d[1])
 	}
+	for _, d := range l.droppedUnlinked {
+		kept := c.Projects[:0]
+		for _, p := range c.Projects {
+			if p.Hub != d[0] || p.ID != d[1] || p.Source == config.KnownProjectSourceLink {
+				kept = append(kept, p)
+			}
+		}
+		c.Projects = kept
+		if len(c.Projects) == 0 {
+			c.Projects = nil
+		}
+	}
 	names := make([]string, 0, len(l.found))
 	for name := range l.found {
 		names = append(names, name)
@@ -444,7 +463,7 @@ func (l *useLookup) apply(c *config.CLIContext) {
 
 // learned reports whether apply has anything to write.
 func (l *useLookup) learned() bool {
-	return len(l.dropped) > 0 || len(l.found) > 0
+	return len(l.dropped) > 0 || len(l.droppedUnlinked) > 0 || len(l.found) > 0
 }
 
 // saveLearned writes what the lookup learned when no project is selected.
