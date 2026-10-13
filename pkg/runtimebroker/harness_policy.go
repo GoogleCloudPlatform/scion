@@ -261,6 +261,12 @@ func (s *Server) lookupHarnessConfigDirForPolicy(req CreateAgentRequest, hydrate
 		if name == "" {
 			name = hcDir.Name
 		}
+		// Logged here, once per dispatch; the later resolves of the same
+		// hydrated copy stay silent (ptone/scion#4975).
+		for _, w := range hcDir.Warnings {
+			s.agentLifecycleLog.Warn("Hydrated harness-config loaded with warning",
+				"harness_config", name, "warning", w)
+		}
 		return name, []config.HarnessConfigEntry{hcDir.Config}, hcDir, true, nil
 	}
 	if name == "" {

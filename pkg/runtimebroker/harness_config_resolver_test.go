@@ -212,3 +212,30 @@ func TestHydrateHarnessConfig_NoResolverWarns(t *testing.T) {
 		t.Errorf("expected no-resolver WARN, got log: %s", out)
 	}
 }
+
+// TestHarnessPolicy_HydratedUnknownTopLevelKeyWarns covers ptone/scion#4975 on
+// the broker: a hydrated bundle whose config.yaml has an unknown top-level
+// key still resolves, and the policy preflight logs the warning once.
+func TestHarnessPolicy_HydratedUnknownTopLevelKeyWarns(t *testing.T) {
+	srv, _, _ := dispatchTestEnv(t, false)
+	var logBuf bytes.Buffer
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(&logBuf, nil))
+	hydratedDir := filepath.Join(t.TempDir(), "hc")
+	writeHarnessConfigDirAt(t, hydratedDir, "harness: claude\nimage: scion-claude:test\nfuture_block:\n  enabled: true\n")
+
+	req := CreateAgentRequest{Config: &CreateAgentConfig{HarnessConfig: "hc"}}
+	name, entries, hcDir, ok, err := srv.lookupHarnessConfigDirForPolicy(req, "", hydratedDir)
+	if err != nil || !ok || name != "hc" || len(entries) != 1 || hcDir == nil {
+		t.Fatalf("lookup failed: name=%q ok=%v entries=%d err=%v", name, ok, len(entries), err)
+	}
+	if entries[0].Image != "scion-claude:test" {
+		t.Errorf("image = %q, want scion-claude:test", entries[0].Image)
+	}
+	logs := logBuf.String()
+	if got := strings.Count(logs, "Hydrated harness-config loaded with warning"); got != 1 {
+		t.Fatalf("expected one warning log line, got %d:\n%s", got, logs)
+	}
+	if !strings.Contains(logs, "future_block") {
+		t.Errorf("warning log does not name the key:\n%s", logs)
+	}
+}
