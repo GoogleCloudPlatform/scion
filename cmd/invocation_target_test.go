@@ -239,10 +239,6 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:  []string{"broker", "register"},
 		},
 		{
-			name: "hub shadow ignores the context",
-			cmd:  []string{"hub", "shadow"},
-		},
-		{
 			name: "hub auth login sees the context hub",
 			cmd:  []string{"hub", "auth", "login"},
 			want: hubOnly,
@@ -265,6 +261,11 @@ func TestResolveInvocationTarget(t *testing.T) {
 		{
 			name: "ssh-config gets the hub and the project",
 			cmd:  []string{"ssh-config"},
+			want: filled,
+		},
+		{
+			name: "vscode gets the hub and the project",
+			cmd:  []string{"vscode"},
 			want: filled,
 		},
 		{

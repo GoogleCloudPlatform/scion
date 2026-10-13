@@ -97,6 +97,24 @@ func init() {
 // Explicitly accepted: the timeout bounds the worst case per-sandbox,
 // but aggregate behavior under concurrency is unverified.
 func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id string, obs sandboxObserved) error {
+	// Every result except a delete that could not start or was cancelled
+	// keeps today's behaviour: the entry is removed and nil returned,
+	// whatever the classification.
+	if _, _, abort := r.runDeleteWithTimeout(ctx, id); abort != nil {
+		return abort
+	}
+
+	// Remove from state store (compare-and-set against obs).
+	r.removeAfterDelete(id, obs)
+	return nil
+}
+
+// runDeleteWithTimeout runs `sandbox delete --force id` with the hang
+// workaround and returns its classification and the CLI's exec error; it
+// changes no state. abort is non-nil, and result failed, when the delete
+// could not start or ctx ended first: deleteWithTimeout then returns
+// abort without removing the entry.
+func (r *CloudRunSandboxRuntime) runDeleteWithTimeout(ctx context.Context, id string) (result sandboxDeleteResult, cmdErr error, abort error) {
 	timeout := r.deleteTimeout
 	if timeout == 0 {
 		timeout = DefaultDeleteTimeout
@@ -108,7 +126,7 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// Capture output in an unlinked file, never a pipe: orphaned runsc
 	// processes holding a pipe's write end would block cmd.Wait.
-	outFile := newSandboxDeleteOutput()
+	outFile := newSandboxCommandOutput("delete")
 	if outFile != nil {
 		defer func() { _ = outFile.Close() }()
 		cmd.Stdout = outFile
@@ -116,21 +134,20 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 	}
 
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("cloudrun-sandbox: failed to start delete --force: %w", err)
+		err = fmt.Errorf("cloudrun-sandbox: failed to start delete --force: %w", err)
+		return sandboxDeleteFailed, err, err
 	}
 
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 
-	// Every result except cancellation keeps today's behaviour: the entry
-	// is removed and nil returned, whatever the classification.
 	select {
 	case err := <-done:
-		out := readSandboxDeleteOutput(outFile)
+		out := readSandboxCommandOutput(outFile)
 		result := classifySandboxDelete(ctx, out, err, false)
 		if err != nil {
 			slog.Warn("sandbox delete --force returned with error",
-				"sandbox", id, "result", result.String(), "error", err, "output", sandboxDeleteOutputForLog(out))
+				"sandbox", id, "result", result.String(), "error", err, "output", sandboxCommandOutputForLog(out))
 		} else {
 			deleteWorkaroundFixDetected.Do(func() {
 				slog.Warn("sandbox delete --force returned normally -- "+
@@ -140,32 +157,30 @@ func (r *CloudRunSandboxRuntime) deleteWithTimeout(ctx context.Context, id strin
 			slog.Info("sandbox delete --force completed normally",
 				"sandbox", id)
 		}
+		return result, err, nil
 	case <-time.After(timeout):
 		killProcessGroup(cmd)
 		<-done // reap the zombie
-		out := readSandboxDeleteOutput(outFile)
+		out := readSandboxCommandOutput(outFile)
 		slog.Warn("sandbox delete --force timed out, treating as success",
 			"sandbox", id, "timeout", timeout,
 			"result", sandboxDeleteTimedOut.String(),
-			"output", sandboxDeleteOutputForLog(out), "defect", deleteDefectRef)
+			"output", sandboxCommandOutputForLog(out), "defect", deleteDefectRef)
 		// Only reap orphaned runsc processes when the timeout actually fired.
 		// If the delete completed normally, there is by definition no orphan.
 		// CRITICAL: when the platform bug is fixed, a working delete returns
 		// promptly and we must NOT SIGKILL a healthy in-flight operation.
 		reapOrphanedRunsc(id)
+		return sandboxDeleteTimedOut, nil, nil
 	case <-ctx.Done():
 		killProcessGroup(cmd)
 		err := <-done
-		out := readSandboxDeleteOutput(outFile)
+		out := readSandboxCommandOutput(outFile)
 		slog.Warn("sandbox delete --force cancelled",
 			"sandbox", id, "result", classifySandboxDelete(ctx, out, err, false).String(),
-			"error", err, "output", sandboxDeleteOutputForLog(out))
-		return ctx.Err()
+			"error", err, "output", sandboxCommandOutputForLog(out))
+		return sandboxDeleteFailed, err, ctx.Err()
 	}
-
-	// Remove from state store (compare-and-set against obs).
-	r.removeAfterDelete(id, obs)
-	return nil
 }
 
 // killProcessGroup sends SIGKILL to the entire process group of cmd.

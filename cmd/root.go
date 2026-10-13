@@ -200,6 +200,10 @@ return an error instead of blocking.`,
 					autoConfirm = true
 				}
 			}
+
+			if projectPath == "" {
+				printShadowNotice(cmd)
+			}
 		}
 
 		// Agent mode implies non-interactive: prompts that require stdin
@@ -340,6 +344,7 @@ func Execute() {
 var plainErrorCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh-config": true,
+	"vscode":     true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
