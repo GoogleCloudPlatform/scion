@@ -297,6 +297,9 @@ func (_u *RoleBindingUpdate) sqlSave(ctx context.Context) (_node int, err error)
 	if _u.mutation.MembershipKindCleared() {
 		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
 	}
+	if _u.mutation.SourceRuleIDCleared() {
+		_spec.ClearField(rolebinding.FieldSourceRuleID, field.TypeUUID)
+	}
 	if _u.mutation.RoleDefinitionCleared() {
 		edge := &sqlgraph.EdgeSpec{
 			Rel:     sqlgraph.M2O,
@@ -642,6 +645,9 @@ func (_u *RoleBindingUpdateOne) sqlSave(ctx context.Context) (_node *RoleBinding
 	}
 	if _u.mutation.MembershipKindCleared() {
 		_spec.ClearField(rolebinding.FieldMembershipKind, field.TypeString)
+	}
+	if _u.mutation.SourceRuleIDCleared() {
+		_spec.ClearField(rolebinding.FieldSourceRuleID, field.TypeUUID)
 	}
 	if _u.mutation.RoleDefinitionCleared() {
 		edge := &sqlgraph.EdgeSpec{

@@ -73,6 +73,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectcontributor"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectprestarthook"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectsyncstate"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorexclusion"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/projectvisitorrule"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/relayinstance"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/rolebinding"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/roledefinition"
@@ -169,6 +171,8 @@ const (
 	TypeProjectContributor            = "ProjectContributor"
 	TypeProjectPreStartHook           = "ProjectPreStartHook"
 	TypeProjectSyncState              = "ProjectSyncState"
+	TypeProjectVisitorExclusion       = "ProjectVisitorExclusion"
+	TypeProjectVisitorRule            = "ProjectVisitorRule"
 	TypeRelayInstance                 = "RelayInstance"
 	TypeRoleBinding                   = "RoleBinding"
 	TypeRoleDefinition                = "RoleDefinition"
@@ -66097,6 +66101,1238 @@ func (m *ProjectSyncStateMutation) ResetEdge(name string) error {
 	return fmt.Errorf("unknown ProjectSyncState edge %s", name)
 }
 
+// ProjectVisitorExclusionMutation represents an operation that mutates the ProjectVisitorExclusion nodes in the graph.
+type ProjectVisitorExclusionMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	rule_id       *uuid.UUID
+	user_id       *string
+	created_by    *string
+	created_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*ProjectVisitorExclusion, error)
+	predicates    []predicate.ProjectVisitorExclusion
+}
+
+var _ ent.Mutation = (*ProjectVisitorExclusionMutation)(nil)
+
+// projectvisitorexclusionOption allows management of the mutation configuration using functional options.
+type projectvisitorexclusionOption func(*ProjectVisitorExclusionMutation)
+
+// newProjectVisitorExclusionMutation creates new mutation for the ProjectVisitorExclusion entity.
+func newProjectVisitorExclusionMutation(c config, op Op, opts ...projectvisitorexclusionOption) *ProjectVisitorExclusionMutation {
+	m := &ProjectVisitorExclusionMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeProjectVisitorExclusion,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withProjectVisitorExclusionID sets the ID field of the mutation.
+func withProjectVisitorExclusionID(id uuid.UUID) projectvisitorexclusionOption {
+	return func(m *ProjectVisitorExclusionMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ProjectVisitorExclusion
+		)
+		m.oldValue = func(ctx context.Context) (*ProjectVisitorExclusion, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ProjectVisitorExclusion.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withProjectVisitorExclusion sets the old ProjectVisitorExclusion of the mutation.
+func withProjectVisitorExclusion(node *ProjectVisitorExclusion) projectvisitorexclusionOption {
+	return func(m *ProjectVisitorExclusionMutation) {
+		m.oldValue = func(context.Context) (*ProjectVisitorExclusion, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ProjectVisitorExclusionMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ProjectVisitorExclusionMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ProjectVisitorExclusion entities.
+func (m *ProjectVisitorExclusionMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ProjectVisitorExclusionMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ProjectVisitorExclusionMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ProjectVisitorExclusion.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetRuleID sets the "rule_id" field.
+func (m *ProjectVisitorExclusionMutation) SetRuleID(u uuid.UUID) {
+	m.rule_id = &u
+}
+
+// RuleID returns the value of the "rule_id" field in the mutation.
+func (m *ProjectVisitorExclusionMutation) RuleID() (r uuid.UUID, exists bool) {
+	v := m.rule_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldRuleID returns the old "rule_id" field's value of the ProjectVisitorExclusion entity.
+// If the ProjectVisitorExclusion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorExclusionMutation) OldRuleID(ctx context.Context) (v uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldRuleID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldRuleID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldRuleID: %w", err)
+	}
+	return oldValue.RuleID, nil
+}
+
+// ResetRuleID resets all changes to the "rule_id" field.
+func (m *ProjectVisitorExclusionMutation) ResetRuleID() {
+	m.rule_id = nil
+}
+
+// SetUserID sets the "user_id" field.
+func (m *ProjectVisitorExclusionMutation) SetUserID(s string) {
+	m.user_id = &s
+}
+
+// UserID returns the value of the "user_id" field in the mutation.
+func (m *ProjectVisitorExclusionMutation) UserID() (r string, exists bool) {
+	v := m.user_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldUserID returns the old "user_id" field's value of the ProjectVisitorExclusion entity.
+// If the ProjectVisitorExclusion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorExclusionMutation) OldUserID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldUserID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldUserID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldUserID: %w", err)
+	}
+	return oldValue.UserID, nil
+}
+
+// ResetUserID resets all changes to the "user_id" field.
+func (m *ProjectVisitorExclusionMutation) ResetUserID() {
+	m.user_id = nil
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *ProjectVisitorExclusionMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *ProjectVisitorExclusionMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the ProjectVisitorExclusion entity.
+// If the ProjectVisitorExclusion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorExclusionMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *ProjectVisitorExclusionMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[projectvisitorexclusion.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *ProjectVisitorExclusionMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[projectvisitorexclusion.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *ProjectVisitorExclusionMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, projectvisitorexclusion.FieldCreatedBy)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *ProjectVisitorExclusionMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *ProjectVisitorExclusionMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the ProjectVisitorExclusion entity.
+// If the ProjectVisitorExclusion object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorExclusionMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *ProjectVisitorExclusionMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the ProjectVisitorExclusionMutation builder.
+func (m *ProjectVisitorExclusionMutation) Where(ps ...predicate.ProjectVisitorExclusion) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ProjectVisitorExclusionMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ProjectVisitorExclusionMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ProjectVisitorExclusion, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ProjectVisitorExclusionMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ProjectVisitorExclusionMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ProjectVisitorExclusion).
+func (m *ProjectVisitorExclusionMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ProjectVisitorExclusionMutation) Fields() []string {
+	fields := make([]string, 0, 4)
+	if m.rule_id != nil {
+		fields = append(fields, projectvisitorexclusion.FieldRuleID)
+	}
+	if m.user_id != nil {
+		fields = append(fields, projectvisitorexclusion.FieldUserID)
+	}
+	if m.created_by != nil {
+		fields = append(fields, projectvisitorexclusion.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, projectvisitorexclusion.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ProjectVisitorExclusionMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case projectvisitorexclusion.FieldRuleID:
+		return m.RuleID()
+	case projectvisitorexclusion.FieldUserID:
+		return m.UserID()
+	case projectvisitorexclusion.FieldCreatedBy:
+		return m.CreatedBy()
+	case projectvisitorexclusion.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ProjectVisitorExclusionMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case projectvisitorexclusion.FieldRuleID:
+		return m.OldRuleID(ctx)
+	case projectvisitorexclusion.FieldUserID:
+		return m.OldUserID(ctx)
+	case projectvisitorexclusion.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case projectvisitorexclusion.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ProjectVisitorExclusion field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectVisitorExclusionMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case projectvisitorexclusion.FieldRuleID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetRuleID(v)
+		return nil
+	case projectvisitorexclusion.FieldUserID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetUserID(v)
+		return nil
+	case projectvisitorexclusion.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case projectvisitorexclusion.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorExclusion field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ProjectVisitorExclusionMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ProjectVisitorExclusionMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectVisitorExclusionMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown ProjectVisitorExclusion numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ProjectVisitorExclusionMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(projectvisitorexclusion.FieldCreatedBy) {
+		fields = append(fields, projectvisitorexclusion.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ProjectVisitorExclusionMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ProjectVisitorExclusionMutation) ClearField(name string) error {
+	switch name {
+	case projectvisitorexclusion.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorExclusion nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ProjectVisitorExclusionMutation) ResetField(name string) error {
+	switch name {
+	case projectvisitorexclusion.FieldRuleID:
+		m.ResetRuleID()
+		return nil
+	case projectvisitorexclusion.FieldUserID:
+		m.ResetUserID()
+		return nil
+	case projectvisitorexclusion.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case projectvisitorexclusion.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorExclusion field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ProjectVisitorExclusionMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ProjectVisitorExclusionMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ProjectVisitorExclusionMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ProjectVisitorExclusionMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ProjectVisitorExclusionMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ProjectVisitorExclusionMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ProjectVisitorExclusionMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ProjectVisitorExclusion unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ProjectVisitorExclusionMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ProjectVisitorExclusion edge %s", name)
+}
+
+// ProjectVisitorRuleMutation represents an operation that mutates the ProjectVisitorRule nodes in the graph.
+type ProjectVisitorRuleMutation struct {
+	config
+	op            Op
+	typ           string
+	id            *uuid.UUID
+	project_id    *string
+	issuer        *string
+	domain        *string
+	not_before    *time.Time
+	expires_at    *time.Time
+	created_by    *string
+	created_at    *time.Time
+	clearedFields map[string]struct{}
+	done          bool
+	oldValue      func(context.Context) (*ProjectVisitorRule, error)
+	predicates    []predicate.ProjectVisitorRule
+}
+
+var _ ent.Mutation = (*ProjectVisitorRuleMutation)(nil)
+
+// projectvisitorruleOption allows management of the mutation configuration using functional options.
+type projectvisitorruleOption func(*ProjectVisitorRuleMutation)
+
+// newProjectVisitorRuleMutation creates new mutation for the ProjectVisitorRule entity.
+func newProjectVisitorRuleMutation(c config, op Op, opts ...projectvisitorruleOption) *ProjectVisitorRuleMutation {
+	m := &ProjectVisitorRuleMutation{
+		config:        c,
+		op:            op,
+		typ:           TypeProjectVisitorRule,
+		clearedFields: make(map[string]struct{}),
+	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
+}
+
+// withProjectVisitorRuleID sets the ID field of the mutation.
+func withProjectVisitorRuleID(id uuid.UUID) projectvisitorruleOption {
+	return func(m *ProjectVisitorRuleMutation) {
+		var (
+			err   error
+			once  sync.Once
+			value *ProjectVisitorRule
+		)
+		m.oldValue = func(ctx context.Context) (*ProjectVisitorRule, error) {
+			once.Do(func() {
+				if m.done {
+					err = errors.New("querying old values post mutation is not allowed")
+				} else {
+					value, err = m.Client().ProjectVisitorRule.Get(ctx, id)
+				}
+			})
+			return value, err
+		}
+		m.id = &id
+	}
+}
+
+// withProjectVisitorRule sets the old ProjectVisitorRule of the mutation.
+func withProjectVisitorRule(node *ProjectVisitorRule) projectvisitorruleOption {
+	return func(m *ProjectVisitorRuleMutation) {
+		m.oldValue = func(context.Context) (*ProjectVisitorRule, error) {
+			return node, nil
+		}
+		m.id = &node.ID
+	}
+}
+
+// Client returns a new `ent.Client` from the mutation. If the mutation was
+// executed in a transaction (ent.Tx), a transactional client is returned.
+func (m ProjectVisitorRuleMutation) Client() *Client {
+	client := &Client{config: m.config}
+	client.init()
+	return client
+}
+
+// Tx returns an `ent.Tx` for mutations that were executed in transactions;
+// it returns an error otherwise.
+func (m ProjectVisitorRuleMutation) Tx() (*Tx, error) {
+	if _, ok := m.driver.(*txDriver); !ok {
+		return nil, errors.New("ent: mutation is not running in a transaction")
+	}
+	tx := &Tx{config: m.config}
+	tx.init()
+	return tx, nil
+}
+
+// SetID sets the value of the id field. Note that this
+// operation is only accepted on creation of ProjectVisitorRule entities.
+func (m *ProjectVisitorRuleMutation) SetID(id uuid.UUID) {
+	m.id = &id
+}
+
+// ID returns the ID value in the mutation. Note that the ID is only available
+// if it was provided to the builder or after it was returned from the database.
+func (m *ProjectVisitorRuleMutation) ID() (id uuid.UUID, exists bool) {
+	if m.id == nil {
+		return
+	}
+	return *m.id, true
+}
+
+// IDs queries the database and returns the entity ids that match the mutation's predicate.
+// That means, if the mutation is applied within a transaction with an isolation level such
+// as sql.LevelSerializable, the returned ids match the ids of the rows that will be updated
+// or updated by the mutation.
+func (m *ProjectVisitorRuleMutation) IDs(ctx context.Context) ([]uuid.UUID, error) {
+	switch {
+	case m.op.Is(OpUpdateOne | OpDeleteOne):
+		id, exists := m.ID()
+		if exists {
+			return []uuid.UUID{id}, nil
+		}
+		fallthrough
+	case m.op.Is(OpUpdate | OpDelete):
+		return m.Client().ProjectVisitorRule.Query().Where(m.predicates...).IDs(ctx)
+	default:
+		return nil, fmt.Errorf("IDs is not allowed on %s operations", m.op)
+	}
+}
+
+// SetProjectID sets the "project_id" field.
+func (m *ProjectVisitorRuleMutation) SetProjectID(s string) {
+	m.project_id = &s
+}
+
+// ProjectID returns the value of the "project_id" field in the mutation.
+func (m *ProjectVisitorRuleMutation) ProjectID() (r string, exists bool) {
+	v := m.project_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldProjectID returns the old "project_id" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldProjectID(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldProjectID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldProjectID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldProjectID: %w", err)
+	}
+	return oldValue.ProjectID, nil
+}
+
+// ResetProjectID resets all changes to the "project_id" field.
+func (m *ProjectVisitorRuleMutation) ResetProjectID() {
+	m.project_id = nil
+}
+
+// SetIssuer sets the "issuer" field.
+func (m *ProjectVisitorRuleMutation) SetIssuer(s string) {
+	m.issuer = &s
+}
+
+// Issuer returns the value of the "issuer" field in the mutation.
+func (m *ProjectVisitorRuleMutation) Issuer() (r string, exists bool) {
+	v := m.issuer
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldIssuer returns the old "issuer" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldIssuer(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldIssuer is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldIssuer requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldIssuer: %w", err)
+	}
+	return oldValue.Issuer, nil
+}
+
+// ResetIssuer resets all changes to the "issuer" field.
+func (m *ProjectVisitorRuleMutation) ResetIssuer() {
+	m.issuer = nil
+}
+
+// SetDomain sets the "domain" field.
+func (m *ProjectVisitorRuleMutation) SetDomain(s string) {
+	m.domain = &s
+}
+
+// Domain returns the value of the "domain" field in the mutation.
+func (m *ProjectVisitorRuleMutation) Domain() (r string, exists bool) {
+	v := m.domain
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDomain returns the old "domain" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldDomain(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDomain is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDomain requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDomain: %w", err)
+	}
+	return oldValue.Domain, nil
+}
+
+// ResetDomain resets all changes to the "domain" field.
+func (m *ProjectVisitorRuleMutation) ResetDomain() {
+	m.domain = nil
+}
+
+// SetNotBefore sets the "not_before" field.
+func (m *ProjectVisitorRuleMutation) SetNotBefore(t time.Time) {
+	m.not_before = &t
+}
+
+// NotBefore returns the value of the "not_before" field in the mutation.
+func (m *ProjectVisitorRuleMutation) NotBefore() (r time.Time, exists bool) {
+	v := m.not_before
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldNotBefore returns the old "not_before" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldNotBefore(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldNotBefore is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldNotBefore requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldNotBefore: %w", err)
+	}
+	return oldValue.NotBefore, nil
+}
+
+// ClearNotBefore clears the value of the "not_before" field.
+func (m *ProjectVisitorRuleMutation) ClearNotBefore() {
+	m.not_before = nil
+	m.clearedFields[projectvisitorrule.FieldNotBefore] = struct{}{}
+}
+
+// NotBeforeCleared returns if the "not_before" field was cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) NotBeforeCleared() bool {
+	_, ok := m.clearedFields[projectvisitorrule.FieldNotBefore]
+	return ok
+}
+
+// ResetNotBefore resets all changes to the "not_before" field.
+func (m *ProjectVisitorRuleMutation) ResetNotBefore() {
+	m.not_before = nil
+	delete(m.clearedFields, projectvisitorrule.FieldNotBefore)
+}
+
+// SetExpiresAt sets the "expires_at" field.
+func (m *ProjectVisitorRuleMutation) SetExpiresAt(t time.Time) {
+	m.expires_at = &t
+}
+
+// ExpiresAt returns the value of the "expires_at" field in the mutation.
+func (m *ProjectVisitorRuleMutation) ExpiresAt() (r time.Time, exists bool) {
+	v := m.expires_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldExpiresAt returns the old "expires_at" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldExpiresAt(ctx context.Context) (v *time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldExpiresAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldExpiresAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldExpiresAt: %w", err)
+	}
+	return oldValue.ExpiresAt, nil
+}
+
+// ClearExpiresAt clears the value of the "expires_at" field.
+func (m *ProjectVisitorRuleMutation) ClearExpiresAt() {
+	m.expires_at = nil
+	m.clearedFields[projectvisitorrule.FieldExpiresAt] = struct{}{}
+}
+
+// ExpiresAtCleared returns if the "expires_at" field was cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) ExpiresAtCleared() bool {
+	_, ok := m.clearedFields[projectvisitorrule.FieldExpiresAt]
+	return ok
+}
+
+// ResetExpiresAt resets all changes to the "expires_at" field.
+func (m *ProjectVisitorRuleMutation) ResetExpiresAt() {
+	m.expires_at = nil
+	delete(m.clearedFields, projectvisitorrule.FieldExpiresAt)
+}
+
+// SetCreatedBy sets the "created_by" field.
+func (m *ProjectVisitorRuleMutation) SetCreatedBy(s string) {
+	m.created_by = &s
+}
+
+// CreatedBy returns the value of the "created_by" field in the mutation.
+func (m *ProjectVisitorRuleMutation) CreatedBy() (r string, exists bool) {
+	v := m.created_by
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedBy returns the old "created_by" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldCreatedBy(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedBy is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedBy requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedBy: %w", err)
+	}
+	return oldValue.CreatedBy, nil
+}
+
+// ClearCreatedBy clears the value of the "created_by" field.
+func (m *ProjectVisitorRuleMutation) ClearCreatedBy() {
+	m.created_by = nil
+	m.clearedFields[projectvisitorrule.FieldCreatedBy] = struct{}{}
+}
+
+// CreatedByCleared returns if the "created_by" field was cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) CreatedByCleared() bool {
+	_, ok := m.clearedFields[projectvisitorrule.FieldCreatedBy]
+	return ok
+}
+
+// ResetCreatedBy resets all changes to the "created_by" field.
+func (m *ProjectVisitorRuleMutation) ResetCreatedBy() {
+	m.created_by = nil
+	delete(m.clearedFields, projectvisitorrule.FieldCreatedBy)
+}
+
+// SetCreatedAt sets the "created_at" field.
+func (m *ProjectVisitorRuleMutation) SetCreatedAt(t time.Time) {
+	m.created_at = &t
+}
+
+// CreatedAt returns the value of the "created_at" field in the mutation.
+func (m *ProjectVisitorRuleMutation) CreatedAt() (r time.Time, exists bool) {
+	v := m.created_at
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldCreatedAt returns the old "created_at" field's value of the ProjectVisitorRule entity.
+// If the ProjectVisitorRule object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *ProjectVisitorRuleMutation) OldCreatedAt(ctx context.Context) (v time.Time, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldCreatedAt is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldCreatedAt requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldCreatedAt: %w", err)
+	}
+	return oldValue.CreatedAt, nil
+}
+
+// ResetCreatedAt resets all changes to the "created_at" field.
+func (m *ProjectVisitorRuleMutation) ResetCreatedAt() {
+	m.created_at = nil
+}
+
+// Where appends a list predicates to the ProjectVisitorRuleMutation builder.
+func (m *ProjectVisitorRuleMutation) Where(ps ...predicate.ProjectVisitorRule) {
+	m.predicates = append(m.predicates, ps...)
+}
+
+// WhereP appends storage-level predicates to the ProjectVisitorRuleMutation builder. Using this method,
+// users can use type-assertion to append predicates that do not depend on any generated package.
+func (m *ProjectVisitorRuleMutation) WhereP(ps ...func(*sql.Selector)) {
+	p := make([]predicate.ProjectVisitorRule, len(ps))
+	for i := range ps {
+		p[i] = ps[i]
+	}
+	m.Where(p...)
+}
+
+// Op returns the operation name.
+func (m *ProjectVisitorRuleMutation) Op() Op {
+	return m.op
+}
+
+// SetOp allows setting the mutation operation.
+func (m *ProjectVisitorRuleMutation) SetOp(op Op) {
+	m.op = op
+}
+
+// Type returns the node type of this mutation (ProjectVisitorRule).
+func (m *ProjectVisitorRuleMutation) Type() string {
+	return m.typ
+}
+
+// Fields returns all fields that were changed during this mutation. Note that in
+// order to get all numeric fields that were incremented/decremented, call
+// AddedFields().
+func (m *ProjectVisitorRuleMutation) Fields() []string {
+	fields := make([]string, 0, 7)
+	if m.project_id != nil {
+		fields = append(fields, projectvisitorrule.FieldProjectID)
+	}
+	if m.issuer != nil {
+		fields = append(fields, projectvisitorrule.FieldIssuer)
+	}
+	if m.domain != nil {
+		fields = append(fields, projectvisitorrule.FieldDomain)
+	}
+	if m.not_before != nil {
+		fields = append(fields, projectvisitorrule.FieldNotBefore)
+	}
+	if m.expires_at != nil {
+		fields = append(fields, projectvisitorrule.FieldExpiresAt)
+	}
+	if m.created_by != nil {
+		fields = append(fields, projectvisitorrule.FieldCreatedBy)
+	}
+	if m.created_at != nil {
+		fields = append(fields, projectvisitorrule.FieldCreatedAt)
+	}
+	return fields
+}
+
+// Field returns the value of a field with the given name. The second boolean
+// return value indicates that this field was not set, or was not defined in the
+// schema.
+func (m *ProjectVisitorRuleMutation) Field(name string) (ent.Value, bool) {
+	switch name {
+	case projectvisitorrule.FieldProjectID:
+		return m.ProjectID()
+	case projectvisitorrule.FieldIssuer:
+		return m.Issuer()
+	case projectvisitorrule.FieldDomain:
+		return m.Domain()
+	case projectvisitorrule.FieldNotBefore:
+		return m.NotBefore()
+	case projectvisitorrule.FieldExpiresAt:
+		return m.ExpiresAt()
+	case projectvisitorrule.FieldCreatedBy:
+		return m.CreatedBy()
+	case projectvisitorrule.FieldCreatedAt:
+		return m.CreatedAt()
+	}
+	return nil, false
+}
+
+// OldField returns the old value of the field from the database. An error is
+// returned if the mutation operation is not UpdateOne, or the query to the
+// database failed.
+func (m *ProjectVisitorRuleMutation) OldField(ctx context.Context, name string) (ent.Value, error) {
+	switch name {
+	case projectvisitorrule.FieldProjectID:
+		return m.OldProjectID(ctx)
+	case projectvisitorrule.FieldIssuer:
+		return m.OldIssuer(ctx)
+	case projectvisitorrule.FieldDomain:
+		return m.OldDomain(ctx)
+	case projectvisitorrule.FieldNotBefore:
+		return m.OldNotBefore(ctx)
+	case projectvisitorrule.FieldExpiresAt:
+		return m.OldExpiresAt(ctx)
+	case projectvisitorrule.FieldCreatedBy:
+		return m.OldCreatedBy(ctx)
+	case projectvisitorrule.FieldCreatedAt:
+		return m.OldCreatedAt(ctx)
+	}
+	return nil, fmt.Errorf("unknown ProjectVisitorRule field %s", name)
+}
+
+// SetField sets the value of a field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectVisitorRuleMutation) SetField(name string, value ent.Value) error {
+	switch name {
+	case projectvisitorrule.FieldProjectID:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetProjectID(v)
+		return nil
+	case projectvisitorrule.FieldIssuer:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetIssuer(v)
+		return nil
+	case projectvisitorrule.FieldDomain:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDomain(v)
+		return nil
+	case projectvisitorrule.FieldNotBefore:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetNotBefore(v)
+		return nil
+	case projectvisitorrule.FieldExpiresAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetExpiresAt(v)
+		return nil
+	case projectvisitorrule.FieldCreatedBy:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedBy(v)
+		return nil
+	case projectvisitorrule.FieldCreatedAt:
+		v, ok := value.(time.Time)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetCreatedAt(v)
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorRule field %s", name)
+}
+
+// AddedFields returns all numeric fields that were incremented/decremented during
+// this mutation.
+func (m *ProjectVisitorRuleMutation) AddedFields() []string {
+	return nil
+}
+
+// AddedField returns the numeric value that was incremented/decremented on a field
+// with the given name. The second boolean return value indicates that this field
+// was not set, or was not defined in the schema.
+func (m *ProjectVisitorRuleMutation) AddedField(name string) (ent.Value, bool) {
+	return nil, false
+}
+
+// AddField adds the value to the field with the given name. It returns an error if
+// the field is not defined in the schema, or if the type mismatched the field
+// type.
+func (m *ProjectVisitorRuleMutation) AddField(name string, value ent.Value) error {
+	switch name {
+	}
+	return fmt.Errorf("unknown ProjectVisitorRule numeric field %s", name)
+}
+
+// ClearedFields returns all nullable fields that were cleared during this
+// mutation.
+func (m *ProjectVisitorRuleMutation) ClearedFields() []string {
+	var fields []string
+	if m.FieldCleared(projectvisitorrule.FieldNotBefore) {
+		fields = append(fields, projectvisitorrule.FieldNotBefore)
+	}
+	if m.FieldCleared(projectvisitorrule.FieldExpiresAt) {
+		fields = append(fields, projectvisitorrule.FieldExpiresAt)
+	}
+	if m.FieldCleared(projectvisitorrule.FieldCreatedBy) {
+		fields = append(fields, projectvisitorrule.FieldCreatedBy)
+	}
+	return fields
+}
+
+// FieldCleared returns a boolean indicating if a field with the given name was
+// cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) FieldCleared(name string) bool {
+	_, ok := m.clearedFields[name]
+	return ok
+}
+
+// ClearField clears the value of the field with the given name. It returns an
+// error if the field is not defined in the schema.
+func (m *ProjectVisitorRuleMutation) ClearField(name string) error {
+	switch name {
+	case projectvisitorrule.FieldNotBefore:
+		m.ClearNotBefore()
+		return nil
+	case projectvisitorrule.FieldExpiresAt:
+		m.ClearExpiresAt()
+		return nil
+	case projectvisitorrule.FieldCreatedBy:
+		m.ClearCreatedBy()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorRule nullable field %s", name)
+}
+
+// ResetField resets all changes in the mutation for the field with the given name.
+// It returns an error if the field is not defined in the schema.
+func (m *ProjectVisitorRuleMutation) ResetField(name string) error {
+	switch name {
+	case projectvisitorrule.FieldProjectID:
+		m.ResetProjectID()
+		return nil
+	case projectvisitorrule.FieldIssuer:
+		m.ResetIssuer()
+		return nil
+	case projectvisitorrule.FieldDomain:
+		m.ResetDomain()
+		return nil
+	case projectvisitorrule.FieldNotBefore:
+		m.ResetNotBefore()
+		return nil
+	case projectvisitorrule.FieldExpiresAt:
+		m.ResetExpiresAt()
+		return nil
+	case projectvisitorrule.FieldCreatedBy:
+		m.ResetCreatedBy()
+		return nil
+	case projectvisitorrule.FieldCreatedAt:
+		m.ResetCreatedAt()
+		return nil
+	}
+	return fmt.Errorf("unknown ProjectVisitorRule field %s", name)
+}
+
+// AddedEdges returns all edge names that were set/added in this mutation.
+func (m *ProjectVisitorRuleMutation) AddedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// AddedIDs returns all IDs (to other nodes) that were added for the given edge
+// name in this mutation.
+func (m *ProjectVisitorRuleMutation) AddedIDs(name string) []ent.Value {
+	return nil
+}
+
+// RemovedEdges returns all edge names that were removed in this mutation.
+func (m *ProjectVisitorRuleMutation) RemovedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// RemovedIDs returns all IDs (to other nodes) that were removed for the edge with
+// the given name in this mutation.
+func (m *ProjectVisitorRuleMutation) RemovedIDs(name string) []ent.Value {
+	return nil
+}
+
+// ClearedEdges returns all edge names that were cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) ClearedEdges() []string {
+	edges := make([]string, 0, 0)
+	return edges
+}
+
+// EdgeCleared returns a boolean which indicates if the edge with the given name
+// was cleared in this mutation.
+func (m *ProjectVisitorRuleMutation) EdgeCleared(name string) bool {
+	return false
+}
+
+// ClearEdge clears the value of the edge with the given name. It returns an error
+// if that edge is not defined in the schema.
+func (m *ProjectVisitorRuleMutation) ClearEdge(name string) error {
+	return fmt.Errorf("unknown ProjectVisitorRule unique edge %s", name)
+}
+
+// ResetEdge resets all changes to the edge with the given name in this mutation.
+// It returns an error if the edge is not defined in the schema.
+func (m *ProjectVisitorRuleMutation) ResetEdge(name string) error {
+	return fmt.Errorf("unknown ProjectVisitorRule edge %s", name)
+}
+
 // RelayInstanceMutation represents an operation that mutates the RelayInstance nodes in the graph.
 type RelayInstanceMutation struct {
 	config
@@ -66865,6 +68101,7 @@ type RoleBindingMutation struct {
 	created_by             *string
 	created                *time.Time
 	membership_kind        *string
+	source_rule_id         *uuid.UUID
 	clearedFields          map[string]struct{}
 	role_definition        *uuid.UUID
 	clearedrole_definition bool
@@ -67402,6 +68639,55 @@ func (m *RoleBindingMutation) ResetMembershipKind() {
 	delete(m.clearedFields, rolebinding.FieldMembershipKind)
 }
 
+// SetSourceRuleID sets the "source_rule_id" field.
+func (m *RoleBindingMutation) SetSourceRuleID(u uuid.UUID) {
+	m.source_rule_id = &u
+}
+
+// SourceRuleID returns the value of the "source_rule_id" field in the mutation.
+func (m *RoleBindingMutation) SourceRuleID() (r uuid.UUID, exists bool) {
+	v := m.source_rule_id
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldSourceRuleID returns the old "source_rule_id" field's value of the RoleBinding entity.
+// If the RoleBinding object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleBindingMutation) OldSourceRuleID(ctx context.Context) (v *uuid.UUID, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldSourceRuleID is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldSourceRuleID requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldSourceRuleID: %w", err)
+	}
+	return oldValue.SourceRuleID, nil
+}
+
+// ClearSourceRuleID clears the value of the "source_rule_id" field.
+func (m *RoleBindingMutation) ClearSourceRuleID() {
+	m.source_rule_id = nil
+	m.clearedFields[rolebinding.FieldSourceRuleID] = struct{}{}
+}
+
+// SourceRuleIDCleared returns if the "source_rule_id" field was cleared in this mutation.
+func (m *RoleBindingMutation) SourceRuleIDCleared() bool {
+	_, ok := m.clearedFields[rolebinding.FieldSourceRuleID]
+	return ok
+}
+
+// ResetSourceRuleID resets all changes to the "source_rule_id" field.
+func (m *RoleBindingMutation) ResetSourceRuleID() {
+	m.source_rule_id = nil
+	delete(m.clearedFields, rolebinding.FieldSourceRuleID)
+}
+
 // ClearRoleDefinition clears the "role_definition" edge to the RoleDefinition entity.
 func (m *RoleBindingMutation) ClearRoleDefinition() {
 	m.clearedrole_definition = true
@@ -67463,7 +68749,7 @@ func (m *RoleBindingMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleBindingMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 11)
 	if m.role_definition != nil {
 		fields = append(fields, rolebinding.FieldRoleDefinitionID)
 	}
@@ -67494,6 +68780,9 @@ func (m *RoleBindingMutation) Fields() []string {
 	if m.membership_kind != nil {
 		fields = append(fields, rolebinding.FieldMembershipKind)
 	}
+	if m.source_rule_id != nil {
+		fields = append(fields, rolebinding.FieldSourceRuleID)
+	}
 	return fields
 }
 
@@ -67522,6 +68811,8 @@ func (m *RoleBindingMutation) Field(name string) (ent.Value, bool) {
 		return m.Created()
 	case rolebinding.FieldMembershipKind:
 		return m.MembershipKind()
+	case rolebinding.FieldSourceRuleID:
+		return m.SourceRuleID()
 	}
 	return nil, false
 }
@@ -67551,6 +68842,8 @@ func (m *RoleBindingMutation) OldField(ctx context.Context, name string) (ent.Va
 		return m.OldCreated(ctx)
 	case rolebinding.FieldMembershipKind:
 		return m.OldMembershipKind(ctx)
+	case rolebinding.FieldSourceRuleID:
+		return m.OldSourceRuleID(ctx)
 	}
 	return nil, fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -67630,6 +68923,13 @@ func (m *RoleBindingMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetMembershipKind(v)
 		return nil
+	case rolebinding.FieldSourceRuleID:
+		v, ok := value.(uuid.UUID)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetSourceRuleID(v)
+		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)
 }
@@ -67675,6 +68975,9 @@ func (m *RoleBindingMutation) ClearedFields() []string {
 	if m.FieldCleared(rolebinding.FieldMembershipKind) {
 		fields = append(fields, rolebinding.FieldMembershipKind)
 	}
+	if m.FieldCleared(rolebinding.FieldSourceRuleID) {
+		fields = append(fields, rolebinding.FieldSourceRuleID)
+	}
 	return fields
 }
 
@@ -67703,6 +69006,9 @@ func (m *RoleBindingMutation) ClearField(name string) error {
 		return nil
 	case rolebinding.FieldMembershipKind:
 		m.ClearMembershipKind()
+		return nil
+	case rolebinding.FieldSourceRuleID:
+		m.ClearSourceRuleID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding nullable field %s", name)
@@ -67741,6 +69047,9 @@ func (m *RoleBindingMutation) ResetField(name string) error {
 		return nil
 	case rolebinding.FieldMembershipKind:
 		m.ResetMembershipKind()
+		return nil
+	case rolebinding.FieldSourceRuleID:
+		m.ResetSourceRuleID()
 		return nil
 	}
 	return fmt.Errorf("unknown RoleBinding field %s", name)
