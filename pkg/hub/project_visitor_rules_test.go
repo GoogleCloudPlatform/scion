@@ -395,7 +395,7 @@ func TestFederatedVisitor_RuleAddedLaterAppliesOnNextRequest(t *testing.T) {
 	require.NotNil(t, v)
 
 	otherProject := tid(t.Name() + "-other")
-	createRS1Project(t, f.st, otherProject, f.owner.ID)
+	createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
 	rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
 	require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
 
@@ -417,7 +417,7 @@ func TestFederatedVisitor_FirstContactAppliesRules(t *testing.T) {
 	granted := f.grantOK(t, grantTestOtherIssuer, "nia@any.example")
 	sameProject := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
 	otherProject := tid(t.Name() + "-other")
-	createRS1Project(t, f.st, otherProject, f.owner.ID)
+	createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
 	rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
 	require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
 
@@ -737,7 +737,7 @@ func TestFederatedVisitor_RuleChangedAfterReadBindsCurrentRule(t *testing.T) {
 		token := f.token(t, grantTestOtherIssuer, "sub-cy", "cy@any.example", boolPtr(true))
 		require.NotNil(t, f.visitorThrough(t, token))
 		otherProject := tid(t.Name() + "-other")
-		createRS1Project(t, f.st, otherProject, f.owner.ID)
+		createRS1Project(t, f.st, otherProject, tid(t.Name()+"-other-owner"))
 		rule := &store.ProjectVisitorRule{ProjectID: otherProject, Issuer: grantTestOtherIssuer, Domain: "any.example", CreatedBy: f.owner.ID}
 		require.NoError(t, f.st.CreateProjectVisitorRule(ctx, rule))
 		read, err := f.st.ListActiveProjectVisitorRules(ctx, grantTestOtherIssuer, "any.example", time.Now())
