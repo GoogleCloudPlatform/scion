@@ -307,7 +307,7 @@ func (vs *VersionedSettings) ResolveSharedDirStorage(profileName string) (cfg *V
 	if vs.Server != nil {
 		global = vs.Server.SharedDirStorage
 	}
-	var backend, source string
+	var backend string
 	if vs.flat != nil {
 		// Flat instance: the instance's runtime_target takes the profile
 		// and runtime-entry rung; unset falls through to the global block.
