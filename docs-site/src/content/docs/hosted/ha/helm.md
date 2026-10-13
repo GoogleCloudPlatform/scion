@@ -493,10 +493,13 @@ to the Terraform `helm_release` resource. The previous pair stays in place when:
   the upgrade as successful. A refused delete fails a Helm 4 upgrade.
 
 If the upgrade fails while creating or updating objects, it stops before the
-delete step and the previous pair stays. If an `--atomic` upgrade is rolled
-back, the rollback restores the previous pair. In both cases, and after a Helm 4
-upgrade that failed on the delete, the next successful upgrade deletes the
-previous pair.
+delete step and the previous pair stays. If the upgrade fails later, while
+waiting for readiness (for example on the `--wait` timeout), the delete has
+already run: the previous pair is gone even though the upgrade reports failure.
+If an `--atomic` (Helm 4: `--rollback-on-failure`) upgrade is rolled back, the
+rollback restores the previous pair. After a create or update failure, a
+rollback, or a Helm 4 upgrade that failed on the delete, the next successful
+upgrade deletes the previous pair.
 
 Check that the previous binding is gone:
 
@@ -504,7 +507,7 @@ Check that the previous binding is gone:
 kubectl get clusterrolebinding <previous-name>
 ```
 
-Run this check after every upgrade, whatever the Helm version. A `NotFound`
+Run this check after the upgrade, whatever the Helm version. A `NotFound`
 error means Helm removed it. If the binding is still listed, follow the manual
 steps below.
 

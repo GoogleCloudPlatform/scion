@@ -509,9 +509,10 @@ pin "(m) asymmetric class, ns=core-agents: truncated, so digested" \
 # A release whose name the old code truncated gets a new cluster-scoped name.
 # What happens to the object under the OLD name depends on the install path. A
 # successful `helm upgrade` deletes it after creating the new pair, unless the
-# live object has helm.sh/resource-policy: keep or, on helm 3, the delete fails
-# and is only logged. `helm template | kubectl apply` leaves it in place, and
-# NOTES is not printed on that path, so the docs page carries the same steps.
+# live object has helm.sh/resource-policy: keep, or on helm 3 the read or delete
+# fails and is only logged, or on helm 4 the read fails and is skipped.
+# `helm template | kubectl apply` leaves it in place, and NOTES is not printed
+# on that path, so the docs page carries the same steps.
 # NOTES names the old object and gives the steps for both paths. That text is a
 # deliverable of this fix rather than a courtesy. This arm is static: it checks
 # the names and the text, not what helm does on upgrade.
