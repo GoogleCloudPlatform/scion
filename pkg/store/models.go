@@ -1468,6 +1468,13 @@ type User struct {
 	// session. Never bound from a request body (json:"-").
 	IssuanceID         *string `json:"-"`
 	IssuerCredentialID *string `json:"-"`
+	// FederatedEmail and HomeIssuer are set only on UserKindFederated
+	// rows, at create, and never change: the user's lower-cased email as
+	// asserted by HomeIssuer, the canonical URL of the trusted issuer.
+	// Such a row's Email is a synthetic address (FederatedSyntheticEmail).
+	// Never bound from a request body (json:"-").
+	FederatedEmail *string `json:"-"`
+	HomeIssuer     *string `json:"-"`
 	// IssuerDelegationID is set only on a test-fixture row issued through
 	// a workload-bound issuer delegation (TestIdentityDelegation), at
 	// create, and never changes. Nil for session and PAT issuance.
@@ -1498,6 +1505,11 @@ func (u *User) IsTestAdmin() bool {
 // a check must refuse anything that is not a known human row.
 func (u *User) IsHumanKind() bool {
 	return u != nil && (u.Kind == "" || u.Kind == UserKindHuman)
+}
+
+// IsFederated reports whether u is a federated account (kind federated).
+func (u *User) IsFederated() bool {
+	return u != nil && u.Kind == UserKindFederated
 }
 
 // IsTestIdentity reports whether u is any hub-issued test identity: every
@@ -1585,6 +1597,9 @@ const (
 	UserStatusActive    = "active"
 	UserStatusSuspended = "suspended"
 	UserStatusInvited   = "invited"
+	// UserStatusPending is used only on UserKindFederated rows: the
+	// account was recorded before the user's first verified request.
+	UserStatusPending = "pending"
 )
 
 // User kind constants.
@@ -1598,6 +1613,9 @@ const (
 	// expiring system super-admin binding. Its issuance stays refused until
 	// the admin tier's policy phase ships.
 	UserKindTestSuperAdmin = "test_super_admin"
+	// UserKindFederated is a local account for a user of a trusted
+	// external issuer. Only Store.CreateFederatedUser writes it.
+	UserKindFederated = "federated"
 )
 
 // IsTestAdminKind reports whether kind is one of the admin test identity

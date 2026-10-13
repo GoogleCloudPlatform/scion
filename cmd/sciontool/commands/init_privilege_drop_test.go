@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/telemetry"
 	"github.com/GoogleCloudPlatform/scion/pkg/stagedsecrets"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -190,7 +191,7 @@ func TestSubstrateServeInitOptions_RequiresPrivilegeDrop(t *testing.T) {
 func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *testing.T) {
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 
 	var initCalled bool
 	stubRunInit := func(argv []string, opts InitRunOptions) int {
@@ -232,7 +233,7 @@ func TestNewSubstrateServeServer_PrivilegeDropPreconditionRejectsBootstrap(t *te
 // against whatever "scion" user (if any) actually exists on the machine
 // running the test.
 func TestReportInitFailure_WritesPhaseErrorAndMessage(t *testing.T) {
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	tmpHome := t.TempDir()
 
 	reportInitFailure(tmpHome, errPrivilegeDropRequired)
@@ -268,7 +269,7 @@ func TestReportInitFailure_WritesPhaseErrorAndMessage(t *testing.T) {
 // is independent of where resolveAgentHome happens to land on this
 // particular machine (see TestReportInitFailure_* for that part).
 func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	t.Setenv("HOME", t.TempDir())
@@ -291,7 +292,7 @@ func TestRunInit_PrivilegeDropFailure_ReturnsSentinel(t *testing.T) {
 // call: startReaper runs as RunInit's very first statement, before the
 // privilege-drop gate itself returns the sentinel exit code.
 func TestRunInit_CallsStartReaperSeamExactlyOnce(t *testing.T) {
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	t.Setenv("HOME", t.TempDir())
@@ -317,7 +318,7 @@ func TestRunInit_CallsStartReaperSeamExactlyOnce(t *testing.T) {
 // holding undecodable data makes stagedsecrets.Decode fail before anything
 // else in RunInit runs.
 func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	tmpHome := t.TempDir()
@@ -355,7 +356,7 @@ func TestRunInit_StagedSecretsDecodeFailure_ReportsInitFailure(t *testing.T) {
 // "definitely-not-a-real-binary-xyz", would itself fail loudly if exec were
 // ever attempted, but RunInit must never get that far in the first place).
 func TestRunInit_StagedSecretsWriteFailure_HardErrorsAndNeverRunsChild(t *testing.T) {
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	tmpHome := t.TempDir()
@@ -1057,7 +1058,7 @@ func wrapPasswdEntryNotRewritten(err error) error {
 // least one of them through.
 func TestRunInit_Enforced_RootGIDFromSetupHostUser_FailsClosed(t *testing.T) {
 	for _, pair := range [][2]int{{1000, 0}, {1000, -1}, {-1, 1000}} {
-		scrubHubEnv(t)
+		testutil.ScrubHubEnv(t)
 		t.Setenv("HOME", t.TempDir())
 		orig := runSetupHostUser
 		uid, gid := pair[0], pair[1]
@@ -1248,7 +1249,7 @@ var scionMetadataAndSecretEnvVars = []string{
 // workspace is set to a harmless no-op value.
 func setupRunInitAsRootlessScion(t *testing.T, agentHome string) {
 	t.Helper()
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 	t.Setenv("SCION_HOST_UID", "")
 	t.Setenv("SCION_HOST_GID", "")
 	t.Setenv("SCION_GIT_CLONE_URL", "")

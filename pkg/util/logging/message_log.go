@@ -20,6 +20,7 @@ import (
 	"os"
 
 	gcplog "cloud.google.com/go/logging"
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 )
 
 // Cloud Logging log ID for the dedicated message log.
@@ -85,7 +86,7 @@ func NewMessageLogger(cfg MessageLoggerConfig) (*slog.Logger, func(), error) {
 	// On Cloud Run (K_SERVICE set), stdout is captured and forwarded to Cloud
 	// Logging by the runtime. When a cloud handler is also active, the stdout
 	// handler would produce duplicate entries — skip it in that case.
-	onCloudRun := os.Getenv("K_SERVICE") != ""
+	onCloudRun := cloudrunenv.IsService()
 	if !onCloudRun || cfg.CloudClient == nil {
 		if cfg.UseGCP {
 			handlers = append(handlers, NewGCPHandler(os.Stdout, opts, cfg.Component, cfg.HubName))

@@ -839,6 +839,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 			return nil, fmt.Errorf("%s: %w", callerName, err)
 		}
 		req.tokenGrant = grant
+		addDispatchWarnings(ctx, droppedScopesWarning(agent, grant))
 	} else if d.debug {
 		d.log.Debug("No token generator configured - agent will not have Hub credentials")
 	}
@@ -3380,6 +3381,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 			return startEnvResult{}, fmt.Errorf("%s: %w", caller, err)
 		}
 		tokenGrant = grant
+		addDispatchWarnings(ctx, droppedScopesWarning(agent, grant))
 	}
 
 	// Transport token minting for platform-layer auth (IAP / Cloud Run invoker).
@@ -3716,6 +3718,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentStop(ctx context.Context, agent *stor
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
+	ctx = withDispatchAgentID(ctx, agent.ID)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {
@@ -3922,6 +3925,7 @@ func (d *HTTPAgentDispatcher) DispatchAgentDelete(ctx context.Context, agent *st
 		return err
 	}
 	ctx = withRecordedRuntime(ctx, agent.Runtime)
+	ctx = withDispatchAgentID(ctx, agent.ID)
 
 	endpoint, err := d.getBrokerEndpoint(ctx, agent.RuntimeBrokerID)
 	if err != nil {

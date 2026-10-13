@@ -21,6 +21,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -135,7 +137,55 @@ func (s *Server) AuthorizeAgentToken(ctx context.Context, agent *store.Agent) (A
 		}
 		return AgentTokenGrant{}, fmt.Errorf("%w: %w", errMintLookup, err)
 	}
-	return AgentTokenGrant{AgentID: agent.ID, ProjectID: agent.ProjectID, Scopes: scopes, Ancestry: agent.Ancestry}, nil
+	return AgentTokenGrant{
+		AgentID:       agent.ID,
+		ProjectID:     agent.ProjectID,
+		Scopes:        scopes,
+		Ancestry:      agent.Ancestry,
+		DroppedScopes: droppedCeilingOptionalScopes(candidates, scopes),
+	}, nil
+}
+
+// droppedCeilingOptionalScopes returns, in candidate order, the
+// ceilingOptionalRoleScopes among candidates that issued does not carry:
+// the scopes a role grants but the chain ceiling left out of the token.
+func droppedCeilingOptionalScopes(candidates, issued []AgentTokenScope) []AgentTokenScope {
+	var out []AgentTokenScope
+	for _, scope := range candidates {
+		if ceilingOptionalRoleScopes[scope] && !slices.Contains(issued, scope) && !slices.Contains(out, scope) {
+			out = append(out, scope)
+		}
+	}
+	return out
+}
+
+// droppedScopesWarning is the create and start warning for a grant whose
+// chain ceiling left out ceiling-optional role scopes, or "" when it left
+// out none (ptone/scion#4569). An agent created by a parent whose ceiling
+// lacks the artifact scopes still gets its role, but its first artifact
+// command fails with missing_scope; this says so up front.
+func droppedScopesWarning(agent *store.Agent, grant *AgentTokenGrant) string {
+	if grant == nil || len(grant.DroppedScopes) == 0 {
+		return ""
+	}
+	// The command names the agent by slug only: a display name may hold
+	// spaces or other characters that break the command when pasted.
+	agentName := "<agent>"
+	if agent != nil && agent.Slug != "" {
+		agentName = agent.Slug
+	}
+	names := make([]string, len(grant.DroppedScopes))
+	for i, scope := range grant.DroppedScopes {
+		names[i] = string(scope)
+	}
+	noun, verb := "scope", "it"
+	if len(names) > 1 {
+		noun, verb = "scopes", "them"
+	}
+	return fmt.Sprintf("agent token issued without the %s %s: the scope ceiling of the agent's creator does not allow %s, "+
+		"so artifact commands will fail with missing_scope. Recreating the agent from the same parent gives it the same scopes; "+
+		"once the creator holds them, a hub super-admin can run 'scion reset-auth %s --reissue-scopes'",
+		strings.Join(names, " and "), noun, verb, agentName)
 }
 
 // SignAgentToken signs grant for runID with the server's token service.
