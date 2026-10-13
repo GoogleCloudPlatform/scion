@@ -239,9 +239,10 @@ func TestUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// TestUserTemplateWrites_SessionAndTokenUnchanged pins that a session and a
-// user access credential keep their behaviour on the user template writes.
-func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestUserTemplateWrites_SessionWritesTokenNeedsSelector pins that a
+// session writes its user templates, and that a user access credential
+// without a template selector is refused on every user template write.
+func TestUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
 	sessionTmpl := createUserTemplate(t, f.store, f.alice.ID, "session-template")
@@ -259,7 +260,7 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	tokenTmpl := createUserTemplate(t, f.store, f.alice.ID, "token-template")
 	writes := userTemplateWrites(t, tokenTmpl.ID)
 	writes[0] = jsonProfileRequest(t, http.MethodPost, "/api/v1/users/me/templates", CreateTemplateRequest{Name: "token-created"})
-	want = []int{http.StatusCreated, http.StatusOK, http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}
+	want = []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}
 	for i, pr := range writes {
 		rec := f.asBearer(pr, f.token)
 		assert.Equal(t, want[i], rec.Code, "user access credential %s %s: %s", pr.method, pr.path, rec.Body.String())

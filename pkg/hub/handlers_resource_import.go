@@ -216,6 +216,16 @@ type ImportResourcesResponse struct {
 	Failed   []ImportFailure `json:"failed,omitempty"`
 }
 
+// userScopeImportResource returns the Resource for a new record of
+// authzType ("template" or "harness_config") in the caller's own user
+// scope.
+func userScopeImportResource(authzType string, userIdent UserIdentity) Resource {
+	if authzType == "harness_config" {
+		return harnessConfigUserScopeResource(userIdent)
+	}
+	return templateUserScopeResource(userIdent)
+}
+
 // handleResourcesImport handles POST /api/v1/resources/import: a single,
 // kind/scope-generic import endpoint sitting over the shared import driver
 // (resource_import.go). Global-scope import requires hub-admin; project-scope
@@ -315,6 +325,14 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !requireProfileWriter(w, r) {
+			return
+		}
+		// Import creates records in the caller's user scope: a user access
+		// token needs the create selector of the kind (template:create or
+		// harness_config:create) on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import "+kind.noun+" into your user scope", nil)
 			return
 		}
 		// projectID carries the user ID here. importFromRemote uses it for:
@@ -691,7 +709,14 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"Authentication required", nil)
 			return
 		}
-		// No authz check — users can always discover for their own scope.
+		// Discovery for the caller's user scope needs the create permission
+		// of the kind, as import does: a user access token needs
+		// template:create or harness_config:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover "+kind.noun+" for your user scope", nil)
+			return
+		}
 		// projectID stays empty — discovery is scope-independent (only fetches
 		// and walks directories) and user scope has no project for auth tokens.
 		projectID = ""

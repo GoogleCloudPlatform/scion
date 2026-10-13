@@ -34,6 +34,16 @@ func isUserTemplateOwner(t *store.Template, uid string) bool {
 		(t.OwnerID == uid || t.ScopeID == uid)
 }
 
+// authorizeUserTemplates checks action on the caller's user-scope
+// templates (templateUserScopeResource), before any record is read. An
+// interactive session or a dev credential passes as the owner of its own
+// user scope. A user access token needs the template selector for the
+// action (template:read, template:create, template:update or
+// template:delete) on a hub boundary. It writes 403 on denial.
+func (s *Server) authorizeUserTemplates(w http.ResponseWriter, r *http.Request, userIdent UserIdentity, action Action) bool {
+	return s.authorize(w, r, templateUserScopeResource(userIdent), action)
+}
+
 // handleUserMeTemplates routes GET/POST on /api/v1/users/me/templates.
 func (s *Server) handleUserMeTemplates(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -95,6 +105,10 @@ func (s *Server) listUserTemplates(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
+		return
+	}
+
 	filter := store.TemplateFilter{
 		Scope:   store.TemplateScopeUser,
 		ScopeID: userIdent.ID(),
@@ -142,6 +156,9 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !requireProfileWriter(w, r) {
+		return
+	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionCreate) {
 		return
 	}
 
@@ -239,6 +256,9 @@ func (s *Server) getUserTemplate(w http.ResponseWriter, r *http.Request, id stri
 		Unauthorized(w)
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -265,6 +285,9 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 	if !requireProfileWriter(w, r) {
+		return
+	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
 		return
 	}
 
@@ -335,6 +358,9 @@ func (s *Server) deleteUserTemplate(w http.ResponseWriter, r *http.Request, id s
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionDelete) {
+		return
+	}
 
 	existing, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -381,6 +407,9 @@ func (s *Server) handleUserTemplateUpload(w http.ResponseWriter, r *http.Request
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -415,6 +444,9 @@ func (s *Server) handleUserTemplateFinalize(w http.ResponseWriter, r *http.Reque
 	if !requireProfileWriter(w, r) {
 		return
 	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionUpdate) {
+		return
+	}
 
 	template, err := s.store.GetTemplate(ctx, id)
 	if err != nil {
@@ -444,6 +476,9 @@ func (s *Server) handleUserTemplateDownload(w http.ResponseWriter, r *http.Reque
 	userIdent := GetUserIdentityFromContext(ctx)
 	if userIdent == nil {
 		Unauthorized(w)
+		return
+	}
+	if !s.authorizeUserTemplates(w, r, userIdent, ActionRead) {
 		return
 	}
 

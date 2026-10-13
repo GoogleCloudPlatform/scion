@@ -280,8 +280,19 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	if createScope == "" {
 		createScope = store.HarnessConfigScopeGlobal
 	}
-	if createScope == store.HarnessConfigScopeUser && !requireProfileWriter(w, r) {
-		return
+	// A user-scope harness config belongs to the caller: its scope and
+	// owner are the caller for every caller, never a request field.
+	var owner UserIdentity
+	if createScope == store.HarnessConfigScopeUser {
+		owner = GetUserIdentityFromContext(ctx)
+		if owner == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "User authentication required for user-scoped harness configs", nil)
+			return
+		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
+		req.ScopeID = owner.ID()
 	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
 		return
@@ -314,6 +325,10 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 
 	if hc.Scope == "" {
 		hc.Scope = store.HarnessConfigScopeGlobal
+	}
+	if owner != nil {
+		hc.OwnerID = owner.ID()
+		hc.CreatedBy = owner.ID()
 	}
 
 	// If no files provided, mark as active immediately
@@ -697,6 +712,14 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 		if existing.OwnerID != userIdent.ID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden,
 				"You do not have permission to delete another user's harness config", nil)
+			return
+		}
+		// The route gate checked read on the config; deleting it needs
+		// harness_config:delete, so a user access token with only the read
+		// selector is refused on its own record.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigResource(existing), ActionDelete).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to delete harness configs in your user scope", nil)
 			return
 		}
 	default:
@@ -1192,6 +1215,12 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone harness configs into your own user scope", nil)
 			return
 		}
+		// The destination is a new record in the caller's user scope: a
+		// user access token needs harness_config:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigUserScopeResource(userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create harness configs in your user scope", nil)
+			return
+		}
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Cloning into this resource scope is not supported", nil)
 		return
@@ -1345,6 +1374,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		}
 		if hc.OwnerID != userIdent.ID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport another user's harness config", nil)
+			return
+		}
+		// Reimport overwrites the config's content, so it needs
+		// harness_config:update on the record, not only the route gate's
+		// read.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigResource(hc), ActionUpdate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport harness configs in your user scope", nil)
 			return
 		}
 	default:
@@ -1745,5 +1781,16 @@ func harnessConfigScopeResource(scope, scopeID string) Resource {
 		r.ParentType = "project"
 		r.ParentID = scopeID
 	}
+	return r
+}
+
+// harnessConfigUserScopeResource builds the "harness_config" Resource for a
+// new harness config in the caller's own user scope (a clone or import
+// destination). Like templateUserScopeResource, it takes the authenticated
+// UserIdentity, so the owner always names the caller and never a request
+// field.
+func harnessConfigUserScopeResource(userIdent UserIdentity) Resource {
+	r := harnessConfigScopeResource(store.HarnessConfigScopeUser, "")
+	r.OwnerID = userIdent.ID()
 	return r
 }

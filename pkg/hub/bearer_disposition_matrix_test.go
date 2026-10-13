@@ -103,6 +103,50 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
 		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
+	// User-scope branches of shared routes: the branch is chosen by the
+	// record's scope or by the request's scope and kind, while the matrix
+	// addresses one fixture per pattern and sends no scope. Each is pinned
+	// by a test that drives real tokens through the user-scope branch.
+	{OperationID: "template.delete.user", Method: "DELETE", Pattern: "/api/v1/templates/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder, and the matrix fixture on this pattern is a global template",
+		Pin:    "TestUserTemplateWrite_RequiresTemplateSelector",
+	},
+	{OperationID: "template.clone.user", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the source also needs template:read",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "skill.create.user", Method: "POST", Pattern: "/api/v1/skills"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body",
+		Pin:    "TestUserScopeSkillCreate_RequiresSkillCreate",
+	},
+	{OperationID: "harnessconfig.clone.user", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the route gate also needs harness_config:read on the source",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "harnessconfig.delete.user", Method: "DELETE", Pattern: "/api/v1/harness-configs/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserDelete_RequiresDeleteAction",
+	},
+	{OperationID: "harnessconfig.reimport.user", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder and a source URL, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserReimport_RequiresUpdateAction",
+	},
+	{OperationID: "resource.import.user.template", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "resource.import.user.template", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "resource.import.user.harnessconfig", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "resource.import.user.harnessconfig", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
@@ -415,6 +459,12 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
 	{"hub.metrics.read", http.MethodGet, "/api/v1/admin/metrics-dashboard"}: {
 		http.StatusServiceUnavailable, "the test server configures no telemetry project"},
+	{"user.template.read", http.MethodGet, "/api/v1/users/me/templates/{id}/download"}: {
+		http.StatusBadGateway, "the test server configures no template storage"},
+	{"user.template.update", http.MethodPost, "/api/v1/users/me/templates/{id}/upload"}: {
+		http.StatusBadGateway, "the test server configures no template storage"},
+	{"user.template.update", http.MethodPost, "/api/v1/users/me/templates/{id}/finalize"}: {
+		http.StatusBadGateway, "the test server configures no template storage"},
 	{"hub.githubapp.update", http.MethodPut, "/api/v1/github-app/installations/{id}"}: {
 		http.StatusInternalServerError, "the empty update body fails at the store write"},
 	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/installations/discover"}: {

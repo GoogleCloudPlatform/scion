@@ -225,6 +225,16 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
+- **Your own user scope.** Templates, skills and harness configurations in your own user scope
+  admit only a hub token carrying the selector of the action. Your templates need
+  `template:read` to list, read or download, `template:create` to create or to clone into your
+  scope, `template:update` to update, upload or finalize, and `template:delete` to delete. A
+  user-scope skill needs `skill:create`. Your harness configurations need `harness_config:create`
+  to clone into your scope, `harness_config:update` to reimport, and `harness_config:delete` to
+  delete, together with `harness_config:read`. Importing or discovering templates or harness
+  configurations for your user scope needs `template:create` or `harness_config:create`. A
+  project token is refused for all of these, because these records belong to no project. Any
+  token can list your injected skills.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).

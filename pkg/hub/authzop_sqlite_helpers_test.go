@@ -114,6 +114,18 @@ type idFixtures struct {
 	// dev user's here, the matrix super-admin's in the bearer disposition
 	// matrix (seedUserSkillInjection).
 	userSkillInjection string
+	// userTemplate and userTemplateDel are user-scope templates of the
+	// caller, reached through /api/v1/users/me/templates: the dev user's
+	// here, the matrix super-admin's in the bearer disposition matrix
+	// (seedUserTemplates). userTemplateDel is the delete entry's target.
+	userTemplate    string
+	userTemplateDel string
+	// userScopeTemplateDel, userHarnessConfig and userHarnessConfigDel are
+	// the dev user's user-scope records for the user-scope branches of the
+	// /api/v1/templates and /api/v1/harness-configs routes.
+	userScopeTemplateDel string
+	userHarnessConfig    string
+	userHarnessConfigDel string
 	// delegation holds an agent delegation grant bound to agent, a
 	// disposable twin grant for the revoke entry, and an active delegated
 	// credential of the first grant (seedLiveInventoryDelegation).
@@ -525,6 +537,16 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
+	f.userTemplate, f.userTemplateDel = seedUserTemplates(t, ctx, s, DevUserID)
+	f.userScopeTemplateDel = tid("li-user-scope-template-del")
+	require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: f.userScopeTemplateDel, Name: "li-user-scope-template-del", Slug: "li-user-scope-template-del", Harness: "claude",
+		Scope: store.TemplateScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	f.userHarnessConfig = tid("li-user-hc")
+	f.userHarnessConfigDel = tid("li-user-hc-del")
+	for _, id := range []string{f.userHarnessConfig, f.userHarnessConfigDel} {
+		require.NoError(t, s.CreateHarnessConfig(ctx, &store.HarnessConfig{ID: id, Name: "li-user-hc-" + id[len(id)-6:], Slug: "li-user-hc-" + id[len(id)-6:], Harness: "claude",
+			Scope: store.HarnessConfigScopeUser, ScopeID: DevUserID, OwnerID: DevUserID, CreatedBy: DevUserID, Status: store.HarnessConfigStatusActive, Created: now, Updated: now}))
+	}
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
 	// Hub test identities: turn the feature on (--enable-test-identities)
@@ -557,6 +579,20 @@ func seedUserSkillInjection(t *testing.T, ctx context.Context, s store.Store, us
 	return si.ID
 }
 
+// seedUserTemplates adds two active user-scope templates owned by userID
+// and returns their IDs: one the read and update entries address, and one
+// the delete entry removes.
+func seedUserTemplates(t *testing.T, ctx context.Context, s store.Store, userID string) (keep, del string) {
+	t.Helper()
+	now := time.Now()
+	ids := []string{tid("li-user-template"), tid("li-user-template-del")}
+	for i, name := range []string{"li-user-template", "li-user-template-del"} {
+		require.NoError(t, s.CreateTemplate(ctx, &store.Template{ID: ids[i], Name: name, Slug: name, Harness: "claude",
+			Scope: store.TemplateScopeUser, ScopeID: userID, OwnerID: userID, CreatedBy: userID, Status: store.TemplateStatusActive, Created: now, Updated: now}))
+	}
+	return ids[0], ids[1]
+}
+
 // overrideKey identifies one (operation, pattern) pair for parameter
 // override lookup. Some patterns are declared by more than one operation
 // (e.g. GET, PATCH and DELETE all address "/api/v1/agents/{id}"); an entry
@@ -577,14 +613,22 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
-		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:        {"id": f.agentDel},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:    {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                  {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:              {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:  {"id": f.testIdentityDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                  {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:            {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}: {"id": f.harnessConfigDel},
+		// User-scope branches address the caller's user-scope records; a
+		// clone copies the global fixture into the caller's user scope.
+		{"user.template.delete", "/api/v1/users/me/templates/{id}"}:               {"id": f.userTemplateDel},
+		{"template.delete.user", "/api/v1/templates/{id}"}:                        {"id": f.userScopeTemplateDel},
+		{"template.clone.user", "/api/v1/templates/{id}/clone"}:                   {"id": f.template},
+		{"harnessconfig.clone.user", "/api/v1/harness-configs/{id}/clone"}:        {"id": f.harnessConfig},
+		{"harnessconfig.delete.user", "/api/v1/harness-configs/{id}"}:             {"id": f.userHarnessConfigDel},
+		{"harnessconfig.reimport.user", "/api/v1/harness-configs/{id}/reimport"}:  {"id": f.userHarnessConfig},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
@@ -686,6 +730,10 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{id}/injected-skills":                   {"id": f.project},
 		"/api/v1/projects/{id}/injected-skills/{entryId}":         {"id": f.project, "entryId": f.projectSkillInjection},
 		"/api/v1/users/me/injected-skills/{id}":                   {"id": f.userSkillInjection},
+		"/api/v1/users/me/templates/{id}":                         {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/upload":                  {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/finalize":                {"id": f.userTemplate},
+		"/api/v1/users/me/templates/{id}/download":                {"id": f.userTemplate},
 		"/api/v1/projects/{id}/gcp-service-accounts":              {"id": f.project},
 		"/api/v1/projects/{id}/message-logs":                      {"id": f.project},
 		"/api/v1/projects/{id}/broadcast":                         {"id": f.project},
@@ -899,6 +947,17 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// User-scope writes: valid bodies, so the probes reach the
+		// user-scope branch past body validation.
+		{"user.template.create", "/api/v1/users/me/templates"}:               {"name": "li-user-template-created"},
+		{"user.template.update", "/api/v1/users/me/templates/{id}"}:          {"name": "li-user-template-renamed"},
+		{"template.clone.user", "/api/v1/templates/{id}/clone"}:              {"name": "li-user-template-clone", "scope": "user"},
+		{"harnessconfig.clone.user", "/api/v1/harness-configs/{id}/clone"}:   {"name": "li-user-hc-clone", "scope": "user"},
+		{"skill.create.user", "/api/v1/skills"}:                              {"name": "li-user-skill", "scope": "user"},
+		{"resource.import.user.template", "/api/v1/resources/import"}:        {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"resource.import.user.template", "/api/v1/resources/discover"}:      {"kind": "template", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"resource.import.user.harnessconfig", "/api/v1/resources/import"}:   {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
+		{"resource.import.user.harnessconfig", "/api/v1/resources/discover"}: {"kind": "harness-config", "scope": "user", "sourceUrl": "https://example.invalid/li-user"},
 	}
 }
 

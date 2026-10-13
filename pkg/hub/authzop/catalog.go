@@ -236,9 +236,6 @@ var EntryPointExemptions = []EntryPointExemption{
 	{Pattern: "/api/v1/metrics/session/", Kind: ExemptionAuthenticationOnly, Reason: "Session metrics, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/users/me/groups", Kind: ExemptionAuthenticationOnly, Reason: "List own group memberships, self-service", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/principals/", Kind: ExemptionAuthenticationOnly, Reason: "Resolve principal display name, self-service", Owner: "route_metadata.go"},
-	{Pattern: "GET /api/v1/users/me/injected-skills", Kind: ExemptionAuthenticationOnly, Reason: "List own injected skills, self-service; the writes are catalogued as user.skillinjection.update", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/users/me/templates", Kind: ExemptionAuthenticationOnly, Reason: "Manage own templates, self-service; a federated caller is refused on writes (requireProfileWriter)", Owner: "route_metadata.go"},
-	{Pattern: "/api/v1/users/me/templates/", Kind: ExemptionAuthenticationOnly, Reason: "Manage own template by ID, self-service; a federated caller is refused on writes, including upload and finalize (requireProfileWriter)", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/gcs/object", Kind: ExemptionAuthenticationOnly, Reason: "gs:// link fetch, inline message-visibility-based authorization", Owner: "route_metadata.go"},
 	{Pattern: "/api/v1/conduit/grant-keys", Kind: ExemptionAuthenticationOnly, Reason: "Conduit grant public keys, authenticated read-only, experiment-gated", Owner: "route_metadata.go"},
 	// Artifact share links (hub.artifacts experiment): reads authenticated
