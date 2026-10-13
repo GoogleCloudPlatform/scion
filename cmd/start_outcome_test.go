@@ -15,11 +15,14 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,25 +241,217 @@ func TestEnvGatherCleanupSafe(t *testing.T) {
 	}
 }
 
-// The interrupt path deletes only before the env is submitted, and the
-// interrupt and error paths together delete at most once.
+// The interrupt path deletes only before the env is submitted; the error
+// path deletes before the submit or after a definite refusal; at most one
+// delete runs.
 func TestEnvGatherCleanupGuard(t *testing.T) {
-	var deletes int
-	c := &envGatherCleanup{del: func() { deletes++ }}
-	c.markSubmitted()
+	var deletes atomic.Int32
+	del := func() { deletes.Add(1) }
+
+	c := newEnvGatherCleanup(del)
+	require.True(t, c.markSubmitted())
 	assert.False(t, c.cleanupIfUnsubmitted(), "no delete after the env was submitted")
-	assert.Equal(t, 0, deletes)
+	assert.Equal(t, int32(0), deletes.Load())
 
-	c2 := &envGatherCleanup{del: func() { deletes++ }}
+	c2 := newEnvGatherCleanup(del)
 	assert.True(t, c2.cleanupIfUnsubmitted())
+	assert.False(t, c2.markSubmitted(), "no submit once the delete began")
 	assert.False(t, c2.cleanupAfterFailure(errors.New("local failure")), "a second delete must not run")
-	assert.Equal(t, 1, deletes)
+	assert.Equal(t, int32(1), deletes.Load())
 
-	c3 := &envGatherCleanup{del: func() { deletes++ }}
-	c3.markSubmitted()
+	c3 := newEnvGatherCleanup(del)
+	require.True(t, c3.markSubmitted())
 	assert.False(t, c3.cleanupAfterFailure(&envSubmitError{err: errors.New("EOF")}), "no delete on an unknown submit outcome")
 	assert.True(t, c3.cleanupAfterFailure(&envSubmitError{err: &apiclient.APIError{StatusCode: http.StatusBadRequest}}), "a refused submit deletes")
-	assert.Equal(t, 2, deletes)
+	assert.False(t, c3.cleanupIfUnsubmitted())
+	assert.Equal(t, int32(2), deletes.Load())
+}
+
+// The interrupt's delete and the env submit are mutually exclusive: in no
+// interleaving do both happen.
+func TestEnvGatherCleanupGuard_InterruptRacesSubmit(t *testing.T) {
+	for i := 0; i < 500; i++ {
+		var deleted atomic.Bool
+		c := newEnvGatherCleanup(func() { deleted.Store(true) })
+		start := make(chan struct{})
+		var submitted, interrupted bool
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() { defer wg.Done(); <-start; submitted = c.markSubmitted() }()
+		go func() { defer wg.Done(); <-start; interrupted = c.cleanupIfUnsubmitted() }()
+		close(start)
+		wg.Wait()
+		require.NotEqual(t, submitted, interrupted, "exactly one of submit and interrupt delete must win (iteration %d)", i)
+		require.Equal(t, interrupted, deleted.Load())
+	}
+}
+
+// The submit marks the cleanup submitted, so a later interrupt leaves the
+// agent alone.
+func TestGatherAndSubmitEnvGuarded_MarksSubmitted(t *testing.T) {
+	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
+	t.Cleanup(func() { nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm })
+	nonInteractive, autoConfirm = true, true
+	t.Setenv("START_OUTCOME_KEY", "value")
+
+	projectID := tid("project-1")
+	server, captured := newEnvGatherMockHubServer(t, projectID)
+	defer server.Close()
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	var deletes atomic.Int32
+	c := newEnvGatherCleanup(func() { deletes.Add(1) })
+	_, err = gatherAndSubmitEnvGuarded(context.Background(), hubCtx, projectID, startOutcomeEnvGatherResp(), c)
+	require.NoError(t, err)
+	require.Equal(t, "value", (*captured)["START_OUTCOME_KEY"])
+	assert.False(t, c.cleanupIfUnsubmitted(), "an interrupt after the submit must not delete")
+	assert.Equal(t, int32(0), deletes.Load())
+}
+
+// An interrupt that began the delete first stops the submit; a context
+// that already ended sends nothing. Both are failures before the submit,
+// so the agent is cleaned up.
+func TestGatherAndSubmitEnvGuarded_NothingSent(t *testing.T) {
+	origNonInteractive, origAutoConfirm := nonInteractive, autoConfirm
+	t.Cleanup(func() { nonInteractive, autoConfirm = origNonInteractive, origAutoConfirm })
+	nonInteractive, autoConfirm = true, true
+	t.Setenv("START_OUTCOME_KEY", "value")
+
+	projectID := tid("project-1")
+	server, captured := newEnvGatherMockHubServer(t, projectID)
+	defer server.Close()
+	client, err := hubclient.New(server.URL)
+	require.NoError(t, err)
+	hubCtx := &HubContext{Client: client, Endpoint: server.URL, ProjectID: projectID}
+
+	interrupted := newEnvGatherCleanup(nil)
+	require.True(t, interrupted.cleanupIfUnsubmitted())
+	_, err = gatherAndSubmitEnvGuarded(context.Background(), hubCtx, projectID, startOutcomeEnvGatherResp(), interrupted)
+	require.ErrorIs(t, err, errEnvGatherInterrupted)
+	assert.True(t, envGatherCleanupSafe(err))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = gatherAndSubmitEnvGuarded(ctx, hubCtx, projectID, startOutcomeEnvGatherResp(), newEnvGatherCleanup(nil))
+	require.ErrorIs(t, err, context.Canceled)
+	assert.True(t, envGatherCleanupSafe(err), "a submit that was never sent is a failure before the submit")
+	assert.Empty(t, *captured, "nothing may be submitted")
+}
+
+func startOutcomeEnvGatherResp() *hubclient.CreateAgentResponse {
+	return &hubclient.CreateAgentResponse{
+		Agent: &hubclient.Agent{ID: tid("agent-1")},
+		EnvGather: &hubclient.EnvGatherResponse{
+			AgentID:  tid("agent-1"),
+			Required: []string{"START_OUTCOME_KEY"},
+			Needs:    []string{"START_OUTCOME_KEY"},
+		},
+	}
+}
+
+// The lookup after an unknown submit outcome: an agent caller's 404 may be
+// a read it is not allowed (ptone/scion#4568), so it is not reported as
+// gone; a user's 404 is; other failures are reported as unreadable.
+func TestEnvSubmitOutcomeUnknownError_Lookup(t *testing.T) {
+	submitErr := &envSubmitError{err: errors.New("request failed: timeout")}
+	notFound := &apiclient.APIError{StatusCode: http.StatusNotFound, Code: "not_found", Message: "Agent not found"}
+	getErr := func(err error) func(context.Context) (*hubclient.Agent, error) {
+		return func(context.Context) (*hubclient.Agent, error) { return nil, err }
+	}
+	cases := []struct {
+		name     string
+		agentID  string
+		get      func(context.Context) (*hubclient.Agent, error)
+		contains []string
+		absent   []string
+	}{
+		{"agent caller 404", "agent-x", getErr(notFound),
+			[]string{"may have started", "could not be read"}, []string{"no longer exists"}},
+		{"user caller 404", "", getErr(notFound),
+			[]string{"no longer exists"}, []string{"may have started"}},
+		{"server error", "", getErr(&apiclient.APIError{StatusCode: http.StatusInternalServerError, Code: "internal_error", Message: "boom"}),
+			[]string{"may have started", "could not be read (", "boom"}, []string{"no longer exists"}},
+		{"transport error", "", getErr(errors.New("request failed: EOF")),
+			[]string{"could not be read (request failed: EOF)"}, []string{"no longer exists"}},
+		{"phase from status", "", func(context.Context) (*hubclient.Agent, error) {
+			return &hubclient.Agent{Name: "a", Status: "running"}, nil
+		}, []string{"it is in phase running"}, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_AGENT_ID", tc.agentID)
+			msg := envSubmitOutcomeUnknownError("a", submitErr, tc.get).Error()
+			for _, c := range tc.contains {
+				assert.Contains(t, msg, c)
+			}
+			for _, a := range tc.absent {
+				assert.NotContains(t, msg, a)
+			}
+		})
+	}
+}
+
+// A submit refused because a delete is in progress does not suggest
+// another delete.
+func TestEnvSubmitOutcomeUnknownError_DeleteInProgress(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	err := &envSubmitError{err: &apiclient.APIError{StatusCode: http.StatusConflict, Code: apiclient.ErrCodeDeleteInProgress, Message: "deleting"}}
+	msg := envSubmitOutcomeUnknownError("a", err, func(context.Context) (*hubclient.Agent, error) {
+		return &hubclient.Agent{Name: "a", Phase: "stopping"}, nil
+	}).Error()
+	assert.Contains(t, msg, "a delete of the agent is in progress")
+	assert.NotContains(t, msg, "scion delete")
+}
+
+// End to end as an agent caller: the submit times out and the lookup gets
+// 404, which for an agent may be a read it is not allowed. The agent is not
+// deleted and not reported as gone.
+func TestStartAgentViaHub_EnvSubmitTimeoutAgentCallerNotFound(t *testing.T) {
+	release := make(chan struct{})
+	h := &startOutcomeHub{projectID: "p-outcome", agentID: "agent-outcome"} // every GET answers 404
+	h.submitHandler = func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-time.After(2 * time.Second):
+		}
+		writeAPIError(w, http.StatusOK, "late")
+	}
+	server := h.serve(t)
+	defer server.Close()
+	defer close(release)
+	hubCtx := setupStartOutcomeTest(t, server.URL, h.projectID)
+	t.Setenv("SCION_AGENT_ID", "agent-launcher")
+
+	err := startAgentViaHub(nil, hubCtx, "outcome-agent", "", false, nil)
+	require.Error(t, err)
+	assert.Equal(t, int32(0), h.deletes.Load())
+	assert.Contains(t, err.Error(), "may have started")
+	assert.NotContains(t, err.Error(), "no longer exists")
+}
+
+// The create-path lookup runs only for a transport failure: a local
+// failure sent nothing. An agent that existed before the start is "being
+// started", not created.
+func TestCreateOutcomeUnknownError(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	var gets int
+	get := func(context.Context) (*hubclient.Agent, error) {
+		gets++
+		return &hubclient.Agent{Name: "a", Phase: "stopped"}, nil
+	}
+	assert.NoError(t, createOutcomeUnknownError("a", errors.New("operation cancelled"), true, get))
+	assert.NoError(t, createOutcomeUnknownError("a", &apiclient.APIError{StatusCode: http.StatusBadGateway}, false, get))
+	assert.Equal(t, 0, gets, "no lookup for a local failure or a Hub answer")
+
+	timeout := fmt.Errorf("request failed: %w", &url.Error{Op: "Post", URL: "http://hub/agents", Err: context.DeadlineExceeded})
+	err := createOutcomeUnknownError("a", timeout, true, get)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may still be starting it: phase stopped")
+	err = createOutcomeUnknownError("a", timeout, false, get)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "may still be creating it")
 }
 
 // A create that times out on the client may still be running on the Hub

@@ -1541,7 +1541,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		// timeout) may still be running on the Hub, which carries on
 		// without the client: say so when the agent now exists
 		// (ptone/scion#4007). Nothing is deleted here.
-		if unknownErr := createOutcomeUnknownError(agentName, err, func(ctx context.Context) (*hubclient.Agent, error) {
+		if unknownErr := createOutcomeUnknownError(agentName, err, existingPhase != "", func(ctx context.Context) (*hubclient.Agent, error) {
 			return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 		}); unknownErr != nil {
 			return wrapHubError(unknownErr)
@@ -1603,7 +1603,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 			}
 		}
 
-		cleanup := &envGatherCleanup{del: cleanupProvisioningAgent}
+		cleanup := newEnvGatherCleanup(cleanupProvisioningAgent)
 
 		// Install a signal handler so Ctrl+C during interactive prompting
 		// still cleans up the provisioning agent instead of leaving it
@@ -1617,11 +1617,11 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		go func() {
 			select {
 			case <-sigCh:
-				if cleanup.submitted.Load() {
-					fmt.Fprintf(os.Stderr, "\nInterrupted after the env was submitted; agent '%s' may be starting and was not deleted.\n", agentName)
+				fmt.Fprintln(os.Stderr, "\nInterrupted.")
+				if cleanup.cleanupIfUnsubmitted() {
+					fmt.Fprintln(os.Stderr, "Cleaned up the provisioning agent.")
 				} else {
-					fmt.Fprintln(os.Stderr, "\nInterrupted. Cleaning up provisioning agent...")
-					cleanup.cleanupIfUnsubmitted()
+					fmt.Fprintf(os.Stderr, "The env was already submitted; agent '%s' may be starting and was not deleted.\n", agentName)
 				}
 				os.Exit(130) // 128 + SIGINT(2)
 			case <-envGatherDone:
@@ -1644,6 +1644,8 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 					return hubCtx.Client.ProjectAgents(projectID).Get(ctx, agentName)
 				}))
 			}
+			// cleanupAfterFailure re-checks envGatherCleanupSafe so the
+			// guard is safe on its own; the check is pure and cheap.
 			cleanup.cleanupAfterFailure(err)
 			return fmt.Errorf("env-gather failed: %w", err)
 		}
@@ -2322,7 +2324,14 @@ func gatherAndSubmitEnvGuarded(ctx context.Context, hubCtx *HubContext, projectI
 	statusf("Submitting %d gathered environment variable(s)...\n", len(gatheredEnv))
 
 	// Submit gathered env to Hub. From here the Hub may launch the agent.
-	cleanup.markSubmitted()
+	// A context that already ended sends nothing: report it as a failure
+	// before the submit, so the agent is cleaned up as before.
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("env submit not sent: %w", err)
+	}
+	if !cleanup.markSubmitted() {
+		return nil, errEnvGatherInterrupted
+	}
 	submitResp, err := hubCtx.Client.ProjectAgents(projectID).SubmitEnv(ctx, agentID, &hubclient.SubmitEnvRequest{
 		Env: gatheredEnv,
 	})

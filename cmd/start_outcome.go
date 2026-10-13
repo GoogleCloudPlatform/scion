@@ -18,8 +18,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"sync"
+	"net/url"
 	"sync/atomic"
 	"time"
 
@@ -76,53 +77,82 @@ func envGatherCleanupSafe(err error) bool {
 	return true
 }
 
+// errEnvGatherInterrupted is returned, before anything is submitted, when
+// an interrupt began deleting the agent first.
+var errEnvGatherInterrupted = errors.New("env-gather interrupted")
+
+// envGatherCleanup states. Every transition is a compare-and-swap, so the
+// delete and the env submit are mutually exclusive: an interrupt that
+// begins the delete stops the submit from being sent, and a submit that is
+// marked first stops the interrupt from deleting.
+const (
+	envCleanupIdle int32 = iota
+	envCleanupSubmitted
+	envCleanupDeleting
+)
+
 // envGatherCleanup deletes the provisioning agent of an env-gather that
 // failed or was interrupted, but only while the env has not been
-// submitted: once the submit is sent, the Hub may be launching the agent.
+// submitted (once the submit is sent, the Hub may be launching the agent),
+// or after the Hub definitely refused the submit. At most one delete runs.
 type envGatherCleanup struct {
-	submitted atomic.Bool
-	once      sync.Once
-	del       func()
+	state atomic.Int32
+	done  chan struct{} // closed when a started delete has finished
+	del   func()
 }
 
-// markSubmitted records that the env submit is about to be sent. It is
-// called before the request, so an interrupt that races the send leaves
-// the agent alone.
-func (c *envGatherCleanup) markSubmitted() {
-	if c != nil {
-		c.submitted.Store(true)
+func newEnvGatherCleanup(del func()) *envGatherCleanup {
+	return &envGatherCleanup{done: make(chan struct{}), del: del}
+}
+
+// markSubmitted moves idle to submitted just before the env submit is
+// sent. It reports false when a delete has already begun; the submit must
+// then not be sent. A nil cleanup always allows the submit.
+func (c *envGatherCleanup) markSubmitted() bool {
+	if c == nil {
+		return true
 	}
+	return c.state.CompareAndSwap(envCleanupIdle, envCleanupSubmitted)
 }
 
-// cleanupIfUnsubmitted is the interrupt path: it deletes the agent unless
-// the env was submitted. It reports whether the delete ran.
+// cleanupIfUnsubmitted is the interrupt path: it deletes the agent only if
+// the env has not been submitted (idle to deleting). It reports whether it
+// ran the delete.
 func (c *envGatherCleanup) cleanupIfUnsubmitted() bool {
-	if c == nil || c.submitted.Load() {
+	if c == nil || !c.state.CompareAndSwap(envCleanupIdle, envCleanupDeleting) {
 		return false
 	}
-	return c.run()
+	c.runDelete()
+	return true
 }
 
-// cleanupAfterFailure is the error path: it deletes the agent when
-// envGatherCleanupSafe(err) allows it. It reports whether the delete ran.
+// cleanupAfterFailure is the error path for a failure err that
+// envGatherCleanupSafe allows: before the submit (idle to deleting) or
+// after a definite refusal (submitted to deleting). When the interrupt
+// path is already deleting, it waits for that delete to finish so the
+// process does not exit under it. It reports whether it ran the delete.
 func (c *envGatherCleanup) cleanupAfterFailure(err error) bool {
 	if c == nil || !envGatherCleanupSafe(err) {
 		return false
 	}
-	return c.run()
+	if c.state.CompareAndSwap(envCleanupIdle, envCleanupDeleting) ||
+		c.state.CompareAndSwap(envCleanupSubmitted, envCleanupDeleting) {
+		c.runDelete()
+		return true
+	}
+	if c.state.Load() == envCleanupDeleting && c.done != nil {
+		<-c.done
+	}
+	return false
 }
 
-// run deletes the agent at most once, so the interrupt and error paths
-// cannot both delete.
-func (c *envGatherCleanup) run() bool {
-	ran := false
-	c.once.Do(func() {
-		if c.del != nil {
-			c.del()
-		}
-		ran = true
-	})
-	return ran
+func (c *envGatherCleanup) runDelete() {
+	if c.del != nil {
+		c.del()
+	}
+	if c.done != nil {
+		close(c.done)
+	}
 }
 
 // describeAgentAfterUnknownOutcome reads the agent by name after a start
@@ -165,27 +195,50 @@ func envSubmitOutcomeUnknownError(agentName string, err error, get func(context.
 	if found {
 		state = "it is in " + desc
 	}
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) && apiErr.Code == apiclient.ErrCodeDeleteInProgress {
+		// A delete already owns the agent: do not suggest another.
+		return fmt.Errorf("env submit for agent '%s' did not complete (%w); a delete of the agent is in progress: %s",
+			agentName, err, state)
+	}
 	return fmt.Errorf("env submit for agent '%s' did not complete (%w); the agent may have started and was not deleted: %s. "+
 		"Check it with 'scion list' or 'scion look %s'; delete it with 'scion delete %s' if you do not want it",
 		agentName, err, state, agentName, agentName)
 }
 
+// isTransportOutcomeUnknown reports whether err is a request that may have
+// reached the Hub without an answer: a transport error or timeout (the
+// apiclient wraps the *url.Error), a context deadline, or a 2xx answer
+// with no body. Local failures (a cancelled prompt, unreadable input) are
+// not: nothing was sent.
+func isTransportOutcomeUnknown(err error) bool {
+	var urlErr *url.Error
+	var netErr net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &urlErr) ||
+		errors.As(err, &netErr) || errors.Is(err, apiclient.ErrNoContent)
+}
+
 // createOutcomeUnknownError returns the error for a create request that
 // failed in transport (for example a client timeout) while the Hub may
-// still be creating the agent (ptone/scion#4007). It looks the agent up by
-// name; when it exists, the error says so. Otherwise, or when err is a Hub
-// answer (an *apiclient.APIError, which is definite), it returns nil and
-// the caller reports err as before.
-func createOutcomeUnknownError(agentName string, err error, get func(context.Context) (*hubclient.Agent, error)) error {
-	var apiErr *apiclient.APIError
-	if errors.As(err, &apiErr) {
+// still be creating, or for an existing agent starting, it
+// (ptone/scion#4007). It looks the agent up by name; when it exists, the
+// error says so. Otherwise, or when err is not a transport failure (a Hub
+// answer is definite, and a local failure sent nothing), it returns nil
+// and the caller reports err as before. existing reports that the agent
+// existed before this start (a resume or restart).
+func createOutcomeUnknownError(agentName string, err error, existing bool, get func(context.Context) (*hubclient.Agent, error)) error {
+	if !isTransportOutcomeUnknown(err) {
 		return nil
 	}
 	desc, found, _ := describeAgentAfterUnknownOutcome(get)
 	if !found {
 		return nil
 	}
-	return fmt.Errorf("create request for agent '%s' did not complete (%w); the Hub may still be creating it: %s. "+
+	verb := "creating"
+	if existing {
+		verb = "starting"
+	}
+	return fmt.Errorf("create request for agent '%s' did not complete (%w); the Hub may still be %s it: %s. "+
 		"Check it with 'scion list' or 'scion look %s' before retrying",
-		agentName, err, desc, agentName)
+		agentName, err, verb, desc, agentName)
 }
