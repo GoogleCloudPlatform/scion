@@ -544,6 +544,130 @@ func TestStart_TemplateEnvAuthCandidateKeysSuppressed(t *testing.T) {
 	assertEnv(t, env, "TPL_TOOL", "ok")
 }
 
+// startCaptureRunConfig runs a broker-mode NoAuth Start of agent name from
+// the "tenv" template and returns the RunConfig handed to the runtime.
+func startCaptureRunConfig(t *testing.T, projectScionDir, name string) runtime.RunConfig {
+	t.Helper()
+	var captured runtime.RunConfig
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+		RunFunc: func(ctx context.Context, cfg runtime.RunConfig) (string, error) {
+			captured = cfg
+			return "mock-id", nil
+		},
+	}
+	if _, err := NewManager(mockRT).Start(context.Background(), api.StartOptions{
+		Name: name, Template: "tenv", ProjectPath: projectScionDir, BrokerMode: true, NoAuth: true, Env: map[string]string{},
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	return captured
+}
+
+// ptone/scion#4968: every env key the harness-config's auth metadata lists,
+// for any auth type, is suppressed for the template env fallback, not only
+// required_env any_of keys. The real claude harness-config lists
+// GOOGLE_APPLICATION_CREDENTIALS only as a required_files
+// alternative_env_keys entry (and an autodetect key) of vertex-ai; a
+// template must not supply it to an agent configured for api-key. The
+// any_of key ANTHROPIC_API_KEY stays suppressed too.
+func TestStart_TemplateEnvClaudeAuthFileAltEnvKeySuppressed(t *testing.T) {
+	for _, k := range restartAuthEnvKeys {
+		t.Setenv(k, "")
+	}
+	project := templateEnvStart{tplEnv: map[string]string{
+		"GOOGLE_APPLICATION_CREDENTIALS": "/template/adc.json",
+		"ANTHROPIC_API_KEY":              "template-key",
+		"TPL_TOOL":                       "ok",
+	}}.fixture(t)
+	// Swap the fixture's test-harness for a copy of the real claude bundle.
+	src, err := filepath.Abs(filepath.Join("..", "..", "harnesses", "claude"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hcDir := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness")
+	if err := os.RemoveAll(hcDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.CopyFS(hcDir, os.DirFS(src)); err != nil {
+		t.Fatalf("copy claude harness-config: %v", err)
+	}
+
+	captured := startCaptureRunConfig(t, project, "claude-alt-env")
+	suppressed := map[string]bool{}
+	for _, k := range captured.SuppressedFallbackKeys {
+		suppressed[k] = true
+	}
+	for _, k := range []string{"GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_API_KEY"} {
+		if !suppressed[k] {
+			t.Errorf("SuppressedFallbackKeys = %v, want %s", captured.SuppressedFallbackKeys, k)
+		}
+	}
+	env := effectiveContainerEnv(t, captured)
+	for _, k := range []string{"GOOGLE_APPLICATION_CREDENTIALS", "ANTHROPIC_API_KEY"} {
+		if v, ok := env[k]; ok {
+			t.Errorf("template %s=%q reached the container", k, v)
+		}
+	}
+	assertEnv(t, env, "TPL_TOOL", "ok")
+}
+
+// ptone/scion#4968: an autodetect env key that no auth type lists in
+// required_env or required_files is suppressed for the template env
+// fallback too.
+func TestStart_TemplateEnvAutodetectEnvKeySuppressed(t *testing.T) {
+	project := templateEnvStart{tplEnv: map[string]string{
+		"TPL_AUTODETECT_ONLY": "template-token",
+		"TPL_TOOL":            "ok",
+	}}.fixture(t)
+	hcFile := filepath.Join(os.Getenv("HOME"), ".scion", "harness-configs", "test-harness", "config.yaml")
+	auth := "auth:\n  default_type: api-key\n  types:\n    api-key:\n      required_env:\n        - any_of: [TPL_API_KEY]\n  autodetect:\n    env:\n      TPL_AUTODETECT_ONLY: api-key\n"
+	data, err := os.ReadFile(hcFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(hcFile, append(data, []byte(auth)...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	captured := startCaptureRunConfig(t, project, "autodetect")
+	env := effectiveContainerEnv(t, captured)
+	if v, ok := env["TPL_AUTODETECT_ONLY"]; ok {
+		t.Errorf("template autodetect key TPL_AUTODETECT_ONLY=%q reached the container (SuppressedFallbackKeys = %v)", v, captured.SuppressedFallbackKeys)
+	}
+	assertEnv(t, env, "TPL_TOOL", "ok")
+}
+
+// templateFallbackSuppressedKeys collects any_of, alternative_env_keys and
+// autodetect env keys across all auth types; configAuthEnvKeySet, which
+// drives Start's auth-env filtering, stays any_of only.
+func TestTemplateFallbackSuppressedKeys(t *testing.T) {
+	authMeta := &config.HarnessAuthMetadata{
+		Types: map[string]config.HarnessAuthTypeMetadata{
+			"api-key": {RequiredEnv: []config.HarnessAuthEnvRequirement{{AnyOf: []string{"A_KEY"}}}},
+			"vertex-ai": {RequiredFiles: []config.HarnessAuthFileRequirement{
+				{Name: "gcloud-adc", AlternativeEnvKeys: []string{"ALT_KEY"}},
+			}},
+		},
+		Autodetect: config.HarnessAuthAutodetect{Env: map[string]string{"AUTO_KEY": "api-key"}},
+	}
+	if got, want := sortedKeys(templateFallbackSuppressedKeys(authMeta)), []string{"ALT_KEY", "AUTO_KEY", "A_KEY"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("templateFallbackSuppressedKeys = %v, want %v", got, want)
+	}
+	if got, want := sortedKeys(configAuthEnvKeySet(authMeta)), []string{"A_KEY"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("configAuthEnvKeySet = %v, want %v (unchanged: any_of only)", got, want)
+	}
+	if got := templateFallbackSuppressedKeys(nil); got != nil {
+		t.Errorf("templateFallbackSuppressedKeys(nil) = %v, want nil", got)
+	}
+	autodetectOnly := &config.HarnessAuthMetadata{Autodetect: config.HarnessAuthAutodetect{Env: map[string]string{"AUTO_KEY": "x"}}}
+	if got, want := sortedKeys(templateFallbackSuppressedKeys(autodetectOnly)), []string{"AUTO_KEY"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("autodetect-only = %v, want %v", got, want)
+	}
+}
+
 // B1: a hosted agent's start or restart leaves opts.Template unset; the
 // broker passes the hydrated template in opts.TemplateEnvSource, which
 // supplies the template env without a "not found" warning. Without it, the
