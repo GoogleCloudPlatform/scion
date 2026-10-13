@@ -271,18 +271,19 @@ func (b *TelegramBroker) Configure(config map[string]string) error {
 	// Resolve transport auth for IAP-protected hub endpoints.
 	transportMode := config["transport_mode"]
 	transportAudience := config["transport_audience"]
-	src, mode, tErr := transportauth.ResolveBrokerTransport(transportMode, transportAudience, nil)
+	src, mode, tErr := resolveBrokerTransport(transportMode, transportAudience, nil)
 	if tErr != nil {
 		b.log.Warn("Failed to resolve transport auth, continuing without IAP tokens", "error", tErr)
 	}
+	// Build a new client from the default transport (nil) each time, so
+	// transport auth wraps it once however often the broker is reconfigured.
+	var transport http.RoundTripper
 	if src != nil {
-		if b.httpClient == nil {
-			b.httpClient = &http.Client{Timeout: 10 * time.Second}
-		}
-		b.httpClient.Transport = transportauth.Wrap(b.httpClient.Transport, src, mode)
+		transport = transportauth.Wrap(transport, src, mode)
 		b.log.Info("Transport auth configured for Telegram broker",
 			"mode", transportMode, "audience", transportAudience)
 	}
+	b.httpClient = &http.Client{Timeout: 10 * time.Second, Transport: transport}
 
 	// Start registration server if an address is configured
 	if b.registerAddr != "" {
@@ -577,46 +578,55 @@ func (b *TelegramBroker) HealthCheck() (*plugin.HealthStatus, error) {
 
 // --- Long polling ---
 
-// startPolling starts the long-polling goroutine. Must be called with mu held.
+// startPolling starts the long-polling goroutine unless one runs. Must be
+// called with mu held.
 func (b *TelegramBroker) startPolling() {
 	if b.pollCancel != nil {
 		return // already polling
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	prev := b.pollDone
+	done := make(chan struct{})
 	b.pollCancel = cancel
-	b.pollDone = make(chan struct{})
+	b.pollDone = done
 
-	go b.pollLoop(ctx)
+	go b.pollLoop(ctx, prev, done)
 	b.log.Info("Telegram polling started")
 }
 
-// stopPolling stops the long-polling goroutine and waits for it to finish.
-func (b *TelegramBroker) stopPolling() {
-	b.mu.RLock()
-	cancel := b.pollCancel
-	done := b.pollDone
-	b.mu.RUnlock()
-
-	if cancel == nil {
-		return
+// stopPollingLocked cancels the running poll loop, if any, and returns a
+// channel that is closed once the most recent loop has exited (nil if none
+// was ever started). Must be called with mu held; the caller waits on the
+// channel after releasing mu, because the loop's handlers take mu.
+func (b *TelegramBroker) stopPollingLocked() <-chan struct{} {
+	if b.pollCancel != nil {
+		b.pollCancel()
+		b.pollCancel = nil
 	}
+	return b.pollDone
+}
 
-	cancel()
+// stopPolling stops the long-polling goroutine and waits for it to finish.
+// A loop started after the stop is not affected. Callers must not hold mu.
+func (b *TelegramBroker) stopPolling() {
+	b.mu.Lock()
+	done := b.stopPollingLocked()
+	b.mu.Unlock()
+
 	if done != nil {
 		<-done
 	}
-
-	b.mu.Lock()
-	b.pollCancel = nil
-	b.pollDone = nil
-	b.mu.Unlock()
 }
 
 // pollLoop continuously polls the Telegram Bot API for updates and processes
-// incoming messages. It runs until the context is canceled.
-func (b *TelegramBroker) pollLoop(ctx context.Context) {
-	defer close(b.pollDone)
+// incoming messages until ctx is canceled, then closes done. It first waits
+// for the previous loop (prev) to exit, so loops never overlap.
+func (b *TelegramBroker) pollLoop(ctx context.Context, prev <-chan struct{}, done chan struct{}) {
+	defer close(done)
+	if prev != nil {
+		<-prev
+	}
 
 	for {
 		select {
