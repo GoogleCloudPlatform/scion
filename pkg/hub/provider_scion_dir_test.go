@@ -17,6 +17,7 @@
 package hub
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -137,4 +138,37 @@ func TestProviderLocalPath_EmbeddedScionDirPathNoNestedProject(t *testing.T) {
 		assert.False(t, strings.HasPrefix(e.Name(), "scion__"),
 			"no project config named after the .scion directory, got %s", e.Name())
 	}
+}
+
+func TestLinkedProjectInitDir_SkipsBrokerGlobalDir(t *testing.T) {
+	for _, path := range []string{"/root", "/root/.scion", "/home/u", "/home/u/.scion", "/Users/u/.scion/"} {
+		dir, ok := linkedProjectInitDir(path)
+		assert.False(t, ok, "path %q is the broker's global directory and is not initialized", path)
+		assert.Empty(t, dir, "path %q", path)
+	}
+	for in, want := range map[string]string{
+		"/home/u/repo":        "/home/u/repo/.scion",
+		"/home/u/repo/.scion": "/home/u/repo/.scion",
+	} {
+		dir, ok := linkedProjectInitDir(in)
+		assert.True(t, ok, "path %q", in)
+		assert.Equal(t, want, dir, "path %q", in)
+	}
+}
+
+// The global project registered with the embedded broker's global directory
+// is stored, but the hub does not run linked-project init on that directory.
+func TestProviderLocalPath_EmbeddedRegisterGlobalDirIsNotInitialized(t *testing.T) {
+	inits := stubLinkedProjectInit(t)
+	srv, s := testServer(t)
+	broker := newLocalPathTestBroker(t, s, "gd-embedded-global-broker")
+	srv.SetEmbeddedBrokerID(broker.ID)
+
+	resp, code, body := registerWithBroker(t, srv, "global", broker.ID, brokerGlobalDir)
+	require.Equal(t, http.StatusOK, code, "body: %s", body)
+	assert.Equal(t, "global", resp.Project.Slug)
+	provider, err := s.GetProjectProvider(context.Background(), resp.Project.ID, broker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, brokerGlobalDir, provider.LocalPath)
+	assert.Empty(t, *inits, "the broker's global directory is not initialized as a linked project")
 }
