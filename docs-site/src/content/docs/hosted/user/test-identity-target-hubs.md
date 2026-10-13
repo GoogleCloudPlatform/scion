@@ -270,11 +270,10 @@ target as the `--as` identity, and a profile for the agent's own hub is refused 
   and no `--as` identity was given.
 - **`web-code` answers that web sessions are not available**: the target cannot mint web-login
   codes. A target in proxy auth mode (behind IAP) mints them only when it lists at least one
-  driver principal (`auth.proxy.driverPrincipals`); with none configured it answers this for
-  every code (`details.reason: test_identity_web_sessions_unavailable`,
+  driver principal (`server.auth.proxy.driver_principals`); with none configured it answers
+  this for every code (`details.reason: test_identity_web_sessions_unavailable`,
   `details.cause: proxy_auth_without_driver_principals`), and test identities still work for
-  API calls there.
-  The redeem on such a target also needs the driver's proxy assertion (see
+  API calls there. The redeem on such a target also needs the driver's proxy assertion (see
   [IAP-fronted hubs](/scion/contributing/test-identity-browser-sessions/#iap-fronted-hubs)).
   The other causes are a target without the test infrastructure marker or with test identities
   off.

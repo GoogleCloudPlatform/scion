@@ -1607,7 +1607,13 @@ func TestWorkloadDelegation_WebLoginCodeOnProxyHubFollowsDriverPrincipals(t *tes
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 	assert.Contains(t, rec.Body.String(), testIdentityWebReasonUnavailable)
 	assert.Contains(t, rec.Body.String(), testIdentityWebCauseNoDriverPrincipals)
-	assert.NotContains(t, rec.Body.String(), `"code":"`, "no code in the answer")
+	// The error envelope carries error.code; no web-login code field may
+	// appear at the top level.
+	var top map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &top))
+	assert.NotContains(t, top, "code")
+	assert.NotContains(t, top, "codeId")
+	assert.Contains(t, top, "error")
 	assert.Len(t, x2WebCodeAudits(t, e, i1.ID), 1, "no code minted without a driver principal")
 }
 
