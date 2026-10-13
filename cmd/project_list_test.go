@@ -44,8 +44,9 @@ const projectListGoldenEnv = "SCION_TEST_UPDATE_GOLDEN"
 
 // writeLocalProjectFixture creates, under HOME, one project directory of
 // each kind the machine-local list shows: the global project, an external
-// project whose workspace is gone, a git project with agents, a legacy git
-// project (agents next to the config directory) and an orphaned leftover.
+// project whose workspace is gone, a git project with agents, a git project
+// with no agents and no recorded workspace (unverified), a legacy git project
+// (agents next to the config directory) and an orphaned leftover.
 func writeLocalProjectFixture(t *testing.T) {
 	t.Helper()
 	home := os.Getenv("HOME")
@@ -56,6 +57,7 @@ func writeLocalProjectFixture(t *testing.T) {
 		filepath.Join(configs, "ext__9abc", ".scion"),
 		filepath.Join(configs, "gitcfg__def0", ".scion", "agents", "a"),
 		filepath.Join(configs, "gitcfg__def0", ".scion", "agents", "b"),
+		filepath.Join(configs, "idle__4321", ".scion", "agents"),
 		filepath.Join(configs, "legacy__5678", "agents", "bob"),
 		filepath.Join(configs, "orphan__1234"),
 	} {

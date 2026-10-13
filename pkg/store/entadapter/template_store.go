@@ -275,8 +275,6 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches).
 		SetHarness(template.Harness).
 		SetDefaultHarnessConfig(template.DefaultHarnessConfig).
-		// temporary: removed with the file-telemetry helper (ptone/scion#4223)
-		SetConfig(marshalJSONString(template.Config)).
 		SetAgentConfig(marshalAgentConfig(template.AgentConfig)).
 		SetContentHash(template.ContentHash).
 		SetStorageURI(template.StorageURI).
