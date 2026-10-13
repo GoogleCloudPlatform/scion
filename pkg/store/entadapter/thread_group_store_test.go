@@ -869,3 +869,57 @@ func TestThreadGroupDelete_WaitsForUncommittedFiling_Postgres(t *testing.T) {
 	assert.Zero(t, memberRows(t, cs, conv), "no orphan member row")
 	assert.Zero(t, groupMemberRows(t, cs, g.ID))
 }
+
+func TestThreadGroupCount(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+
+	n, err := cs.CountThreadGroups(ctx, projectID)
+	require.NoError(t, err)
+	assert.Zero(t, n)
+
+	g := newThreadGroup(t, cs, projectID, "one")
+	newThreadGroup(t, cs, projectID, "two")
+	newThreadGroup(t, cs, uuid.NewString(), "other project")
+	require.NoError(t, cs.SetThreadGroupMember(ctx, g.ID, newGroupConversation(t, cs, projectID), "u"))
+
+	n, err = cs.CountThreadGroups(ctx, projectID)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n, "groups of this project only; members do not count")
+
+	_, err = cs.CountThreadGroups(ctx, "not-a-uuid")
+	assert.ErrorIs(t, err, store.ErrInvalidInput)
+}
+
+func TestThreadGroupGetIDForConversation(t *testing.T) {
+	ctx := context.Background()
+	cs := newThreadGroupTestStore(t)
+	projectID := uuid.NewString()
+	a := newThreadGroup(t, cs, projectID, "a")
+	b := newThreadGroup(t, cs, projectID, "b")
+	c := newGroupConversation(t, cs, projectID)
+
+	id, err := cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Empty(t, id, "not filed")
+
+	require.NoError(t, cs.SetThreadGroupMember(ctx, a.ID, c, "u"))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, a.ID, id)
+
+	require.NoError(t, cs.SetThreadGroupMember(ctx, b.ID, c, "u"))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Equal(t, b.ID, id, "follows a move")
+
+	require.NoError(t, cs.RemoveThreadGroupMember(ctx, b.ID, c))
+	id, err = cs.GetThreadGroupIDForConversation(ctx, c)
+	require.NoError(t, err)
+	assert.Empty(t, id, "removed")
+
+	id, err = cs.GetThreadGroupIDForConversation(ctx, "not-a-uuid")
+	require.NoError(t, err)
+	assert.Empty(t, id, "a malformed ID is in no group")
+}

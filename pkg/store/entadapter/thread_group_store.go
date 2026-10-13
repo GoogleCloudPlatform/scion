@@ -236,6 +236,42 @@ func (s *ThreadGroupStore) ListThreadGroups(ctx context.Context, projectID strin
 	return groups, nil
 }
 
+// CountThreadGroups returns how many thread groups a project has, without
+// loading them or their members.
+func (s *ThreadGroupStore) CountThreadGroups(ctx context.Context, projectID string) (int, error) {
+	pid, err := parseUUID(projectID)
+	if err != nil {
+		return 0, err
+	}
+	n, err := s.client.ThreadGroup.Query().
+		Where(threadgroup.ProjectIDEQ(pid)).
+		Count(ctx)
+	if err != nil {
+		return 0, mapError(err)
+	}
+	return n, nil
+}
+
+// GetThreadGroupIDForConversation returns the ID of the thread group a
+// conversation is filed in, or "" when it is in none. It is a point lookup on
+// the unique conversation_id index. A malformed ID is in no group.
+func (s *ThreadGroupStore) GetThreadGroupIDForConversation(ctx context.Context, conversationID string) (string, error) {
+	cid, err := uuid.Parse(conversationID)
+	if err != nil {
+		return "", nil
+	}
+	m, err := s.client.ThreadGroupMember.Query().
+		Where(threadgroupmember.ConversationIDEQ(cid)).
+		Only(ctx)
+	if ent.IsNotFound(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", mapError(err)
+	}
+	return m.GroupID.String(), nil
+}
+
 // RenameThreadGroup renames a thread group and bumps updated_at.
 func (s *ThreadGroupStore) RenameThreadGroup(ctx context.Context, id, name string) error {
 	uid, err := parseGetID(id)
