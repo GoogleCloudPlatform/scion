@@ -118,7 +118,7 @@ scion artifact get scion://artifact/5f1c2d3e-... > design.md
 scion artifact get scion://artifact/5f1c2d3e-...@2 --out ./design-v2/
 ```
 
-`get` checks every file against what the Hub recorded at publish time, and it does not replace an existing file under `--out` (short form `-o`) unless you add `--force`; without it, `get` stops with "<path> already exists; use --force to replace it".
+`get` checks every file against what the Hub recorded at publish time, and it does not replace an existing file under `--out` (short form `-o`) unless you add `--force`; without it, `get` stops and says which file already exists.
 
 ## View an artifact
 
@@ -178,7 +178,7 @@ As with `--version-of`, a reference with `@<n>` must name the current version. T
 
 ### Act on a review (owner)
 
-When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A review by the owner itself sends no message, and a user who owns an artifact gets no message; check for the *Review pending* badge instead. To read a review:
+When an agent owns the artifact, the Hub sends it a message when someone else's review is published, with the commands to read it. A user owner gets no message; check for the *Review pending* badge instead. To read a review:
 
 ```bash
 scion artifact get scion://artifact/5f1c2d3e-...             # with the marks
@@ -204,7 +204,7 @@ A share link lets anyone who holds it open the artifact's **current** version in
 - An HTML entry renders in its sandbox; a Markdown entry opens as plain text.
 - A link gives no other access: it does not add the artifact to anyone's list.
 
-From the CLI, users can do the same with `scion artifact share`. `--ttl` takes any whole number of hours or days (such as `24h` or `3d`); without it the link lasts the Hub's default (7 days unless changed), and a lifetime above the Hub's maximum (30 days unless changed) is refused:
+From the CLI, users can do the same with `scion artifact share`. `--ttl` sets the lifetime in hours or days (such as `24h` or `3d`), up to the Hub's maximum; see the [reference](/scion/reference/artifacts/#share-links) for defaults:
 
 ```bash
 scion artifact share scion://artifact/5f1c2d3e-... --ttl 3d
@@ -259,7 +259,7 @@ Keep in mind:
 
 - The Hub keeps only references that you can read, and drops the others with a warning.
 - When you message one agent or one user directly, the Hub warns if the recipient may not be able to read a reference. The message is still delivered; ask whoever manages the artifact to share it with the recipient, or check the recipient agent's scopes (see [`missing_scope`](#missing_scope-when-an-agent-publishes)).
-- `scion message --artifact` refuses to send to `group[...]` recipients, and together with `--in` or `--at`. Broadcast messages, @-mention copies and messages that arrive through chat plugins lose their references. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
+- `scion message --artifact` cannot be used with `group[...]` recipients or with `--in`/`--at`. Broadcast messages, @-mention copies and messages that arrive through chat plugins lose their references. See [Artifacts in messages](/scion/reference/artifacts/#artifacts-in-messages).
 
 ## Expiry, moving and deleting
 
@@ -277,9 +277,7 @@ Agents use the same `scion artifact` command, but in agent mode:
 
 - **No share links.** `scion artifact share` is not available to agents, and the Hub refuses an agent's request to create one, even for an artifact the agent owns.
 - **No grants.** Agents cannot add, change or remove grants, including review access.
-- **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents.
-
-In an agent, `share` and `delete` do not exist at all: running one fails with `unknown command "share" for "scion artifact"` (or `"delete"`). That is expected, not a typo or an old CLI.
+- **No deleting, expiry changes or moves.** `scion artifact delete` is not available to agents. In an agent, `share` and `delete` do not exist at all: running one fails with `unknown command "share" for "scion artifact"` (or `"delete"`). That is expected, not a typo or an old CLI.
 - **Publishing needs the right agent role.** Agents started with `--role readonly` can read artifacts but not publish them; `baseline` and `full` agents can do both. An agent can publish new versions or reviews of someone else's artifact only with *Can edit* on it, granted to the agent or to its project.
 
 An artifact an agent owns has no user owner and no one with *Can manage*, so nobody can share it beyond its home project, and **Grant review access** reaches only people who can already read it. When the work needs readers or reviewers outside the project, the user who delegated to the agent can fetch it (`scion artifact get <ref> --out <folder>`) and publish it as their own artifact, which they can then share. The copy is a new artifact with its own reference, and it starts without the original's history or reviews; versions the agent publishes later still go to the original. If a review is current, add `--kind publish` (or `--accept`) to `get`. To let the agent keep publishing to the copy, publish the copy into the agent's project, then raise that home project's grant on the copy to *Can edit*.
