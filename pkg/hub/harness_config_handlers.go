@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -962,44 +963,9 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		status := store.HarnessConfigImageStatusUnknown
 		source := "broker_check"
 
-		if s.brokerClient != nil {
-			brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
-			if err == nil {
-				var found bool
-				var wg sync.WaitGroup
-				var mu sync.Mutex
-				for i := range brokerResult.Items {
-					b := &brokerResult.Items[i]
-					if isPluginBroker(b) {
-						continue
-					}
-					if !s.canDispatchToBroker(ctx, b) {
-						continue
-					}
-					if !isNodeBoundBroker(b) {
-						continue
-					}
-					wg.Add(1)
-					go func(broker *store.RuntimeBroker) {
-						defer wg.Done()
-						brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-						defer cancel()
-						imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, image, "")
-						if err != nil {
-							return
-						}
-						if imgResp != nil && imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
-							mu.Lock()
-							found = true
-							mu.Unlock()
-						}
-					}(b)
-				}
-				wg.Wait()
-				if found {
-					status = store.HarnessConfigImageStatusValid
-				}
-			}
+		if s.localImagePresent(ctx, image, "") {
+			status = store.HarnessConfigImageStatusValid
+			source = "local"
 		}
 
 		if status != store.HarnessConfigImageStatusValid && resolvedImage != image {
@@ -1024,6 +990,23 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A registry-qualified image can be present in a local image store
+	// without being in the registry (built locally, never pushed), so the
+	// local store is consulted before the registry.
+	if s.localImagePresent(ctx, "", resolvedImage) {
+		now := time.Now()
+		if err := s.store.UpdateHarnessConfigImageStatus(ctx, hc.ID, store.HarnessConfigImageStatusValid, now); err != nil {
+			slog.Warn("failed to persist image status", "id", hc.ID, "error", err)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"image_status":            store.HarnessConfigImageStatusValid,
+			"image_status_checked_at": now,
+			"source":                  "local",
+			"resolved_image":          resolvedImage,
+		})
+		return
+	}
+
 	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	slog.Info("image check result", "id", hc.ID, "status", result.Status, "source", result.Source, "error", result.Error)
 
@@ -1041,6 +1024,72 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		resp["error"] = result.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// localImagePresent reports whether an image exists in a local runtime image
+// store. It asks the same sources as the image-status endpoint: every
+// dispatchable node-bound broker, through its image-status API, or, when there
+// is no such broker, the hub's co-located runtime. shortImage is checked as a
+// bare local name and longImage as a registry-qualified name; either may be
+// empty. It returns false when no source can be asked.
+func (s *Server) localImagePresent(ctx context.Context, shortImage, longImage string) bool {
+	var nodeBound []*store.RuntimeBroker
+	if s.brokerClient != nil {
+		brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
+		if err != nil {
+			slog.Warn("image check: failed to list brokers", "error", err)
+			return false
+		}
+		for i := range brokerResult.Items {
+			b := &brokerResult.Items[i]
+			if isPluginBroker(b) || !s.canDispatchToBroker(ctx, b) || !isNodeBoundBroker(b) {
+				continue
+			}
+			nodeBound = append(nodeBound, b)
+		}
+	}
+
+	if len(nodeBound) == 0 {
+		mgr := s.getImageManager()
+		if mgr == nil {
+			return false
+		}
+		for _, img := range []string{shortImage, longImage} {
+			if img == "" {
+				continue
+			}
+			exists, err := mgr.ImageExists(ctx, img)
+			if err != nil {
+				slog.Warn("image check: local runtime check failed", "image", img, "error", err)
+				continue
+			}
+			if exists {
+				return true
+			}
+		}
+		return false
+	}
+
+	var found atomic.Bool
+	var wg sync.WaitGroup
+	for _, b := range nodeBound {
+		wg.Add(1)
+		go func(broker *store.RuntimeBroker) {
+			defer wg.Done()
+			brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, shortImage, longImage)
+			if err != nil || imgResp == nil {
+				return
+			}
+			if (imgResp.LocalShort != nil && imgResp.LocalShort.Exists) ||
+				(imgResp.LocalLong != nil && imgResp.LocalLong.Exists) {
+				found.Store(true)
+			}
+		}(b)
+	}
+	wg.Wait()
+	return found.Load()
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.
