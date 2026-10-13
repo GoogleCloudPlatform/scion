@@ -247,6 +247,12 @@ func pasteBufferArgv(target, bufName string) []string {
 	return []string{"tmux", "paste-buffer", "-t", target, "-p", "-d", "-b", bufName}
 }
 
+// sendKeyArgv builds the argv that sends one tmux key to the agent's
+// session. deliverImmediate uses it for interrupt and submit keys.
+func sendKeyArgv(key string) []string {
+	return []string{"tmux", "send-keys", "-t", "scion:0", key}
+}
+
 func NewManager(rt runtime.Runtime) Manager {
 	mgr := &AgentManager{
 		Runtime: rt,
@@ -1403,11 +1409,11 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	if interrupt {
 		if seq := h.GetInterruptSequence(); len(seq) > 0 {
 			for _, key := range seq {
-				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
+				steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
 			}
 		} else {
 			key := h.GetInterruptKey()
-			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
+			steps = append(steps, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
 		}
 	}
 
@@ -1421,7 +1427,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 	submitSteps := func() []deliveryStep {
 		out := make([]deliveryStep, 0, len(ds.SubmitKeys))
 		for _, key := range ds.SubmitKeys {
-			out = append(out, deliveryStep{kind: stepSendKeys, argv: []string{"tmux", "send-keys", "-t", "scion:0", key}})
+			out = append(out, deliveryStep{kind: stepSendKeys, argv: sendKeyArgv(key)})
 		}
 		return out
 	}
@@ -1458,7 +1464,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 
 	// 4. Execute. Once "tmux paste-buffer" succeeds, the message content is
 	// already sitting in the agent's terminal input — a later failure (the
-	// closing Enter, or one of the confirmation Enters below) must not
+	// closing submit keys, or one of the extra submits below) must not
 	// trigger a retry of the whole delivery, or the retried paste-buffer
 	// would duplicate the already-visible text (ptone/scion#1866). Errors
 	// from that point on are wrapped in PartialDeliveryError so the message
@@ -1512,7 +1518,7 @@ func (m *AgentManager) deliverImmediate(ctx context.Context, agentID, projectID 
 			case <-time.After(ds.ExtraSubmitDelay):
 			}
 			for _, key := range ds.SubmitKeys {
-				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, []string{"tmux", "send-keys", "-t", "scion:0", key}); err != nil {
+				if _, err := m.Runtime.Exec(ctx, agent.ContainerID, sendKeyArgv(key)); err != nil {
 					return &PartialDeliveryError{Err: fmt.Errorf("failed to send %s to agent '%s': %w", key, agent.Name, err)}
 				}
 			}
