@@ -336,7 +336,8 @@ func (s *Server) handleAuthzExplain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Only the credentials the user.self.explain catalog operation
-	// declares are admitted here; a cross-principal explain is checked
+	// declares are admitted here; an explain for another principal, or a
+	// comparison with another principal (comparePrincipalId), is checked
 	// again against hub.audit.explain below. A user access token explains
 	// through its own ceiling and boundary.
 	token, credentialOK := selfReadCredential(ctx, identity, "user.self.explain")
