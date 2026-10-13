@@ -34,14 +34,25 @@ import (
 )
 
 var (
-	stopRm  bool
-	stopAll bool
+	stopRm   bool
+	stopAll  bool
+	stopSelf bool
 )
 
 // stopCmd represents the stop command
 var stopCmd = &cobra.Command{
 	Use:   "stop [agent]",
 	Short: "Stop an agent",
+	Long: `Stop an agent, or every running agent of the project with --all.
+
+With --rm the agent is also removed after it stops, with its local files
+and worktree (the git branch is kept).
+
+Inside an agent, --rm does not remove the current agent (the one the
+command runs in) unless --self is given: naming the current agent with
+--rm is refused and nothing is stopped, and --all --rm skips the current
+agent and stops and removes the others. Outside an agent container --self
+has no effect.`,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if stopAll {
 			if len(args) > 0 {
@@ -78,6 +89,13 @@ var stopCmd = &cobra.Command{
 		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
 		if err != nil {
 			return err
+		}
+
+		// Checked before the stop, so a refusal leaves the agent running.
+		if stopRm {
+			if err := refuseCurrentAgentTarget([]string{agentName}, hubProjectID(hubCtx), stopSelf); err != nil {
+				return err
+			}
 		}
 
 		if hubCtx != nil {
@@ -164,6 +182,12 @@ func stopAllAgents() error {
 			running = append(running, runningAgent{Name: agentName})
 		}
 	}
+
+	// Without a Hub the project ID is unknown, so the current agent is
+	// matched by name (fail closed).
+	running = skipCurrentAgentForStopAllRm(running, "", func(ra runningAgent) []string {
+		return []string{ra.Name}
+	})
 
 	if len(running) == 0 {
 		if isJSONOutput() {
@@ -341,6 +365,10 @@ func stopAllAgentsViaHub(hubCtx *HubContext) error {
 			running = append(running, a)
 		}
 	}
+
+	running = skipCurrentAgentForStopAllRm(running, projectID, func(a hubclient.Agent) []string {
+		return []string{a.Name, a.Slug, a.ID}
+	})
 
 	if len(running) == 0 {
 		if isJSONOutput() {
@@ -612,6 +640,22 @@ func stopAgentViaHub(hubCtx *HubContext, agentName string) error {
 	return nil
 }
 
+// skipCurrentAgentForStopAllRm returns items without the current agent when
+// stop --all --rm runs without --self, and notes each skipped agent on
+// stderr (in every output mode, so in JSON mode stdout still carries only
+// the JSON document). Otherwise it returns items unchanged. targetProjectID
+// and refs are as for withoutCurrentAgent.
+func skipCurrentAgentForStopAllRm[T any](items []T, targetProjectID string, refs func(T) []string) []T {
+	if !stopRm || stopSelf {
+		return items
+	}
+	kept, skipped := withoutCurrentAgent(items, targetProjectID, refs)
+	for _, name := range skipped {
+		fmt.Fprintf(os.Stderr, "Skipping agent '%s': it is the current agent (this command is running inside it); add --self to stop and remove it too.\n", name)
+	}
+	return kept
+}
+
 // stopRmCleanupWarning is the warning for a stop --rm whose Hub removal
 // was confirmed but whose local cleanup failed. The command still succeeds.
 // stop --rm keeps the git branch, so the retry command does too.
@@ -661,5 +705,6 @@ func printLifecycleWarnings(resp *hubclient.LifecycleResponse) {
 func init() {
 	stopCmd.Flags().BoolVar(&stopRm, "rm", false, "Remove the agent after stopping, including its local files and worktree (the git branch is kept)")
 	stopCmd.Flags().BoolVarP(&stopAll, "all", "a", false, "Stop all running agents in the current project")
+	stopCmd.Flags().BoolVar(&stopSelf, "self", false, "With --rm, allow removing the current agent when run inside an agent; without it, naming the current agent is refused and --all skips it")
 	rootCmd.AddCommand(stopCmd)
 }
