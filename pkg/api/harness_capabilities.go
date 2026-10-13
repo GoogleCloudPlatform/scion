@@ -77,4 +77,7 @@ type HarnessAdvancedCapabilities struct {
 	Auth      HarnessAuthCapabilities      `json:"auth" yaml:"auth" koanf:"auth"`
 	MCP       HarnessMCPCapabilities       `json:"mcp" yaml:"mcp" koanf:"mcp"`
 	Resume    CapabilityField              `json:"resume" yaml:"resume" koanf:"resume"`
+	// AgentPlugins describes native Agent Plugins install support. An empty
+	// Support (a harness-config that predates the capability) is treated as no.
+	AgentPlugins CapabilityField `json:"agent_plugins" yaml:"agent_plugins" koanf:"agent_plugins"`
 }
