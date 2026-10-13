@@ -260,7 +260,7 @@ _See also_: User Access Token (UAT)
 **Group**:
 A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
 _Avoid_: team, org, role
-_See also_: Message Group (different concept — message recipients, not users)
+_See also_: Message Group (different concept — message recipients, not users), Thread Group (different concept — a project's threads, not users)
 
 **User Access Token (UAT)**:
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**.
@@ -305,7 +305,7 @@ _Avoid_: ancestry mode, parent-only mode
 **Message Group**:
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project.
 _Avoid_: group, set, group chat, room, thread
-_See also_: Group (different concept — hub users, not recipients)
+_See also_: Group (different concept — hub users, not recipients), Thread Group (different concept — a project's threads, not recipients)
 
 **Message Mode**:
 A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the default), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
@@ -346,6 +346,11 @@ _Avoid_: override, bypass (too generic)
 **Project mode** (message mode):
 The default message mode. Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
 _Avoid_: open mode, public mode
+
+**Thread Group**:
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group`, behind the `hub.chat_thread_groups` experiment (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
+_Avoid_: group (bare), folder, channel, conversation group, thread folder
+_See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
 
 ## Identity & State
 

@@ -515,6 +515,7 @@ Conversations are referenced using one of three forms:
     - `join <conversation-ref> <principal-kind> <principal-id>`: Add a participant to a conversation.
     - `leave <conversation-ref>`: Leave a conversation.
     - `catch-up <conversation-ref>`: Show recent messages in a conversation.
+    - `group <command>`: Manage the project's thread groups. See [`scion conversation group`](#scion-conversation-group) below.
 - **Flags (on `list`):**
     - `--kind <string>`: Filter by kind (`direct`, `group`).
     - `--surface <string>`: Filter by surface (`native`, `discord`, `slack`, etc.).
@@ -528,12 +529,38 @@ Conversations are referenced using one of three forms:
     - `--json`: Output in JSON format.
 - **Flags (on `create`):**
     - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
+    - `--group <group>`: File the new conversation into a thread group of the same project: a group ID, or a group name resolved within the project as `scion conversation group` resolves it. The group is checked before the conversation is created, so an unknown or ambiguous group creates nothing. Requires the `hub.chat_thread_groups` experiment.
     - `--json`: Output in JSON format.
 - **Flags (on `catch-up`):**
     - `--since <duration>`: Show messages from this duration ago, e.g. `30m`, `2h` (default `1h`).
     - `--json`: Output in JSON format.
 - **Flags (on `get-message`):**
     - `--json`: Output in JSON format.
+
+### `scion conversation group`
+
+Manages a project's **thread groups**: named sets of the project's group conversations (threads), shared by every member of the project, user or agent. A thread is in at most one group, so adding it to another group moves it. Requires Hub mode and the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/) (default off). On a Hub with the experiment off, every subcommand fails with `thread groups are not enabled on this hub (experiment hub.chat_thread_groups)`.
+
+A `<group>` argument is a group ID, or a group name resolved within the current project through the project's group list. Names are compared as the Hub compares them: trimmed and case-insensitive. A name that matches no group, or more than one (including an ID that is also another group's name), is an error that names the matches; use the group ID then. An ID that is not in the current project's list is looked up directly, and the Hub decides whether you can read it. A `<conversation-ref>` takes the same forms as the other `scion conversation` commands.
+
+**Usage:** `scion conversation group [command] [flags]`
+
+- **Commands:**
+    - `list`: List the project's thread groups, sorted by name. Text output has the columns `NAME`, `THREADS` (the number of member threads) and `ID`.
+    - `get <group>`: Show a thread group and its member threads (name, conversation ID and when it was added).
+    - `create <name>`: Create a thread group. A name is 1 to 100 characters after trimming, with no control characters. A name already used in the project, compared case-insensitively, returns `409`. A project can have at most 100 groups (`422`).
+    - `rename <group> <new-name>`: Rename a thread group. The name rules of `create` apply.
+    - `delete <group>`: Delete a thread group. Its threads become ungrouped; no thread or message is deleted. Asks for confirmation; without a terminal it needs `--yes`. Only users may delete a thread group: the command is not available in agent mode, and the Hub answers `403` to an agent.
+    - `add <group> <conversation-ref>`: Add a thread to a thread group, moving it out of any other group of the project. Adding a thread that is already in the group changes nothing. The thread must be a group conversation of the group's project; direct conversations and the project's `#general` thread are refused. A group holds at most 500 threads (`422`).
+    - `remove <group> <conversation-ref>`: Remove a thread from a thread group. The thread is not deleted. Removing a thread that is not in the group changes nothing.
+- **Flags (on `list` and `create`):**
+    - `--project <string>`: Project ID. Defaults to the Hub-linked project, then the local project, as for `scion conversation create`. If no project resolves, the Hub falls back to the calling agent's project; a user caller with no project gets `400 projectId is required`.
+- **Flags (on `list`, `get` and `create`):**
+    - `--json`: Output in JSON format. `list` prints `{"threadGroups": [...]}`, the Hub's list body; `get` and `create` print one thread group: `id`, `projectId`, `name`, `createdBy`, `createdByKind` (`user` or `agent`), `createdAt`, `updatedAt` and `threads`, where each thread has `conversationId`, `threadId` (the web chat thread ID, empty for a conversation with no web thread), `name`, `addedBy` and `addedAt`. `threads` is always a list, never `null`.
+- **Flags (on `delete`):**
+    - `-y, --yes`: Answer Yes to the confirmation prompt.
+
+In agent mode (inside agent containers), every subcommand except `delete` is available.
 
 ### `scion logs`
 
