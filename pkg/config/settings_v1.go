@@ -2980,7 +2980,10 @@ func (d *HarnessDeliveryConfig) extraSubmitDelay() (time.Duration, error) {
 // Validate checks the rules the JSON schema cannot express: key contents and
 // duration ranges. A nil block is valid. On load paths the schema runs first
 // and is the stricter gate for an empty submit_keys list and for a bare "0"
-// duration, both of which Validate treats as acceptable.
+// duration, both of which Validate treats as acceptable. Validate is the
+// stricter gate for key length, which it counts in bytes where the schema
+// counts code points, and for non-ASCII whitespace and control characters,
+// which the schema's ASCII-only character classes let through.
 func (d *HarnessDeliveryConfig) Validate() error {
 	if d == nil {
 		return nil
