@@ -275,39 +275,25 @@ func TestHubTestIdentityWebCode_RootCommandNeverPrintsCode(t *testing.T) {
 	assert.Equal(t, 1, hub.mints)
 }
 
-// WS3 AC3 (amended): web-code exists in human mode and is removed in agent
-// mode; it is not in agentAllowed.
-func TestHubTestIdentityWebCodeCmd_HumanModeOnly(t *testing.T) {
+// X3b (ptone/scion#4240): web-code exists in human mode and in agent mode,
+// where checkHubProfileGate lets it run only with a target-hub profile for
+// another hub (TestHubTestIdentityWebCode_Profile covers the run-time rule).
+func TestHubTestIdentityWebCodeCmd_ModeAvailability(t *testing.T) {
 	const p = "hub.test-identity.web-code"
 	require.NotNil(t, resolveCommandPath(rootCmd, p), "%s must exist in the real command tree", p)
-	assert.False(t, agentAllowed[p], "%s must not be allowed in agent mode", p)
-	// The test-identity parent is agent-allowed for target-hub profiles
-	// (ptone/scion#4240: issue/token/list/delete/teardown run in agent mode
-	// only against a profile for another hub); web-code itself is not.
-	assert.True(t, agentAllowed["hub.test-identity"], "the test-identity parent is agent-allowed for target-hub profiles")
-	for _, tc := range []struct {
-		mode    string
-		present bool
-	}{
-		{"human", true},
-		{"agent", false},
-	} {
-		t.Run(tc.mode, func(t *testing.T) {
+	assert.True(t, agentAllowed[p], "%s is agent-allowed (with a target-hub profile only)", p)
+	assert.True(t, hubProfileAllowed[p], "%s runs with a hub profile", p)
+	assert.True(t, hubProfileAgentRuntime[p], "%s in agent mode needs a target-hub profile", p)
+	assert.True(t, agentAllowed["hub.test-identity"])
+	for _, mode := range []string{"human", "agent"} {
+		t.Run(mode, func(t *testing.T) {
 			root := &cobra.Command{Use: "scion"}
 			hubReal := resolveCommandPath(rootCmd, "hub")
 			require.NotNil(t, hubReal)
 			root.AddCommand(cloneCommandShape(hubReal))
-			t.Setenv("SCION_CLI_MODE", tc.mode)
+			t.Setenv("SCION_CLI_MODE", mode)
 			applyModeRestrictions(root, resolveMode())
-			if tc.present {
-				assert.NotNil(t, resolveCommandPath(root, p))
-			} else {
-				// The parent and a sibling stay (target-hub profiles), so
-				// web-code is removed by its own path, not with its parent.
-				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity"))
-				assert.NotNil(t, resolveCommandPath(root, "hub.test-identity.issue"))
-				assert.Nil(t, resolveCommandPath(root, p))
-			}
+			assert.NotNil(t, resolveCommandPath(root, p))
 		})
 	}
 	// --out is a required flag.
