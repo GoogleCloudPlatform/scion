@@ -352,7 +352,7 @@ func TestFlatBranches_NeverReachProfileTier(t *testing.T) {
 	// Not vacuous: every wired flat branch is found.
 	for _, want := range []string{
 		"VersionedSettings.ResolveSharedDirDefaultsWithSource",
-		// agent_defaults (P3.1-c)
+		// agent_defaults
 		"VersionedSettings.ResolveHarnessConfig",
 		"VersionedSettings.ResolveCloneDepthWithSource",
 		"VersionedSettings.ResolveImageRegistry",
@@ -421,8 +421,8 @@ func (vs *VersionedSettings) Clean() string {
 }
 
 // TestConvertedProfileReaders_UseTierAccessors extends the guard to the call
-// sites that used to index Profiles directly (contract appendix FC5,
-// P3.1-c): each now reads the Profile tier only through a Tier* accessor,
+// sites that used to index Profiles directly (contract appendix FC5):
+// each now reads the Profile tier only through a Tier* accessor,
 // whose flat branch the guard above covers, so none may reference Profiles
 // again.
 func TestConvertedProfileReaders_UseTierAccessors(t *testing.T) {

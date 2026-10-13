@@ -153,7 +153,7 @@ func TestFlatDefaults_EnvKeysCallSiteUsesInstanceOverrides(t *testing.T) {
 	}
 }
 
-// Secrets call site (step 3c) and the W8 rung: the instance's secret
+// Secrets call site (step 3c) and the FC5 `secrets` rung: the instance's secret
 // declarations are required; for one key, the instance declaration (3c)
 // overrides the settings harness config's (3b) and the template's (3d)
 // overrides the instance's. The active profile's are not used.

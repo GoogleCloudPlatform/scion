@@ -211,10 +211,10 @@ func TestFlatAgentDefaults_UnsetFallsThroughToLowerRungs(t *testing.T) {
 	}
 }
 
-// W2: the instance default_harness_config sits at rung 6 of
+// FC5 `default_harness_config`: the instance value sits at rung 6 of
 // ResolveHarnessConfigName: below the template's (rungs 3-4) and the stored
 // config (rungs 2 and 5), above the top-level default (rung 7).
-func TestFlatAgentDefaults_W2DefaultHarnessConfigRung(t *testing.T) {
+func TestFlatAgentDefaults_DefaultHarnessConfigRung(t *testing.T) {
 	view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", &V1InstanceAgentDefaults{DefaultHarnessConfig: "instance-hc"}))
 	cases := []struct {
 		name   string
@@ -236,7 +236,7 @@ func TestFlatAgentDefaults_W2DefaultHarnessConfigRung(t *testing.T) {
 	}
 }
 
-// W2 call site (R5-N3, R6-N2): settings built through the flat view
+// Rung 6 call site: settings built through the flat view
 // (Profiles == nil), an empty profile name and an instance value set. The
 // former rung-6 guard (an empty effective profile skips the rung) must not
 // skip the instance value.
@@ -256,8 +256,8 @@ func TestResolveHarnessConfigName_FlatCallSiteUsesInstanceDefault(t *testing.T) 
 	}
 }
 
-// W3: the instance image_registry beats the top-level one.
-func TestFlatAgentDefaults_W3ImageRegistryRung(t *testing.T) {
+// FC5 `image_registry`: the instance value beats the top-level one.
+func TestFlatAgentDefaults_ImageRegistryRung(t *testing.T) {
 	view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", &V1InstanceAgentDefaults{ImageRegistry: "registry.example/instance"}))
 	if got := view.ResolveImageRegistry(""); got != "registry.example/instance" {
 		t.Fatalf("got %q, want the instance registry over the top-level one", got)
@@ -267,12 +267,12 @@ func TestFlatAgentDefaults_W3ImageRegistryRung(t *testing.T) {
 	}
 }
 
-// W4 and W6: ResolveHarnessConfig applies the instance volumes after the
+// FC5 `volumes` and `harness_overrides.<hc>.*`: ResolveHarnessConfig applies the instance volumes after the
 // harness config's (same order as a profile's), then the instance's
 // harness override for the active harness config over the base: image,
 // pull policy, user, auth type, env merged over the base env, volumes
 // appended last. Another harness config's override does not apply.
-func TestFlatAgentDefaults_W4W6ResolveHarnessConfig(t *testing.T) {
+func TestFlatAgentDefaults_ResolveHarnessConfigVolumesAndOverride(t *testing.T) {
 	vs := legacyAgentDefaultsSettings()
 	view := vs.ForFlatInstance(agentDefaultsPolicy("docker-1", fullAgentDefaults()))
 	got, err := view.ResolveHarnessConfig("", "claude")
@@ -304,11 +304,11 @@ func TestFlatAgentDefaults_W4W6ResolveHarnessConfig(t *testing.T) {
 	}
 }
 
-// W6: the ptone/scion#1799 exception. The explicit instance override image
+// FC5 `harness_overrides.<hc>.*`, the ptone/scion#1799 exception. The explicit instance override image
 // (and its pull policy) is reported separately from the plain settings
 // image, so image precedence can rank it over the template and inline
 // tiers; a harness config without an override reports none.
-func TestFlatAgentDefaults_W6OverrideImageReportedSeparately(t *testing.T) {
+func TestFlatAgentDefaults_OverrideImageReportedSeparately(t *testing.T) {
 	view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("docker-1", fullAgentDefaults()))
 	if got := view.ProfileHarnessOverrideImage("", "claude"); got != "instance-image:v2" {
 		t.Fatalf("override image %q", got)
@@ -324,9 +324,9 @@ func TestFlatAgentDefaults_W6OverrideImageReportedSeparately(t *testing.T) {
 	}
 }
 
-// W9: clone_depth is returned as written ("full" is an explicit value) with
+// FC5 `clone_depth`: the value is returned as written ("full" is an explicit value) with
 // the instance path as its source.
-func TestFlatAgentDefaults_W9CloneDepth(t *testing.T) {
+func TestFlatAgentDefaults_CloneDepthValueAndSource(t *testing.T) {
 	for _, depth := range []api.CloneDepth{"full", "3"} {
 		view := legacyAgentDefaultsSettings().ForFlatInstance(agentDefaultsPolicy("k-1", &V1InstanceAgentDefaults{CloneDepth: depth}))
 		got, src := view.ResolveCloneDepthWithSource("batch")
@@ -529,6 +529,9 @@ func TestRuntimeBrokerInstances_AgentDefaultsStrictErrorsNamePath(t *testing.T) 
 		"override key":     {"              user: instance-user\n", "              user: instance-user\n              usr: x\n", p + ".harness_overrides.claude.usr: unknown key"},
 		"override volume":  {"                - source: /ho\n", "                - source: /ho\n                  sorce: x\n", p + ".harness_overrides.claude.volumes[0].sorce: unknown key"},
 		"volume key":       {"              read_only: true\n", "              read_only: true\n              readonly: true\n", p + ".volumes[1].readonly: unknown key"},
+		"resources key":    {"              memory: 1Gi\n", "              memory: 1Gi\n              gpu: \"1\"\n", p + ".resources.requests.gpu: unknown key"},
+		"resources block":  {"          resources:\n            requests:\n", "          resources:\n            request: {}\n            requests:\n", p + ".resources.request: unknown key"},
+		"override res key": {"                  cpu: \"2\"\n", "                  cpu: \"2\"\n                  gpus: \"1\"\n", p + ".harness_overrides.claude.resources.limits.gpus: unknown key"},
 		"secret key":       {"              type: environment\n", "              type: environment\n              value: x\n", p + ".secrets[0].value: unknown key"},
 		"numeric registry": {"          image_registry: registry.example/instance\n", "          image_registry: 5\n", p + ".image_registry must be a string"},
 		"numeric env":      {"                SHARED: from-instance\n", "                SHARED: 1\n", p + ".harness_overrides.claude.env.SHARED must be a string"},
@@ -548,21 +551,36 @@ func TestRuntimeBrokerInstances_AgentDefaultsStrictErrorsNamePath(t *testing.T) 
 	}
 }
 
-// agent_defaults harness overrides get the validation a profile's harness
-// override gets (the settings schema's $defs/harnessOverride): an
-// out-of-range image_pull_policy, auth_selected_type or volume type is
-// refused, naming its settings path; a valid override passes.
-func TestValidateRuntimeBrokerInstances_AgentDefaultsHarnessOverrides(t *testing.T) {
+// agent_defaults values get the validation the same profile values get (the
+// settings schema's definitions, through $defs/instanceAgentDefaults): an
+// out-of-range image_pull_policy, auth_selected_type, volume type, secret
+// type or clone_depth, or a volume without a target or a secret without a
+// key, is refused, naming its settings path; valid values pass.
+func TestValidateRuntimeBrokerInstances_AgentDefaultsValues(t *testing.T) {
 	inst := V1RuntimeBrokerInstanceConfig{Key: "d", Name: "d", RuntimeTarget: &V1RuntimeTargetConfig{Type: "docker"},
 		AgentDefaults: fullAgentDefaults()}
 	if errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{inst}); len(errs) != 0 {
-		t.Fatalf("valid overrides refused: %v", errs)
+		t.Fatalf("valid agent_defaults refused: %v", errs)
 	}
-	inst.AgentDefaults.HarnessOverrides["claude"] = V1HarnessOverride{ImagePullPolicy: "Sometimes", AuthSelectedType: "magic",
-		Volumes: []api.VolumeMount{{Source: "/s", Target: "/t", Type: "floppy"}}}
+	d := inst.AgentDefaults
+	d.HarnessOverrides["claude"] = V1HarnessOverride{ImagePullPolicy: "Sometimes", AuthSelectedType: "magic",
+		Volumes: []api.VolumeMount{{Source: "/s", Target: "/t", Type: "floppy"}, {Source: "/s"}}}
+	d.Volumes = []api.VolumeMount{{Source: "/s", Target: "/t", Type: "floppy"}, {Source: "/s"}}
+	d.Secrets = []api.RequiredSecret{{Key: "A", Type: "bogus"}, {Description: "no key"}}
+	d.CloneDepth = "shallow"
 	errs := ValidateRuntimeBrokerInstances([]V1RuntimeBrokerInstanceConfig{inst})
-	const p = "server.broker.instances[0].agent_defaults.harness_overrides.claude"
-	for _, want := range []string{p + ".image_pull_policy", p + ".auth_selected_type", p + ".volumes.0.type"} {
+	const p = "server.broker.instances[0].agent_defaults"
+	for _, want := range []string{
+		p + ".harness_overrides.claude.image_pull_policy",
+		p + ".harness_overrides.claude.auth_selected_type",
+		p + ".harness_overrides.claude.volumes[0].type",
+		p + ".harness_overrides.claude.volumes[1].target",
+		p + ".volumes[0].type",
+		p + ".volumes[1].target",
+		p + ".secrets[0].type",
+		p + ".secrets[1].key",
+		p + ".clone_depth",
+	} {
 		found := false
 		for _, e := range errs {
 			found = found || e.Path == want
@@ -574,6 +592,19 @@ func TestValidateRuntimeBrokerInstances_AgentDefaultsHarnessOverrides(t *testing
 	for _, e := range errs {
 		if !strings.HasPrefix(e.Path, p) {
 			t.Errorf("unexpected error %v", e)
+		}
+	}
+}
+
+func TestSettingsPathSuffix(t *testing.T) {
+	for in, want := range map[string]string{
+		"":            "",
+		"clone_depth": ".clone_depth",
+		"harness_overrides/claude/volumes/0/type": ".harness_overrides.claude.volumes[0].type",
+		"harness_overrides/a~1b/env/X~0Y":         ".harness_overrides.a/b.env.X~Y",
+	} {
+		if got := settingsPathSuffix(in); got != want {
+			t.Errorf("settingsPathSuffix(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

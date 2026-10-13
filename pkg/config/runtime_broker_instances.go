@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -90,17 +91,7 @@ func ValidateRuntimeBrokerInstances(instances []V1RuntimeBrokerInstanceConfig) [
 			errs = append(errs, ValidationError{Path: p + ".name", Message: "name is required"})
 		}
 		if d := inst.AgentDefaults; d != nil {
-			if err := d.CloneDepth.Validate(); err != nil {
-				errs = append(errs, ValidationError{Path: p + ".agent_defaults.clone_depth", Message: err.Error()})
-			}
-			names := make([]string, 0, len(d.HarnessOverrides))
-			for name := range d.HarnessOverrides {
-				names = append(names, name)
-			}
-			sort.Strings(names)
-			for _, name := range names {
-				errs = append(errs, validateHarnessOverride(p+".agent_defaults.harness_overrides."+name, d.HarnessOverrides[name])...)
-			}
+			errs = append(errs, validateInstanceAgentDefaults(p+".agent_defaults", d)...)
 		}
 		t := inst.RuntimeTarget
 		if t == nil || t.Type == "" {
@@ -378,6 +369,8 @@ var (
 	knownHarnessOverKeys   = knownYAMLKeys(V1HarnessOverride{})
 	knownVolumeMountKeys   = knownYAMLKeys(api.VolumeMount{})
 	knownSecretKeys        = knownYAMLKeys(api.RequiredSecret{})
+	knownResourceSpecKeys  = knownYAMLKeys(api.ResourceSpec{})
+	knownResourceListKeys  = knownYAMLKeys(api.ResourceList{})
 )
 
 // checkInstanceKeys refuses every key of an instance entry or its
@@ -461,65 +454,105 @@ func joinValidationErrors(errs []ValidationError) error {
 }
 
 var (
-	harnessOverrideSchemaOnce sync.Once
-	harnessOverrideSchema     *jsonschema.Schema
-	harnessOverrideSchemaErr  error
+	agentDefaultsSchemaOnce sync.Once
+	agentDefaultsSchema     *jsonschema.Schema
+	agentDefaultsSchemaErr  error
 )
 
-// validateHarnessOverride checks o against the settings schema's
-// $defs/harnessOverride, the validation a profile's harness override gets
-// (scion config validate): for example image_pull_policy and
-// auth_selected_type must be one of their allowed values. Each problem is
-// one ValidationError whose path is under path.
-func validateHarnessOverride(path string, o V1HarnessOverride) []ValidationError {
-	harnessOverrideSchemaOnce.Do(func() {
+// validateInstanceAgentDefaults checks d against the settings schema's
+// $defs/instanceAgentDefaults, which reuses the definitions profiles are
+// validated with (scion config validate): harnessOverride, volumeMount,
+// requiredSecret, resourceSpec and the clone_depth pattern. For example an
+// out-of-range image_pull_policy, auth_selected_type, volume type or secret
+// type is refused. A volume target and a secret key, which the schema
+// requires but a marshalled struct always carries, must be non-empty. Each
+// problem is one ValidationError whose path is under path.
+func validateInstanceAgentDefaults(path string, d *V1InstanceAgentDefaults) []ValidationError {
+	var errs []ValidationError
+	for i, v := range d.Volumes {
+		if v.Target == "" {
+			errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.volumes[%d].target", path, i), Message: "target is required"})
+		}
+	}
+	for i, sec := range d.Secrets {
+		if sec.Key == "" {
+			errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.secrets[%d].key", path, i), Message: "key is required"})
+		}
+	}
+	names := make([]string, 0, len(d.HarnessOverrides))
+	for name := range d.HarnessOverrides {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for i, v := range d.HarnessOverrides[name].Volumes {
+			if v.Target == "" {
+				errs = append(errs, ValidationError{Path: fmt.Sprintf("%s.harness_overrides.%s.volumes[%d].target", path, name, i), Message: "target is required"})
+			}
+		}
+	}
+
+	agentDefaultsSchemaOnce.Do(func() {
 		schemaPath := settingsSchemaFiles["1"]
 		data, err := schemasFS.ReadFile(schemaPath)
 		if err != nil {
-			harnessOverrideSchemaErr = err
+			agentDefaultsSchemaErr = err
 			return
 		}
 		var doc interface{}
 		if err := json.Unmarshal(data, &doc); err != nil {
-			harnessOverrideSchemaErr = err
+			agentDefaultsSchemaErr = err
 			return
 		}
 		compiler := jsonschema.NewCompiler()
 		if err := compiler.AddResource(schemaPath, doc); err != nil {
-			harnessOverrideSchemaErr = err
+			agentDefaultsSchemaErr = err
 			return
 		}
-		harnessOverrideSchema, harnessOverrideSchemaErr = compiler.Compile(schemaPath + "#/$defs/harnessOverride")
+		agentDefaultsSchema, agentDefaultsSchemaErr = compiler.Compile(schemaPath + "#/$defs/instanceAgentDefaults")
 	})
-	if harnessOverrideSchemaErr != nil {
-		return []ValidationError{{Path: path, Message: "cannot load the harness override schema: " + harnessOverrideSchemaErr.Error()}}
+	if agentDefaultsSchemaErr != nil {
+		return append(errs, ValidationError{Path: path, Message: "cannot load the agent_defaults schema: " + agentDefaultsSchemaErr.Error()})
 	}
-	raw, err := json.Marshal(o)
+	raw, err := json.Marshal(d)
 	if err != nil {
-		return []ValidationError{{Path: path, Message: err.Error()}}
+		return append(errs, ValidationError{Path: path, Message: err.Error()})
 	}
 	inst, err := jsonschema.UnmarshalJSON(bytes.NewReader(raw))
 	if err != nil {
-		return []ValidationError{{Path: path, Message: err.Error()}}
+		return append(errs, ValidationError{Path: path, Message: err.Error()})
 	}
-	if err := harnessOverrideSchema.Validate(inst); err != nil {
-		var errs []ValidationError
+	if err := agentDefaultsSchema.Validate(inst); err != nil {
 		for _, e := range extractValidationErrors(err) {
-			if e.Path != "" {
-				e.Path = path + "." + strings.ReplaceAll(e.Path, "/", ".")
-			} else {
-				e.Path = path
-			}
+			e.Path = path + settingsPathSuffix(e.Path)
 			errs = append(errs, e)
 		}
-		return errs
 	}
-	return nil
+	return errs
+}
+
+// settingsPathSuffix turns a JSON pointer without its leading "/" (for
+// example "harness_overrides/claude/volumes/0/type") into the settings path
+// style the loader's other errors use (".harness_overrides.claude.volumes[0].type").
+func settingsPathSuffix(pointer string) string {
+	if pointer == "" {
+		return ""
+	}
+	var b strings.Builder
+	for _, seg := range strings.Split(pointer, "/") {
+		seg = strings.ReplaceAll(strings.ReplaceAll(seg, "~1", "/"), "~0", "~")
+		if _, err := strconv.Atoi(seg); err == nil {
+			b.WriteString("[" + seg + "]")
+		} else {
+			b.WriteString("." + seg)
+		}
+	}
+	return b.String()
 }
 
 // checkAgentDefaultsKeys refuses every unknown key of an instance's
-// agent_defaults, of each of its harness overrides, and of each volume and
-// secret declaration in them, naming its settings path.
+// agent_defaults, of each of its harness overrides, and of each resources
+// block, volume and secret declaration in them, naming its settings path.
 func checkAgentDefaultsKeys(path string, dm map[string]interface{}, check func(string, map[string]interface{}, map[string]bool, []string) error) error {
 	if err := check(path, dm, knownAgentDefaultsKeys, nil); err != nil {
 		return err
@@ -534,6 +567,26 @@ func checkAgentDefaultsKeys(path string, dm map[string]interface{}, check func(s
 			}
 		}
 		return nil
+	}
+	checkResources := func(path string, v interface{}) error {
+		rm, ok := v.(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		if err := check(path, rm, knownResourceSpecKeys, nil); err != nil {
+			return err
+		}
+		for _, list := range []string{"limits", "requests"} {
+			if lm, ok := rm[list].(map[string]interface{}); ok {
+				if err := check(path+"."+list, lm, knownResourceListKeys, nil); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := checkResources(path+".resources", dm["resources"]); err != nil {
+		return err
 	}
 	if err := checkList(path+".volumes", dm["volumes"], knownVolumeMountKeys); err != nil {
 		return err
@@ -554,6 +607,9 @@ func checkAgentDefaultsKeys(path string, dm map[string]interface{}, check func(s
 		}
 		op := path + ".harness_overrides." + name
 		if err := check(op, om, knownHarnessOverKeys, nil); err != nil {
+			return err
+		}
+		if err := checkResources(op+".resources", om["resources"]); err != nil {
 			return err
 		}
 		if err := checkList(op+".volumes", om["volumes"], knownVolumeMountKeys); err != nil {

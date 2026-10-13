@@ -39,7 +39,7 @@ func agentDefaultsView(vs *config.VersionedSettings, d *config.V1InstanceAgentDe
 	return vs.ForFlatInstance(config.FlatInstancePolicyFrom(agentDefaultsCtx(d)))
 }
 
-// W5 and W7: lowest tier first, settings default_resources < Hub
+// FC5 `resources` and `harness_overrides.<hc>.resources`: lowest tier first, settings default_resources < Hub
 // agent_defaults.resources < instance resources < the agent's own <
 // instance harness_overrides.<hc>.resources, exactly the profile's rungs.
 // The active profile's resources never apply.
@@ -77,7 +77,7 @@ func TestResolveEnvironmentResources_FlatInstanceRungs(t *testing.T) {
 	require.NotNil(t, got)
 	assert.Equal(t, "3Gi", got.Requests.Memory, "the agent's own resources beat the instance resources")
 	assert.Equal(t, "500m", got.Requests.CPU, "the instance fills what the agent leaves unset")
-	assert.Equal(t, "2", got.Limits.CPU, "the instance harness override resources rank above the agent's own (W7)")
+	assert.Equal(t, "2", got.Limits.CPU, "the instance harness override resources rank above the agent's own")
 	assert.Equal(t, "3Gi", own.Requests.Memory, "own is not modified")
 	assert.Equal(t, "3", own.Limits.CPU, "own is not modified")
 
@@ -137,7 +137,7 @@ func startFlatCapturingRun(t *testing.T, ctx context.Context, opts api.StartOpti
 	return captured
 }
 
-// W6, the ptone/scion#1799 exception: on a flat instance the explicit
+// FC5 `harness_overrides.<hc>.*`, the ptone/scion#1799 exception: on a flat instance the explicit
 // agent_defaults.harness_overrides.<hc>.image outranks the plain settings
 // image and the inline image, as a profile override does, while a request
 // image still beats it. The active profile's override never applies.
@@ -183,4 +183,45 @@ func TestFlatProfileResolution_StartUsesInstanceAgentDefaults(t *testing.T) {
 	require.NotNil(t, cfg.Resources)
 	assert.Equal(t, "1234Mi", cfg.Resources.Requests.Memory, "the instance resources reach the agent")
 	assert.Equal(t, "3", cfg.Resources.Limits.CPU, "the instance harness override resources reach the agent")
+}
+
+// FC5 `clone_depth`: on a flat instance the instance value sits below the
+// template's or agent's clone_depth, exactly where the profile value sat,
+// through the same resolution Start uses (ResolveCloneDepthWithSource then
+// applyCloneDepth).
+func TestApplyCloneDepth_FlatInstanceRung(t *testing.T) {
+	vs := &config.VersionedSettings{ActiveProfile: "batch",
+		Profiles: map[string]config.V1ProfileConfig{"batch": {Runtime: "docker", CloneDepth: "7"}}}
+	view := agentDefaultsView(vs, &config.V1InstanceAgentDefaults{CloneDepth: "3"})
+	depthOf := func(template api.CloneDepth) (*int, error) {
+		t.Helper()
+		in := cloneDepthInput{Template: template}
+		in.Profile, in.ProfileSource = view.ResolveCloneDepthWithSource("")
+		gc, err := applyCloneDepth(&api.GitCloneConfig{URL: "https://example.com/r.git"}, nil, in)
+		if err != nil {
+			return nil, err
+		}
+		return gc.Depth, nil
+	}
+
+	d, err := depthOf("")
+	require.NoError(t, err)
+	require.NotNil(t, d)
+	assert.Equal(t, 3, *d, "the instance clone_depth applies when the template sets none")
+
+	d, err = depthOf("full")
+	require.NoError(t, err)
+	require.NotNil(t, d)
+	assert.Equal(t, 0, *d, "the template's clone_depth (full) beats the instance's")
+
+	d, err = depthOf("5")
+	require.NoError(t, err)
+	require.NotNil(t, d)
+	assert.Equal(t, 5, *d, "the template's clone_depth beats the instance's")
+
+	// An invalid instance value is reported with its settings path.
+	view = agentDefaultsView(vs, &config.V1InstanceAgentDefaults{CloneDepth: "shallow"})
+	_, err = depthOf("")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "server.broker.instances[docker-1].agent_defaults.clone_depth")
 }
