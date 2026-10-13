@@ -214,7 +214,7 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 	if len(check.files) == 0 {
 		return base, false
 	}
-	if !s.discard(w, r, b, a.ID, v.Seq, claim) {
+	if !s.discard(w, r, b, a.ID, v.Seq, claim, FailReasonUnmarkedChanges) {
 		return 0, true
 	}
 	writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: errorBody{
@@ -229,22 +229,23 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 // discardStaleReview discards a review overtaken by a newer version and
 // answers 409.
 func (s *Service) discardStaleReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time) {
-	s.discardReview(w, r, b, id, seq, claim,
+	s.discardReview(w, r, b, id, seq, claim, FailReasonStaleReview,
 		"the version the review was started from is no longer the latest; the review was discarded. Review the current version")
 }
 
-// discardReview discards a claimed review and answers 409 stale_review
-// with message.
-func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, message string) {
-	if !s.discard(w, r, b, id, seq, claim) {
+// discardReview discards a claimed review, recording reason, and answers
+// 409 stale_review with message.
+func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, reason, message string) {
+	if !s.discard(w, r, b, id, seq, claim, reason) {
 		return
 	}
 	writeError(w, http.StatusConflict, CodeStaleReview, message)
 }
 
-// discard fails a claimed version. ok=false means the response was written.
-func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time) bool {
-	err := b.store.DiscardFinalize(context.WithoutCancel(r.Context()), id, seq, claim)
+// discard fails a claimed version, recording reason (a FailReason
+// constant). ok=false means the response was written.
+func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, reason string) bool {
+	err := b.store.DiscardFinalize(context.WithoutCancel(r.Context()), id, seq, claim, reason)
 	switch {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")

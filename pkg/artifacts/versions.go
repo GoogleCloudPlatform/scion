@@ -812,7 +812,7 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if errors.Is(err, ErrPendingNewer) {
-		s.discardReview(w, r, b, a.ID, seq, claim,
+		s.discardReview(w, r, b, a.ID, seq, claim, FailReasonNewerPublishPending,
 			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
 		return
 	}
@@ -927,7 +927,9 @@ const (
 )
 
 // handleListVersions implements GET /{id}/versions[?limit=][&before=]: the ready versions,
-// newest first, without their files.
+// newest first, without their files, and in Discarded the failed versions
+// of the same page (ptone/scion#4577). A page walks ready and failed
+// versions together by seq.
 func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id string) {
 	b, a, ok := s.readableArtifact(w, r, id)
 	if !ok {
@@ -952,14 +954,18 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		}
 		before = n
 	}
-	versions, err := b.store.ListVersions(r.Context(), a.ID, before, limit)
+	versions, err := b.store.ListVersionHistory(r.Context(), a.ID, before, limit)
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list versions failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the versions")
 		return
 	}
-	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions))}
+	resp := VersionListResponse{Versions: make([]VersionInfo, 0, len(versions)), Discarded: []DiscardedVersionInfo{}}
 	for i := range versions {
+		if versions[i].State == VersionStateFailed {
+			resp.Discarded = append(resp.Discarded, discardedVersionInfo(&versions[i]))
+			continue
+		}
 		vi := versionInfo(&versions[i], nil)
 		vi.Files = nil
 		resp.Versions = append(resp.Versions, *vi)
@@ -968,6 +974,16 @@ func (s *Service) handleListVersions(w http.ResponseWriter, r *http.Request, id 
 		resp.NextBefore = versions[len(versions)-1].Seq
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// discardedVersionInfo is the list entry of a failed version: its number,
+// state, reason and creation time, and nothing else.
+func discardedVersionInfo(v *Version) DiscardedVersionInfo {
+	reason := v.FailReason
+	if reason == "" {
+		reason = FailReasonDiscarded
+	}
+	return DiscardedVersionInfo{Seq: v.Seq, State: v.State, Reason: reason, CreatedAt: v.CreatedAt}
 }
 
 // handleGetVersion implements GET /{id}/versions/{seq}: one ready version

@@ -170,3 +170,14 @@ func HasEmptyPerAgentSupport(rt Runtime) bool {
 type AgentResourceCleaner interface {
 	CleanupAgentResources(ctx context.Context, agentName, projectID, runID string) error
 }
+
+// OwnedAgentResourceCleaner is AgentResourceCleaner for a flat Runtime
+// Broker instance's agents (ptone/scion#3274): it also selects by the
+// reserved owner label (api.LabelRuntimeBrokerID = runtimeBrokerID), so it
+// never removes another instance's (or an unlabeled) object with the same
+// name and project. runID scopes the cleanup exactly as on
+// AgentResourceCleaner (an empty runID selects by name, project and owner).
+// An empty or invalid runtimeBrokerID is an error and nothing is removed.
+type OwnedAgentResourceCleaner interface {
+	CleanupOwnedAgentResources(ctx context.Context, agentName, projectID, runtimeBrokerID, runID string) error
+}

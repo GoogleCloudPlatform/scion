@@ -38,6 +38,9 @@ make test-hub-shard SHARD=2 NOSQLITE=1 # the same with -tags no_sqlite (RACE=1 a
 make build-hub-shard SHARD=2           # compile only (binary discarded)
 make vet-hub-shard SHARD=2             # go vet the shard with both vet tag sets
 make test-hub-postgres SHARD=2         # the shard's Postgres tests (needs the Postgres env vars)
+make test-hub-postgres-default SHARD=2     # ... only the default-tag ones (CI: in the shard job)
+make test-hub-postgres-integration SHARD=2 # ... only the -tags integration ones (CI: own job)
+make hub-postgres-integration-shards   # the shards holding a -tags integration Postgres test
 make hubshard-parity                   # parse only: every test runs in exactly one shard
 make test-hub-shards                   # every shard in turn (NOSQLITE=1, RACE=1 as above)
 make test-hub-sqlite                   # every shard in turn, plus the non-hub SQLite packages

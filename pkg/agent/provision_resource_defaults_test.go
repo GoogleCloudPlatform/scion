@@ -16,6 +16,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -40,11 +41,20 @@ harness_configs:
     harness: test-harness
 `
 
+// provisionWithTemplate provisions with templateJSON as the limits-tpl
+// template AND as the inline (request) config. A template's resources and
+// kubernetes keys are environment keys, which agents ignore
+// (ptone/scion#4524), so the resource values under test reach the agent
+// through the inline config, the tier merged directly above the template.
 func provisionWithTemplate(t *testing.T, settingsYAML, templateJSON string) *api.ScionConfig {
 	t.Helper()
 	projectScionDir := hubDefaultsFixture(t, settingsYAML, templateJSON)
+	var inline api.ScionConfig
+	if err := json.Unmarshal([]byte(templateJSON), &inline); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
 	_, _, cfg, err := ProvisionAgent(context.Background(), "res-agent", "limits-tpl", "", "test-harness",
-		projectScionDir, "", "", "", "")
+		projectScionDir, "", "", "", "", &inline)
 	if err != nil {
 		t.Fatalf("ProvisionAgent: %v", err)
 	}
@@ -158,7 +168,7 @@ harness_configs:
 		t.Errorf("limits.cpu = %+v, want 3 from settings default_resources", cfg.Resources)
 	}
 	if cfg.Resources != nil && cfg.Resources.Requests.CPU != "4" {
-		t.Errorf("requests.cpu = %q, want 4 from the template", cfg.Resources.Requests.CPU)
+		t.Errorf("requests.cpu = %q, want 4 from the inline config", cfg.Resources.Requests.CPU)
 	}
 }
 

@@ -148,10 +148,12 @@ func collectStringConsts(decl ast.Decl, into map[string]string) {
 // ptone/scion#2312.
 func TestNoRawMemorySQLiteOpen(t *testing.T) {
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards in-memory sql.Open/ent.Open in test files, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards in-memory sql.Open/ent.Open in test files.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards in-memory sql.Open/ent.Open in test files (no test file moves), which identity.go and identity_credential.go do not contain.
-	names, err := filepath.Glob("*_test.go")
+	// scanned through guardScanSubdirs; guards in-memory sql.Open/ent.Open in test files.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards in-memory sql.Open/ent.Open in test files.
+	names, err := globGuardScanDirs(".", "*_test.go")
 	if err != nil {
 		t.Fatal(err)
 	}

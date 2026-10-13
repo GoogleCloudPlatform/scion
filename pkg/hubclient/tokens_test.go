@@ -64,3 +64,41 @@ func TestTokenInfo_JSON(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateTokenRequest_HubBoundaryJSON(t *testing.T) {
+	req := CreateTokenRequest{Name: "health-check", Boundary: &TokenBoundary{Kind: "hub"}, Scopes: []string{"hub_health:read"}}
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Unmarshal back failed: %v", err)
+	}
+	if _, ok := m["projectId"]; ok {
+		t.Errorf("projectId present in a hub-boundary request: %s", data)
+	}
+	boundary, _ := m["boundary"].(map[string]interface{})
+	if boundary["kind"] != "hub" {
+		t.Errorf("boundary = %v, want kind hub", m["boundary"])
+	}
+	if _, ok := boundary["projectId"]; ok {
+		t.Errorf("boundary carries a projectId: %s", data)
+	}
+
+	// The project shorthand still sends projectId and no boundary.
+	data, err = json.Marshal(CreateTokenRequest{Name: "ci", ProjectID: "p1", Scopes: []string{"agent:read"}})
+	if err != nil {
+		t.Fatalf("Marshal failed: %v", err)
+	}
+	m = nil
+	if err := json.Unmarshal(data, &m); err != nil {
+		t.Fatalf("Unmarshal back failed: %v", err)
+	}
+	if m["projectId"] != "p1" {
+		t.Errorf("projectId = %v, want p1", m["projectId"])
+	}
+	if _, ok := m["boundary"]; ok {
+		t.Errorf("boundary present in a project shorthand request: %s", data)
+	}
+}

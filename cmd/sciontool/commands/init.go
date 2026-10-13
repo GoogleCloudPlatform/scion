@@ -310,8 +310,7 @@ func reportInitFailure(agentHome string, cause error) {
 	statusHandler := handlers.NewStatusHandler()
 	statusHandler.StatusPath = filepath.Join(agentHome, "agent-info.json")
 	errMsg := cause.Error()
-	_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-	_ = statusHandler.SetMessage(errMsg)
+	_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", errMsg)
 	if hubClient := hub.NewClient(); hubClient != nil && hubClient.IsConfigured() {
 		hubCtx, hubCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if hubErr := hubClient.ReportState(hubCtx, state.PhaseError, "", errMsg); hubErr != nil {
@@ -705,8 +704,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 		// Update local agent-info.json to error state so local status readers
 		// and the broker heartbeat see the failure and error message.
 		errMsg := fmt.Sprintf("git clone failed: %v", err)
-		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-		_ = statusHandler.SetMessage(errMsg)
+		_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", errMsg)
 
 		// Report error to Hub directly so the agent doesn't stay stuck in "cloning" state.
 		// This is best-effort; the broker heartbeat will also pick up the error from
@@ -748,8 +746,7 @@ func RunInit(args []string, opts InitRunOptions) int {
 			}
 			if !fallbackExists {
 				log.Error("Pre-start provisioning is required; aborting startup")
-				_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-				_ = statusHandler.SetMessage(fmt.Sprintf("pre-start hook failed: %v", err))
+				_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", fmt.Sprintf("pre-start hook failed: %v", err))
 				return 1
 			}
 		}
@@ -1519,11 +1516,9 @@ waitLoop:
 		// HYBRID mapping: an unexpected non-zero exit becomes PhaseError with
 		// the activity cleared (crash detail lives in the message + exitCode).
 		// `crashed` activity is only valid on PhaseStopped per state validation.
-		_ = statusHandler.UpdatePhase(state.PhaseError, "", "")
-		_ = statusHandler.SetMessage(outcome.message)
+		_ = statusHandler.UpdatePhaseAndMessage(state.PhaseError, "", outcome.message)
 	} else if limitsExceeded {
-		_ = statusHandler.UpdatePhase(state.PhaseStopped, state.ActivityLimitsExceeded, "")
-		_ = statusHandler.SetMessage("limits exceeded")
+		_ = statusHandler.UpdatePhaseAndMessage(state.PhaseStopped, state.ActivityLimitsExceeded, "limits exceeded")
 	}
 
 	// Report final status to Hub, distinguishing clean stop from crash.

@@ -405,26 +405,51 @@ func TestHubTestIdentityPurge(t *testing.T) {
 	assert.Empty(t, stdout.String())
 }
 
-// CLI mode: scion hub test-identity and its subcommands are available in
-// human mode and removed in agent mode (not in agentAllowed).
+// CLI mode (ptone/scion#4240): scion hub test-identity's issue, token, list, delete
+// and teardown, hub status and hub profile stay in agent mode (they refuse
+// at run time without a target-hub profile; see hub_profile_test.go), while
+// delegate, the human consent step, and every other hub child are removed.
 func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
-	paths := []string{
+	agentPaths := []string{
+		"hub.status",
+		"hub.profile",
+		"hub.profile.add",
+		"hub.profile.list",
+		"hub.profile.show",
+		"hub.profile.remove",
 		"hub.test-identity",
 		"hub.test-identity.issue",
 		"hub.test-identity.token",
 		"hub.test-identity.list",
 		"hub.test-identity.delete",
+		"hub.test-identity.teardown",
 	}
-	for _, p := range paths {
+	humanOnly := []string{
+		"hub.test-identity.web-code",
+		"hub.test-identity.delegate",
+		"hub.test-identity.delegate.create",
+		"hub.test-identity.delegate.list",
+		"hub.test-identity.delegate.revoke",
+		"hub.projects",
+		"hub.enable",
+		"hub.link",
+		"hub.auth",
+		"hub.token",
+	}
+	for _, p := range append(append([]string{}, agentPaths...), humanOnly...) {
 		require.NotNil(t, resolveCommandPath(rootCmd, p), "%s must exist in the real command tree", p)
+	}
+	for _, p := range agentPaths {
+		assert.True(t, agentAllowed[p], "%s must be allowed in agent mode", p)
+	}
+	for _, p := range humanOnly {
 		assert.False(t, agentAllowed[p], "%s must not be allowed in agent mode", p)
 	}
 	for _, tc := range []struct {
-		mode    string
-		present bool
+		mode string
 	}{
-		{"human", true},
-		{"agent", false},
+		{"human"},
+		{"agent"},
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			root := &cobra.Command{Use: "scion"}
@@ -434,11 +459,14 @@ func TestHubTestIdentityCmd_ModeAvailability(t *testing.T) {
 
 			t.Setenv("SCION_CLI_MODE", tc.mode)
 			applyModeRestrictions(root, resolveMode())
-			for _, p := range paths {
-				if tc.present {
-					assert.NotNil(t, resolveCommandPath(root, p), "%s mode keeps %s", tc.mode, p)
+			for _, p := range agentPaths {
+				assert.NotNil(t, resolveCommandPath(root, p), "%s mode keeps %s", tc.mode, p)
+			}
+			for _, p := range humanOnly {
+				if tc.mode == "human" {
+					assert.NotNil(t, resolveCommandPath(root, p), "human mode keeps %s", p)
 				} else {
-					assert.Nil(t, resolveCommandPath(root, p), "%s mode removes %s", tc.mode, p)
+					assert.Nil(t, resolveCommandPath(root, p), "agent mode removes %s", p)
 				}
 			}
 		})
