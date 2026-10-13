@@ -91,7 +91,8 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	// grants. A test admin still reads and revokes the grants it issued
 	// and those on agents it owns: agentDelegationControlAllowed admits
 	// the issuer and the owner from the stored rows before it asks
-	// Decide.
+	// Decide. It may still grant them at project scope
+	// (testAdminGrantableAtProjectScope).
 	"agent.delegation.revoke":            testAdminPolicyDeny,
 	"agent.delegation.credential.revoke": testAdminPolicyDeny,
 	"agent.delegation.list":              testAdminPolicyDeny,
@@ -270,6 +271,37 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"inbox.read":                  testAdminPolicyAllow,
 	"inbox.write":                 testAdminPolicyAllow,
 	"user_skill_injection.update": testAdminPolicyAllow,
+}
+
+// testAdminGrantableAtProjectScope names the deny-classified permissions
+// an admin-kind test identity may still grant through a project-scope
+// grant (a project role binding, project membership or a project-scope
+// custom role), while it can never exercise them itself (decide step 0c
+// stays deny). They are the agent delegation grant management
+// permissions, which the built-in project-owner and project-admin roles
+// hold. Granted on a project they reach only grants bounded to that
+// project, which every project owner already manages, so a test admin
+// keeps appointing project owners and admins. At hub scope they reach any
+// user's grants and stay refused. No other deny entry is exempt:
+// project.secret_read and every other project-held deny permission is
+// refused at every scope. The census pins every member as deny-classified
+// and held by a built-in project role.
+var testAdminGrantableAtProjectScope = map[string]bool{
+	"agent.delegation.revoke":            true,
+	"agent.delegation.credential.revoke": true,
+	"agent.delegation.list":              true,
+	"agent.delegation.read":              true,
+}
+
+// testAdminGrantRefuses reports whether an admin-kind test identity is
+// refused a grant conferring permissionID at scopeType: every
+// deny-classified permission, except a testAdminGrantableAtProjectScope
+// member granted at project scope.
+func testAdminGrantRefuses(permissionID, scopeType string) bool {
+	if !testAdminPermissionDenied(permissionID) {
+		return false
+	}
+	return !(scopeType == store.RoleScopeProject && testAdminGrantableAtProjectScope[permissionID])
 }
 
 // testAdminMustDenyPermissions is the initial deny set of the admin tier

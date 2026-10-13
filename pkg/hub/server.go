@@ -387,8 +387,8 @@ type ServerConfig struct {
 	// X2). New validates it (config.ValidateTestIdentityWorkloadIssuers, a
 	// resolved HubID, and an issuer audience distinct from every other
 	// configured token audience) and refuses to build a Server otherwise.
-	// It is accepted only while EnableTestIdentities is true (--test-mode=member or above); it is never
-	// writable through the API.
+	// It is accepted only while EnableTestIdentities is true
+	// (--test-mode=member or above); it is never writable through the API.
 	TestIdentityWorkloadIssuers []config.TestIdentityWorkloadIssuer
 	// TestIdentityWorkloadValidator verifies workload Google ID tokens.
 	// Nil means the production Google validator; tests set a fake.

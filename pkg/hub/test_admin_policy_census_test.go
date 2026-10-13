@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -149,6 +150,40 @@ func TestTestAdminPolicy_InitialDenySet(t *testing.T) {
 		assert.False(t, testAdminExperimentAllowed(e.Name), e.Name)
 	}
 	assert.False(t, testAdminExperimentAllowed("hub.unknown_experiment"))
+}
+
+// testAdminGrantableAtProjectScope exempts the agent delegation grant
+// management permissions from the grant check at project scope only, so a
+// test admin can still grant project-owner and project-admin ("project
+// roles stay grantable"). A test admin cannot hold a project binding
+// itself (refuseTestAdminMemberGrantee, refuseTestAdminGrantee), and it
+// never exercises these permissions (decide step 0c stays deny). Every
+// member is deny-classified (the exemption only widens what may be
+// granted, never what is exercised) and held by a built-in project role
+// (so the exemption has a project-scope grant to apply to). It applies at
+// no other scope and to no other deny-classified permission.
+func TestTestAdminPolicy_GrantableAtProjectScopeCensus(t *testing.T) {
+	projectRole := map[string]bool{}
+	for _, id := range append(projectOwnerPermissionIDs(), projectAdminPermissionIDs()...) {
+		projectRole[id] = true
+	}
+	require.NotEmpty(t, testAdminGrantableAtProjectScope)
+	for id, ok := range testAdminGrantableAtProjectScope {
+		assert.True(t, ok, id)
+		assert.Equal(t, testAdminPolicyDeny, testAdminPermissionPolicy[id], "%s must be deny-classified", id)
+		assert.True(t, projectRole[id], "%s must be held by a built-in project role", id)
+		assert.False(t, testAdminGrantRefuses(id, store.RoleScopeProject), "%s grantable at project scope", id)
+		assert.True(t, testAdminGrantRefuses(id, store.RoleScopeSystem), "%s refused at system scope", id)
+		assert.True(t, testAdminGrantRefuses(id, "hub"), "%s refused at hub scope", id)
+		assert.True(t, testAdminGrantRefuses(id, ""), "%s refused without a grant scope", id)
+	}
+	for id := range testAdminPermissionPolicy {
+		if testAdminPermissionDenied(id) && !testAdminGrantableAtProjectScope[id] {
+			assert.True(t, testAdminGrantRefuses(id, store.RoleScopeProject), "%s stays refused at project scope", id)
+		}
+	}
+	assert.True(t, testAdminGrantRefuses("secret.use", store.RoleScopeProject), "secret.use stays refused at project scope")
+	assert.False(t, testAdminGrantRefuses("agent.read", store.RoleScopeSystem), "an allow-classified permission is grantable")
 }
 
 // requireAdminAt sites: every handler call passes a literal site name, the

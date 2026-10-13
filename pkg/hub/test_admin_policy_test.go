@@ -1263,3 +1263,203 @@ func TestTestAdminPolicy_DelegationGrantManagementDenied(t *testing.T) {
 		assert.False(t, srv.agentDelegationControlAllowed(ctx, c, other, nil, agentDelegationListPermission), "%s cannot list another user's grant", who)
 	}
 }
+
+// Review R1 (ti-a2-rev-2): the built-in project-owner and project-admin
+// roles hold the agent delegation grant management permissions, which are
+// deny for a test admin's own use. Both admin kinds still grant those
+// roles at project scope (testAdminGrantableAtProjectScope): members POST
+// and PUT, and a member role change. Every other deny-classified
+// permission stays refused at project scope, and the four permissions stay
+// refused in a hub-scope (system) grant.
+func TestTestAdminPolicy_ProjectRolesStayGrantable(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-pr-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-pr-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	owner := taUser(t, s, "tsa-pr-owner", store.SystemRoleHubMember)
+	roleID := func(name string) string {
+		rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+		require.NoError(t, err)
+		return rd.ID
+	}
+	adminRD, ownerRD, memberRD := roleID(store.ProjectRoleAdmin), roleID(store.ProjectRoleOwner), roleID(store.ProjectRoleMember)
+	delegationPerms := []string{agentDelegationRevokePermission, agentDelegationCredentialRevokePermission, agentDelegationListPermission, agentDelegationReadPermission}
+
+	for who, k := range kinds {
+		projectID := tid("tsa-pr-project-" + who)
+		taProject(t, s, projectID, owner.ID)
+		hasRole := func(userID, roleName string) bool {
+			roles, err := activeDirectProjectRoles(ctx, s, nil, false, userID, projectID)
+			require.NoError(t, err)
+			return roles[roleName]
+		}
+
+		// Members POST with project-admin and with project-owner.
+		for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
+			u := taUser(t, s, "tsa-pr-post-"+tc.role+"-"+who, store.SystemRoleHubMember)
+			rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/projects/"+projectID+"/members",
+				addProjectMemberRequest{RoleDefinitionID: tc.rd, PrincipalType: "user", PrincipalID: u.ID})
+			assert.Less(t, rec.Code, 300, "%s members POST %s: %s", who, tc.role, rec.Body.String())
+			assert.True(t, hasRole(u.ID, tc.role), "%s granted %s by POST", who, tc.role)
+		}
+		// Members PUT with project-admin and with project-owner.
+		for _, tc := range []struct{ role, rd string }{{store.ProjectRoleAdmin, adminRD}, {store.ProjectRoleOwner, ownerRD}} {
+			u := taUser(t, s, "tsa-pr-put-"+tc.role+"-"+who, store.SystemRoleHubMember)
+			rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/projects/"+projectID+"/members/principals/user/"+u.ID,
+				setMemberRolesRequestBody{RoleDefinitionIDs: []string{tc.rd}})
+			assert.Less(t, rec.Code, 300, "%s members PUT %s: %s", who, tc.role, rec.Body.String())
+			assert.True(t, hasRole(u.ID, tc.role), "%s granted %s by PUT", who, tc.role)
+		}
+		// Member role change from project-member to project-admin.
+		changed := taUser(t, s, "tsa-pr-change-"+who, store.SystemRoleHubMember)
+		b, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: memberRD, PrincipalType: store.RoleBindingPrincipalUser,
+			PrincipalID: changed.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+		require.NoError(t, err)
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPatch, "/api/v1/projects/"+projectID+"/members/"+b.ID,
+			updateProjectMemberRequest{RoleDefinitionID: adminRD})
+		assert.Less(t, rec.Code, 300, "%s member role change to project-admin: %s", who, rec.Body.String())
+		assert.True(t, hasRole(changed.ID, store.ProjectRoleAdmin), "%s changed the member to project-admin", who)
+
+		// A project-scope custom role holding the four is grantable; one
+		// holding another deny-classified permission is not.
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-pdeleg-" + generateID()[:8], "scopeType": "project", "permissions": delegationPerms})
+		assert.Less(t, rec.Code, 300, "%s project-scope custom role with the delegation management permissions: %s", who, rec.Body.String())
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-psecret-" + generateID()[:8], "scopeType": "project", "permissions": []string{"agent.read", "secret.use"}})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with secret.use: %s", who, rec.Body.String())
+		// Set-complete, not any-match: one of the four together with
+		// another deny-classified permission is still refused.
+		for _, extra := range []string{"secret.use", "hub.config.update"} {
+			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+				map[string]any{"name": "tsa-pr-pmixed-" + generateID()[:8], "scopeType": "project", "permissions": []string{agentDelegationListPermission, extra}})
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s project-scope custom role with %s and %s: %s", who, agentDelegationListPermission, extra, rec.Body.String())
+		}
+
+		// The four stay refused in a hub-scope (system) grant: a system
+		// custom role, and a system role binding of a role holding them.
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+			map[string]any{"name": "tsa-pr-sdeleg-" + generateID()[:8], "scopeType": "system", "permissions": delegationPerms})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s system-scope custom role with the delegation management permissions: %s", who, rec.Body.String())
+		sysRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "tsa-pr-sysrole-" + generateID()[:6],
+			ScopeType: store.RoleScopeSystem, Permissions: delegationPerms})
+		require.NoError(t, err)
+		grantee := taUser(t, s, "tsa-pr-sysgrantee-"+who, store.SystemRoleHubMember)
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/role-bindings",
+			map[string]any{"roleDefinitionId": sysRole.ID, "principalType": "user", "principalId": grantee.ID, "scopeType": "system"})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s system role binding of a role holding them: %s", who, rec.Body.String())
+
+		// The refusals are the test-admin policy's.
+		id := tsaIdentity(t, s, k.Identity.ID)
+		for _, tc := range []struct {
+			name  string
+			grant GrantDescriptor
+			allow bool
+		}{
+			{"project-scope custom role with the four", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: delegationPerms, ScopeType: store.RoleScopeProject}, true},
+			{"project-scope custom role with secret.use", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{"secret.use"}, ScopeType: store.RoleScopeProject}, false},
+			{"system-scope custom role with the four", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: delegationPerms, ScopeType: store.RoleScopeSystem}, false},
+			{"hub-scope role binding with the four", GrantDescriptor{Type: GrantTypeRoleBinding, RolePermissions: delegationPerms, ScopeType: "hub"}, false},
+			{"system-scope role binding with the four", GrantDescriptor{Type: GrantTypeRoleBinding, RolePermissions: delegationPerms, ScopeType: store.RoleScopeSystem}, false},
+			{"project role binding of project-admin", GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: adminRD, ScopeType: store.RoleScopeProject, ScopeID: projectID}, true},
+			{"project membership of project-owner", GrantDescriptor{Type: GrantTypeProjectMembership, RoleDefinitionID: ownerRD, ScopeType: store.RoleScopeProject, ScopeID: projectID}, true},
+			{"project-scope custom role mixing the four with secret.use", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: append([]string{"secret.use"}, delegationPerms...), ScopeType: store.RoleScopeProject}, false},
+			{"project-scope custom role mixing one of the four with hub.config.update", GrantDescriptor{Type: GrantTypeCustomRole, CustomRolePermissions: []string{agentDelegationReadPermission, "hub.config.update"}, ScopeType: store.RoleScopeProject}, false},
+			{"project-admin role named with a system scope", GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: adminRD, ScopeType: store.RoleScopeSystem}, false},
+			{"system role holding the four named with a project scope", GrantDescriptor{Type: GrantTypeRoleBinding, RoleDefinitionID: sysRole.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID}, false},
+		} {
+			refusal := srv.authzService.refuseTestAdminDeniedGrant(ctx, id, tc.grant)
+			if tc.allow {
+				assert.Nil(t, refusal, "%s %s", who, tc.name)
+				continue
+			}
+			if assert.NotNil(t, refusal, "%s %s", who, tc.name) {
+				assert.Equal(t, DeniedByTestAdminPolicy, refusal.DeniedBy, "%s %s", who, tc.name)
+			}
+		}
+	}
+}
+
+// Review N1 (ti-a2-rev-2): agent delegation grant management over HTTP
+// with a test admin's own token. The admin token is admitted as a user
+// credential (not hub-only): the test admin reads and revokes a grant it
+// issued and reads a grant on an agent it owns; another user's grant,
+// hub-bounded or bounded to a project, is not found. A human project admin
+// reads the project-bounded grant (the project half of the decision can
+// allow).
+func TestTestAdminPolicy_DelegationGrantManagementHTTP(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-dgh-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-dgh-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	owner := taUser(t, s, "tsa-dgh-owner", store.SystemRoleHubMember)
+	projectID := tid("tsa-dgh-project")
+	taProject(t, s, projectID, owner.ID)
+	projectAdmin := taUser(t, s, "tsa-dgh-padmin", store.SystemRoleHubMember)
+	adminRD, err := s.GetRoleDefinitionByName(ctx, store.ProjectRoleAdmin, store.RoleScopeProject)
+	require.NoError(t, err)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: adminRD.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: projectAdmin.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
+	require.NoError(t, err)
+
+	agent := func(ownerID string) *store.Agent {
+		id := generateID()
+		a := &store.Agent{ID: id, Slug: "tsa-dgh-" + id[:6], Name: "tsa dgh", ProjectID: projectID, Phase: "stopped",
+			CreatedBy: ownerID, OwnerID: ownerID}
+		require.NoError(t, s.CreateAgent(ctx, a))
+		return a
+	}
+	grant := func(a *store.Agent, issuerID, boundaryKind, boundaryProject string) *store.AgentDelegationGrant {
+		g := &store.AgentDelegationGrant{AgentID: a.ID, AgentProjectID: a.ProjectID, AgentGeneration: a.Generation, AgentStateVersion: a.StateVersion,
+			IssuerUserID: issuerID, BoundaryKind: boundaryKind, BoundaryProjectID: boundaryProject, CeilingVersion: 1,
+			CeilingPermissionIDs: []string{"agent.read"}, Name: "tsa-dgh", MaxCredentialTTLSeconds: agentDelegationCredentialDefaultTTL,
+			ExpiresAt: time.Now().Add(time.Hour), IssuanceAuditID: "00000000-0000-0000-0000-000000000001"}
+		require.NoError(t, s.CreateAgentDelegationGrant(ctx, g))
+		return g
+	}
+	path := func(g *store.AgentDelegationGrant) string { return "/api/v1/agents/" + g.AgentID + "/delegations/" + g.ID }
+	ownerAgent := agent(owner.ID)
+	otherHub := grant(ownerAgent, owner.ID, "hub", "")
+	otherProject := grant(ownerAgent, owner.ID, "project", projectID)
+
+	for who, k := range kinds {
+		own := grant(ownerAgent, k.Identity.ID, "hub", "")
+		ownedAgent := agent(k.Identity.ID)
+		ownerRule := grant(ownedAgent, owner.ID, "hub", "")
+
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodGet, path(own), nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s reads its own grant: %s", who, rec.Body.String())
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodGet, path(ownerRule), nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "%s reads a grant on an agent it owns: %s", who, rec.Body.String())
+		for name, g := range map[string]*store.AgentDelegationGrant{"hub-bounded": otherHub, "project-bounded": otherProject} {
+			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodGet, path(g), nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s reads another user's %s grant: %s", who, name, rec.Body.String())
+			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(g), nil)
+			assert.Equal(t, http.StatusNotFound, rec.Code, "%s revokes another user's %s grant: %s", who, name, rec.Body.String())
+		}
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(own), nil)
+		assert.Less(t, rec.Code, 300, "%s revokes its own grant: %s", who, rec.Body.String())
+		g, err := s.GetAgentDelegationGrant(ctx, own.ID)
+		require.NoError(t, err)
+		assert.NotNil(t, g.RevokedAt, "%s revoked its own grant", who)
+	}
+	for _, g := range []*store.AgentDelegationGrant{otherHub, otherProject} {
+		row, err := s.GetAgentDelegationGrant(ctx, g.ID)
+		require.NoError(t, err)
+		assert.Nil(t, row.RevokedAt, "another user's grant is not revoked")
+	}
+
+	// Human control at project scope.
+	rec := doRequestAsUser(t, srv, projectAdmin, http.MethodGet, path(otherProject), nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "a human project admin reads the project-bounded grant: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, projectAdmin, http.MethodGet, path(otherHub), nil)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "a human project admin does not reach a hub-bounded grant: %s", rec.Body.String())
+}
