@@ -145,19 +145,28 @@ func (rs *ResourceStore) reconcileStorage(ctx context.Context, stor storage.Stor
 	reconcileResourceStorage(ctx, stor, storagePath, name, keep, rs.srv.resourceLog, rs.pers.Label())
 }
 
-// reconcileAfterCommitter is an optional resourcePersistence extension: the
-// shared store reconciles storage only after the persistence's Update has
-// committed the manifest, and not at all when it fails. harnessConfigPersistence
-// implements it (ptone/scion#4219): a bootstrap or import whose commit loses
-// the compare-and-swap (or is refused) must not reconcile storage to its own
-// directory while the row keeps another commit's manifest.
-type reconcileAfterCommitter interface {
-	reconcileAfterCommit()
-}
-
-func (rs *ResourceStore) reconcilesAfterCommit() bool {
-	_, ok := rs.pers.(reconcileAfterCommitter)
-	return ok
+// commitUploaded commits rec (its uploaded manifest) through the
+// persistence's Update and reconciles storage under storagePath to the
+// objects the upload wrote. Every path that uploads and then commits an
+// existing resource (Bootstrap, BootstrapSource's update and storage
+// repair) goes through it, so the reconcile order cannot drift between them.
+//
+// For a store with reconcileAfterCommit (harness-configs, ptone/scion#4219)
+// the reconcile runs only after Update succeeded and not at all when it
+// fails: a commit that loses the compare-and-swap (or is refused) must not
+// reconcile storage to its own directory while the row keeps another
+// commit's manifest. Other kinds reconcile before Update, as before.
+func (rs *ResourceStore) commitUploaded(ctx context.Context, stor storage.Storage, storagePath, name string, written map[string]struct{}, rec *ResourceRecord, dir string) error {
+	if !rs.reconcileAfterCommit {
+		rs.reconcileStorage(ctx, stor, storagePath, name, written)
+	}
+	if err := rs.pers.Update(ctx, rec, dir); err != nil {
+		return err
+	}
+	if rs.reconcileAfterCommit {
+		rs.reconcileStorage(ctx, stor, storagePath, name, written)
+	}
+	return nil
 }
 
 // checkDir runs the persistence's optional pre-upload check.
@@ -179,6 +188,9 @@ type ResourceStore struct {
 	// excludePatterns are extra transfer.CollectFiles exclude patterns for
 	// this kind (e.g. harness-config backups and temp files).
 	excludePatterns []string
+	// reconcileAfterCommit makes commitUploaded reconcile storage only
+	// after a successful commit (harness-configs).
+	reconcileAfterCommit bool
 }
 
 // templateStore returns a ResourceStore for templates.
@@ -190,10 +202,11 @@ func (s *Server) templateStore() *ResourceStore {
 // harness type already parsed from the directory's config.yaml by the caller.
 func (s *Server) harnessConfigStore(harness string) *ResourceStore {
 	return &ResourceStore{
-		srv:             s,
-		pers:            &harnessConfigPersistence{s: s, harness: harness},
-		hubID:           s.HubID(),
-		excludePatterns: config.HarnessConfigTransientPatterns,
+		srv:                  s,
+		pers:                 &harnessConfigPersistence{s: s, harness: harness},
+		hubID:                s.HubID(),
+		excludePatterns:      config.HarnessConfigTransientPatterns,
+		reconcileAfterCommit: true,
 	}
 }
 
@@ -290,15 +303,6 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 		return false, err
 	}
 
-	// Reconcile storage: drop objects no longer in the manifest so removed files
-	// don't linger. (Harness-configs gain it by routing through the shared
-	// path — a removed-file cleanup fix — and reconcile only after their
-	// commit succeeded, below. Templates store blobs, which the blob garbage
-	// collector removes instead.)
-	if !rs.reconcilesAfterCommit() {
-		rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
-	}
-
 	newHash := computeContentHash(uploaded)
 	changed := newHash != existing.ContentHash
 	if changed {
@@ -315,11 +319,12 @@ func (rs *ResourceStore) Bootstrap(ctx context.Context, name, dir, scope, scopeI
 	// record left in "pending" by a prior bootstrap that failed mid-upload: the
 	// retry re-syncs and flips it to active rather than leaving it stuck.
 	existing.Status = resourceStatusActive
-	if err := p.Update(ctx, existing, dir); err != nil {
+	// Commit, and reconcile storage: drop objects no longer in the manifest
+	// so removed files don't linger (commitUploaded orders the two per kind;
+	// templates store blobs, which the blob garbage collector removes
+	// instead).
+	if err := rs.commitUploaded(ctx, stor, storagePath, existing.Name, written, existing, dir); err != nil {
 		return false, err
-	}
-	if rs.reconcilesAfterCommit() {
-		rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
 	}
 
 	p.PostFinalize(ctx, existing, dir)
@@ -639,10 +644,6 @@ type harnessConfigPersistence struct {
 	model   *store.HarnessConfig
 }
 
-// reconcileAfterCommit marks harnessConfigPersistence as a
-// reconcileAfterCommitter.
-func (p *harnessConfigPersistence) reconcileAfterCommit() {}
-
 func (p *harnessConfigPersistence) Kind() storage.ResourceKind {
 	return storage.ResourceKindHarnessConfig
 }
@@ -839,10 +840,11 @@ func (p *targetHarnessConfigPersistence) Create(context.Context, *ResourceRecord
 // harness-config with the given ID.
 func (s *Server) targetHarnessConfigStore(id string) *ResourceStore {
 	return &ResourceStore{
-		srv:             s,
-		pers:            &targetHarnessConfigPersistence{harnessConfigPersistence: &harnessConfigPersistence{s: s}, id: id},
-		hubID:           s.HubID(),
-		excludePatterns: config.HarnessConfigTransientPatterns,
+		srv:                  s,
+		pers:                 &targetHarnessConfigPersistence{harnessConfigPersistence: &harnessConfigPersistence{s: s}, id: id},
+		hubID:                s.HubID(),
+		excludePatterns:      config.HarnessConfigTransientPatterns,
+		reconcileAfterCommit: true,
 	}
 }
 

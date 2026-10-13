@@ -781,3 +781,63 @@ func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
 	assert.Equal(t, hc.ContentHash, after.ContentHash)
 	assertDerivedFrom(t, after, deriveFullYAML)
 }
+
+// BootstrapSource (the bundled/built-in startup path) gates its reconcile the
+// same way as Bootstrap (ts4a-rev R2): an update or a storage repair whose
+// commit loses the compare-and-swap twice leaves storage as it was, so the
+// row's manifest never lists objects the reconcile deleted.
+func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
+	t.Run("update", func(t *testing.T) {
+		srv, s, w, fault := newCommitTestServerWithConflicts(t)
+		ctx := context.Background()
+		rs := srv.harnessConfigStore("claude")
+		v1 := testBundledResource(storage.ResourceKindHarnessConfig, deriveHCName, map[string]string{
+			"config.yaml": deriveBareYAML, "extra.txt": "x",
+		})
+		_, err := rs.BootstrapSource(ctx, NewFSResourceSource(v1), BootstrapOptions{OverwritePolicy: OverwriteBuiltinManaged})
+		require.NoError(t, err)
+		before := globalHC(t, s, deriveHCName)
+		require.Len(t, before.Files, 2)
+
+		v2 := testBundledResource(storage.ResourceKindHarnessConfig, deriveHCName, map[string]string{
+			"config.yaml": deriveFullYAML,
+		})
+		fault.Arm()
+		_, err = srv.harnessConfigStore("claude").BootstrapSource(ctx, NewFSResourceSource(v2), BootstrapOptions{OverwritePolicy: OverwriteBuiltinManaged})
+		require.ErrorIs(t, err, store.ErrHarnessConfigConflict)
+		assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
+
+		after := globalHC(t, s, deriveHCName)
+		assert.Equal(t, before.ContentHash, after.ContentHash)
+		assert.Len(t, after.Files, 2)
+		exists, err := srv.GetStorage().Exists(ctx, after.StoragePath+"/extra.txt")
+		require.NoError(t, err)
+		assert.True(t, exists, "a lost commit must not reconcile away a file the row still lists")
+	})
+
+	t.Run("storage repair", func(t *testing.T) {
+		srv, s, w, fault := newCommitTestServerWithConflicts(t)
+		ctx := context.Background()
+		v1 := testBundledResource(storage.ResourceKindHarnessConfig, deriveHCName, map[string]string{
+			"config.yaml": deriveBareYAML, "extra.txt": "x",
+		})
+		_, err := srv.harnessConfigStore("claude").BootstrapSource(ctx, NewFSResourceSource(v1), BootstrapOptions{OverwritePolicy: OverwriteBuiltinManaged})
+		require.NoError(t, err)
+		row := globalHC(t, s, deriveHCName)
+		// A missing listed object triggers the repair; a stray object shows
+		// whether the reconcile ran.
+		require.NoError(t, srv.GetStorage().Delete(ctx, row.StoragePath+"/extra.txt"))
+		_, err = srv.GetStorage().Upload(ctx, row.StoragePath+"/stray.txt", strings.NewReader("stray"), storage.UploadOptions{})
+		require.NoError(t, err)
+
+		fault.Arm()
+		_, err = srv.harnessConfigStore("claude").BootstrapSource(ctx, NewFSResourceSource(v1), BootstrapOptions{
+			OverwritePolicy: OverwriteBuiltinManaged, RepairStorage: true,
+		})
+		require.ErrorIs(t, err, store.ErrHarnessConfigConflict)
+		assert.Equal(t, 2, w.attempts(), "one retry, no third attempt")
+		exists, err := srv.GetStorage().Exists(ctx, row.StoragePath+"/stray.txt")
+		require.NoError(t, err)
+		assert.True(t, exists, "a lost repair commit must not reconcile storage")
+	})
+}

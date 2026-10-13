@@ -399,13 +399,11 @@ func (rs *ResourceStore) bootstrapSourceUpdate(
 		return *result, err
 	}
 
-	rs.reconcileStorage(ctx, stor, storagePath, existing.Name, written)
-
 	existing.Files = uploaded
 	existing.ContentHash = computeContentHash(uploaded)
 	existing.SourceURL = meta.SourceURL
 	existing.Status = resourceStatusActive
-	if err := p.Update(ctx, existing, dir); err != nil {
+	if err := rs.commitUploaded(ctx, stor, storagePath, existing.Name, written, existing, dir); err != nil {
 		result.Failed++
 		return *result, err
 	}
@@ -451,12 +449,10 @@ func (rs *ResourceStore) repairStorageIfNeeded(
 		return false, fmt.Errorf("repair upload: %w", err)
 	}
 
-	rs.reconcileStorage(ctx, stor, storagePath, rec.Name, written)
-
 	rec.Files = uploaded
 	rec.ContentHash = computeContentHash(uploaded)
 	rec.Status = resourceStatusActive
-	if err := p.Update(ctx, rec, dir); err != nil {
+	if err := rs.commitUploaded(ctx, stor, storagePath, rec.Name, written, rec, dir); err != nil {
 		return false, fmt.Errorf("repair update: %w", err)
 	}
 
