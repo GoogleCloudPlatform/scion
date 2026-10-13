@@ -264,6 +264,11 @@ func TestResolveInvocationTarget(t *testing.T) {
 			want: filled,
 		},
 		{
+			name: "vscode gets the hub and the project",
+			cmd:  []string{"vscode"},
+			want: filled,
+		},
+		{
 			name:  "tunnel in a directory project gets no context project",
 			setup: func(t *testing.T) { makeDirProject(t, "") },
 			cmd:   []string{"tunnel"},

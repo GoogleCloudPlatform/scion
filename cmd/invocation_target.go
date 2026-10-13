@@ -150,6 +150,7 @@ var contextProjectCommands = map[string]bool{
 	"scion tunnel":     true,
 	"scion ssh":        true,
 	"scion ssh-config": true,
+	"scion vscode":     true,
 }
 
 // importGlobalHubSettings turns on the one-time import of the global

@@ -44,6 +44,7 @@ var hubOnlyCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
+	"vscode":     true,
 	"expose":     true,
 	"unexpose":   true,
 }

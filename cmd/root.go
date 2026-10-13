@@ -344,6 +344,7 @@ func Execute() {
 var plainErrorCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh-config": true,
+	"vscode":     true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is

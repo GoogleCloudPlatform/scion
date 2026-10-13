@@ -649,7 +649,7 @@ func TestAgentModeAllowsKeys(t *testing.T) {
 // TestSSHCommands_HumanOnly pins that ssh and ssh-config are absent in agent
 // mode: they are not in agentAllowed and are removed from the real tree.
 func TestSSHCommands_HumanOnly(t *testing.T) {
-	for _, name := range []string{"ssh", "ssh-config"} {
+	for _, name := range []string{"ssh", "ssh-config", "vscode"} {
 		t.Run(name, func(t *testing.T) {
 			assert.False(t, agentAllowed[name], "agentAllowed must not contain %s", name)
 			real := resolveCommandPath(rootCmd, name)
