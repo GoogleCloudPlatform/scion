@@ -206,16 +206,16 @@ func TestPrintShadowNotice(t *testing.T) {
 		assert.NotContains(t, preRun(t), shadowNoticeMarker)
 	})
 
+	// The negative cases use 'hub status': it needs no project and no
+	// image registry, and reaches the same notice condition.
 	t.Run("a directory project prints nothing", func(t *testing.T) {
 		setupNoProjectPreRun(t)
-		writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 		makeDirProject(t, "")
-		assert.NotContains(t, preRun(t), shadowNoticeMarker)
+		assert.NotContains(t, preRunCmd(t, "hub", "status"), shadowNoticeMarker)
 	})
 
 	t.Run("a non-shadow marker prints nothing", func(t *testing.T) {
 		setupNoProjectPreRun(t)
-		writeHomeGlobalSettings(t, "image_registry: registry.example.test/team\n")
 		dir := t.TempDir()
 		marker := &config.ProjectMarker{ProjectID: shadowTestProjectID, ProjectName: "Plain", ProjectSlug: "plain"}
 		require.NoError(t, config.WriteProjectMarker(filepath.Join(dir, config.DotScion), marker))
@@ -223,7 +223,7 @@ func TestPrintShadowNotice(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.MkdirAll(ext, 0o755))
 		t.Chdir(dir)
-		assert.NotContains(t, preRun(t), shadowNoticeMarker)
+		assert.NotContains(t, preRunCmd(t, "hub", "status"), shadowNoticeMarker)
 	})
 }
 
