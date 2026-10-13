@@ -2041,12 +2041,16 @@ func init() {
 	roledefinitionDescSystem := roledefinitionFields[5].Descriptor()
 	// roledefinition.DefaultSystem holds the default value on creation for the system field.
 	roledefinition.DefaultSystem = roledefinitionDescSystem.Default.(bool)
+	// roledefinitionDescConfersMembership is the schema descriptor for confers_membership field.
+	roledefinitionDescConfersMembership := roledefinitionFields[6].Descriptor()
+	// roledefinition.DefaultConfersMembership holds the default value on creation for the confers_membership field.
+	roledefinition.DefaultConfersMembership = roledefinitionDescConfersMembership.Default.(bool)
 	// roledefinitionDescCreated is the schema descriptor for created field.
-	roledefinitionDescCreated := roledefinitionFields[6].Descriptor()
+	roledefinitionDescCreated := roledefinitionFields[7].Descriptor()
 	// roledefinition.DefaultCreated holds the default value on creation for the created field.
 	roledefinition.DefaultCreated = roledefinitionDescCreated.Default.(func() time.Time)
 	// roledefinitionDescUpdated is the schema descriptor for updated field.
-	roledefinitionDescUpdated := roledefinitionFields[7].Descriptor()
+	roledefinitionDescUpdated := roledefinitionFields[8].Descriptor()
 	// roledefinition.DefaultUpdated holds the default value on creation for the updated field.
 	roledefinition.DefaultUpdated = roledefinitionDescUpdated.Default.(func() time.Time)
 	// roledefinition.UpdateDefaultUpdated holds the default value on update for the updated field.
