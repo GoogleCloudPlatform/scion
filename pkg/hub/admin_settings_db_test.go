@@ -1906,6 +1906,58 @@ server:
 	}
 }
 
+// TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault checks, with the
+// unseeded bootstrap set, that a key whose only value besides a coded
+// default comes from SCION_SEED_* is still attributed to the seed layer:
+// the merge without the seed layer has the key (the coded default), but
+// with a different value. It also checks that a key with both a seed value
+// and a SCION_SERVER_* value is attributed to the server environment
+// (ptone/scion#4904).
+func TestGetServerConfigDB_SupersededSeedOnlyKeyOverDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	// Only a seed value over the coded default ([]).
+	t.Setenv("SCION_SEED_SERVER_HUB_ADMINEMAILS", "seed@example.com")
+	// Both a seed value and a SCION_SERVER_* value.
+	t.Setenv("SCION_SEED_SERVER_AUTH_USERACCESSMODE", "invite")
+	t.Setenv("SCION_SERVER_AUTH_USERACCESSMODE", "closed")
+
+	unseededK := config.LoadUnseededBootstrapKoanfWithConfigPath("")
+	if !unseededK.Exists("server.hub.admin_emails") {
+		t.Fatal("precondition: the merge without the seed layer should carry the coded admin_emails default")
+	}
+
+	fakeStore := newFakeHubSettingStore()
+	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
+	ops.SetUnseededBootstrap(unseededK)
+	fakeStore.seedWithOrigin("access", json.RawMessage(`{"admin_emails":["db@example.com"],"user_access_mode":"open"}`), "managed")
+	if _, err := ops.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{
+		dbDriver:    "postgres",
+		maintenance: NewMaintenanceState(false, ""),
+	}
+	srv.SetOperationalSettings(ops)
+
+	got := make(map[string]string)
+	for _, sk := range getServerConfigDB(t, srv, ops).SupersededKeys["access"] {
+		got[sk.Key] = sk.Source
+	}
+	if got["server.hub.admin_emails"] != "seed_env" {
+		t.Errorf("superseded server.hub.admin_emails source = %q, want seed_env (all: %v)", got["server.hub.admin_emails"], got)
+	}
+	if got["server.auth.user_access_mode"] != "server_env" {
+		t.Errorf("superseded server.auth.user_access_mode source = %q, want server_env (all: %v)", got["server.auth.user_access_mode"], got)
+	}
+}
+
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {
 	fakeStore := newFakeHubSettingStore()
 	bootstrapK := emptyKoanf()
