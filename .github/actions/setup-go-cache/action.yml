@@ -82,12 +82,17 @@ runs:
         WORKLOAD: ${{ inputs.workload }}
       run: |
         set -euo pipefail
-        # grep exits 1 when no workflow names a literal workload (fine: only
-        # this job's name is checked) and 2 when it cannot read them.
+        # grep exits 1 when no workflow names a literal workload, and 2
+        # when it cannot read them; either way there is nothing to check
+        # against, so fail loudly rather than pass a check that saw nothing.
         rc=0
         literal=$(grep -hE '^[[:space:]]+workload:[[:space:]]*[^[:space:]$]+[[:space:]]*$' "$GITHUB_WORKSPACE"/.github/workflows/*.yml) || rc=$?
         if [ "$rc" -gt 1 ]; then
           echo "::error title=setup-go-cache::could not read the workflows in $GITHUB_WORKSPACE/.github/workflows to check the Go cache workload names (grep exit $rc)"
+          exit 1
+        fi
+        if [ -z "$literal" ]; then
+          echo "::error title=setup-go-cache::found no literal 'workload:' in $GITHUB_WORKSPACE/.github/workflows/*.yml, so the Go cache workload names cannot be checked; the check's pattern no longer matches how workflows pass the workload"
           exit 1
         fi
         names=$( { echo "$WORKLOAD"; printf '%s\n' "$literal" | sed -E 's/^[[:space:]]+workload:[[:space:]]*//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//'; } | sed '/^$/d' | sort -u)
