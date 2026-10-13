@@ -1164,12 +1164,20 @@ func g(a *AuthzService) {
 	_ = a.ComputeCapabilities(nil, nil, emptyResource())
 	_ = a.ComputeCapabilities(nil, nil, a.methodResource())
 	_ = a.ComputeCapabilities(nil, nil, overriddenResource())
+	_ = a.ComputeCapabilities(nil, nil, parenTypedResource())
 }
 
 func overriddenResource() Resource {
 	r := innerResource()
 	r.Type = pickType()
 	(r).Type = pickType()
+	(r.Type) = pickType()
+	return r
+}
+
+func parenTypedResource() Resource {
+	var r Resource
+	(r).Type = "res_type"
 	return r
 }
 `
@@ -1190,24 +1198,33 @@ func overriddenResource() Resource {
 		`sample.go:15: ComputeCapabilitiesBatch: ResourceActions: "scope_type"`,
 		`sample.go:21: ComputeCapabilities: ResourceActions: "scope_type" (outerResource, called at sample.go:11, sample.go:12)`,
 	}, missingActionMapEntries(scan.helperValues, resourceActions, scopeActions))
-	require.Len(t, scan.helperValues, 11, "the plain literal at line 13 must not be a helper value")
+	require.Len(t, scan.helperValues, 12,
+		"helper values: 8 at calls (not the plain literal at line 13) and 4 from constructors")
 	assert.Equal(t, `innerResource via outerResource, called at sample.go:11, sample.go:12`,
 		scan.helperValues[9].site, "a constructor is followed into the constructors it calls")
+	assert.Equal(t, resourceTypeLiteral{
+		pos:      "sample.go:47",
+		typeName: "res_type",
+		fn:       "parenTypedResource",
+		helper:   "ComputeCapabilities",
+		site:     "parenTypedResource, called at sample.go:34",
+	}, scan.helperValues[11], "a (r).Type write on a Resource variable is a resolved value")
 	assert.Equal(t, []string{
 		"emptyResource, called at sample.go:31",
-		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:38: r.Type",
-		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:39: (r).Type",
+		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:39: r.Type",
+		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:40: (r).Type",
+		"overriddenResource, called at sample.go:33: Type write not followed at sample.go:41: (r.Type)",
 	}, scan.unfollowed,
 		"a constructor that builds no resolved type, or sets Type in a form the scan does not follow, must be reported")
 	assert.Equal(t, []string{"sample.go: a.methodResource()"}, scan.unresolved,
 		"a method call passed to ComputeCapabilities must be unresolved")
 	assert.Equal(t, map[string]int{
-		"ComputeCapabilities":      8,
+		"ComputeCapabilities":      9,
 		"ComputeCapabilitiesBatch": 3,
 		"ComputeScopeCapabilities": 2,
 	}, scan.helperCalls)
 	assert.Equal(t, map[string]int{
-		"ComputeCapabilities":      5,
+		"ComputeCapabilities":      6,
 		"ComputeCapabilitiesBatch": 3,
 		"ComputeScopeCapabilities": 2,
 	}, scan.helperTagged, "the unfollowed constructor calls must not be counted")
