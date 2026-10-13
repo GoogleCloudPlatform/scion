@@ -28,6 +28,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -53,6 +54,7 @@ func clearGitHubCredentialEnv(t *testing.T) {
 func TestRemoteFetchCredential(t *testing.T) {
 	t.Cleanup(func() { loglevel.Reset(false) })
 	loglevel.Apply(loglevel.Spec{Default: slog.LevelDebug}, loglevel.SourceFlag)
+	require.True(t, util.DebugEnabled(), "debug output must be on for the log assertions")
 
 	tests := []struct {
 		name     string
@@ -75,7 +77,7 @@ func TestRemoteFetchCredential(t *testing.T) {
 			var got string
 			stderr := captureStderr(t, func() { got = remoteFetchCredential(credTestSource) })
 			assert.Equal(t, tt.want, got)
-			if tt.wantName != "" && util.DebugEnabled() {
+			if tt.wantName != "" {
 				assert.Contains(t, stderr, "using credential "+tt.wantName)
 			}
 			for k, v := range tt.env {
@@ -101,44 +103,90 @@ func TestRemoteFetchCredential_NonGitHubReadsNothing(t *testing.T) {
 	}
 }
 
+// stubGitHubFetch makes a GitHub folder fetch hermetic and records the
+// credential it sends. The tarball request is answered 404, so the fetch
+// falls back to the sparse-checkout seam, which records the credential it was
+// given and writes marker (a file name) with body; ls-remote is stubbed and
+// no real git runs. The returned func reports the tarball request's
+// Authorization header and the sparse-checkout credential.
+func stubGitHubFetch(t *testing.T, marker, body string) func() (tarballAuth, checkoutToken string) {
+	t.Helper()
+	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
+		return nil, errors.New("ls-remote disabled in test")
+	}))
+	var tarballAuth, checkoutToken string
+	tarballSeen := false
+	oldTransport := http.DefaultClient.Transport
+	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
+	http.DefaultClient.Transport = credTestRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if strings.Contains(r.URL.Path, "/archive/") {
+			tarballSeen = true
+			tarballAuth = r.Header.Get("Authorization")
+		}
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
+	})
+	t.Cleanup(config.SetGitSparseCheckoutForTest(func(_ context.Context, _ *config.GitHubURLParts, destPath, token string) error {
+		checkoutToken = token
+		return os.WriteFile(filepath.Join(destPath, marker), []byte(body), 0o644)
+	}))
+	return func() (string, string) {
+		t.Helper()
+		require.True(t, tarballSeen, "the fetch sent no tarball request")
+		return tarballAuth, checkoutToken
+	}
+}
+
 // TestResolveInstallSource_SendsGitHubCredential verifies that
-// 'harness-config install' passes the CLI credential to the fetch. The
-// tarball request is answered 404, so the fetch falls back to the
-// sparse-checkout seam, which records the credential it was given and writes
-// a config.yaml; no real git runs.
+// 'harness-config install' passes the CLI credential to the fetch, both on
+// the tarball request and to the sparse-checkout fallback.
 func TestResolveInstallSource_SendsGitHubCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	clearGitHubCredentialEnv(t)
 	t.Setenv(credTestOwnerKey, "fake-owner-cred")
 	t.Setenv("GITHUB_TOKEN", "fake-default-cred")
-
-	t.Cleanup(config.SetGitLsRemoteForTest(func(context.Context, string) ([]byte, error) {
-		return nil, errors.New("ls-remote disabled in test")
-	}))
-	var tarballAuth string
-	oldTransport := http.DefaultClient.Transport
-	t.Cleanup(func() { http.DefaultClient.Transport = oldTransport })
-	http.DefaultClient.Transport = credTestRoundTripFunc(func(r *http.Request) (*http.Response, error) {
-		if a := r.Header.Get("Authorization"); a != "" {
-			tarballAuth = a
-		}
-		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("")), Request: r}, nil
-	})
-	var checkoutToken string
-	t.Cleanup(config.SetGitSparseCheckoutForTest(func(_ context.Context, _ *config.GitHubURLParts, destPath, token string) error {
-		checkoutToken = token
-		return os.WriteFile(filepath.Join(destPath, "config.yaml"), []byte("harness: claude\n"), 0o644)
-	}))
+	sent := stubGitHubFetch(t, "config.yaml", "harness: claude\n")
 
 	localPath, cleanup, err := resolveInstallSource(credTestSource)
 	require.NoError(t, err)
 	require.NotNil(t, cleanup)
 	defer cleanup()
 	assert.FileExists(t, filepath.Join(localPath, "config.yaml"))
+	tarballAuth, checkoutToken := sent()
+	assert.Equal(t, "Bearer fake-owner-cred", tarballAuth)
 	assert.Equal(t, "fake-owner-cred", checkoutToken)
-	if tarballAuth != "" {
-		assert.Equal(t, "Bearer fake-owner-cred", tarballAuth)
-	}
+}
+
+// TestRunTemplateImport_SendsGitHubCredential verifies that 'templates
+// import' passes the CLI credential to the fetch of a GitHub folder URL. The
+// run is a dry run, so nothing is written to any project.
+func TestRunTemplateImport_SendsGitHubCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	clearGitHubCredentialEnv(t)
+	t.Setenv("GH_ACME_CORP__PRIVATE_TEMPLATES", "fake-repo-cred")
+	t.Setenv(credTestOwnerKey, "fake-owner-cred")
+	sent := stubGitHubFetch(t, "scion-agent.yaml", "harness: claude\n")
+
+	cmd := newTemplateImportTestCmd(t)
+	require.NoError(t, cmd.Flags().Set("dry-run", "true"))
+	_ = captureStdout(t, func() {
+		_ = runTemplateImport(cmd, []string{"https://github.com/acme-corp/private.templates/tree/main/.scion/templates/reviewer"})
+	})
+	tarballAuth, checkoutToken := sent()
+	assert.Equal(t, "Bearer fake-repo-cred", tarballAuth)
+	assert.Equal(t, "fake-repo-cred", checkoutToken)
+}
+
+// newTemplateImportTestCmd returns a command carrying the flags
+// runTemplateImport reads, at their defaults.
+func newTemplateImportTestCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{Use: "import"}
+	cmd.Flags().String("harness", "", "")
+	cmd.Flags().String("name", "", "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().Bool("dry-run", false, "")
+	cmd.Flags().Bool("all", false, "")
+	return cmd
 }
 
 type credTestRoundTripFunc func(*http.Request) (*http.Response, error)

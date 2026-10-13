@@ -271,3 +271,105 @@ func TestResourcesEndpoints_ScopeCredentialOnTheWire(t *testing.T) {
 		})
 	}
 }
+
+// TestHarnessConfigReimport_ScopeCredentialOnTheWire verifies end to end that
+// reimporting a stored harness config sends the hub credential for a global
+// config and the owner's own credential for a user config, and that a user
+// config whose ScopeID names another user is fetched anonymously, even though
+// both users have a credential stored.
+func TestHarnessConfigReimport_ScopeCredentialOnTheWire(t *testing.T) {
+	tests := []struct {
+		name         string
+		scope        string
+		admin        bool
+		otherScopeID bool // store the config under another user's ScopeID
+		credScope    string
+		wantAuth     string
+		want200      bool
+	}{
+		{"global reimport uses hub credential", store.HarnessConfigScopeGlobal, true, false, secret.ScopeHub, "Bearer fake-scope-cred", true},
+		{"user reimport uses owner credential", store.HarnessConfigScopeUser, false, false, secret.ScopeUser, "Bearer fake-scope-cred", true},
+		{"user reimport under another user's ScopeID is anonymous", store.HarnessConfigScopeUser, false, true, secret.ScopeUser, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			srv, s, _ := testTemplateBootstrapServer(t)
+			ctx := context.Background()
+
+			var user *store.User
+			if tt.admin {
+				user = skillDiscoverAdmin(t, s, "reimport-cred-admin")
+			} else {
+				user = skillDiscoverMember(t, s, "reimport-cred-member")
+			}
+			otherID := tid("reimport-cred-other")
+
+			srv.SetSecretBackend(secret.NewLocalBackend(s, srv.HubID(), "test-secret"))
+			credIDs := []string{srv.HubID()}
+			if tt.credScope == secret.ScopeUser {
+				credIDs = []string{user.ID, otherID}
+			}
+			for _, id := range credIDs {
+				if _, _, err := srv.GetSecretBackend().Set(ctx, &secret.SetSecretInput{
+					Name: "GH_ACME_CORP", Value: "fake-scope-cred", SecretType: secret.TypeEnvironment,
+					Scope: tt.credScope, ScopeID: id,
+				}); err != nil {
+					t.Fatalf("failed to store credential: %v", err)
+				}
+			}
+
+			hc := &store.HarnessConfig{
+				ID: tid("reimport-cred-hc"), Name: "my-config", Slug: "my-config", Harness: "claude",
+				Scope: tt.scope, Status: store.HarnessConfigStatusActive,
+			}
+			if tt.scope == store.HarnessConfigScopeUser {
+				hc.OwnerID, hc.CreatedBy, hc.ScopeID = user.ID, user.ID, user.ID
+				if tt.otherScopeID {
+					hc.ScopeID = otherID
+				}
+			}
+			if err := s.CreateHarnessConfig(ctx, hc); err != nil {
+				t.Fatalf("failed to create harness config: %v", err)
+			}
+
+			fetched := false
+			var capturedAuth string
+			defer mockSkillTarballWithHook(t, map[string]string{
+				"repo-main/harness-configs/my-config/config.yaml": "harness: claude\n",
+			}, func(req *http.Request) {
+				fetched = true
+				capturedAuth = req.Header.Get("Authorization")
+			})()
+
+			rec := doRequestAsUser(t, srv, user, http.MethodPost,
+				"/api/v1/harness-configs/"+hc.ID+"/reimport",
+				ReimportHarnessConfigRequest{SourceURL: "https://github.com/acme-corp/configs/tree/main/harness-configs"})
+			if tt.want200 && rec.Code != http.StatusOK {
+				t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+			}
+			if !fetched {
+				t.Fatalf("reimport sent no fetch request (status %d: %s)", rec.Code, rec.Body.String())
+			}
+			if capturedAuth != tt.wantAuth {
+				t.Errorf("Authorization header = %q, want %q", capturedAuth, tt.wantAuth)
+			}
+		})
+	}
+}
+
+// TestImportCredential_ScopeConstantsAgree pins that the harness-config scope
+// values equal the template scope values importCredential matches on, so a
+// rename of either set cannot silently make harness-config reimport
+// anonymous.
+func TestImportCredential_ScopeConstantsAgree(t *testing.T) {
+	for _, pair := range [][2]string{
+		{store.HarnessConfigScopeGlobal, store.TemplateScopeGlobal},
+		{store.HarnessConfigScopeProject, store.TemplateScopeProject},
+		{store.HarnessConfigScopeUser, store.TemplateScopeUser},
+	} {
+		if pair[0] != pair[1] {
+			t.Errorf("harness-config scope %q != template scope %q", pair[0], pair[1])
+		}
+	}
+}

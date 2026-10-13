@@ -337,6 +337,9 @@ func (s *Server) importCredential(ctx context.Context, scope, scopeID, sourceURL
 	if !ok {
 		return ""
 	}
+	// scope is a template or a harness-config scope: harness-config reimport
+	// passes store.HarnessConfigScope*, whose values equal the TemplateScope*
+	// ones matched here (pinned by TestImportCredential_ScopeConstantsAgree).
 	switch scope {
 	case store.TemplateScopeProject:
 		if scopeID == "" {

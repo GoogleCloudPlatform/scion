@@ -347,6 +347,8 @@ Other scopes use the same names, read from their own credentials only:
 
 In every scope the first match wins, and with no match the fetch is unauthenticated, which works for public repos only. A global or user-scope import never reads project credentials.
 
+Reimporting an existing template (`POST /api/v1/templates/{id}/reimport`) does not use these credentials yet in any scope, so it works only with public repositories.
+
 Only GitHub folder URLs use a credential. Archive URLs (`.tar.gz`, `.tgz`, `.zip`, including `github.com/.../archive/...` links), rclone sources and other hosts are always fetched without one.
 
 ### Injection Mode Behavior
