@@ -76,23 +76,49 @@ func resolveHubOnlyProject() hubOnlyProject {
 // linkedHubProjectID returns the id the hub knows the directory project dir
 // by: hub.projectId, or else project_id when the project's own settings say
 // it is linked (registration keeps the local id when the hub accepts it).
-// It returns "" for a project that is not linked.
+// It returns "" for a project that is not linked. Only the project's own
+// settings files are read, never the global ones.
 func linkedHubProjectID(dir string) string {
-	settings, err := config.LoadSettings(dir)
-	if err != nil || settings == nil {
-		return ""
-	}
-	if id := settings.GetHubProjectID(); id != "" {
-		return id
-	}
 	isGlobal := false
 	if g, err := config.GetGlobalDir(); err == nil && g == dir {
 		isGlobal = true
 	}
+	hubID, localID := ownProjectIDs(dir, isGlobal)
+	if hubID != "" {
+		return hubID
+	}
 	if linked := hubsync.ProjectLinkedSetting(dir, isGlobal); linked != nil && *linked {
-		return settings.ProjectID
+		return localID
 	}
 	return ""
+}
+
+// ownProjectIDs returns hub.projectId and the project's own id from the
+// settings files of the project dir itself (and of its external config
+// directory, which wins), as hubsync.ProjectLinkedSetting reads hub.linked.
+// A versioned settings file keeps its id at hub.project_id; that counts as
+// the project's own id.
+func ownProjectIDs(dir string, isGlobal bool) (hubID, localID string) {
+	dirs := []string{dir}
+	if !isGlobal {
+		if ext := config.GetProjectConfigDir(dir); ext != "" && ext != dir {
+			dirs = append(dirs, ext)
+		}
+	}
+	for _, d := range dirs {
+		if s, err := config.LoadSettingsFromDir(d); err == nil && s != nil {
+			if s.Hub != nil && s.Hub.ProjectID != "" {
+				hubID = s.Hub.ProjectID
+			}
+			if s.ProjectID != "" {
+				localID = s.ProjectID
+			}
+		}
+		if vs, err := config.LoadSingleFileVersioned(d); err == nil && vs != nil && vs.Hub != nil && vs.Hub.ProjectID != "" {
+			localID = vs.Hub.ProjectID
+		}
+	}
+	return hubID, localID
 }
 
 // describe names the project and its source for messages.

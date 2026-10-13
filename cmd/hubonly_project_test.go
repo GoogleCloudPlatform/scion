@@ -121,6 +121,31 @@ func TestResolveHubOnlyProject(t *testing.T) {
 			wantHub: ctxTestHub,
 		},
 		{
+			name: "a global hub.projectId never stands in for an unlinked directory project",
+			setup: func(t *testing.T) {
+				writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+				makeHubOnlyDirProject(t, "project_id: "+hubOnlyLocalID+"\n")
+			},
+			want:    hubOnlyProject{unlinkedDir: "myrepo"},
+			wantHub: ctxTestHub,
+		},
+		{
+			name: "a linked versioned directory project uses its hub.project_id",
+			setup: func(t *testing.T) {
+				makeHubOnlyDirProject(t, "schema_version: \"1\"\nhub:\n  linked: true\n  project_id: v1-dir-id\n")
+			},
+			want:    hubOnlyProject{ref: "v1-dir-id", label: "myrepo", source: hubOnlySourceDirectory},
+			wantHub: ctxTestHub,
+		},
+		{
+			name: "an unlinked versioned directory project sends no id",
+			setup: func(t *testing.T) {
+				makeHubOnlyDirProject(t, "schema_version: \"1\"\nhub:\n  project_id: "+hubOnlyLocalID+"\n")
+			},
+			want:    hubOnlyProject{unlinkedDir: "myrepo"},
+			wantHub: ctxTestHub,
+		},
+		{
 			name:      "no directory project and no context give no project",
 			noContext: true,
 			want:      hubOnlyProject{},
@@ -140,6 +165,7 @@ func TestResolveHubOnlyProject(t *testing.T) {
 				got := resolveHubOnlyProject()
 				assert.Equal(t, tt.want, got)
 				assert.NotEqual(t, hubOnlyLocalID, got.ref, "a local project id must never be sent")
+				assert.NotEqual(t, "global-hub-id", got.ref, "the global settings must never be used")
 				assert.Equal(t, tt.wantHub, hubEndpoint, "hubEndpoint")
 			})
 		}
@@ -241,6 +267,19 @@ func TestHubOnly_UnlinkedDirectoryProject(t *testing.T) {
 		errb.Reset()
 		assert.Equal(t, tunnelclient.ExitOK, runSSH(context.Background(), env, []string{"a/b-c"}), errb.String())
 	})
+}
+
+// A hub.projectId in the global settings never stands in for an unlinked
+// directory project: tunnel exits 2 with the link hint and sends nothing.
+func TestTunnelCLI_UnlinkedDirectoryIgnoresGlobalHubProjectID(t *testing.T) {
+	code, stderr := tunnelRunCLIWith(t, nil, func() {
+		writeHomeGlobalSettings(t, "hub:\n  projectId: global-hub-id\n")
+		makeHubOnlyDirProject(t, "project_id: "+hubOnlyLocalID+"\n")
+	}, "tunnel", "--stdio", "--port", "22", "--hub", "http://127.0.0.1:1", "a1")
+	t.Cleanup(resetContextTargets)
+	assert.Equal(t, tunnelclient.ExitUsage, code, "stderr %q", stderr)
+	assert.Contains(t, stderr, unlinkedMessage)
+	assert.NotContains(t, stderr, "global-hub-id")
 }
 
 // tunnel takes its project from the current context: the request passes
