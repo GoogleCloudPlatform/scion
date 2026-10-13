@@ -152,8 +152,10 @@ func runClean(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Project '%s' is linked to the Hub.\n", projectName)
 
 		if hubsync.ShowCleanUnlinkPrompt(projectName, autoConfirm) {
-			// Unlink from Hub
-			if err := config.UpdateSetting(resolvedPath, "hub.enabled", "false", isGlobal); err != nil {
+			// Unlink from Hub as 'scion hub unlink' does (hub.linked=false,
+			// hub project ID cleared, link entry removed). The retired
+			// hub.enabled switch is not written.
+			if err := markProjectUnlinked(os.Stderr, resolvedPath, isGlobal); err != nil {
 				return fmt.Errorf("failed to unlink from Hub: %w", err)
 			}
 			fmt.Printf("Project '%s' has been unlinked from the Hub.\n", projectName)

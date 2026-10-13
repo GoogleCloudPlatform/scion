@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -2769,16 +2770,9 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("unlinking cancelled")
 	}
 
-	// Mark the project unlinked and clear the hub project ID. hub.enabled is
-	// left alone: agent commands in this project refuse with a pointer to
-	// 'scion hub link' while hub.linked is false.
-	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
-		return fmt.Errorf("failed to save linked state: %w", err)
+	if err := markProjectUnlinked(cmd.ErrOrStderr(), resolvedPath, isGlobal); err != nil {
+		return err
 	}
-	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
-		util.Debugf("Failed to clear hub.projectId: %v", err)
-	}
-	removeLinkEntry(cmd.ErrOrStderr(), resolvedPath)
 
 	message := fmt.Sprintf("Project '%s' has been unlinked from the Hub.", projectName)
 	if !onHub {
@@ -2807,6 +2801,22 @@ func runHubUnlink(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Use \"scion hub projects delete '%s'\" to remove project from hub entirely.\n", projectName)
 	}
 
+	return nil
+}
+
+// markProjectUnlinked records an unlink in the project's own settings, as
+// 'scion hub unlink' does: hub.linked=false, the hub project ID cleared, and
+// the directory's link entry removed from the hub list. hub.enabled is left
+// alone: agent commands in the project refuse with a pointer to 'scion hub
+// link' while hub.linked is false. Every local unlink goes through it.
+func markProjectUnlinked(stderr io.Writer, resolvedPath string, isGlobal bool) error {
+	if err := config.UpdateSetting(resolvedPath, "hub.linked", "false", isGlobal); err != nil {
+		return fmt.Errorf("failed to save linked state: %w", err)
+	}
+	if err := config.UpdateSetting(resolvedPath, "hub.projectId", "", isGlobal); err != nil {
+		util.Debugf("Failed to clear hub.projectId: %v", err)
+	}
+	removeLinkEntry(stderr, resolvedPath)
 	return nil
 }
 
