@@ -491,8 +491,10 @@ func initInRepoProject(projectDir string, opt InitProjectOpts) error {
 	}
 
 	// Ensure project-id file exists for split storage, recording
-	// opt.ProjectID when set.
-	existingID, err := ReadProjectID(projectDir)
+	// opt.ProjectID when set. The read, like the writes below, goes through
+	// an os.Root on projectDir so project setup stays inside the project
+	// directory.
+	existingID, err := readProjectIDInDir(projectDir)
 	switch {
 	case err == nil:
 		if opt.ProjectID != "" && existingID != opt.ProjectID {

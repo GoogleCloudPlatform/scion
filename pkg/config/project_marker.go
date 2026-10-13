@@ -243,15 +243,25 @@ func ExtractSlugFromExternalDir(dirName string) string {
 // ReadProjectID reads the project-id file from a git project's .scion
 // directory. A value that does not match the project ID format (see
 // ValidateProjectID) is reported as an error wrapping ErrInvalidProjectID.
-// The file is read through an os.Root opened on projectDir, to keep project
-// setup reads and writes inside the project directory: a project-id entry
-// that is a symbolic link leading out of projectDir is refused with an error
-// rather than followed.
+// A project-id entry that is a symbolic link is followed; callers that must
+// stay inside projectDir (project setup) use readProjectIDInDir instead.
 func ReadProjectID(projectDir string) (string, error) {
 	path := filepath.Join(projectDir, projectkeys.ProjectIDFile)
-	data, err := readFileInDir(projectDir, projectkeys.ProjectIDFile)
+	data, err := os.ReadFile(path)
 	if err == nil {
 		return checkedProjectID(path, strings.TrimSpace(string(data)))
+	}
+	return "", err
+}
+
+// readProjectIDInDir is ReadProjectID for project setup: the file is read
+// through an os.Root opened on projectDir, so a project-id entry that is a
+// symbolic link leading out of projectDir is refused with an error rather
+// than followed.
+func readProjectIDInDir(projectDir string) (string, error) {
+	data, err := readFileInDir(projectDir, projectkeys.ProjectIDFile)
+	if err == nil {
+		return checkedProjectID(filepath.Join(projectDir, projectkeys.ProjectIDFile), strings.TrimSpace(string(data)))
 	}
 	return "", err
 }

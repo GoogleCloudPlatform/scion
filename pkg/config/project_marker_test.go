@@ -305,6 +305,34 @@ func TestWriteAndReadProjectID(t *testing.T) {
 	}
 }
 
+// TestReadProjectID_FollowsSymlinkedMarker pins ReadProjectID to following
+// a project-id entry that is a symbolic link: callers such as the broker's
+// project re-link read the recorded ID through the link and then replace the
+// link with a regular file. Only project setup (readProjectIDInDir) refuses
+// a link leading out of the directory.
+func TestReadProjectID_FollowsSymlinkedMarker(t *testing.T) {
+	scionDir := filepath.Join(t.TempDir(), ".scion")
+	if err := os.MkdirAll(scionDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "outside-id")
+	projectID := "550e8400-e29b-41d4-a716-446655440000"
+	if err := os.WriteFile(outside, []byte(projectID+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(scionDir, "project-id")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := ReadProjectID(scionDir)
+	if err != nil || got != projectID {
+		t.Fatalf("ReadProjectID() = %q, %v; want %q, nil", got, err, projectID)
+	}
+	if _, err := readProjectIDInDir(scionDir); err == nil {
+		t.Fatal("readProjectIDInDir() followed a link leading out of the directory; want an error")
+	}
+}
+
 func TestReadProjectID_NotExist(t *testing.T) {
 	tmpDir := t.TempDir()
 	_, err := ReadProjectID(tmpDir)
