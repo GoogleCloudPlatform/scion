@@ -31,10 +31,10 @@ import (
 // the container starts, not after it (ptone/scion#4766). This covers the
 // path where the pre-start runtime List succeeds; when it fails, Start still
 // records the run ID after the create (recordAfterCreate), in the host
-// state file, not agent-info.json (ptone/scion#4771). The fake runtime snapshots the
-// file when the container starts; any later host write replaces it
-// (writeAgentInfoFile renames a temp file over it), which the comparison
-// after Start detects.
+// state file, not agent-info.json (ptone/scion#4771). The fake runtime
+// snapshots the file when the container starts; any later host write
+// replaces it (writeAgentInfoFile renames a temp file over it), which the
+// comparison after Start detects.
 func TestStart_ListOK_NoAgentInfoWriteWhileContainerRuns(t *testing.T) {
 	for _, fresh := range []bool{false, true} {
 		name := "provisioned"
