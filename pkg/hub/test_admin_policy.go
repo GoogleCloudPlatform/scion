@@ -288,10 +288,10 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 // Granted on a project they reach only that project (grants bounded to
 // it; its visitor grants), which every project owner already manages, so
 // a test admin keeps appointing project owners and admins. At hub scope
-// they stay refused. No other deny entry is exempt:
-// project.secret_read and every other project-held deny permission is
-// refused at every scope. The census pins every member as deny-classified
-// and held by a built-in project role.
+// they stay refused. No other deny entry is exempt: every other
+// deny-classified permission (for example secret.use) is refused at every
+// scope. The census pins every member as deny-classified and held by a
+// built-in project role.
 var testAdminGrantableAtProjectScope = map[string]bool{
 	"agent.delegation.revoke":            true,
 	"agent.delegation.credential.revoke": true,
