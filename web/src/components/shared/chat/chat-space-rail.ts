@@ -2907,7 +2907,10 @@ export class ScionChatSpaceRail extends LitElement {
       // The last edit in the space has its answer: a failed edit's rollback
       // reload can run now (see `groupRequest`). It starts after the last
       // bump, so `commitProjectGroups` accepts it.
-      if (!this._groupsMutationsInFlight.has(projectId) && this._groupsReconcile.delete(projectId)) {
+      if (
+        !this._groupsMutationsInFlight.has(projectId) &&
+        this._groupsReconcile.delete(projectId)
+      ) {
         void this.loadProjectGroups(projectId);
       }
     };

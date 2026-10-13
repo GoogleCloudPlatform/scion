@@ -685,7 +685,10 @@ describe('project thread groups — flag on', () => {
     await el.handleThreadDrop({ preventDefault: vi.fn() }, 't1', P);
     await settle(el);
 
-    expect(showToastMock).toHaveBeenCalledWith('This group has reached its thread limit', 'warning');
+    expect(showToastMock).toHaveBeenCalledWith(
+      'This group has reached its thread limit',
+      'warning'
+    );
     expect(hub.groups[0]!.threads.map((t) => t.threadId)).toEqual(['t1', 't3']);
     expect(groupsOf(el)).toEqual({ Shared: ['t1', 't3'] });
     expect(topLevel(el)).toContain('t4');
