@@ -150,6 +150,9 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
 	if req.Name == "" {
 		ValidationError(w, "name is required", nil)
@@ -182,7 +185,6 @@ func (s *Server) createUserTemplate(w http.ResponseWriter, r *http.Request) {
 		DisplayName:  req.DisplayName,
 		Description:  req.Description,
 		Harness:      req.Harness,
-		Config:       req.Config,
 		Scope:        store.TemplateScopeUser,
 		ScopeID:      userIdent.ID(),
 		OwnerID:      userIdent.ID(),
@@ -280,34 +282,20 @@ func (s *Server) updateUserTemplate(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	var template store.Template
-	if err := readJSON(r, &template); err != nil {
+	var req UpdateTemplateRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
+	if refuseTemplateConfigFields(w, req.Config, req.Image) {
+		return
+	}
 
-	// Preserve immutable fields
-	template.ID = existing.ID
-	template.Scope = store.TemplateScopeUser
-	template.ScopeID = userIdent.ID()
-	template.OwnerID = userIdent.ID()
-	template.Created = existing.Created
-	template.CreatedBy = existing.CreatedBy
-	template.UpdatedBy = userIdent.ID()
-	// Preserve system-managed fields that must not be zeroed by client input
-	template.StoragePath = existing.StoragePath
-	template.StorageBucket = existing.StorageBucket
-	template.StorageURI = existing.StorageURI
-	template.Layout = existing.Layout
-	template.Files = existing.Files
-	template.ContentHash = existing.ContentHash
-	template.AgentConfig = existing.AgentConfig // derived; set only by the commit path
-	// Harness and DefaultHarnessConfig are derived from the files too. The
-	// store's UpdateTemplate does not write any content column
-	// (ptone/scion#4221); pinning them here keeps the response truthful.
-	template.Harness = existing.Harness
-	template.DefaultHarnessConfig = existing.DefaultHarnessConfig
-	template.Status = existing.Status
+	// A PUT replaces only the metadata; every other field, including
+	// BaseTemplate, SourceURL and ProjectID, keeps its stored value
+	// (applyTemplateMetadataUpdate). Ownership was verified above, so the
+	// stored scope, scope ID and owner are the caller's.
+	template := applyTemplateMetadataUpdate(existing, &req, userIdent.ID())
 	if template.Slug != "" {
 		template.Slug = api.Slugify(template.Slug)
 	}

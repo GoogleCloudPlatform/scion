@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/clitime"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
 	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging/loglevel"
 	"github.com/spf13/cobra"
@@ -28,7 +29,7 @@ var (
 	profile        string
 	outputFormat   string
 	hubEndpoint    string // Hub API endpoint override
-	noHub          bool   // Disable Hub integration for this invocation
+	noHub          bool   // Removed --no-hub flag (hidden; any use fails with errNoHubRemoved)
 	autoConfirm    bool   // Auto-confirm prompts (--yes flag)
 	nonInteractive bool   // Full non-interactive mode (implies --yes, errors on ambiguous prompts)
 	autoHelp       = true // Default to true, updated in PersistentPreRunE
@@ -118,6 +119,14 @@ return an error instead of blocking.`,
 		// settings, so it is resolved once here and reused below.
 		mode := resolveMode()
 		configureDebugOutput(mode, debugMode)
+
+		// --no-hub was removed with local-only mode. The flag stays,
+		// hidden, for one release so that old scripts get this guidance
+		// instead of an unknown-flag error. It is checked before the
+		// hub-profile gate, so every use gets the same guidance.
+		if noHub {
+			return errNoHubRemoved
+		}
 
 		// Target-hub profiles (ptone/scion#4240): refuse commands outside
 		// the profile allow-list, and apply the agent-mode target rule.
@@ -314,6 +323,14 @@ func Execute() {
 		rootCmd.Long = ""
 	}
 
+	// "<group> <unknown> --help" is an unknown command, not the group's
+	// help (ptone/scion#4579). Checked after the mode restrictions, so a
+	// subcommand the mode removed is unknown too.
+	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
+		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
+		os.Exit(1)
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil && topLevelName(cmd) == "ssh" {
 		// scion ssh follows the ssh convention: any failure before the
@@ -344,6 +361,7 @@ func Execute() {
 var plainErrorCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh-config": true,
+	"vscode":     true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is
@@ -484,7 +502,8 @@ func init() {
 	// Hub integration flags
 	rootCmd.PersistentFlags().StringVar(&hubEndpoint, "hub", "", "Hub nickname or API endpoint URL (overrides SCION_HUB_ENDPOINT)")
 	_ = rootCmd.RegisterFlagCompletionFunc("hub", completeHubNames)
-	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Disable Hub integration for this invocation (local-only mode)")
+	rootCmd.PersistentFlags().BoolVar(&noHub, "no-hub", false, "Removed: local-only mode no longer exists; scion always uses a hub")
+	_ = rootCmd.PersistentFlags().MarkHidden("no-hub")
 
 	// Confirmation and non-interactive flags
 	rootCmd.PersistentFlags().BoolVarP(&autoConfirm, "yes", "y", false, "Answer Yes to every confirmation prompt, including destructive ones (required to confirm when stdin is not a terminal)")
@@ -562,11 +581,8 @@ Use "{{.CommandPath}} [command] --help" for more information about a command.{{e
 
 // GetHubEndpoint returns the effective Hub endpoint based on flags, settings,
 // and environment variables.
-// Returns empty string if Hub is disabled or not configured.
+// Returns empty string if no hub is configured.
 func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
-	if noHub {
-		return ""
-	}
 	if hubEndpoint != "" {
 		return hubEndpoint
 	}
@@ -587,15 +603,8 @@ func GetHubEndpoint(settings interface{ GetHubEndpoint() string }) string {
 	return ""
 }
 
-// IsHubEnabled returns true if Hub integration is enabled for this invocation.
-func IsHubEnabled() bool {
-	return !noHub
-}
-
-// IsNoHub returns true if Hub integration is explicitly disabled for this invocation.
-func IsNoHub() bool {
-	return noHub
-}
+// errNoHubRemoved is returned for any use of the removed --no-hub flag.
+var errNoHubRemoved = fmt.Errorf("--no-hub was removed together with local-only mode; scion always uses a hub. See %s", hubsync.LocalModeRemovalDocsURL)
 
 // IsAutoConfirm returns true if prompts should be auto-confirmed.
 func IsAutoConfirm() bool {
@@ -609,29 +618,20 @@ func IsNonInteractive() bool {
 	return nonInteractive
 }
 
-// printDevAuthWarningIfNeeded checks if dev auth is being used with Hub and
+// printDevAuthWarningIfNeeded checks if dev auth is being used with a hub and
 // prints a warning on stderr (the command's error writer), never on stdout,
 // so it cannot mix into JSON or other machine-read output.
 // This function is called on every command invocation via PersistentPreRunE.
 func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
-	// Skip if --no-hub flag is set
-	if noHub {
-		return
-	}
-
-	// Try to load settings to check if Hub is enabled
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		// If we can't load settings, skip the warning
 		return
 	}
 
-	// Check if Hub is enabled (either via settings or --hub flag override).
-	// A hub selected with 'scion use' is in hubEndpoint too and counts the
-	// same way: a project from the current context is resolved on that hub
-	// without hub.enabled, so dev auth is really in use.
-	hubEnabled := settings.IsHubEnabled() || hubEndpoint != ""
-	if !hubEnabled {
+	// No hub configured: nothing to warn about. hubConfigured counts the hub
+	// selected with 'scion use' too (it is in hubEndpoint).
+	if !hubConfigured(settings) {
 		return
 	}
 
@@ -647,6 +647,14 @@ func printDevAuthWarningIfNeeded(stderr io.Writer, projectPath string) {
 	endpoint := GetHubEndpoint(settings)
 	if endpoint != "" && credentials.IsAuthenticated(endpoint) {
 		// OAuth credentials available, not using dev auth
+		return
+	}
+
+	// The local workstation server on loopback is reached with its dev token
+	// by design (it is the default hub of every workstation), so the banner
+	// would show on every command without telling the user anything. It
+	// stays for every other hub.
+	if isLocalWorkstationEndpoint(endpoint) {
 		return
 	}
 

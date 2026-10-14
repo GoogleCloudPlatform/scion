@@ -102,14 +102,23 @@ func brokerRuntimeCauseDetails(err error) map[string]interface{} {
 		return nil
 	}
 	code, _ := se.brokerErrorDetails()["cause"].(string)
-	// The api.IsBrokerRuntimeCause allowlist is the real filter: only its
-	// fixed codes may reach the client. The brokerCodePattern check cannot
-	// reject a code the allowlist accepts today; it is an extra safeguard,
-	// not a replacement, so keep the allowlist.
-	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
+	if code = relayableRuntimeCause(code); code == "" {
 		return nil
 	}
 	return map[string]interface{}{"cause": code}
+}
+
+// relayableRuntimeCause returns code when it is a broker runtime cause the
+// hub may pass to a client (a create's details.cause, or a failed launch
+// report's stored cause), else "". The api.IsBrokerRuntimeCause allowlist is
+// the real filter: only its fixed codes may reach the client. The
+// brokerCodePattern check cannot reject a code the allowlist accepts today;
+// it is an extra safeguard, not a replacement, so keep the allowlist.
+func relayableRuntimeCause(code string) string {
+	if !api.IsBrokerRuntimeCause(code) || !brokerCodePattern.MatchString(code) {
+		return ""
+	}
+	return code
 }
 
 // writeRestartStopFailed writes the retryable 503 for a restart aborted

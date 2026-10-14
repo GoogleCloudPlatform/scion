@@ -470,6 +470,21 @@ func sshShellQuote(s string) string {
 // absolute path; the label, project and agent must be slugs and the endpoint
 // must have no whitespace or control characters.
 func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (string, error) {
+	return renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, sshKnownHostsRef(label))
+}
+
+// renderSSHHostBlockKnown is renderSSHHostBlock with knownHostsRef as the
+// UserKnownHostsFile line, for host files kept outside ~/.ssh/config.d.
+func renderSSHHostBlockKnown(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef string) (string, error) {
+	return renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef, "")
+}
+
+// renderSSHHostBlockPinned is renderSSHHostBlockKnown with pinFile, when not
+// empty, passed to scion tunnel as --known-hosts together with the block's
+// HostKeyAlias as --host-key-alias, so its host-key hint reads the pin this
+// block uses. pinFile must be an absolute path. ssh's own check is the same
+// either way.
+func renderSSHHostBlockPinned(exe, endpoint, label, projectSlug, agentSlug, knownHostsRef, pinFile string) (string, error) {
 	if !filepath.IsAbs(exe) {
 		return "", fmt.Errorf("scion executable path %q is not absolute", exe)
 	}
@@ -482,18 +497,24 @@ func renderSSHHostBlock(exe, endpoint, label, projectSlug, agentSlug string) (st
 	if err := checkSSHNameParts(label, projectSlug, agentSlug); err != nil {
 		return "", err
 	}
+	if pinFile != "" && (!filepath.IsAbs(pinFile) || hasControl(pinFile)) {
+		return "", fmt.Errorf("known-hosts path %q is not a clean absolute path", pinFile)
+	}
 	host := sshHostName(label, projectSlug, agentSlug)
-	proxy := strings.Join([]string{
+	words := []string{
 		sshShellQuote(exe), "tunnel", "--stdio", "--ssh",
 		"--hub", sshShellQuote(endpoint),
 		"--project", sshShellQuote(projectSlug),
-		sshShellQuote(agentSlug),
-	}, " ")
+	}
+	if pinFile != "" {
+		words = append(words, "--known-hosts", sshShellQuote(pinFile), "--host-key-alias", sshShellQuote(host))
+	}
+	proxy := strings.Join(append(words, sshShellQuote(agentSlug)), " ")
 	var b strings.Builder
 	b.WriteString("Host " + host + "\n")
 	b.WriteString("  ProxyCommand " + proxy + "\n")
 	b.WriteString("  HostKeyAlias " + host + "\n")
-	b.WriteString("  UserKnownHostsFile " + sshKnownHostsRef(label) + "\n")
+	b.WriteString("  UserKnownHostsFile " + knownHostsRef + "\n")
 	b.WriteString("  StrictHostKeyChecking yes\n")
 	return b.String(), nil
 }

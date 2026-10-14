@@ -189,9 +189,14 @@ func hubDeletePendingReason(o hubDeleteOutcome) string {
 }
 
 // hubDeletePendingMessage is scion delete's notice for an accepted delete
-// whose completion could not be observed.
-func hubDeletePendingMessage(o hubDeleteOutcome) string {
-	return fmt.Sprintf("delete accepted; cannot observe completion; local worktree kept (%s)", hubDeletePendingReason(o))
+// whose completion could not be observed. kept names the local state that
+// was kept ("local worktree kept"), or is empty when there is none (a
+// target-hub profile).
+func hubDeletePendingMessage(o hubDeleteOutcome, kept string) string {
+	if kept == "" {
+		return fmt.Sprintf("delete accepted; cannot observe completion (%s)", hubDeletePendingReason(o))
+	}
+	return fmt.Sprintf("delete accepted; cannot observe completion; %s (%s)", kept, hubDeletePendingReason(o))
 }
 
 // hubRemovalPendingMessage is scion stop --rm's notice for the same case.
