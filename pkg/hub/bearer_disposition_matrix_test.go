@@ -103,6 +103,54 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
 		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
+	// User-scope branches of shared routes: the branch is chosen by the
+	// record's scope or by the request's scope and kind, while the matrix
+	// addresses one fixture per pattern and sends no scope. Each is pinned
+	// by a test that drives real tokens through the user-scope branch.
+	{OperationID: "template.user.delete", Method: "DELETE", Pattern: "/api/v1/templates/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder, and the matrix fixture on this pattern is a global template",
+		Pin:    "TestUserTemplateWrite_RequiresTemplateSelector",
+	},
+	{OperationID: "template.user.clone", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the source also needs template:read",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "template.user.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder and a source URL, and the read gate also needs template:read",
+		Pin:    "TestTemplateUserReimport_RequiresUpdateAction",
+	},
+	{OperationID: "skill.user.create", Method: "POST", Pattern: "/api/v1/skills"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body",
+		Pin:    "TestUserScopeSkillCreate_RequiresSkillCreate",
+	},
+	{OperationID: "harnessconfig.user.clone", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the route gate also needs harness_config:read on the source",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "harnessconfig.user.delete", Method: "DELETE", Pattern: "/api/v1/harness-configs/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserDelete_RequiresDeleteAction",
+	},
+	{OperationID: "harnessconfig.user.reimport", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder and a source URL, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserReimport_RequiresUpdateAction",
+	},
+	{OperationID: "template.user.import", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "template.user.import", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "harnessconfig.user.import", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "harnessconfig.user.import", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
 	{OperationID: "chat.space.list", Method: "GET", Pattern: "/api/v1/chat/spaces"}: {
 		Reason: "the space list filters projects by project:read instead of refusing the request, so a token without the selector gets 200 with no spaces",
 		Pin:    "TestChatSpacesToken_FilteredToBoundary",

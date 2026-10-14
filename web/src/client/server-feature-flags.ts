@@ -60,8 +60,7 @@ async function okJsonOrNull(res: Response): Promise<unknown> {
  *   refuses the fetch.
  *
  * Resolving both before the first render keeps the /chat route gate in
- * renderRoute() honest and settles `terminalWorkspaceEnabled` before it is
- * read.
+ * renderRoute() honest.
  */
 export async function applyServerFeatureFlags(): Promise<void> {
   const [pub, exp] = await Promise.allSettled([

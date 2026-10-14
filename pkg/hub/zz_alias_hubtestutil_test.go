@@ -15,13 +15,11 @@
 package hub
 
 import (
-	"context"
 	"database/sql"
 	"io"
 	"testing"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/internal/hubtestutil"
 )
 
@@ -31,10 +29,6 @@ import (
 // package need no edits. Code outside this package uses hubtestutil directly.
 
 var ambientGCPProjectEnvKeys = hubtestutil.AmbientGCPProjectEnvKeys
-
-func autoMigrateTestClient(ctx context.Context, client *ent.Client) error {
-	return hubtestutil.AutoMigrateTestClient(ctx, client)
-}
 
 func checkLeaksExcluding(w io.Writer, max int, settle time.Duration, alwaysReport bool, exclude map[string]bool) bool {
 	return hubtestutil.CheckLeaksExcluding(w, max, settle, alwaysReport, exclude)
@@ -70,10 +64,6 @@ var memGuardRunning = &hubtestutil.MemGuardRunning
 
 func memGuardUsage() (uint64, string, bool) {
 	return hubtestutil.MemGuardUsage()
-}
-
-func migrateTestStore(ctx context.Context, s testMigrator) error {
-	return hubtestutil.MigrateTestStore(ctx, s)
 }
 
 func openTestMemorySQLite(t testing.TB, driver string) *sql.DB {
@@ -119,8 +109,6 @@ func stubGitSparseCheckout(t *testing.T, files map[string]string) *gitSparseChec
 }
 
 type syncBuffer = hubtestutil.SyncBuffer
-
-type testMigrator = hubtestutil.TestMigrator
 
 func tid(name string) string {
 	return hubtestutil.TID(name)

@@ -613,18 +613,28 @@ func (s *NotificationStore) ClaimNotificationForDispatch(ctx context.Context, id
 }
 
 // UnmarkNotificationDispatched reverts a notification's dispatched flag to false
-// so a future sweep can retry delivery.
-func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string) error {
+// so a future sweep can retry delivery. The empty dispatch_outcome predicate
+// keeps a row whose outcome another caller has already recorded dispatched
+// (ptone/scion#5030): reverting it would leave dispatched=false with an
+// outcome set, and the sweep would deliver it again. Returns false (no error)
+// when the row has an outcome or does not exist.
+func (s *NotificationStore) UnmarkNotificationDispatched(ctx context.Context, id string) (bool, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
-		return err
+		return false, err
 	}
 
-	_, err = s.client.Notification.Update().
-		Where(notification.IDEQ(uid)).
+	affected, err := s.client.Notification.Update().
+		Where(
+			notification.IDEQ(uid),
+			notification.DispatchOutcomeEQ(""),
+		).
 		SetDispatched(false).
 		Save(ctx)
-	return mapError(err)
+	if err != nil {
+		return false, mapError(err)
+	}
+	return affected > 0, nil
 }
 
 // RecordNotificationDispatchAttempt atomically increments a notification's
@@ -642,20 +652,52 @@ func (s *NotificationStore) RecordNotificationDispatchAttempt(ctx context.Contex
 }
 
 // SetNotificationDispatchOutcome records a terminal dispatch outcome and sets
-// dispatched=true so the sweep stops considering the notification.
-func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error {
+// dispatched=true so the sweep stops considering the notification. The update
+// is conditional so racing writers keep the most informative outcome
+// (ptone/scion#5030): delivered is a fact (the broker accepted the message)
+// and failed is a verdict reached by a caller that did not see it, so a
+// delivered write applies unless the row is already delivered (it replaces
+// failed), and a failed write applies only while no outcome is recorded.
+// Returns false (no error) when the write is refused, and ErrNotFound when
+// the row does not exist.
+func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (bool, error) {
 	if outcome != store.NotificationOutcomeDelivered && outcome != store.NotificationOutcomeFailed {
-		return store.ErrInvalidInput
+		return false, store.ErrInvalidInput
 	}
 	uid, err := parseUUID(id)
 	if err != nil {
-		return err
+		return false, err
 	}
-	_, err = s.client.Notification.UpdateOneID(uid).
+	// failed only over no outcome; delivered over no outcome or failed, never
+	// re-applied over delivered.
+	pred := notification.DispatchOutcomeEQ("")
+	if outcome == store.NotificationOutcomeDelivered {
+		pred = notification.DispatchOutcomeNEQ(store.NotificationOutcomeDelivered)
+	}
+	affected, err := s.client.Notification.Update().
+		Where(
+			notification.IDEQ(uid),
+			pred,
+		).
 		SetDispatched(true).
 		SetDispatchOutcome(outcome).
 		Save(ctx)
-	return mapError(err)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if affected > 0 {
+		return true, nil
+	}
+	exists, err := s.client.Notification.Query().
+		Where(notification.IDEQ(uid)).
+		Exist(ctx)
+	if err != nil {
+		return false, mapError(err)
+	}
+	if !exists {
+		return false, store.ErrNotFound
+	}
+	return false, nil
 }
 
 // orphanPurgeBatchSize caps how many rows one purge statement deletes so a

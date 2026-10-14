@@ -152,7 +152,17 @@ func (t *conduitBrokerTunnel) tunnel(ctx context.Context, brokerID string, req *
 		return nil, ctx.Err()
 	case callCtx.Err() != nil:
 		// Past our own request timeout; Call sent RpcCancel.
-		return nil, fmt.Errorf("request timeout after %v", t.timeout)
+		return nil, &brokerTransportError{msg: fmt.Sprintf("request timeout after %v", t.timeout), sentinel: errBrokerResponseTimeout}
+	case errors.Is(err, conduit.ErrSessionClosed):
+		// The session ended during the call. Once the request was sent the
+		// broker may have it and be acting on it, so the outcome is unknown
+		// (ptone/scion#4866), as for a control-channel connection lost after
+		// the send. This keys on the error of the call that used s, not on
+		// the session registry, which a reconnect may already have refilled.
+		// A session that had ended before the request was sent also lands
+		// here; that errs toward keeping an async launch, which the launch
+		// reaper ends if the request never arrived.
+		return nil, &brokerTransportError{msg: fmt.Sprintf("conduit request failed: %v", err), sentinel: errBrokerConnectionLost}
 	default:
 		return nil, fmt.Errorf("conduit request failed: %w", err)
 	}

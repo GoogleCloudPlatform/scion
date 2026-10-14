@@ -342,6 +342,7 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	row.SoftDeleteOpID = ""
 	row.Updated = now
 	hooks := s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.restore)
+	lapsedClaim := false
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		// An agent whose guard user no longer exists is not restored
 		// (ptone/scion#2769): the user delete refuses while the user has
@@ -413,10 +414,36 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 		if err := tx.CreateMutationAudit(ctx, record); err != nil {
 			return fmt.Errorf("restore audit: %w", err)
 		}
+		lapsedClaim = cur.DeletionState == store.DeletionStateDeleting
 		return nil
 	})
 	if err != nil {
 		return err
+	}
+	// A purge of the agent's retained files whose hub stopped mid-dispatch
+	// leaves its claim (deleting, lease lapsed) on the soft-deleted row
+	// (retained_files_purge.go, ptone/scion#4744). A live claim refuses the
+	// restore earlier (deleteBlocksStart) or conflicts with it (the claim
+	// bumps state_version); a lapsed one must not stay on the restored
+	// agent. UpdateAgentDeletion runs its own transaction, so this follows
+	// the restore's commit; a failure leaves the marker, which then reads
+	// as an abandoned delete, and is logged.
+	if lapsedClaim {
+		// The restore has committed: finish the clear even if the
+		// caller's request has ended meanwhile, within its own bound.
+		clearCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deleteShortStep)
+		defer cancel()
+		lapsedBefore := time.Now()
+		none := store.DeletionStateNone
+		pred := store.DeletionPredicate{States: []string{store.DeletionStateDeleting}, DeletedAtNull: true, LeaseExpiredBefore: &lapsedBefore}
+		set := store.DeletionFields{State: &none, ClearLeaseAt: true, KeepUpdated: true}
+		if _, err := s.store.UpdateAgentDeletion(clearCtx, row.ID, pred, set); err != nil {
+			s.agentLifecycleLog.Warn("restore: could not clear a lapsed purge claim", "agent_id", row.ID, "error", err)
+		} else if fresh, err := s.store.GetAgent(clearCtx, row.ID); err != nil {
+			s.agentLifecycleLog.Warn("restore: could not re-read the agent after clearing a lapsed purge claim", "agent_id", row.ID, "error", err)
+		} else {
+			row = *fresh
+		}
 	}
 	*a = row
 	return nil

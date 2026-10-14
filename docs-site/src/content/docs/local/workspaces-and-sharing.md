@@ -132,7 +132,7 @@ Present (value `"true"`) when the workspace is a git repository. Absent when the
 
 `SCION_WORKSPACE_GIT` is separate from `SCION_WORKSPACE_MODE` because `shared-plain` can be either git-backed or a plain directory — the mode alone cannot disambiguate. Absent means false; there is no `"false"` string value.
 
-**Compatibility note:** Older broker versions emitted only `SCION_SHARED_WORKSPACE=true` for shared-plain git workspaces. The `sciontool init` compat shim prefers the new vars and falls back to `SCION_SHARED_WORKSPACE` when they are absent. `SCION_SHARED_WORKSPACE` is deprecated and tracked for removal in [ptone/scion#575](https://github.com/ptone/scion/issues/575).
+**Compatibility note:** The legacy `SCION_SHARED_WORKSPACE` variable has been removed ([ptone/scion#575](https://github.com/ptone/scion/issues/575)). The broker no longer sets it, and `sciontool init` ignores it if it is present. Use `SCION_WORKSPACE_MODE=shared-plain` together with `SCION_WORKSPACE_GIT=true` to detect a shared git workspace. An agent started by an older broker that sets neither new variable is treated as not being in a shared git workspace. An agent image whose `sciontool` predates `SCION_WORKSPACE_MODE` ([ptone/scion#572](https://github.com/ptone/scion/issues/572)) reads only the legacy variable, so on a current broker it also skips the shared-workspace git setup.
 
 ---
 

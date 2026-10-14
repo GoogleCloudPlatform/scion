@@ -1207,13 +1207,16 @@ func TemplateNameFromContext(ctx context.Context) string {
 // AutoExposePorts is the Hub's auto-expose-ports default
 // (SCION_AUTO_EXPOSE_PORTS). It is the lowest env tier: buildAgentEnv applies
 // it only when no higher tier (hub-resolved env, template, harness-config
-// env, scion-agent.json) left the key set. Unlike the three limit fields it is
-// sent on start and restart as well as create, so a change to the Hub default
-// reaches an agent at its next start.
+// env, scion-agent.json) left the key set. It is sent on start and restart as
+// well as create, so a change to the Hub default reaches an agent at its next
+// start.
 //
-// Resources are also sent on start and restart: the broker applies them per
-// start and never persists them into scion-agent.json (ptone/scion#4561). A
-// broker on this version that talks to an older Hub gets them only on create.
+// Resources and the three limit fields are also sent on start and restart:
+// the broker applies them per start and never persists them into
+// scion-agent.json (ptone/scion#4561, ptone/scion#623). A broker on this
+// version that talks to an older Hub gets resources only on create, and the
+// limits only on create (so after a restart the broker's own settings.yaml
+// limit defaults apply instead).
 type HubAgentDefaults struct {
 	MaxTurns        int           `json:"maxTurns,omitempty"`
 	MaxModelCalls   int           `json:"maxModelCalls,omitempty"`
@@ -1467,10 +1470,10 @@ type KubernetesBlockIdentity struct {
 // (design t1-async-create-v11.md §3.8.4), reported by the runtime via
 // StartOptions.OnResourceCreated after each true create. UID is the
 // identity a cleanup deletes by: the Kubernetes object UID, the
-// container ID for container runtimes, or, for sandboxes, the launch's run
-// ID (scion.run_id), checked against the run label of the sandbox's state
-// entry before deleting. Namespace is empty for runtimes that have no
-// namespaces.
+// container ID for container runtimes, or, for Cloud Run instances and
+// sandboxes, the launch's run ID (scion.run_id), checked against the
+// resource's run label (a sandbox's: its state entry's) before deleting.
+// Namespace is empty for runtimes that have no namespaces.
 type ResourceHandle struct {
 	Kind      string // one of the ResourceKind* constants
 	Namespace string
@@ -1539,6 +1542,11 @@ const (
 	// ResourceKindSandbox is a cloudrun-sandbox sandbox; its handle's UID
 	// is the launch's run ID, not a container ID.
 	ResourceKindSandbox = "sandbox"
+	// ResourceKindCloudRunInstance is a Cloud Run Instances API instance;
+	// its handle's Namespace is the runtime's parent
+	// (projects/<p>/locations/<l>), Name the instance ID and UID the
+	// launch's run ID.
+	ResourceKindCloudRunInstance = "cloudrun_instance"
 )
 
 type StatusEvent struct {
