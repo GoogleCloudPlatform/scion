@@ -54,12 +54,15 @@ provenance() {
 # ROOT that holds a !no_sqlite test file, one per line, sorted.
 sqlite_test_dirs() {
   local root="$1" modules
-  # Nested module roots, as ./dir/ prefixes.
-  modules="$(cd "$root" && find . -name go.mod -not -path ./go.mod \
-    -not -path '*/vendor/*' -not -path '*/node_modules/*' \
+  # Nested module roots, as ./dir/ prefixes. vendor, node_modules
+  # (web/node_modules exists in Build & Test) and .git are not walked.
+  modules="$(cd "$root" && find . \( -name vendor -o -name node_modules \
+    -o -name .git \) -prune -o -name go.mod -not -path ./go.mod -print \
     | sed -e 's|/go.mod$|/|')"
-  # Pattern uses POSIX ERE (-E); no GNU-only \| or \b.
-  (cd "$root" && grep -rlE --include='*_test.go' \
+  # Pattern uses POSIX ERE (-E); no GNU-only \| or \b. --exclude-dir is
+  # in both GNU and BSD grep.
+  (cd "$root" && grep -rlE --include='*_test.go' --exclude-dir=vendor \
+    --exclude-dir=node_modules --exclude-dir=.git \
     -e '^//go:build .*!no_sqlite([^A-Za-z0-9_]|$)' . || true) \
     | grep -vE '/(testdata|vendor|node_modules)/' \
     | sed -e 's|/[^/]*$||' \
@@ -144,6 +147,9 @@ self_test() {
   mk pkg/other/o_test.go '//go:build !no_sqlite_extra'
   mk pkg/prod/p.go '//go:build !no_sqlite'
   mk pkg/a/testdata/t/t_test.go '//go:build !no_sqlite'
+  mk web/node_modules/m/m_test.go '//go:build !no_sqlite'
+  mk web/node_modules/m/go.mod 'module example.com/m'
+  mk pkg/vendor/v/v_test.go '//go:build !no_sqlite'
   mk extras/mod/go.mod 'module example.com/mod'
   mk extras/mod/e_test.go '//go:build !no_sqlite'
 
@@ -172,7 +178,7 @@ self_test() {
   # Nested modules, testdata, non-test files, no_sqlite and !no_sqlite_extra are ignored.
   expect 1 "./pkg/a" ./pkg/b ./cmd/...
   out="$(scan "$tmp" ./nothing 2>&1 || true)"
-  for bad in extras/mod pkg/nosql pkg/other pkg/prod testdata; do
+  for bad in extras/mod pkg/nosql pkg/other pkg/prod testdata node_modules vendor; do
     if [[ "$out" == *"$bad"* ]]; then
       echo "$CHECK self-test FAIL: $bad must not be a candidate: $out" >&2
       fails=$((fails + 1))

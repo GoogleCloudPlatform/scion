@@ -686,9 +686,10 @@ jobs:
       # and pkg/testinfra (ptone/scion#1088); the list is SQLITE_NONHUB_PKGS
       # in the Makefile, and Build & Test's Check SQLite Test Coverage step
       # fails if a package with !no_sqlite tests is missing from it. The
-      # pkg/hub package itself runs in the pkg/hub shard jobs below. The 60m go test timeout
-      # is kept from when pkg/hub ran here; the 70m job timeout stays above
-      # it so a real hang still produces go's goroutine dump.
+      # pkg/hub package itself runs in the pkg/hub shard jobs below. The 60m
+      # go test timeout is kept from when pkg/hub ran here; the 70m job
+      # timeout stays above it so a real hang still produces go's goroutine
+      # dump.
       - name: Run SQLite-enabled tests (make test-sqlite-nonhub)
         run: make test-sqlite-nonhub
 

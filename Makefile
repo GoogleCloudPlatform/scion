@@ -149,9 +149,12 @@ SQLITE_NONHUB_PKGS_CMD = go list $(SQLITE_NONHUB_PKGS) | grep -vx '$(HUB_PKG)'
 # SQLite enabled (no no_sqlite tag): SQLITE_NONHUB_PKGS (SQLite Tests
 # (non-hub), test-sqlite-nonhub; ./pkg/hub/... there also matches the
 # pkg/hub package itself, which the pkg/hub shard jobs run instead),
-# ./cmd (test-cmd-sqlite) and ./internal/fixturegen/...
-# (test-fixture-coverage). Keep it in step with those targets.
-SQLITE_CI_PKGS = $(SQLITE_NONHUB_PKGS) ./cmd ./internal/fixturegen/...
+# SQLITE_CMD_PKGS (test-cmd-sqlite) and FIXTURE_PKGS
+# (test-fixture-coverage). Those targets test exactly these variables, so
+# the list check-sqlite-coverage checks is the list CI runs.
+SQLITE_CMD_PKGS := ./cmd
+FIXTURE_PKGS := ./internal/fixturegen/...
+SQLITE_CI_PKGS = $(SQLITE_NONHUB_PKGS) $(SQLITE_CMD_PKGS) $(FIXTURE_PKGS)
 
 ## sqlite-ci-pkgs: Print SQLITE_CI_PKGS, one pattern per line (read by hack/check-sqlite-coverage.sh)
 sqlite-ci-pkgs:
@@ -175,7 +178,7 @@ test-sqlite-nonhub:
 # (non-hub) job.
 test-cmd-sqlite:
 	@echo "Running cmd tests (SQLite-enabled)..."
-	@go test -count=1 -timeout 20m ./cmd
+	@go test -count=1 -timeout 20m $(SQLITE_CMD_PKGS)
 
 ## hubshard-parity: Check the pkg/hub test shards: every test runs in exactly one shard, every shard compiles (parse only)
 # Also fails if a hubshard tag or a generated imports file is committed:
@@ -226,7 +229,7 @@ vet-hub-shard:
 # ptone/scion#1931). CI runs this in the SQLite Tests (non-hub) job.
 test-fixture-coverage:
 	@echo "Running fixture coverage gate (SQLite-enabled)..."
-	@go test -count=1 ./internal/fixturegen/...
+	@go test -count=1 $(FIXTURE_PKGS)
 
 # TEST_IDENTITY_POSTGRES_TESTS are the pkg/hub test identity purge
 # concurrency tests (ptone/scion#4240, Phase 3b) run by
