@@ -2599,8 +2599,9 @@ authDone:
 		// phantom agent forever. Some runtimes do not let the host write
 		// files in the container, so the failed start is also recorded in
 		// the host-owned host state file, which list reads and which does
-		// not depend on the agent home being writable (ptone/scion#4815). The agent-info.json write is kept, best
-		// effort, for readers of that file; it may fail on such runtimes.
+		// not depend on the agent home being writable (ptone/scion#4815).
+		// The agent-info.json write is kept, best effort, for readers of
+		// that file; it may fail on such runtimes.
 		if recErr := setStartFailedRunID(RunOwnerTargetFor(opts), runID); recErr != nil {
 			slog.Warn("Start: failed to record the failed start in the host state file",
 				"agent", opts.Name, "run_id", runID, "error", recErr)

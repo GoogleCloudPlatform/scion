@@ -82,7 +82,8 @@ func setStartFailedRunID(t RunOwnerTarget, runID string) error {
 // dir: with no hub project ID the resolver cannot tell a shared-workspace
 // agent (whose state lives in an external dir) from a worktree agent, and
 // would address the in-project dir instead. "Same dir" is sameDir, the
-// check the host state writers use (agentDirRunOwnerRoot).
+// check agentDirRunOwnerRoot uses (for recordRunOwnerInAgentDir and
+// recordLegacyRunOwnerInAgentDir).
 func startFailedForDisplay(t RunOwnerTarget, listedAgentDir string) string {
 	root, err := HostStateRootFor(t)
 	if err != nil {
