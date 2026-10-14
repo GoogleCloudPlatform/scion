@@ -50,7 +50,7 @@ const fkReconcileSnapshotLabelPrefix = "pre-fk-reconcile"
 func fkReconcileSnapshotLabel(groups []entc.FKRepairGroup) string {
 	h := sha256.New()
 	for _, g := range groups {
-		fmt.Fprintf(h, "%s\x00%d\x00%s\x00%d\x00%s\n", g.Table, g.ForeignKeyID, strings.Join(g.Columns, ","), g.Rows, g.Orphans)
+		_, _ = fmt.Fprintf(h, "%s\x00%d\x00%s\x00%d\x00%s\n", g.Table, g.ForeignKeyID, strings.Join(g.Columns, ","), g.Rows, g.Orphans)
 	}
 	return fkReconcileSnapshotLabelPrefix + "-" + hex.EncodeToString(h.Sum(nil)[:4])
 }

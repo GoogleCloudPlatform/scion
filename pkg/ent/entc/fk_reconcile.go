@@ -164,11 +164,11 @@ func orphanDigest(ctx context.Context, q sqlQuerier, fk fkInfo, r *fkViolatingRo
 	sort.Strings(content)
 	h := sha256.New()
 	for _, id := range ids {
-		fmt.Fprintf(h, "%d\n", id)
+		_, _ = fmt.Fprintf(h, "%d\n", id)
 	}
-	fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
+	_, _ = fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
 	for _, c := range content {
-		fmt.Fprintf(h, "row=%d:%s\n", len(c), c)
+		_, _ = fmt.Fprintf(h, "row=%d:%s\n", len(c), c)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
