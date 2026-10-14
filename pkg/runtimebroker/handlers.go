@@ -1618,7 +1618,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			var skillErr *agent.SkillResolutionError
 			if errors.As(err, &skillErr) {
 				markAttemptFailed(skillResolutionHTTPStatus(skillErr.Code), "failed to provision agent")
-				SkillResolutionFailed(w, skillErr)
+				ref := skillResolutionCorrelationID(opts.RunID)
+				s.logSkillResolutionFailure(skillErr, ref,
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+				SkillResolutionFailed(w, skillErr, ref)
 				return
 			}
 			// An unusable harness-config provisioner is a configuration
@@ -1716,7 +1719,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.agentLifecycleLog.Error("Agent create failed", append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug,
-			"error", err}, runtimeFailureLogAttrs(err)...)...)
+			"error", startErrorLogValue(err)}, runtimeFailureLogAttrs(err)...)...)
 
 		// Clean up provisioned agent files so they don't become orphans --
 		// but only while this start still owns the agent name. The files
@@ -1785,7 +1788,10 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// broker paths (ptone/scion#3113). The full error is logged above.
 			writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage(opCreateAgent, err, opts.TemplateName), nil)
 		case isSkillErr:
-			SkillResolutionFailed(w, skillErr)
+			ref := skillResolutionCorrelationID(opts.RunID)
+			s.logSkillResolutionFailure(skillErr, ref,
+				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
+			SkillResolutionFailed(w, skillErr, ref)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to create agent: "+err.Error(), nil)
 		default:
@@ -3330,7 +3336,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			return
 		}
 		s.agentLifecycleLog.Error("Agent start failed",
-			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", err)
+			"agent_id", id, "project_id", projectID, "run_id", opts.RunID, "error", startErrorLogValue(err))
 		// Manager.Start may have acted (removed the previous entry or
 		// created a new one), so mark the failure for the hub, and report
 		// the run the runtime holds now. Start can also re-provision the
@@ -3352,7 +3358,10 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 			// wrapped error carries identity (see runtimeOpError).
 			writeError(w, http.StatusConflict, ErrCodeConflict, scionrt.ErrRunConflict.Error(), details)
 		case errors.As(err, &skillErr):
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			ref := skillResolutionCorrelationID(opts.RunID)
+			s.logSkillResolutionFailure(skillErr, ref,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+			skillResolutionFailedWithDetails(w, skillErr, ref, details)
 		case config.IsAgentStateConflict(err):
 			writeError(w, http.StatusConflict, ErrCodeConflict, "Failed to start agent: "+err.Error(), details)
 		default:
@@ -4426,7 +4435,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 			return
 		}
 		s.agentLifecycleLog.Error("Agent restart failed",
-			"agent_id", id, "error", err)
+			"agent_id", id, "error", startErrorLogValue(err))
 		// The stop above and Manager.Start may have acted, so mark the
 		// failure for the hub, and report the run the runtime holds now.
 		details := s.startFailureDetails(ctx, mgr, id, projectID, opts.RunID)
@@ -4440,7 +4449,10 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 		// is not reported as a missing agent.
 		var skillErr *agent.SkillResolutionError
 		if errors.As(err, &skillErr) {
-			skillResolutionFailedWithDetails(w, skillErr, details)
+			ref := skillResolutionCorrelationID(opts.RunID)
+			s.logSkillResolutionFailure(skillErr, ref,
+				"agent_id", id, "project_id", projectID, "run_id", opts.RunID)
+			skillResolutionFailedWithDetails(w, skillErr, ref, details)
 			return
 		}
 		if config.IsAgentStateConflict(err) {

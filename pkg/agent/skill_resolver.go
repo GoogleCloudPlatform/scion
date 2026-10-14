@@ -118,7 +118,7 @@ const (
 // upstream response that failed the resolution, when one is known, else 0.
 //
 // Message is resolver text for the server-side log; it is not shown to the
-// user (the runtime broker stores a fixed reason phrase instead).
+// user (the agent runtime stores a fixed reason phrase instead).
 type SkillResolutionError struct {
 	URI        string
 	Code       string

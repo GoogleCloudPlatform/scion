@@ -671,14 +671,18 @@ func skillResolutionHTTPStatus(code string) int {
 // cause instead of folding the failure into a generic 500/502 (#2546). Every
 // mapped status gets the same {skill, cause} detail payload so the response
 // is actionable without broker logs, including the uncategorized/5xx default.
-func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError) {
-	skillResolutionFailedWithDetails(w, err, nil)
+//
+// The message is fixed text (see skillResolutionPublicText) carrying ref,
+// the correlation id of the server-side log record; the caller logs the
+// full error with logSkillResolutionFailure.
+func SkillResolutionFailed(w http.ResponseWriter, err *agent.SkillResolutionError, ref string) {
+	skillResolutionFailedWithDetails(w, err, ref, nil)
 }
 
 // skillResolutionFailedWithDetails is SkillResolutionFailed with extra error
 // details (for example the start markers from startFailureDetails) merged
 // alongside the skill and cause.
-func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, extra map[string]interface{}) {
+func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillResolutionError, ref string, extra map[string]interface{}) {
 	if err.Code == agent.SkillErrCodeRateLimited && err.RetryAfter != "" {
 		w.Header().Set("Retry-After", err.RetryAfter)
 	}
@@ -686,10 +690,10 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 	for k, v := range extra {
 		details[k] = v
 	}
-	details["skill"] = err.URI
+	details["skill"] = publicSkillRef(err.URI)
 	details["cause"] = err.Code
 	writeError(w, skillResolutionHTTPStatus(err.Code), ErrCodeSkillResolution,
-		"Failed to provision agent: "+err.Error(), details)
+		"Failed to provision agent: "+skillResolutionPublicText(err, ref), details)
 }
 
 // writeStartContextError writes the HTTP response for an error returned by

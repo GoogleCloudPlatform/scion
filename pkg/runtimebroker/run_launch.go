@@ -382,7 +382,16 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// full error reaches only the broker's own log.
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code, "error", sr.err}, runtimeFailureLogAttrs(sr.err)...)...)
+			"launch_id", rec.ID, "error_code", code, "error", startErrorLogValue(sr.err)}, runtimeFailureLogAttrs(sr.err)...)...)
+		// A skill resolution failure stores fixed text with a correlation
+		// id; the full error is logged with the same id.
+		var launchSkillErr *agent.SkillResolutionError
+		if code == ErrCodeSkillResolution && errors.As(sr.err, &launchSkillErr) {
+			ref := skillResolutionCorrelationID(lc.opts.RunID)
+			s.logSkillResolutionFailure(launchSkillErr, ref,
+				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
+			message = skillResolutionPublicText(launchSkillErr, ref)
+		}
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
@@ -701,9 +710,10 @@ func classifyStartErrorCode(err error, templateSlug string) (code, message strin
 		return api.LaunchCodeNameInUse, scionrt.ErrRunConflict.Error()
 	case errors.As(err, &skillErr):
 		// A required skill could not be resolved: the same code a
-		// synchronous create or start returns, with the error naming the
-		// skill and its cause.
-		return ErrCodeSkillResolution, err.Error()
+		// synchronous create or start returns, with a fixed reason phrase
+		// naming the skill. runLaunch adds the correlation id and logs the
+		// full error (see skillResolutionPublicText).
+		return ErrCodeSkillResolution, skillResolutionPublicText(skillErr, "")
 	case errors.Is(err, config.ErrTemplateNotFound), errors.Is(err, config.ErrHarnessConfigNotFound):
 		// The same text the synchronous create gives: it names the
 		// template or harness-config (the ptone/scion#1316 404 contract)
