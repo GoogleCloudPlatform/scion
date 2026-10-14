@@ -112,6 +112,11 @@ var (
 	// ErrDraining is returned by OpenStream on a session that has sent or
 	// received GoAway. Open the stream on the replacement session.
 	ErrDraining = errors.New("conduit: session draining")
+	// ErrRequestNotSent is returned by Call, together with
+	// ErrSessionClosed, when the session ended before the request's frame
+	// was handed to the transport: the peer never saw the request, so
+	// the caller may send it on another session whatever its kind.
+	ErrRequestNotSent = errors.New("conduit: request not sent")
 	// ErrKeepaliveTimeout ends a session whose peer has been silent for
 	// longer than the pong wait.
 	ErrKeepaliveTimeout = errors.New("conduit: keepalive timeout")

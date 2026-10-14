@@ -658,6 +658,9 @@ func (s *session) writeLoop() {
 		if !ok {
 			return
 		}
+		if of.claim != nil && !of.claim() {
+			continue // abandoned by its sender before the write began
+		}
 		if of.f != nil {
 			for _, f := range s.intercept(Outbound, of.f) {
 				b, err := encodeFrame(f)
@@ -1365,12 +1368,18 @@ func (s *session) handleAuthRefresh(ar *conduitv1.AuthRefresh) {
 // Config.MaxRPCFrame, are answered with 413 locally. On a draining
 // session (GoAway sent or received) Call returns ErrDraining: new work
 // belongs on the replacement session.
+//
+// When the session ends before the request's frame was handed to the
+// transport, Call returns an error matching both ErrRequestNotSent and
+// ErrSessionClosed. Once the writer has taken the frame, the session's end
+// is reported with ErrSessionClosed alone: the peer may have received the
+// request, so its outcome is unknown.
 func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduitv1.RpcResponse, error) {
 	if len(req.GetBody()) > MaxRPCBody {
 		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: 413}, nil
 	}
 	if s.isDone() {
-		return nil, ErrSessionClosed
+		return nil, fmt.Errorf("%w: %w", ErrRequestNotSent, ErrSessionClosed)
 	}
 	req = proto.Clone(req).(*conduitv1.RpcRequest)
 	if req.RequestId == "" {
@@ -1388,7 +1397,7 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 	s.mu.Lock()
 	if s.isDone() {
 		s.mu.Unlock()
-		return nil, s.endErr()
+		return nil, s.notSentErr()
 	}
 	if s.draining {
 		s.mu.Unlock()
@@ -1407,9 +1416,17 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 		s.closeIfDrained()
 	}()
 
-	if err := s.sendControl(ctx, frame); err != nil {
+	// write moves from writeQueued to writeTaken when the writer takes
+	// the frame, or to writeAbandoned when the session ends first; the
+	// one CAS that wins decides whether the peer may have the request.
+	var write atomic.Int32
+	of := &outFrame{
+		f: frame, class: classControl, size: int64(proto.Size(frame)),
+		claim: func() bool { return write.CompareAndSwap(writeQueued, writeTaken) },
+	}
+	if err := s.sched.enqueue(of, ctx.Done(), ctx.Err); err != nil {
 		if err == ErrSessionClosed {
-			err = s.endErr()
+			err = s.notSentErr()
 		}
 		return nil, err
 	}
@@ -1425,8 +1442,25 @@ func (s *session) Call(ctx context.Context, req *conduitv1.RpcRequest) (*conduit
 			return resp, nil
 		default:
 		}
+		if write.CompareAndSwap(writeQueued, writeAbandoned) {
+			return nil, s.notSentErr()
+		}
 		return nil, s.endErr()
 	}
+}
+
+// States of a Call's request frame (see Call).
+const (
+	writeQueued int32 = iota
+	writeTaken
+	writeAbandoned
+)
+
+// notSentErr is the error of a Call whose request never reached the
+// transport because the session ended: ErrRequestNotSent wrapping the
+// session's end error.
+func (s *session) notSentErr() error {
+	return fmt.Errorf("%w: %w", ErrRequestNotSent, s.endErr())
 }
 
 func (s *session) handleRPCResponse(r *conduitv1.RpcResponse) {
@@ -1487,13 +1521,19 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 	// refuse answers from the read loop without blocking: status-only
 	// responses are tiny and use the internal control reserve, and they
 	// are queued ahead of any close-after-flush that follows.
+	// The two refusals that mean "not handled here" (no handler: 501;
+	// draining: 503) carry RefusalHeader, so the caller can tell them
+	// from a handler's own 501 or 503.
 	refuse := func(status int32, reason string) {
 		resp := &conduitv1.RpcResponse{RequestId: id, Status: status}
 		if reason != "" {
 			resp.Body = []byte(reason)
 		}
-		if status == 503 {
-			resp.Headers = map[string]string{RetryAfterHeader: "0"}
+		switch status {
+		case 501:
+			resp.Headers = map[string]string{RefusalHeader: RefusalUnsupported}
+		case 503:
+			resp.Headers = map[string]string{RetryAfterHeader: "0", RefusalHeader: RefusalDraining}
 		}
 		s.sendInternal(&conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}})
 	}
@@ -1543,6 +1583,8 @@ func (s *session) handleRPCRequest(req *conduitv1.RpcRequest) {
 		}
 		resp = proto.Clone(resp).(*conduitv1.RpcResponse)
 		resp.RequestId = id
+		// Only the session layer marks refusals; a handler cannot.
+		StripRefusal(resp.Headers)
 		frame := &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: resp}}
 		if len(resp.GetBody()) > MaxRPCBody || proto.Size(frame) > s.cfg.MaxRPCFrame {
 			frame = &conduitv1.Frame{Body: &conduitv1.Frame_RpcResponse{RpcResponse: &conduitv1.RpcResponse{RequestId: id, Status: 413}}}
