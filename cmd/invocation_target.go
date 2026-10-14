@@ -44,11 +44,9 @@ var (
 	// projectSource is targetSourceContext when resolveInvocationTarget set
 	// projectPath from the current context, and "" otherwise.
 	projectSource string
-	// contextProjectID is the hub project UUID resolveInvocationTarget
-	// injected as projectPath, or "".
-	contextProjectID string
-	// contextProjectSlug is the slug of the contextProjectID project, as
-	// recorded in the context, or "". It is for messages only.
+	// contextProjectSlug is the slug of the hub project
+	// resolveInvocationTarget injected as projectPath, as recorded in the
+	// context, or "". It is for messages only.
 	contextProjectSlug string
 	// hubFlagName is the hub nickname given with --hub, which
 	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
@@ -57,12 +55,6 @@ var (
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
 )
-
-// isContextProject reports whether path is the project that
-// resolveInvocationTarget took from the current context.
-func isContextProject(path string) bool {
-	return projectSource == targetSourceContext && path != "" && path == contextProjectID
-}
 
 // contextDisabled reports whether the current context must be ignored:
 // in agent mode, inside an agent container (SCION_HOST_UID), and in a
@@ -150,6 +142,7 @@ var contextProjectCommands = map[string]bool{
 	"scion tunnel":     true,
 	"scion ssh":        true,
 	"scion ssh-config": true,
+	"scion vscode":     true,
 }
 
 // importGlobalHubSettings turns on the one-time import of the global
@@ -243,16 +236,10 @@ func hubWithoutEndpointError(name string) error {
 func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	hubSource = ""
 	projectSource = ""
-	contextProjectID = ""
 	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
 	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
-		return nil
-	}
-	// --no-hub turns the hub off, and a context project is a hub project.
-	// Remove this check together with the --no-hub flag.
-	if noHub {
 		return nil
 	}
 	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
@@ -315,7 +302,6 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 		if p := ctx.ProjectFor(effectiveHub); p != nil && !inFilesystemProject() {
 			projectPath = p.ID
 			projectSource = targetSourceContext
-			contextProjectID = p.ID
 			contextProjectSlug = p.Slug
 		}
 	}
@@ -380,18 +366,4 @@ func warnHubFlagMismatch(stderr io.Writer, c *config.CLIContext) {
 	}
 	_, _ = fmt.Fprintf(stderr, "Warning: this directory is linked to hub %s, but --hub selects %s; the directory's project may not exist there.\n",
 		describeHub(dirName, config.NormalizeEndpoint(dirHub)), describeHub(flagName, config.NormalizeEndpoint(hubEndpoint)))
-}
-
-// persistHubFlagEndpoint saves the --hub flag value as hub.endpoint in the
-// settings of resolvedPath (global settings when isGlobal). It does nothing
-// without the flag, including when the hub came from the current context.
-func persistHubFlagEndpoint(resolvedPath string, isGlobal bool) error {
-	ep := hubFlagEndpoint()
-	if ep == "" {
-		return nil
-	}
-	if err := config.UpdateSetting(resolvedPath, "hub.endpoint", ep, isGlobal); err != nil {
-		return fmt.Errorf("failed to save endpoint: %w", err)
-	}
-	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -87,9 +88,13 @@ func TestProviderLocalPath_EmbeddedBrokerChecksAndInitializes(t *testing.T) {
 	rec = doRequestAsUser(t, f.srv, f.projectOwner, http.MethodPost, f.providersPath(),
 		AddProviderRequest{BrokerID: f.ownBroker.ID, LocalPath: dir})
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
-	info, err := os.Stat(filepath.Join(dir, ".scion"))
-	require.NoError(t, err, "the embedded broker's .scion directory is initialized")
-	assert.True(t, info.IsDir())
+	// dir is not a git work tree, so it gets the external layout: .scion is
+	// a project marker file. A git work tree would get the in-repo .scion
+	// directory instead (covered by the pkg/config tests).
+	marker := filepath.Join(dir, ".scion")
+	_, err := os.Stat(marker)
+	require.NoError(t, err, "the embedded broker's linked project is initialized")
+	assert.True(t, config.IsProjectMarkerFile(marker), "a non-git linked directory gets a .scion project marker file")
 }
 
 func TestProviderLocalPath_RegisterOtherBrokerPathIsNotInitialized(t *testing.T) {

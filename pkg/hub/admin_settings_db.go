@@ -36,6 +36,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/authzop"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
 	"github.com/knadh/koanf/v2"
@@ -81,6 +82,12 @@ type ServerConfigDBResponse struct {
 	// from, and the operator setting that pins it, if any (ptone/scion#3905).
 	// Read-only.
 	PublicURLStatus *PublicURLStatus `json:"public_url_status,omitempty"`
+
+	// ObservabilityExport reports whether the hub's own metrics and trace
+	// exporters run, why, and the export project with its source (env,
+	// file or metadata), as decided at startup. Read-only: the export
+	// project is not a settings key (ptone/scion#4914).
+	ObservabilityExport *hubexport.Status `json:"observability_export,omitempty"`
 }
 
 // SupersededKey represents a bootstrap-material key whose value in the
@@ -228,6 +235,8 @@ func (s *Server) buildServerConfigDBResponse(ctx context.Context, ops *Operation
 	resp.EnvOverrides = overrides
 	// How the hub endpoint was resolved at startup (ptone/scion#3905).
 	resp.PublicURLStatus = s.publicURLStatus()
+	// The hub observability exporters as started (ptone/scion#4914).
+	resp.ObservabilityExport = s.ObservabilityExportStatus()
 
 	// Superseded keys (managed sections whose DB value diverges from bootstrap).
 	resp.SupersededKeys = s.computeSupersededKeys(ops)
@@ -300,6 +309,17 @@ func applySnapshotToResponse(resp *ServerConfigResponse, snap Layer1Snapshot) {
 	// Endpoints
 	resp.Server.Hub.PublicURL = snap.PublicURL
 	resp.Server.Hub.MonitoringDashboardURL = snap.MonitoringDashboardURL
+
+	// Hub observability export switches: the saved (or bootstrap) value;
+	// nil when unset. They apply at the next start, so the exporters in
+	// effect are reported separately (ObservabilityExport).
+	resp.Server.Hub.Observability = nil
+	if snap.HubMetricsEnabled != nil || snap.HubTracingEnabled != nil {
+		resp.Server.Hub.Observability = &config.V1ServerHubObservabilityConfig{
+			MetricsEnabled: snap.HubMetricsEnabled,
+			TracingEnabled: snap.HubTracingEnabled,
+		}
+	}
 
 	// GitHub App
 	if resp.Server.GitHubApp == nil {
@@ -416,13 +436,18 @@ func (s *Server) sectionHasBootstrapValues(ops *OperationalSettings, sectionName
 
 // computeSupersededKeys returns, for each managed section, the bootstrap-material
 // keys whose merged value differs from the DB value. This tells the admin which
-// deployment-config values their explicit DB writes are overriding.
+// deployment-config values their explicit DB writes are overriding. When the
+// unseeded bootstrap is set (SetUnseededBootstrap, as startup does), the
+// endpoints public_url is compared with its value from that merge instead,
+// since startup never applies a seed value for the hub endpoint
+// (ptone/scion#4865).
 func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]SupersededKey {
 	ops.mu.RLock()
 	cacheSnap := make(map[string]sectionState, len(ops.cache))
 	for name, ss := range ops.cache {
 		cacheSnap[name] = ss
 	}
+	unseededPublicURL, hasUnseededPublicURL := ops.unseededPublicURL, ops.hasUnseededPublicURL
 	ops.mu.RUnlock()
 
 	if ops.bootstrapKoanf == nil {
@@ -463,6 +488,19 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				// pinned badge says so (ptone/scion#3905).
 				continue
 			}
+			keySeedEnvK := seedEnvK
+			if sec.Name == "endpoints" && key == "public_url" && hasUnseededPublicURL {
+				// Startup's endpoint resolution ignores a seed value, so
+				// compare with the value from the layers it reads, and do
+				// not attribute the key to the seed layer
+				// (ptone/scion#4826, ptone/scion#4865). Without such a
+				// value, the saved one supersedes nothing.
+				if unseededPublicURL == "" {
+					continue
+				}
+				bootstrapVal = unseededPublicURL
+				keySeedEnvK = nil
+			}
 			dbVal, exists := dbMap[key]
 			if !exists && bootstrapAppliesWhenAbsent(sec.Name, key) {
 				// The DB row does not override this key; the bootstrap
@@ -476,7 +514,7 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 				}
 				superseded = append(superseded, SupersededKey{
 					Key:    koanfPath,
-					Source: detectKeySource(seedEnvK, serverEnvK, sec.Name, key),
+					Source: detectKeySource(keySeedEnvK, serverEnvK, sec.Name, key),
 				})
 			}
 		}
@@ -1836,6 +1874,14 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.MonitoringDashboardURL != "" {
 				keys = append(keys, config.MonitoringDashboardURLKey)
 			}
+			if o := hub.Observability; o != nil {
+				if o.MetricsEnabled != nil {
+					keys = append(keys, config.HubMetricsEnabledKey)
+				}
+				if o.TracingEnabled != nil {
+					keys = append(keys, config.HubTracingEnabledKey)
+				}
+			}
 			if len(hub.AdminEmails) > 0 {
 				keys = append(keys, "server.hub.admin_emails")
 			}
@@ -2327,6 +2373,17 @@ func buildSingleSectionDoc(req *ServerConfigUpdateRequest, secName string, fp *f
 		} else {
 			return nil, nil
 		}
+
+	case hubObservabilitySection:
+		// handlePutServerConfigDB merges this doc on the current row
+		// (bodyMergedSections): an omitted switch keeps its value, null
+		// clears it.
+		d := &opsettings.HubObservabilitySettings{}
+		if req.Server != nil && req.Server.Hub != nil && req.Server.Hub.Observability != nil {
+			d.MetricsEnabled = req.Server.Hub.Observability.MetricsEnabled
+			d.TracingEnabled = req.Server.Hub.Observability.TracingEnabled
+		}
+		doc = d
 
 	case "agent_secrets":
 		if req.AgentSecrets != nil {
@@ -2822,6 +2879,7 @@ var serverConfigTokenSections = map[string]settingsTokenClass{
 	"lifecycle":         settingsTokenConfiguration, // stall, retention and start timing
 	"telemetry":         settingsTokenConfiguration, // telemetry export
 	"quotas":            settingsTokenConfiguration, // broker quota enforcement switch
+	"hub_observability": settingsTokenRefused,       // where the hub's own metrics and traces go
 	"gcp_iam":           settingsTokenRefused,       // service account permission check
 	"notifications":     settingsTokenConfiguration, // notification channels
 	"project_defaults":  settingsTokenConfiguration, // see projectDefaultsTokenKeys

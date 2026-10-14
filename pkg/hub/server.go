@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -1919,6 +1920,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -2552,6 +2557,16 @@ func New(cfg ServerConfig, s store.Store) (_ *Server, retErr error) {
 		slog.Info("Transport token minter configured",
 			"mode", cfg.TransportMode,
 			"audience", cfg.TransportAudience)
+	}
+
+	// Settings for user access credentials for peer hubs are read at
+	// startup only; an invalid value fails startup rather than being
+	// ignored.
+	if err := cfg.OIDCConfig.ValidateUserTokens(); err != nil {
+		return nil, fmt.Errorf("oidc: %w", err)
+	}
+	if len(cfg.OIDCConfig.UserTokenAudiences) > 0 && !cfg.OIDCConfig.Enabled {
+		slog.Warn("oidc.user_token_audiences is set but oidc.enabled is false; no federation tokens are issued")
 	}
 
 	// Initialize OIDC Identity Provider key manager if enabled
@@ -6701,6 +6716,10 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/v1/auth/tokens", s.guarded("/api/v1/auth/tokens", s.handleTokens))
 	s.mux.HandleFunc("/api/v1/auth/tokens/", s.guarded("/api/v1/auth/tokens/", s.handleTokenByID))
 	s.mux.HandleFunc("/api/v1/auth/scopes", s.guarded("/api/v1/auth/scopes", s.handleAuthScopes))
+	// User access credentials for peer hubs: 404 while
+	// federation.project_visitors is off or the OIDC provider is not
+	// enabled (handlers_federation_token.go).
+	s.mux.HandleFunc("POST /api/v1/auth/federation-token", s.guarded("POST /api/v1/auth/federation-token", s.federationTokenHandler()))
 	s.mux.HandleFunc("/api/v1/auth/providers", s.guarded("/api/v1/auth/providers", s.handleCLIAuthProviders))
 
 	// GE Google credential exchange endpoint (unauthenticated — authentication endpoint itself)
