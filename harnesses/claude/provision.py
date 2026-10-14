@@ -631,13 +631,58 @@ def _remove_path(path: str) -> None:
         shutil.rmtree(path)
 
 
+GENERATED_MANIFEST_REL = f"{CLAUDE_PLUGIN_MANIFEST_DIR}/{AGENT_PLUGIN_MANIFEST}"
+
+
+def _sha256_file(path: str) -> str | None:
+    """sha256 of a regular file (never through a symlink), or None."""
+    try:
+        if os.path.islink(path) or not os.path.isfile(path):
+            return None
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _walk_entries(root: str) -> tuple[list[str], list[str]]:
+    """(files, dirs) under root as sorted relative paths; symlinks are
+    reported as files and never followed."""
+    files: list[str] = []
+    dirs: list[str] = []
+    for cur, dnames, fnames in os.walk(root, followlinks=False):
+        rel = os.path.relpath(cur, root)
+        for d in list(dnames):
+            p = os.path.join(cur, d)
+            r = os.path.normpath(os.path.join(rel, d))
+            if os.path.islink(p):
+                files.append(r)
+                dnames.remove(d)
+            else:
+                dirs.append(r)
+        for fn in fnames:
+            files.append(os.path.normpath(os.path.join(rel, fn)))
+    return sorted(files), sorted(dirs)
+
+
 class ClaudePluginInstaller(scion_harness.PluginInstaller):
     """Installs Agent Plugins as Claude skills-dir plugins (design 2.5).
 
-    Ownership: a directory in the skills dir is Scion's only when the
-    plugin is recorded in ~/.scion/agent-plugins/state-claude.json. Any
-    other directory (a template, platform, bank or user skill, or a user's
-    own plugin) is never replaced or removed.
+    Invariant: Scion removes only what Scion wrote. install records, in the
+    plugin's native_ref, every file it wrote under ~/.claude/skills/<name>/
+    with its sha256 (the generated .claude-plugin/plugin.json included) and
+    every directory. Removal, update and stale handling delete only recorded
+    files whose content still matches, then prune recorded directories that
+    are empty. Anything else (template content Go merged in, a file a user
+    added or edited) stays, and the dir is handed back: the plugin's record
+    is dropped with a warning, so Scion never touches the dir again.
+
+    Ownership: a dir is Scion's only while the plugin is recorded in
+    ~/.scion/agent-plugins/state-claude.json and holds nothing but what was
+    recorded. Registration (is_present) is the generated manifest's sha.
     """
 
     harness = "claude"
@@ -654,9 +699,13 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         try:
             desired = scion_harness.read_agent_plugins(ctx)
         except ValueError:
-            desired = []  # reconcile reports it and changes nothing
-        self.conflicts = {p.name for p in desired if p.skills_dir_conflict}
+            desired = None  # reconcile reports it and changes nothing
+        self.index_ok = desired is not None
+        self.desired = {p.name: p.digest for p in desired or []}
+        self.conflicts = {p.name for p in desired or [] if p.skills_dir_conflict}
         self.owned = set(self._recorded_plugins())
+
+    # --- state and paths -------------------------------------------------
 
     def _state_path(self) -> str:
         return os.path.join(scion_harness.agent_plugins_dir(), f"state-{self.harness}.json")
@@ -671,7 +720,9 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             doc = scion_harness.load_json(path)
         except (OSError, ValueError):
             return {}
-        plugins = doc.get("plugins") if isinstance(doc, dict) else None
+        if not isinstance(doc, dict) or doc.get("schema_version") != scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION:
+            return {}
+        plugins = doc.get("plugins")
         return plugins if isinstance(plugins, dict) else {}
 
     def target(self, name: str) -> str:
@@ -681,70 +732,132 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         return os.path.join(self.data_root, name)
 
     @staticmethod
-    def _has_root_skill(path: str) -> bool:
-        """Any root SKILL.md entry (a symlink counts: this predicate protects
-        skill content, so it errs toward "is a skill"). Scion never installs
-        one (install strips a bundle's root SKILL.md), so in an owned dir it
-        is always a skill that arrived later: merged in by Go from a
-        template skill, or written at runtime."""
-        return (os.path.isdir(path) and not os.path.islink(path)
-                and os.path.lexists(os.path.join(path, ROOT_SKILL_FILE)))
+    def _recorded_files(ref: dict[str, Any]) -> dict[str, str]:
+        files = ref.get("files")
+        if not isinstance(files, dict):
+            return {}
+        return {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
 
-    def _has_generated_manifest(self, path: str) -> bool:
-        return (
-            os.path.isdir(path) and not os.path.islink(path)
-            and os.path.isfile(os.path.join(path, AGENT_PLUGIN_MANIFEST))
-            and not os.path.islink(os.path.join(path, AGENT_PLUGIN_MANIFEST))
-            and os.path.isfile(os.path.join(path, CLAUDE_PLUGIN_MANIFEST_DIR, AGENT_PLUGIN_MANIFEST))
-            and not os.path.islink(os.path.join(path, CLAUDE_PLUGIN_MANIFEST_DIR))
-        )
+    @staticmethod
+    def _recorded_dirs(ref: dict[str, Any]) -> set[str]:
+        dirs = ref.get("dirs")
+        return {d for d in dirs if isinstance(d, str)} if isinstance(dirs, list) else set()
+
+    def _is_real_dir(self, path: str) -> bool:
+        return os.path.isdir(path) and not os.path.islink(path)
+
+    # --- the ownership invariant ----------------------------------------
+
+    def _foreign(self, target: str, ref: dict[str, Any], hash_files: bool) -> list[str]:
+        """Entries in target Scion did not write: unrecorded paths, a
+        recorded file that is now a dir or symlink, and (with hash_files, or
+        always for the generated manifest) a recorded file whose content
+        changed. Missing recorded files are not foreign."""
+        files = self._recorded_files(ref)
+        dirs = self._recorded_dirs(ref)
+        found_files, found_dirs = _walk_entries(target)
+        out = [f for f in found_files if f not in files]
+        out += [d for d in found_dirs if d not in dirs]
+        for rel, sha in files.items():
+            path = os.path.join(target, rel)
+            if not os.path.lexists(path):
+                continue
+            if rel == GENERATED_MANIFEST_REL or hash_files:
+                if _sha256_file(path) != sha:
+                    out.append(rel)
+            elif os.path.islink(path) or not os.path.isfile(path):
+                out.append(rel)
+        return sorted(set(out))
+
+    def _remove_ours(self, target: str, ref: dict[str, Any]) -> None:
+        """Delete the recorded files whose content still matches, then the
+        recorded dirs (deepest first) and the target itself when empty."""
+        for rel, sha in sorted(self._recorded_files(ref).items()):
+            path = os.path.join(target, rel)
+            if _sha256_file(path) == sha:
+                os.unlink(path)
+        dirs = sorted(self._recorded_dirs(ref), key=lambda d: d.count(os.sep), reverse=True)
+        for rel in [*dirs, "."]:
+            path = os.path.normpath(os.path.join(target, rel))
+            try:
+                if self._is_real_dir(path) and not os.listdir(path):
+                    os.rmdir(path)
+            except OSError:
+                pass
+
+    def _hand_back(self, name: str, ref: dict[str, Any], why: str) -> None:
+        """Remove only Scion's files from the plugin dir and leave the rest
+        (the caller drops the record). Warns."""
+        target = self.target(name)
+        if self._is_real_dir(target):
+            self._remove_ours(target, ref)
+        left = " (the rest was left in place)" if os.path.lexists(target) else ""
+        self.ctx.warn(f"agent plugin {name}: {why}; removed only the files Scion installed{left}")
+
+    def _needs_work(self, name: str, rec: dict[str, Any], ref: dict[str, Any]) -> bool:
+        """Whether reconcile will remove, update or reinstall this plugin."""
+        if name not in self.desired or rec.get("digest") != self.desired[name]:
+            return True
+        return not self.is_present(name, ref)
 
     def release_stale(self) -> None:
-        """Stale ownership (design 2.5): a plugin Scion installed now shares
-        its name with a skill (a template added one, and Go merged it into
-        the plugin's directory on re-provision; or a SKILL.md appeared in the
-        dir otherwise). Remove the generated
-        .claude-plugin/ so Claude treats the directory as that skill again
-        (and the root plugin.json when it is the bundle's own, so the Go
-        skills-dir skips do not hide the skill), drop the plugin from the
-        state file, and warn. Runs before
-        reconcile_agent_plugins, which then reports the conflict."""
+        """Runs before reconcile_agent_plugins on every start (it acts even
+        when reconcile later skips for an old CLI: it only ever protects
+        skill content, and the claude route makes no CLI call). For each
+        plugin Scion recorded:
+
+        * Go flags skills_dir_conflict (a template, platform or bank skill
+          has its name, design 2.5 stale ownership), or
+        * the dir holds entries Scion did not write, or its generated
+          manifest was replaced (a template .claude-plugin merged in), or
+        * reconcile is about to remove, update or reinstall it and a
+          recorded file was edited:
+
+        hand the dir back (remove only Scion's files), drop the record and
+        warn. Reconcile then never touches the dir. Also sweeps leftover
+        .<n>.tmp/.<n>.old dirs of owned plugins.
+        """
         recorded = self._recorded_plugins()
         self._sweep_leftovers(recorded)
-        # Stale: Go flags the conflict, or an owned dir holds a root
-        # SKILL.md that Go did not flag (the plugin was dropped in the same
-        # edit that added the skill, or the file was written at runtime).
-        stale = sorted(
-            n for n in recorded
-            if scion_harness.valid_agent_plugin_name(n)
-            and (n in self.conflicts or self._has_root_skill(self.target(n)))
-        )
-        if not stale:
-            return
-        for name in stale:
-            rec = recorded.get(name)
-            ref = rec.get("native_ref") if isinstance(rec, dict) else None
-            try:
-                self._release_dir(name, ref if isinstance(ref, dict) else {})
-            except OSError as exc:
-                self.ctx.warn(f"agent plugin {name}: cannot release {self.target(name)}: {exc}")
+        if not self.index_ok:
+            return  # an unreadable index: change nothing (reconcile warns)
+        changed = False
+        for name in sorted(recorded):
+            rec = recorded[name]
+            if not scion_harness.valid_agent_plugin_name(name) or not isinstance(rec, dict):
                 continue
-            recorded.pop(name, None)
+            ref = rec.get("native_ref") if isinstance(rec.get("native_ref"), dict) else {}
+            target = self.target(name)
+            if name in self.conflicts:
+                why = f"a skill named {name} now shares its directory"
+            elif not self._is_real_dir(target):
+                continue  # gone: reconcile reinstalls or forgets it
+            else:
+                foreign = self._foreign(target, ref, hash_files=self._needs_work(name, rec, ref))
+                if not foreign:
+                    continue
+                shown = ", ".join(foreign[:3]) + (", …" if len(foreign) > 3 else "")
+                why = f"{target} now also holds content Scion did not install ({shown})"
+            try:
+                self._hand_back(name, ref, why)
+            except OSError as exc:
+                self.ctx.warn(f"agent plugin {name}: cannot release {target}: {exc}")
+                continue
+            recorded.pop(name)
             self.owned.discard(name)
-            self.ctx.warn(
-                f"agent plugin {name}: a skill named {name} now shares its directory; "
-                "removed the generated .claude-plugin manifest, so claude loads it as that skill"
-            )
-        scion_harness.atomic_write_json(self._state_path(), {
-            "schema_version": scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION,
-            "harness": self.harness,
-            "plugins": recorded,
-        })
+            changed = True
+        if changed:
+            scion_harness.atomic_write_json(self._state_path(), {
+                "schema_version": scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION,
+                "harness": self.harness,
+                "plugins": recorded,
+            })
 
     def _sweep_leftovers(self, recorded: dict[str, Any]) -> None:
-        """Remove .<n>.tmp / .<n>.old left by an interrupted install of an
-        owned plugin. Runs on every start, so the fast path cleans up too
-        (claude skips hidden skills-dir entries, so they never load)."""
+        """Remove .<n>.tmp / .<n>.old (names only Scion creates) left by an
+        interrupted install of an owned plugin. Runs on every start, so the
+        fast path cleans up too (claude skips hidden skills-dir entries, so
+        they never load)."""
         for name in sorted(set(recorded) | self.owned):
             if not scion_harness.valid_agent_plugin_name(name):
                 continue
@@ -756,41 +869,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                     except OSError as exc:
                         self.ctx.warn(f"agent plugin {name}: cannot remove leftover {path}: {exc}")
 
-    def _release_dir(self, name: str, native_ref: dict[str, Any]) -> None:
-        """Hand a plugin dir that now also holds a skill back to that skill:
-        remove the generated .claude-plugin/ and the bundle's own root
-        plugin.json (so the Go skills-dir skips of design 2.7 do not hide
-        the skill). Every other file stays (R6)."""
-        target = self.target(name)
-        if os.path.islink(target) or not os.path.isdir(target):
-            return
-        gen = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
-        if os.path.lexists(gen):
-            _remove_path(gen)
-        stray = os.path.join(target, AGENT_PLUGIN_MANIFEST)
-        if not os.path.islink(stray) and os.path.isfile(stray) and self._is_bundle_manifest(name, stray, native_ref):
-            os.unlink(stray)
-
-    def _is_bundle_manifest(self, name: str, path: str, native_ref: dict[str, Any]) -> bool:
-        """Whether path is the root plugin.json Scion installed: its sha256
-        matches the one recorded at install time. Records from before the
-        sha was kept fall back to the staged bundle's bytes."""
-        try:
-            with open(path, "rb") as f:
-                got = hashlib.sha256(f.read()).hexdigest()
-        except OSError:
-            return False
-        want = native_ref.get("manifest_sha256")
-        if isinstance(want, str) and want:
-            return got == want
-        staged = os.path.join(self.ctx.inputs_dir, "plugins", name, AGENT_PLUGIN_MANIFEST)
-        try:
-            if os.path.islink(staged):
-                return False
-            with open(staged, "rb") as f:
-                return got == hashlib.sha256(f.read()).hexdigest()
-        except OSError:
-            return False
+    # --- PluginInstaller --------------------------------------------------
 
     def detect_version(self) -> tuple[int, int, int] | None:
         if self._claude_version is None:
@@ -800,6 +879,11 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             )
             self._claude_version = (proc.stdout or "") if proc.returncode == 0 else ""
         return scion_harness.parse_semver(self._claude_version)
+
+    def _current_ref(self, name: str) -> dict[str, Any]:
+        rec = self._recorded_plugins().get(name)
+        ref = rec.get("native_ref") if isinstance(rec, dict) else None
+        return ref if isinstance(ref, dict) else {}
 
     def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
         name = plugin.name
@@ -813,20 +897,17 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 f"plugin {name} not installed for claude: {target} exists and was not installed by Scion")
         if os.path.islink(target):
             raise scion_harness.PluginInstallError(f"{target} is a symlink")
-        if self._has_root_skill(target):
-            # An owned dir that now also holds a skill Go did not flag (for
-            # example a SKILL.md written at runtime): never swap it away.
-            # Hand it to the skill, as uninstall does.
-            rec = self._recorded_plugins().get(name)
-            ref = rec.get("native_ref") if isinstance(rec, dict) else None
-            try:
-                self._release_dir(name, ref if isinstance(ref, dict) else {})
-            except OSError as exc:
-                raise scion_harness.PluginInstallError(f"cannot release {target}: {exc}") from None
-            self.owned.discard(name)
-            raise scion_harness.PluginInstallError(
-                f"plugin {name} not installed for claude: {target} holds a skill (SKILL.md); "
-                "left it to that skill")
+        if os.path.lexists(target):
+            # Replacing an owned dir: only when it holds nothing but what
+            # Scion wrote (release_stale has normally handed back any other
+            # dir already; this is the last guard before the swap).
+            ref = self._current_ref(name)
+            foreign = self._foreign(target, ref, hash_files=True)
+            if foreign:
+                self._hand_back(name, ref, f"{target} now also holds content Scion did not install")
+                self.owned.discard(name)
+                raise scion_harness.PluginInstallError(
+                    f"plugin {name} not installed for claude: {target} holds content Scion did not install")
 
         _warn_invalid_mcp(self.ctx, plugin)
         data_dir = self.data_dir(name)
@@ -858,7 +939,18 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             gen = os.path.join(tmp, CLAUDE_PLUGIN_MANIFEST_DIR)
             os.makedirs(gen)
             scion_harness.atomic_write_json(os.path.join(gen, AGENT_PLUGIN_MANIFEST), manifest)
-            # Atomic swap: old aside, tmp into place, old removed.
+            # Record what Scion writes. Go never stages a symlink; drop any
+            # so every recorded entry is a regular file or a dir.
+            files, dirs = _walk_entries(tmp)
+            recorded: dict[str, str] = {}
+            for rel in files:
+                path = os.path.join(tmp, rel)
+                sha = _sha256_file(path)
+                if sha is None:
+                    _remove_path(path)
+                    continue
+                recorded[rel] = sha
+            # Atomic swap: old aside (verified Scion's above), tmp into place.
             if os.path.lexists(target):
                 os.rename(target, old)
             try:
@@ -874,74 +966,54 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 pass
             raise scion_harness.PluginInstallError(f"cannot write {target}: {exc}") from None
         # The new plugin is in place: a leftover old copy is only a warning
-        # (it is hidden, and the next install removes it).
+        # (it is hidden, and the next start sweeps it).
         try:
             _remove_path(old)
         except OSError as exc:
             self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
         self.owned.add(name)
-        ref: dict[str, Any] = {"path": target}
-        try:
-            with open(os.path.join(target, AGENT_PLUGIN_MANIFEST), "rb") as f:
-                ref["manifest_sha256"] = hashlib.sha256(f.read()).hexdigest()
-        except OSError:
-            pass
-        return ref
+        return {"path": target, "files": recorded, "dirs": dirs}
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
-        """Remove Scion's plugin dir: one carrying the generated manifest,
-        or one whose generated manifest was removed by hand but whose root
-        plugin.json is still the one Scion installed (recorded sha). A dir
-        that also holds a skill (root SKILL.md) is handed to the skill
-        instead, and anything else is left alone. data/<name> is kept (spec
-        9.1 makes deletion optional). Success is judged by the result."""
+        """Remove only what Scion wrote (recorded files whose content still
+        matches, then empty recorded dirs). If anything else remains, the
+        dir is handed back with a warning; either way the record goes.
+        data/<name> is kept (spec 9.1 makes deletion optional). Success is
+        judged by the result: Scion's generated manifest must be gone."""
         target = self.target(name)
-        root_manifest = os.path.join(target, AGENT_PLUGIN_MANIFEST)
-        if self._has_root_skill(target):
-            if not self._has_generated_manifest(target):
-                self.owned.discard(name)
-                return  # nothing of the plugin loads; the dir is the skill's
-            # A skill was merged into the plugin dir (a template added skill
-            # <name> in the same edit that dropped the plugin): hand the dir
-            # to the skill, never rmtree.
+        if self._is_real_dir(target):
+            foreign = self._foreign(target, native_ref, hash_files=True)
             try:
-                self._release_dir(name, native_ref)
-            except OSError as exc:
-                raise scion_harness.PluginInstallError(f"cannot release {target}: {exc}") from None
-            self.ctx.warn(
-                f"agent plugin {name}: removed; a skill named {name} shares its directory, so only the "
-                "generated .claude-plugin manifest was removed and claude loads it as that skill"
-            )
-            self.owned.discard(name)
-            return
-        ours = self._has_generated_manifest(target) or (
-            os.path.isdir(target) and not os.path.islink(target)
-            and os.path.isfile(root_manifest) and not os.path.islink(root_manifest)
-            and self._is_bundle_manifest(name, root_manifest, native_ref)
-        )
-        if ours:
-            try:
-                shutil.rmtree(target)
+                self._remove_ours(target, native_ref)
             except OSError as exc:
                 raise scion_harness.PluginInstallError(f"cannot remove {target}: {exc}") from None
-            if os.path.lexists(target):
+            gen_sha = self._recorded_files(native_ref).get(GENERATED_MANIFEST_REL)
+            if gen_sha and _sha256_file(os.path.join(target, GENERATED_MANIFEST_REL)) == gen_sha:
                 raise scion_harness.PluginInstallError(f"{target} is still present")
-        if self._has_generated_manifest(target):
-            raise scion_harness.PluginInstallError(f"{target} is still present")
+            if os.path.lexists(target):
+                shown = ", ".join(foreign[:3]) + (", …" if len(foreign) > 3 else "")
+                self.ctx.warn(
+                    f"agent plugin {name}: removed; {target} also holds content Scion did not install "
+                    f"({shown or 'unknown'}), which was left in place")
         self.owned.discard(name)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
-        """Claude's registration of a skills-dir plugin is the directory
-        itself: root plugin.json plus the generated manifest at the current
-        skills dir. The data dir must exist too (spec 9.1: created before
-        launch). A plugin now in conflict with a skill is reported missing
-        so install handles it."""
+        """Claude registers a skills-dir plugin by its generated manifest:
+        it must be the one Scion wrote (recorded sha), at the current skills
+        dir, with the data dir in place (spec 9.1: created before launch).
+        A plugin now in conflict with a skill is reported missing."""
         if name in self.conflicts:
             return False
         path = native_ref.get("path")
         if isinstance(path, str) and path and os.path.normpath(path) != os.path.normpath(self.target(name)):
             return False
-        return self._has_generated_manifest(self.target(name)) and os.path.isdir(self.data_dir(name))
+        gen_sha = self._recorded_files(native_ref).get(GENERATED_MANIFEST_REL)
+        target = self.target(name)
+        return (
+            bool(gen_sha) and self._is_real_dir(target)
+            and _sha256_file(os.path.join(target, GENERATED_MANIFEST_REL)) == gen_sha
+            and self._is_real_dir(self.data_dir(name))
+        )
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:

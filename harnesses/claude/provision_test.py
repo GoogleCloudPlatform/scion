@@ -871,7 +871,7 @@ class _NoCLI:
         return subprocess.CompletedProcess(argv, 2, "", "unexpected")
 
 
-class ClaudeAgentPluginsTest(unittest.TestCase):
+class _ClaudePluginsBase(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.TemporaryDirectory(prefix="claude-plugins-test-")
         self.addCleanup(tmp.cleanup)
@@ -942,6 +942,8 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         with open(os.path.join(self.skills, *parts)) as f:
             return f.read()
 
+
+class ClaudeAgentPluginsTest(_ClaudePluginsBase):
     def test_install_writes_plugin_dir(self) -> None:
         self.stage({"scion-smoke": {"servers": {"s": {"type": "stdio", "command": "./bin/srv"}}}})
         warnings: list[str] = []
@@ -961,9 +963,16 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
                                  "args": [*WRAP, R, R + "/bin/srv"],
                                  "env": {"PLUGIN_ROOT": R, "PLUGIN_DATA": data}}},
         })
-        with open(os.path.join(target, "plugin.json"), "rb") as f:
-            sha = hashlib.sha256(f.read()).hexdigest()
-        self.assertEqual(self.state()["scion-smoke"]["native_ref"], {"path": target, "manifest_sha256": sha})
+        # native_ref records every file Scion wrote, with its sha256, and
+        # every dir: the basis of "Scion removes only what Scion wrote".
+        ref = self.state()["scion-smoke"]["native_ref"]
+        self.assertEqual(ref["path"], target)
+        self.assertEqual(sorted(ref["files"]), [
+            ".claude-plugin/plugin.json", "bin/srv", "plugin.json", "skills/hello/SKILL.md"])
+        for rel, sha in ref["files"].items():
+            with open(os.path.join(target, rel), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha, rel)
+        self.assertEqual(sorted(ref["dirs"]), [".claude-plugin", "bin", "skills", "skills/hello"])
         self.assertEqual(self.status()["installed"], ["scion-smoke"])
         self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [], "no tmp/old left behind")
 
@@ -1033,13 +1042,11 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
     def test_digest_change_atomic_swap(self) -> None:
         self.stage({"p": {"digest": "d1", "skill": "PLUM-7"}})
         self.reconcile()
-        stray = os.path.join(self.skills, "p", "stray")
-        with open(stray, "w") as f:
-            f.write("x")
         self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
-        self.reconcile()
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
         self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
-        self.assertFalse(os.path.exists(stray), "the whole dir is replaced")
         self.assertEqual(self.state()["p"]["digest"], "d2")
         self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
 
@@ -1075,47 +1082,6 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-7")
         self.assertTrue(any("install failed" in w and "disk full" in w for w in warnings), warnings)
         self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
-
-    def test_stale_ownership_removes_only_generated_manifest(self) -> None:
-        self.stage({"p": {}})
-        self.reconcile()
-        # A template now ships a skill named p; Go merged it into the dir.
-        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
-            f.write("template skill")
-        self.stage({"p": {"conflict": True}})
-        warnings: list[str] = []
-        self.reconcile(warnings)
-        target = os.path.join(self.skills, "p")
-        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
-        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
-        # The bundle's own root plugin.json goes (so the Go skills-dir skips
-        # see a skill again); other stray bundle files stay (R6).
-        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
-        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")))
-        self.assertNotIn("p", self.state())
-        self.assertEqual(warnings, [
-            "agent plugin p: a skill named p now shares its directory; removed the generated "
-            ".claude-plugin manifest, so claude loads it as that skill",
-            "agent plugin p: install failed (plugin p not installed for claude: a skill named p is already "
-            "installed in the skills dir); will retry next start",
-        ])
-        self.assertEqual(self.status()["installed"], [])
-        # Dropping the plugin later leaves the skill alone.
-        self.stage({})
-        self.reconcile()
-        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
-
-    def test_stale_ownership_keeps_foreign_root_manifest(self) -> None:
-        # A root plugin.json that is not the bundle's own (the template
-        # skill ships one) is left alone.
-        self.stage({"p": {}})
-        self.reconcile()
-        with open(os.path.join(self.skills, "p", "plugin.json"), "w") as f:
-            f.write('{"template": true}')
-        self.stage({"p": {"conflict": True}})
-        self.reconcile()
-        self.assertEqual(self.read("p", "plugin.json"), '{"template": true}')
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", ".claude-plugin")))
 
     def test_claude_specific_paths_not_installed(self) -> None:
         # Review round 1, finding 1: claude 2.1.296 loads these from a plugin
@@ -1246,47 +1212,6 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(self.cli.calls, [["claude", "--version"]])
         self.assertTrue(os.path.isdir(os.path.join(self.root, "data", "p")))
 
-    def test_uninstall_hands_merged_skill_back(self) -> None:
-        # Review round 2, finding 1: the template drops the plugin and adds
-        # skill p in the same edit; Go merged p/SKILL.md into the plugin dir.
-        # Removal must not delete the skill.
-        self.stage({"p": {}})
-        self.reconcile()
-        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
-            f.write("template skill")
-        self.stage({})
-        warnings: list[str] = []
-        self.reconcile(warnings)
-        target = os.path.join(self.skills, "p")
-        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
-        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
-        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
-        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")), "other stray files stay (R6)")
-        self.assertEqual(self.state(), {})
-        # release_stale hands the dir back before reconcile (record dropped
-        # there), so reconcile has nothing left to remove.
-        self.assertEqual(self.status()["removed"], [])
-        self.assertEqual(warnings, [
-            "agent plugin p: a skill named p now shares its directory; removed the generated "
-            ".claude-plugin manifest, so claude loads it as that skill",
-        ])
-
-    def test_stale_ownership_after_manifest_change(self) -> None:
-        # Review round 2, finding 2: the edit that adds the skill also bumps
-        # the plugin's version, so the staged plugin.json differs from the
-        # installed one; the recorded sha still identifies Scion's copy.
-        self.stage({"p": {}})
-        self.reconcile()
-        with open(os.path.join(self.skills, "p", "SKILL.md"), "w") as f:
-            f.write("template skill")
-        self.stage({"p": {"conflict": True, "digest": "d2"}})
-        with open(os.path.join(self.inputs, "plugins", "p", "plugin.json"), "w") as f:
-            json.dump({"name": "p", "version": "0.2.0"}, f)
-        self.reconcile()
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "plugin.json")))
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", ".claude-plugin")))
-        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
-
     def test_leftovers_swept_on_fast_path(self) -> None:
         # Review round 2, finding 3.
         self.stage({"p": {}})
@@ -1298,176 +1223,6 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.reconcile()
         self.assertEqual(self.cli.calls, [])
         self.assertEqual(sorted(e for e in os.listdir(self.skills) if e.startswith(".")), [".other.old"])
-
-    def test_install_hands_runtime_skill_back(self) -> None:
-        # Review round 3, finding 1: an owned dir reinstalled at the same
-        # digest (generated manifest gone) that now holds a SKILL.md Go did
-        # not flag is never swapped away.
-        self.stage({"p": {}})
-        self.reconcile()
-        target = os.path.join(self.skills, "p")
-        shutil.rmtree(os.path.join(target, ".claude-plugin"))
-        with open(os.path.join(target, "SKILL.md"), "w") as f:
-            f.write("written at runtime")
-        warnings: list[str] = []
-        self.reconcile(warnings)
-        self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
-        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
-        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
-        not_owned = (f"agent plugin p: install failed (plugin p not installed for claude: {target} exists "
-                     "and was not installed by Scion); will retry next start")
-        self.assertEqual(warnings, [
-            "agent plugin p: a skill named p now shares its directory; removed the generated "
-            ".claude-plugin manifest, so claude loads it as that skill",
-            not_owned,
-        ])
-        # Review round 4, finding 3: the record is dropped at the hand-back,
-        # so later starts neither repeat the hand-back nor own the dir.
-        self.assertEqual(self.state(), {})
-        warnings.clear()
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [not_owned])
-        os.unlink(os.path.join(target, "SKILL.md"))
-        self.reconcile()
-        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")), "no longer owned: never swapped")
-        with open(os.path.join(target, "SKILL.md"), "w") as f:
-            f.write("written at runtime")
-        # Dropping the plugin later leaves the skill alone.
-        self.stage({})
-        self.reconcile()
-        self.assertEqual(self.read("p", "SKILL.md"), "written at runtime")
-        self.assertEqual(self.state(), {})
-
-    def _stage_root_skill_bundle(self, digest: str, skill: str) -> None:
-        self.stage({"p": {"digest": digest, "skill": skill}})
-        with open(os.path.join(self.inputs, "plugins", "p", "SKILL.md"), "w") as f:
-            f.write("dual-packaged root skill " + skill)
-
-    def test_bundle_root_skill_md_install_update_remove(self) -> None:
-        # Review round 4, finding 1: a bundle shipping its own root SKILL.md
-        # (dual-packaged for skills-only harnesses) is installed without it,
-        # so it never trips the hand-back and stays updatable and removable.
-        stripped = ("agent plugin p: ignored root SKILL.md in bundle "
-                    "(Agent Plugins skills live under skills/)")
-        target = os.path.join(self.skills, "p")
-        self._stage_root_skill_bundle("d1", "PLUM-7")
-        warnings: list[str] = []
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [stripped])
-        self.assertFalse(os.path.lexists(os.path.join(target, "SKILL.md")))
-        self.assertTrue(os.path.isfile(os.path.join(target, ".claude-plugin", "plugin.json")))
-        # Same digest, data dir deleted: reinstalled, not released.
-        shutil.rmtree(os.path.join(self.root, "data", "p"))
-        warnings.clear()
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [stripped])
-        self.assertIn("p", self.state())
-        # Digest change: replaced at d2.
-        self._stage_root_skill_bundle("d2", "PLUM-8")
-        warnings.clear()
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [stripped])
-        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
-        self.assertFalse(os.path.lexists(os.path.join(target, "SKILL.md")))
-        self.assertTrue(os.path.isfile(os.path.join(target, ".claude-plugin", "plugin.json")))
-        self.assertEqual(self.state()["p"]["digest"], "d2")
-        # Removal: the dir goes.
-        self.stage({})
-        warnings.clear()
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [])
-        self.assertFalse(os.path.exists(target))
-        self.assertEqual(self.state(), {})
-        self.assertEqual(self.status()["removed"], ["p"])
-
-    def test_symlinked_root_skill_counts_as_skill(self) -> None:
-        # Review round 4, finding 2: a symlinked SKILL.md protects the dir
-        # like a regular one; the link itself is never followed or removed.
-        self.stage({"p": {}})
-        self.reconcile()
-        target = os.path.join(self.skills, "p")
-        outside = os.path.join(self.home, "elsewhere.md")
-        with open(outside, "w") as f:
-            f.write("linked skill")
-        os.symlink(outside, os.path.join(target, "SKILL.md"))
-        self.stage({})
-        warnings: list[str] = []
-        self.reconcile(warnings)
-        self.assertTrue(os.path.islink(os.path.join(target, "SKILL.md")))
-        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")), "dir not removed")
-        self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
-        self.assertEqual(self.state(), {})
-        with open(outside) as f:
-            self.assertEqual(f.read(), "linked skill")
-        self.assertEqual(warnings, [
-            "agent plugin p: a skill named p now shares its directory; removed the generated "
-            ".claude-plugin manifest, so claude loads it as that skill",
-        ])
-
-    def test_removal_after_manual_manifest_removal(self) -> None:
-        self.stage({"p": {}})
-        self.reconcile()
-        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
-        self.stage({})
-        self.reconcile()
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
-        self.assertEqual(self.state(), {})
-
-    def test_failed_install_after_manual_manifest_removal_not_orphaned(self) -> None:
-        # Review round 3, finding 2: the digest-change uninstall removes
-        # Scion's bundle dir, so a failed install leaves nothing behind that
-        # would later count as "not installed by Scion".
-        self.stage({"p": {"digest": "d1"}})
-        self.reconcile()
-        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
-        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
-        warnings: list[str] = []
-        real_copytree = shutil.copytree
-
-        def copytree(src, dst, *a, **k):
-            if str(dst).endswith(".p.tmp"):
-                raise OSError("disk full")
-            return real_copytree(src, dst, *a, **k)
-
-        with mock.patch.object(provision.shutil, "copytree", copytree):
-            self.reconcile(warnings)
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
-        self.assertTrue(any("disk full" in w for w in warnings), warnings)
-        warnings.clear()
-        self.reconcile(warnings)
-        self.assertEqual(warnings, [])
-        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
-
-    def test_uninstall_only_owned_generated_dirs(self) -> None:
-        self.stage({"a": {}, "b": {}})
-        self.reconcile()
-        # b's dir lost its generated manifest by hand.
-        shutil.rmtree(os.path.join(self.skills, "b", ".claude-plugin"))
-        # A user skill and a user plugin are never touched.
-        os.makedirs(os.path.join(self.skills, "mine", ".claude-plugin"))
-        with open(os.path.join(self.skills, "mine", "plugin.json"), "w") as f:
-            f.write("{}")
-        with open(os.path.join(self.skills, "mine", ".claude-plugin", "plugin.json"), "w") as f:
-            f.write("{}")
-        self.stage({})
-        self.reconcile()
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "a")))
-        # b is still Scion's bundle (root plugin.json matches the recorded
-        # sha), so it is removed too.
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "b")))
-        self.assertTrue(os.path.isdir(os.path.join(self.skills, "mine")))
-        self.assertEqual(self.state(), {})
-        self.assertEqual(sorted(self.status()["removed"]), ["a", "b"])
-
-    def test_uninstall_failure_judged_by_result(self) -> None:
-        self.stage({"a": {}})
-        self.reconcile()
-        inst = provision.ClaudePluginInstaller(self.ctx())
-        with mock.patch.object(shutil, "rmtree", lambda *a, **k: None):
-            with self.assertRaisesRegex(scion_harness.PluginInstallError, "still present"):
-                inst.uninstall("a", {})
-        inst.uninstall("a", {})
-        inst.uninstall("never-installed", {})
 
     def test_manually_removed_is_reinstalled(self) -> None:
         self.stage({"p": {}})
@@ -1502,8 +1257,19 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.stage({"p": {}})
         self.reconcile()
         inst = provision.ClaudePluginInstaller(self.ctx())
-        self.assertTrue(inst.is_present("p", {"path": os.path.join(self.skills, "p")}))
-        self.assertFalse(inst.is_present("p", {"path": os.path.join(self.home, "other", "p")}))
+        ref = self.state()["p"]["native_ref"]
+        self.assertTrue(inst.is_present("p", ref))
+        self.assertFalse(inst.is_present("p", {**ref, "path": os.path.join(self.home, "other", "p")}))
+
+    def test_is_present_compares_generated_manifest_sha(self) -> None:
+        self.stage({"p": {}})
+        self.reconcile()
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        ref = self.state()["p"]["native_ref"]
+        with open(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json"), "w") as f:
+            f.write('{"name": "p", "template": true}')
+        self.assertFalse(inst.is_present("p", ref))
+        self.assertFalse(inst.is_present("p", {"path": ref["path"]}), "no recorded sha: not present")
 
     def test_invalid_servers_rewarned_and_placeholder_skipped(self) -> None:
         self.stage({"p": {
@@ -1566,6 +1332,267 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.assertEqual(provision._parse_semver("2.1.270-beta.1"), (2, 1, 270))
         self.assertIsNone(provision._parse_semver(""))
         self.assertIsNone(provision._parse_semver("2.1"))
+
+
+class ClaudeOwnershipTest(_ClaudePluginsBase):
+    """Review round 5: "Scion removes only what Scion wrote". Every
+    ownership path (restart, update, drop, conflict, sweep) against content
+    Scion did not write in an installed plugin dir. Go's util.CopyDir merge
+    of a same-named template skill dir is simulated by writing its files
+    into ~/.claude/skills/p/ (overwriting same-named files)."""
+
+    GEN = ".claude-plugin/plugin.json"
+
+    def install_p(self) -> None:
+        self.stage({"p": {"digest": "d1"}})
+        self.reconcile()
+        self.assertIn("p", self.state())
+
+    def put(self, rel: str, text: str) -> None:
+        path = os.path.join(self.skills, "p", rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(text)
+
+    # Foreign content kinds: rel path -> text that must survive.
+    def foreign(self, kind: str) -> dict[str, str]:
+        return {
+            "template-skill": {"SKILL.md": "template skill"},
+            "template-dir-no-skill-md": {"README.md": "template resources", "skills/tpl/SKILL.md": "tpl"},
+            "template-claude-plugin": {self.GEN: '{"name": "p", "template": true}',
+                                       "skills/native/SKILL.md": "native"},
+            "hand-added": {"notes.txt": "mine"},
+            "hand-edited": {"skills/hello/SKILL.md": "edited by hand"},
+            "symlinked-skill": {},
+        }[kind]
+
+    def apply(self, kind: str) -> dict[str, str]:
+        files = self.foreign(kind)
+        for rel, text in files.items():
+            self.put(rel, text)
+        if kind == "symlinked-skill":
+            outside = os.path.join(self.home, "elsewhere.md")
+            with open(outside, "w") as f:
+                f.write("linked")
+            os.symlink(outside, os.path.join(self.skills, "p", "SKILL.md"))
+        return files
+
+    def assert_kept(self, kind: str, files: dict[str, str]) -> None:
+        for rel, text in files.items():
+            self.assertEqual(self.read("p", *rel.split("/")), text, f"{kind}: {rel}")
+        if kind == "symlinked-skill":
+            self.assertTrue(os.path.islink(os.path.join(self.skills, "p", "SKILL.md")))
+            with open(os.path.join(self.home, "elsewhere.md")) as f:
+                self.assertEqual(f.read(), "linked")
+
+    def assert_scion_files_gone(self, kind: str, kept: dict[str, str]) -> None:
+        # Every file Scion wrote whose content still matched is gone; only
+        # the foreign content (and dirs holding it) remains.
+        for rel in ("plugin.json", "bin/srv", "skills/hello/SKILL.md", self.GEN):
+            if rel in kept:
+                continue
+            self.assertFalse(os.path.lexists(os.path.join(self.skills, "p", rel)), f"{kind}: {rel}")
+
+    KINDS = ("template-skill", "template-dir-no-skill-md", "template-claude-plugin",
+             "hand-added", "hand-edited", "symlinked-skill")
+
+    def fresh(self) -> None:
+        for d in (os.path.join(self.home, ".claude"), os.path.join(self.home, ".scion", "agent-plugins")):
+            shutil.rmtree(d, ignore_errors=True)
+
+    def run_path(self, path: str, warnings: list[str]) -> None:
+        if path == "restart":
+            self.reconcile(warnings)
+        elif path == "update":
+            self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+            self.reconcile(warnings)
+        elif path == "drop":
+            self.stage({})
+            self.reconcile(warnings)
+        elif path == "conflict":
+            self.stage({"p": {"digest": "d1", "conflict": True}})
+            self.reconcile(warnings)
+        else:
+            raise AssertionError(path)
+
+    def test_foreign_content_is_never_removed(self) -> None:
+        for kind in self.KINDS:
+            for path in ("restart", "update", "drop", "conflict"):
+                with self.subTest(kind=kind, path=path):
+                    self.fresh()
+                    self.install_p()
+                    files = self.apply(kind)
+                    warnings: list[str] = []
+                    self.run_path(path, warnings)
+                    self.assert_kept(kind, files)
+                    if kind == "hand-edited" and path == "restart":
+                        # Nothing to do on a steady-state start: the edit is
+                        # left alone and the plugin stays installed.
+                        self.assertIn("p", self.state())
+                        self.assertEqual(warnings, [])
+                        continue
+                    # Handed back: the record is gone, so Scion never
+                    # touches the dir again, and only Scion's files went.
+                    self.assertNotIn("p", self.state(), warnings)
+                    self.assert_scion_files_gone(kind, files)
+                    self.assertTrue(any("removed only the files Scion installed" in w
+                                        or "which was left in place" in w for w in warnings), warnings)
+                    # And a later start leaves everything as it is.
+                    self.reconcile([])
+                    self.assert_kept(kind, files)
+
+    def test_handed_back_dir_is_not_owned_any_more(self) -> None:
+        self.install_p()
+        self.apply("template-skill")
+        target = os.path.join(self.skills, "p")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        not_owned = (f"agent plugin p: install failed (plugin p not installed for claude: {target} exists "
+                     "and was not installed by Scion); will retry next start")
+        self.assertEqual(warnings, [
+            f"agent plugin p: {target} now also holds content Scion did not install (SKILL.md); "
+            "removed only the files Scion installed (the rest was left in place)",
+            not_owned,
+        ])
+        self.assertEqual(os.listdir(target), ["SKILL.md"])
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [not_owned], "the hand-back is not repeated")
+
+    def test_conflict_without_foreign_content_removes_scion_files(self) -> None:
+        # Go flags the conflict (for example a platform skill name), but the
+        # dir holds only Scion's files: they all go, and so does the dir.
+        self.install_p()
+        warnings: list[str] = []
+        self.stage({"p": {"conflict": True}})
+        self.reconcile(warnings)
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertEqual(warnings, [
+            "agent plugin p: a skill named p now shares its directory; removed only the files Scion installed",
+            "agent plugin p: install failed (plugin p not installed for claude: a skill named p is already "
+            "installed in the skills dir); will retry next start",
+        ])
+
+    def test_bundle_root_skill_md_all_paths(self) -> None:
+        # A dual-packaged bundle ships a root SKILL.md: it is never
+        # installed, so the dir holds only Scion's files on every path.
+        stripped = "agent plugin p: ignored root SKILL.md in bundle (Agent Plugins skills live under skills/)"
+        target = os.path.join(self.skills, "p")
+
+        def stage(digest: str, skill: str) -> None:
+            self.stage({"p": {"digest": digest, "skill": skill}})
+            with open(os.path.join(self.inputs, "plugins", "p", "SKILL.md"), "w") as f:
+                f.write("root " + skill)
+
+        stage("d1", "PLUM-7")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        self.assertFalse(os.path.lexists(os.path.join(target, "SKILL.md")))
+        self.assertNotIn("SKILL.md", self.state()["p"]["native_ref"]["files"])
+        # restart: fast path
+        self.cli.calls.clear()
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual((self.cli.calls, warnings), ([], []))
+        # same digest, data dir deleted: reinstalled
+        shutil.rmtree(os.path.join(self.root, "data", "p"))
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        # update
+        stage("d2", "PLUM-8")
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [stripped])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+        # drop: the dir goes entirely
+        self.stage({})
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertFalse(os.path.exists(target))
+        self.assertEqual(self.status()["removed"], ["p"])
+
+    def test_clean_paths_remove_everything(self) -> None:
+        # No foreign content: drop removes the dir; a manifest deleted by
+        # hand is reinstalled at the same digest and replaced on update.
+        self.install_p()
+        os.unlink(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json"))
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
+        os.unlink(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json"))
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.stage({})
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+
+    def test_failed_install_after_clean_uninstall_leaves_nothing(self) -> None:
+        self.install_p()
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        real_copytree = shutil.copytree
+
+        def copytree(src, dst, *a, **k):
+            if str(dst).endswith(".p.tmp"):
+                raise OSError("disk full")
+            return real_copytree(src, dst, *a, **k)
+
+        warnings: list[str] = []
+        with mock.patch.object(provision.shutil, "copytree", copytree):
+            self.reconcile(warnings)
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertTrue(any("disk full" in w for w in warnings), warnings)
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+
+    def test_uninstall_failure_judged_by_result(self) -> None:
+        self.install_p()
+        ref = self.state()["p"]["native_ref"]
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        with mock.patch.object(os, "unlink", lambda *a, **k: None):
+            with self.assertRaisesRegex(scion_harness.PluginInstallError, "still present"):
+                inst.uninstall("p", ref)
+        inst.uninstall("p", ref)
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        inst.uninstall("never-installed", {})
+
+    def test_install_guard_hands_back_unverified_owned_dir(self) -> None:
+        # The last guard before the swap: an owned dir with foreign content
+        # that release_stale did not see (simulated by skipping it).
+        self.install_p()
+        self.put("notes.txt", "mine")
+        os.unlink(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json"))
+        ctx = self.ctx([])
+        inst = provision.ClaudePluginInstaller(ctx, claude_version="2.1.296")
+        [p] = scion_harness.read_agent_plugins(ctx)
+        with self.assertRaisesRegex(scion_harness.PluginInstallError, "holds content Scion did not install"):
+            inst.install(p, p.staged_dir)
+        self.assertEqual(self.read("p", "notes.txt"), "mine")
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "bin", "srv")))
+
+    def test_legacy_record_without_files_is_handed_back(self) -> None:
+        # A record that lists no files (written before this change) owns
+        # nothing: the dir is handed back untouched.
+        self.install_p()
+        path = os.path.join(self.root, "state-claude.json")
+        with open(path) as f:
+            doc = json.load(f)
+        doc["plugins"]["p"]["native_ref"] = {"path": os.path.join(self.skills, "p")}
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.stage({})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", "bin", "srv")))
+        self.assertNotIn("p", self.state())
 
 
 if __name__ == "__main__":
