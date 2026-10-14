@@ -884,7 +884,7 @@ There are two exceptions to the pattern:
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
 
-A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: when the server starts, a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make it ignore the whole `server` section.
+A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make the server ignore the whole `server` section, at startup or when it reloads settings.
 
 ### Logging Environment Variables
 
