@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -306,8 +307,20 @@ func (s *TemplateStore) UpdateTemplateContent(ctx context.Context, template *sto
 
 // SetTemplateAgentConfig writes only the agent_config column of template id,
 // in one conditional UPDATE (WHERE id = ? AND content_hash = ? AND layout = ?
-// AND agent_config is empty), and keeps updated at its stored value (the
-// column has an update default). It reports whether a row was written.
+// AND agent_config is empty AND updated = <the value it read>), and keeps
+// updated at the value it read (the column has an update default). It
+// reports whether a row was written; a row that no longer matches, or no
+// longer exists, writes nothing and returns (false, nil).
+//
+// The updated precondition means a metadata edit that commits between the
+// read and the UPDATE wins: nothing is written and the edit's updated time
+// is kept, instead of being rolled back to the value read
+// (ptone/scion#4674). As in DeactivateDelegationEdgeGuarded, updated is
+// compared as the exact stored value (see rawStoredText): on SQLite the raw
+// text, read first and bound as a string, so a row whose stored text is not
+// canonical still matches; on Postgres the timestamptz value read, which
+// compares as an instant. Any ent write between that read and the UPDATE
+// bumps updated, so the UPDATE matches no row.
 func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected store.TemplateContentPrecondition) (bool, error) {
 	if cfg == nil {
 		return false, nil
@@ -315,6 +328,18 @@ func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, c
 	uid, err := parseUUID(id)
 	if err != nil {
 		return false, err
+	}
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	var rawUpdated string
+	if !pg {
+		var found bool
+		rawUpdated, found, err = rawStoredText(ctx, s.client.Driver(), enttemplate.Table, enttemplate.FieldID, enttemplate.FieldUpdated, uid)
+		if err != nil {
+			return false, err
+		}
+		if !found {
+			return false, nil
+		}
 	}
 	current, err := s.client.Template.Get(ctx, uid)
 	if err != nil {
@@ -333,9 +358,13 @@ func (s *TemplateStore) SetTemplateAgentConfig(ctx context.Context, id string, c
 		layoutMatches = enttemplate.Or(enttemplate.LayoutEQ(""), enttemplate.LayoutIsNil())
 	}
 	noSnapshot := enttemplate.Or(enttemplate.AgentConfigEQ(""), enttemplate.AgentConfigIsNil())
+	unchanged := enttemplate.UpdatedEQ(current.Updated)
+	if !pg {
+		unchanged = predicate.Template(storedTextEQ(enttemplate.FieldUpdated, rawUpdated))
+	}
 
 	n, err := s.client.Template.Update().
-		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches, noSnapshot).
+		Where(enttemplate.IDEQ(uid), hashMatches, layoutMatches, noSnapshot, unchanged).
 		SetAgentConfig(marshalAgentConfig(cfg)).
 		SetUpdated(current.Updated).
 		Save(ctx)
