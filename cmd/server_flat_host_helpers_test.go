@@ -72,11 +72,12 @@ func dockerScopeProbe(probe func(context.Context, string) (brokeridentity.Execut
 	}
 }
 
-// isolateKubernetesEnv keeps a test from reaching an ambient Kubernetes
-// cluster (ptone/scion#5088): it clears the in-cluster service variables and
-// points KUBECONFIG at a file that does not exist, so a Kubernetes client
-// built from the default loading rules fails instead of using the cluster
-// the tests happen to run in or next to.
+// isolateKubernetesEnv is a backstop that keeps a test from reaching an
+// ambient Kubernetes cluster (ptone/scion#5088). The durable fix is
+// TestMain's flatDefaultKubernetesClient, which has no in-cluster fallback;
+// this also clears the in-cluster service variables and points KUBECONFIG
+// at a file that does not exist, so the default loading rules find no
+// cluster the tests happen to run in or next to.
 func isolateKubernetesEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("KUBERNETES_SERVICE_HOST", "")

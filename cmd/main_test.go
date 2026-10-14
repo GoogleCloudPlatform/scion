@@ -18,6 +18,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 )
 
 // TestMain disables the UTC pin for the whole cmd test binary.
@@ -39,6 +41,11 @@ func TestMain(m *testing.M) {
 	// change behaviour. Tests of the import turn it back on with a temp
 	// HOME (enableGlobalHubImport). This is the only place it is turned off.
 	importGlobalHubSettings = false
+	// A flat Kubernetes instance with no kubeconfig builds its client
+	// from the default loading rules only: no test uses the in-cluster
+	// config of the pod it runs in (ptone/scion#5088). This is the only
+	// place it is set.
+	flatDefaultKubernetesClient = k8s.NewClientWithContextNoInCluster
 	teardown := integrationTestSetup()
 	code := m.Run()
 	teardown()

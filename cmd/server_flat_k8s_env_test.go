@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,5 +78,23 @@ func TestPrepareFlatInstance_NonDockerTarget_AmbientClusterIgnored(t *testing.T)
 	}
 	if !strings.Contains(err.Error(), "building its runtime") {
 		t.Fatalf("refusal = %v, want the runtime build error", err)
+	}
+}
+
+// A Kubernetes instance with no kubeconfig builds its client through
+// flatDefaultKubernetesClient, which TestMain sets to the constructor with no
+// in-cluster fallback: with the in-cluster service variables set and no
+// kubeconfig, the build fails on the disabled in-cluster leg.
+func TestNewFlatInstanceRuntime_TestsHaveNoInClusterFallback(t *testing.T) {
+	t.Setenv("KUBERNETES_SERVICE_HOST", "10.43.0.1")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "443")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "missing.kubeconfig"))
+	t.Setenv("HOME", t.TempDir())
+
+	inst := flatTestInstance()
+	inst.RuntimeTarget.Type = "kubernetes"
+	_, err := newFlatInstanceRuntime(context.Background(), inst)
+	if err == nil || !strings.Contains(err.Error(), "in-cluster config disabled for this client") {
+		t.Fatalf("Kubernetes instance with no kubeconfig: err = %v, want the disabled in-cluster leg", err)
 	}
 }
