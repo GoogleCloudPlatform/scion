@@ -1101,10 +1101,11 @@ func postDyingStoppedReport(t *testing.T, srv *Server, a *store.Agent) {
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// ptone/scion#2010, ptone/scion#2014: the dying container's own stopped
-// report during a restart's stop leg releases the reservation through the
-// status endpoint; the restart re-asserts it after the stop leg, so a
-// successful restart ends running with the slot held.
+// ptone/scion#2010, ptone/scion#2014, design P3.3-b §4.4: the dying
+// container's own stopped report during a restart's stop leg no longer
+// releases the reservation (the restart holds its restart claim, a
+// start-kind claim, across both legs), so the slot is held throughout and
+// the restart's backstop re-assert writes nothing.
 func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{}
@@ -1114,6 +1115,7 @@ func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 	broker, project := newQuotaTestBrokerAndProject(t, s, "rs-dying")
 	a := newQuotaTestAgent(t, s, broker, project, "rs-dying", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, a.ID)
+	backstops := backstopCounter(t, srv)
 	var releasedDuringStop bool
 	disp.onStop = func(*store.Agent) {
 		postDyingStoppedReport(t, srv, a)
@@ -1121,7 +1123,8 @@ func TestRestart_DyingContainerStoppedReportKeepsReservation(t *testing.T) {
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.True(t, releasedDuringStop, "precondition: the self-report released the slot")
+	assert.False(t, releasedDuringStop, "the self-report does not free a slot the restart owns")
+	assert.Zero(t, backstops(backstopSiteRestart), "nothing slipped, so the backstop wrote nothing")
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)
@@ -1209,10 +1212,10 @@ func TestMergeDispatchedAgent_RunningCarriesClearedMessageAndStalled(t *testing.
 	assert.Empty(t, dst.StalledFromActivity)
 }
 
-// ptone/scion#2010, ptone/scion#2014: a stopped report about the old
-// container that lands during the start leg (after the post-stop re-assert)
-// releases the slot; the restart re-asserts once more after its final write,
-// so it ends running with the slot held.
+// ptone/scion#2010, ptone/scion#2014, design P3.3-b §4.4: a stopped report
+// about the old container that lands during the start leg does not release
+// the slot (the restart claim is held), so it ends running with the slot
+// held and no backstop write.
 func TestRestart_StoppedReportDuringStartLegKeepsReservation(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &hookedStartDispatcher{}
@@ -1222,6 +1225,7 @@ func TestRestart_StoppedReportDuringStartLegKeepsReservation(t *testing.T) {
 	broker, project := newQuotaTestBrokerAndProject(t, s, "rs-startleg")
 	a := newQuotaTestAgent(t, s, broker, project, "rs-startleg", state.PhaseRunning)
 	reserveBrokerSlot(t, s, broker, a.ID)
+	backstops := backstopCounter(t, srv)
 	var releasedDuringStart bool
 	disp.onStart = func(*store.Agent) {
 		postDyingStoppedReport(t, srv, a)
@@ -1229,7 +1233,8 @@ func TestRestart_StoppedReportDuringStartLegKeepsReservation(t *testing.T) {
 	}
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/restart", nil)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	require.True(t, releasedDuringStart, "precondition: the report released the slot")
+	assert.False(t, releasedDuringStart, "the report does not free a slot the restart owns")
+	assert.Zero(t, backstops(backstopSiteRestart))
 	got, err := s.GetAgent(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Equal(t, string(state.PhaseRunning), got.Phase)

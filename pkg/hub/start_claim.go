@@ -293,11 +293,20 @@ func (r *startClaimRun) renewLoop() {
 
 // finish stops the renewal and settles the claim by outcome. A lost claim
 // writes nothing: whoever took it (a stop or the reaper) owns its next
-// state. It reports whether the claim was still held.
+// state. It reports whether the claim was still held. For every outcome
+// except a handoff, success and a lost claim included, it then frees the
+// agent's slot if the agent holds no capacity and no start-kind claim
+// (releaseSlotIfIdle): an exit observed while the claim was held skipped
+// its release (for example a synchronous create whose container exited
+// during the dispatch keeps its terminal phase). That is a no-op for a
+// running agent and while a start-kind claim is still held.
 func (r *startClaimRun) finish(outcome startOutcome) bool {
 	close(r.stop)
 	<-r.done
 	defer r.cancel()
+	if outcome != startHandedOff {
+		defer r.releaseSlotIfIdle()
+	}
 	if r.isLost() {
 		return false
 	}
@@ -316,13 +325,15 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 	if err != nil {
 		slog.Warn("Start claim: settling the claim failed; the reaper will settle it", "agent_id", r.agent, "claim_id", r.claim.ID, "error", err)
 	}
-	// Every outcome except a handoff, success included: an exit observed
-	// while the claim was held skipped its release (a synchronous create
-	// whose container exited during the dispatch keeps its terminal phase),
-	// so free the slot now if the agent holds no capacity. A no-op for a
-	// running agent, and while a start-kind claim is still held.
-	r.s.releaseSlotIfIdle(ctx, r.agent)
 	return held
+}
+
+// releaseSlotIfIdle runs Server.releaseSlotIfIdle for the run's agent once
+// the claim is settled, on a context detached from the run's.
+func (r *startClaimRun) releaseSlotIfIdle() {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.ctx), 10*time.Second)
+	defer cancel()
+	r.s.releaseSlotIfIdle(ctx, r.agent)
 }
 
 // claimedDispatch runs a start under its claim's context. fence reports
