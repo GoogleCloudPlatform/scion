@@ -1133,9 +1133,7 @@ export class ScionHeader extends LitElement {
             <sl-icon slot="prefix" name="terminal"></sl-icon>
             Terminal
             ${this.terminalSessionCount > 0
-              ? html`<span slot="suffix" class="count-badge"
-                  >${this.terminalSessionCount}</span
-                >`
+              ? html`<span slot="suffix" class="count-badge">${this.terminalSessionCount}</span>`
               : ''}
             ${this.renderMenuShortcutHint('terminals')}
           </sl-menu-item>
