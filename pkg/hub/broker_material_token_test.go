@@ -613,23 +613,36 @@ func TestBrokerUpdateDelete_TestAdminIdentitiesOnlyOwnBroker(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s update of another user's broker: %s", who, rec.Body.String())
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(others), nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s delete of another user's broker: %s", who, rec.Body.String())
-		_, err := s.GetRuntimeBroker(ctx, others.ID)
+		kept, err := s.GetRuntimeBroker(ctx, others.ID)
 		require.NoError(t, err, "%s: the other user's broker is kept", who)
+		assert.Equal(t, others.Name, kept.Name, "%s: the refused update wrote nothing", who)
 
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPatch, path(own), map[string]interface{}{"name": "bud-own-renamed-" + who})
 		assert.Equal(t, http.StatusOK, rec.Code, "%s update of its own broker: %s", who, rec.Body.String())
+		renamed, err := s.GetRuntimeBroker(ctx, own.ID)
+		require.NoError(t, err, "%s: its own broker exists after the update", who)
+		assert.Equal(t, "bud-own-renamed-"+who, renamed.Name, "%s: the update of its own broker is stored", who)
 		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(own), nil)
 		assert.Equal(t, http.StatusNoContent, rec.Code, "%s delete of its own broker: %s", who, rec.Body.String())
+		_, err = s.GetRuntimeBroker(ctx, own.ID)
+		assert.ErrorIs(t, err, store.ErrNotFound, "%s: its own broker is deregistered", who)
 	}
 
+	// Each identity's refusals come from the two role gates, recorded with
+	// its user ID (not from the later permission check).
 	gates := map[string]bool{}
 	for _, d := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
 		if d["class"] == "role_gate" {
-			gates[d["subject"].(string)] = true
+			uid, _ := d["user_id"].(string)
+			subject, _ := d["subject"].(string)
+			gates[uid+"|"+subject] = true
 		}
 	}
-	assert.True(t, gates["handlers_runtime_brokers.go:updateRuntimeBroker"], "update refusal recorded: %v", gates)
-	assert.True(t, gates["handlers_runtime_brokers.go:deleteRuntimeBroker"], "delete refusal recorded: %v", gates)
+	for who, k := range kinds {
+		for _, subject := range []string{"handlers_runtime_brokers.go:updateRuntimeBroker", "handlers_runtime_brokers.go:deleteRuntimeBroker"} {
+			assert.True(t, gates[k.Identity.ID+"|"+subject], "%s refusal recorded as %s: %v", who, subject, gates)
+		}
+	}
 
 	// A human super-admin who did not register the broker is admitted.
 	human := taUser(t, s, "bud-human", store.SystemRoleSuperAdmin)
