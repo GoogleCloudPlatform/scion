@@ -1665,10 +1665,12 @@ type TemplateStore interface {
 
 	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
 	// template id, and only while the stored row has no snapshot and still
-	// matches expected (one conditional UPDATE). No other column changes,
-	// Updated included. It reports whether a row was written: false with a
-	// nil error means the row already has a snapshot, its content or layout
-	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// matches expected and the Updated time it read (one conditional
+	// UPDATE). No other column changes, Updated included. It reports whether
+	// a row was written: false with a nil error means the row already has a
+	// snapshot, its content or layout changed, a concurrent write changed its
+	// Updated time (ptone/scion#4674), or it no longer exists. A nil cfg
+	// writes nothing. Used to
 	// backfill rows committed before the snapshot existed (ptone/scion#4222).
 	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
 

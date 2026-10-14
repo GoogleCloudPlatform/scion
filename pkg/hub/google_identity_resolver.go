@@ -381,6 +381,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 		return existingUser, nil
 	}
 
+	// As with the binding lookup above, only store.ErrNotFound means "no
+	// user with this email exists". Any other store error is returned, so
+	// sign-in does not continue into new-user provisioning.
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: user lookup by email failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("look up user by email: %w", err)
+	}
+
 	// No existing user by email — provision a new user through the normal path.
 	// This requires the same authorization checks as regular login, unless
 	// policy.PreAuthorized (service accounts admitted by allowed_gcp_projects).
@@ -498,6 +507,17 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 	} else if !r.authorize(ctx, normalizedEmail) {
 		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)
+		// Same audit record as the existing-record branches (auditDenied in
+		// applyLiveSignInPolicy). The decision above stands; the code is
+		// read only for the audit reason, and "" makes the reason follow
+		// the access mode.
+		if r.policyDeps.auditDenied != nil {
+			denial := ""
+			if r.signInDenial != nil {
+				denial = r.signInDenial(ctx, normalizedEmail)
+			}
+			r.policyDeps.auditDenied(ctx, normalizedEmail, denial)
+		}
 		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
 	}
 

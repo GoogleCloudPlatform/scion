@@ -139,7 +139,7 @@ With `async_agent_launch: true`, the Hub instead answers as soon as the broker a
 - **Bounded by `launch_timeout`.** A launch that has not reached a terminal Hub state by its deadline is ended: the broker stops it shortly before the deadline, and the Hub sets the agent to `error` with launch error `launch_timeout` shortly after. Starting such an agent is refused with `agent_create_incomplete`; delete it and create it again.
 - **Starts during a launch.** While a launch is in progress and before its deadline, a start or restart of that agent returns the launching agent with HTTP 200 instead of starting it again (a restart adds the warning `agent is launching; restart not performed`), and `scion start` keeps waiting. Restore, reincarnate, and wake are refused with `agent_launching`.
 
-**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch also falls back to the synchronous create.
+**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate`, `cloudrun`, and `cloudrun-sandbox`) also falls back to the synchronous create.
 
 **Slow pod starts.** On clusters with slow node provisioning, for example GKE Autopilot cold starts where a new node is added and the agent image takes several minutes to pull, raise `launch_timeout` so the launch is not ended first:
 
@@ -788,6 +788,8 @@ Configuration for the Hub's built-in OIDC Identity Provider feature.
 | `enabled` | bool | `false` | Enable the OIDC Identity Provider endpoints. |
 | `issuer_url` | string | | The public issuer URL of this Hub. If empty, the hub public URL is used. |
 | `token_lifetime` | duration | `"15m"` | Validity duration for minted OIDC identity tokens (e.g. `"15m"`, `"1h"`). |
+| `user_token_audiences` | list | `[]` | Peer hub issuer URLs for which this hub issues user access credentials to its own users (`POST /api/v1/auth/federation-token`, `scion hub auth federation-token`). Empty means none are issued. Experimental: also needs the `federation.project_visitors` experiment. Read at startup; a change needs a restart. |
+| `user_token_lifetime` | duration | `"15m"` | Validity of those user access credentials; a whole number of seconds, at most `"1h"`. Read at startup. |
 
 ### OIDC Federation (`server.federation`)
 

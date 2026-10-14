@@ -35,6 +35,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -136,14 +137,27 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -1195,6 +1209,21 @@ type VersionedSettings struct {
 	Profiles             map[string]V1ProfileConfig    `json:"profiles,omitempty" yaml:"profiles,omitempty" koanf:"profiles"`
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
+
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
 
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
@@ -2795,28 +2824,26 @@ func (t *HarnessThinkingConfig) Validate() error {
 	return nil
 }
 
-// Ready strategies for HarnessReadyConfig.Strategy.
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
 const (
 	// ReadyStrategyHook means the harness is ready once the ready marker for
 	// the current run is written (by a session-start hook) plus the settle.
-	ReadyStrategyHook = "hook"
+	ReadyStrategyHook = state.ReadyStrategyHook
 	// ReadyStrategyDelay means the harness is ready once its tmux session has
 	// existed for the settle period.
-	ReadyStrategyDelay = "delay"
+	ReadyStrategyDelay = state.ReadyStrategyDelay
 )
 
-// Ready and delivery defaults and limits. The ready defaults equal the
-// runtime's current readiness constants (state.ReadySettleSession,
-// state.ReadyDeadline and the host's post-marker settle); a test in
-// pkg/agent pins them together. The delivery defaults reproduce the
-// historical hard-coded delivery: Enter, then two more Enters 300ms apart.
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
 const (
-	defaultReadySettleDelay   = 8 * time.Second
-	defaultReadySettleHook    = 1500 * time.Millisecond
-	defaultReadyTimeout       = 90 * time.Second
-	maxReadySettle            = 60 * time.Second
-	minReadyTimeout           = 10 * time.Second
-	maxReadyTimeout           = 10 * time.Minute
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
 	defaultDeliverySubmitKey  = "Enter"
 	defaultDeliveryExtras     = 2
 	defaultDeliveryExtraDelay = 300 * time.Millisecond
@@ -2864,12 +2891,10 @@ type HarnessDeliveryConfig struct {
 }
 
 // DefaultReadySpec returns the ready spec used for strategy when no value is
-// configured. An unknown strategy gets the delay defaults.
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
 func DefaultReadySpec(strategy string) ReadySpec {
-	if strategy == ReadyStrategyHook {
-		return ReadySpec{Strategy: ReadyStrategyHook, Settle: defaultReadySettleHook, Timeout: defaultReadyTimeout}
-	}
-	return ReadySpec{Strategy: ReadyStrategyDelay, Settle: defaultReadySettleDelay}
+	return state.DefaultReadySpec(strategy)
 }
 
 // DefaultDeliverySpec returns the delivery spec used when no value is
@@ -4584,7 +4609,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}
