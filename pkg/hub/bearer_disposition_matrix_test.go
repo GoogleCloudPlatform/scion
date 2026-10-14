@@ -187,6 +187,10 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
 		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
 	},
+	{OperationID: "broker.read", Method: "GET", Pattern: "/api/v1/runtime-brokers"}: {
+		Reason: "the broker list filters each row by broker.read instead of refusing the request, so a token without the selector, or bounded to a project, gets 200 with no rows rather than 403",
+		Pin:    "TestBrokerListing_TokenWithoutBrokerReadListsNoBrokers",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",

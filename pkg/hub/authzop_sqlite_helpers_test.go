@@ -86,6 +86,9 @@ type idFixtures struct {
 	uatRevokePost           string
 	uatRevokeDelete         string
 	runtimeBroker           string
+	runtimeBrokerDel        string
+	brokerEnvKey            string
+	brokerSecretKey         string
 	githubInstallationID    string
 	roleDefinition          string
 	roleDefinitionDel       string
@@ -320,6 +323,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		uatRevokePost:        tid("li-uat-revoke-post"),
 		uatRevokeDelete:      tid("li-uat-revoke-delete"),
 		runtimeBroker:        tid("li-broker"),
+		runtimeBrokerDel:     tid("li-broker-del"),
+		brokerEnvKey:         "LI_BROKER_ENV_VAR",
+		brokerSecretKey:      "LI_BROKER_SECRET",
 		githubInstallationID: "900000001",
 		roleDefinition:       tid("li-role"),
 		roleDefinitionDel:    tid("li-role-del"),
@@ -458,6 +464,11 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, s.CreateUserAccessToken(ctx, &store.UserAccessToken{ID: f.uatRevokeDelete, UserID: DevUserID, Name: "li-uat-revoke-delete", Prefix: "li_d", KeyHash: "li-uat-revoke-delete-key-hash", ProjectID: f.project, Scopes: []string{"project:read"}, ExpiresAt: &expiry, Created: now}))
 
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBroker, Name: "li-broker", Slug: "li-broker", Status: "offline", ConnectionState: "disconnected"}))
+	// DELETE /runtime-brokers/{id} deregisters the broker, so it takes its
+	// own disposable broker.
+	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{ID: f.runtimeBrokerDel, Name: "li-broker-del", Slug: "li-broker-del", Status: "offline", ConnectionState: "disconnected"}))
+	// A sensitive broker-scoped variable: reads of it return a masked value.
+	require.NoError(t, s.CreateEnvVar(ctx, &store.EnvVar{ID: tid("li-broker-envvar"), Key: f.brokerEnvKey, Value: "1", Sensitive: true, Scope: store.ScopeRuntimeBroker, ScopeID: f.runtimeBroker, Created: now, Updated: now}))
 
 	require.NoError(t, s.CreateGitHubInstallation(ctx, &store.GitHubInstallation{InstallationID: 900000001, AccountLogin: "li-account", AccountType: "Organization", AppID: 1, Status: store.GitHubInstallationStatusActive, CreatedAt: now, UpdatedAt: now}))
 
@@ -688,6 +699,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
 		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
 		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
+		{"broker.delete", "/api/v1/runtime-brokers/{id}"}:                               {"id": f.runtimeBrokerDel},
 		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:                    {"id": f.gcpSADel},
 		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                          {"id": f.roleDefinitionDel},
 		{"quota.update", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
@@ -916,6 +928,12 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		// --- runtime broker family ---
 		"/api/v1/runtime-brokers/{id}":                         {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/settings":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/heartbeat":               {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/projects":                {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env":                     {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/env/{key}":               {"id": f.runtimeBroker, "key": f.brokerEnvKey},
+		"/api/v1/runtime-brokers/{id}/secrets":                 {"id": f.runtimeBroker},
+		"/api/v1/runtime-brokers/{id}/secrets/{key}":           {"id": f.runtimeBroker, "key": f.brokerSecretKey},
 		"/api/v1/runtime-brokers/{id}/message-failures":        {"id": f.runtimeBroker},
 		"/api/v1/runtime-brokers/{id}/agents/{agentId}/launch": {"id": f.runtimeBroker, "agentId": f.agent},
 
