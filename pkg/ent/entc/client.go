@@ -108,6 +108,44 @@ func withUTCTimezone(dsn string) string {
 	return base + "?" + values.Encode()
 }
 
+// withSQLitePragmas returns dsn with each of pragmas (e.g.
+// "foreign_keys(1)") added as a modernc.org/sqlite "_pragma" DSN option,
+// after any "_pragma" options the caller already set. modernc runs every
+// "_pragma" option on each new connection it opens, so the setting holds on
+// every pooled connection, including one the pool opens to replace a
+// discarded connection. A one-time "PRAGMA ..." statement after sql.Open
+// would reach only the connection that ran it. Pragmas run in DSN order, so
+// appending last also overrides a conflicting value set by the caller.
+//
+// As in withUTCTimezone, a query string that fails to parse is returned
+// unchanged so the driver reports the caller's error at open time.
+func withSQLitePragmas(dsn string, pragmas ...string) string {
+	base, rawQuery, _ := strings.Cut(dsn, "?")
+	values, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return dsn
+	}
+	for _, p := range pragmas {
+		values.Add("_pragma", p)
+	}
+	return base + "?" + values.Encode()
+}
+
+// requireSQLitePragmaOn returns an error unless PRAGMA name reads 1 on a
+// connection from db. OpenSQLite and OpenSQLiteReadOnly set their pragmas
+// through the DSN (withSQLitePragmas); this catches a DSN the driver did not
+// apply them from.
+func requireSQLitePragmaOn(db *sql.DB, name string) error {
+	var on int
+	if err := db.QueryRow("PRAGMA " + name).Scan(&on); err != nil {
+		return fmt.Errorf("reading PRAGMA %s: %w", name, err)
+	}
+	if on != 1 {
+		return fmt.Errorf("PRAGMA %s is %d after opening: the _pragma=%s(1) DSN option was not applied by the modernc.org/sqlite driver", name, on, name)
+	}
+	return nil
+}
+
 // UTCTimeHook is an Ent mutation hook that converts every time.Time field
 // value set in a mutation (explicit or defaulted — ent fills in defaults
 // before hooks run) to UTC before it is persisted. On SQLite this makes a
@@ -166,18 +204,21 @@ func UTCTimeHook(next ent.Mutator) ent.Mutator {
 
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
-// Foreign keys and WAL journal mode are enabled automatically.
+// Foreign keys and WAL journal mode are enabled automatically. Foreign keys
+// are a per-connection setting, so they are set through the DSN and apply to
+// every connection in the pool.
 // This uses the modernc.org/sqlite pure-Go driver which registers as "sqlite".
 func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
+	db, err := sql.Open("sqlite", withSQLitePragmas(withUTCTimezone(dsn), "foreign_keys(1)"))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
-	// Enable foreign keys and WAL mode, matching existing store pattern.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "foreign_keys"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
+	// journal_mode=WAL is stored in the database file, so setting it once
+	// covers every connection.
 	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling WAL mode: %w", err)
@@ -196,23 +237,23 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 // switch the journal to WAL mode (doing so would write to the database header
 // and fail on a query-only connection).
 //
-// MaxOpenConns is forced to 1 because the query_only and foreign_keys pragmas
-// are connection-scoped; with a larger pool, unprimed connections would not
-// inherit them.
+// The query_only and foreign_keys pragmas are connection-scoped, so both are
+// set through the DSN and apply to every connection the pool opens, including
+// a replacement for a discarded one. MaxOpenConns stays 1: a migration reads
+// the source through a single connection.
 func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
-	db, err := sql.Open("sqlite", withUTCTimezone(dsn))
+	// Foreign keys on for read consistency; query_only to guarantee the source
+	// is never modified during migration.
+	db, err := sql.Open("sqlite", withSQLitePragmas(withUTCTimezone(dsn), "foreign_keys(1)", "query_only(1)"))
 	if err != nil {
 		return nil, fmt.Errorf("opening sqlite connection: %w", err)
 	}
-	// Pin to a single connection so the pragmas below apply to every query.
 	db.SetMaxOpenConns(1)
-	// Foreign keys on for read consistency; query_only to guarantee the source
-	// is never modified during migration.
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "foreign_keys"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling foreign keys: %w", err)
 	}
-	if _, err := db.Exec("PRAGMA query_only = ON"); err != nil {
+	if err := requireSQLitePragmaOn(db, "query_only"); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enabling query_only mode: %w", err)
 	}
