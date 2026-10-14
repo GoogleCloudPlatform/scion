@@ -29,10 +29,11 @@ import (
 )
 
 // A project visitor grant never creates a pending account for a transport
-// identity (ptone/scion#4240, WS2): a proxy driver principal and the
-// platform service account each get 400 with the generic message, and no
-// federated account, visitor binding or grant audit is written. Another
-// email under the same issuer is still granted.
+// identity (ptone/scion#4240, WS2): a proxy driver principal (also given in
+// mixed case with surrounding spaces) and the platform service account each
+// get 400 validation_error with details.field email and the generic message,
+// and no federated account, visitor binding or grant audit is written.
+// Another email under the same issuer is still granted.
 func TestProjectVisitors_GrantRefusesTransportIdentities(t *testing.T) {
 	const (
 		driver   = "web-driver@visitor-proj.iam.gserviceaccount.com"
@@ -45,13 +46,19 @@ func TestProjectVisitors_GrantRefusesTransportIdentities(t *testing.T) {
 	ctx := context.Background()
 	issuer := store.NormalizeFederatedIssuer(grantTestOtherIssuer)
 
-	for name, email := range map[string]string{"driver principal": driver, "platform service account": platform} {
+	for name, email := range map[string]string{
+		"driver principal":                        driver,
+		"driver principal, mixed case and spaces": "  Web-Driver@Visitor-Proj.IAM.gserviceaccount.com ",
+		"platform service account":                platform,
+	} {
 		t.Run(name, func(t *testing.T) {
 			rec := f.grant(t, f.owner, map[string]interface{}{"issuer": grantTestOtherIssuer, "email": email})
 			require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
 			var resp ErrorResponse
 			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 			assert.Equal(t, proxyDriverPrincipalUserMessage, resp.Error.Message)
+			assert.Equal(t, ErrCodeValidationError, resp.Error.Code)
+			assert.Equal(t, "email", resp.Error.Details["field"])
 			assert.NotContains(t, rec.Body.String(), "driver", "the answer does not name drivers")
 
 			_, err := f.st.GetFederatedUserByEmail(ctx, issuer, store.NormalizeFederatedEmail(email))
