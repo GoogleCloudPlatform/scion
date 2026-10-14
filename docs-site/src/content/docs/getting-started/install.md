@@ -2,12 +2,14 @@
 title: Installation
 ---
 
-**What you will learn**: How to get Scion running on your machine from scratch with zero configuration, allowing you to start your first agent immediately.
+**What you will learn**: How to get Scion running on your machine from scratch, up to the point where you can start your first agent.
 
-This guide covers the steps to install and configure Scion on your local machine. It applies to
-both [Local mode](/scion/choosing-a-mode/) (CLI only, no server) and
-[Workstation mode](/scion/choosing-a-mode/) (the combo server run locally). If you are not sure
-which you want, read [Choosing a Mode](/scion/choosing-a-mode/) first.
+This guide covers the steps to install and configure Scion on your local machine. Scion runs
+agents through a hub. On your own machine that is [Workstation mode](/scion/choosing-a-mode/):
+the combo server (Hub, Runtime Broker and web dashboard) on loopback, started with
+`scion server start`. To use a shared hub instead, install the CLI here and then follow
+[Connecting to a Hub](/scion/hosted/user/hosted-user/). If you are not sure which you want, read
+[Choosing a Mode](/scion/choosing-a-mode/) first.
 
 :::tip[Prefer a guided setup?]
 For Workstation mode, the [Onboarding Wizard](/scion/getting-started/onboarding/) walks you
@@ -51,12 +53,13 @@ Your browser opens to the [Onboarding Wizard](/scion/getting-started/onboarding/
 (Docker, Podman, or Apple Container), identity configuration, container image setup (pulling from
 `ghcr.io/homebrew-scion`), and creating your first workspace.
 
-After onboarding, start your first agent in the web UI:
+After onboarding, start your first agent from the web UI, or from the CLI in a repository with
+`scion init` and `scion start` (see the [Tutorial](/scion/getting-started/tutorial/)).
 
 :::note[Using Homebrew?]
 The onboarding wizard performs machine initialization and image setup for you, so you can skip many of
 the [Prerequisites](#prerequisites) and [Configuration](#configuration) sections below — they
-apply to a from-source install or a fully manual, CLI-only (Local mode) setup. You will still need a container runtime - podman is recommended.
+apply to a from-source install or a manual setup without the wizard. You will still need a container runtime - podman is recommended.
 :::
 
 ---
@@ -75,6 +78,8 @@ skip this if you installed with `brew`.
 ### 2. Container Runtime
 Scion requires a container runtime to manage agents. You can use Docker, Podman, or the Apple Virtualization Framework (experimental).
 
+When no runtime is configured, Scion picks one automatically. On macOS it prefers Podman, then Docker, then Apple `container`. On macOS, when Podman is selected or auto-detected but not on your `PATH`, Scion also looks for it in `/opt/podman/bin`, `/usr/local/bin` and `/usr/bin` when it uses the runtime. Detection during setup, including the onboarding wizard's, looks only on your `PATH` and checks that each runtime runs; on Linux it prefers Podman, then Docker. To use another installed runtime, select it in the onboarding wizard or in your profile's `runtime` setting.
+
 #### Docker (Linux/Windows)
 - Install [Docker Desktop](https://www.docker.com/products/docker-desktop) or [Docker Engine](https://docs.docker.com/engine/install/).
 - Ensure the `docker` command is available in your PATH.
@@ -89,6 +94,12 @@ Scion requires a container runtime to manage agents. You can use Docker, Podman,
 - Requires the [container](https://github.com/apple/container/releases) tool (an Apple tool for running OCI images in micro VMs).
 - Ensure the `container` command executes.
 - Start the system services `container system start`.
+- Agents reach the hub from inside their containers. With Docker and Podman this works
+  automatically. With Apple container it needs a `sudo` DNS rule that must be re-created after each reboot (or installed as a LaunchDaemon); the onboarding wizard's runtime
+  step shows the command. See [Apple Container DNS](/scion/local/apple-container/).
+  On macOS, auto-detection prefers Podman, then Docker, and picks Apple container only when neither
+  is installed, so the DNS step applies when Apple container is the only runtime or you select it
+  (see [Select Runtime](#5-select-runtime)).
 
 ### 3. Git
 Scion uses `git worktree` to manage agent workspaces.
@@ -176,9 +187,35 @@ scion init
 ```
 
 This creates a `.scion` marker file in the directory, linking it to structures inside the global folder created on the machine initialization.
+When a hub is running (next step), `init` also links the project to it; otherwise it prints a note
+and the project links on its first `scion` command.
+
+### 3. Start the local hub
+Agents run through a hub. Start the workstation server once:
+
+```bash
+scion server start
+```
+
+It runs in the background, adds itself to your list of hubs as `local` (`http://127.0.0.1:8080`),
+and on the first run opens the [Onboarding Wizard](/scion/getting-started/onboarding/). Before any
+hub is set up, agent commands fail with:
+
+```
+No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'.
+```
+
+Once the local hub is set up, commands run while it is stopped (for example after
+`scion server stop`) fail with:
+
+```
+Local scion server is not running. Start it with 'scion server start'.
+```
+
+To use a shared hub instead, see [Connecting to a Hub](/scion/hosted/user/hosted-user/).
 
 
-### 3. Agent Authentication (LLM Access)
+### 4. Agent Authentication (LLM Access)
 
 Before starting an agent, you must provide credentials so the underlying LLM harness (Claude, Gemini, etc.) can authenticate with its model provider.
 
@@ -192,12 +229,12 @@ export ANTHROPIC_API_KEY="your-api-key"
 export GEMINI_API_KEY="your-api-key"
 ```
 
-Scion also supports Vertex AI (via Application Default Credentials) and OAuth token files. For advanced credential configurations, including Hub-based secret injection, see [Agent Credentials](/scion/local/agent-credentials/).
+On the workstation server, harness login files in your home directory (for example after you sign in to a harness on this machine) are given to agents automatically. Scion also supports Vertex AI (via Application Default Credentials). For advanced credential configurations, including Hub-based secret injection, see [Agent Credentials](/scion/local/agent-credentials/).
 
-### 4. Select Runtime
-Scion automatically selects the appropriate runtime based on your operating system:
-- **macOS**: Uses the first runtime it finds, in this order: `podman`, `docker`, then `container` (Apple Virtualization Framework).
-- **Linux/Windows**: Defaults to `docker` (or `podman` if Docker is missing).
+### 5. Select Runtime
+Scion automatically selects the first runtime it finds working, in this order:
+- **macOS**: `podman`, then `docker`, then `container` (Apple Virtualization Framework).
+- **Linux/Windows**: `podman`, then `docker`.
 
 If you wish to change this (e.g., to use Apple `container` on macOS when Podman or Docker is also installed), you can manually edit `.scion/settings.yaml`:
 
@@ -228,6 +265,8 @@ Both files validate against the [settings JSON schema](https://github.com/Google
 - **Run your first agent** — follow the [Tutorial](/scion/getting-started/tutorial/).
 - **Set up Workstation mode** — use the [Onboarding Wizard](/scion/getting-started/onboarding/)
   (`scion server start`).
+- **Upgrading from a release that ran agents without a hub?** See the
+  [migration page](/scion/reference/local-mode-removal/).
 - **Understand the pieces** — read [Core Concepts](/scion/concepts/).
 
 ---

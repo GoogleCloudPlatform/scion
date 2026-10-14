@@ -42,7 +42,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import type { TemplateResult } from 'lit';
 import { customElement, property, state, query } from 'lit/decorators.js';
 
-import type { PageData, Agent } from '../../shared/types.js';
+import type { PageData, Agent, Project } from '../../shared/types.js';
 import { apiFetch, parseApiError } from '../../client/api.js';
 import { navigateTo, pushRoute, replaceRoute, stateManager } from '../../client/main.js';
 import { browserPath, stripBasePath } from '../../client/navigation.js';
@@ -503,6 +503,7 @@ export class ScionPageChat extends LitElement {
   @state() private v2AgentMembers: import('../shared/chat/chat-members.js').ChatAgentMember[] = [];
   private _onChatMessage = this.handleChatMessage.bind(this);
   private _onChatTopic = this.handleChatTopic.bind(this);
+  private _onChatThreadGroup = this.handleChatThreadGroup.bind(this);
   private _onPresenceUpdated = this.handlePresenceUpdated.bind(this);
   private _onChatTyping = this.handleChatTyping.bind(this);
   private _onRailLoaded = this.handleRailLoaded.bind(this);
@@ -1772,6 +1773,7 @@ export class ScionPageChat extends LitElement {
     this._paletteTypeahead.stop({ restoreFocus: false });
     stateManager.removeEventListener('chat-message-received', this._onChatMessage);
     stateManager.removeEventListener('chat-topic-updated', this._onChatTopic);
+    stateManager.removeEventListener('chat-thread-group-updated', this._onChatThreadGroup);
     stateManager.removeEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.removeEventListener('chat-typing-received', this._onChatTyping);
     stateManager.removeEventListener('agents-updated', this._onAgentsUpdated);
@@ -1962,6 +1964,7 @@ export class ScionPageChat extends LitElement {
     // Subscribe to SSE events
     stateManager.addEventListener('chat-message-received', this._onChatMessage);
     stateManager.addEventListener('chat-topic-updated', this._onChatTopic);
+    stateManager.addEventListener('chat-thread-group-updated', this._onChatThreadGroup);
     stateManager.addEventListener('chat-presence-updated', this._onPresenceUpdated);
     stateManager.addEventListener('chat-typing-received', this._onChatTyping);
     stateManager.addEventListener('agents-updated', this._onAgentsUpdated);
@@ -2477,11 +2480,9 @@ export class ScionPageChat extends LitElement {
     try {
       const res = await apiFetch(`/api/v1/projects?slug=${encodeURIComponent(slug)}&limit=1`);
       if (res.ok) {
-        const data = (await res.json()) as {
-          items?: Array<{ id: string; slug: string; name: string }>;
-        };
-        if (data.items && data.items.length > 0) {
-          const project = data.items[0];
+        const data = (await res.json()) as { projects?: Project[] };
+        const project = data.projects?.[0];
+        if (project?.slug) {
           this._slugToProjectId.set(project.slug, project.id);
           this._projectIdToSlug.set(project.id, project.slug);
           this._refreshPaletteAgentRows();
@@ -2924,6 +2925,24 @@ export class ScionPageChat extends LitElement {
 
     // For other topic changes (rename, delete, etc.), reload rail
     if (rail) void rail.reload();
+  }
+
+  /**
+   * Handle a `chat.thread_group` SSE event: hand the group snapshot to the
+   * rail, which applies it in place when project thread groups are on
+   * (it ignores the event otherwise).
+   */
+  private handleChatThreadGroup(e: Event): void {
+    const detail = (e as CustomEvent).detail as Record<string, unknown> | undefined;
+    // Unwrap the notifyWithData envelope: { state, data: { projectId, action, group } }
+    const data = (detail?.data ?? detail) as Record<string, unknown> | undefined;
+    const projectId = typeof data?.projectId === 'string' ? data.projectId : '';
+    const action = typeof data?.action === 'string' ? data.action : '';
+    if (!projectId || !action) return;
+    const rail = this.shadowRoot?.querySelector('scion-chat-space-rail') as
+      | import('../shared/chat/chat-space-rail.js').ScionChatSpaceRail
+      | null;
+    rail?.applyThreadGroupEvent(projectId, action, data?.group);
   }
 
   /**

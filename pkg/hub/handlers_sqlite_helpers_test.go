@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -50,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -3361,6 +3364,42 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 
 const testOIDCIssuerURL = "https://scion.example.com"
 
+// installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
+// the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
+// the OIDC provider is enabled stay unregistered.
+func installTestOIDCKeyManager(t *testing.T, srv *Server) {
+	t.Helper()
+
+	// Generate a test RSA key pair.
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	kid := computeKeyID(&privKey.PublicKey)
+	signingKey := &OIDCSigningKey{
+		KeyID:      kid,
+		PrivateKey: privKey,
+		PublicKey:  &privKey.PublicKey,
+		Active:     true,
+	}
+
+	// Create the RS256 signer (needed by identity token endpoint).
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	require.NoError(t, err)
+
+	mgr := &OIDCKeyManager{
+		activeKey: signingKey,
+		allKeys:   []*OIDCSigningKey{signingKey},
+		signer:    signer,
+		issuerURL: testOIDCIssuerURL,
+	}
+
+	srv.oidcKeyManager = mgr
+	srv.oidcIssuerURL = testOIDCIssuerURL
+}
+
 // testOIDCServerWithRoutes creates a Server with OIDC enabled via config so
 // that routes are registered during New(). Use for mux-routing tests.
 func testOIDCServerWithRoutes(t *testing.T) *Server {
@@ -6440,3 +6479,13 @@ func (f *brokerAuthFixture) asAgent(t *testing.T, method, path string, body inte
 }
 
 const provisionPath = "/api/v1/users"
+
+// createProjectOwnerRoleBinding creates a project-owner role binding for the
+// user on the project, with its audit record, in one transaction. Only
+// tests use it; the create, register and clone handlers write the binding
+// inside the project create transaction (createProjectWithOwner).
+func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
+	return s.store.WithTx(ctx, func(tx store.Store) error {
+		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
+	})
+}

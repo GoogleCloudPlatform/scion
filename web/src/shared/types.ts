@@ -492,6 +492,11 @@ export interface AgentLaunch {
   step?: string;
   /** Failure code, e.g. `runtime_error`, `launch_timeout`, `broker_lost`. */
   error?: string;
+  /**
+   * The runtime cause behind a `runtime_error`, when the broker reported one
+   * (ptone/scion#4666): `runtime_forbidden` or `runtime_unauthorized`.
+   */
+  cause?: string;
   /** succeeded | running_observed | failed | timed_out | lost | not_launched | superseded */
   endReason?: string;
   /** Present only while the launch is active. */
@@ -1077,6 +1082,12 @@ export interface HarnessConfig {
   files?: TemplateFileInfo[];
   imageStatus?: string;
   imageStatusCheckedAt?: string;
+  /**
+   * Image the hub's image-build executor last built for this harness-config
+   * (ptone/scion#4219). Operational state, not derived from config.yaml;
+   * when set it is the image to show and check, in place of config.image.
+   */
+  builtImage?: string;
   created?: string;
   updated?: string;
   _capabilities?: Capabilities;
@@ -1156,7 +1167,7 @@ export type BrokerStatus = 'online' | 'offline' | 'degraded';
  * Capabilities advertised by a Runtime Broker
  */
 export interface BrokerCapabilities {
-  webPTY: boolean;
+  webPty: boolean;
   sync: boolean;
   attach: boolean;
 }

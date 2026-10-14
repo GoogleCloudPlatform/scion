@@ -261,7 +261,7 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
   scion hub env clear --project SCION_LOG_LEVEL
   ```
 
-- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of a template or an inline `--config` file. A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 
@@ -576,7 +576,7 @@ If you see logs but they aren't linked to traces in the Cloud Trace waterfall:
 * **Observable:** Loop between user `login` and `session_expired` states.
 * **Root Cause:** The Hub regenerated its JWT/session signing keys on restart, or there is a multi-replica key mismatch (replicas using different signing keys).
 * **Operator Action:** 
-  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
+  1. Pin the session/JWT signing key securely in the deployment configuration. Ensure `SCION_SERVER_SESSION_SECRET` (or `SharedSigningSecret`) is set consistently across all Hub replicas and survives restarts.
   2. Have users run `scion message <agent> "continue"` to trigger resume, or perform a manual login refresh.
 
 #### 3. Duplicate `sciontool` Processes (Split-Brain Agent)

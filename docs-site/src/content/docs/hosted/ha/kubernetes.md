@@ -95,7 +95,7 @@ Each project [shared directory](/scion/local/workspace/#5-project-shared-directo
 
 You can set them in three places. Each key is resolved separately, and the first source that sets it wins:
 
-1. The `kubernetes:` block of the agent's inline config.
+1. The agent's `kubernetes:` block (a template's `kubernetes:` block is ignored with a warning).
 2. The profile entry in `settings.yaml`.
 3. The profile's runtime entry in `settings.yaml`.
 
@@ -125,7 +125,7 @@ profiles:
     # shared_dir_storage_class: premium-rwx
 ```
 
-An agent's inline config can still override this for that agent:
+An agent can still override this for itself:
 
 ```yaml
 kubernetes:
@@ -198,7 +198,7 @@ A variable is set only when its limit is set, either in `resources.limits` or in
 
 Setting `GOMAXPROCS` turns off the Go 1.25+ default, which reads the cgroup CPU limit and follows changes to it (for example after an in-place pod resize). In return, images with older Go toolchains also get a value that matches the pod.
 
-A value set in the agent's env (request env, settings or hub env) always wins, and each variable is checked separately. Template `env:` is a fallback applied after these derived values, so a template cannot replace them. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
+A value set in the agent's `env` (or any env source other than the template) always wins, and each variable is checked separately. A template's `env` is applied only when nothing else sets the variable, so it does not replace the derived value. A value set with `ENV` in the container image does not: pod env overrides image `ENV`, so the value derived from the limit replaces it. Set `GOMEMLIMIT: "off"` to turn the soft limit off, or any `GOMAXPROCS` value to replace the one derived from the CPU limit:
 
 ```yaml
 env:
@@ -264,7 +264,7 @@ globalDefault: false
 description: "Priority class for Scion agent pods"
 ```
 
-Then reference it by name, either as a runtime-level default or per agent, in the agent's inline config (the per-agent value wins if both are set):
+Then reference it by name, either as a runtime-level default or per agent (the per-agent value wins if both are set):
 
 ```yaml
 runtimes:
@@ -304,6 +304,8 @@ When either signal is observed, the agent leaves `running` at once, and its stat
 
 The home backend does not change this: with a pod-local home the harness session is not kept across any Kubernetes restart. A `scion stop` that races a preemption stays `stopped`.
 
+**Resume without a saved session.** When you resume or wake an agent whose home is pod-local, the harness has no saved session to continue. If the resume attempt exits with an error status (1 to 127; a harness stopped by a signal does not count) within 30 seconds, the agent prints `scion: no resumable session; starting fresh` and starts the harness fresh instead of exiting. With the `nfs` home backend the session survives, so a failed resume is reported as an error and is not retried fresh.
+
 If the pod disappears between polls before either signal is observed, the Runtime Broker reads the pod's Kubernetes Events and classifies a preemption or eviction recorded there the same way. Only when the Events show neither does the agent fall back to the missing-container reconcile: after `missing_agent_grace` it moves to `error` with exit reason `container_missing` (see [server configuration](/scion/reference/server-config/)). One known gap: an agent preempted within about two broker heartbeats of its start, before the Hub has confirmed which runtime target lists it, is not covered by that fallback.
 
 #### Out-of-memory kills
@@ -322,7 +324,7 @@ metadata:
 
 The setting is opt-in, and only `false` has an effect. Leaving it unset, or setting it to `true`, adds no annotation; that is the default behaviour.
 
-You can set it on a runtime, on a profile, or in an agent's inline config:
+You can set it on a runtime, on a profile, or on an agent:
 
 ```yaml
 # settings.yaml — runtime default
@@ -341,18 +343,18 @@ profiles:
 ```
 
 ```yaml
-# agent inline config (--config) — overrides profile and runtime
+# agent scion-agent.yaml — overrides profile and runtime (ignored in a template)
 kubernetes:
   safeToEvict: false
 ```
 
 Scion uses the first value it finds, in this order:
 
-1. The agent's inline config `kubernetes.safeToEvict`
+1. The agent's `kubernetes.safeToEvict`
 2. The agent's profile's `safe_to_evict`: the `--profile` flag, or the profile the agent was created with, falling back to the active profile
 3. The `safe_to_evict` on that profile's runtime entry
 
-An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` in an agent's inline config turns the annotation off for that agent, even when the runtime sets `false`.
+An explicit `true` at a higher level wins over a `false` lower down. For example, `safeToEvict: true` on an agent turns the annotation off for that agent, even when the runtime sets `false`.
 
 Other runtimes (Docker, Podman, Apple, Cloud Run) accept the setting and ignore it. `scion config validate` warns when it is set on a non-Kubernetes runtime, or on a profile that uses one, and Scion logs a warning at agent start when it is ignored.
 
@@ -447,7 +449,7 @@ For agents whose identity resolves to `block`, none of the steps above apply. In
 
 GKE cannot give a single pod no Google identity: on a node pool with Workload Identity, every Kubernetes ServiceAccount (KSA) receives a federated token, with or without a Google service account annotation. On Kubernetes, `block` therefore means a zero-privilege identity. When the mode resolved for a Kubernetes dispatch is `block`, from the request, a project default, a hub default, or an agent's own stored identity, the broker starts the pod with:
 
-- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's inline or saved config.
+- `spec.serviceAccountName` set to the **block KSA** named by `kubernetes_block_service_account`, or, when none is configured, left unset so the pod runs as the namespace's `default` KSA. Either way this replaces any `serviceAccountName` from the agent's saved config.
 - `automountServiceAccountToken: false`, so no Kubernetes API token is mounted. This does not remove the federated Google token.
 - The node selector `iam.gke.io/gke-metadata-server-enabled: "true"`, merged into any existing node selector, so the pod only schedules on Workload Identity nodes. On a node pool without Workload Identity a pod can use the node's own service account. If no node carries the label, the pod stays `Pending`.
 
@@ -600,7 +602,7 @@ Nothing is filtered out: accounts with an `unknown` state are still listed, with
 
 The check uses the report, which the broker builds from its global settings. A project whose own settings point a profile at a different runtime entry or runtime type should also map the GSA explicitly on that profile (the profile's `kubernetes_service_account_mappings` in the broker's global settings), so the report lists it.
 
-**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A template's `kubernetes:` block, including `serviceAccountName`, is ignored.
+**Request-level values.** A `kubernetes.serviceAccountName` set on the create or start request must equal the mapped KSA, and a `kubernetes.namespace` on the request must equal the resolved namespace; otherwise the dispatch fails. A template's `kubernetes:` block, `serviceAccountName` included, is ignored.
 
 **Dispatch errors.** Each of these fails the dispatch before any pod is created:
 
@@ -709,16 +711,15 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 Starting an agent pod can take several minutes when the cluster has to add a node first, for example a GKE Autopilot cold start followed by a multi-minute image pull. A synchronous Hub create is bounded by the CLI's 30-second HTTP timeout and the Hub's `write_timeout`, so it is not suited to these starts.
 
-Turn on asynchronous create on the Hub and raise the launch budget above your slowest expected start:
+Turn on asynchronous create on the Hub, the `hub.async_agent_launch` [experiment](/scion/reference/experiments/) in **Admin → Server Config → Experiments** (no restart needed), and raise the launch budget above your slowest expected start:
 
 ```yaml
 server:
   hub:
-    async_agent_launch: true
     launch_timeout: "15m"   # default 5m
 ```
 
-Both keys are read only at Hub startup, so restart the Hub after changing them. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
+`launch_timeout` is read only at Hub startup, so restart the Hub after changing it. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
 
 ## Architecture & Security
 
@@ -769,7 +770,7 @@ The provisioning init container runs the agent's own image, so an older `scionto
 - writes `.scion-provisioned` back into the workspace root (newer images add it to the git excludes);
 - if it only waits for another Pod's provisioning, times out, because the newer image writes the sentinel in the state directory.
 
-No data is lost in these cases, but to keep the workspace free of provisioning files, update the images the project's agents run (set in harness-configs and settings) to a release that includes the provisioning state directory.
+No data is lost in these cases, but to keep the workspace free of provisioning files, make sure every agent of the project runs an image from a release that includes the provisioning state directory.
 
 `mount_root/<share id>` must be the mounted export itself, not a parent of the mount point or an ordinary directory. The broker treats it as the export once it exists: if the export is not actually mounted there, the directories are created on the broker's local disk, and the Pod still depends on the kubelet creating them on the export.
 
@@ -842,7 +843,7 @@ A git clone-per-agent workspace on EmptyDir is cloned again from the remote when
   If the check cannot run (for example the container has already exited, or it times out), there is no warning and the stop goes ahead as usual. The Hub's stop-all action (for example **Stop All** in the Web Dashboard) does not run the check, to keep it fast; `scion stop --all` stops each agent on its own and does run it.
 - **When the agent next starts** (`scion start`, `scion resume`, or a restart), the response repeats the result recorded at the stop, for example `Workspace is ephemeral and was re-cloned; 2 unpushed commits and 3 changed files from the previous run were lost.` When there is no record (the Pod went away without a single-agent stop, or the check did not complete), it says `Workspace is ephemeral and is re-cloned on start; local changes from the previous run are not kept.` A clean workspace gives no warning.
 
-To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning. The check runs only for agents managed through a Hub; local mode with the Kubernetes runtime does not warn.
+To keep the work, push it before stopping the agent, or use [NFS workspace storage](#sharing-modes-on-the-nfs-workspace). Agents on NFS workspace storage and agents on other runtimes, such as Docker, are not checked and get no warning.
 
 ### Persistent Agent Home (NFS)
 
@@ -914,7 +915,7 @@ Tar sync includes retry with exponential backoff (1s, 2s, 4s — up to 3 retries
 | RuntimeClassName | Supported |
 | ServiceAccountName | Supported |
 | PriorityClassName | Supported (runtime default and per-agent override; the class must already exist on the cluster) |
-| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` in an agent's inline config) |
+| Safe-to-evict annotation | Supported (opt-in `safe_to_evict: false` on a runtime or profile, or `safeToEvict: false` on an agent) |
 | NodeSelector | Supported |
 | Tolerations | Supported |
 | ImagePullPolicy | Supported (Always, IfNotPresent, Never) |

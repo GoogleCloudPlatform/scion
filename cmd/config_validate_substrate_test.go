@@ -15,7 +15,6 @@
 package cmd
 
 import (
-	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -56,20 +55,11 @@ func writeGlobalSettingsForValidate(t *testing.T, data string) {
 func runConfigValidate(t *testing.T) (output string, err error) {
 	t.Helper()
 
-	oldStdout := os.Stdout
-	r, w, pipeErr := os.Pipe()
-	require.NoError(t, pipeErr)
-	os.Stdout = w
-
 	cmd := configValidateCmd
-	err = cmd.RunE(cmd, nil)
-
-	require.NoError(t, w.Close())
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-	return buf.String(), err
+	output = captureStdout(t, func() {
+		err = cmd.RunE(cmd, nil)
+	})
+	return output, err
 }
 
 func TestConfigValidateCmd_SubstrateEgressTrustBundleValid(t *testing.T) {

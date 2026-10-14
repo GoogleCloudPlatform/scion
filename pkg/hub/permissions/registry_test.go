@@ -58,6 +58,7 @@ var expectedSelectorRegistry = map[string][]string{
 	"broker:create":                   {"broker.create"},
 	"broker:list":                     {"broker.list"},
 	"broker:read":                     {"broker.read"},
+	"federation_token:mint":           {"federation_token.mint"},
 	"gcp_service_account:assign":      {"gcp_service_account.assign"},
 	"gcp_service_account:list":        {"gcp_service_account.list"},
 	"gcp_service_account:read":        {"gcp_service_account.read"},
@@ -130,6 +131,17 @@ var expectedSelectorRegistry = map[string][]string{
 	"scheduled_event:list":   {"scheduled_event.list"},
 	"scheduled_event:read":   {"scheduled_event.read"},
 	"scheduled_event:update": {"scheduled_event.update"},
+
+	// agent selectors outside the agent:manage alias.
+	"agent:set_message_mode": {"agent.set_message_mode"},
+	"agent:stop_all":         {"agent.stop_all"},
+	"agent:update":           {"agent.update"},
+
+	// quota selectors (hub-wide limit, entitlement and usage administration).
+	"quota:create": {"quota.create"},
+	"quota:delete": {"quota.delete"},
+	"quota:read":   {"quota.read"},
+	"quota:update": {"quota.update"},
 }
 
 func TestValidateSelectorRegistry_PinnedSnapshot(t *testing.T) {

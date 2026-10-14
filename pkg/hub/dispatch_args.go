@@ -88,6 +88,10 @@ type DeleteDispatchArgs struct {
 	Claim          int64               `json:"claim,omitempty"`
 	Target         *DeleteIntentTarget `json:"target,omitempty"`
 	NotAfter       time.Time           `json:"notAfter,omitzero"`
+	// PurgeRetained marks the purge job's removal of a soft-deleted
+	// agent's retained files (withPurgeRetained, ptone/scion#4744); the
+	// executing node sends the delete the same way.
+	PurgeRetained bool `json:"purgeRetained,omitempty"`
 }
 
 // DeleteIntentTarget is what a delete intent records about its agent so

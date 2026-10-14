@@ -2,7 +2,9 @@
 
 **Issue:** [ptone/scion#572](https://github.com/ptone/scion/issues/572)  
 **Project slug:** `workspace-mode-env`  
-**Status:** Finalized — all open questions resolved (see §Open Questions for decisions)
+**Status:** Finalized — all open questions resolved (see §Open Questions for decisions)  
+**Update:** Phase 2 landed: `SCION_SHARED_WORKSPACE` was removed with no further
+compatibility period (ptone/scion#575). See the OQ3 update below.
 
 ---
 
@@ -376,6 +378,15 @@ Phase 2 (eventual removal of `SCION_SHARED_WORKSPACE`) is tracked in
 implementation phases below include a sciontool update task for the
 compatibility shim.
 
+> **Update (ptone/scion#575):** Phase 2 is done. The broker no longer emits
+> `SCION_SHARED_WORKSPACE`, and `sciontool init` no longer falls back to it:
+> `SCION_WORKSPACE_MODE` + `SCION_WORKSPACE_GIT` are the only inputs, and the
+> legacy var is ignored when set. With no `SCION_WORKSPACE_MODE` (an older
+> broker), the agent is treated as not being in a shared git workspace — the
+> same result the shim gave when neither variable was set. The compatibility
+> shim, deprecation comment and fallback tests described below were removed
+> with it.
+
 ---
 
 ## Implementation Phases
@@ -472,7 +483,7 @@ The QA tester should verify:
    - Agent in a project with no `scion.dev/workspace-mode` label.
    - `SCION_WORKSPACE_MODE` → `shared-plain`.
 
-6. **`SCION_SHARED_WORKSPACE` backward compatibility (OQ3 deprecation):**
+6. **`SCION_SHARED_WORKSPACE` backward compatibility (OQ3 deprecation; superseded — the var was removed in ptone/scion#575):**
    - Existing shared-plain git agents still receive `SCION_SHARED_WORKSPACE=true`
      (emitted unchanged; deprecation period is in effect).
    - `sciontool init` works correctly when only `SCION_SHARED_WORKSPACE` is

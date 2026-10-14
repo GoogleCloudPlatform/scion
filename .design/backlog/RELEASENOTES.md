@@ -11,6 +11,14 @@
 - All container images built and published to Artifact Registry (core-base, scion-base, scion-claude, scion-gemini, scion-opencode, scion-codex)
 
 ### Changed
+- **`SCION_SHARED_WORKSPACE` removed.** The broker no longer sets `SCION_SHARED_WORKSPACE` in agent
+  containers, and `sciontool init` no longer reads it. Use `SCION_WORKSPACE_MODE=shared-plain` with
+  `SCION_WORKSPACE_GIT=true` to detect a shared git workspace. An agent image with this change,
+  started by an older broker that sets neither new variable, is not treated as a shared git workspace,
+  so its shared-workspace git setup is skipped. Likewise, an agent image whose `sciontool` predates
+  `SCION_WORKSPACE_MODE` (ptone/scion#572) reads only the legacy variable, so on this broker it also
+  skips the shared-workspace git setup. Run matching broker and agent image versions.
+  (ptone/scion#575)
 - **Session-end metrics are kept until sent; mixed agent images can drop unsent ones.** A finished
   session's summary now stays in the agent's session state file (`~/.scion/session-metrics.json`)
   until a send has been attempted, so a report survives the hook or init process being killed and

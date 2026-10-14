@@ -17,13 +17,13 @@ A template now describes the agent's **job** (harness config, model, instruction
 **Templates and environment keys** ([ptone/scion#4524](https://github.com/ptone/scion/issues/4524), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
 
 - A template's `telemetry`, `hub`, `image`, `resources`, `kubernetes` and `volumes` are ignored with a warning, and the Hub no longer copies a template's image, env or telemetry into agents. `GET /api/v1/admin/validate-resources` lists the affected templates (`templateConfigFindings`). Move these values to the harness-config or settings.
-- Template `env:` variables are now a lowest-precedence fallback: each applies only when no other source sets the key. Previously they beat settings harness-config env. Their values are no longer expanded from the broker host's environment. `SCION_*` keys and the harness-config's required auth keys (its `required_env[].any_of` keys) are never taken from a template; keep all credentials out of templates. Template env is read from the template's current version on every start, so edits take effect on the next start.
+- Template `env:` variables are now a lowest-precedence fallback: each applies only when no other source sets the key. Previously they beat settings harness-config env. Their values are no longer expanded from the broker host's environment. `SCION_*` keys and every env key the harness-config's auth metadata lists are never taken from a template ([ptone/scion#4968](https://github.com/ptone/scion/issues/4968)). Template env is read from the template's current version on every start, so edits take effect on the next start.
 - Existing agents: a template env key baked into an agent's stored config with the same value as the template is treated as the fallback from the agent's next start.
 
 **Precedence** ([ptone/scion#4222](https://github.com/ptone/scion/issues/4222), [ptone/scion#4223](https://github.com/ptone/scion/issues/4223), [ptone/scion#4218](https://github.com/ptone/scion/issues/4218), [ptone/scion#4217](https://github.com/ptone/scion/issues/4217)):
 
 - The Hub default model and thinking level apply only when neither the template nor the project sets one. The template beats the Hub default; the project still beats the template.
-- For Hub-created agents, requester telemetry is on/off only. Other inline telemetry fields are ignored with a warning, on every Runtime Broker.
+- Requester telemetry is on/off only. Other inline telemetry fields are ignored with a warning, on every Runtime Broker.
 - Project telemetry policy beats `--enable-telemetry` / `--disable-telemetry` and `SCION_TELEMETRY_ENABLED`.
 - When a template sets both `harness_config` and `default_harness_config`, `default_harness_config` wins.
 - On the Hub, an explicit `harness:` key in a template wins over inferring the harness from the template's name.
@@ -38,7 +38,7 @@ A template now describes the agent's **job** (harness config, model, instruction
 
 **Settings are no longer baked into agents** ([ptone/scion#4241](https://github.com/ptone/scion/issues/4241), [ptone/scion#4561](https://github.com/ptone/scion/issues/4561), [ptone/scion#4222](https://github.com/ptone/scion/issues/4222)):
 
-- Broker settings telemetry and the settings- and profile-derived image, image pull policy, resources and volumes are applied at each start, not persisted in `scion-agent.json`. A settings or profile change takes effect on the agent's next start. Hub `agent_defaults.resources` are also applied on every start.
+- Broker settings telemetry and the settings- and profile-derived image, image pull policy, resources and volumes are applied at each start, not persisted in `scion-agent.json`. A settings or profile change takes effect on the agent's next start. Hub `agent_defaults.resources` and the Hub default limits are also applied on every start ([ptone/scion#623](https://github.com/ptone/scion/issues/623)).
 - Agents created before this change keep their already-baked values until they are reprovisioned.
 - Agents created before ptone/scion#4222 keep a copy of the Hub default telemetry in their stored config until they are reprovisioned. Starting them no longer resends it.
 

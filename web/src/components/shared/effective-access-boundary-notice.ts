@@ -37,6 +37,9 @@ import { srOnlyStyles } from './styles.js';
 import { customElement, property, state } from 'lit/decorators.js';
 
 import { apiFetch } from '../../client/api.js';
+import { loadAdminStatus } from '../../client/admin-status.js';
+import { stateManager } from '../../client/state.js';
+import { hasAnyPermission } from '../../lib/admin-permissions.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -192,6 +195,11 @@ export class ScionEffectiveAccessBoundaryNotice extends LitElement {
       if (this.contextType === 'project') {
         url = `/api/v1/admin/access-constraints?scopeType=project&scopeId=${encodeURIComponent(this.contextId)}&pageSize=0`;
       } else {
+        // The effective-access route checks hub.audit.read; read it from
+        // the shared admin status and send nothing without it. A missing
+        // or failed admin status grants nothing.
+        const status = await loadAdminStatus(stateManager.getCurrentUserId());
+        if (!hasAnyPermission(status, ['hub.audit.read'])) return;
         url = `/api/v1/admin/effective-access?principalType=${encodeURIComponent(this.contextType)}&principalId=${encodeURIComponent(this.contextId)}`;
       }
 

@@ -1,0 +1,41 @@
+{
+  "profile_map": {
+    "dock": "docker",
+    "k8s": "k8s-kind-a-agents"
+  },
+  "findings": [
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.cluster.env",
+      "profiles": [
+        "k8s"
+      ],
+      "message_contains": [
+        "runtimes.cluster.env has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.cluster.host",
+      "profiles": [
+        "k8s"
+      ],
+      "message_contains": [
+        "runtimes.cluster.host has no effect today"
+      ]
+    },
+    {
+      "code": "legacy_field_no_effect",
+      "severity": "notice",
+      "path": "runtimes.cluster.sync",
+      "profiles": [
+        "k8s"
+      ],
+      "message_contains": [
+        "runtimes.cluster.sync has no effect today"
+      ]
+    }
+  ]
+}

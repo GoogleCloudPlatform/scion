@@ -31,12 +31,6 @@ const DM_KEY = `dm:agent:${AGENT_ID}:user:${USER_ID}`;
 const DM_PATH = `/chat/dm/${encodeURIComponent(DM_KEY)}`;
 
 async function mocks(page: Page): Promise<void> {
-  await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = {
-      ...(window.__SCION_FEATURES__ ?? {}),
-      'web.terminal_workspace': true,
-    };
-  });
   await page.route('**/auth/me', (route) =>
     route.fulfill({ json: { id: USER_ID, email: 'u@example.test' } })
   );

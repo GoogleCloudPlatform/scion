@@ -83,7 +83,7 @@ A template sets **job keys**: what the agent does. Where and how it runs comes f
 | Kubernetes settings | Settings runtimes and profiles |
 | Telemetry | Settings `telemetry`, the hub telemetry config, or project telemetry policy |
 
-A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`); for a Hub-created agent, its inline `telemetry` can only turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
+A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in its own inline config (`--config`); its inline `telemetry` can only turn telemetry on or off. Project defaults and the requester override a template's job keys; hub `agent_defaults` fill only what the template leaves unset. See [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
 
 ### Template env
 
@@ -92,8 +92,9 @@ A single agent can still set `image`, `resources`, `volumes` and `kubernetes` in
 - It applies only when no other source sets the key: settings and harness-config env, hub, project and user env, request env, secrets, and the auth, harness and telemetry env the runtime adds all win over it.
 - Values are literal. `${VAR}` is not expanded, and an empty value is not filled from the broker host.
 - `SCION_*` keys are ignored.
-- The required auth keys of the harness-config (its `required_env[].any_of` keys) are never filled from a template. Other credential keys a harness reads are not protected this way, so supply credentials as secrets or hub env, never in a template.
+- No key the harness-config's auth metadata lists (its `required_env`, `required_files` alternative and `autodetect` env keys) is ever filled from a template. Supply credentials as secrets or hub env.
 - Edits take effect on the agent's next start: the broker reads the template's current env on every start, and never stores it in the agent's config.
+- A template `TZ` is not applied to Hub-dispatched agents; see [Times and Timezones](/scion/reference/times-and-timezones/).
 
 :::tip
 Top-level keys accept **either hyphens or underscores** — `default-harness-config` and `default_harness_config` are equivalent. Underscored form is canonical.
@@ -135,9 +136,9 @@ scion start coord --type ./templates/coordinator
 When you do not pass `--harness-config`, Scion resolves it in this order:
 
 1. **CLI flag** — `--harness-config` (alias `--harness`).
-2. **Project default** (Hub-created agents only) — the project's `scion.io/default-harness-config` setting.
+2. **Project default** — the project's `scion.io/default-harness-config` setting.
 3. **Template default** — `default_harness_config` in the template's `scion-agent.yaml`, else its `harness_config`. When both are set, `default_harness_config` wins.
-4. **Hub default** (Hub-created agents only) — `agent_defaults.default_harness_config` on the hub.
+4. **Hub default** — `agent_defaults.default_harness_config` on the hub.
 5. **System default** — `default_harness_config` in the active profile, then in `settings.yaml`.
 
 ## Template composition & inheritance
@@ -215,10 +216,10 @@ skills:
   - uri: "gh://my-org/skills/linting"           # federated GitHub source
     as: lint-rules                              # mount under a different name
   - uri: "skill://scion/user/alice/scratch"
-    optional: true                              # don't fail provisioning if unresolved
+    optional: true                              # skip (with a warning) if it can't be resolved or installed
 ```
 
-Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
+Each entry supports `uri` (required), `as` (mount under a different name), and `optional` (continue provisioning if it can't be resolved or installed; the skipped skill is logged as a warning). For the full URI grammar, scopes, versioning, and the `scion skills` publishing workflow, see [Skills — Authoring & Publishing](/scion/local/skills/) and [Skill Registry & Federation](/scion/hosted/single-node/skill-registry/).
 
 :::tip
 A skill supplied by a template always takes precedence over a **platform skill** (one embedded in the Scion binary and injected automatically) of the same name.
@@ -360,7 +361,7 @@ scion templates update code-reviewer --scope project
 
 Inside a project, `templates update` considers global and user templates plus the current project's templates (use `--project` to pick another project); outside a project it considers every template you can see. A failed refresh makes the command exit non-zero, in both text and JSON output.
 
-Refreshing works only for sources in a public GitHub repository: a folder on a branch (`https://github.com/<owner>/<repo>/tree/<branch>/<path>`), a branch's root (`https://github.com/<owner>/<repo>/tree/<branch>`), or `https://github.com/<owner>/<repo>[/<path>]` on branch `main`. As a `--url` override, a bare repository URL (`https://github.com/<owner>/<repo>` or `github.com/<owner>/<repo>`) is read as that repository's `.scion/templates` folder on branch `main`, the same as when importing. Folder names may contain letters, digits, spaces and `.` `_` `@` `+` `-`, and branch names letters, digits and `.` `_` `-`. Built-in templates and templates created without a source URL cannot be refreshed: `--all` skips them, and the Web UI does not offer a refresh for them. The Hub checks the source URL each time, refuses URLs that include a username or password, and limits how large the download and the extracted folder may be and how many entries the folder may contain (directories count toward this limit as well as files). A refresh writes only into the named template, even when the source folder holds several: it uses the one folder named after the template's name or slug, refuses a source with none or more than one such folder, and never creates a new template. A refresh does not touch harness-configs: a `harness-configs/` folder inside the template's source is stored as part of the template's files, but no Hub harness-config is created or updated from it. It needs the same permission as importing a template into that scope. With `--all`, each template's refresh has its own time limit.
+Refreshing works only for sources in a GitHub repository: a folder on a branch (`https://github.com/<owner>/<repo>/tree/<branch>/<path>`), a branch's root (`https://github.com/<owner>/<repo>/tree/<branch>`), or `https://github.com/<owner>/<repo>[/<path>]` on branch `main`. As a `--url` override, a bare repository URL (`https://github.com/<owner>/<repo>` or `github.com/<owner>/<repo>`) is read as that repository's `.scion/templates` folder on branch `main`, the same as when importing. Folder names may contain letters, digits, spaces and `.` `_` `@` `+` `-`, and branch names letters, digits and `.` `_` `-`. Built-in templates and templates created without a source URL cannot be refreshed: `--all` skips them, and the Web UI does not offer a refresh for them. The Hub checks the source URL each time, refuses URLs that include a username or password, and limits how large the download and the extracted folder may be and how many entries the folder may contain (directories count toward this limit as well as files). A refresh writes only into the named template, even when the source folder holds several: it uses the one folder named after the template's name or slug, refuses a source with none or more than one such folder, and never creates a new template. A refresh does not touch harness-configs: a `harness-configs/` folder inside the template's source is stored as part of the template's files, but no Hub harness-config is created or updated from it. It needs the same permission as importing a template into that scope. A source in a private repository needs a repository credential in the template's scope, the same one importing would use (see [Template and Harness-Config Imports](/scion/hosted/user/secrets/#template-and-harness-config-imports)). With `--all`, each template's refresh has its own time limit.
 
 The Web UI offers the same action as **Refresh from Source** on a template's detail page, and **Refresh All from Source** on the templates list, which refreshes a few templates at a time. The detail page shows the stored source without any username or password; sources that are not web URLs are shown as "non-web source".
 

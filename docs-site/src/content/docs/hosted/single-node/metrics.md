@@ -105,7 +105,7 @@ Environment variables override any settings file value and are the most convenie
 
 #### Client certificates (mTLS)
 
-For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a template. Set both or neither. Where a half pair is caught depends on where it comes from:
+For a generic OTLP gRPC endpoint that requires client certificate authentication, set `telemetry.cloud.tls.cert_file` and `telemetry.cloud.tls.key_file` (or `SCION_OTEL_CERT_FILE` and `SCION_OTEL_KEY_FILE`). The paths are read inside the agent container, so the files must be mounted there, for example through a file secret or a `volumes` entry in settings or the harness-config. Set both or neither. Where a half pair is caught depends on where it comes from:
 
 - In settings files or the host environment, a half pair (or a client certificate together with `tls.enabled: false`) fails settings load, so `scion` commands that load settings fail with that error, on the host or inside the agent.
 - A half pair that reaches the agent only through the agent environment is caught by `sciontool` at startup. The same happens when a file cannot be read, or when a client certificate is combined with plaintext transport or GCP-native export. `sciontool` logs the error (naming the path for file problems) and runs without its telemetry pipeline (no local receiver and no cloud export); the agent itself still runs. A half pair, or a client certificate with plaintext transport, is also in the agent environment, so `scion` commands inside the agent that load settings fail with the settings-load error as well.
@@ -346,7 +346,7 @@ For every significant lifecycle event (session start/end, tool use, model call),
 
 The Scion Hub maintains internal operational metrics for infrastructure monitoring. These are available via the `/api/v1/admin/metrics` endpoint (requires `hub-admin` role) and can be exported to standard monitoring tools.
 
-When `server.hub.gcp_project_id` is set, the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
+When Hub metrics export is on ([`server.hub.observability.metrics_enabled`](/scion/reference/server-config/#observability-export-serverhubobservability), or, when that switch is unset, `server.hub.gcp_project_id`), the Hub also exports its database pool, dispatch, notification and launch reaper metrics to Cloud Monitoring. To chart them per Hub instance, import the ready-made [Hub Monitoring Dashboard](/scion/hosted/single-node/hub-monitoring-dashboard/).
 
 ### GCP Token Metrics
 

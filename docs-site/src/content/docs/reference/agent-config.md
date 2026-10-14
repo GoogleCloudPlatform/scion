@@ -20,7 +20,7 @@ Previous versions of Scion used `scion-agent.json`. The new versioned settings s
 | :--- | :--- | :--- | :--- | :--- |
 | **Job keys** | `harness_config` / `default_harness_config`, `model`, `thinking_level`, `agent_instructions`, `system_prompt`, `skills`, `mcp_servers`, `command_args`, `task_flag`, `max_turns`, `max_model_calls`, `max_duration`, `services`, `secrets` (names only), `message_mode` | Set | Set; beats the project and the template | Project defaults, hub `agent_defaults`, broker settings, the harness-config |
 | **Template env** | `env` | A [fallback](#environment-variables-env) for the job's own tools | Request env, at its usual System A rank | Settings, hub env scopes, secrets, the runtime |
-| **Environment keys** | `image`, `resources`, `volumes`, `kubernetes`, `hub`, `telemetry` | **Ignored, with a warning** | Set for this agent (`telemetry`: on/off only for a Hub-created agent) | The harness-config (`config.yaml`), broker settings and profiles, hub settings, project policy |
+| **Environment keys** | `image`, `resources`, `volumes`, `kubernetes`, `hub`, `telemetry` | **Ignored, with a warning** | Set for this agent (`telemetry`: on/off only) | The harness-config (`config.yaml`), broker settings and profiles, hub settings, project policy |
 
 A template that sets an environment key still loads. The agent start prints `template <name> sets environment key(s) <keys>; ignored (environment comes from settings)`, the hub logs a warning naming the keys when the template is committed, and a hub admin can list every affected template with `GET /api/v1/admin/validate-resources` (`templateConfigFindings`, kind `environment_keys`). Remove the key from the template and set the value where the last column says. For the full precedence of every class, see [Settings Precedence](/scion/reference/settings-precedence/#the-model-a-template-describes-the-job-settings-describe-the-environment).
 
@@ -79,7 +79,7 @@ In a **template**, `env:` is for the job's own tools, and each variable is a fal
 - **It applies only when no other source sets the key.** Settings harness-config env, hub, project and user env, request env, secrets, and the env the runtime adds itself (auth, harness and telemetry env) all win over it.
 - **Values are literal.** `${VAR}` is not expanded (it is used as written, with a warning), and an empty value is not filled from the broker host's environment (it is skipped, with a warning).
 - **`SCION_*` keys are ignored.** That namespace belongs to the platform.
-- **Required auth keys never come from a template.** The keys in the `required_env[].any_of` sets of the harness-config's auth metadata are never filled from template env, even when nothing else sets them. Other credential keys a harness reads (such as its alternative or auto-detected keys) are not in that set and can be filled from template env, so supply credentials as secrets or hub env, never in a template.
+- **Credentials never come from a template.** Every env key the harness-config's auth metadata lists (its `required_env` `any_of` keys, `required_files` `alternative_env_keys` and `autodetect` env keys, for any auth type) is never filled from template env, even when nothing else sets it. Supply credentials as secrets or hub env instead.
 - **Edits take effect on the next start.** Template env is not stored in the agent's config; the broker reads it from the template's current version on every start. If the template can no longer be found, the start warns and applies none.
 
 In an agent's **inline config**, `env` is request env and ranks above the hub storage scopes; see [Settings Precedence](/scion/reference/settings-precedence/#a2-the-config-rung-sits-above-all-four-storage-scopes).
@@ -95,7 +95,7 @@ The keys in this section are **ignored in templates**, with a warning. They take
 | `resources` | object | Container resource requests/limits (see below). | Settings `default_resources`, profile `resources` and `harness_overrides`; hub `agent_defaults.resources`; project resource defaults |
 | `kubernetes` | object | Kubernetes runtime overrides (see below). | Settings runtimes and profiles |
 | `hub` | object | Hub endpoint override (see below). | Broker settings |
-| `telemetry` | object | Telemetry. For a Hub-created agent only `enabled` is honoured; a local `--config` applies the whole block. | Settings `telemetry`; hub telemetry config; project telemetry policy |
+| `telemetry` | object | Telemetry. Only `enabled` is honoured. | Settings `telemetry`; hub telemetry config; project telemetry policy |
 
 ### Workspace Clone
 
@@ -176,7 +176,7 @@ gemini:
 
 ### Telemetry (`telemetry`)
 
-An environment key. A template's `telemetry:` block is ignored. For a Hub-created agent, only `enabled` in the inline config is honoured: it turns telemetry on or off for that agent (the CLI's `--enable-telemetry` / `--disable-telemetry`), below the project's telemetry policy, and other inline telemetry fields are ignored with a warning. A local `scion start --config` still applies the whole `telemetry` block.
+An environment key. A template's `telemetry:` block is ignored. Only `enabled` in the inline config is honoured: it turns telemetry on or off for that agent (the CLI's `--enable-telemetry` / `--disable-telemetry`), below the project's telemetry policy, and other inline telemetry fields are ignored with a warning.
 
 ```yaml
 telemetry:
