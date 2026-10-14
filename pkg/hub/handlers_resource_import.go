@@ -510,16 +510,17 @@ func (s *Server) projectImportDecision(ctx context.Context, user UserIdentity, p
 // the hub scope, so a user access token needs that selector on a hub
 // boundary. Any other resource type is refused.
 func (s *Server) globalImportDecision(ctx context.Context, user UserIdentity, authzResourceType string) Decision {
+	var target Resource
 	var permissionID string
 	switch authzResourceType {
 	case "template":
-		permissionID = "template.create"
+		target, permissionID = Resource{Type: "template"}, "template.create"
 	case "harness_config":
-		permissionID = "harness_config.create"
+		target, permissionID = Resource{Type: "harness_config"}, "harness_config.create"
 	default:
 		return Decision{Allowed: false, Reason: "unsupported import resource type"}
 	}
-	return s.authzService.CheckAccessWithEvidence(ctx, user, Resource{Type: authzResourceType}, ActionCreate,
+	return s.authzService.CheckAccessWithEvidence(ctx, user, target, ActionCreate,
 		hubCollectionEvidence(permissionID))
 }
 
