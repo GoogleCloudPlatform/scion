@@ -43,7 +43,7 @@ with no trailing Enter. Supports control keys like arrows, Escape, etc.
 This is useful for interacting with interactive TUI applications running
 inside an agent's terminal session.
 
-In Hub mode, keys are delivered through the Hub's dedicated keys operation.
+Keys are delivered through the Hub's dedicated keys operation.
 This replaces the removed 'scion message --raw' flag. When run by an agent,
 this only works within the agent's own project; cross-project targets are
 refused. A human operator using --project can still target other projects.
@@ -78,7 +78,7 @@ Examples:
 			return fmt.Errorf("scion keys does not support cross-project targets; message the agent from within its own project")
 		}
 
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

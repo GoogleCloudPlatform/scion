@@ -1640,22 +1640,24 @@ type TemplateStore interface {
 
 	// UpdateTemplateContent writes the columns a commit owns (Files,
 	// ContentHash, Harness, DefaultHarnessConfig, AgentConfig, Layout,
-	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, Config,
-	// UpdatedBy) only if the stored row still matches expected
-	// (compare-and-swap). It never writes the metadata UpdateTemplate owns
-	// (Name, Slug, DisplayName, Description, Image, BaseTemplate, OwnerID,
-	// Scope, ScopeID, ProjectID), so neither writer can revert the other
-	// (ptone/scion#4221). Config is on the list only until the
-	// file-telemetry helper is removed (ptone/scion#4223). Returns ErrTemplateConflict when the row exists
-	// but no longer matches, and ErrNotFound when it does not exist.
+	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, UpdatedBy)
+	// only if the stored row still matches expected (compare-and-swap). It
+	// never writes the metadata UpdateTemplate owns (Name, Slug,
+	// DisplayName, Description, Image, BaseTemplate, OwnerID, Scope,
+	// ScopeID, ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221), and it never writes Config (ptone/scion#4223).
+	// Returns ErrTemplateConflict when the row exists but no longer
+	// matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
 	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
 	// template id, and only while the stored row has no snapshot and still
-	// matches expected (one conditional UPDATE). No other column changes,
-	// Updated included. It reports whether a row was written: false with a
-	// nil error means the row already has a snapshot, its content or layout
-	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// matches expected and the Updated time it read (one conditional
+	// UPDATE). No other column changes, Updated included. It reports whether
+	// a row was written: false with a nil error means the row already has a
+	// snapshot, its content or layout changed, a concurrent write changed its
+	// Updated time (ptone/scion#4674), or it no longer exists. A nil cfg
+	// writes nothing. Used to
 	// backfill rows committed before the snapshot existed (ptone/scion#4222).
 	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
 
@@ -2449,6 +2451,21 @@ type NotificationStore interface {
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
 	// proceed (no dispatcher, no broker) after an optimistic claim.
 	UnmarkNotificationDispatched(ctx context.Context, id string) error
+
+	// RecordNotificationDispatchAttempt atomically increments a
+	// notification's DispatchAttempts by one. Callers record an attempt just
+	// before each delivery attempt to a subscriber agent; one attempt is one
+	// dispatchWithBrokerRetry call in pkg/hub, whose internal deferred-retry
+	// loop is not counted separately.
+	// Returns ErrNotFound if the notification doesn't exist.
+	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
+
+	// SetNotificationDispatchOutcome records a notification's terminal
+	// dispatch outcome (NotificationOutcomeDelivered or
+	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
+	// not pick it up again. Returns ErrInvalidInput for any other outcome
+	// and ErrNotFound if the notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
@@ -3317,7 +3334,22 @@ type RoleStore interface {
 	//   - PrincipalType must be one of user/agent/group
 	//   - super-admin and project-owner bindings are direct-user-only
 	//   - Duplicate (role, principal, scope) is rejected
+	//   - A federated account (UserKindFederated) is refused
+	//     (ErrFederatedAccountRefused)
+	//   - A role that does not confer membership (project-visitor) is
+	//     refused (ErrNonMembershipRoleRefused); see CreateVisitorRoleBinding
 	CreateRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
+
+	// CreateVisitorRoleBinding creates a visitor grant: a binding of the
+	// seeded project-visitor role (system, ConfersMembership false), at
+	// project scope (non-empty ScopeID), to a user principal whose account
+	// is UserKindFederated. Anything else is refused with
+	// ErrVisitorBindingRefused (a missing user is ErrNotFound). NotBefore
+	// and ExpiresAt are optional and stored as given. RoleDefinitionID may
+	// be empty, in which case the project-visitor role is resolved by
+	// name. Returns ErrAlreadyExists for a duplicate. It is safe to call
+	// on the store passed to WithTx.
+	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
@@ -3368,13 +3400,17 @@ type RoleStore interface {
 
 	// GetProjectMembership returns the project membership for a user in a project.
 	// Returns ErrNotFound if the user is not a member of the project.
+	// The project membership reads (this, ListProjectMembers and
+	// IsProjectMember) count only active bindings of roles that confer
+	// membership (RoleDefinition.ConfersProjectMembership): a visitor is
+	// not a member.
 	GetProjectMembership(ctx context.Context, projectID, userID string) (*ProjectMembership, error)
 
 	// ListProjectMembers returns all members of a project via role bindings.
 	ListProjectMembers(ctx context.Context, projectID string) ([]*ProjectMembership, error)
 
-	// IsProjectMember returns true if the user has any project-scoped role binding
-	// for the given project.
+	// IsProjectMember returns true if the user has any active project-scoped
+	// role binding for the given project of a role that confers membership.
 	IsProjectMember(ctx context.Context, projectID, userID string) (bool, error)
 }
 

@@ -505,8 +505,8 @@ func rawMapKeys(m map[string]interface{}) []string {
 // it, so a key is never accepted without its effect. A change that wires a
 // key removes it here, adds the Go field and adds it to the JSON schema.
 var (
-	reservedInstanceKeys []string
-	// Every frozen runtime_target key is wired.
+	// Every frozen instance and runtime_target key is wired.
+	reservedInstanceKeys      []string
 	reservedRuntimeTargetKeys []string
 )
 
@@ -939,16 +939,6 @@ func copyRequiredSecrets(s []api.RequiredSecret) []api.RequiredSecret {
 		out[i] = sec
 	}
 	return out
-}
-
-// copyBoolPtr returns a new pointer to *b, or nil, so a tri-state value is
-// never shared between two copies of a config.
-func copyBoolPtr(b *bool) *bool {
-	if b == nil {
-		return nil
-	}
-	v := *b
-	return &v
 }
 
 // copyStringMap returns a copy of m (nil for an empty map).

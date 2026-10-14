@@ -137,3 +137,23 @@ func TestAgent_ProvisionedOnlyFalseIsExplicit(t *testing.T) {
 		t.Errorf("expected explicit provisionedOnly false, got %s", data)
 	}
 }
+
+// TestComputeAgentLaunch_Cause: the launch view carries the stored runtime
+// cause, and none when the row has none (ptone/scion#4666).
+func TestComputeAgentLaunch_Cause(t *testing.T) {
+	now := time.Now()
+	for _, cause := range []string{"runtime_forbidden", ""} {
+		a := &Agent{
+			ID: "a1", Phase: "error",
+			LaunchID: "L1", LaunchState: LaunchStateEnded, LaunchEndReason: LaunchEndReasonFailed,
+			LaunchKind: LaunchKindCreate, LaunchError: "runtime_error", LaunchCause: cause,
+		}
+		got := ComputeAgentLaunch(a, now)
+		if got == nil {
+			t.Fatal("expected a launch view")
+		}
+		if got.Cause != cause {
+			t.Fatalf("cause = %q, want %q", got.Cause, cause)
+		}
+	}
+}

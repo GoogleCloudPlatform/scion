@@ -45,6 +45,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
+	"github.com/GoogleCloudPlatform/scion/pkg/util"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	"gopkg.in/yaml.v3"
 )
@@ -709,6 +710,10 @@ func gitTracked(path string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), gitTrackedTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", "-C", filepath.Dir(abs), "ls-files", "--error-unmatch", filepath.Base(abs))
+	// This can run while the server loads its config, before it clears
+	// server secrets from its own env, so the child gets an env without
+	// them.
+	cmd.Env = util.EnvWithoutAgentRefusedNames(os.Environ())
 	return cmd.Run() == nil
 }
 

@@ -335,7 +335,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			return nil, fmt.Errorf("google identity resolver: existing user record is nil")
 		}
 		// Found a user by email. Verify no conflicting binding exists.
-		existingBindings, _ := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		// The store returns an empty slice and a nil error for a user with
+		// no bindings, so every non-nil error, store.ErrNotFound included,
+		// is returned and no binding is created.
+		existingBindings, listErr := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		if listErr != nil {
+			r.log.Error("google identity resolver: existing identities lookup failed",
+				"sub", identity.Subject, "user_id", existingUser.ID, "error", listErr)
+			return nil, fmt.Errorf("look up existing identities for user: %w", listErr)
+		}
 		for _, eb := range existingBindings {
 			if eb.Provider == "google" && eb.Issuer == canonicalIssuer && eb.Subject != identity.Subject {
 				// Another Google subject is already bound to this user.
@@ -379,6 +387,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			"email", normalizedEmail,
 			"user_id", existingUser.ID)
 		return existingUser, nil
+	}
+
+	// As with the binding lookup above, only store.ErrNotFound means "no
+	// user with this email exists". Any other store error is returned, so
+	// sign-in does not continue into new-user provisioning.
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: user lookup by email failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("look up user by email: %w", err)
 	}
 
 	// No existing user by email — provision a new user through the normal path.
@@ -498,6 +515,17 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 	} else if !r.authorize(ctx, normalizedEmail) {
 		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)
+		// Same audit record as the existing-record branches (auditDenied in
+		// applyLiveSignInPolicy). The decision above stands; the code is
+		// read only for the audit reason, and "" makes the reason follow
+		// the access mode.
+		if r.policyDeps.auditDenied != nil {
+			denial := ""
+			if r.signInDenial != nil {
+				denial = r.signInDenial(ctx, normalizedEmail)
+			}
+			r.policyDeps.auditDenied(ctx, normalizedEmail, denial)
+		}
 		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
 	}
 

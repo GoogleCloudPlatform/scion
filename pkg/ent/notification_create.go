@@ -94,6 +94,34 @@ func (_c *NotificationCreate) SetNillableAcknowledged(v *bool) *NotificationCrea
 	return _c
 }
 
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (_c *NotificationCreate) SetDispatchAttempts(v int) *NotificationCreate {
+	_c.mutation.SetDispatchAttempts(v)
+	return _c
+}
+
+// SetNillableDispatchAttempts sets the "dispatch_attempts" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableDispatchAttempts(v *int) *NotificationCreate {
+	if v != nil {
+		_c.SetDispatchAttempts(*v)
+	}
+	return _c
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (_c *NotificationCreate) SetDispatchOutcome(v string) *NotificationCreate {
+	_c.mutation.SetDispatchOutcome(v)
+	return _c
+}
+
+// SetNillableDispatchOutcome sets the "dispatch_outcome" field if the given value is not nil.
+func (_c *NotificationCreate) SetNillableDispatchOutcome(v *string) *NotificationCreate {
+	if v != nil {
+		_c.SetDispatchOutcome(*v)
+	}
+	return _c
+}
+
 // SetCreated sets the "created" field.
 func (_c *NotificationCreate) SetCreated(v time.Time) *NotificationCreate {
 	_c.mutation.SetCreated(v)
@@ -165,6 +193,14 @@ func (_c *NotificationCreate) defaults() {
 		v := notification.DefaultAcknowledged
 		_c.mutation.SetAcknowledged(v)
 	}
+	if _, ok := _c.mutation.DispatchAttempts(); !ok {
+		v := notification.DefaultDispatchAttempts
+		_c.mutation.SetDispatchAttempts(v)
+	}
+	if _, ok := _c.mutation.DispatchOutcome(); !ok {
+		v := notification.DefaultDispatchOutcome
+		_c.mutation.SetDispatchOutcome(v)
+	}
 	if _, ok := _c.mutation.Created(); !ok {
 		v := notification.DefaultCreated()
 		_c.mutation.SetCreated(v)
@@ -223,6 +259,17 @@ func (_c *NotificationCreate) check() error {
 	}
 	if _, ok := _c.mutation.Acknowledged(); !ok {
 		return &ValidationError{Name: "acknowledged", err: errors.New(`ent: missing required field "Notification.acknowledged"`)}
+	}
+	if _, ok := _c.mutation.DispatchAttempts(); !ok {
+		return &ValidationError{Name: "dispatch_attempts", err: errors.New(`ent: missing required field "Notification.dispatch_attempts"`)}
+	}
+	if v, ok := _c.mutation.DispatchAttempts(); ok {
+		if err := notification.DispatchAttemptsValidator(v); err != nil {
+			return &ValidationError{Name: "dispatch_attempts", err: fmt.Errorf(`ent: validator failed for field "Notification.dispatch_attempts": %w`, err)}
+		}
+	}
+	if _, ok := _c.mutation.DispatchOutcome(); !ok {
+		return &ValidationError{Name: "dispatch_outcome", err: errors.New(`ent: missing required field "Notification.dispatch_outcome"`)}
 	}
 	if _, ok := _c.mutation.Created(); !ok {
 		return &ValidationError{Name: "created", err: errors.New(`ent: missing required field "Notification.created"`)}
@@ -298,6 +345,14 @@ func (_c *NotificationCreate) createSpec() (*Notification, *sqlgraph.CreateSpec)
 	if value, ok := _c.mutation.Acknowledged(); ok {
 		_spec.SetField(notification.FieldAcknowledged, field.TypeBool, value)
 		_node.Acknowledged = value
+	}
+	if value, ok := _c.mutation.DispatchAttempts(); ok {
+		_spec.SetField(notification.FieldDispatchAttempts, field.TypeInt, value)
+		_node.DispatchAttempts = value
+	}
+	if value, ok := _c.mutation.DispatchOutcome(); ok {
+		_spec.SetField(notification.FieldDispatchOutcome, field.TypeString, value)
+		_node.DispatchOutcome = value
 	}
 	if value, ok := _c.mutation.Created(); ok {
 		_spec.SetField(notification.FieldCreated, field.TypeTime, value)
@@ -460,6 +515,36 @@ func (u *NotificationUpsert) SetAcknowledged(v bool) *NotificationUpsert {
 // UpdateAcknowledged sets the "acknowledged" field to the value that was provided on create.
 func (u *NotificationUpsert) UpdateAcknowledged() *NotificationUpsert {
 	u.SetExcluded(notification.FieldAcknowledged)
+	return u
+}
+
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (u *NotificationUpsert) SetDispatchAttempts(v int) *NotificationUpsert {
+	u.Set(notification.FieldDispatchAttempts, v)
+	return u
+}
+
+// UpdateDispatchAttempts sets the "dispatch_attempts" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateDispatchAttempts() *NotificationUpsert {
+	u.SetExcluded(notification.FieldDispatchAttempts)
+	return u
+}
+
+// AddDispatchAttempts adds v to the "dispatch_attempts" field.
+func (u *NotificationUpsert) AddDispatchAttempts(v int) *NotificationUpsert {
+	u.Add(notification.FieldDispatchAttempts, v)
+	return u
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (u *NotificationUpsert) SetDispatchOutcome(v string) *NotificationUpsert {
+	u.Set(notification.FieldDispatchOutcome, v)
+	return u
+}
+
+// UpdateDispatchOutcome sets the "dispatch_outcome" field to the value that was provided on create.
+func (u *NotificationUpsert) UpdateDispatchOutcome() *NotificationUpsert {
+	u.SetExcluded(notification.FieldDispatchOutcome)
 	return u
 }
 
@@ -637,6 +722,41 @@ func (u *NotificationUpsertOne) SetAcknowledged(v bool) *NotificationUpsertOne {
 func (u *NotificationUpsertOne) UpdateAcknowledged() *NotificationUpsertOne {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateAcknowledged()
+	})
+}
+
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (u *NotificationUpsertOne) SetDispatchAttempts(v int) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchAttempts(v)
+	})
+}
+
+// AddDispatchAttempts adds v to the "dispatch_attempts" field.
+func (u *NotificationUpsertOne) AddDispatchAttempts(v int) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.AddDispatchAttempts(v)
+	})
+}
+
+// UpdateDispatchAttempts sets the "dispatch_attempts" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateDispatchAttempts() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchAttempts()
+	})
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (u *NotificationUpsertOne) SetDispatchOutcome(v string) *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchOutcome(v)
+	})
+}
+
+// UpdateDispatchOutcome sets the "dispatch_outcome" field to the value that was provided on create.
+func (u *NotificationUpsertOne) UpdateDispatchOutcome() *NotificationUpsertOne {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchOutcome()
 	})
 }
 
@@ -981,6 +1101,41 @@ func (u *NotificationUpsertBulk) SetAcknowledged(v bool) *NotificationUpsertBulk
 func (u *NotificationUpsertBulk) UpdateAcknowledged() *NotificationUpsertBulk {
 	return u.Update(func(s *NotificationUpsert) {
 		s.UpdateAcknowledged()
+	})
+}
+
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (u *NotificationUpsertBulk) SetDispatchAttempts(v int) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchAttempts(v)
+	})
+}
+
+// AddDispatchAttempts adds v to the "dispatch_attempts" field.
+func (u *NotificationUpsertBulk) AddDispatchAttempts(v int) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.AddDispatchAttempts(v)
+	})
+}
+
+// UpdateDispatchAttempts sets the "dispatch_attempts" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateDispatchAttempts() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchAttempts()
+	})
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (u *NotificationUpsertBulk) SetDispatchOutcome(v string) *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.SetDispatchOutcome(v)
+	})
+}
+
+// UpdateDispatchOutcome sets the "dispatch_outcome" field to the value that was provided on create.
+func (u *NotificationUpsertBulk) UpdateDispatchOutcome() *NotificationUpsertBulk {
+	return u.Update(func(s *NotificationUpsert) {
+		s.UpdateDispatchOutcome()
 	})
 }
 

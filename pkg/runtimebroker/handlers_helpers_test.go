@@ -509,6 +509,9 @@ type provisionCapturingManager struct {
 	lastProvisionCtx context.Context
 	// lastReprovisionCtx captures the context passed to Reprovision.
 	lastReprovisionCtx context.Context
+	// onStart, when set, runs at the start of Start, so a test can observe
+	// what the agent's start would read.
+	onStart func(ctx context.Context, opts api.StartOptions)
 }
 
 func (m *provisionCapturingManager) Provision(ctx context.Context, opts api.StartOptions) (*api.ScionConfig, error) {
@@ -539,6 +542,9 @@ func (m *provisionCapturingManager) Reprovision(ctx context.Context, opts api.St
 func (m *provisionCapturingManager) Start(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
 	m.startCalled = true
 	m.lastOpts = opts
+	if m.onStart != nil {
+		m.onStart(ctx, opts)
+	}
 	return m.mockManager.Start(ctx, opts)
 }
 
