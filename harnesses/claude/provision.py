@@ -61,6 +61,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from typing import Any
@@ -634,18 +635,88 @@ def _remove_path(path: str) -> None:
 GENERATED_MANIFEST_REL = f"{CLAUDE_PLUGIN_MANIFEST_DIR}/{AGENT_PLUGIN_MANIFEST}"
 
 
-def _sha256_file(path: str) -> str | None:
-    """sha256 of a regular file (never through a symlink), or None."""
+# Every read or delete under a plugin dir goes through these fd-relative
+# helpers: the plugin dir is opened with O_NOFOLLOW, then each path
+# component with dir_fd and O_NOFOLLOW, so a symlink anywhere below the
+# plugin dir (a replaced file or a replaced ancestor dir) is never followed.
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+_FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
+
+
+def _safe_rel(rel: Any) -> bool:
+    """A recorded path: relative, normalised, not ".", no ".." component,
+    no NUL. Anything else is ignored (never joined onto the plugin dir)."""
+    return (
+        isinstance(rel, str) and bool(rel) and "\x00" not in rel
+        and not os.path.isabs(rel) and os.path.normpath(rel) == rel
+        and rel != "." and ".." not in rel.split(os.sep)
+    )
+
+
+def _open_dir(path: str) -> int | None:
+    """An fd for path when it is a real directory (not a symlink), else None."""
     try:
-        if os.path.islink(path) or not os.path.isfile(path):
+        return os.open(path, _DIR_FLAGS)
+    except OSError:
+        return None
+
+
+def _open_parent(root_fd: int, rel: str) -> tuple[int, str] | None:
+    """(fd of rel's parent dir, rel's last component), walking every
+    ancestor below root_fd with O_NOFOLLOW; None when an ancestor is a
+    symlink, not a dir, or missing. The caller closes the fd."""
+    parts = rel.split(os.sep)
+    fd = os.dup(root_fd)
+    try:
+        for part in parts[:-1]:
+            nfd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except OSError:
+        os.close(fd)
+        return None
+    return fd, parts[-1]
+
+
+def _sha256_at(dir_fd: int, name: str) -> str | None:
+    """sha256 of the regular file name in dir_fd (never through a symlink)."""
+    try:
+        fd = os.open(name, _FILE_FLAGS, dir_fd=dir_fd)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None
         h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1 << 20), b""):
-                h.update(chunk)
+        while True:
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            h.update(chunk)
         return h.hexdigest()
     except OSError:
         return None
+    finally:
+        os.close(fd)
+
+
+def _sha256_rel(root: str, rel: str) -> str | None:
+    """sha256 of root/rel when root, every ancestor and the file are real
+    (no symlink anywhere below root), else None."""
+    root_fd = _open_dir(root)
+    if root_fd is None:
+        return None
+    try:
+        parent = _open_parent(root_fd, rel)
+        if parent is None:
+            return None
+        pfd, name = parent
+        try:
+            return _sha256_at(pfd, name)
+        finally:
+            os.close(pfd)
+    finally:
+        os.close(root_fd)
 
 
 def _walk_entries(root: str) -> tuple[list[str], list[str]]:
@@ -718,6 +789,82 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
     def _state_path(self) -> str:
         return os.path.join(scion_harness.agent_plugins_dir(), f"state-{self.harness}.json")
 
+    def _pending_path(self) -> str:
+        return os.path.join(scion_harness.agent_plugins_dir(), f"pending-{self.harness}.json")
+
+    def _load_pending(self) -> dict[str, Any]:
+        """Intent records: installs whose swap may have happened without the
+        state save that follows (a crash or the provisioner timeout)."""
+        path = self._pending_path()
+        try:
+            if os.path.islink(path):
+                return {}
+            doc = scion_harness.load_json(path)
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(doc, dict) or doc.get("schema_version") != scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION:
+            return {}
+        plugins = doc.get("plugins")
+        return {k: v for k, v in plugins.items() if isinstance(v, dict)} if isinstance(plugins, dict) else {}
+
+    def _save_pending(self, pending: dict[str, Any]) -> None:
+        path = self._pending_path()
+        if not pending:
+            try:
+                os.unlink(path)
+            except FileNotFoundError:
+                pass
+            return
+        scion_harness.atomic_write_json(path, {
+            "schema_version": scion_harness.AGENT_PLUGINS_STATE_SCHEMA_VERSION,
+            "harness": self.harness,
+            "plugins": pending,
+        })
+
+    def _settle_pending(self, recorded: dict[str, Any]) -> bool:
+        """Finish or discard the intent records of interrupted installs.
+        A target that holds exactly what the intent recorded (all hashes
+        match, nothing else) is adopted into the state; one that still
+        matches the existing record is left to it; anything else is handed
+        back using the intent's file list. Returns whether recorded changed."""
+        pending = self._load_pending()
+        if not pending:
+            return False
+        changed = False
+        for name in sorted(pending):
+            entry = pending[name]
+            ref = entry.get("native_ref") if isinstance(entry.get("native_ref"), dict) else {}
+            rec = recorded.get(name) if isinstance(recorded.get(name), dict) else None
+            target = self.target(name)
+            if not scion_harness.valid_agent_plugin_name(name) or not self._recorded_files(ref):
+                continue
+            if rec is not None and rec.get("native_ref") == ref:
+                continue  # the state save happened: confirmed
+            if not self._is_real_dir(target):
+                continue  # the swap never happened
+            if not self._foreign(target, ref, hash_files=True):
+                recorded[name] = {
+                    "digest": entry.get("digest"),
+                    "version": entry.get("version"),
+                    "native_ref": ref,
+                }
+                self.owned.add(name)
+                self.refs[name] = ref
+                changed = True
+                self.ctx.info(f"agent plugin {name}: recorded an install interrupted before its state was saved")
+                continue
+            old_ref = rec.get("native_ref") if rec is not None and isinstance(rec.get("native_ref"), dict) else None
+            if old_ref is not None and not self._foreign(target, old_ref, hash_files=True):
+                continue  # still the recorded install: the swap never happened
+            self._hand_back(name, ref, f"{target} does not match an interrupted install")
+            if rec is not None:
+                recorded.pop(name, None)
+                self.owned.discard(name)
+                self.refs.pop(name, None)
+                changed = True
+        self._save_pending({})
+        return changed
+
     def _recorded_plugins(self) -> dict[str, Any]:
         """The plugins recorded in the state file; {} when absent or
         unreadable (reconcile reports an unreadable file)."""
@@ -744,12 +891,12 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         files = ref.get("files")
         if not isinstance(files, dict):
             return {}
-        return {k: v for k, v in files.items() if isinstance(k, str) and isinstance(v, str)}
+        return {k: v for k, v in files.items() if _safe_rel(k) and isinstance(v, str)}
 
     @staticmethod
     def _recorded_dirs(ref: dict[str, Any]) -> set[str]:
         dirs = ref.get("dirs")
-        return {d for d in dirs if isinstance(d, str)} if isinstance(dirs, list) else set()
+        return {d for d in dirs if _safe_rel(d)} if isinstance(dirs, list) else set()
 
     def _is_real_dir(self, path: str) -> bool:
         return os.path.isdir(path) and not os.path.islink(path)
@@ -771,7 +918,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             if not os.path.lexists(path):
                 continue
             if rel == GENERATED_MANIFEST_REL or hash_files:
-                if _sha256_file(path) != sha:
+                if _sha256_rel(target, rel) != sha:
                     out.append(rel)
             elif os.path.islink(path) or not os.path.isfile(path):
                 out.append(rel)
@@ -779,19 +926,43 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
     def _remove_ours(self, target: str, ref: dict[str, Any]) -> None:
         """Delete the recorded files whose content still matches, then the
-        recorded dirs (deepest first) and the target itself when empty."""
-        for rel, sha in sorted(self._recorded_files(ref).items()):
-            path = os.path.join(target, rel)
-            if _sha256_file(path) == sha:
-                os.unlink(path)
-        dirs = sorted(self._recorded_dirs(ref), key=lambda d: d.count(os.sep), reverse=True)
-        for rel in [*dirs, "."]:
-            path = os.path.normpath(os.path.join(target, rel))
-            try:
-                if self._is_real_dir(path) and not os.listdir(path):
-                    os.rmdir(path)
-            except OSError:
-                pass
+        recorded dirs (deepest first) and the target itself when empty.
+        Every operation is relative to an O_NOFOLLOW fd for the target: an
+        entry below a symlinked or non-dir ancestor is skipped, a symlink is
+        never followed, and unlink/rmdir act on the entry itself."""
+        root_fd = _open_dir(target)
+        if root_fd is None:
+            return
+        try:
+            for rel, sha in sorted(self._recorded_files(ref).items()):
+                parent = _open_parent(root_fd, rel)
+                if parent is None:
+                    continue
+                pfd, name = parent
+                try:
+                    if _sha256_at(pfd, name) == sha:
+                        os.unlink(name, dir_fd=pfd)
+                finally:
+                    os.close(pfd)
+            dirs = sorted(self._recorded_dirs(ref), key=lambda d: d.count(os.sep), reverse=True)
+            for rel in dirs:
+                parent = _open_parent(root_fd, rel)
+                if parent is None:
+                    continue
+                pfd, name = parent
+                try:
+                    os.rmdir(name, dir_fd=pfd)  # only an empty real dir; never a symlink
+                except OSError:
+                    pass
+                finally:
+                    os.close(pfd)
+        finally:
+            os.close(root_fd)
+        try:
+            if self._is_real_dir(target) and not os.listdir(target):
+                os.rmdir(target)
+        except OSError:
+            pass
 
     def _hand_back(self, name: str, ref: dict[str, Any], why: str) -> None:
         """Remove only Scion's files from the plugin dir and leave the rest
@@ -829,7 +1000,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         self._sweep_leftovers(recorded)
         if not self.index_ok:
             return  # an unreadable index: change nothing (reconcile warns)
-        changed = False
+        changed = self._settle_pending(recorded)
         for name in sorted(recorded):
             rec = recorded[name]
             if not scion_harness.valid_agent_plugin_name(name) or not isinstance(rec, dict):
@@ -927,12 +1098,15 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
         tmp = os.path.join(self.skills_dir, f".{name}.tmp")
         old = os.path.join(self.skills_dir, f".{name}.old")
+        wrote_intent = False
         try:
             # PLUGIN_DATA (spec 9.1): created before launch, private to the
             # agent user, kept across updates and removals. Created first,
             # so nothing can fail after the new dir is in place.
+            if os.path.islink(data_dir):
+                raise OSError(f"{data_dir} is a symlink")
             os.makedirs(data_dir, mode=0o700, exist_ok=True)
-            os.chmod(data_dir, 0o700)
+            os.chmod(data_dir, 0o700)  # not a symlink (checked above)
             os.makedirs(self.skills_dir, exist_ok=True)
             for leftover in (tmp, old):
                 _remove_path(leftover)
@@ -957,11 +1131,19 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             recorded: dict[str, str] = {}
             for rel in files:
                 path = os.path.join(tmp, rel)
-                sha = _sha256_file(path)
+                sha = _sha256_rel(tmp, rel)
                 if sha is None:
                     _remove_path(path)
                     continue
                 recorded[rel] = sha
+            ref = {"path": target, "files": recorded, "dirs": dirs}
+            # Intent record: if the process dies after the swap but before
+            # reconcile saves the state, the next start adopts the install
+            # (see _settle_pending) instead of finding an unowned plugin.
+            pending = self._load_pending()
+            pending[name] = {"digest": plugin.digest, "version": plugin.version, "native_ref": ref}
+            self._save_pending(pending)
+            wrote_intent = True
             # Atomic swap: old aside (verified Scion's above), tmp into place.
             if os.path.lexists(target):
                 os.rename(target, old)
@@ -976,6 +1158,13 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 _remove_path(tmp)
             except OSError:
                 pass
+            if wrote_intent:
+                try:
+                    pending = self._load_pending()
+                    pending.pop(name, None)
+                    self._save_pending(pending)
+                except OSError:
+                    pass
             raise scion_harness.PluginInstallError(f"cannot write {target}: {exc}") from None
         # The new plugin is in place: a leftover old copy is only a warning
         # (it is hidden, and the next start sweeps it).
@@ -984,7 +1173,6 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         except OSError as exc:
             self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
         self.owned.add(name)
-        ref = {"path": target, "files": recorded, "dirs": dirs}
         self.refs[name] = ref
         return ref
 
@@ -1002,7 +1190,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             except OSError as exc:
                 raise scion_harness.PluginInstallError(f"cannot remove {target}: {exc}") from None
             gen_sha = self._recorded_files(native_ref).get(GENERATED_MANIFEST_REL)
-            if gen_sha and _sha256_file(os.path.join(target, GENERATED_MANIFEST_REL)) == gen_sha:
+            if gen_sha and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha:
                 raise scion_harness.PluginInstallError(f"{target} is still present")
             if os.path.lexists(target):
                 shown = ", ".join(foreign[:3]) + (", …" if len(foreign) > 3 else "")
@@ -1026,7 +1214,7 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         target = self.target(name)
         return (
             bool(gen_sha) and self._is_real_dir(target)
-            and _sha256_file(os.path.join(target, GENERATED_MANIFEST_REL)) == gen_sha
+            and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha
             and self._is_real_dir(self.data_dir(name))
         )
 

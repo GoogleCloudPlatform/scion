@@ -1364,10 +1364,21 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
             "hand-added": {"notes.txt": "mine"},
             "hand-edited": {"skills/hello/SKILL.md": "edited by hand"},
             "symlinked-skill": {},
+            # Read through the symlink: the outside copy, identical content.
+            "symlinked-dir": {"skills/hello/SKILL.md": "PLUM-7"},
         }[kind]
 
     def apply(self, kind: str) -> dict[str, str]:
         files = self.foreign(kind)
+        if kind == "symlinked-dir":
+            # Review round 6, finding 1: a recorded dir replaced by a symlink
+            # to an outside copy whose files match Scion's hashes exactly.
+            outside = os.path.join(self.home, "src-skills")
+            shutil.rmtree(outside, ignore_errors=True)
+            shutil.copytree(os.path.join(self.skills, "p", "skills"), outside)
+            shutil.rmtree(os.path.join(self.skills, "p", "skills"))
+            os.symlink(outside, os.path.join(self.skills, "p", "skills"))
+            return files
         for rel, text in files.items():
             self.put(rel, text)
         if kind == "symlinked-skill":
@@ -1380,6 +1391,10 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
     def assert_kept(self, kind: str, files: dict[str, str]) -> None:
         for rel, text in files.items():
             self.assertEqual(self.read("p", *rel.split("/")), text, f"{kind}: {rel}")
+        if kind == "symlinked-dir":
+            self.assertTrue(os.path.islink(os.path.join(self.skills, "p", "skills")))
+            with open(os.path.join(self.home, "src-skills", "hello", "SKILL.md")) as f:
+                self.assertEqual(f.read(), "PLUM-7", "the outside file survives")
         if kind == "symlinked-skill":
             self.assertTrue(os.path.islink(os.path.join(self.skills, "p", "SKILL.md")))
             with open(os.path.join(self.home, "elsewhere.md")) as f:
@@ -1394,7 +1409,7 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
             self.assertFalse(os.path.lexists(os.path.join(self.skills, "p", rel)), f"{kind}: {rel}")
 
     KINDS = ("template-skill", "template-dir-no-skill-md", "template-claude-plugin",
-             "hand-added", "hand-edited", "symlinked-skill")
+             "hand-added", "hand-edited", "symlinked-skill", "symlinked-dir")
 
     def fresh(self) -> None:
         for d in (os.path.join(self.home, ".claude"), os.path.join(self.home, ".scion", "agent-plugins")):
@@ -1577,6 +1592,126 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
             inst.install(p, p.staged_dir)
         self.assertEqual(self.read("p", "notes.txt"), "mine")
         self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "bin", "srv")))
+
+    def test_recorded_paths_are_validated(self) -> None:
+        for rel, ok in (("a", True), ("a/b", True), (".claude-plugin/plugin.json", True),
+                        ("", False), (".", False), ("..", False), ("../x", False), ("a/../b", False),
+                        ("/etc/passwd", False), ("a//b", False), ("a/", False), ("./a", False),
+                        ("a\x00b", False), (None, False), (3, False)):
+            self.assertEqual(provision._safe_rel(rel), ok, repr(rel))
+        # A tampered record pointing outside the plugin dir is ignored.
+        self.install_p()
+        outside = os.path.join(self.skills, "outside.txt")
+        with open(outside, "w") as f:
+            f.write("keep")
+        with open(outside, "rb") as f:
+            sha = hashlib.sha256(f.read()).hexdigest()
+        path = os.path.join(self.root, "state-claude.json")
+        with open(path) as f:
+            doc = json.load(f)
+        files = doc["plugins"]["p"]["native_ref"]["files"]
+        files["../outside.txt"] = sha
+        files[outside] = sha
+        with open(path, "w") as f:
+            json.dump(doc, f)
+        self.stage({})
+        self.reconcile([])
+        self.assertEqual(open(outside).read(), "keep")
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+
+    def pending_path(self) -> str:
+        return os.path.join(self.root, "pending-claude.json")
+
+    def direct_install(self, digest: str, skill: str = "PLUM-7") -> None:
+        """install() without reconcile's state save: a crash right after the
+        swap."""
+        self.stage({"p": {"digest": digest, "skill": skill}})
+        ctx = self.ctx([])
+        inst = provision.ClaudePluginInstaller(ctx, claude_version="2.1.296")
+        [p] = scion_harness.read_agent_plugins(ctx)
+        if os.path.exists(os.path.join(self.skills, "p")):
+            inst.uninstall("p", self.state()["p"]["native_ref"])
+        inst.install(p, p.staged_dir)
+
+    def test_crash_after_swap_on_fresh_install_is_adopted(self) -> None:
+        # Review round 6, finding 2.
+        self.direct_install("d1")
+        self.assertEqual(self.state(), {})
+        self.assertTrue(os.path.isfile(self.pending_path()))
+        warnings: list[str] = []
+        self.cli.calls.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [], "adopted, then the fast path")
+        self.assertEqual(self.state()["p"]["digest"], "d1")
+        self.assertFalse(os.path.exists(self.pending_path()))
+        # And it is fully owned: dropping it removes it.
+        self.stage({})
+        self.reconcile([])
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+
+    def test_crash_after_swap_on_update_is_adopted(self) -> None:
+        self.install_p()
+        self.direct_install("d2", "PLUM-8")
+        self.assertEqual(self.state()["p"]["digest"], "d1", "the state save never happened")
+        self.cli.calls.clear()
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.cli.calls, [])
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+
+    def test_confirmed_intent_is_cleared(self) -> None:
+        self.install_p()
+        self.assertTrue(os.path.isfile(self.pending_path()))
+        before = self.state()
+        self.reconcile([])
+        self.assertFalse(os.path.exists(self.pending_path()))
+        self.assertEqual(self.state(), before)
+
+    def test_intent_without_swap_is_discarded(self) -> None:
+        # The intent was written but the swap never happened: the target is
+        # still the recorded install, which is kept as it is.
+        self.install_p()
+        before = self.state()
+        with open(self.pending_path(), "w") as f:
+            json.dump({"schema_version": 1, "harness": "claude", "plugins": {"p": {
+                "digest": "d9", "version": "0.1.0",
+                "native_ref": {"path": os.path.join(self.skills, "p"),
+                               "files": {"other.txt": "0" * 64}, "dirs": []}}}}, f)
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.state(), before)
+        self.assertFalse(os.path.exists(self.pending_path()))
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", "bin", "srv")))
+
+    def test_intent_with_edited_target_is_handed_back(self) -> None:
+        self.direct_install("d1")
+        self.put("notes.txt", "mine")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(self.read("p", "notes.txt"), "mine")
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "bin", "srv")))
+        self.assertNotIn("p", self.state())
+        self.assertTrue(any("does not match an interrupted install" in w for w in warnings), warnings)
+        self.assertFalse(os.path.exists(self.pending_path()))
+
+    def test_failed_install_clears_its_intent(self) -> None:
+        self.stage({"p": {}})
+        real_rename = os.rename
+        target = os.path.join(self.skills, "p")
+
+        def rename(src, dst):
+            if dst == target:
+                raise OSError("disk full")
+            return real_rename(src, dst)
+
+        with mock.patch.object(os, "rename", rename):
+            self.reconcile([])
+        self.assertFalse(os.path.exists(self.pending_path()))
+        self.assertFalse(os.path.exists(target))
 
     def test_legacy_record_without_files_is_handed_back(self) -> None:
         # A record that lists no files (written before this change) owns
