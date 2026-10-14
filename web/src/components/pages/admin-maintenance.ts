@@ -1545,7 +1545,7 @@ export class ScionPageAdminMaintenance extends LitElement {
         class="reissue-confirm"
         label="Apply Scope Re-issue"
         open
-        @sl-request-close=${() => this.closeReissueConfirm()}
+        @sl-request-close=${(e: Event) => this.closeReissueConfirm(e)}
       >
         <div class="dialog-body">
           <p>Re-issue role scopes for every agent on the hub?</p>
@@ -1581,8 +1581,16 @@ export class ScionPageAdminMaintenance extends LitElement {
     if (this.reissueResult?.dry_run) this.reissueConfirmOpen = true;
   }
 
-  private closeReissueConfirm(): void {
-    if (!this.reissueLoading) this.reissueConfirmOpen = false;
+  /**
+   * Closes the apply confirmation. While a request is in flight the dialog
+   * stays open: the sl-request-close event is cancelled so it is not hidden.
+   */
+  private closeReissueConfirm(e?: Event): void {
+    if (this.reissueLoading) {
+      e?.preventDefault();
+      return;
+    }
+    this.reissueConfirmOpen = false;
   }
 
   /** Runs the bulk scope re-issue as a dry run and shows its result. */
@@ -1590,9 +1598,12 @@ export class ScionPageAdminMaintenance extends LitElement {
     await this.runReissue(true);
   }
 
-  /** Applies the bulk scope re-issue; reached only from the confirm dialog. */
+  /**
+   * Applies the bulk scope re-issue; reached only from the confirm dialog.
+   * A click while a request is in flight sends nothing.
+   */
   private async handleReissueApply(): Promise<void> {
-    if (!this.reissueConfirmOpen) return;
+    if (!this.reissueConfirmOpen || this.reissueLoading) return;
     await this.runReissue(false);
     this.reissueConfirmOpen = false;
   }

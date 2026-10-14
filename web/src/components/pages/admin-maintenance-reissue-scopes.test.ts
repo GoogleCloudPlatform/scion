@@ -67,26 +67,37 @@ let calls: Call[] = [];
 
 interface MountOpts {
   superAdmin: boolean;
+  /** Status for every re-issue request (dry run and apply). */
   reissueStatus?: number;
+  /** Status for the apply request (dry_run false) only. */
+  applyStatus?: number;
+  /** When set, the apply response waits for this promise. */
+  holdApply?: Promise<void>;
 }
 
 function makeHandler(
   opts: MountOpts
 ): (input: string | URL | Request, init?: RequestInit) => Promise<Response> {
-  return (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+  return async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
     const path = new URL(url, 'http://localhost').pathname;
     const body = typeof init?.body === 'string' ? (JSON.parse(init.body) as unknown) : undefined;
     calls.push({ path, body });
     let status = 200;
     let out: unknown = {};
+    let wait: Promise<void> = Promise.resolve();
     if (path === '/api/v1/auth/admin-status') {
       out = { isAdmin: opts.superAdmin, isSuperAdmin: opts.superAdmin, permissions: [] };
     } else if (path === RESET_AUTH_PATH) {
       const req = (body ?? {}) as { reissue_scopes?: boolean; dry_run?: boolean };
+      const apply = req.dry_run === false;
+      if (apply && opts.holdApply) wait = opts.holdApply;
       if (opts.reissueStatus && opts.reissueStatus !== 200) {
         status = opts.reissueStatus;
         out = { error: { code: 'forbidden', message: 'hub super-admin required' } };
+      } else if (apply && opts.applyStatus && opts.applyStatus !== 200) {
+        status = opts.applyStatus;
+        out = { error: { code: 'unavailable', message: 'agent list could not be read' } };
       } else {
         out = reissueResult(req.dry_run !== false);
       }
@@ -95,12 +106,11 @@ function makeHandler(
     } else if (path.endsWith('/operations')) {
       out = { migrations: [], operations: [] };
     }
-    return Promise.resolve(
-      new Response(JSON.stringify(out), {
-        status,
-        headers: { 'Content-Type': 'application/json' },
-      })
-    );
+    await wait;
+    return new Response(JSON.stringify(out), {
+      status,
+      headers: { 'Content-Type': 'application/json' },
+    });
   };
 }
 
@@ -197,7 +207,11 @@ describe('admin maintenance reset auth: re-issue scopes', () => {
   });
 
   it('applies only after confirmation and sends dry_run false', async () => {
-    const page = await mount({ superAdmin: true });
+    let release: () => void = () => {};
+    const holdApply = new Promise<void>((r) => {
+      release = r;
+    });
+    const page = await mount({ superAdmin: true, holdApply });
     q(page, '.reissue-dry-run')!.click();
     await settle(page);
 
@@ -218,6 +232,21 @@ describe('admin maintenance reset auth: re-issue scopes', () => {
     q(page, '.reissue-confirm-apply')!.click();
     await settle(page);
 
+    // While the apply request is in flight, a second Apply sends nothing
+    // and the dialog refuses to close.
+    expect(reissueCalls()).toHaveLength(2);
+    q(page, '.reissue-confirm-apply')!.click();
+    await settle(page);
+    expect(reissueCalls()).toHaveLength(2);
+    const closeEvent = new Event('sl-request-close', { cancelable: true });
+    q(page, 'sl-dialog.reissue-confirm')!.dispatchEvent(closeEvent);
+    await settle(page);
+    expect(closeEvent.defaultPrevented).toBe(true);
+    expect(q(page, 'sl-dialog.reissue-confirm')).not.toBeNull();
+
+    release();
+    await settle(page);
+
     const sent = reissueCalls();
     expect(sent).toHaveLength(2);
     expect(sent[1].body).toEqual({ reissue_scopes: true, dry_run: false });
@@ -226,6 +255,28 @@ describe('admin maintenance reset auth: re-issue scopes', () => {
       '3 agents: 1 changed, 1 unchanged, 1 refused, 0 token not delivered'
     );
     expect(q(page, '.reissue-dry-run-note')).toBeNull();
+    expect(q(page, '.reissue-apply')).toBeNull();
+  });
+
+  it('renders an apply error and sends exactly one dry_run false request', async () => {
+    const page = await mount({ superAdmin: true, applyStatus: 503 });
+    q(page, '.reissue-dry-run')!.click();
+    await settle(page);
+    q(page, '.reissue-apply')!.click();
+    await settle(page);
+    q(page, '.reissue-confirm-apply')!.click();
+    await settle(page);
+
+    const applies = reissueCalls().filter(
+      (c) => (c.body as { dry_run?: boolean }).dry_run === false
+    );
+    expect(applies).toHaveLength(1);
+    expect(reissueCalls()).toHaveLength(2);
+    const err = q(page, '.reissue-error')?.textContent ?? '';
+    expect(err).toContain('Apply failed');
+    expect(err).toContain('agent list could not be read');
+    expect(q(page, 'sl-dialog.reissue-confirm')).toBeNull();
+    expect(q(page, '.reissue-summary')).toBeNull();
     expect(q(page, '.reissue-apply')).toBeNull();
   });
 
