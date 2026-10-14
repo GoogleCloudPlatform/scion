@@ -53,7 +53,7 @@ func TestSkillResolutionPublicText(t *testing.T) {
 			"r", `required skill "gh://o/r/s@v" could not be resolved: skill source unavailable (status 503) (ref r)`},
 		{"unreachable", agent.SkillResolutionError{URI: uri, Code: agent.SkillErrCodeUnreachable, Message: "x"},
 			"r", `required skill "gh://o/r/s@v" could not be resolved: skill source unreachable (ref r)`},
-		{"invalid uri", agent.SkillResolutionError{URI: uri, Code: "invalid_uri", Message: "x"},
+		{"invalid uri", agent.SkillResolutionError{URI: uri, Code: agent.SkillErrCodeInvalidURI, Message: "x"},
 			"r", `required skill "gh://o/r/s@v" could not be resolved: invalid skill URI (ref r)`},
 		{"hub storage_error", agent.SkillResolutionError{URI: uri, Code: "storage_error", Message: "x"},
 			"r", `required skill "gh://o/r/s@v" could not be resolved: resolver error (ref r)`},
@@ -93,17 +93,70 @@ func TestPublicSkillRef(t *testing.T) {
 }
 
 func TestRedactURLsInText(t *testing.T) {
-	in := `GCP API error (500): {"see":"https://u:pw@api.example.test/v1/x?sig=AAA&token=BBB&flag"} and http://plain.example.test/p ok`
+	in := `GCP API error (500): {"see":"https://u:pw-1@api.example.test/v1/x?sig=qv-1&token=qv-2&qv-3#qv-4"} and http://plain.example.test/p ok`
 	got := redactURLsInText(in)
-	for _, secret := range []string{"pw", "AAA", "BBB"} {
-		if strings.Contains(got, secret) {
-			t.Errorf("redacted text %q still carries %q", got, secret)
+	for _, v := range []string{"pw-1", "qv-1", "qv-2", "qv-3", "qv-4"} {
+		if strings.Contains(got, v) {
+			t.Errorf("redacted text %q still carries %q", got, v)
 		}
 	}
-	for _, kept := range []string{"GCP API error (500)", "api.example.test/v1/x", "sig=REDACTED", "token=REDACTED", "flag", "http://plain.example.test/p ok"} {
+	for _, kept := range []string{"GCP API error (500)", "api.example.test/v1/x", "sig=REDACTED", "token=REDACTED&REDACTED#REDACTED", "http://plain.example.test/p ok"} {
 		if !strings.Contains(got, kept) {
 			t.Errorf("redacted text %q lost %q", got, kept)
 		}
+	}
+}
+
+func TestRedactURLsInText_QueryAndFragmentForms(t *testing.T) {
+	tests := map[string]string{
+		"see https://h.example.test/p?qv-1":            "see https://h.example.test/p?REDACTED",
+		"see https://h.example.test/p#k=qv-1":          "see https://h.example.test/p#REDACTED",
+		"see https://h.example.test/p?a=qv-1&&b":       "see https://h.example.test/p?a=REDACTED&&REDACTED",
+		"see https://h.example.test/p?a=qv-1, then go": "see https://h.example.test/p?a=REDACTED, then go",
+		"(at https://h.example.test/p?a=qv-1).":        "(at https://h.example.test/p?a=REDACTED).",
+		"no url here":                                  "no url here",
+	}
+	for in, want := range tests {
+		if got := redactURLsInText(in); got != want {
+			t.Errorf("redactURLsInText(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// TestSkillResolutionPublicText_LongRefKeepsCorrelationID checks the shown
+// reference is capped, so the correlation id survives the hub's cut of a
+// stored failure reason to 512 bytes.
+func TestSkillResolutionPublicText_LongRefKeepsCorrelationID(t *testing.T) {
+	const runID = "0f8e2c4a-1b3d-4e5f-8a9b-0c1d2e3f4a5b"
+	long := "https://skills.example.test/" + strings.Repeat("a", 600) + ".tar.gz"
+	e := &agent.SkillResolutionError{URI: long, Code: agent.SkillErrCodeUpstreamUnavailable, Status: 503}
+	got := skillResolutionPublicText(e, runID)
+	if len(got) > 512 {
+		t.Errorf("text is %d bytes, want at most 512: %q", len(got), got)
+	}
+	if !strings.HasSuffix(got, "(status 503) (ref "+runID+")") {
+		t.Errorf("text %q does not end with the status and correlation id", got)
+	}
+	shown := publicSkillRef(long)
+	if !strings.HasSuffix(shown, "…") || len(shown) != maxPublicSkillRefLen+len("…") {
+		t.Errorf("publicSkillRef = %q (%d bytes), want %d bytes plus an ellipsis", shown, len(shown), maxPublicSkillRefLen)
+	}
+	if got := capText("ab"+strings.Repeat("é", 200), 5); got != "abé…" {
+		t.Errorf("capText cut inside a rune: %q", got)
+	}
+}
+
+// TestSkillResolutionPublicText_InstallHTTPRefRedacted pins the install
+// failure text for an http(s) reference: the reference is shown without its
+// userinfo, query or fragment, and the reason is kept.
+func TestSkillResolutionPublicText_InstallHTTPRefRedacted(t *testing.T) {
+	e := &agent.SkillResolutionError{
+		URI:  "https://user:pw-1@skills.example.test/s.tar.gz?sig=qv-1#qv-2",
+		Code: agent.SkillErrCodeInstallFailed, Message: "download failed with status 404",
+	}
+	want := `required skill "https://skills.example.test/s.tar.gz" could not be installed: download failed with status 404`
+	if got := skillResolutionPublicText(e, "r"); got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }
 
@@ -120,7 +173,7 @@ func TestSkillResolutionCorrelationID(t *testing.T) {
 func TestSkillResolutionFailed_FixedReasonPhrase(t *testing.T) {
 	w := httptest.NewRecorder()
 	SkillResolutionFailed(w, &agent.SkillResolutionError{
-		URI: "https://skills.example.test/s.tar.gz?sig=abc", Code: agent.SkillErrCodeUpstreamUnavailable,
+		URI: "https://skills.example.test/s.tar.gz?sig=qv-1", Code: agent.SkillErrCodeUpstreamUnavailable,
 		Status: 503, Message: resolverTestBody,
 	}, "run-7")
 	var resp ErrorResponse
@@ -134,7 +187,7 @@ func TestSkillResolutionFailed_FixedReasonPhrase(t *testing.T) {
 	if resp.Error.Details["skill"] != "https://skills.example.test/s.tar.gz" {
 		t.Errorf("details.skill = %v, want the redacted reference", resp.Error.Details["skill"])
 	}
-	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") || strings.Contains(w.Body.String(), "abc") {
+	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") || strings.Contains(w.Body.String(), "qv-1") {
 		t.Errorf("body carries resolver text or the query: %s", w.Body.String())
 	}
 	if w.Code != http.StatusBadGateway {
@@ -165,5 +218,5 @@ func TestAsyncLaunch_SkillResolverError_StatusInStoredText(t *testing.T) {
 	if rec["status"] != float64(http.StatusUnprocessableEntity) {
 		t.Errorf("log status = %v, want 422", rec["status"])
 	}
-	assertResolverLogRecord(t, logs, startErrTextRunID)
+	assertResolverLogRecord(t, logs, "runLaunch: agent start failed", startErrTextRunID)
 }

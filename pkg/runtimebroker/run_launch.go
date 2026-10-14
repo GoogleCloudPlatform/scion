@@ -380,17 +380,20 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		code, step, message := classifyStartError(ctx, sr.err, lc.opts.TemplateName, sender.LastStep())
 		// message is fixed text for the client (ptone/scion#3113); the
 		// full error reaches only the broker's own log.
-		s.agentLifecycleLog.Error("runLaunch: agent start failed", append([]any{
-			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
-			"launch_id", rec.ID, "error_code", code, "error", startErrorLogValue(sr.err)}, runtimeFailureLogAttrs(sr.err)...)...)
 		// A skill resolution failure stores fixed text with a correlation
-		// id; the full error is logged with the same id.
-		var launchSkillErr *agent.SkillResolutionError
-		if code == ErrCodeSkillResolution && errors.As(sr.err, &launchSkillErr) {
-			ref := skillResolutionCorrelationID(lc.opts.RunID)
-			s.logSkillResolutionFailure(launchSkillErr, ref,
+		// id; its full text is logged once, with the same id.
+		var launchSkill *skillFailure
+		if code == ErrCodeSkillResolution {
+			launchSkill = skillFailureFrom(sr.err, lc.opts.RunID)
+		}
+		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
+			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
+			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
+			runtimeFailureLogAttrs(sr.err)...)...)
+		if launchSkill != nil {
+			s.logSkillResolutionFailure(launchSkill,
 				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)
-			message = skillResolutionPublicText(launchSkillErr, ref)
+			message = launchSkill.publicText()
 		}
 		if sender.CheckpointUnreachable() {
 			// A pre-create checkpoint blocked until ctx' expired with no

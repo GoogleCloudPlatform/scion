@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -43,7 +44,7 @@ var skillResolutionPhrases = map[string]string{
 	agent.SkillErrCodeTimeout:             "timed out reaching the skill source",
 	agent.SkillErrCodeUpstreamUnavailable: "skill source unavailable",
 	agent.SkillErrCodeUnreachable:         "skill source unreachable",
-	"invalid_uri":                         "invalid skill URI",
+	agent.SkillErrCodeInvalidURI:          "invalid skill URI",
 }
 
 // skillResolutionDefaultPhrase is the reason phrase for a resolver error
@@ -62,25 +63,46 @@ func skillResolutionPhrase(code string) string {
 // not parse as a URL.
 const unparseableSkillRef = "(unparseable skill URL)"
 
+// maxPublicSkillRefLen bounds the skill reference shown to the user, so
+// the correlation id at the end of the text survives the hub's cut of a
+// stored failure reason to 512 bytes.
+const maxPublicSkillRefLen = 200
+
 // publicSkillRef returns the declared skill reference uri for user-visible
 // text. An http(s) reference loses its userinfo, query and fragment, and
 // its path is redacted by logging.RedactURL where that applies; any other
-// reference (gh://, a registry name) is returned as is.
+// reference (gh://, a registry name) is kept. A reference longer than
+// maxPublicSkillRefLen bytes is cut there, at a rune boundary, and ends in
+// an ellipsis.
 func publicSkillRef(uri string) string {
+	ref := uri
 	lower := strings.ToLower(uri)
-	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		return uri
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") {
+		u, err := url.Parse(uri)
+		if err != nil {
+			return unparseableSkillRef
+		}
+		u.User = nil
+		u.RawQuery = ""
+		u.ForceQuery = false
+		u.Fragment = ""
+		u.RawFragment = ""
+		ref = logging.RedactURL(u)
 	}
-	u, err := url.Parse(uri)
-	if err != nil {
-		return unparseableSkillRef
+	return capText(ref, maxPublicSkillRefLen)
+}
+
+// capText returns s cut to at most max bytes at a rune boundary, with an
+// ellipsis appended when it was cut.
+func capText(s string, max int) string {
+	if len(s) <= max {
+		return s
 	}
-	u.User = nil
-	u.RawQuery = ""
-	u.ForceQuery = false
-	u.Fragment = ""
-	u.RawFragment = ""
-	return logging.RedactURL(u)
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "…"
 }
 
 // skillResolutionPublicText returns the user-visible text for e. For an
@@ -121,18 +143,26 @@ func skillResolutionCorrelationID(runID string) string {
 // textURLPattern matches an http(s) URL inside free text.
 var textURLPattern = regexp.MustCompile(`(?i)https?://[^\s"'<>]+`)
 
+// urlTrailingPunct is punctuation that, at the end of a textURLPattern
+// match, is taken to belong to the surrounding prose, not to the URL.
+const urlTrailingPunct = ".,;:!?)]}"
+
 // redactedLogValue replaces a query value or userinfo in a logged URL.
 const redactedLogValue = "REDACTED"
 
 // redactURLsInText returns s with every http(s) URL in it redacted for the
-// server-side log: userinfo replaced, every query value replaced (the keys
-// are kept), and the path redacted by logging.RedactURL where that applies.
-// The rest of s is unchanged.
+// server-side log: userinfo replaced; every query value replaced, keeping
+// the keys, and every query part with no "=" replaced whole; a fragment
+// replaced; and the path redacted by logging.RedactURL where that applies.
+// Punctuation ending a URL (see urlTrailingPunct) is kept as text. The rest
+// of s is unchanged.
 func redactURLsInText(s string) string {
-	return textURLPattern.ReplaceAllStringFunc(s, func(raw string) string {
+	return textURLPattern.ReplaceAllStringFunc(s, func(match string) string {
+		raw := strings.TrimRight(match, urlTrailingPunct)
+		trailing := match[len(raw):]
 		u, err := url.Parse(raw)
 		if err != nil {
-			return "(unparseable URL)"
+			return "(unparseable URL)" + trailing
 		}
 		if u.User != nil {
 			u.User = url.User(redactedLogValue)
@@ -142,11 +172,16 @@ func redactURLsInText(s string) string {
 			for i, p := range parts {
 				if key, _, ok := strings.Cut(p, "="); ok {
 					parts[i] = key + "=" + redactedLogValue
+				} else if p != "" {
+					parts[i] = redactedLogValue
 				}
 			}
 			u.RawQuery = strings.Join(parts, "&")
 		}
-		return logging.RedactURL(u)
+		if u.Fragment != "" || u.RawFragment != "" {
+			u.Fragment, u.RawFragment = redactedLogValue, ""
+		}
+		return logging.RedactURL(u) + trailing
 	})
 }
 
@@ -159,25 +194,66 @@ func skillResolutionLogError(err error) string {
 	return redactURLsInText(err.Error())
 }
 
-// logSkillResolutionFailure logs the full skill resolution error e with
-// correlationID, the id the user-visible text carries. attrs are extra log
-// attributes (agent_id, project_id, run_id).
-func (s *Server) logSkillResolutionFailure(e *agent.SkillResolutionError, correlationID string, attrs ...any) {
-	s.agentLifecycleLog.Warn("Required skill could not be resolved", append(attrs,
-		"correlation_id", correlationID,
-		"skill_uri", redactURLsInText(e.URI),
-		"code", e.Code,
-		"status", e.Status,
-		"error", skillResolutionLogError(e))...)
+// skillFailure is a skill resolution failure in a create or start error,
+// with the correlation id that its user-visible text and its log record
+// carry.
+type skillFailure struct {
+	err *agent.SkillResolutionError
+	ref string
 }
 
-// startErrorLogValue returns err for the "error" attribute of a start or
-// create failure log record: a skill resolution failure as its redacted text
-// (see skillResolutionLogError), any other error unchanged.
-func startErrorLogValue(err error) any {
+// skillFailureFrom returns the skill resolution failure in err's chain, with
+// the correlation id for runID (see skillResolutionCorrelationID), or nil
+// when there is none.
+func skillFailureFrom(err error, runID string) *skillFailure {
+	var skillErr *agent.SkillResolutionError
+	if !errors.As(err, &skillErr) {
+		return nil
+	}
+	return &skillFailure{err: skillErr, ref: skillResolutionCorrelationID(runID)}
+}
+
+// publicText returns the user-visible text of f (see
+// skillResolutionPublicText).
+func (f *skillFailure) publicText() string {
+	return skillResolutionPublicText(f.err, f.ref)
+}
+
+// failureLogAttrs returns the error attributes of a general create or start
+// failure log record. For a skill resolution failure f they are its
+// user-visible text and correlation id: the full text is in the one record
+// logSkillResolutionFailure writes. For any other error (f nil) they are
+// err itself.
+func failureLogAttrs(err error, f *skillFailure) []any {
+	if f == nil {
+		return []any{"error", err}
+	}
+	return []any{"error", f.publicText(), "correlation_id", f.ref}
+}
+
+// spanErrorText returns err's text for a trace span status: for a skill
+// resolution failure, the text with its URLs redacted (see
+// redactURLsInText); for any other error, err's text unchanged.
+func spanErrorText(err error) string {
 	var skillErr *agent.SkillResolutionError
 	if errors.As(err, &skillErr) {
 		return skillResolutionLogError(err)
 	}
-	return err
+	return err.Error()
+}
+
+// skillFailureLogMsg is the message of the log record that carries the full
+// text of a skill resolution or install failure.
+const skillFailureLogMsg = "Required skill failed"
+
+// logSkillResolutionFailure logs the full text of the skill failure f, with
+// its URLs redacted, under f's correlation id. attrs are extra log
+// attributes (agent_id, project_id, run_id).
+func (s *Server) logSkillResolutionFailure(f *skillFailure, attrs ...any) {
+	s.agentLifecycleLog.Warn(skillFailureLogMsg, append(attrs,
+		"correlation_id", f.ref,
+		"skill_uri", redactURLsInText(f.err.URI),
+		"code", f.err.Code,
+		"status", f.err.Status,
+		"error", skillResolutionLogError(f.err))...)
 }

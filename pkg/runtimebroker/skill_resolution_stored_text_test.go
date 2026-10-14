@@ -31,10 +31,10 @@ import (
 // to server-side logs (ptone/scion#5061).
 
 const (
-	resolverTestSkill  = "gh://example-org/example-skills/my-skill@main"
-	resolverTestBody   = "ARBITRARY-UPSTREAM-BODY <html>see https://internal.example.test/doc?token=s3cr3t-value</html>"
-	resolverTestSecret = "s3cr3t-value"
-	resolverLogMsg     = "Required skill could not be resolved"
+	resolverTestSkill      = "gh://example-org/example-skills/my-skill@main"
+	resolverTestBody       = "ARBITRARY-UPSTREAM-BODY <html>see https://docs.example.test/doc?token=qv-1</html>"
+	resolverTestQueryValue = "qv-1"
+	resolverLogMsg         = skillFailureLogMsg
 )
 
 func resolverTestError() *agent.SkillResolutionError {
@@ -58,9 +58,11 @@ func logRecord(t *testing.T, logs, msg string) map[string]any {
 	return nil
 }
 
-// assertResolverLogRecord checks the server-side record carries the full
-// resolver text under correlation id ref, with URL query values redacted.
-func assertResolverLogRecord(t *testing.T, logs, ref string) {
+// assertResolverLogRecord checks that exactly one server-side record, the
+// skill failure record, carries the full resolver text, under correlation
+// id ref and with URL query values redacted. When generalMsg is set, the
+// general failure record must carry the same correlation id.
+func assertResolverLogRecord(t *testing.T, logs, generalMsg, ref string) {
 	t.Helper()
 	rec := logRecord(t, logs, resolverLogMsg)
 	if rec["correlation_id"] != ref {
@@ -70,8 +72,16 @@ func assertResolverLogRecord(t *testing.T, logs, ref string) {
 	if !strings.Contains(got, "ARBITRARY-UPSTREAM-BODY") {
 		t.Errorf("log error = %q, want the full resolver text", got)
 	}
-	if strings.Contains(logs, resolverTestSecret) {
-		t.Errorf("logs carry the URL query value %q: %s", resolverTestSecret, logs)
+	if n := strings.Count(logs, "ARBITRARY-UPSTREAM-BODY"); n != 1 {
+		t.Errorf("the full resolver text is in %d log records, want 1: %s", n, logs)
+	}
+	if strings.Contains(logs, resolverTestQueryValue) {
+		t.Errorf("logs carry the URL query value %q: %s", resolverTestQueryValue, logs)
+	}
+	if generalMsg != "" {
+		if general := logRecord(t, logs, generalMsg); general["correlation_id"] != ref {
+			t.Errorf("%q record correlation_id = %v, want %q", generalMsg, general["correlation_id"], ref)
+		}
 	}
 }
 
@@ -87,7 +97,7 @@ func TestAsyncLaunch_SkillResolverError_StoresFixedReasonPhrase(t *testing.T) {
 	if report.Message != want {
 		t.Errorf("stored message = %q, want %q", report.Message, want)
 	}
-	assertResolverLogRecord(t, logs, startErrTextRunID)
+	assertResolverLogRecord(t, logs, "runLaunch: agent start failed", startErrTextRunID)
 }
 
 func TestSyncCreate_SkillResolverError_FixedReasonPhrase(t *testing.T) {
@@ -112,7 +122,7 @@ func TestSyncCreate_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
 		t.Errorf("response body carries resolver text: %s", w.Body.String())
 	}
-	assertResolverLogRecord(t, logs.String(), startErrTextRunID)
+	assertResolverLogRecord(t, logs.String(), "Agent create failed", startErrTextRunID)
 }
 
 // TestStartRestart_SkillResolverError_FixedReasonPhrase covers start and
@@ -144,7 +154,8 @@ func TestStartRestart_SkillResolverError_FixedReasonPhrase(t *testing.T) {
 			if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
 				t.Errorf("response body carries resolver text: %s", w.Body.String())
 			}
-			assertResolverLogRecord(t, logs.String(), m[1])
+			generalMsg := map[string]string{"start": "Agent start failed", "restart": "Agent restart failed"}[op]
+			assertResolverLogRecord(t, logs.String(), generalMsg, m[1])
 		})
 	}
 }
@@ -167,7 +178,7 @@ func TestAsyncLaunch_SkillInstallError_TextUnchanged(t *testing.T) {
 // skill reference is stored without its userinfo or query string.
 func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 	skillErr := &agent.SkillResolutionError{
-		URI:     "https://user:pa55word@skills.example.test/packs/my-skill.tar.gz?sig=abc123&token=xyz789",
+		URI:     "https://user:pw-1@skills.example.test/packs/my-skill.tar.gz?sig=qv-2&token=qv-3",
 		Code:    agent.SkillErrCodeNotFound,
 		Message: "not found: " + resolverTestBody,
 	}
@@ -176,9 +187,53 @@ func TestAsyncLaunch_SkillResolverError_HTTPRefRedacted(t *testing.T) {
 	if report.Message != want {
 		t.Errorf("stored message = %q, want %q", report.Message, want)
 	}
-	for _, secret := range []string{"pa55word", "abc123", "xyz789", resolverTestSecret} {
-		if strings.Contains(logs, secret) {
-			t.Errorf("logs carry %q: %s", secret, logs)
+	for _, v := range []string{"pw-1", "qv-2", "qv-3", resolverTestQueryValue} {
+		if strings.Contains(logs, v) {
+			t.Errorf("logs carry %q: %s", v, logs)
 		}
+	}
+}
+
+// TestProvisionOnly_SkillResolverError_FixedReasonPhrase covers the
+// provision-only and reprovision branch of create.
+func TestProvisionOnly_SkillResolverError_FixedReasonPhrase(t *testing.T) {
+	const runID = "run-provision-5061"
+	for _, reprovision := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reprovision=%v", reprovision), func(t *testing.T) {
+			var srv *Server
+			if reprovision {
+				var mgr *provisionCapturingManager
+				srv, mgr = newTestServerWithProvisionCapture()
+				mgr.reprovisionErr = resolverTestError()
+			} else {
+				srv = newTestServer(t)
+				srv.manager.(*mockManager).provisionErr = resolverTestError()
+			}
+			logs := &syncBuffer{}
+			srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+			body := fmt.Sprintf(`{"name": "skill-provision-agent", "id": "agent-skill-provision", "runId": %q,
+				"provisionOnly": true, "reprovision": %v, "config": {"template": "claude"}}`, runID, reprovision)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			srv.Handler().ServeHTTP(w, req)
+
+			var resp ErrorResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("decode error body: %v (status %d, body %s)", err, w.Code, w.Body.String())
+			}
+			want := `Failed to provision agent: required skill "` + resolverTestSkill + `" could not be resolved: resolver error (ref ` + runID + `)`
+			if resp.Error.Message != want {
+				t.Errorf("message = %q, want %q", resp.Error.Message, want)
+			}
+			if resp.Error.Details["skill"] != resolverTestSkill {
+				t.Errorf("details.skill = %v, want %q", resp.Error.Details["skill"], resolverTestSkill)
+			}
+			if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
+				t.Errorf("response body carries resolver text: %s", w.Body.String())
+			}
+			assertResolverLogRecord(t, logs.String(), "", runID)
+		})
 	}
 }
