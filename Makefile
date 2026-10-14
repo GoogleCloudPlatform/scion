@@ -215,7 +215,7 @@ test-hub-shards:
 build-hub-shard:
 	@./hack/hubshard/shard.sh build $(SHARD) $(if $(NOSQLITE),--nosqlite)
 
-## vet-hub-shard: go vet pkg/hub test shard SHARD=K with -tags no_sqlite and -tags 'integration volume_test tzcontract'
+## vet-hub-shard: go vet pkg/hub test shard SHARD=K with -tags no_sqlite and -tags 'integration tzcontract'
 # The shards' vets together cover every pkg/hub file that make lint and
 # make vet-integration cover (hubshard-parity checks it). CI vets pkg/hub
 # this way (lint-ci and vet-integration-ci leave the package out).
@@ -714,11 +714,11 @@ vet:
 lint:
 	@go vet -tags no_sqlite ./...
 
-## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration volume_test tzcontract')
+## vet-integration: Compile-check integration-tagged code (go vet -tags 'integration tzcontract')
 # Catches build breaks in integration-tagged files that other vet/lint
 # targets skip (ptone/scion#2348).
 vet-integration:
-	@go vet -tags 'integration volume_test tzcontract' ./...
+	@go vet -tags 'integration tzcontract' ./...
 
 ## lint-ci: lint without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
 lint-ci:
@@ -727,8 +727,8 @@ lint-ci:
 
 ## vet-integration-ci: vet-integration without the pkg/hub package itself (CI vets it per shard: vet-hub-shard)
 vet-integration-ci:
-	@pkgs=$$($(call non_hub_pkgs,integration volume_test tzcontract)) || exit 1; \
-	go vet -tags 'integration volume_test tzcontract' $$pkgs
+	@pkgs=$$($(call non_hub_pkgs,integration tzcontract)) || exit 1; \
+	go vet -tags 'integration tzcontract' $$pkgs
 
 ## vet-integration-extras: Compile-check integration-tagged code in every extras/ module that has it
 # vet-integration only covers the root module's ./... tree; extras/*
