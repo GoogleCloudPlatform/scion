@@ -87,18 +87,7 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 		return nil, fmt.Errorf("failed to load settings from fallback project: %w", err)
 	}
 
-	debugf("resolveHubProjectRef: hub=%v, hubConfigured=%v", settings.Hub != nil, settings.IsHubConfigured())
-
-	endpoint := opts.EndpointOverride
-	if endpoint == "" {
-		endpoint = getEndpoint(settings)
-	}
-	if endpoint == "" {
-		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
-		if endpoint == "" {
-			endpoint = os.Getenv("SCION_HUB_URL")
-		}
-	}
+	endpoint := resolveEndpoint(opts)
 	if endpoint == "" {
 		return nil, ErrHubNotConfigured
 	}

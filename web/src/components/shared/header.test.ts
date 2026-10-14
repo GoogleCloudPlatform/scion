@@ -934,6 +934,37 @@ describe('mode switch: remembered chat path', () => {
   });
 });
 
+describe('project lookup by chat slug', () => {
+  function resolve(el: ScionHeader, slug: string): Promise<string> {
+    return (
+      el as unknown as { resolveProjectIdBySlug(s: string): Promise<string> }
+    ).resolveProjectIdBySlug(slug);
+  }
+
+  it('returns the ID of the project the hub lists for the slug', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-1' });
+    vi.mocked(apiFetch).mockClear();
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ projects: [{ id: 'p1', slug: 'alpha', name: 'A' }], totalCount: 1 }),
+        { status: 200 }
+      )
+    );
+
+    expect(await resolve(el, 'alpha')).toBe('p1');
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/v1/projects?slug=alpha&limit=1');
+  });
+
+  it('returns an empty ID when the hub lists no project for the slug', async () => {
+    const el = await mountHeader({ currentPath: '/chat/alpha/topic-1' });
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+    );
+
+    expect(await resolve(el, 'alpha')).toBe('');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // View-mode keyboard shortcuts: Cmd+1/2/3 on macOS, Ctrl+1/2/3 elsewhere.
 // ---------------------------------------------------------------------------

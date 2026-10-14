@@ -27,12 +27,33 @@ import (
 // accepts, in any mode (file, DB, and workstation, where other Layer-0 keys
 // are API-writable), for any caller. They are deploy-time inputs of the test
 // identity tiers (ptone/scion#4240): the hub class of the admin tier gate
-// (phase A0) and the workload issuer allowlist (phase X2, whose trust set
-// must not grow through the API). A key matches itself and every key nested
-// under it.
+// (phase A0), the workload issuer allowlist (phase X2, whose trust set
+// must not grow through the API), and the proxy driver principals and
+// driver token audience (phase WS2, which decide who may carry test
+// identity web sessions behind the proxy). A key matches itself and every
+// key nested under it.
 var neverAPIWritableSettingsKeys = []string{
 	config.HubClassKey,
 	config.TestIdentitiesKey,
+	config.ProxyDriverPrincipalsKey,
+	config.ProxyDriverTokenAudienceKey,
+}
+
+// hideNeverAPIWritableProxyKeys blanks the WS2 proxy driver settings in a
+// server-config GET body: they are never API-writable, so they are not
+// shown either, and a client that echoes the body back does not send them.
+func hideNeverAPIWritableProxyKeys(srv *config.V1ServerConfig) {
+	if srv == nil || srv.Auth == nil || srv.Auth.Proxy == nil {
+		return
+	}
+	// Copies, so a config value the body shares pointers with is never
+	// changed.
+	proxy := *srv.Auth.Proxy
+	proxy.DriverPrincipals = nil
+	proxy.DriverTokenAudience = ""
+	auth := *srv.Auth
+	auth.Proxy = &proxy
+	srv.Auth = &auth
 }
 
 // testAdminTierRefusedSettingsKeys are settings keys refused by every

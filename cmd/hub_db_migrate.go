@@ -35,6 +35,7 @@ import (
 // than to start. allowShadowed is server.database.allow_shadowed_schema.
 func migrateHubStore(ctx context.Context, cs *entadapter.CompositeStore, allowShadowed bool) error {
 	cs.EnableMaintenanceSchemaShadowGuard(allowShadowed)
+	cs.SetBeforeFKReconcile(snapshotBeforeFKReconcile)
 	return cs.Migrate(ctx)
 }
 
@@ -45,6 +46,10 @@ func migrateHubStore(ctx context.Context, cs *entadapter.CompositeStore, allowSh
 // returned unwrapped, as a *entadapter.SchemaShadowError with Maintenance
 // set. The guard only reads the PostgreSQL catalog, so a refusal leaves the
 // database unchanged, including in a dry run.
+//
+// Both helpers pass snapshotBeforeFKReconcile to the schema migration, so
+// on SQLite the database is snapshotted before the foreign key reconcile
+// changes rows, as at hub startup.
 func migrateHubSchema(ctx context.Context, client *ent.Client, allowShadowed, preMigrate bool) error {
 	if err := entadapter.CheckSchemaShadowing(ctx, client, allowShadowed, nil); err != nil {
 		return err
@@ -54,7 +59,7 @@ func migrateHubSchema(ctx context.Context, client *ent.Client, allowShadowed, pr
 			return fmt.Errorf("pre-migration steps: %w", err)
 		}
 	}
-	if err := entc.AutoMigrate(ctx, client); err != nil {
+	if err := entc.AutoMigrate(ctx, client, entc.WithBeforeFKReconcile(snapshotBeforeFKReconcile)); err != nil {
 		return fmt.Errorf("auto-migrate: %w", err)
 	}
 	return nil

@@ -9133,3 +9133,144 @@ describe('scion-chat-thread default agent stored by ID', () => {
     expect(optimistic?.recipientId).toBe(AGENT_ID);
   });
 });
+
+/**
+ * Every DM entry point mounts this thread with isDM set and, often, a
+ * projectId (an agent DM carries the agent's project; a DM opened from a
+ * project rail or deep link carries the scope's project). The hub accepts
+ * only project-less uploads in a DM, so the upload must go without
+ * project_id there, while a group or topic keeps it (ptone/scion#5084).
+ */
+describe('scion-chat-thread attachment upload scope', () => {
+  const UPLOADED = { id: 'att-1', name: 'a.txt', mime: 'text/plain', size: 5, url: '' };
+
+  function created(body: Record<string, unknown>): Response {
+    return { ok: true, status: 201, json: () => Promise.resolve(body) } as unknown as Response;
+  }
+
+  beforeEach(() => {
+    apiFetch.mockReset();
+    apiFetch.mockImplementation((path: unknown, init?: RequestInit) => {
+      const p = String(path);
+      if (p === '/api/v1/chat/attachments') {
+        return Promise.resolve(created({ attachments: [UPLOADED], failures: [] }));
+      }
+      if (p.endsWith('/messages') && init?.method === 'POST') {
+        return Promise.resolve(created({ id: 'srv-1', attachments: [UPLOADED] }));
+      }
+      return Promise.resolve(emptyHistory());
+    });
+  });
+
+  afterEach(() => {
+    document.body.innerHTML = '';
+  });
+
+  type Composer = HTMLElement & {
+    updateComplete: Promise<boolean>;
+    uploadFiles(files: File[]): Promise<void>;
+    doSend(interrupt: boolean): void;
+    text: string;
+    pendingFiles: Array<{ id: string }>;
+  };
+
+  async function mountComposer(opts: {
+    key: string;
+    isDM: boolean;
+    projectId: string;
+  }): Promise<{ el: ScionChatThread; composer: Composer }> {
+    const el = document.createElement('scion-chat-thread') as ScionChatThread;
+    el.conversationKey = opts.key;
+    el.isDM = opts.isDM;
+    el.projectId = opts.projectId;
+    el.canSend = true;
+    el.currentUserId = 'u1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    const composer = el.shadowRoot!.querySelector('scion-chat-composer') as Composer;
+    await composer.updateComplete;
+    return { el, composer };
+  }
+
+  function uploadForm(): FormData {
+    const call = apiFetch.mock.calls.find((c) => c[0] === '/api/v1/chat/attachments');
+    expect(call).toBeTruthy();
+    return (call![1] as RequestInit).body as FormData;
+  }
+
+  for (const [label, key, projectId] of [
+    ['an agent DM (agent page, agent project)', 'dm:agent:a1:user:u1', 'proj-agent'],
+    ['a user DM', 'dm:user:u1:user:u2', ''],
+    ['a user DM opened in a project scope', 'dm:user:u1:user:u2', 'proj-scope'],
+    ['an agent DM opened in a project scope', 'dm:agent:a1:user:u1', 'proj-scope'],
+  ] as const) {
+    it(`uploads without project_id in ${label}`, async () => {
+      const { composer } = await mountComposer({ key, isDM: true, projectId });
+
+      await composer.uploadFiles([new File(['hello'], 'a.txt')]);
+
+      expect(uploadForm().has('project_id')).toBe(false);
+      expect(composer.pendingFiles.map((f) => f.id)).toEqual(['att-1']);
+    });
+  }
+
+  it('uploads with project_id in a topic and sends the attachment', async () => {
+    const { composer } = await mountComposer({
+      key: CONVERSATION_KEY,
+      isDM: false,
+      projectId: 'proj-topic',
+    });
+
+    await composer.uploadFiles([new File(['hello'], 'a.txt')]);
+    expect(uploadForm().get('project_id')).toBe('proj-topic');
+
+    composer.text = 'see file';
+    composer.doSend(false);
+
+    await vi.waitFor(() => {
+      const post = apiFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith('/messages') && (c[1] as RequestInit)?.method === 'POST'
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(requestBodyText((post![1] as RequestInit).body)) as {
+        attachments?: string[];
+      };
+      expect(body.attachments).toEqual(['att-1']);
+    });
+    expect(composer.pendingFiles).toEqual([]);
+  });
+
+  it('drops a file pending in a topic when the thread switches to a DM', async () => {
+    const { el, composer } = await mountComposer({
+      key: CONVERSATION_KEY,
+      isDM: false,
+      projectId: 'proj-topic',
+    });
+    await composer.uploadFiles([new File(['hello'], 'a.txt')]);
+    expect(composer.pendingFiles.map((f) => f.id)).toEqual(['att-1']);
+
+    el.conversationKey = 'dm:user:u1:user:u2';
+    el.isDM = true;
+    await el.updateComplete;
+    await composer.updateComplete;
+    expect(composer.pendingFiles).toEqual([]);
+    expect(composer.shadowRoot!.querySelector('.composer-context')).toBeNull();
+
+    apiFetch.mockClear();
+    composer.text = 'hi';
+    composer.doSend(false);
+
+    await vi.waitFor(() => {
+      const post = apiFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith('/messages') && (c[1] as RequestInit)?.method === 'POST'
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(requestBodyText((post![1] as RequestInit).body)) as Record<
+        string,
+        unknown
+      >;
+      expect(body.content).toBe('hi');
+      expect(body).not.toHaveProperty('attachments');
+    });
+  });
+});

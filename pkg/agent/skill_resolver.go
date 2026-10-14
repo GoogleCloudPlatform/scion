@@ -349,18 +349,75 @@ func ContextWithGitHubCredentialLookup(ctx context.Context, lookup GitHubCredent
 	return context.WithValue(ctx, gitHubCredentialLookupKey{}, lookup)
 }
 
+// Labels naming where a skill download credential came from. They appear in
+// logs and errors in place of the credential itself. The GitHub resolver
+// supplies more specific labels (secret names, never values) through the
+// credential source lookup; gitHubCredSourceResolver is the fallback when it
+// has none.
+const (
+	gitHubCredSourceDefault  = "the GITHUB_TOKEN credential"
+	gitHubCredSourceResolver = "the credential the GitHub skill resolver uses for this skill"
+)
+
+type gitHubCredentialSourceLookupKey struct{}
+
+// gitHubCredentialSourceLookup returns a label naming where the credential
+// GitHubCredentialLookup returns for a gh:// URI comes from, or "".
+type gitHubCredentialSourceLookup func(uri string) string
+
+// contextWithGitHubCredentialSourceLookup returns a context carrying lookup
+// for the install phase, alongside the GitHubCredentialLookup it describes.
+func contextWithGitHubCredentialSourceLookup(ctx context.Context, lookup gitHubCredentialSourceLookup) context.Context {
+	return context.WithValue(ctx, gitHubCredentialSourceLookupKey{}, lookup)
+}
+
+// credentialSourceLabel returns the label for uri's credential from the
+// source lookup carried by ctx, or gitHubCredSourceResolver if there is none.
+func credentialSourceLabel(ctx context.Context, uri string) string {
+	if lookup, ok := ctx.Value(gitHubCredentialSourceLookupKey{}).(gitHubCredentialSourceLookup); ok && lookup != nil {
+		if label := lookup(uri); label != "" {
+			return label
+		}
+	}
+	return gitHubCredSourceResolver
+}
+
+// gitHubCredential is the credential installOneSkill presents for a skill's
+// raw downloads, with a label naming its source. The token is never
+// formatted: every fmt verb prints only the source (see Format).
+type gitHubCredential struct {
+	token  string
+	source string
+}
+
+func (c gitHubCredential) String() string {
+	if c.token == "" {
+		return "gitHubCredential(none)"
+	}
+	return "gitHubCredential(" + c.source + ")"
+}
+
+func (c gitHubCredential) GoString() string { return c.String() }
+
+// Format prints String for every verb, so no verb (%d, %x, ...) falls back
+// to printing the struct fields.
+func (c gitHubCredential) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
+
 // gitHubDownloadToken returns the credential installOneSkill presents for
 // skill's raw downloads: the credential the GitHub resolver uses for the
 // skill's ref, when the skill came from that resolver without content and a
 // lookup is available, and otherwise the context's default GitHub token.
 // downloadSkillFile only ever sends either to GitHub hosts.
-func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) string {
+func gitHubDownloadToken(ctx context.Context, skill ResolvedSkill) gitHubCredential {
 	if skill.githubCredentialRef != "" {
 		if tok := credentialLookupFromContext(ctx)(skill.githubCredentialRef); tok != "" {
-			return tok
+			return gitHubCredential{token: tok, source: credentialSourceLabel(ctx, skill.githubCredentialRef)}
 		}
 	}
-	return GitHubTokenFromContext(ctx)
+	if tok := GitHubTokenFromContext(ctx); tok != "" {
+		return gitHubCredential{token: tok, source: gitHubCredSourceDefault}
+	}
+	return gitHubCredential{}
 }
 
 // credentialLookupFromContext returns the GitHub credential lookup carried
@@ -680,7 +737,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 	// broker's GitHub resolver served without content, the credential it
 	// uses for that ref; otherwise the default token, used for gh:// skills
 	// the Hub resolved on our behalf. Empty for public repos.
-	ghToken := gitHubDownloadToken(ctx, skill)
+	ghCred := gitHubDownloadToken(ctx, skill)
 
 	var fileEntries []FileEntry
 
@@ -714,7 +771,7 @@ func installOneSkill(ctx context.Context, skill ResolvedSkill, dest, skillsDest 
 			if err := writeSkillFileContent(f.Content, destPath); err != nil {
 				return nil, wrapSkillFileError("failed to write", f.Path, err)
 			}
-		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghToken); err != nil {
+		} else if err := downloadSkillFile(ctx, f.URL, destPath, defaultMaxFileSize, ghCred); err != nil {
 			return nil, wrapSkillFileError("failed to download", f.Path, err)
 		}
 
@@ -953,11 +1010,19 @@ func isGitHubHost(host string) bool {
 
 // downloadSkillFile downloads a single file from a URL to a local path.
 //
-// ghToken, when non-empty, is sent as a bearer credential — but only to
+// ghCred's token, when non-empty, is sent as a bearer credential — but only to
 // GitHub hosts. Registry skills are served from signed object-store URLs that
 // have no business seeing a GitHub token, so the host check is what keeps the
 // credential from leaking to an unrelated origin named in a Hub response.
-func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghToken string) error {
+//
+// GitHub answers 404 (or 401/403) for a public file when the credential sent
+// with it is rejected, for example an expired or revoked user token. So when
+// a credential was sent and the answer is one of those, the download is
+// retried exactly once, at the same URL, without credentials: public skills
+// still install, and the caller's hash checks apply to the result as usual.
+// If the retry fails too, the error is a *gitHubCredentialRejectedError. The
+// retry uses the same client, so the cross-host redirect ban applies to it.
+func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize int64, ghCred gitHubCredential) error {
 	parsed, err := url.Parse(fileURL)
 	if err != nil {
 		// The parse error quotes the URL, which may be signed, so neither
@@ -977,7 +1042,8 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 	}
 
 	client := &http.Client{
-		Timeout: downloadTimeout,
+		Transport: skillDownloadTransport,
+		Timeout:   downloadTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			// S5: No cross-host redirects
 			if len(via) > 0 && req.URL.Host != via[0].URL.Host {
@@ -990,28 +1056,37 @@ func downloadSkillFile(ctx context.Context, fileURL, destPath string, maxSize in
 		},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	sendCred := ghCred.token != "" && isGitHubHost(parsed.Hostname())
+	resp, err := getSkillFile(ctx, client, fileURL, parsed.Host, ghCred.token, sendCred)
 	if err != nil {
-		// Not err: it can quote the URL.
-		return fmt.Errorf("failed to create request for %s", parsed.Host)
-	}
-	if ghToken != "" && isGitHubHost(parsed.Hostname()) {
-		req.Header.Set("Authorization", "Bearer "+ghToken)
+		return err
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		// client.Do returns a *url.Error, whose text quotes the full URL; a
-		// signed URL carries a token in its query. Neither the user text nor
-		// the logged error includes it: only the host and the cause.
-		var ue *url.Error
-		if !errors.As(err, &ue) {
-			return newSkillInstallError("download failed", fmt.Errorf("download from %s failed", parsed.Host))
+	if sendCred && isRejectedCredentialStatus(resp.StatusCode) {
+		// One retry, same URL, no credential (see the doc comment above).
+		authStatus := resp.StatusCode
+		_ = resp.Body.Close()
+		resp, err = getSkillFile(ctx, client, fileURL, parsed.Host, "", false)
+		if err != nil {
+			return err
 		}
-		cause := transportFailureCause(ue)
-		public := "download failed: " + cause
-		return newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", parsed.Host, cause))
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			// The rejected-credential error names only the file, statuses
+			// and credential source, so users see it verbatim.
+			rej := &gitHubCredentialRejectedError{
+				File:       filepath.Base(destPath),
+				Source:     ghCred.source,
+				AuthStatus: authStatus,
+				AnonStatus: resp.StatusCode,
+			}
+			return newSkillInstallError(rej.Error(), rej)
+		}
+		// S5: no URL in logs, and never the credential.
+		slog.WarnContext(ctx, "skill download: GitHub rejected the configured credential; the download succeeded without credentials",
+			"file", filepath.Base(destPath), "status", authStatus, "credential_source", ghCred.source)
 	}
+	// Deferred only now: resp is not reassigned after this point.
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
@@ -1058,6 +1133,64 @@ func transportFailureCause(ue *url.Error) string {
 		cause = "invalid redirect Location"
 	}
 	return cause
+}
+
+// skillDownloadTransport is the HTTP transport downloadSkillFile uses; nil
+// means http.DefaultTransport. Tests replace it to serve GitHub hosts locally.
+var skillDownloadTransport http.RoundTripper
+
+// getSkillFile sends one GET for fileURL (whose host is host), with token as
+// a bearer credential when withCred is set. Errors never include the URL,
+// which may be signed: only host and the cause.
+func getSkillFile(ctx context.Context, client *http.Client, fileURL, host, token string, withCred bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fileURL, nil)
+	if err != nil {
+		// Not err: it can quote the URL.
+		return nil, fmt.Errorf("failed to create request for %s", host)
+	}
+	if withCred {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		// client.Do returns a *url.Error, whose text quotes the full URL; a
+		// signed URL carries a token in its query. Neither the user text nor
+		// the logged error includes it: only the host and the cause.
+		var ue *url.Error
+		if !errors.As(err, &ue) {
+			return nil, newSkillInstallError("download failed", fmt.Errorf("download from %s failed", host))
+		}
+		cause := transportFailureCause(ue)
+		public := "download failed: " + cause
+		return nil, newSkillInstallError(public, fmt.Errorf("download from %s failed: %s", host, cause))
+	}
+	return resp, nil
+}
+
+// isRejectedCredentialStatus reports whether status is one GitHub returns
+// for a request whose credential it rejects or finds insufficient.
+func isRejectedCredentialStatus(status int) bool {
+	return status == http.StatusUnauthorized ||
+		status == http.StatusForbidden ||
+		status == http.StatusNotFound
+}
+
+// gitHubCredentialRejectedError reports a skill file download from GitHub
+// that failed with the configured credential and again without one. Source
+// names where the credential came from; the credential itself is never part
+// of the error.
+type gitHubCredentialRejectedError struct {
+	File       string
+	Source     string
+	AuthStatus int
+	AnonStatus int
+}
+
+func (e *gitHubCredentialRejectedError) Error() string {
+	return fmt.Sprintf("download of %s failed: GitHub rejected %s, or it was not enough to read the file (status %d), "+
+		"and a retry without credentials got status %d; the credential may be expired, revoked or rate limited, "+
+		"or the repository is private and the credential cannot read it",
+		e.File, e.Source, e.AuthStatus, e.AnonStatus)
 }
 
 // writeSkillFileContent writes pre-fetched content bytes directly to destPath,

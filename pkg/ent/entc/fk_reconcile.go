@@ -16,8 +16,10 @@ package entc
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"database/sql/driver"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -76,6 +78,120 @@ type fkOrphanGroup struct {
 type fkReconcileResult struct {
 	// Unrepaired lists orphans left in place, one entry per foreign key.
 	Unrepaired []fkOrphanGroup
+	// Repaired lists the keys whose declared action changed rows, in the
+	// order applied. A key appears once per pass that changed rows. It is
+	// read only by tests, which check it against PendingSQLiteFKRepairs.
+	Repaired []fkRepair
+}
+
+// fkRepair is one application of a declared ON DELETE action.
+type fkRepair struct {
+	info fkInfo
+	rows int64
+	// pass is the repair pass, from 0. Pass 0 repairs the orphans that
+	// existed before the reconcile; later passes follow cascades. Read
+	// only by tests.
+	pass int
+}
+
+// FKRepairGroup is one foreign key whose orphaned rows the SQLite foreign
+// key reconcile changes by applying the key's declared ON DELETE action.
+type FKRepairGroup struct {
+	// Table is the child table holding the orphaned rows.
+	Table string
+	// ForeignKeyID is the key's id in PRAGMA foreign_key_list(Table).
+	ForeignKeyID int
+	// Columns are the child table's key columns.
+	Columns []string
+	// Parent is the referenced table.
+	Parent string
+	// Action is the declared ON DELETE action: CASCADE or SET NULL.
+	Action string
+	// Rows is the number of orphaned rows.
+	Rows int
+	// Orphans is a digest of the orphaned rows: their sorted rowids, the
+	// count of rows without one, and each row's full content (every column,
+	// in table order, rendered with quote(), together with its rowid). Two
+	// sets of orphans give the same digest only when these rows are
+	// byte-identical, so a snapshot reused for the same digest holds exactly
+	// the rows the reconcile starts from. Rows that a CASCADE repair reaches
+	// further down (children of the deleted rows) are not part of the
+	// digest.
+	Orphans string
+}
+
+// orphanDigest returns a stable hex digest of the violating rows of fk,
+// with one SELECT over their full content; see FKRepairGroup.Orphans.
+func orphanDigest(ctx context.Context, q sqlQuerier, fk fkInfo, r *fkViolatingRows) (string, error) {
+	ids := make([]int64, 0, len(r.rowids))
+	for id := range r.rowids {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	cols, err := orderedColumns(ctx, q, fk.table)
+	if err != nil {
+		return "", err
+	}
+	if len(cols) == 0 {
+		return "", fmt.Errorf("reading orphaned rows of %s: no columns", fk.table)
+	}
+	exprs := make([]string, len(cols))
+	for i, c := range cols {
+		exprs[i] = "quote(" + quoteIdent(c) + ")"
+	}
+	sel := strings.Join(exprs, " || ',' || ")
+	// foreign_key_check reports a NULL rowid only for WITHOUT ROWID
+	// tables, which have no rowid to select.
+	if len(r.rowids) > 0 {
+		sel = "quote(rowid) || '|' || " + sel
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s WHERE %s", sel, quoteIdent(fk.table), orphanPredicate(fk)))
+	if err != nil {
+		return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var content []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
+		}
+		content = append(content, c)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
+	}
+	sort.Strings(content)
+	h := sha256.New()
+	for _, id := range ids {
+		_, _ = fmt.Fprintf(h, "%d\n", id)
+	}
+	_, _ = fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
+	for _, c := range content {
+		_, _ = fmt.Fprintf(h, "row=%d:%s\n", len(c), c)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// orderedColumns returns the table's columns in declaration order.
+func orderedColumns(ctx context.Context, q sqlQuerier, table string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name FROM pragma_table_info(?) ORDER BY cid", table)
+	if err != nil {
+		return nil, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("PRAGMA table_info(%s): scanning: %w", table, err)
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
+	}
+	return cols, nil
 }
 
 // diagnostic renders the unrepaired orphans with suggested repair SQL. It
@@ -321,6 +437,143 @@ func quoteIdent(s string) string {
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
+// fkLookup resolves foreign keys by (table, id), caching each table's
+// PRAGMA foreign_key_list.
+type fkLookup struct {
+	q     sqlQuerier
+	cache map[string]map[int]fkInfo
+}
+
+func newFKLookup(q sqlQuerier) *fkLookup {
+	return &fkLookup{q: q, cache: make(map[string]map[int]fkInfo)}
+}
+
+// get returns the resolved key; parentExists is false when the referenced
+// table does not exist.
+func (l *fkLookup) get(ctx context.Context, k fkKey) (info fkInfo, parentExists bool, err error) {
+	fks, ok := l.cache[k.table]
+	if !ok {
+		if fks, err = foreignKeyList(ctx, l.q, k.table); err != nil {
+			return fkInfo{}, false, err
+		}
+		l.cache[k.table] = fks
+	}
+	info, ok = fks[k.id]
+	if !ok {
+		return fkInfo{}, false, fmt.Errorf("%s has no foreign key with id %d", k.table, k.id)
+	}
+	return resolveFK(ctx, l.q, info)
+}
+
+// fkRepairStatement classifies a key whose rows are orphaned. It returns
+// the statement that applies the key's declared ON DELETE action, or, when
+// that action is not applied automatically, "" and the reason. Both the
+// reconcile and PendingSQLiteFKRepairs use it, so they agree on which keys
+// are repaired.
+func fkRepairStatement(ctx context.Context, q sqlQuerier, info fkInfo, parentExists bool) (stmt, skipReason string, err error) {
+	if !parentExists {
+		// The parent table itself is missing: that is not an orphan the
+		// declared action describes, so leave the rows alone.
+		return "", reasonNoParent, nil
+	}
+	switch info.onDelete {
+	case "CASCADE":
+		return fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdent(info.table), orphanPredicate(info)), "", nil
+	case "SET NULL":
+		notNull, _, err := fkTableColumns(ctx, q, info.table)
+		if err != nil {
+			return "", "", err
+		}
+		for _, c := range info.from {
+			if notNull[c] {
+				return "", reasonNotNull, nil
+			}
+		}
+		return fmt.Sprintf("UPDATE %s SET %s WHERE %s", quoteIdent(info.table), setNullList(info.from), orphanPredicate(info)), "", nil
+	default:
+		return "", reasonNotAuto, nil
+	}
+}
+
+// BeforeFKReconcileFunc is called by AutoMigrate on SQLite just before the
+// foreign key reconcile, with the keys whose orphaned rows it is about to
+// change (never empty). Returning an error aborts AutoMigrate before the
+// reconcile or the schema migration writes anything.
+type BeforeFKReconcileFunc func(ctx context.Context, db *sql.DB, groups []FKRepairGroup) error
+
+// pendingSQLiteFKRepairs is PendingSQLiteFKRepairs; a variable so tests can
+// make the pre-check fail.
+var pendingSQLiteFKRepairs = PendingSQLiteFKRepairs
+
+// runBeforeFKReconcile runs the pre-check and, when the reconcile is about
+// to change rows, the hook. A pre-check failure is logged and the reconcile
+// runs as it would without a hook.
+func runBeforeFKReconcile(ctx context.Context, db *sql.DB, hook BeforeFKReconcileFunc) error {
+	if hook == nil {
+		return nil
+	}
+	groups, err := pendingSQLiteFKRepairs(ctx, db)
+	if err != nil {
+		slog.Warn("foreign key reconcile: pre-check failed; continuing without the pre-reconcile step", "error", err)
+		return nil
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	return hook(ctx, db, groups)
+}
+
+// PendingSQLiteFKRepairs reports, without writing, the foreign keys whose
+// orphaned rows the reconcile run by AutoMigrate on SQLite would change: the
+// keys whose declared ON DELETE action is applied automatically (CASCADE,
+// or SET NULL on nullable columns, with an existing parent table). Cascades
+// only start from these keys, so an empty result means the reconcile
+// changes no rows; keys left unrepaired are not listed. Callers use it to
+// back up the database before a reconcile that changes rows. A database
+// without orphans costs one PRAGMA foreign_key_check. If the reconcile
+// later finds that its repairs would orphan further rows, it changes
+// nothing (see reconcileSQLiteForeignKeys).
+func PendingSQLiteFKRepairs(ctx context.Context, db *sql.DB) ([]FKRepairGroup, error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("foreign key pre-check: acquiring connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	initial, err := checkForeignKeys(ctx, conn)
+	if err != nil {
+		return nil, fmt.Errorf("foreign key pre-check: %w", err)
+	}
+	lookup := newFKLookup(conn)
+	var out []FKRepairGroup
+	for _, k := range sortedFKKeys(initial) {
+		info, parentExists, err := lookup.get(ctx, k)
+		if err != nil {
+			return nil, fmt.Errorf("foreign key pre-check: %w", err)
+		}
+		stmt, _, err := fkRepairStatement(ctx, conn, info, parentExists)
+		if err != nil {
+			return nil, fmt.Errorf("foreign key pre-check: %w", err)
+		}
+		if stmt == "" {
+			continue
+		}
+		digest, err := orphanDigest(ctx, conn, info, initial[k])
+		if err != nil {
+			return nil, fmt.Errorf("foreign key pre-check: %w", err)
+		}
+		out = append(out, FKRepairGroup{
+			Table:        info.table,
+			ForeignKeyID: info.id,
+			Columns:      append([]string(nil), info.from...),
+			Parent:       info.parent,
+			Action:       info.onDelete,
+			Rows:         initial[k].count(),
+			Orphans:      digest,
+		})
+	}
+	return out, nil
+}
+
 // errFKRepairIntroducedOrphans is returned when applying the declared
 // actions would orphan a row that was not orphaned before, which can happen
 // when a CASCADE delete removes a row that another table references through
@@ -386,28 +639,8 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 		}
 	}()
 
-	fkCache := make(map[string]map[int]fkInfo)
-	lookup := func(k fkKey) (fkInfo, bool, error) {
-		fks, ok := fkCache[k.table]
-		if !ok {
-			var err error
-			if fks, err = foreignKeyList(ctx, tx, k.table); err != nil {
-				return fkInfo{}, false, err
-			}
-			fkCache[k.table] = fks
-		}
-		info, ok := fks[k.id]
-		if !ok {
-			return fkInfo{}, false, fmt.Errorf("%s has no foreign key with id %d", k.table, k.id)
-		}
-		return resolveFK(ctx, tx, info)
-	}
-
-	type applied struct {
-		info fkInfo
-		rows int64
-	}
-	var repairs []applied
+	lookup := newFKLookup(tx)
+	var repairs []fkRepair
 	// skipped holds keys whose declared action is not applied, with why.
 	skipped := make(map[fkKey]string)
 	current := initial
@@ -417,36 +650,16 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 			if _, ok := skipped[k]; ok {
 				continue
 			}
-			info, parentExists, err := lookup(k)
+			info, parentExists, err := lookup.get(ctx, k)
 			if err != nil {
 				return res, fmt.Errorf("foreign key reconcile: %w", err)
 			}
-			if !parentExists {
-				// The parent table itself is missing: that is not an orphan
-				// the declared action describes, so leave the rows alone.
-				skipped[k] = reasonNoParent
-				continue
+			stmt, reason, err := fkRepairStatement(ctx, tx, info, parentExists)
+			if err != nil {
+				return res, fmt.Errorf("foreign key reconcile: %w", err)
 			}
-			var stmt string
-			switch info.onDelete {
-			case "CASCADE":
-				stmt = fmt.Sprintf("DELETE FROM %s WHERE %s", quoteIdent(info.table), orphanPredicate(info))
-			case "SET NULL":
-				notNull, _, err := fkTableColumns(ctx, tx, info.table)
-				if err != nil {
-					return res, fmt.Errorf("foreign key reconcile: %w", err)
-				}
-				for _, c := range info.from {
-					if notNull[c] {
-						skipped[k] = reasonNotNull
-					}
-				}
-				if _, ok := skipped[k]; ok {
-					continue
-				}
-				stmt = fmt.Sprintf("UPDATE %s SET %s WHERE %s", quoteIdent(info.table), setNullList(info.from), orphanPredicate(info))
-			default:
-				skipped[k] = reasonNotAuto
+			if stmt == "" {
+				skipped[k] = reason
 				continue
 			}
 			r, err := tx.ExecContext(ctx, stmt)
@@ -455,7 +668,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 			}
 			if n, _ := r.RowsAffected(); n > 0 {
 				progressed = true
-				repairs = append(repairs, applied{info: info, rows: n})
+				repairs = append(repairs, fkRepair{info: info, rows: n, pass: pass})
 			}
 		}
 		if current, err = checkForeignKeys(ctx, tx); err != nil {
@@ -470,7 +683,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 	// that is newly orphaned was orphaned by the repairs above.
 	var introduced []fkOrphanGroup
 	for _, k := range sortedFKKeys(current) {
-		info, _, err := lookup(k)
+		info, _, err := lookup.get(ctx, k)
 		if err != nil {
 			return res, fmt.Errorf("foreign key reconcile: %w", err)
 		}
@@ -493,6 +706,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 		return res, fmt.Errorf("foreign key reconcile: commit: %w", err)
 	}
 	committed = true
+	res.Repaired = repairs
 	for _, a := range repairs {
 		slog.Warn("repaired orphaned rows by applying the declared ON DELETE action before schema migration",
 			"table", a.info.table, "column", strings.Join(a.info.from, ","), "parent", a.info.parent,

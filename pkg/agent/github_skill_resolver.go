@@ -353,6 +353,32 @@ func (r *GitHubSkillResolver) CredentialForURI(uri string) string {
 	return token
 }
 
+// CredentialSourceForURI returns a label naming where CredentialForURI's
+// credential for uri comes from: the secret named by ?token=, the GH_*
+// convention key that matched (names only, never values), or the default
+// GITHUB_TOKEN. It returns "" when CredentialForURI would return "".
+func (r *GitHubSkillResolver) CredentialSourceForURI(uri string) string {
+	ghRef, err := ParseGitHubSkillURI(uri)
+	if err != nil {
+		return ""
+	}
+	_, source, err := r.lookupToken(ghRef)
+	if err != nil {
+		return ""
+	}
+	switch source {
+	case tokenSourceSecretParam:
+		return fmt.Sprintf("the credential %s named by ?token=", ghRef.TokenSecretName)
+	case tokenSourceRepoKey:
+		return "the credential " + ghauth.RepoKey(ghRef.Owner, ghRef.Repo)
+	case tokenSourceOwnerKey:
+		return "the credential " + ghauth.OwnerKey(ghRef.Owner)
+	case tokenSourceDefault:
+		return gitHubCredSourceDefault
+	}
+	return ""
+}
+
 // WithInstallCredentials returns ctx with what the install step needs to
 // download files of gh:// skills: this resolver's CredentialForURI as the
 // GitHub credential lookup, and defaultToken (when non-empty) as the default
@@ -363,6 +389,7 @@ func (r *GitHubSkillResolver) WithInstallCredentials(ctx context.Context, defaul
 	if defaultToken != "" {
 		ctx = ContextWithGitHubToken(ctx, defaultToken)
 	}
+	ctx = contextWithGitHubCredentialSourceLookup(ctx, r.CredentialSourceForURI)
 	return ContextWithGitHubCredentialLookup(ctx, r.CredentialForURI)
 }
 

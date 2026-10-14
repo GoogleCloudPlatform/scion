@@ -465,7 +465,7 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		endpoint := c.Hubs[name].Endpoint
 		// A hub gets only a credential bound to it unless it was given with
 		// --hub or is the effective hub (hubGetsFullChain).
-		fanOut := !hubGetsFullChain(settings, endpoint, onlyHub != "")
+		fanOut := !hubGetsFullChain(endpoint, onlyHub != "")
 		if !hubUsable(settings, endpoint, fanOut) {
 			results[i].skipped = true
 			continue

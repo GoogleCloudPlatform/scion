@@ -51,7 +51,13 @@ func TestParseMemory(t *testing.T) {
 
 		// Plain bytes
 		{"1073741824", 1073741824, false},
+		{"9223372036854775807", 1<<63 - 1, false},
 		{"0", 0, false},
+		{"0Gi", 0, false},
+
+		// Representable boundaries for suffixed quantities.
+		{"8191Pi", 8191 << 50, false},
+		{"-8192Pi", -1 << 63, false},
 
 		// Fractional
 		{"1.5Gi", 1610612736, false},
@@ -61,6 +67,13 @@ func TestParseMemory(t *testing.T) {
 		{"", 0, true},
 		{"abc", 0, true},
 		{"Gi", 0, true},
+		{"8192Pi", 0, true},
+		{"9223372036854776K", 0, true},
+		{"-8193Pi", 0, true},
+		{"1e308G", 0, true},
+		{"NaNGi", 0, true},
+		{"InfM", 0, true},
+		{"-InfMi", 0, true},
 	}
 
 	for _, tt := range tests {
