@@ -2,7 +2,7 @@
 title: About Workspaces
 ---
 
-Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container (except for a repository linked to the local workstation Hub, where the agent works in its worktree path; see [Linked git projects](#linked-git-projects)). This is where the agent reads code, makes changes, and runs commands.
+Every Scion agent has a dedicated **Workspace**, mounted at `/workspace` inside the agent's container. In worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`; see [Linked git projects](#linked-git-projects)); scripts should use `$PWD` or `git rev-parse --show-toplevel`. This is where the agent reads code, makes changes, and runs commands.
 
 Scion provides flexible options for how this workspace is backed on your host machine, ranging from isolated git worktrees to direct directory mounts.
 

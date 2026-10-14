@@ -8,7 +8,7 @@ An **artifact** is a file or a folder that you or an agent publish to the Hub. I
 This guide walks through the common tasks. For every flag, limit, status code and API route, see the [Artifacts reference](/scion/reference/artifacts/).
 
 :::caution[Experimental]
-Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default, and they need Hub mode. While the experiment is off, the web UI shows no artifact pages, every `scion artifact` command fails, and messages sent with `--artifact` lose their references. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
+Artifacts are behind the `hub.artifacts` [experiment](/scion/reference/experiments/), which is off by default. While the experiment is off, the web UI shows no artifact pages, every `scion artifact` command fails, and messages sent with `--artifact` lose their references. See [The artifacts experiment is off](#the-artifacts-experiment-is-off).
 :::
 
 ## Who does what

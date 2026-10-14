@@ -52,7 +52,7 @@ Subdirectories contain domain-specific agent instructions for their respective a
   - **Naming**: Slugified version of the parent directory containing the `.scion` directory.
 - **Agent**: An isolated container running an LLM harness (Gemini, Claude, etc.).
   - **Filesystem**: Dedicated home directory (`/home/gemini`) containing unique config and history.
-  - **Workspace**: mounted at `/workspace`; for a repo linked to the local workstation hub the agent works in its worktree at `/repo-root/.scion/agents/<name>/workspace` instead (use `$PWD` or `git rev-parse --show-toplevel`, not a hard-coded `/workspace`).
+  - **Workspace**: mounted at `/workspace`; in worktree-per-agent mode the agent instead works in its worktree under `/repo-root` (for a repository linked to the local workstation Hub, `/repo-root/.scion/agents/<name>/workspace`); scripts should use `$PWD` or `git rev-parse --show-toplevel`, not a hard-coded `/workspace`.
 - **Workspace Strategy**:
   - A repository linked to the local workstation hub is registered `worktree-per-agent`; the co-located broker gives each new agent a git worktree of the user's checkout at `<repo>/.scion/agents/<agent>/workspace` (branch named after the agent), and refuses the start if the checkout check fails (git < 2.48, not a checkout, origin missing or different), with no clone fallback. Projects linked to a remote hub, or linked to a workstation hub before this, clone per agent inside the container (HTTPS, `GITHUB_TOKEN` for private repos). Hub-native `worktree-per-agent` projects use worktrees of the broker's own shared clone. See "Linked git projects" in `docs-site/src/content/docs/local/workspace.md`.
 - **Observability & Interactivity**:
