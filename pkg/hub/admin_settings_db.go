@@ -1594,7 +1594,9 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 		beforeDocs["endpoints"] = publicURLInEffectDoc(before, publicURLSavedBefore, operatorEndpoint)
 		writtenDocs["endpoints"] = publicURLInEffectDoc(doc, publicURLFromSectionDoc(doc), operatorEndpoint)
 	}
-	keyReport := reportSavedKeys(beforeDocs, writtenDocs)
+	// The keys the write's self-apply skipped are reported as skipped, not
+	// applied (ptone/scion#4466).
+	keyReport := reportSavedKeys(beforeDocs, writtenDocs).withSkipped(s.layer1ApplySkips())
 
 	if len(conflicted) > 0 {
 		fileTxn.abort()
@@ -1613,6 +1615,7 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			"conflicted":          conflicted,
 			"applied_keys":        keyReport.Applied,
 			"pending_restart":     keyReport.PendingRestart,
+			"skipped":             keyReport.Skipped,
 		})
 		return
 	}
@@ -1656,9 +1659,12 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 			// applied_keys and pending_restart list the changed Layer-1
 			// keys (koanf paths) by whether they took effect on save.
 			// file_applied lists the settings.yaml changes applied live
-			// on a workstation hub (also included in applied).
+			// on a workstation hub (also included in applied). skipped
+			// lists the changed keys saved but not in use, each with a
+			// reason (ptone/scion#4466).
 			"applied_keys":    keyReport.Applied,
 			"pending_restart": keyReport.PendingRestart,
+			"skipped":         keyReport.Skipped,
 			"file_applied":    fileApplied,
 		},
 	}
