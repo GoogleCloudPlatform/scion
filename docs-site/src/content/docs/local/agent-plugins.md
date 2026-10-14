@@ -149,7 +149,7 @@ If the harness CLI in the image is older than the minimum, the harness skips plu
 
 ### codex
 
-- Scion keeps a local marketplace named `scion-agent-plugins` in `~/.scion/agent-plugins/` and runs `codex plugin marketplace add`, `codex plugin add <name>@scion-agent-plugins` and `codex plugin remove`. The install does not use the network.
+- Scion keeps a local marketplace named `scion-agent-plugins` in `~/.scion/agent-plugins/` and runs `codex plugin marketplace add`, `codex plugin add <name>@scion-agent-plugins` and `codex plugin remove`. The local marketplace path does not clone or download the bundle; a fully offline install is not yet verified end to end.
 - `sse` MCP servers are skipped, with the warning `agent plugin <name>: codex skips sse server(s): <list>` in `agent.log`.
 - The `codex` harness-config's `provisioner.timeout` is 60s to leave room for plugin installs.
 
@@ -185,7 +185,7 @@ Claude has no plugin install command for local bundles, so Scion writes the plug
 
   A root `SKILL.md` is not installed either, with its own warning: `agent plugin <name>: ignored root SKILL.md in bundle (Agent Plugins skills live under skills/)`. Agent Plugins skills live under `skills/`.
 
-  An MCP server whose command points into a removed path is skipped.
+  An MCP server whose command, cwd, args or env point into a removed path is skipped (`mcp server <s> skipped for claude: it uses <path>, which is not installed for claude`).
 - **Name conflicts with skills.** If a template, platform or Skill Bank skill has the same name as a plugin, the plugin is not installed for claude (`plugin <name> not installed for claude: a skill named <name> is already installed in the skills dir`). A directory in `~/.claude/skills/` that Scion did not install is never replaced or removed (`… exists and was not installed by Scion`).
 - **Scion removes only what it wrote.** Scion records every file it installs, with its checksum, in `~/.scion/agent-plugins/state-claude.json`. On removal or update it deletes only recorded files whose content is unchanged.
 - **Presence check.** At each start, Scion checks that the generated `.claude-plugin/plugin.json` and the bundle's root `plugin.json` are still in place and unchanged (by checksum), and that `~/.scion/agent-plugins/data/<name>/` exists.
@@ -205,7 +205,7 @@ Inside the agent container:
 | Path | Contents |
 | :--- | :--- |
 | `~/.scion/harness/inputs/plugins/<name>/`, `~/.scion/harness/inputs/plugins.json` | The bundles Scion staged for this start, and their index. Restored from the agent's control-plane record at every start. |
-| `~/.scion/agent-plugins/bundles/<name>/` | Scion's copy of each bundle, the source the harness installs from. |
+| `~/.scion/agent-plugins/bundles/<name>/` | Scion's copy of each bundle, the source codex, copilot and muse-code install from (claude copies from the staged inputs). |
 | `~/.scion/agent-plugins/state-<harness>.json` | The plugins Scion installed for that harness. Scion only ever removes plugins listed here. |
 | `~/.scion/agent-plugins/status-<harness>.json` | The result of the last start: `installed`, `stale` (an older version kept after a failed upgrade, or a removal deferred to the next start), `skipped` (each with a reason), `removed`, `cli_version` and `updated_at`. |
 | `~/.scion/agent-plugins/.agents/plugins/marketplace.json` | codex only: the `scion-agent-plugins` local marketplace. |
@@ -240,7 +240,7 @@ Scion's own checks run when it provisions or starts the agent. Their messages st
 | `template <t>: plugin dir "<p>": <error>` | Any other error opening the plugin directory, such as an unreadable template directory. |
 | `plugin at "<p>": plugin.json …` | `plugin.json` is missing, not a regular file, not valid JSON, has a field of the wrong type, or has an invalid name. |
 | `plugin "<n>": unsupported Agent Plugins version "<x>"; Scion supports 1.0.0` | The manifest's `$schema` is not the 1.0.0 schema. |
-| `plugin "<n>": bundle exceeds <limit>` | The bundle is over 10,000 files, 100 MiB, or a directory depth of 32. |
+| `plugin "<n>": bundle exceeds <limit>` | The bundle is over 10,000 entries (files, directories and skipped symlinks), 100 MiB, or a directory depth of 32. |
 | `plugin "<n>": skipped <k> symlink(s) or special file(s) (not followed): …` | Those entries were not copied. |
 | `plugin "<n>": unknown manifest field "<f>" ignored` | Unknown `plugin.json` fields are ignored. |
 | `plugin "<n>": manifest field "extensions" is not an object; ignored` | `extensions` must be a JSON object; anything else is ignored. |
@@ -266,7 +266,7 @@ The harness's provisioner installs the plugins inside the container just before 
 | `agent plugins skipped: <cli> <version> is older than <min> (needs Agent Plugins support)` | The image's harness CLI is too old. Nothing is installed or removed. |
 | `agent plugin <n>: install failed (…); will retry next start` | The harness CLI failed. The CLI output is included. |
 | `agent plugin <n>: removal failed (…); will retry next start` | A plugin that was dropped could not be removed. |
-| `agent plugins: time budget reached; <k> plugin(s) deferred to next start` | Plugin work has a 20-second budget per start. |
+| `agent plugins: time budget reached; <k> plugin(s) deferred to next start`, or `…; <k> removal(s) deferred to next start` | Plugin work has a 20-second budget per start. |
 | `agent plugin <n>: codex skips sse server(s): …` | codex only. |
 | `agent plugin <n>: muse: Agent Plugins MCP server "<s>" is not supported in this release; …` | muse-code only. |
 | `agent plugin <n>: mcp server <s> skipped for claude: …` | claude only; see the [skip rule](#claude). |
@@ -298,7 +298,7 @@ To fix this:
 - **Bundles run code.** A stdio MCP server is a program from the bundle, started by the harness with the agent's permissions. Only use bundles you trust, as you would for template files.
 - **Template-relative sources only.** Scion does not fetch plugins from URLs or registries in this release. A plugin path must stay inside its template directory, and the plugin directory and its parents inside the template must be real directories, not symlinks.
 - **Symlinks are never followed.** Symlinks and special files inside a bundle are skipped and reported. Copied files get mode 0644, or 0755 if any execute bit was set; setuid, setgid and sticky bits are dropped.
-- **Size limits.** Each bundle is limited to 10,000 files, 100 MiB and a directory depth of 32. `plugin.json` and `mcp.json` are limited to 1 MiB each.
+- **Size limits.** Each bundle is limited to 10,000 entries (files, directories and skipped symlinks), 100 MiB and a directory depth of 32. `plugin.json` and `mcp.json` are limited to 1 MiB each.
 - **MCP values are visible data.** Header and `env` values in `mcp.json` are stored in the template and copied into the agent home and the harness's config. Do not put secrets in them.
 - **Remote MCP URLs must use https,** except for `localhost` and loopback addresses. URLs with user information or a fragment are rejected.
 - **claude: `bin/` is on the model's shell PATH.** Claude appends each plugin's `bin/` directory to the PATH of its Bash tool. It is appended, so it cannot shadow existing commands, but every executable in the bundle's `bin/` can be run from the model's shell.
