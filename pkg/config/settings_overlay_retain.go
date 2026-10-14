@@ -282,6 +282,18 @@ func (vs *VersionedSettings) RetainedRuntimeNames() []string {
 	return append([]string(nil), vs.retainedRuntimeNames...)
 }
 
+// ConservativeRetention reports whether retention is in conservative mode
+// (enabled because references could not be counted, and no count has
+// succeeded since).
+func (o *SettingsOverlay) ConservativeRetention() bool {
+	if o == nil {
+		return false
+	}
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	return o.conservative
+}
+
 // RetentionEnabled reports whether built-in retention is enabled.
 func (o *SettingsOverlay) RetentionEnabled() bool {
 	if o == nil {

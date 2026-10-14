@@ -713,3 +713,19 @@ func TestRetain_UnmanagedHubReportsNothing(t *testing.T) {
 		t.Fatalf("WARN after clearing the stored sets: %s", logs)
 	}
 }
+
+// ConservativeRetention reports conservative mode until a count succeeds.
+func TestRetain_ConservativeRetentionAccessor(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
+	if o.ConservativeRetention() || o.RetentionEnabled() {
+		t.Fatal("a new overlay is neither conservative nor enabled")
+	}
+	o.EnableConservativeRetention()
+	if !o.ConservativeRetention() || !o.RetentionEnabled() {
+		t.Fatal("conservative enable must report conservative and enabled")
+	}
+	o.SetProfileReferences(ProfileReferences{})
+	if o.ConservativeRetention() {
+		t.Fatal("a successful count ends conservative mode")
+	}
+}

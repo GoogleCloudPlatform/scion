@@ -125,6 +125,7 @@ func TestProfileReferences_AutoLinkCreateRetainsFirstTime(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	f.srv.EnableProfileReferences(ctx, overlay, f.unlinked.ID, t.TempDir())
+	requireCounted(t, f.srv, overlay)
 	require.Error(t, resolvesThrough(overlay, "local"), "precondition: local is not retained before the link")
 
 	disp := &resolveAtDispatchDispatcher{createAgentDispatcher: createAgentDispatcher{createPhase: string(state.PhaseRunning)}, overlay: overlay}
@@ -150,6 +151,7 @@ func TestProfileReferences_LinkToOtherBrokerAddsNothing(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	srv.EnableProfileReferences(ctx, overlay, testColocatedBrokerID, t.TempDir())
+	requireCounted(t, srv, overlay)
 
 	srv.onColocatedPlacement(ctx, project.ID, testOtherBrokerID, "local")
 	assert.Error(t, resolvesThrough(overlay, "local"))
@@ -167,6 +169,7 @@ func TestProfileReferences_ProjectSaveGatedOnProvider(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	srv.EnableProfileReferences(ctx, overlay, broker.ID, t.TempDir())
+	requireCounted(t, srv, overlay)
 
 	notProvided := &store.Project{ID: tid("pr-save-np"), Name: "np", Slug: "pr-save-np",
 		Annotations: map[string]string{projectSettingActiveProfile: "remote"}}
@@ -265,6 +268,20 @@ func TestProfileReferences_CountReadsAgentInfoWhereDispatchPoints(t *testing.T) 
 	assert.Equal(t, map[string]int{"local": 3, "remote": 1, "hubval": 2, "": 2}, refs.Agents)
 	assert.Equal(t, 1, refs.AgentInfoMissing)
 	assert.Equal(t, 1, refs.AgentInfoUnreadable)
+}
+
+// requireCounted asserts that retention is enabled from a successful
+// count: conservative mode is off and the last count left no error. Every
+// reference-counting test checks it before asserting behaviour, so
+// conservative retention cannot make a test pass for the wrong reason.
+func requireCounted(t *testing.T, srv *Server, overlay *config.SettingsOverlay) {
+	t.Helper()
+	require.True(t, overlay.RetentionEnabled(), "retention must be enabled")
+	require.False(t, overlay.ConservativeRetention(), "conservative mode must be off: the reference count must have succeeded")
+	srv.profileRefs.runMu.Lock()
+	lastErr := srv.profileRefs.lastErr
+	srv.profileRefs.runMu.Unlock()
+	require.Empty(t, lastErr, "the reference count must have succeeded")
 }
 
 // publishTarget publishes overlay and brokerID as the reference target
@@ -448,6 +465,7 @@ func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	srv.EnableProfileReferences(context.Background(), overlay, testColocatedBrokerID, t.TempDir())
+	requireCounted(t, srv, overlay)
 	fault.Arm()
 	logs := captureHubLogs(t, func() {
 		srv.runProfileReferenceCount(context.Background())
@@ -491,6 +509,7 @@ func TestProfileReferences_InstallFailureIsConservative(t *testing.T) {
 		remoteErr = resolvesThrough(overlay, "remote")
 	})
 	require.True(t, overlay.RetentionEnabled())
+	require.True(t, overlay.ConservativeRetention(), "this test covers conservative mode: it must be on")
 	assert.NoError(t, localErr)
 	assert.Error(t, remoteErr)
 	assert.Contains(t, logs, "could not be counted at start")
@@ -542,6 +561,7 @@ func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
 			overlay := config.NewSettingsOverlay()
 			overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}}, storedGkeNFSProfiles(), nil, "")
 			srv.EnableProfileReferences(ctx, overlay, broker.ID, t.TempDir())
+			requireCounted(t, srv, overlay)
 			require.Error(t, resolvesThrough(overlay, "local"))
 			require.Error(t, resolvesThrough(overlay, "remote"))
 			project.Annotations[projectSettingActiveProfile] = "local" // set after the count, so only the move adds it
@@ -583,6 +603,7 @@ func TestProfileReferences_ProjectSettingsPutRetains(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	requireCounted(t, f.srv, overlay)
 	require.Error(t, resolvesThrough(overlay, "local"))
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, "/api/v1/projects/"+f.proj.ID+"/settings",
@@ -601,6 +622,7 @@ func TestProfileReferences_ServerConfigGetShowsRetained(t *testing.T) {
 	overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
 		map[string]config.V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local-nfs": {Runtime: "docker"}}, nil, "")
 	overlay.SetProfileReferences(config.ProfileReferences{Agents: map[string]int{"local": 2}})
+	require.False(t, overlay.ConservativeRetention())
 	require.NoError(t, resolvesThrough(overlay, "local"))
 	publishTarget(srv, overlay, testColocatedBrokerID, t.TempDir())
 
@@ -641,6 +663,7 @@ func TestProfileReferences_FailedCountKeepsReferences(t *testing.T) {
 			overlay := config.NewSettingsOverlay()
 			overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 			srv.EnableProfileReferences(ctx, overlay, testColocatedBrokerID, t.TempDir())
+			requireCounted(t, srv, overlay)
 			require.NoError(t, resolvesThrough(overlay, "local"))
 			ps, _ := overlay.RetainedState()
 			require.Len(t, ps, 1)
@@ -669,6 +692,7 @@ func TestProfileReferences_ProjectSaveTriggersCount(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	requireCounted(t, f.srv, overlay)
 	ch := f.srv.profileRefs.triggerChan()
 	for len(ch) > 0 {
 		<-ch
@@ -690,6 +714,7 @@ func TestProfileReferences_SaveThenCreateRetainsFirstTime(t *testing.T) {
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	f.srv.EnableProfileReferences(ctx, overlay, f.broker.ID, t.TempDir())
+	requireCounted(t, f.srv, overlay)
 	require.Error(t, resolvesThrough(overlay, "local"), "precondition: local is not retained before the save")
 
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodPut, "/api/v1/projects/"+f.proj.ID+"/settings",
