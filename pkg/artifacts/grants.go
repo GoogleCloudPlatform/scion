@@ -260,13 +260,13 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	if !ok {
 		return
 	}
-	allowed, err := s.canAdminister(r.Context(), b, a)
+	authority, err := s.adminAuthorityWith(r.Context(), a, func() ([]Grant, error) { return b.store.ListGrants(r.Context(), a.ID) })
 	if err != nil {
 		slog.ErrorContext(r.Context(), "artifacts: list grants failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the artifact's grants")
 		return
 	}
-	if !allowed {
+	if authority == "" {
 		s.putReviewGrant(w, r, b, a)
 		return
 	}
@@ -293,6 +293,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	if req.SubjectKind == SubjectScope && !home && !s.crossScopeAllowed(r.Context()) {
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
@@ -315,6 +316,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 			"a review grant cannot replace a user's read, write or admin grant")
 		return
 	case errors.Is(err, ErrCrossScopeDisabled):
+		s.logRefusal(r, logActionShare, logReasonCrossProjectDisabled, a)
 		writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 			"sharing artifacts with other projects is turned off on this hub")
 		return
@@ -334,6 +336,7 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 	if created {
 		status = http.StatusCreated
 	}
+	s.logGrantPut(r, a, g, created, authority)
 	writeJSON(w, status, GrantResponse{Grant: grantInfo(a, g)})
 }
 
@@ -394,6 +397,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
+	s.logGrantPut(r, a, g, created, logAuthorityReviewGrantor)
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -483,6 +487,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 	if !ok {
 		return
 	}
+	removed := s.grantForLog(r, b, a, grantID)
 	switch err := b.store.DeleteGrant(r.Context(), a.ID, grantID, actor); {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "home_grant", "the home project's grant cannot be removed; move the artifact instead")
@@ -492,6 +497,7 @@ func (s *Service) handleDeleteGrant(w http.ResponseWriter, r *http.Request, id, 
 		slog.ErrorContext(r.Context(), "artifacts: delete grant failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not remove the grant")
 	default:
+		s.logGrantRemoved(r, a, removed, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -537,10 +543,12 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			return
 		}
 		if !canCreateIn(ctx, s.host, scope) {
+			s.logRefusal(r, logActionMove, logReasonNotAuthorizedInScope, a)
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}
 		if !s.crossScopeAllowed(ctx) {
+			s.logRefusal(r, logActionMove, logReasonCrossProjectDisabled, a)
 			writeError(w, http.StatusForbidden, "cross_project_sharing_disabled",
 				"moving artifacts to other projects is turned off on this hub")
 			return
@@ -561,6 +569,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 		if !s.patchStored(w, r, err) {
 			return
 		}
+		s.logPatch(r, a, updated, u)
 	}
 	resp := PatchArtifactResponse{Artifact: artifactInfo(updated)}
 	if updated.ExpiresAt != nil {

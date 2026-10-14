@@ -260,7 +260,18 @@ func ownersAfter(after *Owner) (string, []any) {
 }
 
 // SetOwnerOrphaned implements Store.
-func (s *sqlStore) SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) (int, error) {
+func (s *sqlStore) SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]string, error) {
+	var changed []string
+	if _, err := s.setOwnerOrphaned(ctx, owner, orphaned, now, limit, &changed); err != nil {
+		return nil, err
+	}
+	return changed, nil
+}
+
+// setOwnerOrphaned is SetOwnerOrphaned, appending the id of each artifact
+// it changes to changed (valid only when it returns no error) and
+// returning how many it changed.
+func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int, changed *[]string) (int, error) {
 	if limit <= 0 {
 		return 0, errors.New("artifacts: SetOwnerOrphaned needs a positive limit")
 	}
@@ -315,6 +326,7 @@ func (s *sqlStore) SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 			map[string]any{"owner": PrincipalRef(owner.Kind, owner.Ref)}); err != nil {
 			return 0, err
 		}
+		*changed = append(*changed, id)
 		n++
 	}
 	if err := tx.Commit(); err != nil {

@@ -75,6 +75,7 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	if authority == "" {
+		s.logRetireRefusal(r, a)
 		writeRetireForbidden(w)
 		return
 	}
@@ -87,6 +88,7 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		slog.ErrorContext(ctx, "artifacts: delete artifact failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not delete the artifact")
 	default:
+		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: eventLogAuthority(authority)})
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}
@@ -135,7 +137,21 @@ func (e *CheckerError) Unwrap() error { return e.Err }
 // A checker error leaves the failing page and everything after it
 // unchanged and returns a *CheckerError. A ref the checker does not answer
 // counts as live.
-func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time) (ReconcileResult, error) {
+//
+// It writes one decision log entry to log per artifact it marks or clears,
+// and a summary of the pass; a nil log discards them.
+func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time, log *slog.Logger) (ReconcileResult, error) {
+	if log == nil {
+		log = discardLogger
+	}
+	res, err := reconcileOwners(ctx, st, checker, now, log)
+	if st != nil && checker != nil {
+		logOwnerPass(ctx, log, res, err)
+	}
+	return res, err
+}
+
+func reconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time, log *slog.Logger) (ReconcileResult, error) {
 	var res ReconcileResult
 	if st == nil || checker == nil {
 		return res, nil
@@ -166,13 +182,13 @@ func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, no
 			gone := answered && !alive
 			switch {
 			case gone && o.Unmarked > 0:
-				n, err := markOwner(ctx, st, o, true, now)
+				n, err := markOwner(ctx, st, o, true, now, log)
 				res.Orphaned += n
 				if err != nil {
 					return res, err
 				}
 			case !gone && o.Marked > 0:
-				n, err := markOwner(ctx, st, o, false, now)
+				n, err := markOwner(ctx, st, o, false, now, log)
 				res.Unorphaned += n
 				if err != nil {
 					return res, err
@@ -190,13 +206,78 @@ func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, no
 
 // markOwner sets or clears the orphan mark on every live artifact of o, a
 // batch at a time.
-func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.Time) (int, error) {
+func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.Time, log *slog.Logger) (int, error) {
 	total := 0
 	for {
-		n, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
+		ids, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
+		logOwnerMarks(ctx, log, o, orphaned, now, ids)
+		n := len(ids)
 		total += n
 		if err != nil || n < orphanMarkBatch {
 			return total, err
 		}
 	}
+}
+
+// logOwnerMarks writes one entry per artifact of owner o whose orphan mark
+// a pass set (orphaned) or cleared.
+func logOwnerMarks(ctx context.Context, log *slog.Logger, o Owner, orphaned bool, now time.Time, ids []string) {
+	action := logActionUnorphaned
+	var at *time.Time
+	if orphaned {
+		action, at = logActionOrphaned, &now
+	}
+	for _, id := range ids {
+		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action,
+			artifact: &Artifact{ID: id, OwnerKind: o.Kind, OrphanedAt: at}})
+	}
+}
+
+// logOwnerPass writes the summary of one owner liveness pass.
+func logOwnerPass(ctx context.Context, log *slog.Logger, res ReconcileResult, err error) {
+	outcome, reason, level := logOutcomeAllowed, "", slog.LevelInfo
+	var cerr *CheckerError
+	switch {
+	case errors.As(err, &cerr):
+		outcome, reason, level = logOutcomeError, logReasonCheckerError, slog.LevelWarn
+	case err != nil:
+		outcome, reason, level = logOutcomeError, logReasonStoreError, slog.LevelWarn
+	}
+	attrs := []slog.Attr{
+		slog.String(logKeyAction, logActionOwnerPass), slog.String(logKeyOutcome, outcome),
+		slog.String(logKeyPrincipalKind, reconcilerActor.Kind), slog.String(logKeyPrincipalID, reconcilerActor.Ref),
+		slog.String(logKeyAuthority, reconcilerActor.Authority),
+		slog.Int(logKeyOwnersChecked, res.Owners), slog.Int(logKeyOrphanedCount, res.Orphaned),
+		slog.Int(logKeyUnorphanedCount, res.Unorphaned),
+	}
+	if reason != "" {
+		attrs = append(attrs, slog.String(logKeyReason, reason))
+	}
+	log.LogAttrs(ctx, level, "artifacts: "+logActionOwnerPass, attrs...)
+}
+
+// SweepExpired runs one expiry sweep (Store.SweepExpired) and writes one
+// decision log entry per artifact it deleted, and a summary when it deleted
+// any or failed. A nil log discards them. It returns how many it deleted.
+func SweepExpired(ctx context.Context, st Store, now time.Time, limit int, log *slog.Logger) (int, error) {
+	if log == nil {
+		log = discardLogger
+	}
+	ids, err := st.SweepExpired(ctx, now, limit)
+	for _, id := range ids {
+		writeSystemDecision(ctx, log, retentionActor, logEntry{action: logActionDeleted, artifact: &Artifact{ID: id}})
+	}
+	if len(ids) > 0 || err != nil {
+		outcome, level := logOutcomeAllowed, slog.LevelInfo
+		attrs := []slog.Attr{}
+		if err != nil {
+			outcome, level = logOutcomeError, slog.LevelWarn
+			attrs = append(attrs, slog.String(logKeyReason, logReasonStoreError))
+		}
+		attrs = append(attrs, slog.String(logKeyAction, logActionRetentionPass), slog.String(logKeyOutcome, outcome),
+			slog.String(logKeyPrincipalKind, retentionActor.Kind), slog.String(logKeyPrincipalID, retentionActor.Ref),
+			slog.String(logKeyAuthority, retentionActor.Authority), slog.Int(logKeyCount, len(ids)))
+		log.LogAttrs(ctx, level, "artifacts: "+logActionRetentionPass, attrs...)
+	}
+	return len(ids), err
 }

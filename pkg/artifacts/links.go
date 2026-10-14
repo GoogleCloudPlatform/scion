@@ -238,6 +238,7 @@ func (s *Service) adminArtifact(w http.ResponseWriter, r *http.Request, id strin
 		return b, nil, nil, false
 	}
 	if authority == "" {
+		s.logAdminRefusal(r, logActionAdminister, a)
 		s.writeAdminForbidden(w, r)
 		return b, nil, nil, false
 	}
@@ -327,7 +328,7 @@ func writeGrantsReadFailed(w http.ResponseWriter, r *http.Request, err error) {
 
 // handleCreateLink implements POST /{id}/links.
 func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id string) {
-	b, a, _, ok := s.adminArtifact(w, r, id)
+	b, a, actor, ok := s.adminArtifact(w, r, id)
 	if !ok {
 		return
 	}
@@ -383,6 +384,7 @@ func (s *Service) handleCreateLink(w http.ResponseWriter, r *http.Request, id st
 		writeError(w, http.StatusInternalServerError, "internal", "could not create the link")
 		return
 	}
+	s.logLink(r, a, logActionLinkCreated, actor)
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	writeJSON(w, http.StatusCreated, CreateLinkResponse{
 		Link: linkInfo(g), URL: RouteShared + token, ClampedToArtifactExpiry: clamped,
@@ -462,6 +464,7 @@ func (s *Service) handleRevokeLink(w http.ResponseWriter, r *http.Request, id, l
 		slog.ErrorContext(r.Context(), "artifacts: revoke link failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not revoke the link")
 	default:
+		s.logLink(r, a, logActionLinkRevoked, actor)
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

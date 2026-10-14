@@ -338,31 +338,31 @@ func (s *sqlStore) moveArtifact(ctx context.Context, tx *sql.Tx, artifactID stri
 }
 
 // SweepExpired implements Store.
-func (s *sqlStore) SweepExpired(ctx context.Context, now time.Time, limit int) (int, error) {
+func (s *sqlStore) SweepExpired(ctx context.Context, now time.Time, limit int) ([]string, error) {
 	if limit <= 0 {
-		return 0, nil
+		return nil, nil
 	}
 	at := s.timeArg(now)
 	rows, err := s.db.QueryContext(ctx, s.rebind(`SELECT id FROM artifact
 		WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at <= ?
 		ORDER BY expires_at LIMIT `+strconv.Itoa(limit)), at)
 	if err != nil {
-		return 0, fmt.Errorf("artifacts: find expired: %w", err)
+		return nil, fmt.Errorf("artifacts: find expired: %w", err)
 	}
 	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return 0, fmt.Errorf("artifacts: scan expired: %w", err)
+			return nil, fmt.Errorf("artifacts: scan expired: %w", err)
 		}
 		ids = append(ids, id)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("artifacts: find expired: %w", err)
+		return nil, fmt.Errorf("artifacts: find expired: %w", err)
 	}
-	swept := 0
+	var swept []string
 	for _, id := range ids {
 		_, err := s.DeleteArtifact(ctx, id, DeleteOptions{Actor: &retentionActor, ExpiredAt: &now, Now: now})
 		switch {
@@ -371,7 +371,7 @@ func (s *sqlStore) SweepExpired(ctx context.Context, now time.Time, limit int) (
 		case err != nil:
 			return swept, err
 		default:
-			swept++
+			swept = append(swept, id)
 		}
 	}
 	return swept, nil

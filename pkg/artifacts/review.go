@@ -255,5 +255,6 @@ func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, id 
 		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
 		return false
 	}
+	s.logVersionError(r, &Artifact{ID: id}, seq, reason)
 	return true
 }
