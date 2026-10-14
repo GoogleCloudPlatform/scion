@@ -104,10 +104,12 @@ type Config struct {
 	Peers *relay.PeerClient
 	// Now defaults to time.Now.
 	Now func() time.Time
-	// Brokers, when set, is the only source of broker resolutions; the
-	// conduit registry is not consulted for brokers. Brokers are not on
-	// conduit before Phase 3, so the hub sets it to its legacy owner-only
-	// adapter over the broker control channel (design §7 "Phase 2").
+	// Brokers, when set, resolves broker streams and broker RPCs that name
+	// no operation (Want.Capability empty); the conduit registry is not
+	// consulted for those. The hub sets it to its legacy owner-only adapter
+	// over the broker control channel (design §7 "Phase 2"). A broker RPC
+	// that names its operation is resolved through the registry, against
+	// the broker's reference incarnation (design v2.21.35 §7 "3.3b items").
 	Brokers BrokerResolver
 }
 
@@ -222,8 +224,14 @@ func (x exclusions) excluded(rec registry.SessionRecord) bool {
 }
 
 func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (Resolved, error) {
-	if req.Kind == registry.PrincipalBroker && r.cfg.Brokers != nil {
-		return r.resolveLegacyBroker(ctx, req, exclude)
+	if req.Kind == registry.PrincipalBroker {
+		if r.cfg.Brokers != nil && !brokerRPCOverConduit(req) {
+			return r.resolveLegacyBroker(ctx, req, exclude)
+		}
+		var err error
+		if req, err = r.withBrokerIncarnation(ctx, req); err != nil {
+			return Resolved{}, err
+		}
 	}
 	wants, err := r.wants(req)
 	if err != nil {
@@ -263,6 +271,39 @@ func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (
 		}
 	}
 	return Resolved{}, ErrNoSession
+}
+
+// brokerRPCOverConduit reports whether a broker request is resolved
+// through the conduit registry even when Config.Brokers is set: an RPC
+// that names the capability (the operation) it needs (design v2.21.35 §7
+// "3.3b items"). The registry then returns only sessions whose Hello
+// lists that operation. Streams, and RPCs that name no operation, keep the
+// legacy adapter.
+func brokerRPCOverConduit(req Request) bool {
+	return req.Op != OpStream && req.Want.Capability != ""
+}
+
+// withBrokerIncarnation sets req.BrokerIncarnation to the broker's
+// reference incarnation (design §3.4, v2.21.32): that of its live session
+// with the highest connection_epoch. A caller-supplied incarnation that
+// differs from the reference resolves nothing. With no reference (no live
+// session, or a newest session without an incarnation) the result is
+// ErrNoSession.
+func (r *Router) withBrokerIncarnation(ctx context.Context, req Request) (Request, error) {
+	ref, ok, err := r.cfg.Registry.BrokerIncarnation(ctx, req.ID, r.cfg.Now())
+	switch {
+	case err != nil:
+		if errors.Is(err, registry.ErrInvalidInput) {
+			return req, fmt.Errorf("%w: %w", ErrInvalidRequest, err)
+		}
+		return req, fmt.Errorf("%w: %w", ErrRegistryUnavailable, err)
+	case !ok:
+		return req, ErrNoSession
+	case req.BrokerIncarnation != "" && req.BrokerIncarnation != ref:
+		return req, ErrNoSession
+	}
+	req.BrokerIncarnation = ref
+	return req, nil
 }
 
 // resolveLegacyBroker resolves a broker through the configured
