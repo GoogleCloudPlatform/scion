@@ -58,12 +58,24 @@ func (InviteCode) Fields() []ent.Field {
 		field.Time("created").
 			Default(time.Now).
 			Immutable(),
+		// issuance_id is the issuance ID of the admin-kind test identity
+		// whose request created this row (ptone/scion#4240, admin tier A3),
+		// set only by the store's grant shaping (entadapter
+		// applyGrantShaping), at create. NULL for every other row. The
+		// purge of that identity removes the rows carrying it.
+		field.String("issuance_id").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Issuance ID of the admin-kind test identity that created this row (grant shaping)"),
 	}
 }
 
 // Indexes of the InviteCode.
 func (InviteCode) Indexes() []ent.Index {
 	return []ent.Index{
+		// The admin-kind test identity purge selects rows by issuance_id.
+		index.Fields("issuance_id"),
 		index.Fields("expires_at"),
 	}
 }

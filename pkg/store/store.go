@@ -244,6 +244,22 @@ type Store interface {
 	// Truncated reports whether any kind had more.
 	ListFixtureRootedResources(ctx context.Context, rootID string, limit int) (*FixtureRootedResources, error)
 
+	// ListIssuanceStampedGrants returns the grant rows whose issuance_id is
+	// issuanceID (ptone/scion#4240, admin tier A3 grant shaping): role
+	// bindings, group memberships, role definitions, invite codes and
+	// broker join tokens, in that order, each kind by ID. Only the stamp
+	// selects. At most limit rows of each kind are returned (limit <= 0:
+	// no limit); truncated reports whether any kind had more. An empty
+	// issuanceID returns ErrInvalidInput.
+	ListIssuanceStampedGrants(ctx context.Context, issuanceID string, limit int) (grants []IssuanceStampedGrant, truncated bool, err error)
+
+	// DeleteIssuanceStampedGrant deletes the row g names when it still
+	// carries issuanceID, and reports whether it deleted it (false: gone,
+	// or no longer that issuance's row, for example a join token minted
+	// again since). A role definition still referenced by any role
+	// binding is not deleted: ErrStampedRoleInUse.
+	DeleteIssuanceStampedGrant(ctx context.Context, g IssuanceStampedGrant, issuanceID string) (bool, error)
+
 	// Agent operations
 	AgentStore
 

@@ -100,6 +100,7 @@ func entRoleDefinitionToStore(rd *ent.RoleDefinition) *store.RoleDefinition {
 		CreatedAt:         rd.Created,
 		UpdatedAt:         rd.Updated,
 		ConfersMembership: &confers,
+		IssuanceID:        rd.IssuanceID,
 	}
 }
 
@@ -115,6 +116,7 @@ func entRoleBindingToStore(rb *ent.RoleBinding) *store.RoleBinding {
 		ExpiresAt:     rb.ExpiresAt,
 		CreatedBy:     rb.CreatedBy,
 		CreatedAt:     rb.Created,
+		IssuanceID:    rb.IssuanceID,
 	}
 	if rb.RoleDefinitionID != nil {
 		result.RoleDefinitionID = rb.RoleDefinitionID.String()
@@ -196,11 +198,23 @@ func (r *RoleStore) ListRoleDefinitions(ctx context.Context) ([]*store.RoleDefin
 }
 
 // CreateRoleDefinition creates a new role definition.
+//
+// A role defined by an admin-kind test identity carries its issuance ID
+// (grant shaping), so the identity's purge removes it; it can never be a
+// system role.
 func (r *RoleStore) CreateRoleDefinition(ctx context.Context, rd *store.RoleDefinition) (*store.RoleDefinition, error) {
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil && rd.System {
+		return nil, store.ErrTestAdminGrantRefused
+	}
 	builder := r.client.RoleDefinition.Create().
 		SetName(rd.Name).
 		SetScopeType(roledefinition.ScopeType(rd.ScopeType)).
-		SetSystem(rd.System)
+		SetSystem(rd.System).
+		SetNillableIssuanceID(issuanceStamp(shaping))
 
 	if rd.ID != "" {
 		uid, err := parseUUID(rd.ID)
@@ -243,6 +257,16 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	if existing.System {
 		return nil, fmt.Errorf("%w: system roles cannot be modified", store.ErrInvalidInput)
 	}
+	// An admin-kind test identity changes only the roles it defined: a
+	// change to any other role (bound, perhaps, to people) could not be
+	// bounded by the identity's expiry.
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil && !shapedByIssuance(shaping, existing.IssuanceID) {
+		return nil, store.ErrTestAdminGrantRefused
+	}
 
 	builder := r.client.RoleDefinition.UpdateOneID(uid).
 		SetName(rd.Name).
@@ -264,6 +288,14 @@ func (r *RoleStore) UpdateSystemRoleDefinitionPermissions(ctx context.Context, i
 	uid, err := parseGetID(id)
 	if err != nil {
 		return err
+	}
+	// Startup backfill only: never under an admin-kind test identity.
+	shaping, err := grantShapingFor(ctx, r.client)
+	if err != nil {
+		return err
+	}
+	if shaping != nil {
+		return store.ErrTestAdminGrantRefused
 	}
 
 	_, err = r.client.RoleDefinition.UpdateOneID(uid).
@@ -601,6 +633,28 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 			store.ErrScopeMismatch, rd.Name, string(rd.ScopeType), rb.ScopeType)
 	}
 
+	// Grant shaping (admin tier A3): a binding written for an admin-kind
+	// test identity expires no later than the identity and carries its
+	// issuance ID; one written by such an identity without the shaping is
+	// refused. The shaped binding still passes every guard below,
+	// including D10: its CreatedBy is the identity, never a reconciler or
+	// issuance sentinel, so a super-admin binding is refused.
+	shaping, err := grantShapingFor(ctx, r.client, rb.CreatedBy)
+	if err != nil {
+		return nil, err
+	}
+	if shaping != nil {
+		stored := *rb
+		stored.ExpiresAt = shaping.ClampExpiry(rb.ExpiresAt)
+		rb = &stored
+	}
+
+	// No super-admin binding is ever written under shaping, whatever
+	// CreatedBy the caller names (design §4.5).
+	if shaping != nil && rd.Name == store.SystemRoleSuperAdmin {
+		return nil, store.ErrSuperAdminBindingRestricted
+	}
+
 	// D10 guard: refuse super-admin bindings from non-reconciler callers.
 	// The one other writer is test identity issuance: its binding is
 	// admitted only for a test_super_admin row, checked with the principal
@@ -714,7 +768,8 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		SetPrincipalID(rb.PrincipalID).
 		SetScopeType(rolebinding.ScopeType(rb.ScopeType)).
 		SetScopeID(rb.ScopeID).
-		SetNillableMembershipKind(membershipKind)
+		SetNillableMembershipKind(membershipKind).
+		SetNillableIssuanceID(issuanceStamp(shaping))
 
 	if rb.ID != "" {
 		uid, err := parseUUID(rb.ID)
