@@ -2194,6 +2194,11 @@ type Server struct {
 	// directly. Per-Server rather than a package var so a test can shorten
 	// it on its own Server instance without racing other tests' workers.
 	reincarnationRequesterResolveTimeout time.Duration
+
+	// conduitAuthorizeActionTestHook, when non-nil, decides each action in
+	// authorizeConduitUserStream instead of authorizeConduitAction. Only
+	// tests set it, on their own Server; production code never does.
+	conduitAuthorizeActionTestHook func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
 }
 
 // groupsLogger returns the groups subsystem logger, falling back to

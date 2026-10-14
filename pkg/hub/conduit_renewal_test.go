@@ -387,8 +387,8 @@ func TestConduitRenewStream_StateChanges(t *testing.T) {
 // a TCP stream opened through the tunnel path gets no renewal and a TCP
 // stream to the same port opened through the port proxy keeps renewing.
 //
-// The authorizer is installed through conduitAuthorizeActionTestHook, which
-// only tests set. Real roles cannot hold port access without ActionTunnel
+// The authorizer is installed through the Server's
+// conduitAuthorizeActionTestHook field, which only tests set. Real roles cannot hold port access without ActionTunnel
 // until ActionTunnel has a permission of its own (conduitAuthzFor decides it
 // as agent.port_access).
 func TestConduitRenewStream_TunnelTCPNeedsActionTunnel(t *testing.T) {
@@ -399,13 +399,12 @@ func TestConduitRenewStream_TunnelTCPNeedsActionTunnel(t *testing.T) {
 	_, err := f.renew(tunnelTok, tunnelOpen, 1)
 	require.NoError(t, err, "with the hub's own authorizer both origins renew")
 
-	conduitAuthorizeActionTestHook = func(s *Server, ctx context.Context, ident Identity, agent *store.Agent, action Action) error {
+	f.srv.conduitAuthorizeActionTestHook = func(ctx context.Context, ident Identity, agent *store.Agent, action Action) error {
 		if action == ActionTunnel {
 			return errConduitForbidden
 		}
-		return s.authorizeConduitAction(ctx, ident, agent, action)
+		return f.srv.authorizeConduitAction(ctx, ident, agent, action)
 	}
-	t.Cleanup(func() { conduitAuthorizeActionTestHook = nil })
 	_, err = f.renew(tunnelTok, tunnelOpen, 1)
 	assert.ErrorIs(t, err, errConduitForbidden, "via=tunnel without ActionTunnel")
 	_, err = f.renew(proxyTok, proxyOpen, 1)
