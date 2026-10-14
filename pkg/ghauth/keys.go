@@ -50,3 +50,17 @@ func RepoKey(owner, repo string) string {
 func OwnerKey(owner string) string {
 	return "GH_" + NormalizeName(owner)
 }
+
+// Lookup returns the first convention credential set for owner/repo: the
+// repo-specific RepoKey, then the owner-level OwnerKey. get returns the value
+// stored under a name, or "" if it is unset. Lookup returns the value and the
+// name it was found under, or two empty strings when neither is set; it never
+// consults DefaultKey, whose place in the cascade differs between callers.
+func Lookup(owner, repo string, get func(name string) string) (value, name string) {
+	for _, key := range []string{RepoKey(owner, repo), OwnerKey(owner)} {
+		if val := get(key); val != "" {
+			return val, key
+		}
+	}
+	return "", ""
+}

@@ -15,6 +15,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -297,11 +298,16 @@ func syncBuildToHub(harnessConfigName string, hcDir *config.HarnessConfigDir) {
 	} else if resolved, err := config.GetResolvedProjectDir(""); err == nil {
 		gp = resolved
 	}
-	hubCtx, hubErr := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, hubErr := requireHub(gp)
+	if errors.Is(hubErr, errHubNotConfigured) {
+		// No hub configured: the image is built locally and there is
+		// nothing to sync it to.
+		return
+	}
 	if hubErr != nil {
 		fmt.Printf("Warning: could not sync to Hub: %v\n", hubErr)
 		fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")
-	} else if hubCtx != nil {
+	} else {
 		if err := syncHarnessConfigToHub(hubCtx, harnessConfigName, hcDir.Path, "global", "", hcDir.Config.Harness, ""); err != nil {
 			fmt.Printf("Warning: failed to sync to Hub: %v\n", err)
 			fmt.Println("Run 'scion harness-config push " + harnessConfigName + "' to sync manually.")

@@ -33,7 +33,7 @@ import (
 )
 
 // Waiting for a Hub agent launch to finish (`scion start` / `scion resume`
-// in Hub mode). A Hub with asynchronous launch enabled answers the create as
+// through the Hub). A Hub with asynchronous launch enabled answers the create as
 // soon as the broker accepts it, with the agent in a pre-running phase and
 // an active launch; the CLI then polls GET agent until the agent is running
 // or the launch has failed.

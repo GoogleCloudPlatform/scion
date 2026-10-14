@@ -98,7 +98,7 @@ A workspace sharing mode where one workspace directory is mounted into every age
 _Avoid_: shared mount, plain workspace
 
 **Worktree-per-agent**:
-A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported in local mode and on Hub-managed git projects; on Kubernetes it requires NFS workspace storage.
+A workspace sharing mode where each agent gets its own git worktree over a shared checkout, isolating working trees while sharing one clone's history. Supported on repositories linked to the local workstation Hub (registered with this mode automatically; the worktrees are of your own checkout) and on Hub-managed git projects created with `worktree-per-agent` (see "Linked git projects" in the docs); on Kubernetes it requires NFS workspace storage.
 _Avoid_: worktree mode, shared checkout
 
 **Clone-per-agent**:
@@ -123,6 +123,11 @@ _Avoid_: home mount, config dir
 **Hub**:
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
 _Avoid_: server, master, coordinator
+
+**Hub nickname**:
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). Lowercase letters, digits and `-`, at most 63 characters; one nickname per Hub URL. The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings.
+_Avoid_: hub profile, hub alias, hub name (for the nickname), hub connection (that is the Runtime Broker's registration with a Hub)
+_See also_: Hub list, Current context, Hub
 
 **Runtime Broker**:
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. Always write in full; "broker" alone is forbidden because it collides with Message Broker. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
@@ -188,6 +193,17 @@ _Avoid_: hub-native, hub-native project, hub workspace, hub-project, hosted proj
 **Linked project**:
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
 _Avoid_: local project, imported project, registered project
+
+**Hub list**:
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
+
+**Current context**:
+The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+_Avoid_: current project (alone, when the Hub is meant too), default hub, active profile, kube-style context
+_See also_: Hub nickname, Hub list, Link entry
+
+**Link entry**:
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
 
 **Shadowed project**:
 A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine. Created by the removed `scion hub shadow`; existing ones still resolve and print a cleanup notice. Use `scion use <project>` instead.
@@ -393,7 +409,7 @@ _Avoid_: desired state, target phase
 _See also_: Phase, Run ID, Start claim
 
 **Run ID**:
-The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name. A start without a Hub (local mode) gets a run ID from the agent manager instead.
+The identity of one run of an agent, minted by the Hub for each create, start or restart dispatch. It is applied to the runtime entry as the `scion.run_id` label and carried as the `run_id` claim in the agent's Hub token, so a delete that names a run only targets that run, not a later run of an agent with the same name.
 _Avoid_: session ID, instance ID; not the `runId` of an admin maintenance operation
 _See also_: Run intent, Reincarnation
 
@@ -404,22 +420,22 @@ _See also_: Run intent, Run ID
 
 ## Modes
 
-The run modes form a spine of increasing infrastructure — **Local → Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
+The run modes form a spine of increasing infrastructure — **Workstation → Single-node hosted → HA hosted**. Two independent dimensions separate them: the **availability tier** of the control plane (whether the Hub runs as a single instance on an embedded database, or is replicated across an external one), and **Tenancy** (whether it serves one user or many). Tenancy is orthogonal and only opens up once hosted; the availability tier is fixed by the Hub's database driver (`SCION_SERVER_DATABASE_DRIVER`: `sqlite` vs. `postgres`).
 
 | Mode | Control plane | State & durability | Tenancy | Canonical use |
 |------|---------------|--------------------|---------|----------------|
-| **Local mode** | None (CLI only) | Local machine; git-worktree isolation | Single-user | Agents launched directly via the `scion` CLI, no server |
 | **Workstation mode** | Combo server (Hub + Runtime Broker + Web) on loopback | Embedded SQLite on that machine | Single-user | The hosted experience locally, on your own machine |
 | **Single-node hosted** | One networked Hub instance on a single node | Embedded SQLite, local/single-volume; non-HA | Single- or multi-user | A cheap, simple networked Hub — a single VM, or a single Cloud Run instance + SQLite |
 | **HA hosted** | Hub replicated behind a load balancer | External managed DB (Postgres) + object storage; highly available | Single- or multi-user | A durable, always-on shared deployment — Cloud Run + Cloud SQL |
 
-**Local mode**:
-Running Scion with no server at all — agents launched directly via the `scion` CLI, with state on the local machine and isolation via git worktrees.
-_Avoid_: solo mode, standalone mode, single-user mode, workstation mode
-
 **Workstation mode**:
-Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine, giving the hosted experience locally over loopback. A local server, not the no-server CLI workflow.
+Running a single-tenant Scion server (Hub + Runtime Broker + Web combined) on your own machine over loopback, started with `scion server start`. It is the hub that the `scion` CLI and the web dashboard on that machine run agents through; repositories link to it on their first command.
 _Avoid_: local mode, local server, dev mode, single-user mode
+
+**Local mode** (historical):
+Running agents directly from the `scion` CLI with no Hub. Removed; Workstation mode replaces it. Use only when describing that history, for example in migration notes. See `docs-site/src/content/docs/reference/local-mode-removal.md`.
+_Avoid_: as a current mode; solo mode, standalone mode
+_See also_: Workstation mode
 
 **Hosted mode**:
 The umbrella term for running against a networked Hub — reachable beyond a single machine — that coordinates state across users, projects, and runtime brokers. Spans two **availability tiers**, **Single-node hosted** and **HA hosted**, distinguished by control-plane durability and cost; the tier is fixed by the Hub's database driver (embedded `sqlite` vs. external `postgres`). Orthogonal to the tier is **Tenancy** (single- vs. multi-user).
@@ -471,7 +487,7 @@ _Avoid_: harness metrics, user metrics, LLM metrics
 _See also_: Infrastructure metrics (the other family), Telemetry pipeline
 
 **Telemetry pipeline**:
-The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; runs in local-only mode without it.
+The in-container OTLP receiver and forwarding pipeline (`pkg/sciontool/telemetry`) that collects traces, metrics, and logs from the harness and exports them to a cloud backend (GCP Cloud Monitoring, Cloud Trace, Cloud Logging). Requires the `scion-telemetry-gcp-credentials` secret for cloud export; without it, telemetry is collected in the container but not exported.
 _Avoid_: metrics pipeline, collector, OTel collector
 _See also_: Agent metrics
 

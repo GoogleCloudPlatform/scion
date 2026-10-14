@@ -132,6 +132,66 @@ type idFixtures struct {
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
 	inbox inboxRecords
+	// chat holds the caller's own native chat records (seedChatRecords):
+	// the dev user's here, the matrix super-admin's in the bearer
+	// disposition matrix.
+	chat chatRecords
+	// agentDelProject is a disposable agent for the project-form DELETE,
+	// so the by-ID DELETE keeps agentDel.
+	agentDelProject string
+	// agentPorts is the target of the port registration entries, with one
+	// exposed port (agentPortsPort), so clearing its ports leaves agent's
+	// port for the proxy entries.
+	agentPorts     string
+	agentPortsPort string
+}
+
+// chatRecords are native chat records of one user: a second thread of the
+// fixture project (for the delete entry), a DM with an agent of that
+// project and a DM with another user, messages the user wrote in the
+// fixture thread (one for edit, one for delete, one more), and a message
+// in the agent DM.
+type chatRecords struct {
+	topicDel           string
+	dmAgent            string
+	dmUser             string
+	topicMessage       string
+	topicMessageEdit   string
+	topicMessageDelete string
+	dmMessage          string
+}
+
+// seedChatRecords creates chatRecords for userID: topicID is the fixture
+// thread of projectID, agentID an agent of projectID, peerUserID another
+// active user.
+func seedChatRecords(t *testing.T, ctx context.Context, s store.Store, wcs WebChatStore, userID, projectID, topicID, agentID, peerUserID string) chatRecords {
+	t.Helper()
+	at := time.Now().UTC().Add(-time.Minute)
+	r := chatRecords{topicDel: uuid.NewString()}
+	require.NoError(t, wcs.CreateTopic(ctx, WebChatTopic{
+		ID: r.topicDel, ProjectID: projectID, Name: "chat-del-" + r.topicDel[:8],
+		CreatedBy: userID, CreatedAt: at, LastActivityAt: at,
+	}))
+	var err error
+	r.dmAgent, err = messages.DMConversationKey("user", userID, "agent", agentID)
+	require.NoError(t, err)
+	r.dmUser, err = messages.DMConversationKey("user", userID, "user", peerUserID)
+	require.NoError(t, err)
+
+	message := func(threadID, projectOfRow string, offset time.Duration) string {
+		id := uuid.NewString()
+		require.NoError(t, s.CreateMessage(ctx, &store.Message{
+			ID: id, ProjectID: projectOfRow, Sender: "user:" + userID, SenderID: userID,
+			Recipient: "chat", Msg: "chat record " + id[:8], Type: "chat",
+			Channel: "web", ThreadID: threadID, CreatedAt: at.Add(offset),
+		}))
+		return id
+	}
+	r.topicMessageEdit = message(topicID, projectID, time.Second)
+	r.topicMessageDelete = message(topicID, projectID, 2*time.Second)
+	r.topicMessage = message(topicID, projectID, 3*time.Second)
+	r.dmMessage = message(r.dmAgent, projectID, 4*time.Second)
+	return r
 }
 
 // seedInboxRecords creates inboxRecords for userID in projectID; agentID
@@ -273,6 +333,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		agentRestore:         tid("li-agent-restore"),
 		agentRestoreProject:  tid("li-agent-restore-project"),
 		agentProvisioning:    tid("li-agent-provisioning"),
+		agentDelProject:      tid("li-agent-del-project"),
+		agentPorts:           tid("li-agent-ports"),
+		agentPortsPort:       "18081",
 	}
 
 	f.projectSharedDir = "li-shared"
@@ -316,6 +379,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// "no runtime broker available" before persisting anything, for either
 	// form, leaving this fixture's phase untouched.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentProvisioning, Slug: "li-agent-provisioning", Name: "LI Agent Provisioning", ProjectID: f.project, Phase: string(state.PhaseProvisioning)}))
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDelProject, Slug: "li-agent-del-project", Name: "LI Agent Del Project", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentPorts, Slug: "li-agent-ports", Name: "LI Agent Ports", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agentPorts, []store.ExposedPort{{Port: 18081, Host: "127.0.0.1", Label: "li-ports", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
 
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.group, Slug: "li-group", Name: "LI Group"}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.groupDel, Slug: "li-group-del", Name: "LI Group Del"}))
@@ -563,6 +630,7 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
+	f.chat = seedChatRecords(t, ctx, s, srv.webChatStore, DevUserID, f.project, f.chatTopic, f.agent, f.user)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
@@ -616,24 +684,40 @@ type overrideKey struct {
 // patternOverrides gives its pattern.
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
-		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
-		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
-		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
-		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
-		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                   {"id": f.testIdentityDel},
-		{"skill.delete", "/api/v1/skills/{id}"}:                                   {"id": f.skillDel},
-		{"template.delete", "/api/v1/templates/{id}"}:                             {"id": f.templateDel},
-		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                  {"id": f.harnessConfigDel},
-		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:              {"id": f.gcpSADel},
-		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                    {"id": f.roleDefinitionDel},
-		{"quota.update", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
-		{"quota.delete", "/api/v1/admin/limits/{id}"}:                             {"id": f.limitUD},
-		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
-		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                       {"id": f.entitlementUD},
-		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
-		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
-		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
-		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
+		// Chat: the DM variants address the caller's DMs; topic delete
+		// takes the disposable second thread; message delete its own
+		// message.
+		{"chat.topic.delete", "/api/v1/chat/topics/{id}"}:                               {"id": f.chat.topicDel},
+		{"chat.conversation.history.dm", "/api/v1/chat/conversations/{id}/messages"}:    {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmagent", "/api/v1/chat/conversations/{id}/messages"}:  {"id": f.chat.dmAgent},
+		{"chat.conversation.send.dmuser", "/api/v1/chat/conversations/{id}/messages"}:   {"id": f.chat.dmUser},
+		{"chat.conversation.readstate.dm", "/api/v1/chat/conversations/{id}/read"}:      {"id": f.chat.dmAgent},
+		{"chat.conversation.markread.dm", "/api/v1/chat/conversations/{id}/read"}:       {"id": f.chat.dmAgent},
+		{"chat.conversation.markunread.dm", "/api/v1/chat/conversations/{id}/unread"}:   {"id": f.chat.dmAgent},
+		{"chat.conversation.mute.dm", "/api/v1/chat/conversations/{id}/mute"}:           {"id": f.chat.dmAgent},
+		{"chat.conversation.pin.dm", "/api/v1/chat/conversations/{id}/pin"}:             {"id": f.chat.dmAgent},
+		{"chat.conversation.typing.dm", "/api/v1/chat/conversations/{id}/typing"}:       {"id": f.chat.dmAgent},
+		{"chat.message.delete", "/api/v1/chat/conversations/{id}/messages/{messageId}"}: {"id": f.chatTopic, "messageId": f.chat.topicMessageDelete},
+		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                               {"id": f.agentDel},
+		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:          {"projectId": f.project, "id": f.agentDelProject},
+		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                            {"id": f.agentPorts},
+		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                           {"id": f.projectDel},
+		{"group.delete", "/api/v1/groups/{id}"}:                                         {"id": f.groupDel},
+		{"user.admin.delete", "/api/v1/users/{id}"}:                                     {"id": f.userDel},
+		{"testidentity.delete", "/api/v1/test-identities/{id}"}:                         {"id": f.testIdentityDel},
+		{"skill.delete", "/api/v1/skills/{id}"}:                                         {"id": f.skillDel},
+		{"template.delete", "/api/v1/templates/{id}"}:                                   {"id": f.templateDel},
+		{"harnessconfig.delete", "/api/v1/harness-configs/{id}"}:                        {"id": f.harnessConfigDel},
+		{"gcp.identity.delete", "/api/v1/gcp-service-accounts/{id}"}:                    {"id": f.gcpSADel},
+		{"role.definition.delete", "/api/v1/admin/roles/{id}"}:                          {"id": f.roleDefinitionDel},
+		{"quota.update", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
+		{"quota.delete", "/api/v1/admin/limits/{id}"}:                                   {"id": f.limitUD},
+		{"quota.update", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
+		{"quota.delete", "/api/v1/admin/entitlements/{id}"}:                             {"id": f.entitlementUD},
+		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
+		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:           {"id": f.accessConstraintUD},
+		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}:       {"id": f.project, "memberId": f.projectMembershipUpdate},
+		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}:       {"id": f.project, "visitorId": f.projectVisitorUpdate},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -689,6 +773,28 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
 		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}":                                     {"id": f.agentPorts, "port": f.agentPortsPort},
+		"/api/v1/projects/{projectId}/agents":                                  {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/stop-all":                         {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/{id}":                             {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},
+		"/api/v1/agents/{id}/logs":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/logs":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/cloud-logs":                                       {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs":                  {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages":                                         {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs":                                     {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs":                {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/metrics/summary":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/keys":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/keys":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/message":                                          {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -857,9 +963,20 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/admin/maintenance/migrations/{id}/run": {"id": f.maintenanceOpKey},
 
 		// --- chat family ---
-		"/api/v1/chat/spaces/{id}/threads":         {"id": f.project},
-		"/api/v1/chat/topics/{id}":                 {"id": f.chatTopic},
-		"/api/v1/chat/conversations/{id}/messages": {"id": f.chatTopic},
+		"/api/v1/chat/spaces/{id}/threads":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/members":                     {"id": f.project},
+		"/api/v1/chat/spaces/{id}/read":                        {"id": f.project},
+		"/api/v1/chat/spaces/{id}/emoji":                       {"id": f.project},
+		"/api/v1/chat/topics/{id}":                             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages":             {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/messages/{messageId}": {"id": f.chatTopic, "messageId": f.chat.topicMessageEdit},
+		"/api/v1/chat/conversations/{id}/read":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/unread":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/mute":                 {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/pin":                  {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/typing":               {"id": f.chatTopic},
+		"/api/v1/chat/conversations/{id}/interagent":           {"id": f.chat.dmAgent},
+		"/api/v1/chat/conversations/{id}/promote":              {"id": f.chat.dmAgent},
 
 		// --- integrations family ---
 		"/api/v1/admin/integrations/{name}":         {"name": f.integrationName},
@@ -963,6 +1080,19 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// handleWorkspaceSyncTo and handleWorkspaceSyncToFinalize validate
+		// the file list and the manifest before they look up the agent or
+		// check authorization.
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to"}: {
+			"files": []interface{}{map[string]interface{}{"path": "li.txt", "size": 3, "hash": "li-hash"}},
+		},
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+			"manifest": map[string]interface{}{"version": "1", "files": []interface{}{}},
+		},
+		// beginAgentKeysRequest validates the body before the agent lookup
+		// and the authorization check.
+		{"agent.lifecycle.keys", "/api/v1/agents/{id}/keys"}:                      {"keys": "li"},
+		{"agent.lifecycle.keys", "/api/v1/projects/{projectId}/agents/{id}/keys"}: {"keys": "li"},
 	}
 }
 

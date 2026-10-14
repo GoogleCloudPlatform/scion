@@ -14,7 +14,10 @@
 
 package cmd
 
-import "github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+import (
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubsync"
+)
 
 // isLocalWorkstationEndpoint reports whether endpoint is the local
 // workstation hub: a loopback host that the CLI reaches with the dev token.
@@ -23,15 +26,34 @@ func isLocalWorkstationEndpoint(endpoint string) bool {
 	return hubsync.IsLocalWorkstationEndpoint(endpoint)
 }
 
-// hubLinkNoEndpointError is returned by 'scion hub link' when no hub
-// endpoint is configured. It is a type rather than errors.New so that the
-// user-facing sentence can keep its capital letter and full stop.
-type hubLinkNoEndpointError struct{}
+// errHubLinkNoEndpoint is returned by 'scion hub link' when no hub endpoint
+// is configured: the same not-configured error every hub command returns.
+var errHubLinkNoEndpoint = hubsync.ErrHubNotConfigured
 
-func (hubLinkNoEndpointError) Error() string {
-	return "No hub configured. Start the local hub with 'scion server start' (first run opens setup), " +
-		"or set a remote one with 'scion config set hub.endpoint <url>'."
+// hubConfigured reports whether a hub is configured for this invocation:
+// an endpoint resolves from --hub, the settings or the environment (see
+// GetHubEndpoint). Local-only mode was removed, so a configured endpoint is
+// what makes the CLI use a hub; the deprecated hub.enabled is not read.
+// Every cmd "is a hub configured?" check goes through this one function, so
+// that a later change to where hub configuration comes from replaces only
+// its body.
+func hubConfigured(settings interface{ GetHubEndpoint() string }) bool {
+	return GetHubEndpoint(settings) != ""
 }
 
-// errHubLinkNoEndpoint is the hubLinkNoEndpointError value.
-var errHubLinkNoEndpoint error = hubLinkNoEndpointError{}
+// deprecatedHubModeKeys lists the removed mode switches that settings still
+// set: hub.enabled and hub.local_only are deprecated and ignored since
+// local-only mode was removed. 'scion hub status' notes them.
+func deprecatedHubModeKeys(settings *config.Settings) []string {
+	if settings == nil || settings.Hub == nil {
+		return nil
+	}
+	var keys []string
+	if settings.Hub.Enabled != nil {
+		keys = append(keys, "hub.enabled")
+	}
+	if settings.Hub.LocalOnly != nil {
+		keys = append(keys, "hub.local_only")
+	}
+	return keys
+}
