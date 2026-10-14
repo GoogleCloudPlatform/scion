@@ -179,6 +179,18 @@ const ROWS: Record<string, RowSpec> = {
     graded: false,
   },
   'R2-21': { role: 'member', title: 'HTML bundle in the chat preview', where: 'skip' },
+  'DIAG-member-roundtrip': {
+    role: 'member',
+    title: 'diagnostic leg, no oracle row: v1 link click after a History/Preview round-trip',
+    graded: false,
+    where: 'diagnostic',
+  },
+  'DIAG-owner-fresh-v1': {
+    role: 'owner',
+    title: 'diagnostic leg, no oracle row: v1 link click on a fresh /v/1 load, no round-trip',
+    graded: false,
+    where: 'diagnostic',
+  },
   'R2-18': {
     role: '-',
     title: 'cleanup by absence: artifacts, membership, project, identities, temp files',
@@ -788,21 +800,28 @@ async function clickInFrameLink(
   leg: string,
   link: string,
   targetEntry: string,
-  seq: number
+  seq: number,
+  opts: { graded: boolean } = { graded: true }
 ): Promise<void> {
-  const rec: Record<string, unknown> = { leg, link, targetEntry, seq };
+  const rec: Record<string, unknown> = { leg, link, targetEntry, seq, graded: opts.graded };
   ((r.ui.clickDiag ??= []) as Array<Record<string, unknown>>).push(rec);
   const target = `/${targetEntry}`;
   const frameEl = page.locator(RENDER_SELECTORS.htmlFrame).first();
   const beforeFrames = viewFrameStates(page);
+  const linkBox = await htmlFrame(page)
+    .locator(link)
+    .boundingBox({ timeout: 2_000 })
+    .catch(() => null);
   rec.before = {
     frameVisible: await frameEl.isVisible().catch(() => null),
     frameBox: await frameEl.boundingBox({ timeout: 2_000 }).catch(() => null),
     frameDetached: await frameDetached(page),
-    linkBox: await htmlFrame(page)
-      .locator(link)
-      .boundingBox({ timeout: 2_000 })
-      .catch(() => null),
+    panel: await previewPanelState(page),
+    linkBox,
+    topAtLinkCentre: linkBox
+      ? await topElementAt(page, linkBox.x + linkBox.width / 2, linkBox.y + linkBox.height / 2)
+      : null,
+    frameVisibilityState: await viewFrameVisibility(page),
     viewFrames: beforeFrames,
     targetRequests: bundleRequestsFor(target),
   };
@@ -818,6 +837,7 @@ async function clickInFrameLink(
   rec.firstNavigated = firstNavigated;
   rec.afterWait = { viewFrames: viewFrameStates(page), targetRequests: bundleRequestsFor(target) };
   if (firstNavigated) return;
+  // The outcome is decided above; what follows is diagnostic only.
   rec.retryClick = await htmlFrame(page)
     .locator(link)
     .click({ timeout: 5_000 })
@@ -825,7 +845,161 @@ async function clickInFrameLink(
     .catch((err: unknown) => redactViews(firstLine(err)));
   rec.retryNavigated = await frameReaches(page, targetEntry, seq, 5_000);
   rec.afterRetry = { viewFrames: viewFrameStates(page), targetRequests: bundleRequestsFor(target) };
-  throw new Error(`${leg}: the first in-frame link click did not navigate`);
+  if (!rec.retryNavigated) {
+    // A script click inside the frame: does the document navigate at all?
+    rec.scriptClick = await scriptClickInFrame(page, link);
+    rec.scriptClickNavigated = await frameReaches(page, targetEntry, seq, 5_000);
+    rec.afterScriptClick = {
+      viewFrames: viewFrameStates(page),
+      targetRequests: bundleRequestsFor(target),
+    };
+  }
+  if (opts.graded) throw new Error(`${leg}: the first in-frame link click did not navigate`);
+}
+
+/** The preview tab panel's active and hidden state (read-only). */
+async function previewPanelState(page: Page): Promise<Record<string, unknown> | null> {
+  return withTimeout(
+    page
+      .locator(`${SELECTORS.artifactPage} sl-tab-panel[name="preview"]`)
+      .first()
+      .evaluate((el) => ({
+        active: el.hasAttribute('active'),
+        hidden: el.hasAttribute('hidden') || getComputedStyle(el).display === 'none',
+      }))
+      .catch(() => null),
+    2_500,
+    null
+  );
+}
+
+/**
+ * What the parent page has on top at (x, y), descending into open shadow
+ * roots (read-only): the element's tag, class and title.
+ */
+async function topElementAt(page: Page, x: number, y: number): Promise<unknown> {
+  return withTimeout(
+    page
+      .evaluate(
+        ([px, py]) => {
+          let el: Element | null = document.elementFromPoint(px, py);
+          for (let i = 0; i < 10 && el?.shadowRoot; i++) {
+            const inner = el.shadowRoot.elementFromPoint(px, py);
+            if (!inner || inner === el) break;
+            el = inner;
+          }
+          return el
+            ? {
+                tag: el.tagName.toLowerCase(),
+                className: typeof el.className === 'string' ? el.className : null,
+                title: el.getAttribute('title'),
+              }
+            : null;
+        },
+        [x, y] as [number, number]
+      )
+      .catch(() => 'unreadable'),
+    2_500,
+    'timeout'
+  );
+}
+
+/** The view frame document's visibilityState (read-only), per view frame. */
+async function viewFrameVisibility(page: Page): Promise<unknown[]> {
+  const out: unknown[] = [];
+  for (const f of page.frames().filter((fr) => fr.url().includes(VIEW_PREFIX))) {
+    out.push(
+      await withTimeout(
+        f.evaluate(() => document.visibilityState).catch(() => 'unreadable'),
+        2_500,
+        'timeout'
+      )
+    );
+  }
+  return out;
+}
+
+/** A script click on the link inside the view frame (diagnostic only). */
+async function scriptClickInFrame(page: Page, link: string): Promise<string> {
+  const f = page.frames().find((fr) => fr.url().includes(VIEW_PREFIX));
+  if (!f) return 'no view frame';
+  return withTimeout(
+    f
+      .evaluate((sel) => {
+        const a = document.querySelector(sel) as HTMLElement | null;
+        if (!a) return 'no link';
+        a.click();
+        return 'clicked';
+      }, link)
+      .catch((err: unknown) => redactViews(firstLine(err))),
+    2_500,
+    'timeout'
+  );
+}
+
+/**
+ * Diagnostic legs (no oracle row, status observed): the same v1 link click
+ * (a) as the member WITH the History/Preview round-trip and (b) as the
+ * owner on a fresh /v/1 load WITHOUT it. Nothing here is asserted; every
+ * wait is bounded and any error only ends the leg.
+ */
+async function runDiagnosticLegs(): Promise<void> {
+  if (!DIAG_LEGS_ON) {
+    j.notRun(['DIAG-member-roundtrip', 'DIAG-owner-fresh-v1'], DIAG_LEGS_OFF_REASON);
+    return;
+  }
+  const openV1 = async (key: Key, r: RowRecord): Promise<Page> => {
+    const page = await openArtifact(key, artifactPage(bundleId(), 1));
+    await page.locator(RENDER_SELECTORS.htmlFrame).waitFor({ state: 'attached', timeout: 15_000 });
+    r.ui.v1HeadingSeen = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1');
+    return page;
+  };
+  r2.step = 'DIAG-member-roundtrip';
+  await j.row(
+    'DIAG-member-roundtrip',
+    async (r) => {
+      const started = Date.now();
+      try {
+        const page = await openV1('member', r);
+        await tab(page, 'history').click({ timeout: 15_000 });
+        await page
+          .locator(RENDER_SELECTORS.historyVersionRow)
+          .first()
+          .waitFor({ state: 'visible', timeout: 15_000 });
+        await tab(page, 'preview').click({ timeout: 15_000 });
+        await clickInFrameLink(
+          page,
+          r,
+          'member v1 after round-trip',
+          '#to-page2',
+          'page2.html',
+          1,
+          { graded: false }
+        );
+      } catch (err) {
+        r.ui.legError = redactViews(firstLine(err));
+      }
+      r.ui.wallMs = Date.now() - started;
+    },
+    { pre: preV3 }
+  );
+  r2.step = 'DIAG-owner-fresh-v1';
+  await j.row(
+    'DIAG-owner-fresh-v1',
+    async (r) => {
+      const started = Date.now();
+      try {
+        const page = await openV1('owner', r);
+        await clickInFrameLink(page, r, 'owner fresh v1', '#to-page2', 'page2.html', 1, {
+          graded: false,
+        });
+      } catch (err) {
+        r.ui.legError = redactViews(firstLine(err));
+      }
+      r.ui.wallMs = Date.now() - started;
+    },
+    { pre: preV3 }
+  );
 }
 
 /** The current heading of the bundle frame. */
@@ -1238,6 +1412,9 @@ const SKIPPED: Record<string, string> = { 'R2-17b': R2_17B_REASON, 'R2-21': R2_2
 const ORACLE_ROW_MAP: Record<string, { test: string; note: string }> = Object.fromEntries(
   Object.entries(ROWS).map(([id, spec]) => {
     if (spec.where === 'skip') return [id, { test: skipTitle(id), note: SKIPPED[id] ?? '' }];
+    if (spec.where === 'diagnostic') {
+      return [id, { test: TITLE_MAIN, note: 'diagnostic leg, no oracle row (observed only)' }];
+    }
     if (spec.where === 'cleanup') {
       return [id, { test: TITLE_CLEANUP, note: `the afterAll hook: evidence.rows["${id}"]` }];
     }
@@ -1271,6 +1448,14 @@ function runSettingsRefusal(): string | undefined {
   if (!process.env.PLAYWRIGHT_NO_COPY_PROMPT) return WRONG_CONFIG;
   return undefined;
 }
+
+/**
+ * The two diagnostic legs (no oracle row) run unless E2E_R2_DIAG_LEGS=0.
+ * They create nothing on the hub (they only open pages and mint views),
+ * assert nothing, and record their wall time.
+ */
+const DIAG_LEGS_ON = process.env.E2E_R2_DIAG_LEGS !== '0';
+const DIAG_LEGS_OFF_REASON = 'diagnostic legs switched off (E2E_R2_DIAG_LEGS=0)';
 
 /** Set by playwright.render.config.ts, the only config without an HTML reporter. */
 const UNDER_RENDER_CONFIG = process.env.E2E_R2_RENDER_CONFIG === '1';
@@ -2567,6 +2752,9 @@ async function runMain(browser: Browser): Promise<void> {
   // ---- R2-20: markdown in the chat preview -------------------------------
   r2.step = 'R2-20';
   await runChatRow();
+
+  // Diagnostic legs (no oracle row, observed only), after the graded rows.
+  await runDiagnosticLegs();
 
   // No page stays open into the end of the test (defence in depth: nothing
   // left for a failure-time page capture).

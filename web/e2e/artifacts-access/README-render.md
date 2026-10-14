@@ -74,6 +74,9 @@ anchor.
 - R2-17b (view expiry) and R2-21 (an HTML bundle in the chat preview) are declared and skipped with a `NOT RUN`
   annotation. The view lifetime is a fixed constant, and the chat HTML preview is not on this build.
 - R2-20x is recorded only (status `observed`).
+- Two diagnostic legs with no oracle row (`DIAG-member-roundtrip`, `DIAG-owner-fresh-v1`) run after the graded rows
+  and before the cleanup. They are recorded with status `observed` and assert nothing; they create nothing on the hub.
+  Each records its wall time, and any error only ends that leg. Set `E2E_R2_DIAG_LEGS=0` to switch them off.
 
 ## Evidence
 
