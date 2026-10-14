@@ -45,12 +45,17 @@ func TestMain(m *testing.M) {
 	// from the default loading rules only: no test uses the in-cluster
 	// config of the pod it runs in (ptone/scion#5088). This is the only
 	// place it is set.
+	productionFlatDefaultKubernetesClient = flatDefaultKubernetesClient
 	flatDefaultKubernetesClient = k8s.NewClientWithContextNoInCluster
 	teardown := integrationTestSetup()
 	code := m.Run()
 	teardown()
 	os.Exit(code)
 }
+
+// productionFlatDefaultKubernetesClient is flatDefaultKubernetesClient's
+// value before TestMain replaces it, so a test can pin the production value.
+var productionFlatDefaultKubernetesClient func(kubeconfigPath, contextName string) (*k8s.Client, error)
 
 // integrationTestSetup runs before the cmd tests and returns their teardown.
 // It does nothing by default; main_integration_test.go replaces it under

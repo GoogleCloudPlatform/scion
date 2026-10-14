@@ -19,10 +19,12 @@ package cmd
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/k8s"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
 )
 
@@ -96,5 +98,18 @@ func TestNewFlatInstanceRuntime_TestsHaveNoInClusterFallback(t *testing.T) {
 	_, err := newFlatInstanceRuntime(context.Background(), inst)
 	if err == nil || !strings.Contains(err.Error(), "in-cluster config disabled for this client") {
 		t.Fatalf("Kubernetes instance with no kubeconfig: err = %v, want the disabled in-cluster leg", err)
+	}
+}
+
+// In production the seam is k8s.NewClientWithContext, with its in-cluster
+// fallback: only the cmd tests replace it (TestMain).
+func TestFlatDefaultKubernetesClient_ProductionValue(t *testing.T) {
+	if productionFlatDefaultKubernetesClient == nil {
+		t.Fatal("TestMain did not record the production value")
+	}
+	got := reflect.ValueOf(productionFlatDefaultKubernetesClient).Pointer()
+	want := reflect.ValueOf(k8s.NewClientWithContext).Pointer()
+	if got != want {
+		t.Fatal("flatDefaultKubernetesClient's production value is not k8s.NewClientWithContext")
 	}
 }
