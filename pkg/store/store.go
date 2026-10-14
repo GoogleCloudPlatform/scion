@@ -1462,8 +1462,9 @@ type RuntimeBrokerStore interface {
 
 	// SetRuntimeBrokerPresentation stores a flat Runtime Broker's reported
 	// presentation with one conditional, fenced update. The row must be
-	// flat (ErrRuntimeBrokerNotFlat) with runtime target ID targetID
-	// (ErrRuntimeTargetChanged), and the fence must advance: no stored
+	// flat (ErrRuntimeBrokerNotFlat) with runtime target ID targetID and
+	// type p.Target.Type (otherwise ErrRuntimeTargetChanged, wrapped with
+	// the reported and stored values), and the fence must advance: no stored
 	// epoch, a lower stored epoch, the same epoch with a lower stored seq,
 	// or a stored fence older than PresentationFenceRecovery before
 	// observedAt. Otherwise nothing is written (PresentationStale). When

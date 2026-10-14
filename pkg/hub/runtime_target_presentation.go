@@ -28,24 +28,23 @@ import (
 )
 
 // A flat Runtime Broker instance publishes its FC4-a presentation
-// (api.RuntimeTargetPresentation) on every heartbeat; the Hub stores it
-// read-only on the broker row (Flat Runtime Brokers phase 4 design §2.1).
-// ApplyRuntimeTargetPresentation is the one writer: handleBrokerHeartbeat
-// calls it after checking that the request is authenticated as the broker
-// itself (write rule 1), and the co-located flat heartbeat loop
-// (cmd/server_flat_host.go), which is in-process and trusted, calls it
-// directly. It is a Server method, not a free function over the store,
-// because write rule 2 needs the Hub's experiment state.
+// (api.RuntimeTargetPresentation; .design/flat-runtime-brokers/contract-appendix-p3.md
+// FC4/FC4-a, ptone/scion#3282) on every heartbeat; the Hub stores it
+// read-only on the broker row. ApplyRuntimeTargetPresentation is the one
+// writer: handleBrokerHeartbeat calls it after checking that the request is
+// authenticated as the broker itself (write rule 1), and the co-located flat
+// heartbeat loop (cmd/server_flat_host.go), which is in-process and
+// trusted, calls it directly. It is a Server method, not a free function
+// over the store, because write rule 2 needs the Hub's experiment state.
 
 // Reasons ApplyRuntimeTargetPresentation ignores a presentation. An ignored
 // presentation leaves the stored value unchanged.
 const (
 	presentationIgnoredOmitted       = "omitted"
 	presentationIgnoredExperimentOff = "experiment_off"
-	presentationIgnoredLegacyRow     = "legacy_row"
-	presentationIgnoredTargetID      = "target_id_mismatch"
-	presentationIgnoredTargetType    = "target_type_mismatch"
 	presentationIgnoredSchemaVersion = "unknown_schema_version"
+	presentationIgnoredLegacyRow     = "legacy_row"
+	presentationIgnoredTarget        = "target_mismatch"
 )
 
 // PresentationResult is what ApplyRuntimeTargetPresentation did: either the
@@ -79,11 +78,14 @@ func RuntimeTargetPresentationHash(p *api.RuntimeTargetPresentation) (string, er
 // reported for broker brokerID and stores it through the fenced
 // SetRuntimeBrokerPresentation. It ignores (and never clears) the stored
 // value when p is nil (an older broker), when the flat Runtime Brokers
-// experiment is off, when the row is legacy, when targetID or p's target
-// type differ from the stored runtime target, or when p's schema version is
-// not one this Hub knows. epoch and seq are the reporting process's fence;
-// now is the Hub time recorded as observed-at and fence time. Rule 1 (the
-// request is authenticated as the broker itself) is the caller's.
+// experiment is off, or when p's schema version is not one this Hub knows;
+// the store refuses a legacy row (ErrRuntimeBrokerNotFlat) and a targetID
+// or target type that differs from the stored runtime target
+// (ErrRuntimeTargetChanged, carrying both values), which are ignored too.
+// The store is the one place that reads the row, so the binding is checked
+// on the same read as the fence. epoch and seq are the reporting process's
+// fence; now is the Hub time recorded as observed-at and fence time. Rule 1
+// (the request is authenticated as the broker itself) is the caller's.
 func (s *Server) ApplyRuntimeTargetPresentation(ctx context.Context, brokerID, targetID string, p *api.RuntimeTargetPresentation, epoch, seq int64, now time.Time) (PresentationResult, error) {
 	ignore := func(reason string, args ...any) (PresentationResult, error) {
 		if reason != presentationIgnoredOmitted {
@@ -98,23 +100,6 @@ func (s *Server) ApplyRuntimeTargetPresentation(ctx context.Context, brokerID, t
 	if !s.experimentEnabled(experiments.FlatRuntimeBrokers) {
 		return ignore(presentationIgnoredExperimentOff)
 	}
-	broker, err := s.store.GetRuntimeBroker(ctx, brokerID)
-	if err != nil {
-		return PresentationResult{}, err
-	}
-	if !broker.IsFlat() {
-		return ignore(presentationIgnoredLegacyRow)
-	}
-	if targetID == "" || targetID != broker.RuntimeTarget.ID {
-		return ignore(presentationIgnoredTargetID, "reported_target_id", targetID, "stored_target_id", broker.RuntimeTarget.ID)
-	}
-	if p.Target == nil || p.Target.Type != broker.RuntimeTarget.Type {
-		reported := ""
-		if p.Target != nil {
-			reported = p.Target.Type
-		}
-		return ignore(presentationIgnoredTargetType, "reported_type", reported, "stored_type", broker.RuntimeTarget.Type)
-	}
 	if p.SchemaVersion != api.RuntimeTargetPresentationSchemaVersion {
 		return ignore(presentationIgnoredSchemaVersion, "schema_version", p.SchemaVersion)
 	}
@@ -127,7 +112,7 @@ func (s *Server) ApplyRuntimeTargetPresentation(ctx context.Context, brokerID, t
 	case errors.Is(err, store.ErrRuntimeBrokerNotFlat):
 		return ignore(presentationIgnoredLegacyRow)
 	case errors.Is(err, store.ErrRuntimeTargetChanged):
-		return ignore(presentationIgnoredTargetID, "reported_target_id", targetID)
+		return ignore(presentationIgnoredTarget, "detail", err.Error())
 	case err != nil:
 		return PresentationResult{}, err
 	}

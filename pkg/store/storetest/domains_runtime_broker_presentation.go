@@ -231,6 +231,16 @@ func RuntimeBrokerPresentationConformance(t *testing.T, factory Factory) {
 		assert.ErrorIs(t, err, store.ErrRuntimeTargetChanged)
 		assert.Nil(t, f.row(t).RuntimeTargetPresentation)
 
+		otherType := presentationFor("x")
+		otherType.Target.Type = "docker"
+		_, err = f.s.SetRuntimeBrokerPresentation(ctx, f.flat.ID, f.flat.RuntimeTarget.ID, otherType, "h", 1, 1, f.at(0))
+		assert.ErrorIs(t, err, store.ErrRuntimeTargetChanged, "the reported type must equal the stored type")
+		noTarget := presentationFor("x")
+		noTarget.Target = nil
+		_, err = f.s.SetRuntimeBrokerPresentation(ctx, f.flat.ID, f.flat.RuntimeTarget.ID, noTarget, "h", 1, 1, f.at(0))
+		assert.ErrorIs(t, err, store.ErrRuntimeTargetChanged, "a presentation without a target is refused")
+		assert.Nil(t, f.row(t).RuntimeTargetPresentation)
+
 		_, err = f.s.SetRuntimeBrokerPresentation(ctx, uuid.NewString(), "rt-any", presentationFor("x"), "h", 1, 1, f.at(0))
 		assert.ErrorIs(t, err, store.ErrNotFound)
 

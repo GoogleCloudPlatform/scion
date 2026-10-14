@@ -208,11 +208,13 @@ func TestPresentationHeartbeat_WritesOnHashChangeOnly(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), mustHash(t, p2), "the hash is never serialized")
 }
 
-// TestPresentationHeartbeat_IgnoredBeforeAnyWrite: the field is ignored,
-// leaving the stored value and never reaching the store, on a legacy row,
-// on a target-ID or target-type mismatch, on an unknown schema version, with
-// the experiment off, and on the user heartbeat path (with a warning).
-func TestPresentationHeartbeat_IgnoredBeforeAnyWrite(t *testing.T) {
+// TestPresentationHeartbeat_IgnoredWithoutAWrite: the field is ignored,
+// leaving the stored value, on a legacy row, on a target-ID or target-type
+// mismatch (refused by the store's bound read, with typed errors and
+// nothing written), on an unknown schema version, with the experiment off,
+// and on the user heartbeat path with a warning (these three never reach
+// the store).
+func TestPresentationHeartbeat_IgnoredWithoutAWrite(t *testing.T) {
 	f := newPresentationFixture(t, true)
 	grantDevUserRuntimeBrokerAccess(t, f.s)
 	target := f.flat.RuntimeTarget.ID
@@ -223,25 +225,38 @@ func TestPresentationHeartbeat_IgnoredBeforeAnyWrite(t *testing.T) {
 	other := dockerPresentation("other")
 	k8s := dockerPresentation("k8s")
 	k8s.Target.Type = "kubernetes"
+	noTarget := dockerPresentation("none")
+	noTarget.Target = nil
 	v2 := dockerPresentation("v2")
 	v2.SchemaVersion = 2
 	cases := []struct {
 		name, brokerID, targetID, logWant string
 		p                                 *api.RuntimeTargetPresentation
+		storeErr                          error // nil: the store is never called
 	}{
-		{"legacy row", f.legacy.ID, target, "reason=legacy_row", other},
-		{"target id mismatch", f.flat.ID, "some-other-target", "reason=target_id_mismatch", other},
-		{"empty target id", f.flat.ID, "", "reason=target_id_mismatch", other},
-		{"target type mismatch", f.flat.ID, target, "reason=target_type_mismatch", k8s},
-		{"unknown schema version", f.flat.ID, target, "reason=unknown_schema_version", v2},
+		{"legacy row", f.legacy.ID, target, "reason=legacy_row", other, store.ErrRuntimeBrokerNotFlat},
+		{"target id mismatch", f.flat.ID, "some-other-target", "reason=target_mismatch", other, store.ErrRuntimeTargetChanged},
+		{"empty target id", f.flat.ID, "", "reason=target_mismatch", other, store.ErrRuntimeTargetChanged},
+		{"target type mismatch", f.flat.ID, target, "reason=target_mismatch", k8s, store.ErrRuntimeTargetChanged},
+		{"no target", f.flat.ID, target, "reason=target_mismatch", noTarget, store.ErrRuntimeTargetChanged},
+		{"unknown schema version", f.flat.ID, target, "reason=unknown_schema_version", v2, nil},
 	}
 	seq := int64(10)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			f.logs.Reset()
 			seq++
+			before := len(f.rec.snapshot())
 			sendAsBroker(t, f.srv, tc.brokerID, presentationBeat(tc.p, tc.targetID, 100, seq, nil))
-			assert.Len(t, f.rec.snapshot(), 1, "the store is never called")
+			calls := f.rec.snapshot()
+			if tc.storeErr == nil {
+				assert.Len(t, calls, before, "the store is never called")
+			} else {
+				require.Len(t, calls, before+1)
+				last := calls[len(calls)-1]
+				assert.ErrorIs(t, last.err, tc.storeErr)
+				assert.Empty(t, last.outcome, "nothing is written")
+			}
 			assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation, "the stored value is unchanged")
 			assert.Nil(t, f.row(t, f.legacy.ID).RuntimeTargetPresentation, "the legacy row has none")
 			assert.Contains(t, f.logs.String(), tc.logWant)
@@ -250,10 +265,11 @@ func TestPresentationHeartbeat_IgnoredBeforeAnyWrite(t *testing.T) {
 
 	t.Run("user path", func(t *testing.T) {
 		f.logs.Reset()
+		before := len(f.rec.snapshot())
 		rec := doRequest(t, f.srv, http.MethodPost, "/api/v1/runtime-brokers/"+f.flat.ID+"/heartbeat",
 			presentationBeat(other, target, 100, 50, nil))
 		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-		assert.Len(t, f.rec.snapshot(), 1, "the user path never reaches the store")
+		assert.Len(t, f.rec.snapshot(), before, "the user path never reaches the store")
 		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
 		assert.Contains(t, f.logs.String(), "ignoring runtimeTargetPresentation sent without the broker's own credentials")
 	})
@@ -262,8 +278,9 @@ func TestPresentationHeartbeat_IgnoredBeforeAnyWrite(t *testing.T) {
 		setFlatExperiment(t, f.srv, false)
 		t.Cleanup(func() { setFlatExperiment(t, f.srv, true) })
 		f.logs.Reset()
+		before := len(f.rec.snapshot())
 		sendAsBroker(t, f.srv, f.flat.ID, presentationBeat(other, target, 100, 60, nil))
-		assert.Len(t, f.rec.snapshot(), 1)
+		assert.Len(t, f.rec.snapshot(), before, "the store is never called")
 		assert.Equal(t, stored, f.row(t, f.flat.ID).RuntimeTargetPresentation)
 		assert.Contains(t, f.logs.String(), "reason=experiment_off")
 	})

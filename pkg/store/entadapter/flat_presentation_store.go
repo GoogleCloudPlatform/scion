@@ -17,6 +17,7 @@ package entadapter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -44,7 +45,7 @@ func presentationFenceAdvances(storedEpoch, storedSeq *int64, fencedAt *time.Tim
 
 // SetRuntimeBrokerPresentation implements store.RuntimeBrokerStore. Each
 // attempt is one conditional UPDATE bound to the row ID, its runtime target
-// ID, the fence and the stored hash, so it never races the heartbeat's
+// ID and type, the fence and the stored hash, so it never races the heartbeat's
 // other row writes (it does not go through UpdateRuntimeBroker's
 // read-modify-write) and an older process can never overwrite a newer
 // snapshot. An attempt that matches no row because the row changed under it
@@ -78,13 +79,23 @@ func (s *ProjectStore) SetRuntimeBrokerPresentation(ctx context.Context, brokerI
 			return "", store.ErrRuntimeBrokerNotFlat
 		}
 		if *cur.RuntimeTargetID != targetID {
-			return "", store.ErrRuntimeTargetChanged
+			return "", fmt.Errorf("%w: reported runtime target %q, stored %q",
+				store.ErrRuntimeTargetChanged, targetID, *cur.RuntimeTargetID)
+		}
+		reportedType := ""
+		if p.Target != nil {
+			reportedType = p.Target.Type
+		}
+		if reportedType != cur.RuntimeTargetType {
+			return "", fmt.Errorf("%w: reported runtime target type %q, stored %q",
+				store.ErrRuntimeTargetChanged, reportedType, cur.RuntimeTargetType)
 		}
 		if !presentationFenceAdvances(cur.PresentationEpoch, cur.PresentationSeq, cur.PresentationFencedAt, epoch, seq, observedAt) {
 			return store.PresentationStale, nil
 		}
 		update := s.client.RuntimeBroker.Update().
-			Where(runtimebroker.IDEQ(uid), runtimebroker.RuntimeTargetIDEQ(targetID), fence).
+			Where(runtimebroker.IDEQ(uid), runtimebroker.RuntimeTargetIDEQ(targetID),
+				runtimebroker.RuntimeTargetTypeEQ(reportedType), fence).
 			SetPresentationEpoch(epoch).
 			SetPresentationSeq(seq).
 			SetPresentationFencedAt(observedAt)
