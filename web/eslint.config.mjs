@@ -80,6 +80,7 @@ const componentTests = [
   'src/components/pages/agent-detail-reincarnate.test.ts',
   'src/components/pages/agent-placement.test.ts',
   'src/components/pages/agent-detail-placement.test.ts',
+  'src/components/pages/admin-maintenance-reissue-scopes.test.ts',
 ];
 
 /** Points the given files at their own TypeScript project. */
