@@ -1092,3 +1092,46 @@ func TestAttributionReport_SurfaceConflictFlipBlocking(t *testing.T) {
 	assert.Contains(t, output, "FLIP BLOCKED", "surface conflict must trigger flip blocked warning")
 	assert.Contains(t, output, "channel conflicts", "output must explain channel conflicts")
 }
+
+// countingReportStore records whether each ListMessages call asked the store
+// for a total count.
+type countingReportStore struct {
+	store.Store
+	calls        int
+	countedCalls int
+}
+
+func (c *countingReportStore) ListMessages(ctx context.Context, filter store.MessageFilter, opts store.ListOptions) (*store.ListResult[store.Message], error) {
+	c.calls++
+	if !opts.SkipTotalCount {
+		c.countedCalls++
+	}
+	return c.Store.ListMessages(ctx, filter, opts)
+}
+
+// TestAttributionReport_NoPerPageTotalCount checks that the report's message
+// scans (the pre-scan and the dry-run backfill) do not ask the store for a
+// total count on any page. Nothing reads the count, and the store runs a
+// COUNT over every message in the project for it on each page.
+func TestAttributionReport_NoPerPageTotalCount(t *testing.T) {
+	ctx := context.Background()
+	base := newTestStore(t)
+	projectID := seedBackfillProject(t, ctx, base)
+
+	senderID := uuid.NewString()
+	recipientID := uuid.NewString()
+	now := time.Now()
+	// One more than two report batches (500), so each scan takes 3 pages.
+	const n = 1001
+	for i := 0; i < n; i++ {
+		seedDMMessage(t, ctx, base, projectID, senderID, recipientID, now.Add(time.Duration(i)*time.Millisecond))
+	}
+
+	s := &countingReportStore{Store: base}
+	report, err := runAttributionReportForProject(ctx, s, projectID)
+	require.NoError(t, err)
+
+	assert.Equal(t, n, report.Total, "total messages")
+	assert.Equal(t, 6, s.calls, "3 pre-scan pages and 3 dry-run backfill pages")
+	assert.Equal(t, 0, s.countedCalls, "no page should request a total count")
+}
