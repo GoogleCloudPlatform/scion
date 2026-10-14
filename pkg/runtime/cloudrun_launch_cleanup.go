@@ -147,21 +147,11 @@ func cloudRunServerRejected(ctx context.Context, err error) bool {
 	if err == nil || ctx.Err() != nil {
 		return false
 	}
-	switch cloudRunGRPCCode(err) {
+	switch status.Code(err) {
 	case codes.InvalidArgument, codes.PermissionDenied, codes.Unauthenticated:
 		return true
 	}
 	return false
-}
-
-// cloudRunGRPCCode returns the gRPC code of err, found through any %w
-// wrapping, or codes.Unknown when err carries no gRPC status.
-func cloudRunGRPCCode(err error) codes.Code {
-	var se interface{ GRPCStatus() *status.Status }
-	if errors.As(err, &se) {
-		return se.GRPCStatus().Code()
-	}
-	return codes.Unknown
 }
 
 // cloudRunSleep waits d, or returns ctx's error if ctx ends first.
@@ -230,6 +220,15 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 		return c.DeleteInstance(budget, &runpb.DeleteInstanceRequest{Name: n, Etag: etag}, defaultCallOpts...)
 	}
 
+	// waitClient serves the reconciling waits; opened at the first
+	// refusal and shared by every later one.
+	var waitClient cloudrun.InstancesAPI
+	defer func() {
+		if waitClient != nil {
+			_ = waitClient.Close()
+		}
+	}()
+
 	var repollUntil time.Time
 	refusals := 0
 	for {
@@ -254,7 +253,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 		if budget.Err() != nil {
 			return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
 		}
-		switch cloudRunGRPCCode(err) {
+		switch status.Code(err) {
 		case codes.NotFound:
 			if seen || !cloudRunCreateInDoubt(name, h.UID) {
 				clearCloudRunCreateInDoubt(name, h.UID)
@@ -276,7 +275,12 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 		case codes.FailedPrecondition, codes.Aborted:
 			// The read found the instance: the create is observed.
 			clearCloudRunCreateInDoubt(name, h.UID)
-			reconciled, werr := r.waitCloudRunReconciled(budget, name)
+			if waitClient == nil {
+				if c, cerr := r.client(budget); cerr == nil {
+					waitClient = c
+				}
+			}
+			reconciled, werr := waitCloudRunReconciled(budget, waitClient, name)
 			if werr != nil {
 				return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
 			}
@@ -296,18 +300,17 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 	}
 }
 
-// waitCloudRunReconciled reads instance name and, while it reports
-// Reconciling, reads it again every cloudRunReconcilePoll. It reports
+// waitCloudRunReconciled reads instance name through c and, while it
+// reports Reconciling, reads it again every cloudRunReconcilePoll. It reports
 // whether it waited for a reconcile to clear (or saw the instance gone),
 // so the caller retries at once; false means the instance was not
-// reconciling (or could not be read) and the caller backs off. The error
-// is ctx's, when ctx ends first.
-func (r *CloudRunRuntime) waitCloudRunReconciled(ctx context.Context, name string) (bool, error) {
-	c, err := r.client(ctx)
-	if err != nil {
+// reconciling (or could not be read, or c is nil because no client could
+// be opened) and the caller backs off. The error is ctx's, when ctx ends
+// first.
+func waitCloudRunReconciled(ctx context.Context, c cloudrun.InstancesAPI, name string) (bool, error) {
+	if c == nil {
 		return false, nil
 	}
-	defer func() { _ = c.Close() }()
 	waited := false
 	for {
 		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)
@@ -316,7 +319,7 @@ func (r *CloudRunRuntime) waitCloudRunReconciled(ctx context.Context, name strin
 		}
 		if err != nil {
 			// Gone: the retry's read reports it. Otherwise back off.
-			return cloudRunGRPCCode(err) == codes.NotFound, nil
+			return status.Code(err) == codes.NotFound, nil
 		}
 		if inst == nil || !inst.GetReconciling() {
 			return waited, nil
