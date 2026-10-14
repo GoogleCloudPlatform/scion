@@ -353,6 +353,11 @@ export class ScionChatComposer extends LitElement {
       // Reset text so stale content from the old conversation is not carried over.
       this.text = '';
       this.runeCount = 0;
+      // Uploads belong to the conversation they were made in: a topic upload
+      // carries the topic's project, which a DM refuses at send. Drafts keep
+      // only text, so pending uploads are dropped rather than carried over.
+      this.pendingFiles = [];
+      this.uploadFailures = [];
       this.resetMentionTracking();
       this.restoreDraft();
     }

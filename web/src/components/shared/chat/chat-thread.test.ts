@@ -9239,4 +9239,38 @@ describe('scion-chat-thread attachment upload scope', () => {
     });
     expect(composer.pendingFiles).toEqual([]);
   });
+
+  it('drops a file pending in a topic when the thread switches to a DM', async () => {
+    const { el, composer } = await mountComposer({
+      key: CONVERSATION_KEY,
+      isDM: false,
+      projectId: 'proj-topic',
+    });
+    await composer.uploadFiles([new File(['hello'], 'a.txt')]);
+    expect(composer.pendingFiles.map((f) => f.id)).toEqual(['att-1']);
+
+    el.conversationKey = 'dm:user:u1:user:u2';
+    el.isDM = true;
+    await el.updateComplete;
+    await composer.updateComplete;
+    expect(composer.pendingFiles).toEqual([]);
+    expect(composer.shadowRoot!.querySelector('.composer-context')).toBeNull();
+
+    apiFetch.mockClear();
+    composer.text = 'hi';
+    composer.doSend(false);
+
+    await vi.waitFor(() => {
+      const post = apiFetch.mock.calls.find(
+        (c) => String(c[0]).endsWith('/messages') && (c[1] as RequestInit)?.method === 'POST'
+      );
+      expect(post).toBeTruthy();
+      const body = JSON.parse(requestBodyText((post![1] as RequestInit).body)) as Record<
+        string,
+        unknown
+      >;
+      expect(body.content).toBe('hi');
+      expect(body).not.toHaveProperty('attachments');
+    });
+  });
 });
