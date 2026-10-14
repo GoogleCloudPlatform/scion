@@ -1683,6 +1683,12 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// enables this check.
 	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
 
+	// On SQLite, snapshot the database when the migration (after
+	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
+	// rows. A snapshot that is needed but fails stops startup before the
+	// reconcile changes any rows.
+	s.SetBeforeFKReconcile(snapshotBeforeFKReconcile)
+
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
 	if err := migrateStore(ctx, s); err != nil {
@@ -2597,6 +2603,12 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitAgentRefreshMetrics(refreshRec)
 	}
 
+	if conflictRec, err := hub.NewOTelQuotaScopeConflictMetrics(mp); err != nil {
+		log.Printf("WARNING: hub quota scope conflict metrics disabled: %v", err)
+	} else {
+		hubSrv.SetQuotaScopeConflictMetrics(conflictRec)
+	}
+
 	if portProxyRec, err := hub.NewOTelPortProxyMetrics(mp); err != nil {
 		log.Printf("WARNING: hub port proxy metrics disabled: %v", err)
 	} else {
@@ -2703,6 +2715,18 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
+	}
+
+	// Proxy driver principals (auth.proxy.driverPrincipals, test identities
+	// phase WS2): exact emails, proxy auth mode only. A non-empty list on a
+	// hub that is not in proxy mode refuses startup; hub.New re-checks it.
+	proxyDrivers, driversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if driversErr != nil {
+		return nil, driversErr
+	}
+	hubCfg.ProxyDriverPrincipals = proxyDrivers
+	if len(proxyDrivers) > 0 {
+		log.Printf("Proxy driver principals configured: %d (test identity web session drivers; they never get a hub account)", len(proxyDrivers))
 	}
 
 	// Construct transport token minter when auth.transport is configured
@@ -3049,6 +3073,9 @@ func initOperationalSettings(ctx context.Context, cfg *config.GlobalConfig, hubS
 	// The admin view shows a public URL from the layers startup's endpoint
 	// resolution reads, not a seed value (ptone/scion#4826).
 	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(serverConfigPath))
+	// It attributes a superseded key that only the coded defaults set to
+	// them, not to settings.yaml (ptone/scion#4983).
+	ops.SetAboveSeedBootstrap(config.LoadAboveSeedBootstrapKoanfWithConfigPath(serverConfigPath))
 
 	changed, err := ops.Refresh(ctx)
 	if err != nil {
@@ -3407,6 +3434,13 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webPlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 	}
 
+	// The same proxy driver principals the hub gets (WS2), checked the same
+	// way, so the web server never runs with a list the hub would refuse.
+	webProxyDrivers, webDriversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if webDriversErr != nil {
+		return nil, webDriversErr
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:                 webPort,
 		Host:                 webHost,
@@ -3423,6 +3457,9 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+
+		ProxyDriverPrincipals:    webProxyDrivers,
+		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
 	}
 	if enableDebugEndpoints {
 		slog.Warn("Diagnostic endpoints are enabled (--enable-debug-endpoints). Use for local development only.")
@@ -3560,7 +3597,12 @@ func logHomeStorageStartup(gs *config.VersionedSettings, logf func(format string
 
 // logSharedDirStorageOverridesStartup logs one line per profile whose
 // shared-dir storage backend comes from a profile or runtime entry
-// shared_dir_storage_backend override, and a warning per invalid override.
+// shared_dir_storage_backend override, one per flat Runtime Broker
+// instance whose backend comes from its runtime_target, and a warning per
+// invalid override and per instance whose backend differs from the one
+// plugins resolve (config.VersionedSettings.FlatInstanceSharedDirStorageReport).
+// An instance that selects nfs without a complete nfs block is refused when
+// the instances are loaded (config.LoadRuntimeBrokerInstances).
 // It checks configuration only and never touches the filesystem: an nfs
 // override whose export is not mounted on this host is reported when an
 // agent using it starts, not here, so a missing mount never affects startup
@@ -3619,6 +3661,16 @@ func logSharedDirStorageOverridesStartup(gs *config.VersionedSettings, logf func
 			}
 			logf("shared_dir_storage for profile %s, shared dir %s: backend=%s (from %s)", name, dir, backend, source)
 		}
+	}
+	// Flat Runtime Broker instances: their runtime_target overrides, and a
+	// warning for each instance whose backend differs from the one plugins
+	// resolve from the global settings.
+	lines, warnings := gs.FlatInstanceSharedDirStorageReport()
+	for _, w := range warnings {
+		logf("Warning: %s", w)
+	}
+	for _, line := range lines {
+		logf("%s", line)
 	}
 }
 

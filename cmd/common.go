@@ -183,6 +183,19 @@ func parseLabels(raw []string) (map[string]string, error) {
 	return m, nil
 }
 
+// resolveBranch returns the branch for a new agent: the --branch flag if
+// given, else the inline config's branch, else "" (the default). Local and
+// Hub create and start all use it, so they apply the same precedence.
+func resolveBranch(flag string, inlineCfg *api.ScionConfig) string {
+	if flag != "" {
+		return flag
+	}
+	if inlineCfg != nil {
+		return inlineCfg.Branch
+	}
+	return ""
+}
+
 // loadInlineConfig loads a ScionConfig from the --config flag path.
 // If path is "-", reads from stdin. Supports YAML and JSON formats.
 // Returns (nil, nil) if no inline config path is set.
@@ -385,8 +398,8 @@ func requireHub(projectPath string) (*HubContext, error) {
 	}, nil
 }
 
-// errHubNotConfigured is returned by requireHub when no hub endpoint is
-// configured (flag, environment, settings or the hub list). It matches every
+// errHubNotConfigured is returned by requireHub when no hub is selected
+// (flag, environment or the hub list). It matches every
 // hubsync.HubNotConfiguredError through errors.Is.
 var errHubNotConfigured = hubsync.ErrHubNotConfigured
 
@@ -466,19 +479,10 @@ func hubCheckHint(endpoint string) string {
 }
 
 // hintHubEndpoint returns the hub endpoint hubCheckHint describes: the
-// endpoint of the current invocation (the --hub flag, the active project's
-// settings, or the environment). It is only called on an error path, and
-// returns what it can without failing. Tests replace it.
+// endpoint of the current invocation (see invocationHub). It is only called
+// on an error path. Tests replace it.
 var hintHubEndpoint = func() string {
-	resolved, _, err := config.ResolveProjectPath(projectPath)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	settings, err := config.LoadSettings(resolved)
-	if err != nil {
-		return GetHubEndpoint(nil)
-	}
-	return GetHubEndpoint(settings)
+	return invocationHubEndpoint()
 }
 
 // emptyResponseNote replaces the hub-check hint when the hub answered a call
@@ -867,15 +871,12 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	}
 
 	// Apply inline config overrides to CLI options
-	effectiveBranch := branch
+	effectiveBranch := resolveBranch(branch, inlineCfg)
 	effectiveTask := strings.TrimSpace(task)
 	effectiveHarnessConfig := harnessConfigFlag
 	effectiveHarnessAuth := harnessAuthFlag
 
 	if inlineCfg != nil {
-		if effectiveBranch == "" && inlineCfg.Branch != "" {
-			effectiveBranch = inlineCfg.Branch
-		}
 		if effectiveTask == "" && inlineCfg.Task != "" {
 			effectiveTask = inlineCfg.Task
 		}
@@ -934,12 +935,13 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	opts.Env = localAgentStartEnv()
 
 	// Thread CLI-resolved hub endpoint so locally-started agents get
-	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
-	// var are resolved here; the agent's scion-agent.yaml can override
-	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
+	// hub connectivity. The hub selected for this invocation (--hub, the
+	// environment, a link entry or the current context) is resolved here;
+	// the agent's scion-agent.yaml can override inside Start() via
+	// hub.endpoint or env.SCION_HUB_ENDPOINT.
 	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
 		if !cliSettings.IsHubExplicitlyDisabled() {
-			if ep := GetHubEndpoint(cliSettings); ep != "" {
+			if ep := invocationHubEndpoint(); ep != "" {
 				if opts.Env == nil {
 					opts.Env = make(map[string]string)
 				}
@@ -1333,7 +1335,7 @@ func startAgentViaHub(cmd *cobra.Command, hubCtx *HubContext, agentName, task st
 		RuntimeBrokerID: runtimeBrokerID,
 		Profile:         profile,
 		Task:            task,
-		Branch:          branch,
+		Branch:          resolveBranch(branch, inlineCfg),
 		Workspace:       workspace,
 		Labels:          parsedLabels,
 		Resume:          resume,

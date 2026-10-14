@@ -1,0 +1,3 @@
+choices:
+  - target_group: k8s-agents
+    split: [fast]

@@ -940,9 +940,16 @@ func (s *Server) reserveQuotaHTTP(ctx context.Context, w http.ResponseWriter, li
 }
 
 // writeQuotaReserveError writes the response for a failed quota reservation
-// of limitName: 429 at the limit or on lock contention, 500 otherwise.
+// of limitName: 409 broker_reservation_scope_conflict when the resource
+// holds an active reservation on another Runtime Broker, 429 at the limit or
+// on lock contention, 500 otherwise.
 func writeQuotaReserveError(w http.ResponseWriter, limitName string, err error) {
+	var conflict *ReservationScopeConflictError
 	switch {
+	case errors.As(err, &conflict):
+		writeError(w, http.StatusConflict, ErrCodeBrokerReservationScopeConflict,
+			fmt.Sprintf("agent %s already holds capacity on Runtime Broker %s; it cannot be admitted on %s",
+				conflict.ResourceID, conflict.HeldScopeID, conflict.RequestedScopeID), nil)
 	case errors.Is(err, store.ErrQuotaExceeded):
 		writeError(w, http.StatusTooManyRequests, ErrCodeQuotaExceeded,
 			quotaExceededMessage(limitName), nil)
@@ -1057,10 +1064,10 @@ type createRollback struct {
 //     a managed one);
 //  3. compensates the committed create (compensateAgentCreate): one
 //     transaction that deletes the agent row unless a delete holds it
-//     (createRowHeldCheck), deactivates its delegation
-//     edge with cause create_compensation and writes an
-//     agent_create_dispatch_failed audit record naming rb.CreateAuditID and
-//     rb.Stage; and
+//     (createRowHeldCheck), deactivates its delegation edges and its
+//     service-account assignments with cause create_compensation, runs the
+//     hard-delete hooks and writes an agent_create_dispatch_failed audit
+//     record naming rb.CreateAuditID and rb.Stage; and
 //  4. releases its quota reservations, unless the row was left to a delete
 //     that holds it or to a concurrent writer (the conditional row delete
 //     gave up with store.ErrVersionConflict).
@@ -1071,7 +1078,7 @@ type createRollback struct {
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
 // delete + 5s compensation + 5s release), plus about 20s for the fallback
 // below (up to three row-delete attempts with backoff, then marking the row
-// failed or deactivating its edges).
+// failed or deactivating its edges and service-account assignments).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
@@ -1083,8 +1090,9 @@ type createRollback struct {
 // quotas held (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
-// standalone best-effort deactivation of the agent's edges (same cause and
-// op ID), then a delete of the agent row on its own. The correlation ID is
+// delete of the agent row on its own, then, once the row is gone, a
+// standalone best-effort deactivation of the agent's delegation edges and
+// service-account assignments (same cause and op ID). The correlation ID is
 // returned so the caller can report it (writeCreateFailure). The return
 // value is "" when the compensation committed.
 func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
@@ -2112,7 +2120,7 @@ func (s *Server) createAgentInProject(
 			InternalError(w)
 			return
 		}
-	} else if profileName, profileSAID := s.projectProfileDefaultSA(ctx, runtimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	} else if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, runtimeBrokerID, project); profileSAID != "" {
 		// No explicit GCP identity, and the project sets a default service
 		// account for the profile this agent runs under. It is more specific
 		// than the project-wide default below and wins over it, including an
@@ -2806,7 +2814,9 @@ func (s *Server) createAgentInProject(
 					"agent", agent.Name, "broker", agent.RuntimeBrokerID)
 				// The create runs under its start claim; the dispatch is bounded
 				// by syncDispatch, derived from the claim's context.
-				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+				// An unknown outcome keeps the agent (keepUnknownOutcomeStart),
+				// so the dispatch keeps the credential it mints on one.
+				created, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 					err = syncDispatch(ctx, func(dctx context.Context) error {
 						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
 						return err
@@ -2835,6 +2845,13 @@ func (s *Server) createAgentInProject(
 					// not cleaned up as a failed create. A delete that
 					// claimed the row during the dispatch is a dispatch
 					// failure, cleaned up below.
+					return
+				} else if isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+					// The broker may still be starting the agent (the
+					// dispatch deadline, or no answer to a sent request):
+					// keep it for the start-claim reaper instead of
+					// rolling it back (ptone/scion#4817).
+					s.keepUnknownOutcomeStart(ctx, w, agent, createStageDispatchEnvGather, err, createAudit.ID, true, dispatchWarns.Warnings())
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -2888,7 +2905,9 @@ func (s *Server) createAgentInProject(
 			} else {
 				// The create runs under its start claim; the dispatch is bounded
 				// by syncDispatch, derived from the claim's context.
-				created, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+				// An unknown outcome keeps the agent (keepUnknownOutcomeStart),
+				// so the dispatch keeps the credential it mints on one.
+				created, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 					err = syncDispatch(ctx, func(dctx context.Context) error {
 						out, err = dispatcher.DispatchAgentCreateWithGather(dctx, agent)
 						return err
@@ -2917,6 +2936,13 @@ func (s *Server) createAgentInProject(
 					// not cleaned up as a failed create. A delete that
 					// claimed the row during the dispatch is a dispatch
 					// failure, cleaned up below.
+					return
+				} else if isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+					// The broker may still be starting the agent (the
+					// dispatch deadline, or no answer to a sent request):
+					// keep it for the start-claim reaper instead of
+					// rolling it back (ptone/scion#4817).
+					s.keepUnknownOutcomeStart(ctx, w, agent, createStageDispatch, err, createAudit.ID, true, dispatchWarns.Warnings())
 					return
 				} else if err != nil {
 					// Dispatch failed — clean up provisioned files on the broker
@@ -3549,7 +3575,9 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 	ctx, dispatchWarns := withDispatchWarnings(ctx)
 	// The finalize starts the agent: it runs under a start claim, its
 	// dispatch bounded by syncDispatch, derived from the claim's context.
-	finalized, err := s.createUnderClaim(ctx, agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
+	// An unknown outcome keeps the agent (keepUnknownOutcomeStart), so the
+	// dispatch keeps the credential it mints on one.
+	finalized, err := s.createUnderClaim(withKeepCredentialOnUnknownOutcome(ctx), agent, func(ctx context.Context) (out *CreateDispatchResult, err error) {
 		err = syncDispatch(ctx, func(dctx context.Context) error {
 			out, err = dispatcher.DispatchFinalizeEnv(dctx, agent, req.Env)
 			return err
@@ -3561,6 +3589,14 @@ func (s *Server) submitAgentEnv(w http.ResponseWriter, r *http.Request, projectI
 		return
 	}
 	if s.writeStartClaimError(ctx, w, err, agent.ID) {
+		return
+	}
+	if err != nil && isUnknownDispatchOutcome(err) && !errors.Is(err, store.ErrDeleteInProgress) {
+		// The broker may still be starting the agent: keep it for the
+		// start-claim reaper (the finalize never deletes the row) and say
+		// the outcome is unknown, not that the finalize failed
+		// (ptone/scion#4817).
+		s.keepUnknownOutcomeStart(ctx, w, agent, createStageEnvFinalize, err, "", false, dispatchWarns.Warnings())
 		return
 	}
 	if err != nil {
@@ -5116,11 +5152,11 @@ func (s *Server) cancelScheduledEventsForAgent(ctx context.Context, agent *store
 				"event_id", evt.ID, "agent_id", agent.ID, "error", err)
 			continue
 		}
+		// The stored event is already cancelled above, so only the
+		// in-memory timer is left to stop. CancelEvent would try to cancel
+		// the stored event again and fail with ErrNotFound.
 		if s.scheduler != nil {
-			if cancelErr := s.scheduler.CancelEvent(ctx, evt.ID); cancelErr != nil {
-				s.agentLifecycleLog.Warn("Failed to cancel in-memory scheduler timer",
-					"event_id", evt.ID, "error", cancelErr)
-			}
+			s.scheduler.StopEventTimer(evt.ID)
 		}
 		cancelled++
 	}
@@ -5397,6 +5433,11 @@ func (s *Server) handleAgentExec(w http.ResponseWriter, r *http.Request, id stri
 	dispatchedAt := time.Now()
 	output, exitCode, err := dispatcher.DispatchAgentExec(ctx, agent, req.Command, req.Timeout)
 	if err != nil {
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if isBrokerAgentNotFound(err) {
 			// The broker answered that the agent has no running container
 			// (e.g. its pod is gone): a state conflict, not a broker
@@ -5679,6 +5720,11 @@ func (s *Server) handleAgentResetAuth(w http.ResponseWriter, r *http.Request, id
 
 	if err := disp.DispatchAgentResetAuth(ctx, agent); err != nil {
 		slog.Error("Failed to reset agent auth", "agent_id", id, "error", err)
+		// The dispatcher's placement backstop refused before anything was
+		// sent: its own 409 and code.
+		if writeRuntimeTargetRefusal(w, err) {
+			return
+		}
 		if writeAgentTokenRecordError(w, err) {
 			return
 		}

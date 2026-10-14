@@ -155,6 +155,7 @@ server:
         allowed_emails: [a@example.com]
         allowed_gcp_projects: [gp]
         allowed_domains: [example.com]
+        allow_visitor_grants: true
     algorithms: [RS256]
     refresh_interval: 1h
     debounce_interval: 30s

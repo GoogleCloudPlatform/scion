@@ -32,13 +32,19 @@ func TestHasAttachSupport_CloudRunSandboxRuntimeSupported(t *testing.T) {
 	}
 }
 
-// Neither Cloud Run runtime calls RunConfig.Checkpoint or
-// RunConfig.OnResourceCreated, so both must opt out of async launch until
-// they do; otherwise an aborted launch would clean up nothing.
-func TestHasAsyncLaunchSupport_CloudRunRuntimesOptOut(t *testing.T) {
-	for _, rt := range []Runtime{&CloudRunRuntime{}, &CloudRunSandboxRuntime{}} {
-		if HasAsyncLaunchSupport(rt) {
-			t.Errorf("HasAsyncLaunchSupport(%T) = true, want false: Run calls neither Checkpoint nor OnResourceCreated", rt)
-		}
+// CloudRunRuntime calls neither RunConfig.Checkpoint nor
+// RunConfig.OnResourceCreated, so it must opt out of async launch until it
+// does; otherwise an aborted launch would clean up nothing.
+func TestHasAsyncLaunchSupport_CloudRunOptsOut(t *testing.T) {
+	if HasAsyncLaunchSupport(&CloudRunRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&CloudRunRuntime{}) = true, want false: Run calls neither Checkpoint nor OnResourceCreated")
+	}
+}
+
+// CloudRunSandboxRuntime.Run calls both async launch hooks, so the runtime
+// must not opt out of async launch.
+func TestHasAsyncLaunchSupport_CloudRunSandboxSupported(t *testing.T) {
+	if !HasAsyncLaunchSupport(&CloudRunSandboxRuntime{}) {
+		t.Error("HasAsyncLaunchSupport(&CloudRunSandboxRuntime{}) = false, want true: Run calls Checkpoint and OnResourceCreated")
 	}
 }

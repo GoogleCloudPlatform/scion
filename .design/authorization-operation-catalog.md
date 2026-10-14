@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 234
+**Operations:** 294
 
 ## Table of Contents
 
@@ -43,6 +43,10 @@
 - [project.membership.remove](#projectmembershipremove) — Remove a member from a project
 - [project.membership.list](#projectmembershiplist) — List project members and their roles
 - [project.membership.transfer](#projectmembershiptransfer) — Atomically transfer project ownership from the actor to another user
+- [project.visitors.list](#projectvisitorslist) — List a project's visitor grants (federated accounts holding the project-visitor role)
+- [project.visitors.add](#projectvisitorsadd) — Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
+- [project.visitors.update](#projectvisitorsupdate) — Replace the window (not before, expires at) of a project visitor grant
+- [project.visitors.remove](#projectvisitorsremove) — Revoke a project visitor grant; the visitor's next request is refused
 - [project.lifecycle.create](#projectlifecyclecreate) — Create a new project
 - [project.lifecycle.delete](#projectlifecycledelete) — Delete a project with cascading security state cleanup and atomic audit
 - [project.read](#projectread) — Read a single project's metadata by ID or slug
@@ -125,7 +129,50 @@
 - [inbox.notification.template.create](#inboxnotificationtemplatecreate) — Create a subscription template. A template filed under a project needs project:read on it; a token also needs inbox:write for it
 - [inbox.notification.template.read](#inboxnotificationtemplateread) — List subscription templates: only templates of projects the caller may read, and for a token only templates inside its boundary
 - [inbox.notification.template.delete](#inboxnotificationtemplatedelete) — Delete a subscription template the caller created. A token needs inbox:write for the template's project
-- [chat.access](#chataccess) — Access chat threads, spaces, topics, and messages within a project
+- [chat.prefs.read](#chatprefsread) — Read the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:read for the agent's project
+- [chat.prefs.update](#chatprefsupdate) — Write the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:write for the agent's project
+- [chat.space.list](#chatspacelist) — List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
+- [chat.unreadcount.read](#chatunreadcountread) — Count the caller's conversations with unread messages. A token needs inbox:read; threads count only in projects it can read and DMs only where the DM rule passes
+- [chat.thread.list](#chatthreadlist) — List the threads of a chat space. Needs project:read on the space's project
+- [chat.thread.create](#chatthreadcreate) — Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.space.members.read](#chatspacemembersread) — List the members of a chat space. Needs project:read on the space's project; agent rows also need the agent list scope
+- [chat.space.markread](#chatspacemarkread) — Mark every thread of a chat space read for the caller. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.space.emoji.update](#chatspaceemojiupdate) — Set or clear the emoji of a chat space. Needs project:update on the space's project
+- [chat.topic.read](#chattopicread) — Read a chat thread. Needs project:read on the thread's project
+- [chat.topic.update](#chattopicupdate) — Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.topic.delete](#chattopicdelete) — Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.history.topic](#chatconversationhistorytopic) — Read the messages of a chat thread. Needs project:read on the thread's project
+- [chat.conversation.history.dm](#chatconversationhistorydm) — Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
+- [chat.conversation.send.topic](#chatconversationsendtopic) — Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+- [chat.conversation.send.dmagent](#chatconversationsenddmagent) — Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
+- [chat.conversation.send.dmuser](#chatconversationsenddmuser) — Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
+- [chat.message.edit](#chatmessageedit) — Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+- [chat.message.delete](#chatmessagedelete) — Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+- [chat.conversation.readstate.topic](#chatconversationreadstatetopic) — Read the caller's read state on a chat thread. Needs project:read on the thread's project
+- [chat.conversation.readstate.dm](#chatconversationreadstatedm) — Read the caller's read state on one of its DMs. A token needs inbox:read under the DM rule
+- [chat.conversation.markread.topic](#chatconversationmarkreadtopic) — Move the caller's read marker on a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.markread.dm](#chatconversationmarkreaddm) — Move the caller's read marker on one of the caller's DMs. A token needs inbox:write under the DM rule
+- [chat.conversation.markunread.topic](#chatconversationmarkunreadtopic) — Mark unread for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.markunread.dm](#chatconversationmarkunreaddm) — Mark unread for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+- [chat.conversation.mute.topic](#chatconversationmutetopic) — Mute or unmute for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.mute.dm](#chatconversationmutedm) — Mute or unmute for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+- [chat.conversation.pin.topic](#chatconversationpintopic) — Pin or unpin for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.pin.dm](#chatconversationpindm) — Pin or unpin for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+- [chat.conversation.typing.topic](#chatconversationtypingtopic) — Publish the caller's typing indicator on a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+- [chat.conversation.typing.dm](#chatconversationtypingdm) — Publish the caller's typing indicator on one of the caller's DMs. A token needs inbox:write under the DM rule
+- [chat.conversation.interagent.read](#chatconversationinteragentread) — Read the messages an agent in one of the caller's DMs exchanged with other agents. Needs DM participation and agent:attach on the agent
+- [chat.dm.list](#chatdmlist) — List the caller's DMs. A token needs inbox:read and lists only the DMs the DM rule lets it read
+- [chat.userprefs.read](#chatuserprefsread) — Read the caller's chat rail preferences, a project-less record. A token needs inbox:read on a hub boundary
+- [chat.userprefs.update](#chatuserprefsupdate) — Write the caller's chat rail preferences, a project-less record. A federated caller is refused. A token needs inbox:write on a hub boundary
+- [chat.presence.update](#chatpresenceupdate) — Publish the caller's presence. It fans out only on the named projects the caller can read (project:read), each once, at most 1000; the others are left out. A federated caller is refused. A token also needs inbox:write
+- [chat.search.topic](#chatsearchtopic) — Search the messages of one chat thread. Needs project:read on the thread's project
+- [chat.search.project](#chatsearchproject) — Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
+- [chat.search.unscoped](#chatsearchunscoped) — Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
+- [chat.search.dm](#chatsearchdm) — Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
+- [chat.attachment.upload.project](#chatattachmentuploadproject) — Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
+- [chat.attachment.upload.noproject](#chatattachmentuploadnoproject) — Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+- [chat.attachment.download.project](#chatattachmentdownloadproject) — Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
+- [chat.conversation.promote](#chatconversationpromote) — Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
 - [role.definition.create](#roledefinitioncreate) — Create a custom role definition
 - [role.definition.update](#roledefinitionupdate) — Update a custom role definition
 - [role.definition.delete](#roledefinitiondelete) — Delete a custom role definition
@@ -158,6 +205,11 @@
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
+- [user.skillinjection.read](#userskillinjectionread) — List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+- [template.user.read](#templateuserread) — List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+- [template.user.create](#templateusercreate) — Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+- [template.user.update](#templateuserupdate) — Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+- [template.user.delete](#templateuserdelete) — Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -209,6 +261,14 @@
 - [harnessconfig.create](#harnessconfigcreate) — Create a new harness configuration. A user-scope harness config refuses a federated caller (requireProfileWriter)
 - [harnessconfig.update](#harnessconfigupdate) — Update a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
 - [harnessconfig.delete](#harnessconfigdelete) — Delete a harness configuration. On a user-scope harness config the existing route gate (authorizeHarnessConfigRoute) already refuses a federated caller, with requireProfileWriter behind it
+- [template.user.clone](#templateuserclone) — Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+- [template.user.reimport](#templateuserreimport) — Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+- [skill.user.create](#skillusercreate) — Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+- [harnessconfig.user.clone](#harnessconfiguserclone) — Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+- [harnessconfig.user.delete](#harnessconfiguserdelete) — Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+- [harnessconfig.user.reimport](#harnessconfiguserreimport) — Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+- [template.user.import](#templateuserimport) — Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+- [harnessconfig.user.import](#harnessconfiguserimport) — Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
 - [broker.read](#brokerread) — Read runtime broker status or list brokers
 - [broker.agent.launchreport](#brokeragentlaunchreport) — Record a broker's launch report for an agent it runs
 - [broker.messagefailures.report](#brokermessagefailuresreport) — Record buffered message delivery failures reported by a broker
@@ -1429,7 +1489,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.add`
+- **Event Type:** `project_member_add`
 - **Context Fields:** actor_id, project_id
 - **After Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1487,7 +1547,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.update`
+- **Event Type:** `project_member_role_change`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, old_role
 - **After Fields:** new_role
@@ -1540,7 +1600,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.remove`
+- **Event Type:** `project_member_remove`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** target_principal_id, target_role
 - **Atomic:** Yes
@@ -1631,7 +1691,7 @@
 
 ### Audit
 
-- **Event Type:** `project.membership.transfer`
+- **Event Type:** `project_ownership_transfer`
 - **Context Fields:** actor_id, project_id
 - **Before Fields:** old_owner_id
 - **After Fields:** new_owner_id, old_owner_role, new_owner_role
@@ -1642,6 +1702,194 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
+
+---
+
+## project.visitors.list
+
+**Domain:** project.visitors
+
+**Description:** List a project's visitor grants (federated accounts holding the project-visitor role)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/projects/{id}/visitors` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `credential_insufficient`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_AddListRemove`
+
+---
+
+## project.visitors.add
+
+**Domain:** project.visitors
+
+**Description:** Grant a user of a trusted issuer visitor access to a project by email; creates the federated account in status pending when none exists
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/projects/{id}/visitors` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- The actor must hold every permission of the project-visitor role on the project (an unscoped local platform admin passes)
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) grant visitor access; granting also needs every permission of the project-visitor role on the project. A visitor holds no management authority. The issuer must be trusted with allow_visitor_grants and the email must pass its allowed_emails and allowed_domains.
+
+### Invariants
+
+| ID | Kind | Description | Fail-Closed |
+|----|------|-------------|-------------|
+| visitor-role-only | security | The grant binds only the project-visitor role, at project scope, to a federated account (CreateVisitorRoleBinding) | Yes |
+
+### Audit
+
+- **Event Type:** `project_visitor_grant`
+- **Context Fields:** actor_id, project_id
+- **After Fields:** visitor_id, issuer, email, not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `principal_ineligible`, `conflict`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_AddListRemove`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_AuditFailureLeavesNoChange`
+
+---
+
+## project.visitors.update
+
+**Domain:** project.visitors
+
+**Description:** Replace the window (not before, expires at) of a project visitor grant
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/projects/{id}/visitors/{visitorId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `change-authority`
+
+### Delegation
+
+- **Kind:** `conditional_on_increase`
+- Only a window change that extends the grant (an earlier or cleared start, or a later or cleared expiry) needs every permission of the project-visitor role on the project, as for a grant; shortening never does
+
+**Authority Evaluation:** `before_and_after`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) shorten any visitor grant of the project; extending one also needs every permission of the project-visitor role on the project.
+
+### Audit
+
+- **Event Type:** `project_visitor_update`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** visitor_id, not_before, expires_at
+- **After Fields:** not_before, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_WindowHonoured`
+- `pkg/hub:TestProjectVisitors_GrantNeedsEveryVisitorPermission`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
+
+---
+
+## project.visitors.remove
+
+**Domain:** project.visitors
+
+**Description:** Revoke a project visitor grant; the visitor's next request is refused
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/projects/{id}/visitors/{visitorId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`
+
+**Bearer:** `session_only` (reason `GOV_PENDING`)
+
+**Base Permission:** `project.manage_visitors`
+
+**Resource Resolver:** project-from-url
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** peer_superior
+- Holders of project.manage_visitors (project owners and admins, and hub admins) revoke any visitor grant of the project.
+
+### Audit
+
+- **Event Type:** `project_visitor_revoke`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** visitor_id, issuer, email, subject
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`, `credential_insufficient`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestProjectVisitors_RevokeRefusesNextRequest`
+- `pkg/hub:TestProjectVisitors_WhoMayGrant`
 
 ---
 
@@ -4627,35 +4875,411 @@
 
 ---
 
-## chat.access
+## chat.prefs.read
 
 **Domain:** chat
 
-**Description:** Access chat threads, spaces, topics, and messages within a project
+**Description:** Read the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:read for the agent's project
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
 | http_route | GET | `/api/v1/chat/prefs` |
-| http_route | PUT | `/api/v1/chat/prefs` |
-| http_route | GET | `/api/v1/chat/spaces` |
-| http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
-| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
-| http_route | GET | `/api/v1/chat/topics/{id}` |
-| http_route | GET | `/api/v1/chat/dms` |
-| http_route | GET | `/api/v1/chat/unread-count` |
-| http_route | GET | `/api/v1/chat/search` |
-| http_route | POST | `/api/v1/chat/attachments` |
-| http_route | GET | `/api/v1/chat/attachments/{id}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatPrefsToken_RequiresInboxSelectorAndAgentRead`
+
+---
+
+## chat.prefs.update
+
+**Domain:** chat
+
+**Description:** Write the caller's visibility preference for an agent's chat thread. Needs agent:read on the agent; a token also needs inbox:write for the agent's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/prefs` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** agent-from-query
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatPrefsToken_RequiresInboxSelectorAndAgentRead`
+
+---
+
+## chat.space.list
+
+**Domain:** chat
+
+**Description:** List the chat spaces: the projects the caller can read. A project token lists only its boundary project; the caller's rail preferences need inbox:read on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/spaces` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
 
 **Base Permission:** `project.read`
 
-**Resource Resolver:** project-from-row
+**Resource Resolver:** project-collection
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatSpacesToken_FilteredToBoundary`
+
+---
+
+## chat.unreadcount.read
+
+**Domain:** chat
+
+**Description:** Count the caller's conversations with unread messages. A token needs inbox:read; threads count only in projects it can read and DMs only where the DM rule passes
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/unread-count` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatUnreadCountToken_FilteredToBoundary`
+
+---
+
+## chat.thread.list
+
+**Domain:** chat
+
+**Description:** List the threads of a chat space. Needs project:read on the space's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/spaces/{id}/threads` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-path
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.thread.create
+
+**Domain:** chat
+
+**Description:** Create a thread in a chat space. Needs project:read on the space's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/spaces/{id}/threads` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-path
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.space.members.read
+
+**Domain:** chat
+
+**Description:** List the members of a chat space. Needs project:read on the space's project; agent rows also need the agent list scope
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/spaces/{id}/members` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-path
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.space.markread
+
+**Domain:** chat
+
+**Description:** Mark every thread of a chat space read for the caller. Needs project:read on the space's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/spaces/{id}/read` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-path
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.space.emoji.update
+
+**Domain:** chat
+
+**Description:** Set or clear the emoji of a chat space. Needs project:update on the space's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/spaces/{id}/emoji` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.update`
+
+**Resource Resolver:** project-from-path
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.topic.read
+
+**Domain:** chat
+
+**Description:** Read a chat thread. Needs project:read on the thread's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/topics/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.topic.update
+
+**Domain:** chat
+
+**Description:** Rename a chat thread or set its default agent. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/chat/topics/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.topic.delete
+
+**Domain:** chat
+
+**Description:** Delete a chat thread (soft delete; the last thread of a space stays). Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/topics/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.history.topic
+
+**Domain:** chat
+
+**Description:** Read the messages of a chat thread. Needs project:read on the thread's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
 
 **Effects:** `read-one`, `list-scoped`
 
@@ -4663,8 +5287,1035 @@
 
 ### Tests
 
-- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.history.dm
+
+**Domain:** chat
+
+**Description:** Read the messages of one of the caller's DMs. A token needs inbox:read: a DM with an agent needs the agent's project inside its boundary and agent:read on the agent; a DM between users needs a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+- `pkg/hub:TestChatHumanDirectMessage_RequiresHubBoundary`
+
+---
+
+## chat.conversation.send.topic
+
+**Domain:** chat
+
+**Description:** Post a message to a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it. Agent recipients need agent:message
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.conversation.send.topic`
+- **Context Fields:** actor_id, conversation_key
+- **After Fields:** message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The message is stored before agent dispatch, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** message ID
+- **Retry:** no retry for user-sent messages
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.send.dmagent
+
+**Domain:** chat
+
+**Description:** Post a message to one of the caller's DMs with an agent. Needs agent:message on the agent; a token also needs inbox:write for the agent's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`, `emit-external-effect`
+
+### Audit
+
+- **Event Type:** `chat.conversation.send.dmagent`
+- **Context Fields:** actor_id, conversation_key
+- **After Fields:** message_id
+- **Atomic:** No
+- **Non-Atomic Justification:** The message is stored before agent dispatch, which is fire-and-forget
+
+### External Effect Policy
+
+- **Delivery:** `fire_and_forget`
+- **Failure Mode:** `log_and_continue`
+- **Idempotency:** message ID
+- **Retry:** no retry for user-sent messages
+- **Auth Before Emit:** Yes
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.send.dmuser
+
+**Domain:** chat
+
+**Description:** Post a message to one of the caller's DMs with another user. Every caller needs read access to the peer user record; a token also needs inbox:write on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/messages` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatHumanDirectMessage_RequiresHubBoundary`
+
+---
+
+## chat.message.edit
+
+**Domain:** chat
+
+**Description:** Edit one of the caller's chat messages. Only the author edits, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatMessageEdit_RechecksTargetConversation`
+
+---
+
+## chat.message.delete
+
+**Domain:** chat
+
+**Description:** Delete one of the caller's chat messages (soft delete). Only the author deletes, and only before an agent replies. A token needs inbox:write, and the message's conversation is re-checked: project:read for a thread, the DM rule for a DM
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/chat/conversations/{id}/messages/{messageId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatMessageEdit_RechecksTargetConversation`
+
+---
+
+## chat.conversation.readstate.topic
+
+**Domain:** chat
+
+**Description:** Read the caller's read state on a chat thread. Needs project:read on the thread's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/read` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.readstate.dm
+
+**Domain:** chat
+
+**Description:** Read the caller's read state on one of its DMs. A token needs inbox:read under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/read` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.markread.topic
+
+**Domain:** chat
+
+**Description:** Move the caller's read marker on a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/read` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.markread.dm
+
+**Domain:** chat
+
+**Description:** Move the caller's read marker on one of the caller's DMs. A token needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/read` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.markunread.topic
+
+**Domain:** chat
+
+**Description:** Mark unread for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/unread` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.markunread.dm
+
+**Domain:** chat
+
+**Description:** Mark unread for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/unread` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.mute.topic
+
+**Domain:** chat
+
+**Description:** Mute or unmute for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/conversations/{id}/mute` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.mute.dm
+
+**Domain:** chat
+
+**Description:** Mute or unmute for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/conversations/{id}/mute` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.pin.topic
+
+**Domain:** chat
+
+**Description:** Pin or unpin for the caller a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/conversations/{id}/pin` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.pin.dm
+
+**Domain:** chat
+
+**Description:** Pin or unpin for the caller one of the caller's DMs. A token needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/conversations/{id}/pin` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.typing.topic
+
+**Domain:** chat
+
+**Description:** Publish the caller's typing indicator on a chat thread. Needs project:read on the thread's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/typing` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatWriteToken_RequiresInboxWrite`
+
+---
+
+## chat.conversation.typing.dm
+
+**Domain:** chat
+
+**Description:** Publish the caller's typing indicator on one of the caller's DMs. A token needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/typing` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.conversation.interagent.read
+
+**Domain:** chat
+
+**Description:** Read the messages an agent in one of the caller's DMs exchanged with other agents. Needs DM participation and agent:attach on the agent
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/conversations/{id}/interagent` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `agent_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `agent.attach`
+
+**Resource Resolver:** agent-from-dm-key
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
+
+---
+
+## chat.dm.list
+
+**Domain:** chat
+
+**Description:** List the caller's DMs. A token needs inbox:read and lists only the DMs the DM rule lets it read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/dms` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDMListToken_FilteredToBoundary`
+
+---
+
+## chat.userprefs.read
+
+**Domain:** chat
+
+**Description:** Read the caller's chat rail preferences, a project-less record. A token needs inbox:read on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/user-prefs` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatUserPrefsToken_RequiresHubBoundary`
+
+---
+
+## chat.userprefs.update
+
+**Domain:** chat
+
+**Description:** Write the caller's chat rail preferences, a project-less record. A federated caller is refused. A token needs inbox:write on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/chat/user-prefs` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatUserPrefsToken_RequiresHubBoundary`
 - `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
+
+---
+
+## chat.presence.update
+
+**Domain:** chat
+
+**Description:** Publish the caller's presence. It fans out only on the named projects the caller can read (project:read), each once, at most 1000; the others are left out. A federated caller is refused. A token also needs inbox:write
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/presence` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatPresence_EveryProjectRequiresProjectRead`
+- `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
+
+---
+
+## chat.search.topic
+
+**Domain:** chat
+
+**Description:** Search the messages of one chat thread. Needs project:read on the thread's project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/search` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatSearchToken_DMRowsNeedInboxRead`
+
+---
+
+## chat.search.project
+
+**Domain:** chat
+
+**Description:** Search the messages of one project's chat. Needs project:read on the project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/search` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_query`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-query
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatSearchToken_DMRowsNeedInboxRead`
+
+---
+
+## chat.search.unscoped
+
+**Domain:** chat
+
+**Description:** Search the messages of every project the caller can read. A project token searches only its boundary project; a token keeps a DM row only when the DM rule lets it read the DM under inbox:read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/search` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_collection`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-collection
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatSearchToken_DMRowsNeedInboxRead`
+
+---
+
+## chat.search.dm
+
+**Domain:** chat
+
+**Description:** Search the messages of one of the caller's DMs. A token needs inbox:read under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/search` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatSearchToken_DMRowsNeedInboxRead`
+
+---
+
+## chat.attachment.upload.project
+
+**Domain:** chat
+
+**Description:** Upload chat attachments to a space. Needs project:read on the space's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/attachments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatProjectUpload_RequiresInboxWriteAndProjectRead`
+
+---
+
+## chat.attachment.upload.noproject
+
+**Domain:** chat
+
+**Description:** Upload project-less chat attachments, reachable only through the messages that reference them. A federated caller is refused. A token needs inbox:write on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/attachments` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatProjectlessUpload_RequiresHubBoundary`
+- `pkg/hub:TestChatProfileWrites_FederatedUserRefused`
+
+---
+
+## chat.attachment.download.project
+
+**Domain:** chat
+
+**Description:** Download a chat attachment of a project. Needs project:read on the project; a session also reads its own uploads and files attached to messages it can read
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/chat/attachments/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `project_path`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** attachment-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead`
+
+---
+
+## chat.conversation.promote
+
+**Domain:** chat
+
+**Description:** Promote one of the caller's DMs with an agent into a thread of the agent's space. Needs DM participation and project:read on the agent's project; a token also needs inbox:write under the DM rule
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/chat/conversations/{id}/promote` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `conversation_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** conversation-project
+
+**Effects:** `create-resource`, `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestChatDirectMessageToken_PeerAgentInsideBoundary`
 
 ---
 
@@ -4807,7 +6458,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.create`
+- **Event Type:** `role_binding_create`
 - **Context Fields:** actor_id
 - **After Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -4851,7 +6502,7 @@
 
 ### Audit
 
-- **Event Type:** `role.binding.delete`
+- **Event Type:** `role_binding_delete`
 - **Context Fields:** actor_id
 - **Before Fields:** principal_id, role_name, scope
 - **Atomic:** Yes
@@ -4893,7 +6544,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.add`
+- **Event Type:** `group_member_add`
 - **Context Fields:** actor_id, group_id
 - **After Fields:** member_principal_id
 - **Atomic:** Yes
@@ -4935,7 +6586,7 @@
 
 ### Audit
 
-- **Event Type:** `group.member.remove`
+- **Event Type:** `group_member_remove`
 - **Context Fields:** actor_id, group_id
 - **Before Fields:** member_principal_id
 - **Atomic:** Yes
@@ -5922,6 +7573,183 @@
 - `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
 - `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
 - `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
+
+---
+
+## user.skillinjection.read
+
+**Domain:** user.skillinjection
+
+**Description:** List the skills injected into the caller's own agents. Any token of the holder reads its own entries; the entries belong to no project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/injected-skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit_self` (self filter `none`; pinned by `TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`)
+
+**Resource Resolver:** self-principal
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserInjectedSkillsList_AnyTokenReadsOwnEntries`
+
+### Exemptions
+
+- **authentication_only:** The path names no user; the subject is always the caller, and the list carries only the caller's own entries (scope: caller's own user-scope injected skills) — waives: `base_permission`
+
+---
+
+## template.user.read
+
+**Domain:** template
+
+**Description:** List, read or download the caller's own user-scope templates. A user access token needs template:read on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/users/me/templates` |
+| http_route | GET | `/api/v1/users/me/templates/{id}` |
+| http_route | GET | `/api/v1/users/me/templates/{id}/download` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.read`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+
+---
+
+## template.user.create
+
+**Domain:** template
+
+**Description:** Create a template in the caller's own user scope; the scope and owner are the caller. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/users/me/templates` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.update
+
+**Domain:** template
+
+**Description:** Update, upload to or finalize one of the caller's own user-scope templates. A user access token needs template:update on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/users/me/templates/{id}` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/upload` |
+| http_route | POST | `/api/v1/users/me/templates/{id}/finalize` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
+
+---
+
+## template.user.delete
+
+**Domain:** template
+
+**Description:** Delete one of the caller's own user-scope templates, through /api/v1/users/me/templates/{id} or /api/v1/templates/{id}. A user access token needs template:delete on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/users/me/templates/{id}` |
+| http_route | DELETE | `/api/v1/templates/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `template.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** template_id, template_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserTemplateWrite_RequiresTemplateSelector`
+- `pkg/hub:TestUserTemplateWrites_FederatedUserRefused`
 
 ---
 
@@ -7700,6 +9528,274 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestUserHarnessConfigWrites_FederatedUserRefused`
+
+---
+
+## template.user.clone
+
+**Domain:** template
+
+**Description:** Clone a readable template into the caller's own user scope. The source needs template:read; a user access token needs template:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## template.user.reimport
+
+**Domain:** template
+
+**Description:** Reimport one of the caller's own user-scope templates from its source. The read gate needs template:read and the reimport needs template:update on the record, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/templates/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestTemplateUserReimport_RequiresUpdateAction`
+
+---
+
+## skill.user.create
+
+**Domain:** skill
+
+**Description:** Create a skill in the caller's own user scope; the scope and owner are the caller. A user access token needs skill:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/skills` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `skill.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeSkillCreate_RequiresSkillCreate`
+- `pkg/hub:TestUserSkillWrites_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.clone
+
+**Domain:** harnessconfig
+
+**Description:** Clone a readable harness configuration into the caller's own user scope. The source needs harness_config:read; a user access token needs harness_config:create on a hub boundary for the destination
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/clone` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestCloneToUserScope_RequiresCreateOnDestination`
+
+---
+
+## harnessconfig.user.delete
+
+**Domain:** harnessconfig
+
+**Description:** Delete one of the caller's own user-scope harness configurations. The route gate needs harness_config:read and the delete needs harness_config:delete, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/harness-configs/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.delete`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `harnessconfig.delete`
+- **Context Fields:** actor_id
+- **Before Fields:** config_id, config_name
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserDelete_RequiresDeleteAction`
+
+---
+
+## harnessconfig.user.reimport
+
+**Domain:** harnessconfig
+
+**Description:** Reimport one of the caller's own user-scope harness configurations from its source. The route gate needs harness_config:read and the reimport needs harness_config:update, on a hub boundary for a user access token
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/harness-configs/{id}/reimport` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.update`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestHarnessUserReimport_RequiresUpdateAction`
+
+---
+
+## template.user.import
+
+**Domain:** template
+
+**Description:** Import or discover templates for the caller's own user scope. A user access token needs template:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `template.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
+
+---
+
+## harnessconfig.user.import
+
+**Domain:** harnessconfig
+
+**Description:** Import or discover harness configurations for the caller's own user scope. A user access token needs harness_config:create on a hub boundary
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/resources/import` |
+| http_route | POST | `/api/v1/resources/discover` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `catalog_record`; boundaries `hub`)
+
+**Base Permission:** `harness_config.create`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestUserScopeImport_RequiresCreateSelector`
+- `pkg/hub:TestUserResourceImport_FederatedUserRefused`
 
 ---
 

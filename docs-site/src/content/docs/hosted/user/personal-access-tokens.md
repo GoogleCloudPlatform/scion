@@ -229,6 +229,16 @@ The same per-request checks apply, with these limits:
   sign-in, and every token is refused for them: writing integration secrets or integration
   settings that configure credentials, authentication, endpoints or host paths; installing or
   updating an integration; and changing the GitHub App configuration.
+- **Your own user scope.** Templates, skills and harness configurations in your own user scope
+  admit only a hub token carrying the selector of the action. Your templates need
+  `template:read` to list, read or download, `template:create` to create or to clone into your
+  scope, `template:update` to update, upload, finalize or reimport, and `template:delete` to delete. A
+  user-scope skill needs `skill:create`. Your harness configurations need `harness_config:create`
+  to clone into your scope, `harness_config:update` to reimport, and `harness_config:delete` to
+  delete, together with `harness_config:read`. Importing or discovering templates or harness
+  configurations for your user scope needs `template:create` or `harness_config:create`. A
+  project token is refused for all of these, because these records belong to no project. Any
+  token can list your injected skills.
 - **Runtime Broker registration.** The `broker:create` scope can be selected only on a hub token.
   A project token cannot create or re-register a Runtime Broker (see
   [Hub-boundary tokens for broker registration](#hub-boundary-tokens-for-broker-registration)).
@@ -274,9 +284,9 @@ as a likely missing `project:read` scope and stops. A user access token cannot r
 project, so the CLI does not try to link or register the project under one. Link the project
 once with an interactive login (`scion hub link`), then use the token.
 
-Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and any
-command run with `--no-hub` (for example `scion delete --no-hub`), act on the local machine with
-the user's file permissions, and token scopes don't limit them.
+Token scopes limit what the CLI can do on the Hub. Local actions, such as `scion clean` and
+`scion delete --cleanup-only --force`, act on the local machine with the user's file permissions,
+and token scopes don't limit them.
 
 To use the CLI from a coding agent running on your machine, see
 [Using the scion CLI from a coding agent](/scion/hosted/user/coding-agent-cli/).

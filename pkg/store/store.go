@@ -34,6 +34,14 @@ var (
 	ErrRevisionConflict = errors.New("revision conflict")
 	ErrQuotaExceeded    = errors.New("quota exceeded")
 
+	// ErrActiveReservationExists is returned by CreateUsageReservation when
+	// the resource already holds an active (released_at IS NULL)
+	// reservation for the same limit definition: the unique active
+	// (limit_definition_id, resource_id) index refused the insert. It wraps
+	// ErrAlreadyExists. A caller that loses this race reads the winner with
+	// GetActiveReservation to tell a retry from a conflict.
+	ErrActiveReservationExists = fmt.Errorf("%w: resource holds an active usage reservation for this limit", ErrAlreadyExists)
+
 	// ErrTransient marks a database conflict that a retry resolves: a
 	// Postgres serialization failure or deadlock, or a busy or locked
 	// SQLite database. The entadapter WithTx wraps such errors with it.
@@ -186,6 +194,17 @@ type Store interface {
 	// cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
+	// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents
+	// in ids: only those still soft-deleted before cutoff when the purge
+	// runs are removed (a restore in between wins), with the same cascade.
+	// Unknown or malformed IDs are skipped. Returns the number purged.
+	PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error)
+
+	// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents
+	// with deleted_at before cutoff and an ID after afterID ("" for the
+	// first page), in ascending ID order.
+	ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*Agent, error)
+
 	// CreateTestAdminUser creates an admin-kind test identity and its one
 	// system role binding, in one transaction (the caller's, when called
 	// inside WithTx). It is the only store path that writes
@@ -234,6 +253,19 @@ type Store interface {
 	// LinkFederatedIdentity wrote. It returns ErrNotFound when the pair
 	// is not linked, or when the linked row is not UserKindFederated.
 	GetFederatedUserBySubject(ctx context.Context, issuer, subject string) (*User, error)
+
+	// LinkPendingFederatedUser is first contact for a pending federated
+	// account: in one transaction it links (issuer, subject) to the
+	// account userID, as LinkFederatedIdentity does, and sets the
+	// account's status to UserStatusActive. The account must be
+	// UserKindFederated, in UserStatusPending, not linked yet, with
+	// HomeIssuer equal to the normalized issuer and FederatedEmail equal
+	// to the normalized email (ErrInvalidInput otherwise). A pair already
+	// linked to any account returns ErrAlreadyExists, as does the later
+	// of two concurrent first contacts for one account, so a caller can
+	// re-read with GetFederatedUserBySubject. It returns the updated
+	// account. It is safe to call on the store passed to WithTx.
+	LinkPendingFederatedUser(ctx context.Context, userID, issuer, subject, email string) (*User, error)
 
 	// ListFixtureRootedResources returns the agents (soft-deleted ones
 	// included), schedules, groups and projects whose creation-time
@@ -2465,8 +2497,14 @@ type NotificationStore interface {
 
 	// UnmarkNotificationDispatched reverts a claimed notification back to
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
-	// proceed (no dispatcher, no broker) after an optimistic claim.
-	UnmarkNotificationDispatched(ctx context.Context, id string) error
+	// proceed (no dispatcher, no broker) after an optimistic claim. It reverts
+	// only a row with no recorded DispatchOutcome: once another caller (for
+	// example a primary dispatch racing a broker-connect drain) has recorded
+	// an outcome, the row stays dispatched, so an empty outcome keeps meaning
+	// pending or in flight and the notification is not delivered again.
+	// reverted reports whether the row was released; (false, nil) means it
+	// has an outcome or does not exist.
+	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
 
 	// RecordNotificationDispatchAttempt atomically increments a
 	// notification's DispatchAttempts by one. Callers record an attempt just
@@ -2479,9 +2517,15 @@ type NotificationStore interface {
 	// SetNotificationDispatchOutcome records a notification's terminal
 	// dispatch outcome (NotificationOutcomeDelivered or
 	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
-	// not pick it up again. Returns ErrInvalidInput for any other outcome
-	// and ErrNotFound if the notification doesn't exist.
-	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error
+	// not pick it up again. Concurrent writers keep the most informative
+	// outcome: a delivered write applies unless the outcome is already
+	// delivered (it replaces failed, since the message did reach the
+	// subscriber), and a failed write applies only while no outcome is
+	// recorded. applied reports whether this call recorded it; (false, nil)
+	// means the write was refused and the recorded outcome is kept.
+	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	// notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
@@ -3367,6 +3411,18 @@ type RoleStore interface {
 	// on the store passed to WithTx.
 	CreateVisitorRoleBinding(ctx context.Context, rb *RoleBinding) (*RoleBinding, error)
 
+	// ListVisitorRoleBindings returns the project-visitor bindings at the
+	// scope of projectID (the bindings CreateVisitorRoleBinding wrote),
+	// oldest first. Bindings of any other role are not returned.
+	ListVisitorRoleBindings(ctx context.Context, projectID string) ([]*RoleBinding, error)
+
+	// UpdateVisitorRoleBindingWindow replaces the NotBefore and ExpiresAt
+	// of the project-visitor binding id (nil clears a bound) and returns
+	// the updated binding. A binding of any other role returns
+	// ErrVisitorBindingRefused; a missing binding returns ErrNotFound. It
+	// is safe to call on the store passed to WithTx.
+	UpdateVisitorRoleBindingWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*RoleBinding, error)
+
 	// DeleteRoleBinding deletes a role binding by ID.
 	// Returns ErrNotFound if the role binding doesn't exist.
 	DeleteRoleBinding(ctx context.Context, id string) error
@@ -3911,7 +3967,9 @@ type QuotaStore interface {
 	DeleteEntitlementBinding(ctx context.Context, id string) error
 
 	// Usage reservations
-	// CreateUsageReservation creates a new usage reservation.
+	// CreateUsageReservation creates a new usage reservation. When the
+	// resource already holds an active reservation for the same limit
+	// definition, it returns ErrActiveReservationExists and writes nothing.
 	CreateUsageReservation(ctx context.Context, reservation *UsageReservation) (*UsageReservation, error)
 
 	// CountActiveReservations counts non-released reservations for a specific
@@ -3921,6 +3979,13 @@ type QuotaStore interface {
 	// ReleaseReservation releases a reservation by setting released_at.
 	// The record is retained for auditing. Matches on limit_definition_id and resource_id.
 	ReleaseReservation(ctx context.Context, limitDefinitionID, resourceID string) error
+
+	// ReleaseReservationByID releases one reservation by its ID, in a
+	// single conditional write: only while that row is still active. It
+	// returns ErrNotFound when the row is missing or already released, so a
+	// caller acting on an earlier read never releases a newer reservation
+	// of the same resource.
+	ReleaseReservationByID(ctx context.Context, reservationID string) error
 
 	// ReleaseReservationsByResource releases all reservations for a given resource ID.
 	ReleaseReservationsByResource(ctx context.Context, resourceID string) error
@@ -3947,6 +4012,12 @@ type QuotaStore interface {
 	// re-reserving on agent start/resume must not create a second active
 	// reservation for an agent that already holds one.
 	HasActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (bool, error)
+
+	// GetActiveReservation returns resourceID's non-released reservation
+	// for the given limit, whatever its scope, or ErrNotFound when there is
+	// none. At most one exists (the unique active (limit_definition_id,
+	// resource_id) index). Released reservations are never returned.
+	GetActiveReservation(ctx context.Context, limitDefinitionID, resourceID string) (*UsageReservation, error)
 }
 
 // =============================================================================

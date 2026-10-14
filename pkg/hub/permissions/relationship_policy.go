@@ -14,6 +14,8 @@
 
 package permissions
 
+import "slices"
+
 // RelationshipPolicy is the one authoring surface for "what can an
 // owner/ancestor/progeny/etc. relationship do." B.1's runtime
 // relationship-grant evaluator and A.1's MintEligibilityDescriptor both
@@ -241,10 +243,10 @@ func RelationshipPolicyAllows(relationship, principalKind, resourceType, permiss
 		if p.Relationship != relationship || p.ResourceType != resourceType {
 			continue
 		}
-		if !containsString(p.PrincipalKinds, principalKind) {
+		if !slices.Contains(p.PrincipalKinds, principalKind) {
 			continue
 		}
-		if containsString(p.PermissionIDs, permissionID) {
+		if slices.Contains(p.PermissionIDs, permissionID) {
 			return true
 		}
 	}
@@ -265,19 +267,10 @@ func RelationshipPolicyMintEligible(relationship, principalKind, resourceType, p
 		if p.Relationship != relationship || p.ResourceType != resourceType {
 			continue
 		}
-		if !containsString(p.PrincipalKinds, principalKind) {
+		if !slices.Contains(p.PrincipalKinds, principalKind) {
 			continue
 		}
-		if containsString(p.PermissionIDs, permissionID) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsString(list []string, want string) bool {
-	for _, v := range list {
-		if v == want {
+		if slices.Contains(p.PermissionIDs, permissionID) {
 			return true
 		}
 	}

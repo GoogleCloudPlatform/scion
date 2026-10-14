@@ -243,6 +243,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_roles.go:listRoleBindingsForPrincipal:GetEffectiveGroups":                           "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipal":                 "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipals":                "display: stored bindings of a principal",
+	"handlers_project_visitors.go:handleListProjectVisitors:ListVisitorRoleBindings":              "display: project visitor grant listing for a holder of project.manage_visitors; federated accounts only",
 
 	// Mutation inputs: the bindings being replaced, deleted or migrated.
 	"access_constraint_governance.go:ReplaceRoleBinding:GetRoleBinding":                              "mutation: the binding being replaced",
@@ -256,6 +257,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
 	"project_membership_set.go:loadProjectPrincipalBindings:ListRoleBindingsForPrincipal":            "mutation: the target's existing bindings to plan against",
+	"handlers_project_visitors.go:projectVisitorBinding:ListVisitorRoleBindings":                     "mutation: the visitor grant being changed or revoked; federated accounts only",
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",

@@ -54,7 +54,7 @@ import {
 } from './terminal-palette-open.js';
 import { moveTerminalsWithStatus, terminalsOpenElsewhere } from './terminal-move.js';
 import { showToast } from '../utils/toast.js';
-import { isFeatureEnabled, TERMINAL_WORKSPACE_FLAG } from '../utils/feature-flags.js';
+import { isFeatureEnabled } from '../utils/feature-flags.js';
 import { applyServerFeatureFlags } from './server-feature-flags.js';
 import { setPreferredTimeZone } from '../utils/time.js';
 import { withTimeout } from './with-timeout.js';
@@ -161,7 +161,6 @@ let currentUser: User | null = null;
  * per-route permission checks.
  */
 let cachedAdminStatus: AdminStatus | null = null;
-let terminalWorkspaceEnabled = false;
 let terminalCoordinator: TerminalCoordinator | null = null;
 let terminalWorkspace: TerminalWorkspaceRoot | null = null;
 let terminalPersistence: TerminalWorkspacePersistence | null = null;
@@ -175,7 +174,8 @@ let terminalRouteAgentId: string | null = null;
 let terminalMoveRunning = false;
 const uuidPath = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const terminalAgentRoute = new RegExp(`^/terminals/(${uuidPath})$`, 'i');
-const legacyTerminalRoute = new RegExp(`^/agents/(${uuidPath})/terminal$`, 'i');
+/** The pre-workspace terminal URL; any agent id is redirected to /terminals/<id>. */
+const legacyTerminalRoute = /^\/agents\/([^/]+)\/terminal$/;
 
 function ensureRoots(): HTMLElement | null {
   const app = document.getElementById('app');
@@ -243,7 +243,7 @@ async function runTerminalMove(): Promise<void> {
 }
 
 function ensureTerminalCoordinator(): TerminalCoordinator | null {
-  if (!terminalWorkspaceEnabled || !currentUser?.id || accountTornDown) return null;
+  if (!currentUser?.id || accountTornDown) return null;
   if (terminalCoordinator) return terminalCoordinator;
   const app = document.getElementById('app');
   if (!app) return null;
@@ -714,31 +714,6 @@ const ROUTES: RouteConfig[] = [
     load: () => import('../components/pages/agent-edit.js'),
   },
   {
-    // Legacy terminal adapter (flag-off behavior):
-    //
-    // When `web.terminal_workspace` is OFF, navigating to
-    // `/agents/{id}/terminal` renders a disposable standalone page
-    // (`scion-page-terminal`). Each navigation creates a fresh WebSocket
-    // connection and xterm instance. Leaving the page closes the socket
-    // and discards the terminal — no session retention, no rail, no
-    // multi-pane layout. This is the pre-workspace behavior.
-    //
-    // When `web.terminal_workspace` is ON, the router in renderRoute()
-    // intercepts `/agents/{id}/terminal` and redirects to
-    // `/terminals/{id}`, which enters the retained workspace path
-    // instead. The workspace coordinator manages session lifetime,
-    // cross-tab ownership, and layout persistence.
-    //
-    // The `web.terminal_workspace` flag controls the switch between
-    // these two modes. Changing the flag value at runtime (e.g. via
-    // localStorage or server injection) preserves any active sessions
-    // in the workspace until page reload, at which point the flag is
-    // re-evaluated and the appropriate mode takes effect.
-    pattern: /^\/agents\/[^/]+\/terminal$/,
-    tag: 'scion-page-terminal',
-    load: () => import('../components/pages/terminal.js'),
-  },
-  {
     pattern: /^\/agents\/[^/]+$/,
     tag: 'scion-page-agent-detail',
     load: () => import('../components/pages/agent-detail.js'),
@@ -972,7 +947,6 @@ async function init(): Promise<void> {
   // overlap, so this adds no latency beyond the slower of
   // featureFlagsReady and min(the /auth/me refresh, the budget).
   await Promise.all([featureFlagsReady, tzReady]);
-  terminalWorkspaceEnabled = isFeatureEnabled(TERMINAL_WORKSPACE_FLAG);
   ensureRoots();
 
   // The unread conversation count (the header's chat badge and the tab-title
@@ -1114,95 +1088,93 @@ async function renderRoute(path: string): Promise<void> {
 
   // Strip query string and hash for route matching
   let pathname = path.split('?')[0].split('#')[0];
-  if (terminalWorkspaceEnabled) {
-    const legacyAgent = pathname.match(legacyTerminalRoute)?.[1];
-    if (legacyAgent) {
-      pathname = `/terminals/${legacyAgent}`;
-      path = pathname;
-      window.history.replaceState({}, '', browserPath(path));
+  const legacyAgent = pathname.match(legacyTerminalRoute)?.[1];
+  if (legacyAgent) {
+    pathname = `/terminals/${legacyAgent}`;
+    path = pathname;
+    window.history.replaceState({}, '', browserPath(path));
+  }
+  if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
+    if (!currentUser?.id) {
+      navigateTo('/login');
+      return;
     }
-    if (pathname === '/terminals' || terminalAgentRoute.test(pathname)) {
-      if (!currentUser?.id) {
-        navigateTo('/login');
-        return;
-      }
-      appContainer.hidden = true;
-      const coordinator = ensureTerminalCoordinator();
-      terminalWorkspace?.setUser(currentUser);
-      terminalWorkspace?.setCurrentPath(path);
-      terminalWorkspace?.show(true);
-      setDocumentTitle('Terminals');
+    appContainer.hidden = true;
+    const coordinator = ensureTerminalCoordinator();
+    terminalWorkspace?.setUser(currentUser);
+    terminalWorkspace?.setCurrentPath(path);
+    terminalWorkspace?.show(true);
+    setDocumentTitle('Terminals');
 
-      // ── URL layout restoration (#1715) ──────────────────────────────
-      // Parse layout state from query params BEFORE default single-agent
-      // selection to avoid a flash of single → multi layout transition.
-      const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
-      const layoutUrl = parseLayoutUrl(queryString);
+    // ── URL layout restoration (#1715) ──────────────────────────────
+    // Parse layout state from query params BEFORE default single-agent
+    // selection to avoid a flash of single → multi layout transition.
+    const queryString = path.includes('?') ? path.split('?')[1] : window.location.search;
+    const layoutUrl = parseLayoutUrl(queryString);
 
-      // ── Persisted terminal list restore (ptone/scion#2278) ──────────
-      // Runs for every render into /terminals…, before the URL-driven code
-      // below: an explicit URL decides what is visible and connected, and
-      // the saved list decides rail membership only.
-      if (coordinator && terminalPersistence) {
-        await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
-        if (thisNav !== navigationId) return;
-      }
+    // ── Persisted terminal list restore (ptone/scion#2278) ──────────
+    // Runs for every render into /terminals…, before the URL-driven code
+    // below: an explicit URL decides what is visible and connected, and
+    // the saved list decides rail membership only.
+    if (coordinator && terminalPersistence) {
+      await terminalPersistence.restore(restoreUrlIntent(pathname, queryString));
+      if (thisNav !== navigationId) return;
+    }
 
-      if (layoutUrl && coordinator && terminalWorkspace) {
-        // Suppress URL sync while restoring to avoid feedback loops
-        terminalWorkspace.setSuppressUrlSync(true);
-        try {
-          // Restore the layout preset and open agents from URL slots.
-          // Map agent IDs to session keys, opening new sessions as needed.
-          const sessionKeys = await openLayoutSlots({
-            coordinator,
-            workspace: terminalWorkspace,
-            slots: layoutUrl.slots,
-            navigations: terminalNavigations,
-            navigationId: thisNav,
-            currentNavigationId: () => navigationId,
-          });
-          if (!sessionKeys) return;
-          // Restore the layout manager state with the resolved session keys
-          terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
-        } finally {
-          terminalWorkspace.setSuppressUrlSync(false);
-          // Sync URL once after restoration to ensure canonical form
-          terminalWorkspace.syncUrlFromLayout();
-        }
-        return;
-      }
-
-      // Default behavior: single-agent from path
-      const agentId = pathname.match(terminalAgentRoute)?.[1];
-      terminalRouteAgentId = agentId?.toLowerCase() ?? null;
-      if (agentId && coordinator) {
-        const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
-        if (requestId) terminalNavigations.set(requestId, thisNav);
-        const result = await coordinator.open(agentId, requestId);
-        if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
-        if (thisNav === navigationId && !coordinator.isOwner) {
-          if (offersMove(result.status) && !terminalMoveRunning) {
-            showTerminalsOpenElsewhere();
-          } else {
-            terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
-            if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
-          }
-        }
-      } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
-        // A bare /terminals in a window that does not own the terminals
-        // (for example a new window): show the same "open in another
-        // window" state as the other non-owner screens, not the empty one.
-        const elsewhere = await terminalsOpenElsewhere({
+    if (layoutUrl && coordinator && terminalWorkspace) {
+      // Suppress URL sync while restoring to avoid feedback loops
+      terminalWorkspace.setSuppressUrlSync(true);
+      try {
+        // Restore the layout preset and open agents from URL slots.
+        // Map agent IDs to session keys, opening new sessions as needed.
+        const sessionKeys = await openLayoutSlots({
           coordinator,
-          persistence: terminalPersistence,
+          workspace: terminalWorkspace,
+          slots: layoutUrl.slots,
+          navigations: terminalNavigations,
+          navigationId: thisNav,
+          currentNavigationId: () => navigationId,
         });
-        if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
-          showTerminalsOpenElsewhere();
-        }
+        if (!sessionKeys) return;
+        // Restore the layout manager state with the resolved session keys
+        terminalWorkspace.layoutManager.restore(layoutUrl.preset, sessionKeys);
+      } finally {
+        terminalWorkspace.setSuppressUrlSync(false);
+        // Sync URL once after restoration to ensure canonical form
+        terminalWorkspace.syncUrlFromLayout();
       }
       return;
     }
+
+    // Default behavior: single-agent from path
+    const agentId = pathname.match(terminalAgentRoute)?.[1];
+    terminalRouteAgentId = agentId?.toLowerCase() ?? null;
+    if (agentId && coordinator) {
+      const requestId = coordinator.supported ? crypto.randomUUID() : undefined;
+      if (requestId) terminalNavigations.set(requestId, thisNav);
+      const result = await coordinator.open(agentId, requestId);
+      if (requestId && result.status !== 'pending') terminalNavigations.delete(requestId);
+      if (thisNav === navigationId && !coordinator.isOwner) {
+        if (offersMove(result.status) && !terminalMoveRunning) {
+          showTerminalsOpenElsewhere();
+        } else {
+          terminalWorkspace?.setStatus(nonOwnerOpenStatus(result.status));
+          if (!terminalMoveRunning) terminalWorkspace?.setStatusAction(null);
+        }
+      }
+    } else if (!agentId && coordinator && terminalPersistence && !terminalMoveRunning) {
+      // A bare /terminals in a window that does not own the terminals
+      // (for example a new window): show the same "open in another
+      // window" state as the other non-owner screens, not the empty one.
+      const elsewhere = await terminalsOpenElsewhere({
+        coordinator,
+        persistence: terminalPersistence,
+      });
+      if (elsewhere && thisNav === navigationId && !terminalMoveRunning) {
+        showTerminalsOpenElsewhere();
+      }
+    }
+    return;
   }
   // Detect whether we are returning from a terminal workspace view.
   // The terminal route handler hides the outlet without clearing it, so
@@ -1454,8 +1426,7 @@ function setupRouter(): void {
 function navigateTo(path: string): void {
   const currentAppPath = stripBasePath(window.location.pathname);
   if (path === currentAppPath) {
-    if (terminalWorkspaceEnabled && (path === '/terminals' || terminalAgentRoute.test(path)))
-      void renderRoute(path);
+    if (path === '/terminals' || terminalAgentRoute.test(path)) void renderRoute(path);
     return;
   }
 

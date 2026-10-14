@@ -470,6 +470,10 @@ clients. Resolve the flag at bootstrap; a live flag change must not silently
 dispose existing sessions. Retire the flag and disposable page adapter after
 rollout. No database migration or CLI command is required by the initial scope.
 
+> **Status:** done. The flag and the disposable page adapter were retired in
+> ptone/scion#4917; the workspace is always on and `/agents/{id}/terminal`
+> redirects to `/terminals/{id}`.
+
 Suggested validation includes:
 
 | Level | Required cases |
