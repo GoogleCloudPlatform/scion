@@ -1748,6 +1748,19 @@ type Server struct {
 	ctx         context.Context    // Server-lifetime context; cancelled on Shutdown
 	ctxCancel   context.CancelFunc // Cancels ctx
 
+	// shutdownMark is the "shutting down" mark (BeginShutdown,
+	// ptone/scion#5054): /readyz fails, new requests are refused and
+	// streams end before any listener or background service stops.
+	shutdownMark shutdownState
+	// shutdownHooks are the optional shutdown seams cmd sets
+	// (SetShutdownHooks); zero value: today's behaviour.
+	shutdownHooks ShutdownHooks
+	// conduitShutdownGrace is server.hub.conduit.shutdown_grace when set
+	// (SetConduitShutdownGrace), so every relay shutdown path caps the
+	// GoAway drain deadline the same way (ptone/scion#5105 timing).
+	conduitShutdownGrace    time.Duration
+	conduitShutdownGraceSet bool
+
 	// brokerWork admits and joins broker connection work (connect,
 	// disconnect, reconcile and notification drains), so shutdown stops
 	// it before the store closes (broker_work.go, ptone/scion#4869).
@@ -3583,6 +3596,7 @@ func signingKeySecretID(keyName, hubID string) string {
 func (s *Server) SetDispatcher(d AgentDispatcher) {
 	if hd, ok := d.(*HTTPAgentDispatcher); ok && hd != nil {
 		hd.SetRequiredStandingCheck(s.dispatchStandingCheck)
+		hd.SetShutdownGate(s.dispatchShutdownGate)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -4725,6 +4739,7 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	// standing before any broker call (ptone/scion#3433). SetDispatcher
 	// installs it too, for every dispatcher attached to the server.
 	dispatcher.SetRequiredStandingCheck(s.dispatchStandingCheck)
+	dispatcher.SetShutdownGate(s.dispatchShutdownGate)
 
 	// Wire the hub's operational agent_defaults so dispatch can carry the
 	// limit/resource ones to the broker's low-precedence tier. The accessor
@@ -6410,39 +6425,53 @@ func (s *Server) Start(ctx context.Context) error {
 	case err := <-errCh:
 		return err
 	case <-ctx.Done():
-		return s.Shutdown(context.Background())
+		s.mu.RLock()
+		hooks := s.shutdownHooks
+		s.mu.RUnlock()
+		sctx, cancel := hooks.shutdownContext()
+		defer cancel()
+		return s.Shutdown(sctx)
 	}
 }
 
 // Shutdown gracefully shuts down the server. It is safe to call even when
 // the Server was never started (e.g. New() followed directly by Shutdown()):
 // the background-service teardown below always runs via
-// CleanupBackgroundResources, and only the final HTTP listener shutdown is
-// skipped when there is no listener to shut down. It is also safe to call
-// more than once, or together with CleanupResources, since both are
-// idempotent and http.Server.Shutdown tolerates repeated calls. The order
-// is: background teardown, then the HTTP drain, then CloseAuditWriter, so
-// audit records emitted by requests still draining are written rather
-// than dropped as closed (remaining-audit P1, AC P1-9).
+// CleanupBackgroundResources, and only the HTTP listener drain is skipped
+// when there is no listener. It is also safe to call more than once, or
+// together with CleanupResources, since both are idempotent and
+// http.Server.Shutdown tolerates repeated calls.
+//
+// The order (ptone/scion#5054) is: mark shutting down (BeginShutdown, a
+// no-op if cmd already did it), wait for the co-located broker
+// (ShutdownHooks.BeforeHTTPDrain), close the listener and drain HTTP
+// (bounded by ctx and 30s), then the background teardown, then
+// CloseAuditWriter, so audit records emitted by requests still draining
+// are written rather than dropped as closed (remaining-audit P1, AC
+// P1-9). Background work is joined inside the teardown, before the audit
+// writer and the store close (ptone/scion#4869).
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.mu.RLock()
 	srv := s.httpServer
+	hooks := s.shutdownHooks
 	s.mu.RUnlock()
 
 	slog.Info("Hub API server shutting down...")
+	s.BeginShutdown()
+
+	var err error
+	if srv != nil {
+		hooks.beforeHTTPDrain(ctx)
+		dctx, cancelDrain := hooks.httpDrainContext(ctx)
+		err = drainHTTPServer(dctx, srv)
+		cancelDrain()
+	}
 
 	// Run the shared background-service teardown (control channel, broker
 	// auth, scheduler, dispatchers, preview service, link services, event
 	// publisher, command bus, etc). It is sync.Once-guarded, so this is a
 	// no-op if it already ran.
 	_ = s.CleanupBackgroundResources(ctx)
-
-	var err error
-	if srv != nil {
-		shutdownCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		err = srv.Shutdown(shutdownCtx)
-		cancel()
-	}
 
 	// After the drain: close the audit writer (bounded by its own drain
 	// timeout; idempotent).
@@ -7132,6 +7161,11 @@ func (s *Server) applyMiddleware(h http.Handler) http.Handler {
 	}
 
 	h = s.recoveryMiddleware(h)
+
+	// Refuse new work once shutdown has begun (ptone/scion#5054). Inside
+	// the broker auth below, so requests from a Runtime Broker (which
+	// reports to the hub while it shuts down) are let through.
+	h = s.shutdownMark.refuseDuringShutdown(h, isBrokerRequest)
 
 	// Apply broker auth middleware (checks X-Scion-Broker-ID header for HMAC auth)
 	// This runs after unified auth but before the handler, allowing hosts to authenticate

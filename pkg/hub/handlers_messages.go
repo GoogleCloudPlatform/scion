@@ -485,7 +485,10 @@ func (s *Server) handleAgentMessagesStream(w http.ResponseWriter, r *http.Reques
 	}
 	ep := s.events
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 	user := GetUserIdentityFromContext(ctx)
 	if user == nil {
 		Forbidden(w)

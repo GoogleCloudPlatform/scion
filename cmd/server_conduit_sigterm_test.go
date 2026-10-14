@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"context"
-	"os"
 	"sync"
 	"syscall"
 	"testing"
@@ -24,45 +23,15 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
-// fakeConduitSignals replaces the SIGTERM trap's signal seams; it returns
-// the channel the trap registered (nil until it does) and the signals it
-// asked for, and whether the trap was removed.
-type fakeConduitSignals struct {
-	mu      sync.Mutex
-	ch      chan<- os.Signal
-	signals []os.Signal
-	stopped bool
-}
-
-func installFakeConduitSignals(t *testing.T) *fakeConduitSignals {
-	t.Helper()
-	f := &fakeConduitSignals{}
-	prevNotify, prevStop := conduitSignalNotify, conduitSignalStop
-	conduitSignalNotify = func(c chan<- os.Signal, sig ...os.Signal) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		f.ch, f.signals = c, append(f.signals, sig...)
-	}
-	conduitSignalStop = func(c chan<- os.Signal) {
-		f.mu.Lock()
-		defer f.mu.Unlock()
-		if c == f.ch {
-			f.stopped = true
-		}
-	}
-	t.Cleanup(func() { conduitSignalNotify, conduitSignalStop = prevNotify, prevStop })
-	return f
-}
-
-// TestTrapConduitSIGTERM_DrainsBeforeCancel: SIGTERM runs the relay drain
-// (GoAway to every session) to completion before the server context is
-// cancelled, which is what closes the listeners. Only SIGTERM is trapped
-// (os.Interrupt keeps its own handler), and the trap is removed afterwards.
-func TestTrapConduitSIGTERM_DrainsBeforeCancel(t *testing.T) {
-	f := installFakeConduitSignals(t)
+// TestRegisterConduitShutdownDrain_DrainsBeforeCancel (design §3.3,
+// ptone/scion#5054 C1): the relay drain is a pre-cancel step of the one
+// graceful shutdown: it runs after the mark and before cancel (which is
+// what closes the listeners), and the conduit subscribes to no signal of
+// its own.
+func TestRegisterConduitShutdownDrain_DrainsBeforeCancel(t *testing.T) {
+	captureStdLog(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -73,47 +42,33 @@ func TestTrapConduitSIGTERM_DrainsBeforeCancel(t *testing.T) {
 		defer mu.Unlock()
 		order = append(order, s)
 	}
-	drain := func() {
-		assert.NoError(t, ctx.Err(), "the server context must still be live while GoAways are sent")
-		record("drain")
-	}
-	cancelled := func() {
+	q := newTestShutdown(func() {
 		record("cancel")
 		cancel()
-	}
-	var wg sync.WaitGroup
-	trapConduitSIGTERM(ctx, cancelled, drain, &wg)
+	})
+	registerConduitShutdownDrain(q, func() {
+		assert.NoError(t, ctx.Err(), "the server context must still be live while GoAways are sent")
+		record("drain")
+	})
+	q.addStep(shutdownPhaseMark, func() { record("mark") })
 
-	f.mu.Lock()
-	require.NotNil(t, f.ch)
-	assert.Equal(t, []os.Signal{syscall.SIGTERM}, f.signals, "only SIGTERM is trapped")
-	ch := f.ch
-	f.mu.Unlock()
-
-	ch <- syscall.SIGTERM
-	wg.Wait()
-	assert.Equal(t, []string{"drain", "cancel"}, order)
+	q.begin(syscall.SIGTERM)
+	assert.Equal(t, []string{"mark", "drain", "cancel"}, order)
 	assert.Error(t, ctx.Err())
-	f.mu.Lock()
-	assert.True(t, f.stopped, "trap removed")
-	f.mu.Unlock()
 }
 
-// TestTrapConduitSIGTERM_RemovedOnShutdown: when the server stops for
-// another reason (os.Interrupt, a fatal error), the trap is removed and no
-// drain runs from it.
-func TestTrapConduitSIGTERM_RemovedOnShutdown(t *testing.T) {
-	f := installFakeConduitSignals(t)
+// TestRegisterConduitShutdownDrain_NotRunWhenServerStopsOtherwise: when
+// the server stops for another reason (a fatal error cancels the server
+// context without the graceful shutdown), the drain step never runs; the
+// teardown's relay shutdown covers the relay.
+func TestRegisterConduitShutdownDrain_NotRunWhenServerStopsOtherwise(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	drained := false
-	var wg sync.WaitGroup
-	trapConduitSIGTERM(ctx, cancel, func() { drained = true }, &wg)
+	q := newTestShutdown(cancel)
+	registerConduitShutdownDrain(q, func() { drained = true })
 	cancel()
-	wg.Wait()
+	<-ctx.Done()
 	assert.False(t, drained)
-	f.mu.Lock()
-	assert.True(t, f.stopped, "trap removed")
-	f.mu.Unlock()
 }
 
 // TestConduitShutdownDrainSetting: shutdown_grace has no default, so unset

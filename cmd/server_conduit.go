@@ -23,11 +23,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
@@ -192,39 +190,26 @@ func conduitShutdownDrainSetting(cfg *config.GlobalConfig) (time.Duration, bool)
 	return d, set
 }
 
-// Test seams for startConduit and its SIGTERM trap.
+// Test seams for startConduit and its shutdown step.
 var (
-	conduitSignalNotify = signal.Notify
-	conduitSignalStop   = signal.Stop
 	// startConduitRelayFn starts the relay (startConduitRelay).
 	startConduitRelayFn = startConduitRelay
-	// conduitShutdownDrain is the trap's drain: the hub's SIGTERM drain
-	// with the configured grace.
+	// conduitShutdownDrain is the shutdown step's drain: the hub's
+	// SIGTERM drain with the configured grace.
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
 		hubSrv.DrainConduitForShutdown(grace, capDrain)
 	}
 )
 
-// trapConduitSIGTERM handles SIGTERM while the conduit relay runs (design
-// §3.3): drain sends GoAway to every relay session, and only then is the
+// registerConduitShutdownDrain makes the relay drain a pre-cancel step of
+// the process's single graceful shutdown (design §3.3, ptone/scion#5054):
+// on the first SIGINT or SIGTERM, after the servers are marked shutting
+// down, drain sends GoAway to every relay session, and only then is the
 // server context cancelled, so every session has its GoAway before any
-// listener closes. The trap is removed when ctx ends. os.Interrupt is
-// handled elsewhere and is not affected.
-func trapConduitSIGTERM(ctx context.Context, cancel context.CancelFunc, drain func(), wg *sync.WaitGroup) {
-	ch := make(chan os.Signal, 1)
-	conduitSignalNotify(ch, syscall.SIGTERM)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		defer conduitSignalStop(ch)
-		select {
-		case sig := <-ch:
-			slog.Info("Received signal; draining conduit sessions before shutting down", "signal", sig.String())
-			drain()
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+// listener closes. The conduit no longer subscribes to signals itself; a
+// second subscriber would cancel before the drain (ptone/scion#5105).
+func registerConduitShutdownDrain(q *serverShutdownSequence, drain func()) {
+	q.addStep(shutdownPhaseDrain, drain)
 }
 
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
@@ -272,13 +257,15 @@ func conduitPeerAuthOptions(ctx context.Context, cfg *config.GlobalConfig, selfI
 }
 
 // startConduit opens the internal listener (if configured) and starts the
-// hub's conduit relay when hub.conduit is on; once the relay runs, SIGTERM
-// drains it before cancel stops the server. With the flag off it does
-// nothing (SIGTERM is not trapped). In hosted-HA mode every failure is
+// hub's conduit relay when hub.conduit is on; once the relay runs, the
+// graceful shutdown q drains it before the server context is cancelled
+// (registerConduitShutdownDrain), and a set shutdown_grace also caps the
+// teardown's relay shutdown (hub.Server.SetConduitShutdownGrace). With the
+// flag off it does nothing (no shutdown step). In hosted-HA mode every failure is
 // returned and the server exits non-zero (C8); elsewhere a failure is logged and the hub serves
 // without a relay. A relay that stops on its own (superseded) reports on
 // errCh so the process exits and restarts.
-func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
+func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.GlobalConfig, hubSrv *hub.Server, hubEndpoint string, wg *sync.WaitGroup, errCh chan<- error) error {
 	if hubSrv == nil || !hubSrv.ConduitEnabled() {
 		return nil
 	}
@@ -286,7 +273,10 @@ func startConduit(ctx context.Context, cancel context.CancelFunc, cfg *config.Gl
 	err := startConduitRelayFn(ctx, cfg, hubSrv, hubEndpoint, wg, errCh, requireHA)
 	if err == nil {
 		grace, capDrain := conduitShutdownDrainSetting(cfg)
-		trapConduitSIGTERM(ctx, cancel, func() { conduitShutdownDrain(hubSrv, grace, capDrain) }, wg)
+		if capDrain {
+			hubSrv.SetConduitShutdownGrace(grace)
+		}
+		registerConduitShutdownDrain(q, func() { conduitShutdownDrain(hubSrv, grace, capDrain) })
 		return nil
 	}
 	if requireHA {

@@ -233,7 +233,10 @@ func (s *Server) handleAgentCloudLogsStream(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	// Verify agent exists and caller has read access
 	agent, err := s.store.GetAgent(ctx, agentID)
@@ -440,7 +443,10 @@ func (s *Server) handleAgentMessageLogsStream(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	agent, err := s.store.GetAgent(ctx, agentID)
 	if err != nil {
@@ -610,7 +616,10 @@ func (s *Server) handleProjectMessageLogsStream(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	ctx := r.Context()
+	// The stream also ends when the server begins shutting down, so it
+	// does not hold the HTTP drain (ptone/scion#5054).
+	ctx, endStream := s.shutdownMark.streamContext(r)
+	defer endStream()
 
 	project, err := s.store.GetProject(ctx, projectID)
 	if err != nil {
