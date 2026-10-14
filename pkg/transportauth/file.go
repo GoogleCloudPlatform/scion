@@ -286,7 +286,9 @@ func (s *FileSource) reloadLocked() {
 		s.fileErr = err
 		return
 	}
-	if s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
+	// Only reuse successful reads: a failure can be caused by properties
+	// such as the link count that are not part of this metadata check.
+	if s.fileErr == nil && s.fileInfo != nil && os.SameFile(s.fileInfo, fi) &&
 		fi.ModTime().Equal(s.fileModTime) && fi.Size() == s.fileSize {
 		return
 	}
