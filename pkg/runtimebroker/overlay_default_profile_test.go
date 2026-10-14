@@ -440,3 +440,57 @@ func TestOverlayProfiles_SingleStoredProfileUsedAsDefault(t *testing.T) {
 		t.Errorf("response agent.runtime = %v, want kubernetes (the only stored profile's runtime)", got)
 	}
 }
+
+// installEmptyStoredCatalogOverlay installs a global settings overlay whose
+// stored runtimes, profiles and harness_configs are all empty maps, as on a
+// co-located hub whose startup seeded empty rows (ptone/scion#5007).
+func installEmptyStoredCatalogOverlay(t *testing.T) {
+	t.Helper()
+	prev := config.GetGlobalSettingsOverlay()
+	o := config.NewSettingsOverlay()
+	o.Update(map[string]config.V1RuntimeConfig{}, map[string]config.V1ProfileConfig{},
+		map[string]config.HarnessConfigEntry{}, "")
+	config.SetGlobalSettingsOverlay(o)
+	t.Cleanup(func() { config.SetGlobalSettingsOverlay(prev) })
+}
+
+// A co-located hub whose stored catalog is empty is not managing profiles
+// or runtimes: a dispatch that needs the default profile resolves the
+// settings file's active_profile and runs on the file's default runtime,
+// instead of being refused with no available profiles (ptone/scion#5007).
+func TestOverlayProfiles_EmptyStoredCatalogUsesFileDefault(t *testing.T) {
+	t.Run("start", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		installEmptyStoredCatalogOverlay(t)
+		w := lifecyclePost(t, f.srv, "/api/v1/agents/fresh-agent/start", map[string]any{
+			"projectPath": f.projectPath,
+		})
+		if w.Code != http.StatusAccepted {
+			t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusAccepted, w.Body.String())
+		}
+		if f.defaultMgr.StartCalls() != 1 {
+			t.Errorf("default runtime Start calls = %d, want 1", f.defaultMgr.StartCalls())
+		}
+		if runs, _ := f.k8sRun(); runs != 0 {
+			t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+		}
+	})
+	t.Run("create", func(t *testing.T) {
+		f := newLifecycleFixture(t)
+		installEmptyStoredCatalogOverlay(t)
+		w := lifecyclePost(t, f.srv, "/api/v1/agents", map[string]any{
+			"name":          "prov-agent",
+			"slug":          "prov-agent",
+			"id":            "agent-uuid-prov",
+			"projectPath":   f.projectPath,
+			"provisionOnly": true,
+			"config":        map[string]any{"template": "claude"},
+		})
+		if w.Code != http.StatusCreated {
+			t.Fatalf("status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+		}
+		if runs, _ := f.k8sRun(); runs != 0 {
+			t.Errorf("kubernetes runtime runs = %d, want 0", runs)
+		}
+	})
+}

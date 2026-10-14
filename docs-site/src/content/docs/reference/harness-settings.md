@@ -396,6 +396,16 @@ example one installed before the block existed) uses the block of the built-in b
 `harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
 `delay` 8s.
 
+A harness-config without a provisioner that declares a `ready` or `delivery` block, in
+`config.yaml` or in an override, is treated like a harness-config with `command` or
+`config_dir`: its `ready` block is used, its `instructions_file`, `system_prompt_file` and
+`system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
+the agent is provisioned, and the harness reports its `harness` type as its name instead of
+`generic`. A `ready` block taken from the built-in bundle does not have this effect. Message
+delivery and interrupts still use the built-in bundle for the `harness` type (the defaults for a
+type with no bundle), so a custom `delivery` block, `interrupt_key` and `interrupt_sequence` do
+not yet change how messages are submitted or interrupted.
+
 **Version skew.**
 
 - Upgrade brokers with or before the Hub. A broker older than the `ready` block rejects a

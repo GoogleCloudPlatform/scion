@@ -1297,7 +1297,6 @@ type workstationSettingsRequest struct {
 }
 
 // handleWorkstationSettings handles PATCH /api/v1/system/workstation-settings.
-// It allows toggling workstation-level settings without requiring admin role.
 func (s *Server) handleWorkstationSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPatch {
 		MethodNotAllowed(w, http.MethodPatch)

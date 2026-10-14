@@ -1503,15 +1503,29 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			RuntimeError(w, "Failed to create agent: "+err.Error())
 			return
 		}
+		// Last check before the start: from bind on, the request ending no
+		// longer ends the create, so a create whose caller has already
+		// gone (or that a stop, delete or newer start reached) since the
+		// check after buildStartContext must not start now. finish removes
+		// the marker takeName wrote.
+		if testHookSyncCreateBeforeBind != nil {
+			testHookSyncCreateBeforeBind(req)
+		}
+		if ss.cancelled() {
+			s.writeCreateRegistrationError(w, span, req, errCreateStartCancelled, markAttemptFailed)
+			return
+		}
 		// Tracked as a start in flight until Manager.Start, Run's deferred
 		// cleanup and ss.finish have all returned (the deferred release
 		// above runs finishTracked last).
-		// The start runs under ctx as built up to here (policy hook, skill
-		// resolver, hub agent defaults, worktree signal), cancelled also
-		// when the registration is (bind), never under the registration's
-		// own context, which predates those values.
+		// The start runs with ctx's values as built up to here (policy
+		// hook, skill resolver, hub agent defaults, worktree signal), never
+		// under the registration's own context, which predates those
+		// values. It is cancelled only when the registration is (a stop,
+		// delete or newer start), by broker shutdown, or at the broker's
+		// own bound, not when the request ends (bind, ptone/scion#4817).
 		var startCtx, trackCtx context.Context
-		startCtx, unbindStart = ss.bind(ctx)
+		startCtx, unbindStart = ss.bind(ctx, s.syncStartMaxDuration)
 		trackCtx, finishTracked = s.startsInFlight.begin(startCtx, ss.key)
 		s.startsInFlight.setRunID(trackCtx, opts.RunID)
 		ctx = trackCtx
