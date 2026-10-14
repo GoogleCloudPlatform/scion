@@ -247,10 +247,10 @@ harness_configs:
 	}
 }
 
-// TestStart_TemplateImageStillOutranksSettingsAndFileDefault: an explicit
-// template `image:` / `kubernetes.imagePullPolicy` must still outrank both a
-// Hub settings value and the harness-config file default (ptone/scion#2156).
-func TestStart_TemplateImageStillOutranksSettingsAndFileDefault(t *testing.T) {
+// TestStart_TemplateImageAndPullPolicyIgnored: a template's `image:` /
+// `kubernetes.imagePullPolicy` are environment keys, ignored
+// (ptone/scion#4524), so the Hub settings values apply.
+func TestStart_TemplateImageAndPullPolicyIgnored(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -310,15 +310,15 @@ harness_configs:
 		t.Fatalf("Start failed: %v", err)
 	}
 
-	if capturedConfig.Image != "template-pinned:v2" {
-		t.Errorf("expected the explicit template image to outrank settings, got %q", capturedConfig.Image)
+	if capturedConfig.Image != "settings-pinned:v1" {
+		t.Errorf("image = %q, want the settings image (the template's is ignored)", capturedConfig.Image)
 	}
 	gotPolicy := ""
 	if capturedConfig.Kubernetes != nil {
 		gotPolicy = capturedConfig.Kubernetes.ImagePullPolicy
 	}
-	if gotPolicy != "Never" {
-		t.Errorf("expected the explicit template imagePullPolicy to outrank settings, got %q", gotPolicy)
+	if gotPolicy != "Always" {
+		t.Errorf("imagePullPolicy = %q, want the settings Always (the template's is ignored)", gotPolicy)
 	}
 }
 
@@ -448,7 +448,11 @@ func TestStart_RestartOfExistingAgent_ResolvedKubernetesServiceAccountNameOverri
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
 	_ = os.MkdirAll(tplDir, 0755)
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "kubernetes": {"serviceAccountName": "template-ksa"}}`), 0644)
+	// A template's kubernetes block is an ignored environment key
+	// (ptone/scion#4524); the create-time ServiceAccountName comes from the
+	// inline (request) config, which provision persists to scion-agent.json.
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	createInline := &api.ScionConfig{Kubernetes: &api.KubernetesConfig{ServiceAccountName: "template-ksa"}}
 
 	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: k8s
@@ -478,12 +482,13 @@ runtimes:
 	mgr := NewManager(mockRT)
 
 	// First Start (fresh provision): no resolved KSA yet, so the agent's
-	// persisted scion-agent.json ends up with the template's ServiceAccountName.
+	// persisted scion-agent.json ends up with the create-time ServiceAccountName.
 	if _, err := mgr.Start(context.Background(), api.StartOptions{
-		Name:        "test-agent",
-		ProjectPath: projectScionDir,
-		BrokerMode:  true,
-		NoAuth:      true,
+		Name:         "test-agent",
+		ProjectPath:  projectScionDir,
+		BrokerMode:   true,
+		NoAuth:       true,
+		InlineConfig: createInline,
 	}); err != nil {
 		t.Fatalf("first Start failed: %v", err)
 	}
@@ -492,7 +497,7 @@ runtimes:
 		if capturedConfig.Kubernetes != nil {
 			got = capturedConfig.Kubernetes.ServiceAccountName
 		}
-		t.Fatalf("precondition failed: first-provision ServiceAccountName = %q, want the template's 'template-ksa'", got)
+		t.Fatalf("precondition failed: first-provision ServiceAccountName = %q, want the create-time 'template-ksa'", got)
 	}
 
 	// Second Start (restart of the now-existing agent), with the broker
@@ -544,7 +549,11 @@ func TestStart_KubernetesBlockIdentityReplacesServiceAccount(t *testing.T) {
 
 	tplDir := filepath.Join(globalScionDir, "templates", "default")
 	_ = os.MkdirAll(tplDir, 0755)
-	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness", "kubernetes": {"serviceAccountName": "template-ksa"}}`), 0644)
+	// A template's kubernetes block is an ignored environment key
+	// (ptone/scion#4524); the persisted serviceAccountName comes from the
+	// create's inline (request) config.
+	_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(`{"default_harness_config": "test-harness"}`), 0644)
+	createInline := &api.ScionConfig{Kubernetes: &api.KubernetesConfig{ServiceAccountName: "template-ksa"}}
 
 	_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
 active_profile: k8s
@@ -587,13 +596,18 @@ runtimes:
 		{"restart with namespace default", &api.KubernetesBlockIdentity{}, "", true},
 		{"restart without block", nil, "template-ksa", false},
 	}
-	for _, step := range steps {
+	for i, step := range steps {
+		var inline *api.ScionConfig
+		if i == 0 {
+			inline = createInline
+		}
 		if _, err := mgr.Start(context.Background(), api.StartOptions{
 			Name:                    "test-agent",
 			ProjectPath:             projectScionDir,
 			BrokerMode:              true,
 			NoAuth:                  true,
 			KubernetesBlockIdentity: step.block,
+			InlineConfig:            inline,
 		}); err != nil {
 			t.Fatalf("%s: Start failed: %v", step.name, err)
 		}
@@ -707,10 +721,10 @@ harness_configs:
 }
 
 // TestStart_RestartAfterTemplatePullPolicyRemoved_FallsToSettings pins
-// ptone/scion#2156: removing a template's kubernetes.imagePullPolicy pin
-// (the template file still resolves; it just no longer sets that field)
-// must let the settings tier apply on the next restart, not the pull policy
-// ProvisionAgent persisted from the template's original pin.
+// ptone/scion#2156 together with ptone/scion#4524: a template's
+// kubernetes.imagePullPolicy pin is an ignored environment key, so the
+// settings tier applies on the create and, after the pin is removed from the
+// template, on the restart; nothing from the pin is persisted.
 func TestStart_RestartAfterTemplatePullPolicyRemoved_FallsToSettings(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -775,8 +789,8 @@ harness_configs:
 	if capturedConfig.Kubernetes != nil {
 		gotPolicy = capturedConfig.Kubernetes.ImagePullPolicy
 	}
-	if gotPolicy != "Never" {
-		t.Fatalf("precondition failed: create-time imagePullPolicy = %q, want Never", gotPolicy)
+	if gotPolicy != "Always" {
+		t.Fatalf("create-time imagePullPolicy = %q, want the settings Always (the template pin is ignored)", gotPolicy)
 	}
 
 	// The template's pull-policy pin is removed (the template still exists
@@ -799,7 +813,8 @@ harness_configs:
 // settings harness_configs.<h>.image_pull_policy default reaches
 // runtime.RunConfig.Kubernetes.ImagePullPolicy — the field the Kubernetes
 // runtime's buildPod reads to set the pod's container ImagePullPolicy — and
-// an explicit template kubernetes.imagePullPolicy still outranks it.
+// a template kubernetes.imagePullPolicy, an ignored environment key
+// (ptone/scion#4524), does not change it.
 func TestStart_SettingsImagePullPolicyReachesRunConfigKubernetes(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -811,9 +826,9 @@ func TestStart_SettingsImagePullPolicyReachesRunConfigKubernetes(t *testing.T) {
 			wantPullPolicy: "Always",
 		},
 		{
-			name:           "explicit template imagePullPolicy still outranks settings",
+			name:           "template imagePullPolicy is ignored",
 			templateExtra:  `, "kubernetes": {"imagePullPolicy": "Never"}`,
-			wantPullPolicy: "Never",
+			wantPullPolicy: "Always",
 		},
 	}
 
@@ -895,14 +910,18 @@ runtimes:
 // TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate covers the
 // three cases for opts.ResolvedKubernetesServiceAccountName (the broker's
 // GCP-identity-mapped KSA for Kubernetes assign): it applies whether or not
-// the template chain sets a Kubernetes config at all, always wins over a
-// template-set ServiceAccountName when non-empty, and leaves an existing
-// template value untouched when empty (not just "does nothing" — the
-// template's own value must survive, exactly as before this field existed).
+// the agent config sets a Kubernetes config at all, always wins over a
+// configured ServiceAccountName when non-empty, and leaves an existing
+// configured value untouched when empty (not just "does nothing" — the
+// configured value must survive, exactly as before this field existed).
+//
+// A template's kubernetes block is an ignored environment key
+// (ptone/scion#4524), so the configured ServiceAccountName comes from the
+// inline (request) config, the tier merged directly above the template.
 func TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate(t *testing.T) {
 	tests := []struct {
 		name                       string
-		templateExtra              string
+		inline                     *api.ScionConfig
 		resolvedServiceAccountName string
 		wantServiceAccountName     string
 		wantKubernetesConfigAtAll  bool
@@ -925,15 +944,15 @@ func TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate(t *testing.
 			wantKubernetesConfigAtAll: false,
 		},
 		{
-			name:                       "template ServiceAccountName is overridden by the resolved KSA",
-			templateExtra:              `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			name:                       "configured ServiceAccountName is overridden by the resolved KSA",
+			inline:                     &api.ScionConfig{Kubernetes: &api.KubernetesConfig{ServiceAccountName: "template-ksa"}},
 			resolvedServiceAccountName: "resolved-ksa",
 			wantServiceAccountName:     "resolved-ksa",
 			wantKubernetesConfigAtAll:  true,
 		},
 		{
-			name:                      "empty resolved value leaves the template ServiceAccountName untouched",
-			templateExtra:             `, "kubernetes": {"serviceAccountName": "template-ksa"}`,
+			name:                      "empty resolved value leaves the configured ServiceAccountName untouched",
+			inline:                    &api.ScionConfig{Kubernetes: &api.KubernetesConfig{ServiceAccountName: "template-ksa"}},
 			wantServiceAccountName:    "template-ksa",
 			wantKubernetesConfigAtAll: true,
 		},
@@ -959,7 +978,7 @@ func TestStart_ResolvedKubernetesServiceAccountNameOverridesTemplate(t *testing.
 
 			tplDir := filepath.Join(globalScionDir, "templates", "default")
 			_ = os.MkdirAll(tplDir, 0755)
-			tplJSON := `{"default_harness_config": "test-harness"` + tt.templateExtra + `}`
+			tplJSON := `{"default_harness_config": "test-harness"}`
 			_ = os.WriteFile(filepath.Join(tplDir, "scion-agent.json"), []byte(tplJSON), 0644)
 
 			_ = os.WriteFile(filepath.Join(globalScionDir, "settings.yaml"), []byte(`schema_version: "1"
@@ -994,6 +1013,7 @@ runtimes:
 				ProjectPath:                          projectScionDir,
 				BrokerMode:                           true,
 				NoAuth:                               true,
+				InlineConfig:                         tt.inline,
 				ResolvedKubernetesServiceAccountName: tt.resolvedServiceAccountName,
 			})
 			if err != nil {

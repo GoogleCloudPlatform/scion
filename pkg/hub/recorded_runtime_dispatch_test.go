@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -121,6 +121,8 @@ func TestRecordedRuntime_DispatchSendsSignedParamOverHTTP(t *testing.T) {
 			d := NewHTTPAgentDispatcherWithClient(s, NewAuthenticatedBrokerClient(s, false), false, slog.Default())
 			d.SetTokenGenerator(staticTokenGenerator{token: "test-token"})
 			agent := &store.Agent{ID: tid("rr-agent"), Name: "w", Slug: "w", ProjectID: project.ID, RuntimeBrokerID: broker.ID, Runtime: tc.runtime}
+			// DispatchAgentKeys loads the agent row for its placement backstop.
+			require.NoError(t, s.CreateAgent(ctx, agent))
 
 			require.NoError(t, d.DispatchAgentStop(ctx, agent))
 			require.NoError(t, d.DispatchAgentRestart(ctx, agent))
@@ -337,8 +339,10 @@ func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
 			ID   string `json:"id"`
 			Code string `json:"code"`
 		} `json:"failed"`
+		FailedByCode map[string]int `json:"failed_by_code"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	require.Equal(t, map[string]int{brokerCodeRuntimeUnavailable: 1}, body.FailedByCode)
 	var found bool
 	for _, f := range body.Failed {
 		if f.ID == agent.ID {

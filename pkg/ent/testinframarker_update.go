@@ -71,6 +71,9 @@ func (_u *TestInfraMarkerUpdate) sqlSave(ctx context.Context) (_node int, err er
 	if _u.mutation.AttestedCleared() {
 		_spec.ClearField(testinframarker.FieldAttested, field.TypeJSON)
 	}
+	if _u.mutation.WebSessionKeyCleared() {
+		_spec.ClearField(testinframarker.FieldWebSessionKey, field.TypeBytes)
+	}
 	if _node, err = sqlgraph.UpdateNodes(ctx, _u.driver, _spec); err != nil {
 		if _, ok := err.(*sqlgraph.NotFoundError); ok {
 			err = &NotFoundError{testinframarker.Label}
@@ -164,6 +167,9 @@ func (_u *TestInfraMarkerUpdateOne) sqlSave(ctx context.Context) (_node *TestInf
 	}
 	if _u.mutation.AttestedCleared() {
 		_spec.ClearField(testinframarker.FieldAttested, field.TypeJSON)
+	}
+	if _u.mutation.WebSessionKeyCleared() {
+		_spec.ClearField(testinframarker.FieldWebSessionKey, field.TypeBytes)
 	}
 	_node = &TestInfraMarker{config: _u.config}
 	_spec.Assign = _node.assignValues

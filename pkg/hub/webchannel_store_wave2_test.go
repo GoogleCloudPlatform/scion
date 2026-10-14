@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_4
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -32,7 +31,7 @@ func TestWave2_Init_Idempotent(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	// Init again should not fail (CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS).
-	store2 := NewWebChatStore(db, "sqlite3")
+	store2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store2.Init())
 
 	// Verify all wave-2 tables exist.
@@ -646,7 +645,7 @@ func TestWave2_DM_ListEmpty(t *testing.T) {
 // --- Migration: thread_id backfill ---
 
 func TestWave2_Migration_ThreadIDBackfill(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create a minimal messages table.
 	_, err := db.Exec(`
@@ -675,7 +674,7 @@ INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, t
 	require.NoError(t, err)
 
 	// Initialize the store (triggers migration).
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	// Verify: m1, m2, m3 should be backfilled.
@@ -704,7 +703,7 @@ INSERT INTO messages (id, sender, sender_id, recipient, recipient_id, channel, t
 }
 
 func TestWave2_Migration_ThreadIDBackfill_Batching(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create a minimal messages table.
 	_, err := db.Exec(`
@@ -755,7 +754,7 @@ CREATE TABLE IF NOT EXISTS webchat_migrations (
 }
 
 func TestWave2_Migration_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Create messages table.
 	_, err := db.Exec(`
@@ -777,11 +776,11 @@ CREATE TABLE messages (
 	require.NoError(t, err)
 
 	// First init.
-	store1 := NewWebChatStore(db, "sqlite3")
+	store1 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store1.Init())
 
 	// Second init should be a no-op (migration already marked complete).
-	store2 := NewWebChatStore(db, "sqlite3")
+	store2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store2.Init())
 
 	// Should still have the correct thread_id.
@@ -794,7 +793,7 @@ CREATE TABLE messages (
 // --- Wave-1 seeding ---
 
 func TestWave2_SeedFromWave1(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	// Manually create wave-1 tables and seed them.
 	_, err := db.Exec(`
@@ -824,7 +823,7 @@ INSERT INTO webchat_thread_prefs VALUES ('user-1', 'proj-1', 'agent-1', 'convers
 	require.NoError(t, err)
 
 	// Init the store (creates wave-2 tables and runs seeding).
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	ctx := context.Background()
@@ -855,7 +854,7 @@ INSERT INTO webchat_thread_prefs VALUES ('user-1', 'proj-1', 'agent-1', 'convers
 }
 
 func TestWave2_SeedFromWave1_Idempotent(t *testing.T) {
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
 	_, err := db.Exec(`
 CREATE TABLE webchat_thread (
@@ -881,11 +880,11 @@ INSERT INTO webchat_thread VALUES ('user-1', 'proj-1', 'agent-1', 'msg-10', '202
 `)
 	require.NoError(t, err)
 
-	store1 := NewWebChatStore(db, "sqlite3")
+	store1 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store1.Init())
 
 	// Second init should succeed (seed already complete).
-	store2 := NewWebChatStore(db, "sqlite3")
+	store2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store2.Init())
 
 	// Verify DM still exists and there's only one.
@@ -893,27 +892,4 @@ INSERT INTO webchat_thread VALUES ('user-1', 'proj-1', 'agent-1', 'msg-10', '202
 	dms, err := store2.ListDMs(ctx, "user-1")
 	require.NoError(t, err)
 	require.Len(t, dms, 1)
-}
-
-// --- Helper tests ---
-
-func TestParseSQLiteTime(t *testing.T) {
-	tests := []struct {
-		name  string
-		input string
-		zero  bool
-	}{
-		{"empty", "", true},
-		{"RFC3339Nano", "2026-01-01T00:00:00Z", false},
-		{"RFC3339Nano with nanos", "2026-01-01T00:00:00.123456789Z", false},
-		{"SQLite format with tz", "2026-01-01 00:00:00.000000000-07:00", false},
-		{"SQLite format no tz", "2026-01-01 00:00:00.000000000", false},
-		{"garbage", "not-a-time", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := parseSQLiteTime(tt.input)
-			require.Equal(t, tt.zero, result.IsZero(), "input: %q", tt.input)
-		})
-	}
 }

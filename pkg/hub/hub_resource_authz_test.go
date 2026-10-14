@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -421,7 +421,7 @@ func TestChatSearchDMAuthz(t *testing.T) {
 	dbp, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "test store must expose DB()")
 	db := dbp.DB()
-	wcs := NewWebChatStore(db, "sqlite3")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

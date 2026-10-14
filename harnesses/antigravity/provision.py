@@ -120,6 +120,18 @@ def _has_disk_oauth_token(ctx: scion_harness.ProvisionContext) -> bool:
     return os.path.isfile(path)
 
 
+def _resolve_location(ctx: scion_harness.ProvisionContext) -> str:
+    """Return the Vertex AI location: GOOGLE_CLOUD_LOCATION, else
+    GOOGLE_CLOUD_REGION, warning when both are set and differ
+    (ptone/scion#4719). Antigravity does not read CLOUD_ML_REGION."""
+    _, location = scion_harness.resolve_vertex_location(
+        lambda k: ctx.read_secret(k, env_fallback=True),
+        warn_fn=ctx.warn,
+        include_ml_region=False,
+    )
+    return location
+
+
 def provision(ctx: scion_harness.ProvisionContext) -> None:
     ctx.info(
         f"version={PROVISION_VERSION} "
@@ -138,9 +150,17 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         try:
             resolved = ctx.select_auth(ANTIGRAVITY_AUTH)
         except scion_harness.ProvisionError:
-            if ctx.explicit_type:
+            # config.yaml declares oauth-token as a file (AGY_TOKEN projected
+            # to the antigravity-oauth-token path). select_auth checks only
+            # the AGY_TOKEN env route, so an explicit oauth-token with only
+            # the file present is accepted here rather than rejected.
+            if ctx.explicit_type == "oauth-token" and has_disk_token:
+                ctx.info("detected bind-mounted antigravity-oauth-token; using oauth-token auth")
+                resolved = scion_harness.ResolvedAuth(method="oauth-token")
+            elif ctx.explicit_type:
                 raise
-            resolved = scion_harness.ResolvedAuth(method="none")
+            else:
+                resolved = scion_harness.ResolvedAuth(method="none")
 
         if resolved.method == "none" and has_disk_token:
             ctx.info("detected bind-mounted antigravity-oauth-token; using oauth-token auth")
@@ -186,10 +206,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
         project = ctx.read_secret("GOOGLE_CLOUD_PROJECT", env_fallback=True)
         if project:
             env_overlay["GOOGLE_CLOUD_PROJECT"] = project
-        location = (
-            ctx.read_secret("GOOGLE_CLOUD_LOCATION", env_fallback=True)
-            or ctx.read_secret("GOOGLE_CLOUD_REGION", env_fallback=True)
-        )
+        location = _resolve_location(ctx)
         if location:
             env_overlay["GOOGLE_CLOUD_LOCATION"] = location
 
@@ -249,10 +266,7 @@ def provision(ctx: scion_harness.ProvisionContext) -> None:
     if is_enterprise and method == "oauth-token":
         if project:
             env_overlay["GOOGLE_CLOUD_PROJECT"] = project
-        location = (
-            ctx.read_secret("GOOGLE_CLOUD_LOCATION", env_fallback=True)
-            or ctx.read_secret("GOOGLE_CLOUD_REGION", env_fallback=True)
-        )
+        location = _resolve_location(ctx)
         if location:
             env_overlay["GOOGLE_CLOUD_LOCATION"] = location
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -55,6 +55,7 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Equal(t, "dev", created.Label)
 	assert.Equal(t, "127.0.0.1", created.Host)
 	assert.Equal(t, "/api/v1/agents/"+agent.ID+"/ports/3000/proxy/", created.BasePath)
+	assert.Equal(t, "agent", created.ExposedBy, "a port the agent registers is recorded as exposed by the agent")
 
 	rec = doAgentTokenRequest(t, srv, http.MethodGet, "/api/v1/agents/"+agent.ID+"/ports", nil, token)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -71,40 +72,12 @@ func TestAgentPortRegistrationLifecycle(t *testing.T) {
 	assert.Empty(t, got.ExposedPorts)
 }
 
-func TestAuthorizePortRegistrationRejectsScopedHubAdmin(t *testing.T) {
-	srv, s := testServer(t)
-	ctx := context.Background()
-	admin := NewAuthenticatedUser(tid("scoped-port-admin"), "admin@example.com", "Scoped Port Admin", store.UserRoleAdmin, "api")
-	project := &store.Project{
-		ID:      tid("scoped-port-project"),
-		Name:    "Scoped Port Project",
-		Slug:    "scoped-port-project",
-		OwnerID: admin.ID(),
-	}
-	require.NoError(t, s.CreateProject(ctx, project))
-	agent := &store.Agent{
-		ID:        tid("scoped-port-agent"),
-		Slug:      "scoped-port-agent",
-		Name:      "Scoped Port Agent",
-		ProjectID: project.ID,
-		OwnerID:   admin.ID(),
-		Phase:     string(state.PhaseRunning),
-	}
-	require.NoError(t, s.CreateAgent(ctx, agent))
-
-	scoped := NewScopedUserIdentity(admin, project.ID, []string{store.UATScopeAgentPortAccess})
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
-	r = r.WithContext(contextWithIdentity(r.Context(), scoped))
-	w := httptest.NewRecorder()
-
-	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
-
-	assert.False(t, ok, "scoped hub-admin UAT must not use the raw admin port-management shortcut")
-	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "Scoped access tokens cannot manage exposed ports")
-}
-
-func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
+// TestAuthorizePortRegistration_FederatedUserNeedsHubLevelPortAccess pins
+// that a federated user without agent.port_access at hub level is refused
+// port management: with no grant on the agent, and also as the agent's
+// owner with the project-owner role, which carry agent.port_access on the
+// agent record only.
+func TestAuthorizePortRegistration_FederatedUserNeedsHubLevelPortAccess(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
 	caller := newBindableFederatedAdmin(tid("federated-port-admin"))
@@ -120,20 +93,24 @@ func TestAuthorizePortRegistrationRejectsFederatedAdmin(t *testing.T) {
 		ProjectID: project.ID, OwnerID: caller.ID(), Phase: string(state.PhaseRunning),
 	}
 	require.NoError(t, s.CreateAgent(ctx, agent))
-	// The caller owns the agent, so it passes authorizePortAccess (via the
-	// resource-owner grant and project-owner's agent.port_access) but still
-	// lacks the hub-level permission checked by authorizePortRegistration.
-	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
 
-	r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
-	r = r.WithContext(contextWithIdentity(r.Context(), caller))
-	w := httptest.NewRecorder()
+	register := func() (*httptest.ResponseRecorder, bool) {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", nil)
+		r = r.WithContext(contextWithIdentity(r.Context(), caller))
+		w := httptest.NewRecorder()
+		_, ok := srv.authorizePortRegistration(w, r, agent.ID)
+		return w, ok
+	}
 
-	_, ok := srv.authorizePortRegistration(w, r, agent.ID)
-
-	assert.False(t, ok, "federated admins must not use the local-admin port-management shortcut")
+	w, ok := register()
+	assert.False(t, ok, "a federated user with no hub-level grant is refused")
 	assert.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "Only the agent can manage its exposed ports")
+
+	createTestUserWithProjectRole(t, s, caller.ID(), caller.Email(), project.ID, store.ProjectRoleOwner)
+	w, ok = register()
+	assert.False(t, ok, "agent.port_access on the agent record alone does not admit port management")
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Contains(t, w.Body.String(), "requires agent.port_access at hub level")
 }
 
 func TestAuthorizePortRegistrationAllowsUnscopedLocalAdmin(t *testing.T) {

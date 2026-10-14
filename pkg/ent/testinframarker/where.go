@@ -84,6 +84,11 @@ func CreatedByHost(v string) predicate.TestInfraMarker {
 	return predicate.TestInfraMarker(sql.FieldEQ(FieldCreatedByHost, v))
 }
 
+// WebSessionKey applies equality check predicate on the "web_session_key" field. It's identical to WebSessionKeyEQ.
+func WebSessionKey(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldEQ(FieldWebSessionKey, v))
+}
+
 // HubIDEQ applies the EQ predicate on the "hub_id" field.
 func HubIDEQ(v string) predicate.TestInfraMarker {
 	return predicate.TestInfraMarker(sql.FieldEQ(FieldHubID, v))
@@ -327,6 +332,56 @@ func AttestedIsNil() predicate.TestInfraMarker {
 // AttestedNotNil applies the NotNil predicate on the "attested" field.
 func AttestedNotNil() predicate.TestInfraMarker {
 	return predicate.TestInfraMarker(sql.FieldNotNull(FieldAttested))
+}
+
+// WebSessionKeyEQ applies the EQ predicate on the "web_session_key" field.
+func WebSessionKeyEQ(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldEQ(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyNEQ applies the NEQ predicate on the "web_session_key" field.
+func WebSessionKeyNEQ(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldNEQ(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyIn applies the In predicate on the "web_session_key" field.
+func WebSessionKeyIn(vs ...[]byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldIn(FieldWebSessionKey, vs...))
+}
+
+// WebSessionKeyNotIn applies the NotIn predicate on the "web_session_key" field.
+func WebSessionKeyNotIn(vs ...[]byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldNotIn(FieldWebSessionKey, vs...))
+}
+
+// WebSessionKeyGT applies the GT predicate on the "web_session_key" field.
+func WebSessionKeyGT(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldGT(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyGTE applies the GTE predicate on the "web_session_key" field.
+func WebSessionKeyGTE(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldGTE(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyLT applies the LT predicate on the "web_session_key" field.
+func WebSessionKeyLT(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldLT(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyLTE applies the LTE predicate on the "web_session_key" field.
+func WebSessionKeyLTE(v []byte) predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldLTE(FieldWebSessionKey, v))
+}
+
+// WebSessionKeyIsNil applies the IsNil predicate on the "web_session_key" field.
+func WebSessionKeyIsNil() predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldIsNull(FieldWebSessionKey))
+}
+
+// WebSessionKeyNotNil applies the NotNil predicate on the "web_session_key" field.
+func WebSessionKeyNotNil() predicate.TestInfraMarker {
+	return predicate.TestInfraMarker(sql.FieldNotNull(FieldWebSessionKey))
 }
 
 // And groups predicates with the AND operator between them.

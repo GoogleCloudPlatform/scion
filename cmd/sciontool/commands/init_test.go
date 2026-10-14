@@ -29,44 +29,37 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
-// hubEnvVars lists the environment variables used by the Hub client.
-// Leaking these to a subprocess (e.g., sciontool init) causes the child
-// to talk to the real Hub and corrupt agent state. See issue #123.
-var hubEnvVars = []string{
-	"SCION_HUB_ENDPOINT",
-	"SCION_HUB_URL",
-	"SCION_AUTH_TOKEN",
-	"SCION_AGENT_ID",
-	"SCION_AGENT_MODE",
-	"SCION_TRANSPORT_TOKEN",
-	"SCION_TRANSPORT_TOKEN_FILE",
-}
-
-// scrubHubEnv clears all Hub-related environment variables for the
-// duration of the test, preventing accidental communication with a
-// real Hub when tests run inside an agent container.
-func scrubHubEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range hubEnvVars {
-		t.Setenv(key, "")
-	}
-}
-
-// filterHubEnv returns a copy of the environment with all Hub-related
-// variables removed. Use when constructing exec.Cmd.Env to prevent
-// credential leakage to child processes.
+// filterHubEnv returns a copy of the environment with every variable in
+// testutil.HubEnvKeys removed. Use when constructing exec.Cmd.Env so a child
+// process does not inherit Hub client credentials.
 func filterHubEnv(env []string) []string {
+	keys := testutil.HubEnvKeys()
 	var filtered []string
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if !slices.Contains(hubEnvVars, key) {
+		if !slices.Contains(keys, key) {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// TestFilterHubEnv_DropsSharedHubEnvKeys checks that filterHubEnv removes
+// every key in testutil.HubEnvKeys and keeps everything else, so the
+// child-process environment follows the shared key list.
+func TestFilterHubEnv_DropsSharedHubEnvKeys(t *testing.T) {
+	keep := []string{"PATH=/usr/bin", "SCION_HUB_ENDPOINTX=kept", "HOME=/tmp/h"}
+	env := slices.Clone(keep)
+	for _, key := range testutil.HubEnvKeys() {
+		env = append(env, key+"=set")
+	}
+	if got := filterHubEnv(env); !reflect.DeepEqual(got, keep) {
+		t.Errorf("filterHubEnv() = %q, want %q", got, keep)
+	}
 }
 
 // TestInitProjectDataIsolation is a canary test that verifies sciontool source code
@@ -195,7 +188,7 @@ func TestInitCommand_Integration(t *testing.T) {
 
 	// Clear Hub env vars so the subprocess cannot talk to the real Hub
 	// and corrupt agent state. See issue #123.
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 
 	// Build sciontool if needed for integration testing
 	binPath := filepath.Join(t.TempDir(), "sciontool-test")
@@ -1475,9 +1468,9 @@ func mustWriteFileT(t *testing.T, path, contents string) {
 	}
 }
 
-// TestResolveIsSharedGitWorkspace verifies the compat shim logic for detecting
-// a shared-plain git workspace. It covers both the new canonical vars and the
-// legacy SCION_SHARED_WORKSPACE fallback path.
+// TestResolveIsSharedGitWorkspace verifies detection of a shared-plain git
+// workspace from SCION_WORKSPACE_MODE and SCION_WORKSPACE_GIT, and that the
+// removed SCION_SHARED_WORKSPACE var is ignored when set (ptone/scion#575).
 func TestResolveIsSharedGitWorkspace(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -1511,21 +1504,27 @@ func TestResolveIsSharedGitWorkspace(t *testing.T) {
 			want:          false,
 		},
 		{
-			name:         "legacy: SCION_SHARED_WORKSPACE=true → true (fallback)",
-			sharedLegacy: "true",
-			want:         true,
+			name: "no vars → false",
+			want: false,
 		},
 		{
-			name:         "legacy: SCION_SHARED_WORKSPACE absent → false",
-			sharedLegacy: "",
+			name:         "legacy SCION_SHARED_WORKSPACE=true alone is ignored → false",
+			sharedLegacy: "true",
 			want:         false,
 		},
 		{
-			name:          "new vars take precedence: mode set + legacy true → follows mode",
+			name:          "legacy SCION_SHARED_WORKSPACE=true is ignored: mode set → follows mode",
 			workspaceMode: "clone-per-agent",
 			workspaceGit:  "true",
 			sharedLegacy:  "true",
-			want:          false, // mode=clone-per-agent means not shared-plain
+			want:          false,
+		},
+		{
+			name:          "legacy SCION_SHARED_WORKSPACE=false is ignored: shared-plain + git → true",
+			workspaceMode: "shared-plain",
+			workspaceGit:  "true",
+			sharedLegacy:  "false",
+			want:          true,
 		},
 	}
 

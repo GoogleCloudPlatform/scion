@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -41,6 +41,34 @@ type launchSettleFixture struct {
 	agent    *store.Agent
 	brokerID string
 	launchID string
+	// hooks is the wrapper installed as srv.store over the raw store; once
+	// armed, it runs afterReport right after the store applies a launch
+	// report, before the handler settles the run.
+	hooks *launchSettleStore
+	fault *storeFaultSwitch
+}
+
+// launchSettleStore runs afterReport (when armed) right after a launch
+// report is applied, as another hub write landing between the report and
+// the settle would.
+type launchSettleStore struct {
+	store.Store
+	fault       *storeFaultSwitch
+	afterReport func(ctx context.Context, agentID string)
+}
+
+func (w *launchSettleStore) ApplyLaunchReport(ctx context.Context, agentID, brokerID string, r store.LaunchReport) (store.LaunchReportAnswer, store.Agent, error) {
+	answer, updated, err := w.Store.ApplyLaunchReport(ctx, agentID, brokerID, r)
+	if err == nil && w.fault.Active() && w.afterReport != nil {
+		w.afterReport(ctx, agentID)
+	}
+	return answer, updated, err
+}
+
+// afterReport arms hook to run right after each applied report.
+func (f *launchSettleFixture) afterReport(hook func(ctx context.Context, agentID string)) {
+	f.hooks.afterReport = hook
+	f.fault.Arm()
 }
 
 // newLaunchSettleFixture is an agent with an active create launch whose row
@@ -48,6 +76,9 @@ type launchSettleFixture struct {
 func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	t.Helper()
 	srv, s := testServer(t)
+	hooks, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *launchSettleStore {
+		return &launchSettleStore{Store: inner, fault: f}
+	})
 	ctx := context.Background()
 	brokerID := tid("broker-" + name)
 	require.NoError(t, s.CreateRuntimeBroker(ctx, &store.RuntimeBroker{
@@ -68,7 +99,7 @@ func newLaunchSettleFixture(t *testing.T, name string) *launchSettleFixture {
 	}
 	launchID, err := s.BeginLaunch(ctx, agent.ID, store.LaunchKindCreate, 5*time.Minute)
 	require.NoError(t, err)
-	return &launchSettleFixture{srv: srv, store: s, agent: agent, brokerID: brokerID, launchID: launchID}
+	return &launchSettleFixture{srv: srv, store: s, agent: agent, brokerID: brokerID, launchID: launchID, hooks: hooks, fault: fault}
 }
 
 func (f *launchSettleFixture) report(t *testing.T, reportState, runID string) {
@@ -135,13 +166,84 @@ func TestLaunchReportSettle_NoRunID_EmptyRowRun_Keeps(t *testing.T) {
 	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
 }
 
-// A succeeded report naming an older run than the row records misses the
-// keyed swap: the newer run's list is kept.
-func TestLaunchReportSettle_OlderRun_Keeps(t *testing.T) {
-	f := newLaunchSettleFixture(t, "lrsettle-old")
+// heldRunClient is a broker whose runtime holds one entry of the agent,
+// labelled with run held, and refuses a delete naming another run as the
+// real broker does (a run-mismatch, ptone/scion#3080). A delete naming the
+// held run removes the entry.
+type heldRunClient struct {
+	*mockRuntimeBrokerClient
+	held       string
+	deleteRuns []string
+}
+
+func (c *heldRunClient) DeleteAgent(_ context.Context, _, _, _, _ string, opts DeleteAgentOptions) error {
+	c.deleteRuns = append(c.deleteRuns, opts.RunID)
+	if c.held == "" {
+		return nil
+	}
+	if opts.RunID != c.held {
+		return &DeleteRunMismatchError{RequestedRunID: opts.RunID, CurrentRunID: c.held, Err: ErrDeleteRunMismatch}
+	}
+	c.held = ""
+	return nil
+}
+
+// An async create that keeps a running entry (ptone/scion#2965): the
+// broker's Start found run-0's entry running and returned it, so the
+// succeeded report names run-0, not run-1 the hub recorded for the launch.
+// The hub adopts run-0 and clears the previous runs, and a later delete
+// removes the kept entry.
+func TestLaunchReportSettle_KeptRunningEntry_AdoptedAndDeleted(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-kept")
 	f.report(t, store.LaunchReportStateSucceeded, "run-0")
 	got := mustGetAgent(t, f.store, f.agent.ID)
-	assert.Equal(t, "run-1", got.RunID, "the row's run is unchanged")
+	assert.Equal(t, "run-0", got.RunID, "the kept entry's run is adopted")
+	assert.Empty(t, got.PreviousRunIDs, "the run settled")
+
+	client := &heldRunClient{mockRuntimeBrokerClient: &mockRuntimeBrokerClient{}, held: "run-0"}
+	d := NewHTTPAgentDispatcherWithClient(f.store, client, false, slog.Default())
+	require.NoError(t, d.DispatchAgentDelete(context.Background(), got, false, false, false, time.Time{}),
+		"the delete names the run the broker holds")
+	assert.Equal(t, []string{"run-0"}, client.deleteRuns)
+	assert.Empty(t, client.held, "the kept running entry is removed")
+}
+
+// The adoption is keyed on the run the row recorded when the report
+// applied: a run recorded after that is not overwritten.
+func TestLaunchReportSettle_LaterRun_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-later")
+	f.afterReport(func(ctx context.Context, agentID string) {
+		_, err := f.store.SetAgentRunID(ctx, agentID, "run-2", nil)
+		require.NoError(t, err)
+	})
+	f.report(t, store.LaunchReportStateSucceeded, "run-0")
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-2", got.RunID, "the later run is kept")
+	assert.Equal(t, []string{"run-0", "run-1"}, got.PreviousRunIDs)
+}
+
+// A delete that claims the row after the report applied, before the settle,
+// keeps its run: the swap is guarded in the store, not only on the report's
+// snapshot of the row.
+func TestLaunchReportSettle_DeleteClaimedAfterReport_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-claimed-after")
+	f.afterReport(func(_ context.Context, agentID string) {
+		claimForTest(t, f.store, agentID, store.DeletionStateDeleting, time.Minute)
+	})
+	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-0"))
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-1", got.RunID, "the claimed row's run is unchanged")
+	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
+}
+
+// A delete that holds the row keeps its run: the report neither adopts the
+// kept entry's run nor clears the previous runs.
+func TestLaunchReportSettle_DeleteHoldsRow_Keeps(t *testing.T) {
+	f := newLaunchSettleFixture(t, "lrsettle-claimed")
+	claimForTest(t, f.store, f.agent.ID, store.DeletionStateDeleting, time.Minute)
+	require.Equal(t, store.LaunchReportResultApplied, f.reportResult(t, store.LaunchReportStateSucceeded, "run-0"))
+	got := mustGetAgent(t, f.store, f.agent.ID)
+	assert.Equal(t, "run-1", got.RunID, "the claimed row's run is unchanged")
 	assert.Equal(t, []string{"run-0"}, got.PreviousRunIDs)
 }
 

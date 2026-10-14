@@ -15,10 +15,11 @@
 # Full Test Suite (reporting only), moved out of ci.yml (ptone/scion#2845).
 #
 # It no longer runs on pull_request. It is reporting-only (continue-on-error)
-# and duplicates Build & Test's `make test-fast` plus the pkg/hub SQLite Tests
-# job, yet it accounted for about a third of billed CI minutes when it ran on
-# every PR push. It now runs post-merge on push to main, nightly, and on
-# demand via workflow_dispatch.
+# and duplicates Build & Test's `make test-fast-ci` plus the SQLite Tests
+# (non-hub) job and the pkg/hub shard jobs (which the pkg/hub SQLite Tests
+# check aggregates), yet it accounted for about a third of billed CI
+# minutes when it ran on every PR push. It now runs post-merge on push to
+# main, nightly, and on demand via workflow_dispatch.
 #
 # It lives in its own file, rather than in ci.yml behind
 # `if: github.event_name != 'pull_request'`, so that the nightly schedule
@@ -48,6 +49,7 @@ jobs:
     name: Full Test Suite (reporting only)
     runs-on: ubuntu-latest
     continue-on-error: true
+    timeout-minutes: 180
     steps:
       - name: Checkout code
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -60,10 +62,20 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
+      # Every package but pkg/hub in one go test, then pkg/hub shard by shard
+      # (make test-hub-shards; the shard list comes from hack/hubshard): no
+      # step compiles the whole pkg/hub test binary, which got the runner
+      # killed (exit 143) on every run (ptone/scion#4636).
       - name: Run full test suite (with SQLite)
         run: |
           set -o pipefail
-          go test -count=1 -timeout 60m ./... 2>&1 | tee test-full-suite-output.txt
+          {
+            rc=0
+            go test -count=1 -timeout 60m \
+              $(go list ./... | grep -vx 'github.com/GoogleCloudPlatform/scion/pkg/hub') || rc=1
+            make test-hub-shards || rc=1
+            exit "$rc"
+          } 2>&1 | tee test-full-suite-output.txt
 
       - name: Upload test results
         if: always()

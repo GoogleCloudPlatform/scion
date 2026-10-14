@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,9 +23,38 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 )
+
+var (
+	sudoCheckOnce sync.Once
+	sudoCheckErr  error
+)
+
+// requireSudo skips the test when non-interactive sudo is unavailable, for
+// example when sudo is not installed or the process may not gain privileges.
+// backupBinary runs "sudo cp", so tests that exercise it need working sudo.
+func requireSudo(t *testing.T) {
+	t.Helper()
+	sudoCheckOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctx, "sudo", "-n", "true").CombinedOutput()
+		if err != nil {
+			if len(out) > 0 {
+				err = fmt.Errorf("%w: %s", err, bytes.TrimSpace(out))
+			}
+			sudoCheckErr = err
+		}
+	})
+	if sudoCheckErr != nil {
+		t.Skipf("sudo -n unavailable: %v", sudoCheckErr)
+	}
+}
 
 // createTestTarball builds a .tar.gz containing a single file with the given
 // name and contents.
@@ -321,6 +348,8 @@ echo '{"version":"v1.0.0","commit":"abc123","buildTime":"2026-01-01","short":"v1
 }
 
 func TestBackupBinary(t *testing.T) {
+	requireSudo(t)
+
 	t.Run("creates backup copy", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		srcPath := filepath.Join(tmpDir, "scion")
@@ -334,7 +363,7 @@ func TestBackupBinary(t *testing.T) {
 
 		err := backupBinary(context.Background(), srcPath, backupPath, &logBuf)
 		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+			t.Fatalf("backup: %v\nlog:\n%s", err, logBuf.String())
 		}
 
 		data, err := os.ReadFile(backupPath)
@@ -438,9 +467,9 @@ func TestBinaryUpdateExecutor_PreflightValidation(t *testing.T) {
 		// If no download URL and no update available, executor should
 		// return nil (no error, just "no update available").
 		// We test this by providing a dev version that skips the check.
-		executor := &BinaryUpdateExecutor{
-			serviceName: "test-hub",
-		}
+		executor := NewBinaryUpdateExecutor(BinaryUpdateOptions{
+			ServiceName: "test-hub",
+		})
 
 		var logBuf bytes.Buffer
 		params := map[string]string{
@@ -534,6 +563,8 @@ func TestExtractScionBinary_SubdirectoryStructure(t *testing.T) {
 // TestBackupAndRestoreRoundtrip verifies that a backup copy is byte-identical
 // to the original.
 func TestBackupAndRestoreRoundtrip(t *testing.T) {
+	requireSudo(t)
+
 	tmpDir := t.TempDir()
 
 	// Create a "binary" with known content.
@@ -547,7 +578,7 @@ func TestBackupAndRestoreRoundtrip(t *testing.T) {
 	backupPath := filepath.Join(tmpDir, "scion.bak")
 	var logBuf bytes.Buffer
 	if err := backupBinary(context.Background(), originalPath, backupPath, &logBuf); err != nil {
-		t.Fatalf("backup failed: %v", err)
+		t.Fatalf("backup failed: %v\nlog:\n%s", err, logBuf.String())
 	}
 
 	// Overwrite the original.

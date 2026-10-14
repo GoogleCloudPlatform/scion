@@ -102,6 +102,10 @@ type Client interface {
 	// Conversations returns the conversation operations interface.
 	Conversations() ConversationService
 
+	// ThreadGroups returns the project-scoped chat thread group operations
+	// interface (ptone/scion#4424).
+	ThreadGroups() ThreadGroupService
+
 	// AllowList returns the allow list management operations interface.
 	AllowList() AllowListService
 
@@ -120,6 +124,9 @@ type Client interface {
 	// ProjectPreStartHooks returns a ProjectPreStartHookService scoped to a project.
 	ProjectPreStartHooks(projectID string) ProjectPreStartHookService
 
+	// ProjectVisitors returns a ProjectVisitorService scoped to a project.
+	ProjectVisitors(projectID string) ProjectVisitorService
+
 	// HubPreStartHooks returns the hub-scoped pre-start hook service.
 	HubPreStartHooks() HubPreStartHookService
 
@@ -133,8 +140,17 @@ type Client interface {
 	// TestIdentities returns the hub test identity operations interface.
 	TestIdentities() TestIdentityService
 
+	// TestIdentityDelegations returns the workload issuer delegation
+	// operations interface.
+	TestIdentityDelegations() TestIdentityDelegationService
+
 	// Health checks API availability.
 	Health(ctx context.Context) (*HealthResponse, error)
+
+	// HealthSummary returns the admin health summary (GET
+	// /api/v1/admin/health/summary), the data behind the health dashboard.
+	// It needs hub.health.read and a user identity.
+	HealthSummary(ctx context.Context) (*HealthSummary, error)
 }
 
 // client is the concrete implementation of Client.
@@ -160,11 +176,13 @@ type client struct {
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
 	conversations         *conversationService
+	threadGroups          *threadGroupService
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
 	artifacts             *artifactService
 	testIdentities        *testIdentityService
+	testIdentityDelegs    *testIdentityDelegationService
 }
 
 // New creates a new Hub API client.
@@ -216,11 +234,13 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
 	c.conversations = &conversationService{c: c}
+	c.threadGroups = &threadGroupService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
 	c.artifacts = &artifactService{c: c}
 	c.testIdentities = &testIdentityService{c: c}
+	c.testIdentityDelegs = &testIdentityDelegationService{c: c}
 
 	return c, nil
 }
@@ -340,6 +360,11 @@ func (c *client) Conversations() ConversationService {
 	return c.conversations
 }
 
+// ThreadGroups returns the project-scoped chat thread group operations interface.
+func (c *client) ThreadGroups() ThreadGroupService {
+	return c.threadGroups
+}
+
 // AllowList returns the allow list management operations interface.
 func (c *client) AllowList() AllowListService {
 	return c.allowList
@@ -363,6 +388,10 @@ func (c *client) Artifacts() ArtifactService {
 // TestIdentities returns the hub test identity operations interface.
 func (c *client) TestIdentities() TestIdentityService {
 	return c.testIdentities
+}
+
+func (c *client) TestIdentityDelegations() TestIdentityDelegationService {
+	return c.testIdentityDelegs
 }
 
 // get performs an HTTP GET request.

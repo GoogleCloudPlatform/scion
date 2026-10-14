@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -647,7 +647,7 @@ func testScheduledStoreTransitions(t *testing.T, sms ScheduledMessageStore) {
 
 func TestScheduledStore_SQLite_MigrationRecorded(t *testing.T) {
 	_, dsn := openScheduledStorePair(t)
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	var n int
@@ -942,7 +942,7 @@ func TestScheduledStore_SQLite_CanonicalTimeText(t *testing.T) {
 	_, _, err := sms[0].CreateScheduledMessage(ctx, m)
 	require.NoError(t, err)
 
-	db, err := sql.Open("sqlite3", dsn)
+	db, err := sql.Open("sqlite", dsn)
 	require.NoError(t, err)
 	defer func() { _ = db.Close() }()
 	var fire, created string
@@ -1839,15 +1839,15 @@ func newTwoServerSQLite(t *testing.T, n int) *twoServerSQLite {
 	// No shared cache and a busy timeout on both files: the two servers
 	// write concurrently through separate connections.
 	hubDSN := "file:" + dir + "/hub.db?_pragma=busy_timeout(10000)"
-	webchatDSN := "file:" + dir + "/webchat.db?_busy_timeout=10000&_journal_mode=WAL"
+	webchatDSN := "file:" + dir + "/webchat.db?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_timezone=UTC"
 	newReplica := func() twoServerReplica {
 		st, err := newTestStoreAt(t, hubDSN)
 		require.NoError(t, err)
 		srv, st := testServerWithStore(t, st)
-		db, err := sql.Open("sqlite3", webchatDSN)
+		db, err := sql.Open("sqlite", webchatDSN)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
-		wcs := NewWebChatStore(db, "sqlite3")
+		wcs := NewWebChatStore(db, "sqlite")
 		require.NoError(t, wcs.Init())
 		srv.SetWebChatStore(wcs)
 		srv.SetDispatcher(&brokerMockDispatcher{})

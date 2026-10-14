@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 // Package hub — ptone/scion#2129: the resource-aware agent-credential path
 // for gcp_service_account.use. These tests exercise the kernel-level grant

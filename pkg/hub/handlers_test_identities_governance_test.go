@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -68,7 +68,7 @@ func TestTestIdentity_ConstraintLockoutIgnoresTestIdentities(t *testing.T) {
 		}
 	}
 
-	admins, err := ps.resolveAdminUsers(ctx, store.RoleScopeSystem, "")
+	admins, err := ps.resolveAdminUsers(ctx, time.Now(), store.RoleScopeSystem, "")
 	require.NoError(t, err)
 	for _, a := range admins {
 		assert.NotEqual(t, fixture.ID, a.userID, "a test identity is never a resolved constraint admin")
@@ -116,7 +116,7 @@ func TestTestIdentity_ConstraintAdminResolutionFailsClosed(t *testing.T) {
 	ctx := context.Background()
 	tiConstraintAdminSetup(t, s, "ti-failclosed-gov")
 	ps := NewPreviewServiceWithKey(kindErrStore{Store: s}, authz, slog.Default(), []byte("test-preview-hmac-key-32-bytes!!"))
-	_, err := ps.resolveAdminUsers(ctx, store.RoleScopeSystem, "")
+	_, err := ps.resolveAdminUsers(ctx, time.Now(), store.RoleScopeSystem, "")
 	assert.Error(t, err, "an unreadable kind must not let a user count as an admin")
 }
 

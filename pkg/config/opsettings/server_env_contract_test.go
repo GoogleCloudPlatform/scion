@@ -124,6 +124,8 @@ var envContractGaps = map[string]string{
 	"opsettings default_runtime_broker":                                   gapSnakeCaseFields,
 	"opsettings default_thinking_level":                                   gapSnakeCaseFields,
 	"opsettings default_timezone":                                         gapSnakeCaseFields,
+	"opsettings server.auth.proxy.driver_principals":                      gapSnakeCaseFields,
+	"opsettings server.auth.proxy.driver_token_audience":                  gapSnakeCaseFields,
 	"opsettings server.auth.proxy.iap.jwks_url":                           gapSnakeCaseFields,
 	"opsettings server.auth.proxy.jwt.claims.display_name":                gapSnakeCaseFields,
 	"opsettings server.auth.proxy.jwt.jwks_file":                          gapSnakeCaseFields,
@@ -158,7 +160,6 @@ var envContractGaps = map[string]string{
 	"opsettings server.home_storage.skeleton_max_bytes":                   gapSnakeCaseFields,
 	"opsettings server.home_storage.stop_grace_seconds":                   gapSnakeCaseFields,
 	"opsettings server.home_storage.termination_wait_seconds":             gapSnakeCaseFields,
-	"opsettings server.hub.async_agent_launch":                            gapSnakeCaseFields,
 	"opsettings server.hub.cors.allowed_headers":                          gapSnakeCaseFields,
 	"opsettings server.hub.cors.allowed_methods":                          gapSnakeCaseFields,
 	"opsettings server.hub.cors.allowed_origins":                          gapSnakeCaseFields,
@@ -166,7 +167,6 @@ var envContractGaps = map[string]string{
 	"opsettings server.hub.launch_keepalive_seconds":                      gapSnakeCaseFields,
 	"opsettings server.hub.launch_timeout":                                gapSnakeCaseFields,
 	"opsettings server.hub.perf_trace":                                    gapSnakeCaseFields,
-	"opsettings server.hub.public_url":                                    gapHubEndpointName,
 	"opsettings server.oauth.cli.github.client_id":                        gapSnakeCaseFields,
 	"opsettings server.oauth.cli.github.client_secret":                    gapSnakeCaseFields,
 	"opsettings server.oauth.cli.google.client_id":                        gapSnakeCaseFields,
@@ -205,7 +205,6 @@ var envContractGaps = map[string]string{
 	"seed default_runtime_broker":                  gapSnakeCaseFields,
 	"seed default_thinking_level":                  gapSnakeCaseFields,
 	"seed default_timezone":                        gapSnakeCaseFields,
-	"seed server.hub.public_url":                   gapHubEndpointName,
 
 	// globalconfig
 	"globalconfig agent_secrets.user_scope_only":                            gapGlobalConfigOutsideKoanf,
@@ -254,8 +253,10 @@ var envContractGaps = map[string]string{
 	"globalconfig telemetry.cloud.protocol":                                 gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.cloud.provider":                                 gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.cloud.tls.ca_file":                              gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.cert_file":                            gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.cloud.tls.enabled":                              gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.cloud.tls.insecure_skip_verify":                 gapGlobalConfigOutsideKoanf,
+	"globalconfig telemetry.cloud.tls.key_file":                             gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.enabled":                                        gapGlobalConfigTelemetry,
 	"globalconfig telemetry.filter.attributes.hash":                         gapGlobalConfigOutsideKoanf,
 	"globalconfig telemetry.filter.attributes.redact":                       gapGlobalConfigOutsideKoanf,
@@ -276,6 +277,8 @@ var envContractGaps = map[string]string{
 	"versioned server.auth.dev_mode":                                     gapVersionedUnderscored,
 	"versioned server.auth.dev_token":                                    gapVersionedUnderscored,
 	"versioned server.auth.dev_token_file":                               gapVersionedUnderscored,
+	"versioned server.auth.proxy.driver_principals":                      gapVersionedUnderscored,
+	"versioned server.auth.proxy.driver_token_audience":                  gapVersionedUnderscored,
 	"versioned server.auth.proxy.iap.jwks_url":                           gapVersionedUnderscored,
 	"versioned server.auth.proxy.jwt.claims.display_name":                gapVersionedUnderscored,
 	"versioned server.auth.proxy.jwt.jwks_file":                          gapVersionedUnderscored,
@@ -318,7 +321,6 @@ var envContractGaps = map[string]string{
 	"versioned server.home_storage.stop_grace_seconds":                   gapVersionedNoSpelling,
 	"versioned server.home_storage.termination_wait_seconds":             gapVersionedNoSpelling,
 	"versioned server.hub.admin_emails":                                  gapVersionedUnderscored,
-	"versioned server.hub.async_agent_launch":                            gapVersionedUnderscored,
 	"versioned server.hub.auto_suspend_stalled":                          gapVersionedUnderscored,
 	"versioned server.hub.conduit.authz_recheck_interval":                gapVersionedUnderscored,
 	"versioned server.hub.conduit.grant_key_activation":                  gapVersionedUnderscored,
@@ -409,19 +411,20 @@ var envContractGaps = map[string]string{
 // objects. No single env string can set them, so they are outside the
 // contract. The test checks this list against the schema in both directions.
 var envContractStructuredKeys = map[string]bool{
-	"default_resources":                    true, // object
-	"harness_configs":                      true, // map of objects
-	"profiles":                             true, // map of objects
-	"runtimes":                             true, // map of objects
-	"server.broker.instances":              true, // list of objects
-	"server.federation.trusted_issuers":    true, // list of objects (ptone/scion#3836)
-	"server.notification_channels":         true, // list of objects
-	"server.plugins.broker":                true, // map of objects
-	"server.shared_dir_storage.nfs.shares": true, // list of objects
-	"server.workspace_storage.nfs.shares":  true, // list of objects
-	"telemetry.cloud.headers":              true, // map
-	"telemetry.filter.sampling.rates":      true, // map
-	"telemetry.resource":                   true, // map
+	"default_resources":                 true, // object
+	"harness_configs":                   true, // map of objects
+	"profiles":                          true, // map of objects
+	"runtimes":                          true, // map of objects
+	"server.broker.instances":           true, // list of objects
+	"server.federation.trusted_issuers": true, // list of objects (ptone/scion#3836)
+	"server.hub.test_identities.workload_issuers": true, // list of objects (ptone/scion#4240)
+	"server.notification_channels":                true, // list of objects
+	"server.plugins.broker":                       true, // map of objects
+	"server.shared_dir_storage.nfs.shares":        true, // list of objects
+	"server.workspace_storage.nfs.shares":         true, // list of objects
+	"telemetry.cloud.headers":                     true, // map
+	"telemetry.filter.sampling.rates":             true, // map
+	"telemetry.resource":                          true, // map
 }
 
 // schemaNode is a settings-v1 schema property with local $refs merged in.
@@ -648,7 +651,9 @@ var schemaEnvVarDerivationExceptions = map[string]string{
 	"telemetry.cloud.headers":                  envNameClient,
 	"telemetry.cloud.protocol":                 envNameClient,
 	"telemetry.cloud.tls.ca_file":              envNameClient,
+	"telemetry.cloud.tls.cert_file":            envNameClient,
 	"telemetry.cloud.tls.insecure_skip_verify": envNameClient,
+	"telemetry.cloud.tls.key_file":             envNameClient,
 	"telemetry.enabled":                        envNameClient,
 	"telemetry.hub.enabled":                    envNameClient,
 }

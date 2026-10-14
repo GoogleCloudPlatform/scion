@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,7 +17,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -32,13 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"entgo.io/ent/dialect"
-	entsql "entgo.io/ent/dialect/sql"
-
-	"github.com/GoogleCloudPlatform/scion/pkg/ent"
-	"github.com/GoogleCloudPlatform/scion/pkg/ent/entc"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
-	"github.com/GoogleCloudPlatform/scion/pkg/store/entadapter"
 )
 
 // ---------------------------------------------------------------------------
@@ -74,111 +65,6 @@ func newTestExchangeServiceWithExtStore(validator GoogleCredentialValidator, use
 		newTestResolver(userStore, extStore, alwaysAuthorized, nil),
 		slog.Default(),
 	)
-}
-
-// sqliteTimezoneDSNOption returns the named SQLite driver's own DSN query
-// parameter for UTC-normalising time.Time values, so a test harness that
-// cannot use entc.OpenSQLite (because it must also build under the
-// "no_sqlite" tag, where modernc is unavailable) can still get some of the
-// same store-boundary coverage as production. Returns "" for an
-// unrecognised driver name.
-//
-// The two drivers are not equivalent here, and this helper does not paper
-// over the difference:
-//   - modernc.org/sqlite's "_timezone=UTC" (sqlite.go:258-263) applies to
-//     both binds and scans, so it also canonicalises predicate arguments
-//     (e.g. a bare time.Now() passed to a generated XxxLT/XxxGTE predicate)
-//     — the gap entc.UTCTimeHook leaves open (see its doc).
-//   - mattn/go-sqlite3's "_loc=UTC" (sqlite3.go:1123-1133, v1.14.17) applies
-//     only to scans (sqlite3.go:2210,2252); a bind is formatted with the
-//     value's own Location regardless (sqlite3.go:1965-1966), so under this
-//     driver a predicate argument still binds with a local-offset text
-//     comparator. entc.UTCTimeHook still covers mutation field values under
-//     either driver, which is what the Kathmandu regression this harness
-//     guards against needed; only a predicate's own argument is left
-//     uncovered under mattn specifically. No test here currently drives a
-//     time predicate through this harness, so this is a latent gap to be
-//     aware of, not a known failure.
-func sqliteTimezoneDSNOption(driverName string) string {
-	switch driverName {
-	case "sqlite": // modernc.org/sqlite: normalises binds and scans
-		return "_timezone=UTC"
-	case "sqlite3": // mattn/go-sqlite3 (cgo): normalises scans only
-		return "_loc=UTC"
-	default:
-		return ""
-	}
-}
-
-// newPersistentTestExchangeService creates a GEExchangeService backed by a
-// real ent/SQLite store at the given path. Each call opens an independent
-// ent.Client to the same database file — callers can use two instances to
-// simulate cross-instance convergence. Cleanup is registered on t.
-//
-// Opens via a raw sql.Open(driverName, ...), not entc.OpenSQLite, because
-// this file has no "!no_sqlite" build constraint and must keep working
-// under `go test -tags no_sqlite` (make test-fast), where modernc.org/sqlite
-// — and so entc.OpenSQLite's hardcoded "sqlite" driver — is unavailable;
-// driverName is whatever SQLite driver the build actually links (modernc's
-// "sqlite", or the cgo "sqlite3" some webchat test files register even
-// under no_sqlite). sqliteTimezoneDSNOption adds that driver's own
-// DSN-level UTC option, and entc.UTCTimeHook (registered below) is
-// driver-agnostic on top of it (tz-refactor design §2.1.2): a raw sql.Open
-// with neither previously let a bare time.Now() default (e.g.
-// ExternalIdentity.CreatedAt) store a numeric-zone-abbreviation wall clock
-// under a Kathmandu-like time.Local, which ent then failed to Scan back.
-// Under modernc this combination matches entc.OpenSQLite's coverage for
-// both mutation values and predicate arguments; under mattn
-// (sqlite3, no_sqlite builds) entc.UTCTimeHook still covers mutation
-// values, but a predicate argument's own bind is not normalised — see
-// sqliteTimezoneDSNOption's doc.
-func newPersistentTestExchangeService(t *testing.T, dbPath, driverName string) (*GEExchangeService, store.Store, ExternalIdentityStore) {
-	t.Helper()
-	dsn := "file:" + dbPath + "?_journal_mode=WAL&_busy_timeout=5000"
-	if tz := sqliteTimezoneDSNOption(driverName); tz != "" {
-		dsn += "&" + tz
-	}
-	db, err := sql.Open(driverName, dsn)
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
-	}
-	db.SetMaxOpenConns(1)
-	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
-		_ = db.Close()
-		t.Fatalf("enable sqlite foreign keys: %v", err)
-	}
-	if _, err := db.Exec("PRAGMA journal_mode = WAL"); err != nil {
-		_ = db.Close()
-		t.Fatalf("enable sqlite WAL mode: %v", err)
-	}
-	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.SQLite, db)))
-	client.Use(entc.UTCTimeHook)
-	t.Cleanup(func() { _ = client.Close() })
-	if err := autoMigrateTestClient(context.Background(), client); err != nil {
-		t.Fatalf("migrate: %v", err)
-	}
-
-	compositeStore := entadapter.NewCompositeStore(client)
-	extStore := entadapter.NewExternalIdentityStore(client)
-
-	identity := validGmailIdentity()
-	validator := &fakeGoogleValidator{idTokenResult: identity}
-
-	tokenSvc, _ := NewUserTokenService(UserTokenConfig{
-		AccessTokenDuration: DefaultGETokenTTL,
-	})
-	svc := NewGEExchangeService(
-		GEGoogleExchangeConfig{
-			Enabled:          true,
-			AllowedClientIDs: []string{"test-client-id.apps.googleusercontent.com"},
-			TokenTTL:         DefaultGETokenTTL,
-		},
-		validator,
-		tokenSvc,
-		newTestResolver(compositeStore, extStore, alwaysAuthorized, nil),
-		slog.Default(),
-	)
-	return svc, compositeStore, extStore
 }
 
 // ---------------------------------------------------------------------------
@@ -1335,72 +1221,6 @@ func TestGEExchange_ProvisionNewUser_CreateError_FailsClosed(t *testing.T) {
 	// but not leaked to the caller (Exchange sanitizes error messages).
 	if !strings.Contains(err.Error(), "user resolution failed") {
 		t.Fatalf("expected 'user resolution failed' error, got: %v", err)
-	}
-}
-
-// TestGEExchange_ConcurrentFirstLinkage_PersistentStore uses two independent
-// GEExchangeService instances against the same backing database (via the ent
-// adapter), proving that the unique-email collision and binding convergence
-// work across instances/reconnect — not merely through a shared fake object.
-func TestGEExchange_ConcurrentFirstLinkage_PersistentStore(t *testing.T) {
-	driverName := sqliteDriverName()
-	if driverName == "" {
-		t.Skip("skipping: requires SQLite driver (excluded by no_sqlite build tag)")
-	}
-
-	// This test requires the ent adapter with a real SQLite database.
-	// We create two independent service instances sharing the same DB file.
-	tmpDir := t.TempDir()
-	dbPath := tmpDir + "/concurrent_test.db"
-
-	// Create the first service+store pair.
-	svc1, store1, extStore1 := newPersistentTestExchangeService(t, dbPath, driverName)
-	// Create the second service+store pair using the same DB file.
-	svc2, store2, extStore2 := newPersistentTestExchangeService(t, dbPath, driverName)
-	_, _, _ = store1, store2, extStore2 // used only for cleanup via t.Cleanup
-
-	identity := validGmailIdentity()
-
-	ctx := context.Background()
-
-	// Exchange #1 via service instance 1: should provision user + create binding.
-	resp1, _, err := svc1.Exchange(ctx, &ExchangeRequest{
-		Credential:     "persistent-token",
-		CredentialType: "id_token",
-	})
-	if err != nil {
-		t.Fatalf("svc1.Exchange: %v", err)
-	}
-	if resp1.User == nil || resp1.User.ID == "" {
-		t.Fatal("svc1 returned nil/empty user")
-	}
-	user1ID := resp1.User.ID
-
-	// Verify the binding exists in the first store.
-	b1, err := extStore1.GetExternalIdentity(ctx, "google",
-		canonicalizeGoogleIssuer(identity.Issuer), identity.Subject)
-	if err != nil {
-		t.Fatalf("binding lookup in store1: %v", err)
-	}
-	if b1.UserID != user1ID {
-		t.Fatalf("binding in store1 points to %q, expected %q", b1.UserID, user1ID)
-	}
-
-	// Exchange #2 via service instance 2 (same DB, separate store objects):
-	// should find the existing binding and resolve to the same user.
-	resp2, _, err := svc2.Exchange(ctx, &ExchangeRequest{
-		Credential:     "persistent-token",
-		CredentialType: "id_token",
-	})
-	if err != nil {
-		t.Fatalf("svc2.Exchange: %v", err)
-	}
-	if resp2.User == nil {
-		t.Fatal("svc2 returned nil user")
-	}
-	if resp2.User.ID != user1ID {
-		t.Fatalf("svc2 resolved to user %q, expected %q (convergence failed across instances)",
-			resp2.User.ID, user1ID)
 	}
 }
 

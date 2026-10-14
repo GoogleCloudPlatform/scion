@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // Package hub — tests for check 9 (the record-race rule), the agent secret
 // list, and the material selection audit event.

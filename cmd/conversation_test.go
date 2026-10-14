@@ -318,6 +318,9 @@ func setupConversationCreateProject(t *testing.T, home, endpoint, hubProjectID s
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return projectDir
 }
 
@@ -665,9 +668,8 @@ func setupProjectWithoutHubEnabled(t *testing.T, home string) string {
 // TestRunConversationList_AgentHubContext_HubNotEnabledInSettings is a
 // regression test for ptone/scion#1909: inside an agent container,
 // "scion conversation list" failed with "requires Hub mode" because
-// requireHubClient (cmd/notifications.go) gated only on
-// settings.IsHubEnabled(), which is never true in that container settings
-// never get hub.enabled=true written. It lacked the config.IsHubContext()
+// requireHubClient (cmd/notifications.go) gated only on hub.enabled in
+// settings, which agent container settings never carry. It lacked the config.IsHubContext()
 // in-container fallback that hubsync.EnsureHubReady already has. This
 // exercises the actual agent shape: hub context env vars plus an
 // agent-scoped SCION_AUTH_TOKEN, with hub.enabled absent from settings.

@@ -7,12 +7,12 @@ package telemetry
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/otlptls"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/sdk/trace"
 	collogspb "go.opentelemetry.io/proto/otlp/collector/logs/v1"
@@ -26,7 +26,11 @@ import (
 	"google.golang.org/grpc/credentials/oauth"
 )
 
-var errOTLPCACertsNotFound = errors.New("parsing OTLP CA file: no certificates found")
+var (
+	// errOTLPIncompleteClientKeyPair reports that only one of the OTLP
+	// client certificate and key paths is set; mTLS needs both.
+	errOTLPIncompleteClientKeyPair = otlptls.ErrIncompleteClientKeyPair
+)
 
 // partialSuccessError is terminal: replaying the whole batch duplicates the
 // units the destination already accepted.
@@ -41,23 +45,15 @@ type partialSuccessError struct {
 
 func (e *partialSuccessError) Error() string { return e.message }
 
-func loadOTLPTLSConfig(caFile string) (*tls.Config, error) {
-	tlsConfig := &tls.Config{}
-	if caFile == "" {
-		return tlsConfig, nil
-	}
-
-	pemBytes, err := os.ReadFile(caFile)
-	if err != nil {
-		return nil, fmt.Errorf("reading OTLP CA file: %w", err)
-	}
-
-	roots := x509.NewCertPool()
-	if !roots.AppendCertsFromPEM(pemBytes) {
-		return nil, errOTLPCACertsNotFound
-	}
-	tlsConfig.RootCAs = roots
-	return tlsConfig, nil
+// loadOTLPTLSConfig builds the client TLS config for generic OTLP export.
+// caFile adds a PEM CA bundle for verifying the endpoint. certFile and
+// keyFile add a client certificate for mTLS; they must be set together.
+// Errors name the file paths only, never file contents. With all three
+// empty the result carries no roots and no certificates (system defaults).
+// The client pair is reloaded on each new TLS handshake (certificate
+// rotation); see otlptls.LoadClientConfig.
+func loadOTLPTLSConfig(caFile, certFile, keyFile string) (*tls.Config, error) {
+	return otlptls.LoadClientConfig(caFile, certFile, keyFile)
 }
 
 // loadGCPDialOptions loads GCP credentials from a service account key file
@@ -106,10 +102,10 @@ type CloudExporter struct {
 // When provider=gcp, uses GCP-native APIs (Cloud Trace, Cloud Logging).
 // Otherwise, uses standard OTLP gRPC/HTTP forwarding.
 func NewCloudExporter(ctx context.Context, config *Config) (*CloudExporter, error) {
-	if config != nil && config.Insecure && (config.SkipTLSVerify || config.CAFile != "") {
-		return nil, fmt.Errorf("plaintext OTLP transport conflicts with TLS verification options")
+	if config != nil && config.Insecure && (config.SkipTLSVerify || config.CAFile != "" || config.hasClientCertificate()) {
+		return nil, fmt.Errorf("plaintext OTLP transport conflicts with TLS verification or client certificate options")
 	}
-	if config != nil && config.IsGCP() && (config.Insecure || config.SkipTLSVerify || config.CAFile != "") {
+	if config != nil && config.IsGCP() && (config.Insecure || config.SkipTLSVerify || config.CAFile != "" || config.hasClientCertificate()) {
 		return nil, fmt.Errorf("GCP-native exporter does not support generic OTLP TLS overrides")
 	}
 	if !config.IsCloudConfigured() {

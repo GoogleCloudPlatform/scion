@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -73,8 +73,8 @@ func newProfileWriteFixture(t *testing.T) *profileWriteFixture {
 	srv.SetStorage(newMockStorage("test-bucket"))
 	backend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 	srv.SetSecretBackend(backend)
-	chatDB := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(chatDB, "sqlite3")
+	chatDB := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(chatDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	as, err := NewLocalDiskAttachmentStore(t.TempDir())
@@ -239,9 +239,10 @@ func TestUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
 
-// TestUserTemplateWrites_SessionAndTokenUnchanged pins that a session and a
-// user access credential keep their behaviour on the user template writes.
-func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestUserTemplateWrites_SessionWritesTokenNeedsSelector pins that a
+// session writes its user templates, and that a user access credential
+// without a template selector is refused on every user template write.
+func TestUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 
 	sessionTmpl := createUserTemplate(t, f.store, f.alice.ID, "session-template")
@@ -259,7 +260,7 @@ func TestUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 	tokenTmpl := createUserTemplate(t, f.store, f.alice.ID, "token-template")
 	writes := userTemplateWrites(t, tokenTmpl.ID)
 	writes[0] = jsonProfileRequest(t, http.MethodPost, "/api/v1/users/me/templates", CreateTemplateRequest{Name: "token-created"})
-	want = []int{http.StatusCreated, http.StatusOK, http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}
+	want = []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}
 	for i, pr := range writes {
 		rec := f.asBearer(pr, f.token)
 		assert.Equal(t, want[i], rec.Code, "user access credential %s %s: %s", pr.method, pr.path, rec.Body.String())
@@ -375,11 +376,13 @@ func TestChatProfileWrites_FederatedUserRefused(t *testing.T) {
 
 // TestChatProfileWrites_SessionAndTokenUnchanged pins that a session and a
 // user access credential keep their behaviour on the chat preference, presence
-// and project-less attachment writes.
+// and project-less attachment writes. The credential carries inbox:write on a
+// hub boundary, which these writes require of a token.
 func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
+	inboxWriter := mintHubConfigToken(t, f.srv, f.alice.ID, hubBoundary(), "inbox:read", "inbox:write")
 	want := []int{http.StatusOK, http.StatusOK, http.StatusCreated}
-	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"user access credential", f.token}} {
+	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"user access credential", inboxWriter}} {
 		for i, pr := range chatProfileWrites(t) {
 			rec := f.asBearer(pr, caller.key)
 			assert.Equal(t, want[i], rec.Code, "%s %s %s: %s", caller.name, pr.method, pr.path, rec.Body.String())
@@ -473,10 +476,11 @@ func TestGenericUserTemplateWrites_FederatedUserRefused(t *testing.T) {
 	assert.Equal(t, owned.Status, result.Items[0].Status)
 }
 
-// TestGenericUserTemplateWrites_SessionAndTokenUnchanged pins that a
-// session and a user access credential keep their behaviour on the
-// /api/v1/templates user-scope create, patch and delete.
-func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
+// TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector pins that
+// a session creates, patches and deletes its user-scope templates through
+// /api/v1/templates, and that a user access credential without a template
+// selector is refused on each of them.
+func TestGenericUserTemplateWrites_SessionWritesTokenNeedsSelector(t *testing.T) {
 	f := newProfileWriteFixture(t)
 	writes := func(id, name string) []profileRequest {
 		return []profileRequest{
@@ -491,7 +495,7 @@ func TestGenericUserTemplateWrites_SessionAndTokenUnchanged(t *testing.T) {
 		want []int
 	}{
 		{"session", f.session, []int{http.StatusCreated, http.StatusOK, http.StatusNoContent}},
-		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusNoContent}},
+		{"user access credential", f.token, []int{http.StatusForbidden, http.StatusForbidden, http.StatusForbidden}},
 	}
 	for _, tc := range cases {
 		tmpl := createUserTemplate(t, f.store, f.alice.ID, tc.name+"-generic")

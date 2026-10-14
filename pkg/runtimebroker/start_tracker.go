@@ -163,6 +163,17 @@ func (t *startTracker) cancelAndWaitRun(ctx context.Context, key launchKey, runI
 	return cancelAndWaitAll(ctx, waits), len(waits)
 }
 
+// anyFor reports whether any start is tracked for key, whatever its run (a
+// purge of retained files refuses then, ptone/scion#4744).
+func (t *startTracker) anyFor(key launchKey) bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.entries[key]) > 0
+}
+
 // hasRun reports whether a start of run runID exactly is tracked for key.
 // A start with no run recorded does not count, so it never suppresses the
 // refusal of a stale stop. False for an empty runID.
@@ -275,7 +286,12 @@ const inFlightStartStopWait = 45 * time.Second
 
 // shutdownDeadline bounds Shutdown's two waits together: for cancelled
 // starts to finish their cleanup, then for the HTTP server to drain.
-const shutdownDeadline = 30 * time.Second
+const shutdownDeadline = ShutdownDeadline
+
+// ShutdownDeadline is the bound on a Runtime Broker's shutdown drain (starts
+// in flight, then HTTP requests). A host that owns the listener for several
+// instances uses the same bound for its own drain.
+const ShutdownDeadline = 30 * time.Second
 
 // cancelInFlightStart cancels the tracked starts of key and waits, bounded
 // by ctx and inFlightStartStopWait, for their cleanup.

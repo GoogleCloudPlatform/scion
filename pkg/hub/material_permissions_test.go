@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_3)
+//go:build !no_sqlite
 
 // Package hub — registry and admission tests for the material delivery and
 // runtime-use permissions (ptone/scion#2129): the five new rows, the

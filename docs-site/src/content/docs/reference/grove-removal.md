@@ -38,7 +38,7 @@ agents and make sure hub and broker are on the same release.
 
 | Removed | Replacement / action |
 | --- | --- |
-| `.scion/grove-id` file | migrated automatically to `.scion/project-id`. If the file is committed, commit the rename. |
+| `.scion/grove-id` file | no longer read or migrated. Rename it to `.scion/project-id` by hand (`mv .scion/grove-id .scion/project-id`), and commit the rename if the file is committed. |
 | `grove-id`/`grove-name`/`grove-slug` keys in `.scion` marker files; `hub.grove_id` in `settings.yaml` | migrated automatically to `project-id`/`project-name`/`project-slug` and `hub.project_id`. A project-level `hub.grove_id` now takes precedence over a global `hub.project_id`, as project settings normally do. On value conflicts the project-named key wins, and a `.grove-migration.bak` backup is written. |
 | `~/.scion/groves/`, `~/.scion/grove-configs/` | moved automatically to `~/.scion/projects/` and `~/.scion/project-configs/`, with symlinks left at the old paths. If both exist, scion warns and uses the project-named directory. Directories on another filesystem or owned by another user must be moved by hand (scion prints the command). |
 <!-- Rows are appended here as later changes merge. -->

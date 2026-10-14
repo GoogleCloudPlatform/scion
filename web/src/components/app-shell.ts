@@ -43,6 +43,7 @@ import {
   renderTestHubBanner,
   testHubBannerStyles,
 } from './shared/test-hub-banner.js';
+import { renderTestIdentityChip, testIdentityChipStyles } from './shared/test-identity-chip.js';
 
 /**
  * Page title configuration
@@ -102,6 +103,7 @@ export class ScionApp extends LitElement {
 
   static override styles = css`
     ${testHubBannerStyles}
+    ${testIdentityChipStyles}
 
     :host {
       display: flex;
@@ -336,6 +338,7 @@ export class ScionApp extends LitElement {
         <!-- Test-hub banner: keyed on the path, so every navigation renders
              a fresh element even if the previous one was removed. -->
         ${keyed(this.currentPath, renderTestHubBanner(this._testHubBanner.status))}
+        ${renderTestIdentityChip(this.user)}
         <scion-header
           .user=${this.user}
           .currentPath=${this.currentPath}

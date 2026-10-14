@@ -87,31 +87,9 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 		return nil, fmt.Errorf("failed to load settings from fallback project: %w", err)
 	}
 
-	debugf("resolveHubProjectRef: hub=%v, hubConfigured=%v, hubEnabled=%v, hubExplicitlyDisabled=%v",
-		settings.Hub != nil, settings.IsHubConfigured(), settings.IsHubEnabled(), settings.IsHubExplicitlyDisabled())
-	if settings.Hub != nil {
-		hasToken := settings.Hub.Token != ""
-		hasAPIKey := settings.Hub.APIKey != ""
-		hasEndpoint := settings.Hub.Endpoint != ""
-		enabledPtr := "<nil>"
-		if settings.Hub.Enabled != nil {
-			enabledPtr = fmt.Sprintf("%v", *settings.Hub.Enabled)
-		}
-		debugf("resolveHubProjectRef: hub.enabled=%s, hub.endpoint=%v, hub.hasToken=%v, hub.hasAPIKey=%v",
-			enabledPtr, hasEndpoint, hasToken, hasAPIKey)
-	}
-
-	if !settings.IsHubEnabled() {
-		return nil, fmt.Errorf("hub project references (slugs, names, git URLs) require hub mode to be enabled\n\n" +
-			"Enable with: scion hub enable")
-	}
-
-	endpoint := opts.EndpointOverride
+	endpoint := resolveEndpoint(opts)
 	if endpoint == "" {
-		endpoint = getEndpoint(settings)
-	}
-	if endpoint == "" {
-		return nil, fmt.Errorf("hub is enabled but no endpoint configured\n\nConfigure via: scion config set hub.endpoint <url>")
+		return nil, ErrHubNotConfigured
 	}
 
 	client, credentialKind, err := createHubClient(settings, endpoint)
@@ -124,7 +102,7 @@ func resolveHubProjectRef(ref string, opts EnsureHubReadyOptions) (*HubContext, 
 	defer cancel()
 
 	if _, err := client.Health(ctx); err != nil {
-		return nil, wrapHubError(endpoint, fmt.Errorf("hub at %s is not responding: %w", endpoint, hubclient.HintProxyError(err)))
+		return nil, hubUnreachableError(endpoint, err)
 	}
 
 	// Resolve the project on the hub
@@ -212,10 +190,34 @@ func resolveProjectOnHub(ctx context.Context, client hubclient.Client, ref strin
 	}
 	switch len(resp.Projects) {
 	case 0:
-		return nil, fmt.Errorf("project '%s' not found on hub", ref)
+		return nil, &ProjectNotFoundError{Ref: ref}
 	case 1:
 		return &resp.Projects[0], nil
 	default:
-		return nil, fmt.Errorf("multiple projects found with name '%s' — please use a project ID or slug instead", ref)
+		return nil, &AmbiguousProjectError{Ref: ref, Projects: resp.Projects}
 	}
+}
+
+// ProjectNotFoundError is returned by ResolveProjectOnHub when no project
+// on the hub matches a slug or name reference.
+type ProjectNotFoundError struct {
+	// Ref is the reference that was looked up.
+	Ref string
+}
+
+func (e *ProjectNotFoundError) Error() string {
+	return fmt.Sprintf("project '%s' not found on hub", e.Ref)
+}
+
+// AmbiguousProjectError is returned by ResolveProjectOnHub when several
+// projects on the hub have the name given as the reference.
+type AmbiguousProjectError struct {
+	// Ref is the reference that was looked up.
+	Ref string
+	// Projects are the matching projects.
+	Projects []hubclient.Project
+}
+
+func (e *AmbiguousProjectError) Error() string {
+	return fmt.Sprintf("multiple projects found with name '%s' — please use a project ID or slug instead", e.Ref)
 }

@@ -126,6 +126,7 @@ type CompositeStore struct {
 	*AgentReincarnationStore
 	*UserTerminalWorkspaceStore
 	*HubInstanceStore
+	*TestIdentityDelegationStore
 
 	client *ent.Client
 	inTx   bool // true when this CompositeStore wraps a transaction
@@ -176,6 +177,19 @@ type CompositeStore struct {
 	// schemaShadowLogger receives the shadow check's warning. Nil means
 	// slog.Default().
 	schemaShadowLogger *slog.Logger
+
+	// beforeFKReconcile is passed to entc.AutoMigrate by Migrate; see
+	// SetBeforeFKReconcile.
+	beforeFKReconcile entc.BeforeFKReconcileFunc
+}
+
+// SetBeforeFKReconcile makes Migrate pass fn to entc.AutoMigrate, which
+// calls it on SQLite just before the foreign key reconcile changes rows
+// (after PreMigrate); an error from fn aborts Migrate before the reconcile
+// writes. Hub startup and the cmd maintenance commands use it to snapshot
+// the database first.
+func (c *CompositeStore) SetBeforeFKReconcile(fn entc.BeforeFKReconcileFunc) {
+	c.beforeFKReconcile = fn
 }
 
 // EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
@@ -261,47 +275,48 @@ func newTxCompositeStore(tx *ent.Tx) *CompositeStore {
 // agent -> project) resolve natively without any shadow synchronization.
 func NewCompositeStore(client *ent.Client) *CompositeStore {
 	return &CompositeStore{
-		AgentStore:                 NewAgentStore(client),
-		ProjectStore:               NewProjectStore(client),
-		UserStore:                  NewUserStore(client),
-		SecretStore:                NewSecretStore(client),
-		TemplateStore:              NewTemplateStore(client),
-		NotificationStore:          NewNotificationStore(client),
-		ScheduleStore:              NewScheduleStore(client),
-		MaintenanceStore:           NewMaintenanceStore(client),
-		MessageStore:               NewMessageStore(client),
-		ExternalStore:              NewExternalStore(client),
-		BrokerSecretStore:          NewBrokerSecretStore(client),
-		AllowListStore:             NewAllowListStore(client),
-		GroupStore:                 NewGroupStore(client),
-		BrokerDispatchStore:        NewBrokerDispatchStore(client),
-		LifecycleHookStore:         NewLifecycleHookStore(client),
-		SkillStore:                 NewSkillStore(client),
-		SkillRegistryStore:         NewSkillRegistryStore(client),
-		HubSettingStore:            NewHubSettingStore(client),
-		BrokerSettingStore:         NewBrokerSettingStore(client),
-		SkillInjectionStore:        NewSkillInjectionStore(client),
-		ProjectPreStartHookStore:   NewProjectPreStartHookStore(client),
-		AgentSessionMetricsStore:   NewAgentSessionMetricsStore(client),
-		ConversationStore:          NewConversationStore(client),
-		ThreadGroupStore:           NewThreadGroupStore(client),
-		RoleStore:                  NewRoleStore(client),
-		DelegationEdgeStore:        NewDelegationEdgeStore(client),
-		SAAssignmentStore:          NewSAAssignmentStore(client),
-		DelegationAdoptionStore:    NewDelegationAdoptionStore(client),
-		AgentHoldStore:             NewAgentHoldStore(client),
-		MembershipLossCheckStore:   NewMembershipLossCheckStore(client),
-		AgentCredentialStore:       NewAgentCredentialStore(client),
-		AgentDelegationStore:       NewAgentDelegationStore(client),
-		AgentIdentityKeyStore:      NewAgentIdentityKeyStore(client),
-		MutationAuditStore:         NewMutationAuditStore(client),
-		QuotaStore:                 NewQuotaStore(client),
-		AccessConstraintStore:      NewAccessConstraintStore(client),
-		ExternalIdentityStore:      NewExternalIdentityStore(client),
-		AgentReincarnationStore:    NewAgentReincarnationStore(client),
-		UserTerminalWorkspaceStore: NewUserTerminalWorkspaceStore(client),
-		HubInstanceStore:           NewHubInstanceStore(client),
-		client:                     client,
+		AgentStore:                  NewAgentStore(client),
+		ProjectStore:                NewProjectStore(client),
+		UserStore:                   NewUserStore(client),
+		SecretStore:                 NewSecretStore(client),
+		TemplateStore:               NewTemplateStore(client),
+		NotificationStore:           NewNotificationStore(client),
+		ScheduleStore:               NewScheduleStore(client),
+		MaintenanceStore:            NewMaintenanceStore(client),
+		MessageStore:                NewMessageStore(client),
+		ExternalStore:               NewExternalStore(client),
+		BrokerSecretStore:           NewBrokerSecretStore(client),
+		AllowListStore:              NewAllowListStore(client),
+		GroupStore:                  NewGroupStore(client),
+		BrokerDispatchStore:         NewBrokerDispatchStore(client),
+		LifecycleHookStore:          NewLifecycleHookStore(client),
+		SkillStore:                  NewSkillStore(client),
+		SkillRegistryStore:          NewSkillRegistryStore(client),
+		HubSettingStore:             NewHubSettingStore(client),
+		BrokerSettingStore:          NewBrokerSettingStore(client),
+		SkillInjectionStore:         NewSkillInjectionStore(client),
+		ProjectPreStartHookStore:    NewProjectPreStartHookStore(client),
+		AgentSessionMetricsStore:    NewAgentSessionMetricsStore(client),
+		ConversationStore:           NewConversationStore(client),
+		ThreadGroupStore:            NewThreadGroupStore(client),
+		RoleStore:                   NewRoleStore(client),
+		DelegationEdgeStore:         NewDelegationEdgeStore(client),
+		SAAssignmentStore:           NewSAAssignmentStore(client),
+		DelegationAdoptionStore:     NewDelegationAdoptionStore(client),
+		AgentHoldStore:              NewAgentHoldStore(client),
+		MembershipLossCheckStore:    NewMembershipLossCheckStore(client),
+		AgentCredentialStore:        NewAgentCredentialStore(client),
+		AgentDelegationStore:        NewAgentDelegationStore(client),
+		AgentIdentityKeyStore:       NewAgentIdentityKeyStore(client),
+		MutationAuditStore:          NewMutationAuditStore(client),
+		QuotaStore:                  NewQuotaStore(client),
+		AccessConstraintStore:       NewAccessConstraintStore(client),
+		ExternalIdentityStore:       NewExternalIdentityStore(client),
+		AgentReincarnationStore:     NewAgentReincarnationStore(client),
+		UserTerminalWorkspaceStore:  NewUserTerminalWorkspaceStore(client),
+		HubInstanceStore:            NewHubInstanceStore(client),
+		TestIdentityDelegationStore: NewTestIdentityDelegationStore(client),
+		client:                      client,
 	}
 }
 
@@ -528,6 +543,59 @@ var purgeDeletedAgentsTestHook func(tx *ent.Tx, batchCandidateIDs []uuid.UUID)
 // own slug -- stay reserved forever, blocking any later agent from taking
 // them.
 func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error) {
+	return c.purgeDeletedAgents(ctx, cutoff, nil, false)
+}
+
+// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents in
+// ids (ptone/scion#4744): only those of them still soft-deleted before
+// cutoff are removed, in the same transaction, lock order, eligibility
+// re-check and cascade. IDs that are not UUIDs, unknown, restored or not yet
+// past cutoff are skipped. An empty ids purges nothing.
+func (c *CompositeStore) PurgeDeletedAgentsByID(ctx context.Context, ids []string, cutoff time.Time) (int, error) {
+	only := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		if uid, err := parseUUID(id); err == nil {
+			only = append(only, uid)
+		}
+	}
+	if len(only) == 0 {
+		return 0, nil
+	}
+	return c.purgeDeletedAgents(ctx, cutoff, only, true)
+}
+
+// ListSoftDeletedAgentsBefore returns up to limit soft-deleted agents whose
+// deleted_at is before cutoff and whose ID sorts after afterID ("" starts at
+// the lowest), in ascending ID order, so a caller can page through them
+// (ptone/scion#4744). A non-positive limit returns nothing.
+func (c *CompositeStore) ListSoftDeletedAgentsBefore(ctx context.Context, cutoff time.Time, afterID string, limit int) ([]*store.Agent, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	q := c.client.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if afterID != "" {
+		uid, err := parseUUID(afterID)
+		if err != nil {
+			return nil, err
+		}
+		q = q.Where(agent.IDGT(uid))
+	}
+	rows, err := q.Order(ent.Asc(agent.FieldID)).Limit(limit).All(ctx)
+	if err != nil {
+		return nil, mapError(err)
+	}
+	out := make([]*store.Agent, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, entAgentToStore(a))
+	}
+	return out, nil
+}
+
+// purgeDeletedAgents is the purge behind PurgeDeletedAgents and
+// PurgeDeletedAgentsByID. With restrict set, only agents in only are
+// candidates.
+func (c *CompositeStore) purgeDeletedAgents(ctx context.Context, cutoff time.Time, only []uuid.UUID, restrict bool) (int, error) {
 	useLock := c.AgentStore.usesRowLocks()
 	tx, err := c.client.Tx(ctx)
 	if err != nil {
@@ -540,8 +608,12 @@ func (c *CompositeStore) PurgeDeletedAgents(ctx context.Context, cutoff time.Tim
 	// batch. Otherwise a later batch could lock a lower ID than an earlier
 	// one and deadlock against DeleteProject, which locks a project's agents
 	// in one ascending pass.
-	candidateIDs, err := tx.Agent.Query().
-		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff)).
+	candidateQuery := tx.Agent.Query().
+		Where(agent.DeletedAtNotNil(), agent.DeletedAtLT(cutoff))
+	if restrict {
+		candidateQuery = candidateQuery.Where(agent.IDIn(only...))
+	}
+	candidateIDs, err := candidateQuery.
 		Order(ent.Asc(agent.FieldID)).
 		IDs(ctx)
 	if err != nil {
@@ -683,7 +755,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := entc.AutoMigrate(ctx, c.client); err != nil {
+	if err := entc.AutoMigrate(ctx, c.client, entc.WithBeforeFKReconcile(c.beforeFKReconcile)); err != nil {
 		return err
 	}
 

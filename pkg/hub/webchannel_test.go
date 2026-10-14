@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//go:build !no_sqlite
+
 package hub
 
 import (
@@ -23,7 +23,6 @@ import (
 	"testing"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
@@ -33,9 +32,9 @@ import (
 // for testing. The caller should close the returned *sql.DB when done.
 func newTestWebChatStore(t *testing.T) (WebChatStore, *sql.DB) {
 	t.Helper()
-	db := openTestMemorySQLite(t, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
 
-	store := NewWebChatStore(db, "sqlite3")
+	store := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store.Init())
 
 	return store, db
@@ -62,7 +61,7 @@ func TestWebChatStore_Init_Idempotent(t *testing.T) {
 	defer db.Close() //nolint:errcheck
 
 	// Init again should not fail.
-	store2 := NewWebChatStore(db, "sqlite3")
+	store2 := NewWebChatStore(db, "sqlite")
 	require.NoError(t, store2.Init())
 }
 
@@ -324,69 +323,6 @@ func TestWebChannelBus_Close(t *testing.T) {
 	log := slog.Default()
 	bus := NewWebChannelBus(log, store)
 	require.NoError(t, bus.Close())
-}
-
-// --- identityFromTopic tests ---
-
-func TestIdentityFromTopic_UserTopic(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender:   "agent:coder",
-		SenderID: "agent-uuid",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.user.user1.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "user1", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "agent-uuid", agentID)
-}
-
-func TestIdentityFromTopic_UserTopic_SenderIDFallback(t *testing.T) {
-	// When SenderID is empty, fall back to stripping "agent:" prefix from Sender.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.user.user1.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "user1", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "coder", agentID)
-}
-
-func TestIdentityFromTopic_AgentTopic(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender:   "user:alice",
-		SenderID: "alice-uuid",
-	}
-	userID, projectID, agentID, ok := identityFromTopic("scion.project.proj1.agent.coder.messages", msg)
-	require.True(t, ok)
-	require.Equal(t, "alice-uuid", userID)
-	require.Equal(t, "proj1", projectID)
-	require.Equal(t, "coder", agentID)
-}
-
-func TestIdentityFromTopic_Broadcast_ReturnsFalse(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender: "system",
-	}
-	_, _, _, ok := identityFromTopic("scion.project.proj1.broadcast", msg)
-	require.False(t, ok)
-}
-
-func TestIdentityFromTopic_MalformedTopic_ReturnsFalse(t *testing.T) {
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	_, _, _, ok := identityFromTopic("not.a.valid.topic", msg)
-	require.False(t, ok)
-}
-
-func TestIdentityFromTopic_MissingUserID_ReturnsFalse(t *testing.T) {
-	// Agent topic, but sender has no SenderID and is not a user.
-	msg := &messages.StructuredMessage{
-		Sender: "agent:coder",
-	}
-	_, _, _, ok := identityFromTopic("scion.project.proj1.agent.coder.messages", msg)
-	require.False(t, ok)
 }
 
 // --- Wave-2 WebChannelBus re-key tests ---

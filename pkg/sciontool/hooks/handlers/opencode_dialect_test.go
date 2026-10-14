@@ -16,6 +16,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
 	"github.com/GoogleCloudPlatform/scion/pkg/telemetrycontract"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
@@ -96,12 +97,7 @@ func loadOpencodeHookPayloadFixture(t *testing.T) []map[string]interface{} {
 
 func loadOpencodeDialect(t *testing.T) *dialects.MappingDialect {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "opencode", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "opencode")
 	md, err := dialects.LoadMappingDialect(specPath)
 	if err != nil {
 		t.Fatalf("LoadMappingDialect(%s): %v", specPath, err)
@@ -145,6 +141,7 @@ func apiCallTotal(rm metricdata.ResourceMetrics) int64 {
 //   - agent-end and session events fire (session.created x2, session.idle);
 //   - tool_input is populated (not the old bridge's fixed "{}").
 func TestOpencodeDialectFixtureDrivesCanonicalUsage(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -246,6 +243,7 @@ func TestOpencodeDialectFixtureDrivesCanonicalUsage(t *testing.T) {
 // vetting gate): with SCION_USAGE_SOURCE unset, no usage is published, but
 // every other hook signal (tool calls, sessions) still is.
 func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_HARNESS", "opencode")
 	// An empty value is treated as unset.
 	t.Setenv("SCION_USAGE_SOURCE", "")
@@ -313,6 +311,7 @@ func TestOpencodeDialectSuppressesUsageWhenSourceUnset(t *testing.T) {
 // doubling rather than some other inconsistency, documenting where the
 // dedupe responsibility actually lives.
 func TestOpencodeHandlerHasNoDedupeReplayDoubles(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -360,12 +359,7 @@ func TestOpencodeHandlerHasNoDedupeReplayDoubles(t *testing.T) {
 // expose its parsed spec) so a future edit that reintroduces one of these
 // keys fails loudly instead of silently zeroing a token type.
 func TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields(t *testing.T) {
-	_, file, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
-	specPath := filepath.Join(root, "harnesses", "opencode", "dialect.yaml")
+	specPath := testutil.HarnessDialectPath(t, "opencode")
 
 	data, err := os.ReadFile(specPath)
 	if err != nil {
@@ -398,6 +392,7 @@ func TestOpencodeDialectStepFinishMappingOmitsExtractTokensFields(t *testing.T) 
 // tokens.cache.write=7 (see scion-bridge.test.mjs's matching synthetic case
 // for the bridge side of this same path).
 func TestOpencodeDialectCacheWriteMapsToNonZeroTokenType(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 
@@ -493,6 +488,7 @@ var opencodeRun3AgentEndPayload = map[string]interface{}{
 // a failed turn's error status reaches the agent.turn.end span, while the
 // turn is still a single agent-end.
 func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
+	scrubTelemetryEnv(t)
 	md := loadOpencodeDialect(t)
 
 	event, err := md.Parse(opencodeRun3AgentEndPayload)
@@ -543,6 +539,7 @@ func TestOpencodeDialectCarriesSessionErrorOntoTurnEndSpan(t *testing.T) {
 // gen_ai.api.duration is recorded; the test pins that too. The duration
 // label precedence is covered by the antigravity tests, which pair.
 func TestOpencodeDialectModelLabelFromPayload(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks")
 	t.Setenv("SCION_HARNESS", "opencode")
 	t.Setenv("SCION_MODEL", "configured-model-should-lose")

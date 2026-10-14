@@ -267,8 +267,8 @@ active_profile: local
 // addendum Update 04:45 (hy-aud-6, folded in because the loader was being
 // rewritten anyway): LoadGlobalSettings/GlobalSettingsIsLegacyFormat must
 // not merge ~/.scion/project-configs/<slug>__<id>/.scion/settings.yaml just
-// because ~/.scion itself happens to contain a project-id (or legacy
-// grove-id) file — resolveEffectiveProjectPath(globalDir) treats globalDir
+// because ~/.scion itself happens to contain a project-id file —
+// resolveEffectiveProjectPath(globalDir) treats globalDir
 // AS IF it might be a project directory and would otherwise pick that
 // unrelated file up as globalDir's own "project layer".
 func TestLoadGlobalSettings_GlobalOnly_IgnoresProjectConfigsLeak(t *testing.T) {

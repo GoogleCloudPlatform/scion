@@ -29,6 +29,7 @@ func sessionEvent(name, sessionID string) *hooks.Event {
 // When the session-start hook is missed, the session ID carried by later
 // events must still reach the session summary sent to the Hub.
 func TestTelemetryHandler_SessionSummaryWithoutSessionStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	h := NewTelemetryHandler(nil, nil, nil)
 
@@ -73,6 +74,7 @@ func TestTelemetryHandler_SessionSummaryWithoutSessionStart(t *testing.T) {
 // A session-start that arrives after other events of the same session must
 // not drop or double-count what was already recorded.
 func TestTelemetryHandler_LateSessionStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	h := NewTelemetryHandler(nil, nil, nil)
 
@@ -105,6 +107,7 @@ func TestTelemetryHandler_LateSessionStart(t *testing.T) {
 
 // The normal flow, with session-start first, is unchanged.
 func TestTelemetryHandler_SessionSummaryWithSessionStart(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	h := NewTelemetryHandler(nil, nil, nil)
 
@@ -131,6 +134,7 @@ func TestTelemetryHandler_SessionSummaryWithSessionStart(t *testing.T) {
 // Lifecycle events before session-start do not open a session, so the
 // start time still comes from the session-start event.
 func TestTelemetryHandler_LifecycleEventsDoNotOpenSession(t *testing.T) {
+	scrubTelemetryEnv(t)
 	h := NewTelemetryHandler(nil, nil, nil)
 
 	var got []telemetry.SessionSummary
@@ -165,6 +169,7 @@ func TestTelemetryHandler_LifecycleEventsDoNotOpenSession(t *testing.T) {
 // Only session-end carries the session ID: observing session-end must
 // put that ID on the summary.
 func TestTelemetryHandler_SessionIDOnlyOnSessionEnd(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	h := NewTelemetryHandler(nil, nil, nil)
 
@@ -195,6 +200,7 @@ func TestTelemetryHandler_SessionIDOnlyOnSessionEnd(t *testing.T) {
 // Claude repeats session-start with the same ID on /compact and on
 // resume. Counts from before the repeat must reach the summary.
 func TestTelemetryHandler_RepeatedSessionStartSameIDKeepsCounts(t *testing.T) {
+	scrubTelemetryEnv(t)
 	t.Setenv("SCION_USAGE_SOURCE", "hooks") // model-end events carry the usage
 	h := NewTelemetryHandler(nil, nil, nil)
 

@@ -49,6 +49,13 @@ type signInPolicyDeps struct {
 	// authorize is treated as "deny" (fail closed).
 	authorize func(ctx context.Context, email string) bool
 
+	// signInDenial, when set, makes the sign-in policy decision in place
+	// of authorize: it returns "" when email may sign in, otherwise the
+	// denial code (see checkSignInDenial). The code is handed to
+	// auditDenied so the audit entry records the reason the decision
+	// used, without evaluating the policy a second time.
+	signInDenial func(ctx context.Context, email string) string
+
 	// activationRole computes the role an invited record receives when it
 	// activates: evaluated as a brand-new user, except a UI-promoted admin
 	// keeps its role. Optional; when nil, activation keeps the record's
@@ -81,9 +88,10 @@ type signInPolicyDeps struct {
 	syncGrants func(ctx context.Context, userID, role string) error
 
 	// auditActivated / auditDenied record invite-lifecycle audit events.
-	// Optional no-ops when nil.
+	// Optional no-ops when nil. auditDenied receives the denial code from
+	// signInDenial, or "" when the decision came from authorize.
 	auditActivated func(ctx context.Context, email, userID string)
-	auditDenied    func(ctx context.Context, email string)
+	auditDenied    func(ctx context.Context, email, denial string)
 }
 
 // signInPolicyPersistOpts controls when applyLiveSignInPolicy persists the
@@ -142,12 +150,18 @@ func applyLiveSignInPolicy(
 	}
 
 	authorized := preAuthorized
+	var denial string
 	if !authorized {
-		authorized = deps.authorize != nil && deps.authorize(ctx, user.Email)
+		if deps.signInDenial != nil {
+			denial = deps.signInDenial(ctx, user.Email)
+			authorized = denial == ""
+		} else {
+			authorized = deps.authorize != nil && deps.authorize(ctx, user.Email)
+		}
 	}
 	if !authorized {
 		if deps.auditDenied != nil {
-			deps.auditDenied(ctx, user.Email)
+			deps.auditDenied(ctx, user.Email, denial)
 		}
 		return nil, ErrAccessDenied
 	}

@@ -159,7 +159,7 @@ export async function setupHub(page: Page, options: { latencyMs?: number } = {})
 
   await installEventSourceStub(page);
   await page.addInitScript(() => {
-    window.__SCION_FEATURES__ = { 'web.terminal_workspace': true, 'web.native_chat': true };
+    window.__SCION_FEATURES__ = { 'web.native_chat': true };
   });
 
   await page.route('**/auth/me', (route) =>

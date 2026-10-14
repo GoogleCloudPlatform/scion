@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 // ptone/scion#2014: a start-type dispatch holds its broker reservation for
 // the whole dispatch leg (beginStartDispatch), and a heartbeat that reports
@@ -100,7 +100,9 @@ type startSiteCase struct {
 func directStartSite(name string, phase state.Phase, run func(t *testing.T, srv *Server, a *store.Agent) bool) startSiteCase {
 	return startSiteCase{name: name, setup: func(t *testing.T, disp *hookedStartDispatcher, async bool) (*Server, store.Store, *store.RuntimeBroker, string, func() bool) {
 		srv, s := testServer(t)
-		srv.config.AsyncAgentLaunch = async
+		if async {
+			newAsyncLaunchToggle(t, srv).set(true)
+		}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 3)
 		sfx := fmt.Sprintf("sd-%s-%v", name, async)
@@ -116,7 +118,9 @@ func directStartSite(name string, phase state.Phase, run func(t *testing.T, srv 
 func createExistingStartSite(name, action string) startSiteCase {
 	return startSiteCase{name: name, affectedByAsync: true, setup: func(t *testing.T, disp *hookedStartDispatcher, async bool) (*Server, store.Store, *store.RuntimeBroker, string, func() bool) {
 		srv, s, project := setupCreateAgentServer(t, disp)
-		srv.config.AsyncAgentLaunch = async
+		if async {
+			newAsyncLaunchToggle(t, srv).set(true)
+		}
 		srv.SetDispatcher(disp)
 		setBrokerAgentCeiling(t, s, 3)
 		ctx := context.Background()

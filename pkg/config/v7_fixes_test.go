@@ -81,10 +81,19 @@ hub:
 	projectDir := filepath.Join(tmpDir, "my-project", ".scion")
 	require.NoError(t, os.MkdirAll(projectDir, 0755))
 
+	// Loading the project migrates the global file too. The migrated value
+	// belongs to the global project: a project never inherits the global
+	// hub project ID.
 	vs, err := LoadVersionedSettings(projectDir)
 	require.NoError(t, err)
-	require.NotNil(t, vs.Hub)
-	assert.Equal(t, "legacy-grove-uuid-5678", vs.Hub.ProjectID, "grove_id should migrate into project_id")
+	if vs.Hub != nil {
+		assert.Empty(t, vs.Hub.ProjectID, "the global hub project ID does not leak into the project")
+	}
+
+	gs, err := LoadVersionedSettings(globalDir)
+	require.NoError(t, err)
+	require.NotNil(t, gs.Hub)
+	assert.Equal(t, "legacy-grove-uuid-5678", gs.Hub.ProjectID, "grove_id should migrate into project_id")
 
 	data, err := os.ReadFile(globalSettingsPath)
 	require.NoError(t, err)

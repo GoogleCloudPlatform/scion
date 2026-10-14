@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_6)
+//go:build !no_sqlite
 
 package hub
 
@@ -85,5 +85,5 @@ func TestAgentAuthRevokedBeforeHoldFault(t *testing.T) {
 	srv.Handler().ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code, "body: %s", rec.Body.String())
-	assert.Equal(t, ErrCodeUnauthorized, decodeAPIError(t, rec.Body.Bytes()).Error.Code)
+	assert.Equal(t, agentTokenRefusedBody, rec.Body.String())
 }

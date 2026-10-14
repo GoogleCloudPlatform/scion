@@ -107,12 +107,14 @@ func TestStartSafeToEvict_Precedence(t *testing.T) {
 		{"profile true over runtime false", "", api.StartOptions{Profile: "gke-evictable"}, safeToEvictPtr(true)},
 		{"profile false over unset runtime", "", api.StartOptions{Profile: "plain-pinned"}, safeToEvictPtr(false)},
 		{"unset everywhere", "", api.StartOptions{Profile: "plain"}, nil},
-		{"template true over runtime false",
+		// A template's kubernetes block is an ignored environment key
+		// (ptone/scion#4524): the settings value applies.
+		{"template true ignored, runtime false applies",
 			`{"default_harness_config": "test-harness", "kubernetes": {"safeToEvict": true}}`,
-			api.StartOptions{}, safeToEvictPtr(true)},
-		{"template false over profile true",
+			api.StartOptions{}, safeToEvictPtr(false)},
+		{"template false ignored, profile true applies",
 			`{"default_harness_config": "test-harness", "kubernetes": {"safeToEvict": false}}`,
-			api.StartOptions{Profile: "gke-evictable"}, safeToEvictPtr(false)},
+			api.StartOptions{Profile: "gke-evictable"}, safeToEvictPtr(true)},
 		{"agent config true over template false",
 			`{"default_harness_config": "test-harness", "kubernetes": {"safeToEvict": false}}`,
 			api.StartOptions{InlineConfig: &api.ScionConfig{Kubernetes: &api.KubernetesConfig{SafeToEvict: safeToEvictPtr(true)}}},

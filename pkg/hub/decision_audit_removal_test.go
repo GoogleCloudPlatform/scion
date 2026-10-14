@@ -1,7 +1,7 @@
 // Copyright 2026 Google LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -60,7 +60,7 @@ func TestDecisionAuditRemoval_NoPersistence(t *testing.T) {
 			requireNoDecisionPersistenceTable(t, cs)
 			require.NoError(t, srv.Shutdown(ctx))
 			srv.authzService.Decide(ctx, AuthzRequest{})
-			require.NoError(t, migrateTestStore(ctx, cs))
+			require.NoError(t, cs.Migrate(ctx))
 			requireNoDecisionPersistenceTable(t, cs)
 		})
 	}

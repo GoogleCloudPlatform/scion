@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && unix && (!hubshard || hubshard_6)
+//go:build !no_sqlite && unix
 
 package hub
 

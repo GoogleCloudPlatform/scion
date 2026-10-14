@@ -12,8 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !hubshard || hubshard_1
-
 package hub
 
 import (
@@ -21,7 +19,6 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
-	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -35,8 +32,9 @@ import (
 )
 
 // Admin tier A1 census guards (ptone/scion#4240). They walk every non-test
-// file of pkg/hub (this directory only: the census is pkg/hub-scoped; other
-// packages do not decide hub authority) with go/ast, like TestBypassCensus
+// file of pkg/hub and of the packages moved out of it (guardScanSubdirs:
+// code that decided hub authority before a move still does; other packages
+// do not decide hub authority) with go/ast, like TestBypassCensus
 // and TestSigningKeySource_EveryKeySourceClassified: every site that reads
 // authority outside the authorization service's clamped store must be
 // classified, decision sites must apply the test identity clamps and the
@@ -141,9 +139,9 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"access_constraint_governance.go:isConstraintAdmin:GetEffectiveGroups":                          censusClamped,
 	"access_constraint_governance.go:isConstraintAdmin:ListRoleBindingsForPrincipals":               censusClamped,
 	"access_constraint_preview.go:getBasePermissions:ListRoleBindingsForPrincipals":                 censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:GetEffectiveGroups":                              censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
-	"authorize_message.go:CheckEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
+	"authorize_message.go:checkEffectiveMembership:GetEffectiveGroups":                              censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipal":                    censusClamped,
+	"authorize_message.go:checkEffectiveMembership:ListRoleBindingsForPrincipals":                   censusClamped,
 	"authz_list_helpers.go:resolveUserOwnerProjectIDsOrError:ListRoleBindingsForPrincipal":          censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:GetEffectiveGroups":                                    censusClamped,
 	"chat_membership.go:chatMemberProjectIDs:ListRoleBindingsForPrincipal":                          censusClamped,
@@ -176,18 +174,19 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroups":          "authz: group closure fed to the clamped binding read with the user principal",
 	"authz_boundary.go:projectScopedGrants:GetEffectiveGroupsForAgent":  "authz: agent group closure fed to the clamped binding read",
 	"authz_candelegate.go:canDelegateGroupMembership:GetParentGroups":   "delegation: the target group's closure, whose bindings the actor must already hold",
+	"authz_candelegate.go:grantPermissionSet:GetParentGroups":           "delegation: the group closure whose role permissions a test admin's grant would confer (test-admin policy check; counts every binding, so it only refuses more)",
 	"authz.go:buildMembershipPathChains:GetGroupMembership":             "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetParentGroups":                "display: decision explain membership paths",
 	"authz.go:buildMembershipPathChains:GetUserGroups":                  "display: decision explain membership paths",
 	"authz.go:isCurrentHubMember:GetGroupMembership":                    "decision: hub-members membership (relationship grant); admin kinds count only while live and enabled (testAdminPrincipalLive)",
 
 	// Holder-counting guards: test identities never count.
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetEffectiveGroups":                censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:GetGroupMembers":                   censusExcludesTestIdentities,
-	"access_constraint_preview.go:resolveConstraintAdminUsers:ListRoleBindingsForScope":          censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetEffectiveGroups":                    censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:GetGroupMembers":                       censusExcludesTestIdentities,
+	"access_constraint_preview.go:resolveConstraintAdmins:ListRoleBindingsForScope":              censusExcludesTestIdentities,
 	"handlers_users_core.go:checkLastSuperAdminTx:ListRoleBindingsForScope":                      censusExcludesTestIdentities,
 	"seed.go:ReconcileSuperAdminBindings:ListRoleBindingsForPrincipal":                           censusExcludesTestIdentities,
-	"access_constraint_governance.go:adminLosesAuthority:ListRoleBindingsForPrincipals":          "guard: counts survivors among resolveConstraintAdminUsers' admin set, which counts only positively human rows (IsHumanKind)",
+	"access_constraint_governance.go:checkConstraintAdminLockout:ListRoleBindingsForScope":       "guard: counts survivors among resolveConstraintAdmins' admin set, which counts only positively human rows (IsHumanKind); a scope binding keeps an admin only when active (isBindingActive) at the check or activation time and it names that admin or one of its groups",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:GetEffectiveGroups":            "guard: scopes to lockout-check for a user removal; an extra scope only adds a check, never admits",
 	"access_constraint_governance.go:checkUserRemovalAdminLockout:ListRoleBindingsForPrincipals": "guard: scopes to lockout-check for a user removal (clamped, unwired: admin kinds never constraint admins); an extra, even expired, binding only adds a check, never admits",
 
@@ -244,6 +243,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"handlers_roles.go:listRoleBindingsForPrincipal:GetEffectiveGroups":                           "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipal":                 "display: stored bindings of a principal",
 	"handlers_roles.go:listRoleBindingsForPrincipal:ListRoleBindingsForPrincipals":                "display: stored bindings of a principal",
+	"handlers_project_visitors.go:handleListProjectVisitors:ListVisitorRoleBindings":              "display: project visitor grant listing for a holder of project.manage_visitors; federated accounts only",
 
 	// Mutation inputs: the bindings being replaced, deleted or migrated.
 	"access_constraint_governance.go:ReplaceRoleBinding:GetRoleBinding":                              "mutation: the binding being replaced",
@@ -257,6 +257,7 @@ var testAdminAuthorityReadCensus = map[string]string{
 	"project_membership_service.go:UpdateMemberRole:GetRoleBinding":                                  "mutation: the binding being changed",
 	"project_membership_service.go:findExistingDirectBindingsFromStore:ListRoleBindingsForPrincipal": "mutation: the target's existing bindings to replace",
 	"project_membership_set.go:loadProjectPrincipalBindings:ListRoleBindingsForPrincipal":            "mutation: the target's existing bindings to plan against",
+	"handlers_project_visitors.go:projectVisitorBinding:ListVisitorRoleBindings":                     "mutation: the visitor grant being changed or revoked; federated accounts only",
 	"project_fixture_purge.go:purgeFixtureProject:ListRoleBindingsForScope":                          "mutation: test identity purge, the stamped project's bindings to delete; any other owner keeps the project (project scope)",
 	"project_owner_predicates.go:projectOwnerBindingCount:ListRoleBindingsForScope":                  "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
 	"project_owner_predicates.go:usableOwnerPrincipals:ListRoleBindingsForScope":                     "guard: last-project-owner count (project scope; project bindings are not clamped for any kind)",
@@ -295,15 +296,17 @@ var testAdminAdminEmailsCensus = map[string]string{
 }
 
 // The legacy admin fast path itself (IsUnscopedLocalPlatformAdmin) lives in
-// pkg/hub/internal/principal since ptone/scion#3316 (outside this
-// pkg/hub-scoped census); TestBypassCensus tracks its pkg/hub callers.
+// pkg/hub/internal/principal since ptone/scion#3316. The census scans that
+// directory too (guardScanSubdirs), so its role check is classified below;
+// TestBypassCensus tracks its pkg/hub callers.
 //
 // testAdminRoleAdminCensus classifies every function that compares a
 // user's role (stored or claim) with admin, keyed "file:function". A
 // test_hub_admin's stored role is member and the JWT row block refuses a
 // token whose role claim is not its kind's role, so no role gate admits
-// it; the test_super_admin kind is refused until admin tier A2 classifies
-// these gates.
+// it. A test_super_admin holds the admin role: every "role gate" entry here
+// is classified allow or deny for it in testAdminRoleGatePolicy (admin tier
+// A2, TestTestAdminPolicy_RoleGateCensus).
 var testAdminRoleAdminCensus = map[string]string{
 	"admin_delegation_adoption.go:recheckDelegationAdoptionAdmin": "role gate: admin only",
 	"admin_mode.go:adminModeWebMiddleware":                        "role gate: admin only",
@@ -326,6 +329,7 @@ var testAdminRoleAdminCensus = map[string]string{
 	"handlers_users_core.go:updateUser":                           "mutation: requested new role; test identity targets are refused",
 	"seed.go:ReconcileSuperAdminBindings":                         censusExcludesTestIdentities,
 	"seed.go:backfillUserRoleBindings":                            "startup: a super-admin backfill on an admin-kind row is refused by the store (system bindings on admin kinds are issuance-only)",
+	"internal/principal/identity.go:IsUnscopedLocalPlatformAdmin": "role gate: admin only (the legacy unscoped admin fast path); a test_super_admin passes it, so each caller is classified as its own gate in testAdminRoleGatePolicy",
 }
 
 // censusFuncSite is one parsed function of pkg/hub.
@@ -368,11 +372,18 @@ func identCalls(fn *ast.FuncDecl) map[string]int {
 }
 
 // walkPkgHubFuncs calls visit for every function declaration in the
-// non-test files of pkg/hub (this directory only).
+// non-test files of pkg/hub and of its existing guardScanSubdirs (files there
+// are named by their relative path); other subdirectories are not walked.
 func walkPkgHubFuncs(t *testing.T, visit func(file string, fn *ast.FuncDecl, fset *token.FileSet)) {
 	t.Helper()
 	fset := token.NewFileSet()
-	entries, err := os.ReadDir(".")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards test-admin authority census sites.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards test-admin authority census sites.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	for _, e := range entries {
 		name := e.Name()
@@ -554,6 +565,7 @@ var testAdminActivationCensus = map[string]string{
 	"projectMembershipInputs":    "loader: ProjectMembershipEvidence filters with bindingActivationOK",
 	"projectScopedGrants":        "loader: unionScopedRoleBindingPermissions filters with bindingActivationOK",
 	"canDelegateGroupMembership": "delegation: the group's bindings are what the actor must already hold; an inactive one only makes the check stricter",
+	"grantPermissionSet":         "delegation: permissions a test admin's group grant would confer; inactive bindings are counted on purpose (one becoming active later must not slip past the test-admin policy check), so it only refuses more",
 }
 
 // TestTestAdminDecidePathsApplyActivation (DEC-4 C-b): every binding read

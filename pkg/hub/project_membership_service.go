@@ -1181,6 +1181,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	var created *store.RoleBinding
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// A change that drops access_constraint.admin takes the
+		// admin-guard lock before the project lock, the order user
+		// delete uses.
+		if roleHasConstraintAdmin(oldRoleDef) && !roleHasConstraintAdmin(newRoleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1257,6 +1265,14 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if !roleHasConstraintAdmin(newRoleDef) {
+			if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, existing); err != nil {
+				return err
+			}
+		}
+
 		// Delete old binding before creating replacement to satisfy the D4
 		// partial unique index (one binding per principal per project).
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
@@ -1307,6 +1323,9 @@ func (svc *ProjectMembershipService) UpdateMemberRole(ctx context.Context, req M
 		var gdErr *governanceDenialError
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
+		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
 		}
 		if d := storeMembersGroupPrincipalDecision(txErr); d != nil {
 			return nil, d
@@ -1367,6 +1386,13 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 	// R4 O-1: re-evaluate actor authority and re-fetch target inside the lock.
 	// R2-1: hub authority is re-evaluated inside the tx to close the TOCTOU window.
 	txErr := svc.store.WithTx(ctx, func(tx store.Store) error {
+		// Removing a constraint-admin binding takes the admin-guard lock
+		// before the project lock, the order user delete uses.
+		if roleHasConstraintAdmin(roleDef) {
+			if err := lockConstraintAdminGuard(ctx, tx); err != nil {
+				return err
+			}
+		}
 		// Acquire project-scoped membership lock.
 		if err := tx.LockProjectForMembership(ctx, req.ProjectID); err != nil {
 			return fmt.Errorf("lock project: %w", err)
@@ -1436,6 +1462,11 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 			}
 		}
 
+		// Constraint-admin lockout guard, shared with user suspend and
+		// delete.
+		if err := checkRoleBindingRemovalAdminLockout(ctx, tx, now, binding); err != nil {
+			return err
+		}
 		if err := tx.DeleteRoleBinding(ctx, req.BindingID); err != nil {
 			return err
 		}
@@ -1472,6 +1503,9 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		if errors.As(txErr, &gdErr) {
 			return nil, &gdErr.decision
 		}
+		if d := constraintAdminLockoutDecision(txErr); d != nil {
+			return nil, d
+		}
 		if txErr == store.ErrNotFound {
 			return nil, &MembershipDecision{Allowed: false, DenialCode: "not_found", Reason: "binding not found", HTTPStatus: 404}
 		}
@@ -1491,6 +1525,73 @@ func (svc *ProjectMembershipService) RemoveMember(ctx context.Context, req Membe
 		Op:      MembershipOpRemove,
 		Removed: binding,
 	}, nil
+}
+
+// RemoveVisitor revokes the visitor grant of the federated account
+// visitorID on projectID: it deletes the account's project-visitor binding
+// and writes the project_visitor_revoke audit record in one transaction,
+// and returns the deleted binding.
+//
+// The caller has already admitted the actor with project.manage_visitors
+// on the project (authorizeProjectVisitorManagement), so RemoveVisitor
+// applies no governance matrix of its own. A visitor binding confers no
+// project membership, so RemoveVisitor takes no project membership lock
+// and enqueues no membership loss check.
+//
+// Only a project-visitor binding is removed: when visitorID has no visitor
+// grant on projectID the result is store.ErrNotFound, and a binding of any
+// other role, scope or principal type is refused with
+// store.ErrVisitorBindingRefused. The caller publishes the conduit
+// authorization change once RemoveVisitor returns, as the callers of
+// RemoveMember do.
+func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectID, visitorID string) (*store.RoleBinding, error) {
+	var removed *store.RoleBinding
+	err := svc.store.WithTx(ctx, func(tx store.Store) error {
+		u, rb, err := projectVisitorBinding(ctx, tx, projectID, visitorID)
+		if err != nil {
+			return err
+		}
+		if err := requireProjectVisitorBinding(ctx, tx, rb, projectID); err != nil {
+			return err
+		}
+		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
+			return err
+		}
+		subject, err := federationSubjectOf(ctx, tx, u.ID)
+		if err != nil {
+			return err
+		}
+		if err := writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRevoke, projectID,
+			visitorAuditSummary(u, rb, subject), nil); err != nil {
+			return err
+		}
+		removed = rb
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	svc.logger.Info("project visitor removed via service",
+		"project_id", projectID, "binding_id", removed.ID, "visitor_id", visitorID)
+	return removed, nil
+}
+
+// requireProjectVisitorBinding returns store.ErrVisitorBindingRefused
+// unless rb binds the seeded project-visitor role to a user principal at
+// the scope of projectID.
+func requireProjectVisitorBinding(ctx context.Context, st store.Store, rb *store.RoleBinding, projectID string) error {
+	if rb == nil || rb.ScopeType != store.RoleScopeProject || rb.ScopeID != projectID ||
+		rb.PrincipalType != store.RoleBindingPrincipalUser {
+		return store.ErrVisitorBindingRefused
+	}
+	rd, err := st.GetRoleDefinitionByName(ctx, store.ProjectRoleVisitor, store.RoleScopeProject)
+	if err != nil {
+		return err
+	}
+	if !rd.System || rd.ConfersProjectMembership() || rb.RoleDefinitionID != rd.ID {
+		return store.ErrVisitorBindingRefused
+	}
+	return nil
 }
 
 // TransferOwnership atomically transfers project ownership from one user to
@@ -1957,6 +2058,23 @@ func lastOwnerDenial() *MembershipDecision {
 	}
 }
 
+// constraintAdminLockoutDecision converts a constraint-admin lockout
+// refusal into a MembershipDecision with the code and status the user
+// suspend and delete paths return. It returns nil for any other error.
+func constraintAdminLockoutDecision(err error) *MembershipDecision {
+	var ge *GovernanceError
+	if !errors.As(err, &ge) || ge.Code != ErrCodeConstraintAdminLockout {
+		return nil
+	}
+	return &MembershipDecision{
+		Allowed:    false,
+		DenialCode: ge.Code,
+		Reason:     ge.Message,
+		HTTPStatus: governanceErrorStatus(ge.Code),
+		Details:    ge.Details,
+	}
+}
+
 // higherProjectRole returns the higher-authority project role of the two.
 func higherProjectRole(a, b string) string {
 	if projectRoleLevel(a) >= projectRoleLevel(b) {
@@ -2169,7 +2287,7 @@ func (svc *ProjectMembershipService) MigrateMultiRoleBindings(ctx context.Contex
 }
 
 // refuseTestAdminNewOwner refuses an ownership transfer to an admin-kind
-// test identity (403), reading the kind through kindForPrincipal (the row's
+// test identity or a federated account (403), reading the kind through kindForPrincipal (the row's
 // own classification when no authorization service is wired). A read
 // error or an unrecognized kind refuses too.
 func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context, newOwner *store.User) *MembershipDecision {
@@ -2182,6 +2300,9 @@ func (svc *ProjectMembershipService) refuseTestAdminNewOwner(ctx context.Context
 	}
 	if err != nil || k.isTestAdmin() {
 		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: testAdminGranteeReasonRefused, HTTPStatus: 403}
+	}
+	if k.isFederated() {
+		return &MembershipDecision{Allowed: false, DenialCode: "forbidden", Reason: federatedGranteeReasonRefused, HTTPStatus: 403}
 	}
 	return nil
 }

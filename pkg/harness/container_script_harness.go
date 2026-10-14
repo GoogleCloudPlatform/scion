@@ -129,6 +129,16 @@ func (c *ContainerScriptHarness) GetInterruptSequence() []string {
 	return nil
 }
 
+// DeliverySpec returns the config's delivery block with defaults applied.
+func (c *ContainerScriptHarness) DeliverySpec() api.DeliverySpec {
+	return c.entry.ResolvedDelivery()
+}
+
+// ReadySpec returns the config's ready block with defaults applied.
+func (c *ContainerScriptHarness) ReadySpec() api.ReadySpec {
+	return c.entry.ResolvedReady()
+}
+
 // GetHarnessEmbedsFS returns an empty FS — container-script harnesses do not
 // own embedded files; their files live on disk in the harness-config dir.
 func (c *ContainerScriptHarness) GetHarnessEmbedsFS() (embed.FS, string) {
@@ -391,12 +401,14 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// runs and the translation must happen here on the Go side.
 	if c.entry.Harness == "claude" {
 		selectedAuth := auth.SelectedType
+		region := claudeVertexRegion(resolved.EnvVars)
 		if selectedAuth == "" {
-			// Infer vertex-ai from presence of GCP project credential, but
-			// only when no higher-priority credential is present. This
-			// matches the provisioner's AUTH order (provision.py): api-key,
-			// oauth-token, auth-file, then vertex-ai (ptone/scion#2071).
-			if auth.GoogleCloudProject != "" && !hasHigherPriorityClaudeAuth(auth) {
+			// Infer vertex-ai only when a GCP project and a region are both
+			// present and no higher-priority credential is. This matches the
+			// provisioner (provision.py): AUTH order api-key, oauth-token,
+			// auth-file, then vertex-ai (ptone/scion#2071), and vertex-ai
+			// requires the project plus a region (ptone/scion#4557).
+			if auth.GoogleCloudProject != "" && region != "" && !hasHigherPriorityClaudeAuth(auth) {
 				selectedAuth = "vertex-ai"
 			}
 		}
@@ -404,8 +416,11 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 			if proj := resolved.EnvVars["GOOGLE_CLOUD_PROJECT"]; proj != "" {
 				resolved.EnvVars["ANTHROPIC_VERTEX_PROJECT_ID"] = proj
 			}
-			if region := resolved.EnvVars["GOOGLE_CLOUD_REGION"]; region != "" {
+			if region != "" {
 				resolved.EnvVars["CLOUD_ML_REGION"] = region
+			} else {
+				// An explicit selection is kept; report what is missing.
+				slog.Warn("claude vertex-ai auth selected but no region is set; set GOOGLE_CLOUD_LOCATION or GOOGLE_CLOUD_REGION")
 			}
 			resolved.EnvVars["CLAUDE_CODE_USE_VERTEX"] = "1"
 		}
@@ -415,6 +430,21 @@ func (c *ContainerScriptHarness) ResolveAuth(auth api.AuthConfig) (*api.Resolved
 	// candidate set for the script. ResolveAuth provides the env/file material
 	// the runtime needs to project secrets into the container.
 	return resolved, nil
+}
+
+// claudeVertexRegionKeys are the region env names provision.py's vertex-ai
+// method accepts (any_of), in its precedence order.
+var claudeVertexRegionKeys = []string{"GOOGLE_CLOUD_LOCATION", "GOOGLE_CLOUD_REGION"}
+
+// claudeVertexRegion returns the first non-empty value among
+// claudeVertexRegionKeys in env, or "" when none is set.
+func claudeVertexRegion(env map[string]string) string {
+	for _, k := range claudeVertexRegionKeys {
+		if v := env[k]; v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // hasHigherPriorityClaudeAuth reports whether auth carries a Claude
@@ -571,6 +601,37 @@ func (c *ContainerScriptHarness) Provision(ctx context.Context, agentName, agent
 
 	if err := writeHookWrapper(agentHome, bundleContainerPath); err != nil {
 		return fmt.Errorf("stage lifecycle hook wrapper: %w", err)
+	}
+	return nil
+}
+
+// SetManifestAgentWorkspace records containerWorkspace as agent_workspace in
+// the manifest staged under agentHome. The provisioner runs inside the
+// container, where the workspace is mounted at a container path (for example
+// /repo-root/<relative path> for a worktree under the repo root) rather than
+// at the host path Provision receives, so Start calls this once the
+// container-side workspace is known. A missing manifest (no container-script
+// bundle staged) is not an error.
+func SetManifestAgentWorkspace(agentHome, containerWorkspace string) error {
+	manifestPath := filepath.Join(agentHome, ".scion", "harness", "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read manifest.json: %w", err)
+	}
+	var manifest ProvisionManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest.json: %w", err)
+	}
+	manifest.AgentWorkspace = containerWorkspace
+	manifestData, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	if err := os.WriteFile(manifestPath, manifestData, 0644); err != nil {
+		return fmt.Errorf("write manifest.json: %w", err)
 	}
 	return nil
 }

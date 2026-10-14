@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // Admission and release coverage for every site that reserves or releases a
 // max_agents_per_broker slot (ptone/scion#1978).

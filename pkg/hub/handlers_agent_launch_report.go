@@ -28,9 +28,11 @@ import (
 // /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch. `claim` and
 // `checkpoint` are sent synchronously and gate the launch (§3.8.2); `progress`
 // covers step changes and the keepalive. Agent is present only on a
-// `succeeded` report; only the subset of it store.LaunchReport documents
-// (Runtime) is applied here — the full echo (exposed ports, applied config,
-// etc.) is not, since no broker sends this report yet.
+// `succeeded` report; of its fields the hub applies the broker-resolved
+// config (template, harness config and auth, image, profile, runtime: see
+// store.ApplyBrokerAgentConfig), WorkspacePlacement and RunID (see
+// handleAgentLaunchReport). The rest of the echo (phase, activity, container
+// status, etc.) is not applied.
 type AgentLaunchReport struct {
 	LaunchID   string           `json:"launchId"`
 	InstanceID string           `json:"instanceId"`
@@ -40,6 +42,7 @@ type AgentLaunchReport struct {
 	Step       string           `json:"step,omitempty"`
 	Message    string           `json:"message,omitempty"`
 	ErrorCode  string           `json:"errorCode,omitempty"`
+	Cause      string           `json:"cause,omitempty"` // failed runtime_error only: an api.BrokerRuntimeCause code
 	Agent      *RemoteAgentInfo `json:"agent,omitempty"` // succeeded only
 	At         time.Time        `json:"at,omitzero"`
 }
@@ -78,6 +81,21 @@ func hasControlCharacter(s string) bool {
 		}
 	}
 	return false
+}
+
+// launchReportCause returns the cause the hub stores for report r
+// (ptone/scion#4666): r.Cause when r is a failed report whose code is
+// runtime_error (the code a cause qualifies, as on a synchronous create's
+// details.cause) and r.Cause is one of the fixed relayable codes
+// (relayableRuntimeCause), else "". An older broker sends no cause, and a
+// cause this hub does not know is dropped rather than rejected: rejecting
+// the terminal report would leave the broker retrying it and skipping its
+// cleanup.
+func launchReportCause(r AgentLaunchReport) string {
+	if r.State != store.LaunchReportStateFailed || r.ErrorCode != ErrCodeRuntimeError {
+		return ""
+	}
+	return relayableRuntimeCause(r.Cause)
 }
 
 // handleAgentLaunchReport implements the broker->Hub launch report endpoint
@@ -131,9 +149,21 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 		Step:       sanitizeFailureReason(req.Step),
 		Message:    sanitizeFailureReason(req.Message),
 		ErrorCode:  sanitizeFailureReason(req.ErrorCode),
+		Cause:      launchReportCause(req),
+	}
+	if req.Cause != "" && sr.Cause == "" {
+		// The raw cause is untrusted broker text, so only its length is
+		// logged, with the sanitized code it came with.
+		s.agentLifecycleLog.Debug("Launch report: dropped a cause the hub does not relay",
+			"agent_id", agentID, "broker_id", brokerID,
+			"error_code", sr.ErrorCode, "cause_len", len(req.Cause))
 	}
 	if req.Agent != nil {
-		sr.Runtime = req.Agent.Runtime
+		// The broker-resolved config is applied in the store's launch
+		// transaction with the same rules (and the same conversion) as a
+		// synchronous dispatch (ptone/scion#4818), so a report the launch
+		// fencing rejects writes none of it.
+		sr.AgentConfig = brokerAgentConfigOf(req.Agent)
 	}
 
 	answer, updated, err := s.store.ApplyLaunchReport(ctx, agentID, brokerID, sr)
@@ -175,18 +205,17 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	// An applied succeeded report settles the run the launch started
 	// (ptone/scion#3176), as a synchronous dispatch that lands does
 	// (adoptBrokerRunID): the broker's Start removed every earlier entry of
-	// the name that was not running, so the previous runs are cleared (a
-	// start that found the agent running reports that entry's run, which
-	// the keyed swap does not match). The same-value swap is keyed on the
-	// run the broker reports it labelled, so a report for an older run
-	// never clears a newer run's list. A broker that reports no run ID gets
+	// the name that was not running, so the previous runs are cleared. A
+	// start that found the agent running keeps that entry and reports its
+	// run, which the hub then adopts (ptone/scion#2965), so a later delete
+	// names the run the runtime holds. A broker that reports no run ID gets
 	// no clear; a later delete then repeats the previous runs as run-scoped
 	// 404s. Only an applied report settles: a completed answer (a repeated
 	// terminal report, or the hub had already resolved the launch) is
 	// deliberately not settled; the conservative cost is extra 404s on a
 	// later delete.
 	if sr.State == store.LaunchReportStateSucceeded && answer.HTTPStatus == 0 && answer.Result == store.LaunchReportResultApplied {
-		s.settleLaunchedRun(ctx, agentID, req.Agent)
+		s.settleLaunchedRun(ctx, &updated, req.Agent)
 	}
 
 	if answer.HTTPStatus != 0 {
@@ -207,22 +236,53 @@ func (s *Server) handleAgentLaunchReport(w http.ResponseWriter, r *http.Request,
 	}
 }
 
-// settleLaunchedRun clears the agent's previous runs when info names the run
-// the launch started and the row still records that run (see the caller).
-// Best-effort: a failed write is logged and leaves the list, which costs a
-// later delete only extra 404s.
-func (s *Server) settleLaunchedRun(ctx context.Context, agentID string, info *RemoteAgentInfo) {
+// settleLaunchedRun settles the run of a launch whose succeeded report the
+// store applied (see the caller). row is the agent as that report's
+// transaction left it, so row.RunID is the run the hub recorded for the
+// launch when the report applied. The write is one guarded swap from
+// row.RunID to the run the broker reports (store.AdoptAgentRunID), which
+// also clears the previous runs:
+//   - the same run: a same-value swap that only clears the previous runs;
+//   - another run: the broker kept a running entry of the name and reports
+//     its run (agent.AgentManager.Start returns a running entry when the
+//     start has no task), and the hub adopts it (ptone/scion#2965).
+//
+// The swap is checked in the same statement as the write. It never
+// overwrites a run recorded after the report applied (keyed on row.RunID,
+// and on row.RunIDUpdatedAt, so a run that changed and changed back is not
+// matched either), and it writes nothing while the row is soft-deleted or a
+// delete holds it, so a delete's claim snapshot never misses the settled
+// run. A row with no RunIDUpdatedAt (its run has not changed since the
+// column was added, so no dispatch recorded this launch's run) and a report
+// with no run ID change nothing. Best-effort: a failed write is logged and
+// leaves the row as it was, which costs a later delete only a run-scoped
+// refusal or extra 404s. On a swap, row's RunID and PreviousRunIDs are
+// updated to match.
+func (s *Server) settleLaunchedRun(ctx context.Context, row *store.Agent, info *RemoteAgentInfo) {
 	if info == nil || info.RunID == "" {
 		return
 	}
-	swapped, err := s.store.CompareAndSwapAgentRunID(ctx, agentID, info.RunID, info.RunID)
+	if row.RunIDUpdatedAt == nil {
+		s.agentLifecycleLog.Debug("Launch report: the agent's run has no recorded change time; not settling the launched run",
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
+		return
+	}
+	swapped, err := s.store.AdoptAgentRunID(ctx, row.ID, row.RunID, info.RunID, *row.RunIDUpdatedAt)
 	if err != nil {
 		s.agentLifecycleLog.Warn("Launch report: failed to settle the launched run",
-			"agent_id", agentID, "run_id", info.RunID, "error", err)
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID, "error", err)
 		return
 	}
 	if !swapped {
-		s.agentLifecycleLog.Debug("Launch report: another run is recorded; not settling the launched run",
-			"agent_id", agentID, "run_id", info.RunID)
+		s.agentLifecycleLog.Debug("Launch report: another run is recorded or a delete holds the agent; not settling the launched run",
+			"agent_id", row.ID, "run_id", row.RunID, "broker_run_id", info.RunID)
+		return
+	}
+	minted := row.RunID
+	row.RunID = info.RunID
+	row.PreviousRunIDs = nil
+	if info.RunID != minted {
+		s.agentLifecycleLog.Info("Launch report: adopted the broker's run ID",
+			"agent_id", row.ID, "agent", row.Slug, "minted_run_id", minted, "run_id", info.RunID)
 	}
 }

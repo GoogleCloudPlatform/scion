@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -24,7 +24,6 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
-	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -228,27 +227,4 @@ func TestGCPIdentityStartRefusalText(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, ErrCodeValidationError, code)
 	assert.Contains(t, msg, errGCPSANotAvailable.Error())
-}
-
-// --- identity_mode_unsupported ---
-
-func TestIdentityModeUnsupported_BlockDefaultOnKubernetesProject(t *testing.T) {
-	srv, s := testServer(t)
-	project := createTestProjectForSettings(t, s)
-	createTestBroker(t, s, "identity-mode-k8s-broker-"+t.Name(), "k8s-broker", "",
-		[]store.BrokerProfile{{Name: "default", Type: "kubernetes", Available: true}}, nil)
-	require.NoError(t, s.AddProjectProvider(t.Context(), &store.ProjectProvider{
-		ProjectID:  project.ID,
-		BrokerID:   tid("identity-mode-k8s-broker-" + t.Name()),
-		BrokerName: "k8s-broker",
-		Status:     store.BrokerStatusOnline,
-	}))
-
-	rec := doRequest(t, srv, http.MethodPut, "/api/v1/projects/"+project.ID+"/settings",
-		hubclient.ProjectSettings{DefaultGCPIdentityMode: "block"})
-	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
-	apiErr := decodeTargetAPIError(t, rec)
-	assert.Equal(t, ErrCodeIdentityModeUnsupported, apiErr.Code)
-	assert.Equal(t, "default GCP identity mode 'block' is not available for a Kubernetes-bound project; "+
-		"choose 'passthrough' or 'assign' instead", apiErr.Message, "the text is unchanged")
 }

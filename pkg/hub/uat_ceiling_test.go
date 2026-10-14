@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -314,7 +314,7 @@ func TestUATCeiling_LegacyRowThroughValidateToken(t *testing.T) {
 	// already ran Migrate once, before this row existed, and recorded
 	// completion.
 	require.NoError(t, s.DeleteHubSetting(ctx, "migration_uat_ceiling_backfill_v1"))
-	require.NoError(t, migrateTestStore(ctx, s))
+	require.NoError(t, s.Migrate(ctx))
 
 	stored, err = s.GetUserAccessToken(ctx, tokenID)
 	require.NoError(t, err)

@@ -248,9 +248,8 @@ const (
 // signInDenialAuditReason returns the audit reason for a denied sign-in,
 // derived from the checkSignInDenial code so the record says why the
 // sign-in was denied. A code without a mapped reason is recorded as
-// itself. accessMode is used only when the code is empty (the caller
-// was denied but the policy now allows the email, e.g. it changed
-// between the check and the audit).
+// itself. accessMode is used only when the code is empty (the decision
+// came from a bool-only authorize check that returns no code).
 func signInDenialAuditReason(denial, accessMode string) string {
 	switch denial {
 	case signInDeniedDomain:
@@ -512,7 +511,7 @@ func (s *Server) handleAuthRefresh(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: every path that provisions a user or
 	// mints/re-mints a hub token checks this, including an already-issued
 	// refresh token for the configured service account.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 			"invalid refresh token", nil)
 		return
@@ -640,7 +639,7 @@ func (s *Server) handleAuthValidate(w http.ResponseWriter, r *http.Request) {
 	// See isReservedPlatformIdentity: a token for the reserved identity must
 	// not be reported valid, matching the same token's rejection at the
 	// UnifiedAuthMiddleware choke point.
-	if isReservedPlatformIdentity(claims.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(claims.Email) {
 		writeJSON(w, http.StatusOK, AuthValidateResponse{Valid: false})
 		return
 	}
@@ -1571,11 +1570,12 @@ var ErrUserSuspended = errors.New("user account is suspended")
 // authorized, or ErrUserSuspended when the user is suspended.
 // On success it also ensures hub-members group membership.
 func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*store.User, error) {
-	// The hub does not create or authenticate user accounts for its
-	// configured transport service account. Checked before authorization and
+	// The hub does not create or authenticate user accounts for a transport
+	// identity (its configured transport service account or a proxy driver
+	// principal). Checked before authorization and
 	// before find-or-create so this covers both a brand-new identity and an
 	// already-existing user row for that email.
-	if isReservedPlatformIdentity(info.Email, s.platformAuthSA) {
+	if s.isTransportIdentity(info.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is created only by the issuance
@@ -1649,7 +1649,8 @@ func (s *Server) provisionUser(ctx context.Context, info *ExternalUserInfo) (*st
 // inline logic field for field.
 func (s *Server) signInPolicyDeps() signInPolicyDeps {
 	return signInPolicyDeps{
-		authorize: s.isUserAuthorized,
+		authorize:    s.isUserAuthorized,
+		signInDenial: s.signInDenial,
 		activationRole: func(ctx context.Context, email, currentRole, userID string) string {
 			// The stored role on an invited row is a placeholder (invites
 			// carry no role), so evaluate as a brand-new user: admin if in
@@ -1681,7 +1682,8 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		auditActivated: func(ctx context.Context, email, userID string) {
 			LogInviteAudit(ctx, s.auditLogger, InviteAuditUserActivated, email, "", userID, email, nil)
 		},
-		// auditDenied records the same denial reason provisionUser does.
+		// auditDenied records the denial code the decision returned (see
+		// signInDenial above), mapped the same way provisionUser maps it.
 		// provisionUser calls the helper with preAuthorized=true, so this
 		// only fires from a caller (the resolver) that passes
 		// preAuthorized=false and fails the authorize check — provisionUser
@@ -1696,9 +1698,9 @@ func (s *Server) signInPolicyDeps() signInPolicyDeps {
 		// capture, an unauthorized caller retrying is expected to stop or be
 		// blocked at a layer above this one, and de-duplicating here would
 		// mean dropping legitimate repeat-denial records.
-		auditDenied: func(ctx context.Context, email string) {
+		auditDenied: func(ctx context.Context, email, denial string) {
 			LogInviteAuditFailure(ctx, s.auditLogger, InviteAuditLoginDenied, email,
-				signInDenialAuditReason(s.signInDenial(ctx, email), s.UserAccessMode()))
+				signInDenialAuditReason(denial, s.UserAccessMode()))
 		},
 	}
 }
@@ -1982,7 +1984,7 @@ func (s *Server) handleInviteRedeem(w http.ResponseWriter, r *http.Request) {
 		"email", user.Email(),
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRedeemed, user.Email(), invite.ID, user.ID(), user.Email(), nil)
-	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID, invite.CodePrefix)
+	s.events.PublishInviteChanged(r.Context(), "redeemed", invite.ID)
 	s.events.PublishAllowListChanged(r.Context(), "added", user.Email())
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

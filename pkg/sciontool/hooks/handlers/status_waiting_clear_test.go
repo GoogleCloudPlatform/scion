@@ -10,13 +10,13 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"testing"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/hooks/dialects"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -231,11 +231,9 @@ func TestStatusWaitingClear_ModelEndKeepsNotificationWaiting(t *testing.T) {
 // Other harnesses whose permission prompt maps to notification clear the
 // same way on their tool-end event.
 func TestStatusWaitingClear_OtherDialects(t *testing.T) {
-	_, file, _, _ := runtime.Caller(0)
-	root := filepath.Clean(filepath.Join(filepath.Dir(file), "../../../.."))
 	loadMapping := func(t *testing.T, name string) hooks.Dialect {
 		t.Helper()
-		md, err := dialects.LoadMappingDialect(filepath.Join(root, "harnesses", name, "dialect.yaml"))
+		md, err := dialects.LoadMappingDialect(testutil.HarnessDialectPath(t, name))
 		require.NoError(t, err)
 		return md
 	}

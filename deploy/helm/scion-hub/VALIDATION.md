@@ -219,8 +219,9 @@ exist outside a cluster.
 
 - [ ] With the Filestore share mounted, make the hub write to it (start it, or
       `touch` a file under the mounted path as the hub's uid) and confirm
-      `ls -n` on the share shows the new files owned by the numeric `nfs.uid` /
-      `nfs.gid` configured in `values.yaml` -- not `0:0`, and not `root:root`.
+      `ls -n` on the share shows the new files owned by the numeric
+      `hub.securityContext.runAsUser` / `runAsGroup` (rendered as the settings
+      `nfs.uid` / `nfs.gid`) -- not `0:0`, and not `root:root`.
 
 ### Configuration intake (`settings.yaml`)
 

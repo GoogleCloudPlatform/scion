@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"time"
 
+	"entgo.io/ent/dialect"
 	"github.com/google/uuid"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
@@ -371,11 +372,26 @@ func (s *DelegationEdgeStore) ListAllDelegationEdgesForDelegate(ctx context.Cont
 }
 
 // DeactivateDelegationEdgeGuarded deactivates edgeID with cause and opID when
-// it is active and satisfies guard. Every guard predicate, including the
-// updated time, is part of the UPDATE's WHERE clause, so a concurrent change
-// between the caller's read and the write affects zero rows rather than
-// deactivating a changed edge. The existence read only distinguishes
-// ErrNotFound from an unmet precondition. A guard with both Unrecorded and
+// it is active and satisfies guard. Every guard predicate is part of the
+// UPDATE's WHERE clause, so a concurrent change between the store's read and
+// its write affects zero rows rather than deactivating a changed edge. This
+// holds inside and outside WithTx.
+//
+// guard.UpdatedAt is compared as an instant, not as stored text: on SQLite
+// the updated column is TEXT, and one instant can be stored in several forms
+// (an offset other than Z, Go's time.String layout) that a bound time.Time
+// never equals. The store therefore reads the row, refuses (false, nil, no
+// UPDATE) when it is inactive or its updated instant differs from
+// guard.UpdatedAt, and otherwise puts the exact stored value it read into the
+// WHERE as a compare-and-swap: on SQLite the raw text, bound as a string
+// against the column (rawStoredText, storedTextEQ; shared with
+// TemplateStore.SetTemplateAgentConfig); on Postgres the timestamptz value,
+// which compares as an instant. The raw read runs before the typed read, on
+// the same (possibly transaction-bound) client, so any ent write between
+// them bumps updated and changes the stored value, and the UPDATE matches no
+// row.
+//
+// A missing edge returns ErrNotFound. A guard with both Unrecorded and
 // Recorded set, an empty cause or an empty opID returns ErrInvalidInput.
 func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Context, edgeID string, guard store.DelegationEdgeDeactivateGuard, cause store.EdgeDeactivationCause, opID string) (bool, error) {
 	if guard.Unrecorded && guard.Recorded {
@@ -388,7 +404,17 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 	if err != nil {
 		return false, err
 	}
-	if _, err := s.client.DelegationEdge.Get(ctx, uid); err != nil {
+	pg := s.client.Driver().Dialect() == dialect.Postgres
+	var rawUpdated string
+	rawFound := false
+	if guard.UpdatedAt != nil && !pg {
+		rawUpdated, rawFound, err = rawStoredText(ctx, s.client.Driver(), delegationedge.Table, delegationedge.FieldID, delegationedge.FieldUpdated, uid)
+		if err != nil {
+			return false, err
+		}
+	}
+	row, err := s.client.DelegationEdge.Get(ctx, uid)
+	if err != nil {
 		return false, mapError(err)
 	}
 	preds := []predicate.DelegationEdge{
@@ -396,7 +422,17 @@ func (s *DelegationEdgeStore) DeactivateDelegationEdgeGuarded(ctx context.Contex
 		delegationedge.ActiveEQ(true),
 	}
 	if guard.UpdatedAt != nil {
-		preds = append(preds, delegationedge.UpdatedEQ(*guard.UpdatedAt))
+		if !row.Active || !row.Updated.Equal(*guard.UpdatedAt) {
+			return false, nil
+		}
+		if pg {
+			preds = append(preds, delegationedge.UpdatedEQ(row.Updated))
+		} else {
+			if !rawFound {
+				return false, nil
+			}
+			preds = append(preds, predicate.DelegationEdge(storedTextEQ(delegationedge.FieldUpdated, rawUpdated)))
+		}
 	}
 	if guard.Unrecorded {
 		preds = append(preds,

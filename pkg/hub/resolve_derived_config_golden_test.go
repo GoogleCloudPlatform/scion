@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -102,9 +102,10 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 		Scope:                store.TemplateScopeGlobal,
 		Status:               store.TemplateStatusActive,
 		ContentHash:          "tmpl-golden-hash-v1",
+		// The template's image and env are environment keys the hub no
+		// longer copies (ptone/scion#4222); they must not appear below.
 		Config: &store.TemplateConfig{
 			Image: "golden-template-image:v1",
-			Model: "extra-large",
 			Env: map[string]string{
 				"TEMPLATE_ENV_KEY": "template-value",
 			},
@@ -123,6 +124,10 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 			Workspace:   "/tmp/golden-workspace",
 			CreatorName: "dev@localhost",
 			AgentRole:   "baseline",
+			// The template model rung runs in deriveAgentConfig, before
+			// this function (ptone/scion#4222); start from its result so
+			// the alias resolution below is still exercised.
+			Model: "extra-large",
 		},
 	}
 
@@ -135,10 +140,6 @@ func TestResolveDerivedConfig_GoldenCreatePath(t *testing.T) {
 	require.NoError(t, err)
 
 	want := fmt.Sprintf(`{
-  "image": "golden-template-image:v1",
-  "env": {
-    "TEMPLATE_ENV_KEY": "template-value"
-  },
   "model": "concrete-model-x",
   "workspace": "/tmp/golden-workspace",
   "gitClone": {

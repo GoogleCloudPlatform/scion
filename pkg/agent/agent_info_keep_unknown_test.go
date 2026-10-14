@@ -97,9 +97,6 @@ func TestUpdateSavedAgentInfoKeepsUnknownFields(t *testing.T) {
 	if err := UpdateAgentConfig(agentName, projectDir, "stopped", "docker", "fast"); err != nil {
 		t.Fatalf("UpdateAgentConfig() error = %v", err)
 	}
-	if err := SetSavedRunID(agentName, projectDir, "run-1"); err != nil {
-		t.Fatalf("SetSavedRunID() error = %v", err)
-	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -110,7 +107,7 @@ func TestUpdateSavedAgentInfoKeepsUnknownFields(t *testing.T) {
 	if err := json.Unmarshal(data, &info); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if info.Phase != "stopped" || info.Runtime != "docker" || info.Profile != "fast" || info.RunID != "run-1" {
+	if info.Phase != "stopped" || info.Runtime != "docker" || info.Profile != "fast" {
 		t.Errorf("known fields not updated: %+v", info)
 	}
 	if info.Name != "keep-agent" || info.Activity != "waiting_for_input" {
@@ -341,11 +338,24 @@ func TestAgentInfoKnownKeySet(t *testing.T) {
 			t.Errorf("isKnownAgentInfoKey(%q) = true, want false", k)
 		}
 	}
-	got := slices.Clone(jsonFieldNames(typ))
+	// jsonFieldNames builds a fresh slice on every call, so sorting it in
+	// place is safe.
+	got := jsonFieldNames(typ)
 	slices.Sort(got)
 	wantSorted := slices.Clone(want)
 	slices.Sort(wantSorted)
 	if !slices.Equal(got, wantSorted) {
-		t.Errorf("jsonFieldNames(api.AgentInfo) has %d names, want %d:\ngot  %v\nwant %v", len(got), len(wantSorted), got, wantSorted)
+		var missing, extra []string
+		for _, k := range wantSorted {
+			if !slices.Contains(got, k) {
+				missing = append(missing, k)
+			}
+		}
+		for _, k := range got {
+			if !slices.Contains(wantSorted, k) {
+				extra = append(extra, k)
+			}
+		}
+		t.Errorf("jsonFieldNames(api.AgentInfo) differs from the exported JSON field names: missing %v, extra %v\ngot  %v\nwant %v", missing, extra, got, wantSorted)
 	}
 }

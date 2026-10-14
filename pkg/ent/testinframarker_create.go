@@ -62,6 +62,12 @@ func (_c *TestInfraMarkerCreate) SetAttested(v json.RawMessage) *TestInfraMarker
 	return _c
 }
 
+// SetWebSessionKey sets the "web_session_key" field.
+func (_c *TestInfraMarkerCreate) SetWebSessionKey(v []byte) *TestInfraMarkerCreate {
+	_c.mutation.SetWebSessionKey(v)
+	return _c
+}
+
 // SetID sets the "id" field.
 func (_c *TestInfraMarkerCreate) SetID(v string) *TestInfraMarkerCreate {
 	_c.mutation.SetID(v)
@@ -194,6 +200,10 @@ func (_c *TestInfraMarkerCreate) createSpec() (*TestInfraMarker, *sqlgraph.Creat
 		_spec.SetField(testinframarker.FieldAttested, field.TypeJSON, value)
 		_node.Attested = value
 	}
+	if value, ok := _c.mutation.WebSessionKey(); ok {
+		_spec.SetField(testinframarker.FieldWebSessionKey, field.TypeBytes, value)
+		_node.WebSessionKey = value
+	}
 	return _node, _spec
 }
 
@@ -277,6 +287,9 @@ func (u *TestInfraMarkerUpsertOne) UpdateNewValues() *TestInfraMarkerUpsertOne {
 		}
 		if _, exists := u.create.mutation.Attested(); exists {
 			s.SetIgnore(testinframarker.FieldAttested)
+		}
+		if _, exists := u.create.mutation.WebSessionKey(); exists {
+			s.SetIgnore(testinframarker.FieldWebSessionKey)
 		}
 	}))
 	return u
@@ -506,6 +519,9 @@ func (u *TestInfraMarkerUpsertBulk) UpdateNewValues() *TestInfraMarkerUpsertBulk
 			}
 			if _, exists := b.mutation.Attested(); exists {
 				s.SetIgnore(testinframarker.FieldAttested)
+			}
+			if _, exists := b.mutation.WebSessionKey(); exists {
+				s.SetIgnore(testinframarker.FieldWebSessionKey)
 			}
 		}
 	}))

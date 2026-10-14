@@ -120,6 +120,7 @@ const (
 	ErrCodeRuntimeTargetChanged             = "runtime_target_changed"               // 409
 	ErrCodeRuntimeBrokerNotFlat             = "runtime_broker_not_flat"              // 409
 	ErrCodeRuntimeBrokerNameConflict        = "runtime_broker_name_conflict"         // 409
+	ErrCodeRuntimeTargetInUse               = "runtime_target_in_use"                // 409
 	ErrCodeRuntimeTargetMoveUnsupported     = "runtime_target_move_unsupported"      // 409
 	ErrCodeRuntimeTargetPinStale            = "runtime_target_pin_stale"             // 409
 	ErrCodeRuntimeBrokerNotLinked           = "runtime_broker_not_linked"            // 422
@@ -131,6 +132,13 @@ const (
 	// delete blocks starting the agent (design ptone/scion#2483 §2.1
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
+
+	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
+	// submit whose synchronous dispatch to the runtime broker ended without
+	// an answer (the dispatch deadline, or no response to a sent request).
+	// The agent is kept, not rolled back: the broker may still be starting
+	// it. Details carry agentId and phase (ptone/scion#4817).
+	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
 
 	// Conversation resolution error codes (Tranche G read-switch)
 

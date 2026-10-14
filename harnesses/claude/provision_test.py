@@ -492,6 +492,165 @@ class ProvisionEffortWiringTest(unittest.TestCase):
         self.assertIn("ANTHROPIC_MODEL", env)  # sanity: the overlay was written
 
 
+def _select_with_candidates(home: str, candidates: dict[str, Any]):
+    bundle = os.path.join(home, ".scion", "harness")
+    os.makedirs(os.path.join(bundle, "inputs"), exist_ok=True)
+    with open(os.path.join(bundle, "inputs", "auth-candidates.json"), "w", encoding="utf-8") as f:
+        json.dump(candidates, f)
+    ctx = make_ctx(home)
+    ctx.info = lambda *a, **k: None
+    return ctx, ctx.select_auth(provision.AUTH)
+
+
+class VertexAuthSelectionTest(unittest.TestCase):
+    # config.yaml's vertex-ai region group accepts CLOUD_ML_REGION; the
+    # provisioner must accept it too (ptone/scion#4623).
+    def test_explicit_vertex_ai_accepts_cloud_ml_region(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "CLOUD_ML_REGION"],
+            })
+            self.assertEqual(resolved.method, "vertex-ai")
+            self.assertEqual(resolved.env_key, "CLOUD_ML_REGION")
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(env["CLOUD_ML_REGION"], "${CLOUD_ML_REGION}")
+        self.assertEqual(env["CLAUDE_CODE_USE_VERTEX"], "1")
+
+    def test_location_wins_over_region_placeholder_fallback(self) -> None:
+        # Both keys present, no staged secrets: the LOCATION key is chosen and
+        # the ${VAR} placeholder fallback is kept (ptone/scion#4719). The
+        # process env is cleared: the conflict check reads it for these keys.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            GOOGLE_CLOUD_LOCATION=None, GOOGLE_CLOUD_REGION=None,
+        ):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"],
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
+        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(env["ANTHROPIC_VERTEX_PROJECT_ID"], "${GOOGLE_CLOUD_PROJECT}")
+        self.assertEqual(warnings, [])
+
+    def test_location_and_region_differ_location_wins_with_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            secrets = os.path.join(tmp, "secrets")
+            os.makedirs(secrets)
+            paths = {}
+            for key, value in (
+                ("GOOGLE_CLOUD_PROJECT", "proj-1"),
+                ("GOOGLE_CLOUD_REGION", "us-central1"),
+                ("GOOGLE_CLOUD_LOCATION", "us-east5"),
+            ):
+                paths[key] = os.path.join(secrets, key)
+                with open(paths[key], "w", encoding="utf-8") as f:
+                    f.write(value)
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": list(paths),
+                "env_secret_files": paths,
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
+        self.assertEqual(env["CLOUD_ML_REGION"], "us-east5")
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
+    def _env_only_overlay(self, location: str | None, region: str | None):
+        # Both keys are candidates with no staged secrets, so Claude reads the
+        # env values at runtime through the ${VAR} placeholder.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            GOOGLE_CLOUD_LOCATION=location, GOOGLE_CLOUD_REGION=region,
+        ):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION", "GOOGLE_CLOUD_LOCATION"],
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        return env, warnings
+
+    def test_env_only_location_and_region_differ_warns(self) -> None:
+        # The conflict check reads the env, as Claude does (ptone/scion#4719).
+        env, warnings = self._env_only_overlay("us-east5", "us-central1")
+        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_LOCATION}")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("GOOGLE_CLOUD_REGION", warnings[0])
+
+    def test_env_only_location_and_region_equal_no_warning(self) -> None:
+        _, warnings = self._env_only_overlay("us-east5", "us-east5")
+        self.assertEqual(warnings, [])
+
+    def test_env_only_single_key_no_warning(self) -> None:
+        for location, region in (("us-east5", None), (None, "us-central1"), ("us-east5", "")):
+            with self.subTest(location=location, region=region):
+                _, warnings = self._env_only_overlay(location, region)
+                self.assertEqual(warnings, [])
+
+    def test_secret_file_only_keys_differ_warns(self) -> None:
+        # Keys staged only as secret files (not in env_vars), e.g. recorded
+        # secrets merged on restart: selection and _resolve read the files,
+        # so the conflict check must too. Non-candidate env is not read.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            GOOGLE_CLOUD_LOCATION="us-east5", GOOGLE_CLOUD_REGION="us-east5",
+        ):
+            secrets = os.path.join(tmp, "secrets")
+            os.makedirs(secrets)
+            paths = {}
+            for key, value in (
+                ("GOOGLE_CLOUD_PROJECT", "proj-1"),
+                ("GOOGLE_CLOUD_REGION", "us-central1"),
+                ("GOOGLE_CLOUD_LOCATION", "europe-west4"),
+            ):
+                paths[key] = os.path.join(secrets, key)
+                with open(paths[key], "w", encoding="utf-8") as f:
+                    f.write(value)
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": [],
+                "env_secret_files": paths,
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(resolved.env_key, "GOOGLE_CLOUD_LOCATION")
+        self.assertEqual(env["CLOUD_ML_REGION"], "europe-west4")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("'europe-west4'", warnings[0])
+        self.assertIn("'us-central1'", warnings[0])
+
+    def test_non_candidate_env_not_read(self) -> None:
+        # A stale process-env value for a key that is neither a candidate nor
+        # a staged secret is not part of resolution and must not warn.
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp), env_vars(
+            GOOGLE_CLOUD_LOCATION="us-east5", GOOGLE_CLOUD_REGION="us-central1",
+        ):
+            ctx, resolved = _select_with_candidates(tmp, {
+                "explicit_type": "vertex-ai",
+                "env_vars": ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_REGION"],
+            })
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env = provision._build_env_overlay(ctx, resolved)
+        self.assertEqual(env["CLOUD_ML_REGION"], "${GOOGLE_CLOUD_REGION}")
+        self.assertEqual(warnings, [])
+
+    def test_explicit_vertex_ai_without_region_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp, temporary_home(tmp):
+            with self.assertRaises(scion_harness.ProvisionError):
+                _select_with_candidates(tmp, {
+                    "explicit_type": "vertex-ai",
+                    "env_vars": ["GOOGLE_CLOUD_PROJECT"],
+                })
+
+
 class ConfigYamlTest(unittest.TestCase):
     def test_config_yaml_does_not_pin_anthropic_model(self) -> None:
         """config.yaml env entries land in the container env and would win.

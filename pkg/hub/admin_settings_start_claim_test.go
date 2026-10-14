@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -68,11 +66,20 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 		`{"server": {"hub": {"start_claim_lease_ttl": "soon"}}}`,
 		`{"server": {"hub": {"start_claim_lease_ttl": "10s"}}}`,
 		`{"server": {"hub": {"start_max_duration": "5m"}}}`,
-		`{"server": {"hub": {"start_unconfirmed_hold": "10m"}}}`,
 		`{"server": {"hub": {"start_create_unconfirmed_hold": "20m"}}}`,
 	} {
 		if rr := putStartClaimConfigDB(t, srv, ops, body); rr.Code != http.StatusUnprocessableEntity {
 			t.Errorf("%s: status %d, want 422: %s", body, rr.Code, rr.Body.String())
+		}
+	}
+	// A hold an earlier release accepted, now below the minimum, still
+	// saves: it is raised to the minimum when applied (ptone/scion#4817).
+	for _, body := range []string{
+		`{"server": {"hub": {"start_unconfirmed_hold": "13m"}}}`,
+		`{"server": {"hub": {"start_create_unconfirmed_hold": "5m"}}}`,
+	} {
+		if rr := putStartClaimConfigDB(t, srv, ops, body); rr.Code != http.StatusOK {
+			t.Errorf("%s: status %d, want 200: %s", body, rr.Code, rr.Body.String())
 		}
 	}
 	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_max_duration": "15m"}}}`); rr.Code != http.StatusOK {
@@ -85,11 +92,11 @@ func TestPutServerConfigDB_StartClaimSettingsValidated(t *testing.T) {
 func TestPutServerConfigDB_StartClaimValidatedAgainstStartupValues(t *testing.T) {
 	srv, _, ops := newTestDBServer(t)
 	srv.config.StartClaim = StartClaimSettings{UnconfirmedHold: 20 * time.Minute}
-	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusOK {
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "18m"}}}`); rr.Code != http.StatusOK {
 		t.Errorf("a create hold under the startup hold rejected: %d %s", rr.Code, rr.Body.String())
 	}
 	srv.config.StartClaim = StartClaimSettings{}
-	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "15m"}}}`); rr.Code != http.StatusUnprocessableEntity {
+	if rr := putStartClaimConfigDB(t, srv, ops, `{"server": {"hub": {"start_create_unconfirmed_hold": "18m"}}}`); rr.Code != http.StatusUnprocessableEntity {
 		t.Errorf("a create hold over the default hold accepted: %d %s", rr.Code, rr.Body.String())
 	}
 }

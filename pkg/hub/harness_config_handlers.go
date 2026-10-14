@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -280,8 +281,19 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 	if createScope == "" {
 		createScope = store.HarnessConfigScopeGlobal
 	}
-	if createScope == store.HarnessConfigScopeUser && !requireProfileWriter(w, r) {
-		return
+	// A user-scope harness config belongs to the caller: its scope and
+	// owner are the caller for every caller, never a request field.
+	var owner UserIdentity
+	if createScope == store.HarnessConfigScopeUser {
+		owner = GetUserIdentityFromContext(ctx)
+		if owner == nil {
+			writeError(w, http.StatusUnauthorized, "unauthorized", "User authentication required for user-scoped harness configs", nil)
+			return
+		}
+		if !requireProfileWriter(w, r) {
+			return
+		}
+		req.ScopeID = owner.ID()
 	}
 	if !s.authorize(w, r, harnessConfigScopeResource(createScope, req.ScopeID), ActionCreate) {
 		return
@@ -314,6 +326,10 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 
 	if hc.Scope == "" {
 		hc.Scope = store.HarnessConfigScopeGlobal
+	}
+	if owner != nil {
+		hc.OwnerID = owner.ID()
+		hc.CreatedBy = owner.ID()
 	}
 
 	// If no files provided, mark as active immediately
@@ -699,6 +715,14 @@ func (s *Server) deleteHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 				"You do not have permission to delete another user's harness config", nil)
 			return
 		}
+		// The route gate checked read on the config; deleting it needs
+		// harness_config:delete, so a user access token with only the read
+		// selector is refused on its own record.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigResource(existing), ActionDelete).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You do not have permission to delete harness configs in your user scope", nil)
+			return
+		}
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden,
 			"Delete is not supported for this resource scope", nil)
@@ -962,44 +986,9 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		status := store.HarnessConfigImageStatusUnknown
 		source := "broker_check"
 
-		if s.brokerClient != nil {
-			brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
-			if err == nil {
-				var found bool
-				var wg sync.WaitGroup
-				var mu sync.Mutex
-				for i := range brokerResult.Items {
-					b := &brokerResult.Items[i]
-					if isPluginBroker(b) {
-						continue
-					}
-					if !s.canDispatchToBroker(ctx, b) {
-						continue
-					}
-					if !isNodeBoundBroker(b) {
-						continue
-					}
-					wg.Add(1)
-					go func(broker *store.RuntimeBroker) {
-						defer wg.Done()
-						brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-						defer cancel()
-						imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, image, "")
-						if err != nil {
-							return
-						}
-						if imgResp != nil && imgResp.LocalShort != nil && imgResp.LocalShort.Exists {
-							mu.Lock()
-							found = true
-							mu.Unlock()
-						}
-					}(b)
-				}
-				wg.Wait()
-				if found {
-					status = store.HarnessConfigImageStatusValid
-				}
-			}
+		if s.localImagePresent(ctx, image, "") {
+			status = store.HarnessConfigImageStatusValid
+			source = "local"
 		}
 
 		if status != store.HarnessConfigImageStatusValid && resolvedImage != image {
@@ -1024,6 +1013,21 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A registry-qualified image can be present in a local image store
+	// without being in the registry (built locally, never pushed), so the
+	// local store is consulted before the registry. A local find is
+	// reported but not persisted: the stored image status reflects registry
+	// validity only (see store.HarnessConfigImageStatusValid).
+	if s.localImagePresent(ctx, "", resolvedImage) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"image_status":            store.HarnessConfigImageStatusValid,
+			"image_status_checked_at": time.Now(),
+			"source":                  "local",
+			"resolved_image":          resolvedImage,
+		})
+		return
+	}
+
 	result := s.imageChecker.CheckRemoteOnly(ctx, resolvedImage)
 	slog.Info("image check result", "id", hc.ID, "status", result.Status, "source", result.Source, "error", result.Error)
 
@@ -1041,6 +1045,73 @@ func (s *Server) handleHarnessConfigCheckImage(w http.ResponseWriter, r *http.Re
 		resp["error"] = result.Error
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// localImagePresent reports whether an image exists in at least one local
+// runtime image store. It asks the same sources as the image-status endpoint:
+// every dispatchable node-bound broker, through its image-status API, or, when
+// there is no such broker, the hub's co-located runtime. An error from one
+// broker does not mask a find on another. shortImage is checked as a
+// bare local name and longImage as a registry-qualified name; either may be
+// empty. It returns false when no source can be asked.
+func (s *Server) localImagePresent(ctx context.Context, shortImage, longImage string) bool {
+	var nodeBound []*store.RuntimeBroker
+	if s.brokerClient != nil {
+		brokerResult, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: 100})
+		if err != nil {
+			slog.Warn("image check: failed to list brokers", "error", err)
+			return false
+		}
+		for i := range brokerResult.Items {
+			b := &brokerResult.Items[i]
+			if isPluginBroker(b) || !s.canDispatchToBroker(ctx, b) || !isNodeBoundBroker(b) {
+				continue
+			}
+			nodeBound = append(nodeBound, b)
+		}
+	}
+
+	if len(nodeBound) == 0 {
+		mgr := s.getImageManager()
+		if mgr == nil {
+			return false
+		}
+		for _, img := range []string{shortImage, longImage} {
+			if img == "" {
+				continue
+			}
+			exists, err := mgr.ImageExists(ctx, img)
+			if err != nil {
+				slog.Warn("image check: local runtime check failed", "image", img, "error", err)
+				continue
+			}
+			if exists {
+				return true
+			}
+		}
+		return false
+	}
+
+	var found atomic.Bool
+	var wg sync.WaitGroup
+	for _, b := range nodeBound {
+		wg.Add(1)
+		go func(broker *store.RuntimeBroker) {
+			defer wg.Done()
+			brokerCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+			imgResp, err := s.brokerClient.ImageStatus(brokerCtx, broker.ID, broker.Endpoint, shortImage, longImage)
+			if err != nil || imgResp == nil {
+				return
+			}
+			if (imgResp.LocalShort != nil && imgResp.LocalShort.Exists) ||
+				(imgResp.LocalLong != nil && imgResp.LocalLong.Exists) {
+				found.Store(true)
+			}
+		}(b)
+	}
+	wg.Wait()
+	return found.Load()
 }
 
 // handleHarnessConfigDownload returns signed URLs for downloading harness config files.
@@ -1190,6 +1261,12 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			scopeID = userIdent.ID()
 		} else if scopeID != userIdent.ID() {
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You can only clone harness configs into your own user scope", nil)
+			return
+		}
+		// The destination is a new record in the caller's user scope: a
+		// user access token needs harness_config:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigUserScopeResource(userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create harness configs in your user scope", nil)
 			return
 		}
 	default:
@@ -1347,6 +1424,13 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport another user's harness config", nil)
 			return
 		}
+		// Reimport overwrites the config's content, so it needs
+		// harness_config:update on the record, not only the route gate's
+		// read.
+		if !s.authzService.CheckAccess(ctx, userIdent, harnessConfigResource(hc), ActionUpdate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to reimport harness configs in your user scope", nil)
+			return
+		}
 	default:
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, "Reimport is not supported for this resource scope", nil)
 		return
@@ -1358,8 +1442,12 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 	}
 
 	kind := s.harnessConfigImportKind()
+	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
-		return s.importFromRemote(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress, nil)
+		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
+			func(dirs []resourceDir, skipped []skippedDir) ([]resourceDir, []skippedDir) {
+				return applySlugFilter(dirs, skipped, slug)
+			}, fmt.Sprintf("no harness-config in the source matches slug %q", slug))
 	}
 
 	if importAcceptsNDJSON(r) {
@@ -1392,6 +1480,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		Count:          len(imported),
 		Failed:         failures,
 	})
+}
+
+// reimportTargetSlug returns the slug that selects hc's entry when
+// reimporting it, so a source holding several harness-configs validates and
+// imports only the target (ptone/scion#4213). Discovered entries are persisted
+// under Slugify(name), so selection compares that against the record's slug;
+// matching the record's Name instead could pick another config, since Name and
+// Slug can be changed independently. There is no fallback for an empty slug:
+// every API write path sets a non-empty slug, and an empty slug would match
+// only entries whose names slugify to empty, so the reimport does not guess a
+// different record.
+func reimportTargetSlug(hc *store.HarnessConfig) string {
+	return hc.Slug
 }
 
 // handleHarnessConfigImageStatus returns per-broker aggregated image status.
@@ -1728,5 +1829,16 @@ func harnessConfigScopeResource(scope, scopeID string) Resource {
 		r.ParentType = "project"
 		r.ParentID = scopeID
 	}
+	return r
+}
+
+// harnessConfigUserScopeResource builds the "harness_config" Resource for a
+// new harness config in the caller's own user scope (a clone or import
+// destination). Like templateUserScopeResource, it takes the authenticated
+// UserIdentity, so the owner always names the caller and never a request
+// field.
+func harnessConfigUserScopeResource(userIdent UserIdentity) Resource {
+	r := harnessConfigScopeResource(store.HarnessConfigScopeUser, "")
+	r.OwnerID = userIdent.ID()
 	return r
 }

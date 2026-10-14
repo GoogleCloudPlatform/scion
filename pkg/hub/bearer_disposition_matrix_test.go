@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_2)
+//go:build !no_sqlite
 
 package hub
 
@@ -103,6 +103,138 @@ var bearerMatrixExclusions = map[liveInventoryKey]bearerMatrixExclusion{
 		Reason: "the operation needs project:update and project:clone, and a token passes project.clone on a project only when its holder is a member of it; the matrix's super-admin token carries one selector and is not a member of the fixture project",
 		Pin:    "TestSetTemplate_RequiresUpdateAndCloneOnTheProject",
 	},
+	// User-scope branches of shared routes: the branch is chosen by the
+	// record's scope or by the request's scope and kind, while the matrix
+	// addresses one fixture per pattern and sends no scope. Each is pinned
+	// by a test that drives real tokens through the user-scope branch.
+	{OperationID: "template.user.delete", Method: "DELETE", Pattern: "/api/v1/templates/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder, and the matrix fixture on this pattern is a global template",
+		Pin:    "TestUserTemplateWrite_RequiresTemplateSelector",
+	},
+	{OperationID: "template.user.clone", Method: "POST", Pattern: "/api/v1/templates/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the source also needs template:read",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "template.user.reimport", Method: "POST", Pattern: "/api/v1/templates/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope template owned by the token holder and a source URL, and the read gate also needs template:read",
+		Pin:    "TestTemplateUserReimport_RequiresUpdateAction",
+	},
+	{OperationID: "skill.user.create", Method: "POST", Pattern: "/api/v1/skills"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body",
+		Pin:    "TestUserScopeSkillCreate_RequiresSkillCreate",
+	},
+	{OperationID: "harnessconfig.user.clone", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/clone"}: {
+		Reason: "the user-scope branch is selected by scope=user in the request body; the route gate also needs harness_config:read on the source",
+		Pin:    "TestCloneToUserScope_RequiresCreateOnDestination",
+	},
+	{OperationID: "harnessconfig.user.delete", Method: "DELETE", Pattern: "/api/v1/harness-configs/{id}"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserDelete_RequiresDeleteAction",
+	},
+	{OperationID: "harnessconfig.user.reimport", Method: "POST", Pattern: "/api/v1/harness-configs/{id}/reimport"}: {
+		Reason: "the user-scope branch needs a user-scope harness config owned by the token holder and a source URL, and the route gate also needs harness_config:read",
+		Pin:    "TestHarnessUserReimport_RequiresUpdateAction",
+	},
+	{OperationID: "template.user.import", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "template.user.import", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=template in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "harnessconfig.user.import", Method: "POST", Pattern: "/api/v1/resources/import"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "harnessconfig.user.import", Method: "POST", Pattern: "/api/v1/resources/discover"}: {
+		Reason: "the branch is selected by scope=user and kind=harness-config in the request body, and the test server configures no resource storage",
+		Pin:    "TestUserScopeImport_RequiresCreateSelector",
+	},
+	{OperationID: "chat.space.list", Method: "GET", Pattern: "/api/v1/chat/spaces"}: {
+		Reason: "the space list filters projects by project:read instead of refusing the request, so a token without the selector gets 200 with no spaces",
+		Pin:    "TestChatSpacesToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.unreadcount.read", Method: "GET", Pattern: "/api/v1/chat/unread-count"}: {
+		Reason: "the count covers only the conversations inside the token boundary instead of refusing the request, so a project token for another project gets 200",
+		Pin:    "TestChatUnreadCountToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.dm.list", Method: "GET", Pattern: "/api/v1/chat/dms"}: {
+		Reason: "the DM list keeps only the DMs the token may read instead of refusing the request, so a project token for another project gets 200 with no rows",
+		Pin:    "TestChatDMListToken_FilteredToBoundary",
+	},
+	{OperationID: "chat.search.unscoped", Method: "GET", Pattern: "/api/v1/chat/search"}: {
+		Reason: "the unscoped search covers only the projects the token can read instead of refusing the request, so a token without project:read gets 200 with no rows",
+		Pin:    "TestChatSearchToken_DMRowsNeedInboxRead",
+	},
+	{OperationID: "chat.presence.update", Method: "POST", Pattern: "/api/v1/chat/presence"}: {
+		Reason: "presence leaves the named projects the caller cannot read out of its fan-out instead of refusing the request, so a project token for another project gets 200 and fans out on nothing",
+		Pin:    "TestChatPresence_EveryProjectRequiresProjectRead",
+	},
+	{OperationID: "chat.conversation.send.dmuser", Method: "POST", Pattern: "/api/v1/chat/conversations/{id}/messages"}: {
+		Reason: "a send to a user needs read access to the peer user record for every caller, and that record has no hub target for a token, so the admitting token is refused by the peer read check",
+		Pin:    "TestChatHumanDirectMessage_RequiresHubBoundary",
+	},
+	{OperationID: "chat.attachment.upload.project", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
+		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
+		Pin:    "TestChatProjectUpload_RequiresInboxWriteAndProjectRead",
+	},
+	{OperationID: "chat.attachment.upload.noproject", Method: "POST", Pattern: "/api/v1/chat/attachments"}: {
+		Reason: "the upload takes a multipart form, which the matrix body cannot express, and the matrix server configures no attachment store",
+		Pin:    "TestChatProjectlessUpload_RequiresHubBoundary",
+	},
+	{OperationID: "chat.attachment.download.project", Method: "GET", Pattern: "/api/v1/chat/attachments/{id}"}: {
+		Reason: "the matrix server configures no attachment store, so every caller gets 503 before the attachment is looked up",
+		Pin:    "TestChatAttachmentDownloadToken_ProjectFileNeedsProjectRead",
+	},
+	{OperationID: "artifact.update", Method: "PATCH", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.put", Method: "POST", Pattern: "/api/v1/artifacts/{id}/grants"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403 (the review-grant path refuses it with the same 403)",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.grant.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/grants/{grantId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.list", Method: "GET", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/links"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.link.revoke", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}/links/{linkId}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor an admin grantee, so the manage check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.delete", Method: "DELETE", Pattern: "/api/v1/artifacts/{id}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:manage, not artifact:read, so the read check answers it 404 and nothing is deleted; with artifact:read added, the super-admin is not the owner or an admin grantee, and the custodian clause also needs project.manage within the token's own limits, so it would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.create", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.upload", Method: "PUT", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/files/{path}"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.finalize", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/finalize"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method; the admitting token carries only artifact:create, not artifact:read, so the read check answers it 404 too; with artifact:read added, the super-admin is neither the fixture artifact's owner nor a write, admin or review grantee, so the write check would answer 403",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
+	{OperationID: "artifact.version.view", Method: "POST", Pattern: "/api/v1/artifacts/{id}/versions/{seq}/view"}: {
+		Reason: "the artifact service answers a caller that cannot read the artifact with 404, as for a missing artifact, on every method, so the generic refusal probes get 404 where the matrix expects 403 for a non-GET method",
+		Pin:    "TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded",
+	},
 	{OperationID: "artifact.list", Method: "GET", Pattern: "/api/v1/artifacts"}: {
 		Reason: "the artifact list filters each row by the artifact.read check instead of refusing the request, so a token without the selector, or bounded to another project, gets 200 with no rows rather than 403 or 404 (no existence oracle)",
 		Pin:    "TestArtifactsListUserAccessTokensAreBounded",
@@ -173,7 +305,8 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 
 // bearerMatrixCompanionSelectors lists, per operation, the selectors an
 // admitting token carries besides the operation's own: the operation also
-// checks project:read or agent:read on a target the record names.
+// checks project:read or agent:read on a target the record names, or
+// broker:read on the broker whose settings it writes.
 var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.create":              {"project:read"},
 	"inbox.conversation.direct.read":         {"agent:read"},
@@ -182,6 +315,70 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.resolve":             {"project:read"},
 	"inbox.notification.subscription.create": {"project:read"},
 	"inbox.notification.template.create":     {"project:read"},
+	"inbox.threadgroup.create":               {"project:read"},
+	"inbox.threadgroup.update":               {"project:read"},
+	"inbox.threadgroup.delete":               {"project:read"},
+	"chat.prefs.read":                        {"agent:read"},
+	"chat.prefs.update":                      {"agent:read"},
+	"chat.thread.create":                     {"project:read"},
+	"chat.space.markread":                    {"project:read"},
+	"chat.topic.update":                      {"project:read"},
+	"chat.topic.delete":                      {"project:read"},
+	"chat.conversation.history.dm":           {"agent:read"},
+	"chat.conversation.send.topic":           {"project:read"},
+	"chat.conversation.send.dmagent":         {"agent:message"},
+	"chat.message.edit":                      {"project:read"},
+	"chat.message.delete":                    {"project:read"},
+	"chat.conversation.readstate.dm":         {"agent:read"},
+	"chat.conversation.markread.topic":       {"project:read"},
+	"chat.conversation.markread.dm":          {"agent:read"},
+	"chat.conversation.markunread.topic":     {"project:read"},
+	"chat.conversation.markunread.dm":        {"agent:read"},
+	"chat.conversation.mute.topic":           {"project:read"},
+	"chat.conversation.mute.dm":              {"agent:read"},
+	"chat.conversation.pin.topic":            {"project:read"},
+	"chat.conversation.pin.dm":               {"agent:read"},
+	"chat.conversation.typing.topic":         {"project:read"},
+	"chat.conversation.typing.dm":            {"agent:read"},
+	"chat.presence.update":                   {"project:read"},
+	"chat.search.dm":                         {"agent:read"},
+	"chat.conversation.promote":              {"project:read", "agent:read"},
+	"quota.brokersettings.update":            {"broker:read"},
+}
+
+// bearerMatrixNotFoundRefusals lists the non-GET admit rows whose route
+// answers every refused caller as a missing record (404), as the chat
+// conversation routes do. On these rows a 404 counts as a refusal, and,
+// as for a GET, only when the admitting token gets a 2xx on the same
+// target.
+var bearerMatrixNotFoundRefusals = map[liveInventoryKey]string{
+	{"chat.conversation.send.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/messages"}:     "a send the sender may not make is answered as Thread not found",
+	{"chat.conversation.send.dmagent", http.MethodPost, "/api/v1/chat/conversations/{id}/messages"}:   "a send the sender may not make is answered as Thread not found",
+	{"chat.conversation.markread.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/read"}:     "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markread.dm", http.MethodPost, "/api/v1/chat/conversations/{id}/read"}:        "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markunread.topic", http.MethodPost, "/api/v1/chat/conversations/{id}/unread"}: "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.markunread.dm", http.MethodPost, "/api/v1/chat/conversations/{id}/unread"}:    "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.mute.topic", http.MethodPut, "/api/v1/chat/conversations/{id}/mute"}:          "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.mute.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/mute"}:             "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.pin.topic", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:            "a conversation the caller may not use is answered as Thread not found",
+	{"chat.conversation.pin.dm", http.MethodPut, "/api/v1/chat/conversations/{id}/pin"}:               "a conversation the caller may not use is answered as Thread not found",
+}
+
+// bearerMatrixRefusedAt reports whether status refuses a token on the
+// entry point: bearerMatrixRefused, or a 404 on a row listed in
+// bearerMatrixNotFoundRefusals.
+func bearerMatrixRefusedAt(key liveInventoryKey, method string, status int) bool {
+	if _, ok := bearerMatrixNotFoundRefusals[key]; ok && status == http.StatusNotFound {
+		return true
+	}
+	return bearerMatrixRefused(method, status)
+}
+
+func bearerMatrixRefusalAt(key liveInventoryKey, method string) string {
+	if _, ok := bearerMatrixNotFoundRefusals[key]; ok {
+		return "403 or 404"
+	}
+	return bearerMatrixRefusal(method)
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
@@ -256,8 +453,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 			refusedWith404 := false
 			unrelated := m.mint(t, hubBoundary(), []string{bearerMatrixUnrelatedSelector(sel)})
 			ceilingRec := m.request(t, e, unrelated)
-			if !bearerMatrixRefused(ep.Method, ceilingRec.Code) {
-				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, ceilingRec.Code, bearerMatrixRefusal(ep.Method), ceilingRec.Body.String())
+			if !bearerMatrixRefusedAt(e.key(), ep.Method, ceilingRec.Code) {
+				t.Errorf("%s: a token without %s got %d, want %s: %s", label, sel, ceilingRec.Code, bearerMatrixRefusalAt(e.key(), ep.Method), ceilingRec.Body.String())
 			} else if ceilingRec.Code == http.StatusNotFound {
 				refusedWith404 = true
 			}
@@ -279,8 +476,8 @@ func TestBearerDispositionMatrix_CatalogEntryPoints(t *testing.T) {
 				if rec.Code == http.StatusNotFound {
 					refusedWith404 = true
 				}
-				if !bearerMatrixRefused(ep.Method, rec.Code) {
-					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusal(ep.Method), rec.Body.String())
+				if !bearerMatrixRefusedAt(e.key(), ep.Method, rec.Code) {
+					t.Errorf("%s: a project token for %s got %d, want %s: %s", label, boundProject, rec.Code, bearerMatrixRefusalAt(e.key(), ep.Method), rec.Body.String())
 				}
 			} else if hubOnly {
 				t.Logf("%s: a project token for %s with %s cannot be minted; the boundary is enforced at mint", label, boundProject, sel)
@@ -421,6 +618,36 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no GitHub App"},
 	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/sync-permissions"}: {
 		http.StatusBadGateway, "the test server configures no GitHub App"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}: {
+		http.StatusNotImplemented, "the test server configures no agent dispatcher"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}: {
+		http.StatusNotImplemented, "the test server configures no agent dispatcher"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-from"}: {
+		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},
+	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},
+	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/agents/{id}/keys"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/keys"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodPost, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodPut, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodDelete, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization
@@ -524,6 +751,17 @@ func TestBearerMatrixExclusions_NotStaleAndPinned(t *testing.T) {
 		}
 		if want.Status < 500 || strings.TrimSpace(want.Reason) == "" {
 			t.Errorf("positive server error row %v needs a 5xx status and a reason", key)
+		}
+	}
+	for key, reason := range bearerMatrixNotFoundRefusals {
+		if !admitRows[key] || key.Method == http.MethodGet {
+			t.Errorf("stale not-found refusal row %v: no non-GET catalog entry point with an admit disposition", key)
+		}
+		if _, excluded := bearerMatrixExclusions[key]; excluded {
+			t.Errorf("not-found refusal row %v is also excluded from the matrix", key)
+		}
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("not-found refusal row %v needs a reason", key)
 		}
 	}
 	for _, spec := range authzop.Catalog {

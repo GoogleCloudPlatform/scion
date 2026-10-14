@@ -87,6 +87,7 @@ func assertFutureKeys(t *testing.T, store *FileSessionState, after string) {
 // session into a pending report, and the claim and confirmation of that
 // report by the next hook process.
 func TestSessionStateUnknownKeys_HookWriter(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	addFutureKeys(t, store)
@@ -128,6 +129,7 @@ func TestSessionStateUnknownKeys_HookWriter(t *testing.T) {
 // A normal session-end by one hook process (Update to a pending report,
 // then CompleteReport) leaves only the unknown keys; the file stays.
 func TestSessionStateUnknownKeys_OnlyUnknownKeysNotRemoved(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	addFutureKeys(t, store)
@@ -158,6 +160,7 @@ func TestSessionStateUnknownKeys_OnlyUnknownKeysNotRemoved(t *testing.T) {
 // the removal of the tombstone at the next start, which leaves only the
 // unknown keys (and would otherwise remove the file).
 func TestSessionStateUnknownKeys_InitDaemonWriter(t *testing.T) {
+	scrubTelemetryEnv(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)
 	addFutureKeys(t, store)
@@ -206,6 +209,7 @@ func TestSessionStateUnknownKeys_InitDaemonWriter(t *testing.T) {
 // The init daemon's combined shutdown check (close and claim in one pass)
 // keeps unknown keys too.
 func TestSessionStateUnknownKeys_InitDaemonCloseAndClaim(t *testing.T) {
+	scrubTelemetryEnv(t)
 	procs := useFakeProcs(t)
 	store := NewFileSessionState(t.TempDir())
 	openSession(t, store)

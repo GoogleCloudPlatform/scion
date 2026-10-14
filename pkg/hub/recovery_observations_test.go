@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -35,6 +35,7 @@ func TestRecoveryObservations_HeartbeatObservedState(t *testing.T) {
 	}{
 		{brokerAgentHeartbeat{Phase: "running"}, store.ObservedPresentRunning},
 		{brokerAgentHeartbeat{Phase: "starting"}, store.ObservedPresentRunning},
+		{brokerAgentHeartbeat{Phase: "starting", ContainerStatus: "starting"}, store.ObservedPresentRunning},
 		{brokerAgentHeartbeat{ContainerStatus: "Pending"}, store.ObservedPresentRunning},
 		{brokerAgentHeartbeat{Phase: "stopped"}, store.ObservedPresentTerminal},
 		{brokerAgentHeartbeat{Phase: "error"}, store.ObservedPresentTerminal},

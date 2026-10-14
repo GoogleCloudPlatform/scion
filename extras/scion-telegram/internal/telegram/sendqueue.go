@@ -258,7 +258,8 @@ func (sq *SendQueue) removeQueue(chatID int64) {
 }
 
 // Close shuts down all worker goroutines and waits for them to finish.
-// Messages still in the queues are drained with errors.
+// Messages already in the queues are still sent before Close returns; Send
+// calls after Close fail.
 func (sq *SendQueue) Close() {
 	sq.mu.Lock()
 	sq.closed = true

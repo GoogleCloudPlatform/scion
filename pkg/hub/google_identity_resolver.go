@@ -74,6 +74,12 @@ type GoogleIdentityResolver struct {
 	roleFor   func(ctx context.Context, email string) string
 	log       *slog.Logger
 
+	// signInDenial, when set via SetSignInDenial, is the code-returning
+	// form of authorize (authorize is derived from it). It lets the
+	// existing-record branches record the decision's denial code in the
+	// audit entry without evaluating the policy again. Nil by default.
+	signInDenial func(ctx context.Context, email string) string
+
 	// platformAuthSA is the configured platform/transport auth service
 	// account email, if any. Set via SetPlatformAuthSA after construction
 	// (server.go wires it from the same Server field used by
@@ -81,6 +87,12 @@ type GoogleIdentityResolver struct {
 	// inert — safe for the many existing callers that construct a resolver
 	// directly without setting it.
 	platformAuthSA string
+
+	// driverPrincipals is the hub's auth.proxy.driverPrincipals set
+	// (ptone/scion#4240, phase WS2), set via SetDriverPrincipals. Resolve
+	// never resolves or provisions a user for a driver principal. Empty by
+	// default, which leaves the check inert.
+	driverPrincipals driverPrincipalSet
 
 	// policyDeps carries the additional server-config-derived callbacks
 	// (role assignment, super-admin binding, grant sync, audit) that
@@ -108,15 +120,30 @@ func (r *GoogleIdentityResolver) SetSignInPolicyDeps(deps signInPolicyDeps) {
 	r.policyDeps = deps
 }
 
+// SetSignInDenial replaces the resolver's sign-in policy check with deny,
+// which returns "" when email may sign in, otherwise the denial code (see
+// checkSignInDenial). authorize is derived from deny, so both forms of the
+// check always agree. Typically (*Server).signInDenial.
+func (r *GoogleIdentityResolver) SetSignInDenial(deny func(ctx context.Context, email string) string) {
+	if deny == nil {
+		return
+	}
+	r.signInDenial = deny
+	r.authorize = func(ctx context.Context, email string) bool {
+		return deny(ctx, email) == ""
+	}
+}
+
 // liveSignInPolicyDeps returns r.policyDeps with the fields that must never
-// silently depend on SetSignInPolicyDeps having been called: authorize
-// (always r.authorize, the resolver's own configured authorize check) and
+// silently depend on SetSignInPolicyDeps having been called: authorize and
+// signInDenial (always the resolver's own configured check) and
 // UpdateUser (defaults to r.users.UpdateUser, since persisting a state
 // transition like invited -> active must not depend on optional wiring).
 // Used by every existing-record branch of Resolve.
 func (r *GoogleIdentityResolver) liveSignInPolicyDeps() signInPolicyDeps {
 	deps := r.policyDeps
 	deps.authorize = r.authorize
+	deps.signInDenial = r.signInDenial
 	if deps.UpdateUser == nil {
 		deps.UpdateUser = r.users.UpdateUser
 	}
@@ -135,6 +162,16 @@ func (r *GoogleIdentityResolver) liveSignInPolicyDeps() signInPolicyDeps {
 // configured identity, not a general service-account gate.
 func (r *GoogleIdentityResolver) SetPlatformAuthSA(email string) {
 	r.platformAuthSA = email
+}
+
+// SetDriverPrincipals records the hub's proxy driver principals (WS2) so
+// Resolve refuses to resolve or provision a user for one: a driver
+// principal is a transport for test identity web sessions, never a user.
+// Resolve is the one resolution entry point of both Google identity paths
+// (the external-bearer path and the GE exchange endpoint), so this single
+// check covers both.
+func (r *GoogleIdentityResolver) SetDriverPrincipals(drivers driverPrincipalSet) {
+	r.driverPrincipals = drivers
 }
 
 // NewGoogleIdentityResolver creates a GoogleIdentityResolver.
@@ -198,7 +235,9 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 	// mints/re-mints a hub token checks this. See SetPlatformAuthSA for how
 	// the two callers of Resolve differ in whether this duplicates an
 	// existing rejection or is the applicable check.
-	if isReservedPlatformIdentity(identity.Email, r.platformAuthSA) {
+	// The platform service account and the proxy driver principals (WS2)
+	// are transport identities, never users.
+	if r.isTransportIdentity(identity.Email) {
 		return nil, ErrAccessDenied
 	}
 	// The reserved test-identity domain is never provisioned or resolved
@@ -314,7 +353,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			return nil, fmt.Errorf("google identity resolver: existing user record is nil")
 		}
 		// Found a user by email. Verify no conflicting binding exists.
-		existingBindings, _ := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		// The store returns an empty slice and a nil error for a user with
+		// no bindings, so every non-nil error, store.ErrNotFound included,
+		// is returned and no binding is created.
+		existingBindings, listErr := r.extIDs.GetExternalIdentitiesByUserID(ctx, existingUser.ID)
+		if listErr != nil {
+			r.log.Error("google identity resolver: existing identities lookup failed",
+				"sub", identity.Subject, "user_id", existingUser.ID, "error", listErr)
+			return nil, fmt.Errorf("look up existing identities for user: %w", listErr)
+		}
 		for _, eb := range existingBindings {
 			if eb.Provider == "google" && eb.Issuer == canonicalIssuer && eb.Subject != identity.Subject {
 				// Another Google subject is already bound to this user.
@@ -358,6 +405,15 @@ func (r *GoogleIdentityResolver) Resolve(ctx context.Context, identity *Validate
 			"email", normalizedEmail,
 			"user_id", existingUser.ID)
 		return existingUser, nil
+	}
+
+	// As with the binding lookup above, only store.ErrNotFound means "no
+	// user with this email exists". Any other store error is returned, so
+	// sign-in does not continue into new-user provisioning.
+	if !errors.Is(err, store.ErrNotFound) {
+		r.log.Error("google identity resolver: user lookup by email failed",
+			"sub", identity.Subject, "error", err)
+		return nil, fmt.Errorf("look up user by email: %w", err)
 	}
 
 	// No existing user by email — provision a new user through the normal path.
@@ -477,6 +533,17 @@ func (r *GoogleIdentityResolver) provisionNewUser(ctx context.Context, identity 
 	} else if !r.authorize(ctx, normalizedEmail) {
 		r.log.Warn("google identity resolver: user not authorized for auto-provisioning",
 			"email", normalizedEmail, "sub", identity.Subject)
+		// Same audit record as the existing-record branches (auditDenied in
+		// applyLiveSignInPolicy). The decision above stands; the code is
+		// read only for the audit reason, and "" makes the reason follow
+		// the access mode.
+		if r.policyDeps.auditDenied != nil {
+			denial := ""
+			if r.signInDenial != nil {
+				denial = r.signInDenial(ctx, normalizedEmail)
+			}
+			r.policyDeps.auditDenied(ctx, normalizedEmail, denial)
+		}
 		return nil, false, fmt.Errorf("%w: user not authorized for auto-provisioning", ErrAccessDenied)
 	}
 

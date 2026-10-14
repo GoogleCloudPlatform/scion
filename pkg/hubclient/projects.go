@@ -40,8 +40,9 @@ type ProjectService interface {
 	// Update updates project metadata.
 	Update(ctx context.Context, projectID string, req *UpdateProjectRequest) (*Project, error)
 
-	// Delete removes a project and all its agents.
-	Delete(ctx context.Context, projectID string) error
+	// Delete removes a project and its agent records. Without opts.Force
+	// the hub refuses (409) while the project has agents not yet deleted.
+	Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error
 
 	// ListAgents returns agents in a project.
 	ListAgents(ctx context.Context, projectID string, opts *ListAgentsOptions) (*ListAgentsResponse, error)
@@ -66,6 +67,14 @@ type ProjectService interface {
 
 	// UpdateSettings updates project settings.
 	UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error)
+
+	// GetResolvedSettings retrieves the per-setting report of project
+	// annotations and hub defaults (GET /settings/resolved).
+	GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error)
+
+	// UpdateGCPIdentityDefaults writes only the default GCP identity fields
+	// of the project settings; every other setting keeps its stored value.
+	UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error)
 
 	// RefreshCache triggers a cache refresh for a linked project.
 	// The hub pulls the workspace from a connected provider broker.
@@ -279,9 +288,21 @@ func (s *projectService) Update(ctx context.Context, projectID string, req *Upda
 	return apiclient.DecodeRequired[Project](resp)
 }
 
-// Delete removes a project and all its agents.
-func (s *projectService) Delete(ctx context.Context, projectID string) error {
+// DeleteProjectOptions configures project deletion.
+type DeleteProjectOptions struct {
+	// Force deletes the project even while it has agents whose runtime
+	// deletion is not confirmed. Without it the hub refuses such a delete
+	// with 409 conflict, listing the agents in the error details.
+	Force bool
+}
+
+// Delete removes a project and its agent records. Without opts.Force the
+// hub refuses while the project has agents that are not deleted yet.
+func (s *projectService) Delete(ctx context.Context, projectID string, opts *DeleteProjectOptions) error {
 	path := "/api/v1/projects/" + projectID
+	if opts != nil && opts.Force {
+		path += "?force=true"
+	}
 	resp, err := s.c.delete(ctx, path, nil)
 	if err != nil {
 		return err
@@ -391,6 +412,31 @@ func (s *projectService) GetSettings(ctx context.Context, projectID string) (*Pr
 // cannot be reset to inherit.
 func (s *projectService) UpdateSettings(ctx context.Context, projectID string, settings *ProjectSettings) (*ProjectSettings, error) {
 	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", settings, nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ProjectSettings](resp)
+}
+
+// GetResolvedSettings retrieves the per-setting report of project
+// annotations and hub defaults. It reports which layers carry a value; it
+// does not say which one wins.
+func (s *projectService) GetResolvedSettings(ctx context.Context, projectID string) (*ResolvedProjectSettings, error) {
+	resp, err := s.c.get(ctx, "/api/v1/projects/"+projectID+"/settings/resolved", nil)
+	if err != nil {
+		return nil, err
+	}
+	return apiclient.DecodeRequired[ResolvedProjectSettings](resp)
+}
+
+// UpdateGCPIdentityDefaults sends a settings PUT whose body carries only the
+// fields set in update. The server merges the PUT field by field, so every
+// field the body leaves out, identity or not, keeps its stored value.
+func (s *projectService) UpdateGCPIdentityDefaults(ctx context.Context, projectID string, update *ProjectGCPIdentityDefaultsUpdate) (*ProjectSettings, error) {
+	if update == nil {
+		update = &ProjectGCPIdentityDefaultsUpdate{}
+	}
+	resp, err := s.c.put(ctx, "/api/v1/projects/"+projectID+"/settings", update, nil)
 	if err != nil {
 		return nil, err
 	}

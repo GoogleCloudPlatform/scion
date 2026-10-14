@@ -1,5 +1,3 @@
-//go:build !hubshard || hubshard_3
-
 // Copyright 2026 Google LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -81,17 +80,34 @@ func TestDispatchCreateErrorResponse_DeleteInProgressBecomes409(t *testing.T) {
 	}
 }
 
-// TestDispatchCreateErrorResponse_ContainerConflictBecomes409 proves the
-// existing container-name-conflict classification survives being folded
-// into the shared helper.
+// TestDispatchCreateErrorResponse_ContainerConflictBecomes409: the broker's
+// answer for an agent name still held by a stopped container -- 409
+// conflict with the agent.ErrContainerNameInUse text, wrapped by the
+// dispatcher -- reaches the client as 409 conflict with that text
+// (ptone/scion#3501).
 func TestDispatchCreateErrorResponse_ContainerConflictBecomes409(t *testing.T) {
-	err := fmt.Errorf("container name 'my-agent' is already in use")
+	body, _ := json.Marshal(map[string]any{"error": map[string]any{
+		"code":    "conflict",
+		"message": agent.ErrContainerNameInUse.Error(),
+		"details": map[string]any{"startAttempted": true, "runId": "run-1"},
+	}})
+	err := fmt.Errorf("create: %w", &brokerStatusError{StatusCode: http.StatusConflict, Body: string(body)})
 
 	w := httptest.NewRecorder()
 	dispatchCreateErrorResponse(w, err, "")
 
 	if w.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, w.Code, w.Body.String())
+	}
+	var resp ErrorResponse
+	if decErr := json.NewDecoder(w.Body).Decode(&resp); decErr != nil {
+		t.Fatalf("failed to decode response: %v", decErr)
+	}
+	if resp.Error.Code != ErrCodeConflict {
+		t.Errorf("expected code %q, got %q", ErrCodeConflict, resp.Error.Code)
+	}
+	if resp.Error.Message != agent.ErrContainerNameInUse.Error() {
+		t.Errorf("expected the broker's name-in-use text, got: %s", resp.Error.Message)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -112,37 +113,41 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		scanProject(globalDir)
 	}
 
-	// 3. Fetch Hub agents (if enabled)
-	// Check --no-hub flag
-	noHubFlag, _ := cmd.Flags().GetBool("no-hub")
-	if !noHubFlag {
-		hubAgents := fetchHubAgentsForCompletion(resolvedPath)
-		addNames(hubAgents)
-	}
+	// 3. Fetch Hub agents (when a hub endpoint is configured)
+	addNames(fetchHubAgentsForCompletion(cmd, resolvedPath))
 
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
 
+// completionTargetResolver resolves the hub of a shell completion
+// (resolveCompletionTarget). It is assigned in init(), not called
+// directly: the resolver reads command variables (commandRequiresProject
+// reads reincarnateCmd), and the completion functions are themselves set on
+// command variables (ValidArgsFunction), so a direct call would be a
+// package initialization cycle.
+var completionTargetResolver func(cmd *cobra.Command) error
+
+func init() { completionTargetResolver = resolveCompletionTarget }
+
 // fetchHubAgentsForCompletion fetches agent names from the Hub for shell completion.
 // It uses a short timeout and falls back to cache if the Hub is slow or unavailable.
 // This function is designed to be silent - it never returns errors to avoid breaking completion.
-func fetchHubAgentsForCompletion(projectPath string) []string {
-	// Load settings to check if Hub is enabled
+// Completion skips PersistentPreRunE, so it resolves the hub itself (from
+// the hub list, without imports or output; see completionTargetResolver).
+func fetchHubAgentsForCompletion(cmd *cobra.Command, projectPath string) []string {
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return nil
 	}
-
-	// Check if Hub is enabled in settings
-	if !settings.IsHubEnabled() {
+	if err := completionTargetResolver(cmd); err != nil {
 		return nil
 	}
 
-	// Get Hub endpoint
-	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
+	// Without a hub there is nothing to ask
+	if !hubConfigured() {
 		return nil
 	}
+	endpoint := invocationHubEndpoint()
 
 	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)
@@ -172,13 +177,12 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 	}
 
 	// Add authentication - non-interactive only
-	// Check settings for explicit auth first
+	// An explicit token from the environment first (tokens in settings
+	// files are not read).
 	authConfigured := false
-	if settings.Hub != nil {
-		if settings.Hub.Token != "" {
-			opts = append(opts, hubclient.WithBearerToken(settings.Hub.Token))
-			authConfigured = true
-		}
+	if token := os.Getenv("SCION_HUB_TOKEN"); token != "" {
+		opts = append(opts, hubclient.WithBearerToken(token))
+		authConfigured = true
 	}
 
 	// Check for OAuth credentials (non-interactive)
@@ -222,4 +226,69 @@ func fetchHubAgents(ctx context.Context, endpoint string, settings *config.Setti
 	}
 
 	return names, nil
+}
+
+// loadCompletionContext reads context.yaml for shell completion, or
+// returns nil inside an agent (which never uses the hub list) or when the
+// file cannot be read. Completion never writes the file and never prints.
+func loadCompletionContext() *config.CLIContext {
+	if contextDisabled(resolveMode()) {
+		return nil
+	}
+	c, err := config.LoadCLIContext()
+	if err != nil {
+		return nil
+	}
+	return c
+}
+
+// completeHubNames completes --hub with the nicknames in the hub list.
+func completeHubNames(_ *cobra.Command, _ []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	c := loadCompletionContext()
+	if c == nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	var names []string
+	for _, name := range c.HubNames() {
+		if strings.HasPrefix(name, toComplete) {
+			names = append(names, name)
+		}
+	}
+	return names, cobra.ShellCompDirectiveNoFileComp
+}
+
+// completeUseProjects completes 'scion use <project>' and 'scion project
+// use <project>' with the slugs in the known-project list, offline. With
+// --hub, only that hub's projects are offered.
+func completeUseProjects(_ *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	if len(args) > 0 {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	c := loadCompletionContext()
+	if c == nil {
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+	// Completion runs without the persistent pre-run, so hubEndpoint holds
+	// the raw --hub value: a nickname or a URL.
+	hubName := ""
+	if hubEndpoint != "" {
+		hubName, _ = c.LookupHub(hubEndpoint)
+		if hubName == "" {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+	}
+	var slugs []string
+	seen := map[string]bool{}
+	for _, p := range c.Projects {
+		if p.Slug == "" || seen[p.Slug] || !strings.HasPrefix(p.Slug, toComplete) {
+			continue
+		}
+		if hubName != "" && p.Hub != hubName {
+			continue
+		}
+		seen[p.Slug] = true
+		slugs = append(slugs, p.Slug)
+	}
+	sort.Strings(slugs)
+	return slugs, cobra.ShellCompDirectiveNoFileComp
 }

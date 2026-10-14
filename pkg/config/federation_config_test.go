@@ -659,3 +659,40 @@ func TestFederationConfig_Validate_InvalidDomainEntryShape(t *testing.T) {
 		}
 	}
 }
+
+// TestFederationConfig_Validate_AllowVisitorGrants checks Rule 12:
+// allow_visitor_grants is accepted on user and hub issuers (empty
+// issuer_type is hub) and refused on a service-account issuer.
+func TestFederationConfig_Validate_AllowVisitorGrants(t *testing.T) {
+	for _, tc := range []struct {
+		issuerType string
+		wantErr    bool
+	}{
+		{issuerType: "", wantErr: false},
+		{issuerType: "hub", wantErr: false},
+		{issuerType: "user", wantErr: false},
+		{issuerType: "service_account", wantErr: true},
+	} {
+		t.Run("type_"+tc.issuerType, func(t *testing.T) {
+			cfg := FederationConfig{
+				Enabled: true,
+				TrustedIssuers: []TrustedIssuerConfig{
+					{IssuerURL: "https://idp.example.com", IssuerType: tc.issuerType, AllowVisitorGrants: true},
+				},
+			}
+			errs := cfg.Validate()
+			if !tc.wantErr {
+				if len(errs) != 0 {
+					t.Fatalf("Validate() = %v, want no errors", errs)
+				}
+				return
+			}
+			if len(errs) != 1 || !strings.Contains(errs[0].Error(), "allow_visitor_grants is only applicable") {
+				t.Fatalf("Validate() = %v, want one allow_visitor_grants error", errs)
+			}
+		})
+	}
+	if !IssuerAllowsVisitorGrantsType("user") || IssuerAllowsVisitorGrantsType("service_account") {
+		t.Fatal("IssuerAllowsVisitorGrantsType disagrees with Rule 12")
+	}
+}

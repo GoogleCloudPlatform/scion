@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
 
@@ -30,8 +31,10 @@ type agentTokenRefusal int
 const (
 	// agentTokenAccepted: the token may authenticate the request.
 	agentTokenAccepted agentTokenRefusal = iota
-	// agentTokenRevoked: the credential is revoked or the agent is held.
+	// agentTokenRevoked: the credential is revoked.
 	agentTokenRevoked
+	// agentTokenHeld: the agent is held.
+	agentTokenHeld
 	// agentTokenInvalidSubject: the subject names no agent.
 	agentTokenInvalidSubject
 	// agentTokenRunRefused: the token's run check refused it.
@@ -80,11 +83,9 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 			// Credential found and active.
 			credState.cred = cred
 			ctx = context.WithValue(ctx, agentCredentialIDContextKey{}, cred.ID)
-			// Update last_seen_at (fire-and-forget)
-			go func() {
-				_ = cfg.CredentialStore.UpdateAgentCredentialLastSeen(
-					context.Background(), cred.ID, time.Now())
-			}()
+			// Update last_seen_at (fire-and-forget, at most once per
+			// agentCredentialLastSeenInterval).
+			touchAgentCredentialLastSeen(ctx, cfg.CredentialStore, cred, time.Now())
 		}
 	}
 
@@ -106,7 +107,7 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 			return ctx, agentTokenUnevaluated
 		}
 		if held {
-			return ctx, agentTokenRevoked
+			return ctx, agentTokenHeld
 		}
 	}
 
@@ -123,20 +124,86 @@ func verifyAgentTokenCredential(ctx context.Context, cfg AuthConfig, log *slog.L
 	return ctx, agentTokenAccepted
 }
 
+// Agent-token refusal causes. A cause is logged only: the client gets
+// writeAgentTokenRefused whatever the cause.
+const (
+	agentTokenCauseRevoked            = "revoked"              // credential revoked
+	agentTokenCauseHeld               = "held"                 // agent held
+	agentTokenCauseInvalidSubject     = "invalid_subject"      // subject names no agent
+	agentTokenCauseInvalidToken       = "invalid_token"        // X-Scion-Agent-Token failed validation
+	agentTokenCauseHeaderNotValidated = "header_not_validated" // X-Scion-Agent-Token reached dev auth unvalidated
+	agentTokenCauseRefreshRevoked     = "refresh_revoked"      // token refresh found the credential revoked
+)
+
+// agentTokenRefusedLogMessage is the message of the log line for a
+// refused agent token.
+const agentTokenRefusedLogMessage = "agent token refused"
+
+// refuseAgentToken logs cause and attrs at info level on log (nil:
+// slog.Default) and writes the shared agent-token refusal.
+func refuseAgentToken(ctx context.Context, w http.ResponseWriter, log *slog.Logger, cause string, attrs ...any) {
+	if log == nil {
+		log = slog.Default()
+	}
+	log.InfoContext(ctx, agentTokenRefusedLogMessage, append([]any{"cause", cause}, attrs...)...)
+	writeAgentTokenRefused(w)
+}
+
 // writeAgentTokenRefusal writes UnifiedAuthMiddleware's response to a
-// refusal from verifyAgentTokenCredential.
-func writeAgentTokenRefusal(w http.ResponseWriter, refusal agentTokenRefusal) {
+// refusal from verifyAgentTokenCredential for the token of agentID: the
+// shared refusal for every cause, or 503 when the token could not be
+// evaluated.
+func writeAgentTokenRefusal(ctx context.Context, w http.ResponseWriter, log *slog.Logger, refusal agentTokenRefusal, agentID string) {
 	switch refusal {
 	case agentTokenRevoked:
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-			"token has been revoked", nil)
+		refuseAgentToken(ctx, w, log, agentTokenCauseRevoked, "agent_id", agentID)
+	case agentTokenHeld:
+		refuseAgentToken(ctx, w, log, agentTokenCauseHeld, "agent_id", agentID)
 	case agentTokenInvalidSubject:
-		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-			"invalid agent token", nil)
+		refuseAgentToken(ctx, w, log, agentTokenCauseInvalidSubject, "agent_id", agentID)
 	case agentTokenRunRefused:
+		// The run-scope checker has logged the outcome.
 		writeAgentTokenRefused(w)
 	default:
 		writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
 			"unable to verify credential status", nil)
 	}
+}
+
+// agentCredentialLastSeenDue reports whether a credential last seen at
+// lastSeen (nil: never) is due a last_seen_at write at now.
+func agentCredentialLastSeenDue(lastSeen *time.Time, now time.Time) bool {
+	return lastSeen == nil || now.Sub(*lastSeen) >= agentCredentialLastSeenInterval
+}
+
+// agentCredentialLastSeenSpawnKey is a test seam: a func(func()) under
+// this request context key runs the last_seen_at write instead of a new
+// goroutine, so a test can tell deterministically whether a write was
+// made.
+type agentCredentialLastSeenSpawnKey struct{}
+
+// touchAgentCredentialLastSeen writes cred's last_seen_at in the
+// background when the row read for this request shows it older than the
+// interval. The write is best effort (5s timeout, error ignored) and never
+// affects the request; a failed write leaves the row old, so the next
+// request writes again. Concurrent requests at the interval boundary may
+// each write; that is acceptable. A nil store or credential writes nothing.
+func touchAgentCredentialLastSeen(ctx context.Context, creds store.AgentCredentialStore, cred *store.AgentCredential, now time.Time) {
+	if creds == nil || cred == nil {
+		return
+	}
+	if !agentCredentialLastSeenDue(cred.LastSeenAt, now) {
+		return
+	}
+	credID := cred.ID
+	write := func() {
+		bg, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = creds.UpdateAgentCredentialLastSeen(bg, credID, now)
+	}
+	if spawn, ok := ctx.Value(agentCredentialLastSeenSpawnKey{}).(func(func())); ok {
+		spawn(write)
+		return
+	}
+	go write()
 }

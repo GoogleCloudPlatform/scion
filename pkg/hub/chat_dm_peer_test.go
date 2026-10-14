@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -48,8 +48,8 @@ type dmPeerEnv struct {
 func setupDMPeerEnv(t *testing.T) *dmPeerEnv {
 	t.Helper()
 	srv, s, alice, bob, project := setupDemoPolicyTest(t)
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return &dmPeerEnv{srv: srv, s: s, wcs: wcs, alice: alice, bob: bob, project: project}
@@ -275,7 +275,7 @@ func TestChatDMPeer_ValidPeersStillSend(t *testing.T) {
 func TestChatDMPeer_ScopedTokenWithoutUserReadCannotSendUserDM(t *testing.T) {
 	e := setupDMPeerEnv(t)
 	want := e.nonParticipantRefusal(t, e.send)
-	uat := mintScopedUAT(t, e.srv, e.alice.ID, e.project.ID, []string{"project:read"})
+	uat := mintScopedUAT(t, e.srv, e.alice.ID, e.project.ID, []string{"project:read", "inbox:write"})
 	key := userDMKey(t, e.alice.ID, e.bob.ID)
 	rr := doRequestWithUAT(t, e.srv, uat, http.MethodPost,
 		"/api/v1/chat/conversations/"+key+"/messages", map[string]string{"content": "hello"})

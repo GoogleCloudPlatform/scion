@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_1)
+//go:build !no_sqlite
 
 package hub
 
@@ -24,10 +24,11 @@ import (
 
 // TestNewTestStoreParallel opens several test stores from parallel subtests
 // and migrates each again. newTestStore itself no longer migrates (it
-// restores the migrate-once template), so the explicit second
-// migrateTestStore is what runs concurrent migrations here: without
-// testMigrateMu they would write the shared pkg/ent/migrate Tables at once
-// and the test process would die with "fatal error: concurrent map writes".
+// restores the migrate-once template), so the explicit second Migrate is
+// what runs concurrent migrations here: if entc.AutoMigrate, which Migrate
+// calls, stopped serializing them, they would write the shared
+// pkg/ent/migrate Tables at once and the test process would die with "fatal
+// error: concurrent map writes".
 // The parallel newTestStore calls also exercise concurrent template restores.
 func TestNewTestStoreParallel(t *testing.T) {
 	const stores = 8
@@ -39,7 +40,7 @@ func TestNewTestStoreParallel(t *testing.T) {
 				t.Fatalf("newTestStore: %v", err)
 			}
 			// A second Migrate, as many test helpers do, must be safe too.
-			if err := migrateTestStore(context.Background(), s); err != nil {
+			if err := s.Migrate(context.Background()); err != nil {
 				t.Fatalf("migrate again: %v", err)
 			}
 		})

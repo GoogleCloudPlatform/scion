@@ -21,6 +21,8 @@ const (
 	FieldCreatedByHost = "created_by_host"
 	// FieldAttested holds the string denoting the attested field in the database.
 	FieldAttested = "attested"
+	// FieldWebSessionKey holds the string denoting the web_session_key field in the database.
+	FieldWebSessionKey = "web_session_key"
 	// Table holds the table name of the testinframarker in the database.
 	Table = "test_infra_marker"
 )
@@ -33,6 +35,7 @@ var Columns = []string{
 	FieldCreatedAt,
 	FieldCreatedByHost,
 	FieldAttested,
+	FieldWebSessionKey,
 }
 
 // ValidColumn reports if the column name is valid (part of the table columns).

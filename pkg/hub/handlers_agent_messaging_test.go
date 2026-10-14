@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -2078,8 +2078,8 @@ func TestHandleAgentOutboundMessage_DMSyncBackfill(t *testing.T) {
 	// Set up a WebChatStore so registerDMParticipants can write webchat_dm rows.
 	// openTestMemorySQLite closes db in t.Cleanup, not defer, so db.Close
 	// runs after any background work the send started has finished.
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init WebChatStore: %v", err)
 	}
@@ -2193,8 +2193,8 @@ func TestHandleAgentOutboundMessage_DMSyncBrokerPath(t *testing.T) {
 	// proxy.Stop, so LIFO ordering guarantees proxy.Stop runs first —
 	// draining in-flight deliverToUser callbacks (including TouchDMActivity)
 	// before the database handle is closed.
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_4)
+//go:build !no_sqlite
 
 package hub
 
@@ -113,7 +113,7 @@ func TestDispatchCreateErrorResponse_FakeBrokerOtherStatusesUnchanged(t *testing
 		{name: "404 not_found", status: http.StatusNotFound, body: brokerErrorBody("not_found", "template not found"),
 			wantCode: http.StatusNotFound, wantErr: ErrCodeNotFound},
 		{name: "409 container name conflict", status: http.StatusConflict,
-			body:     brokerErrorBody("conflict", "container name \"agent-1\" is already in use"),
+			body:     brokerErrorBody("conflict", nameInUseMessage),
 			wantCode: http.StatusConflict, wantErr: ErrCodeConflict},
 	}
 	for _, tc := range tests {

@@ -212,18 +212,24 @@ const (
 	// CredentialDelegatedAgent is an agent delegated credential. An
 	// operation admits it only together with PrincipalAgentDelegated.
 	CredentialDelegatedAgent CredentialKind = "delegated_agent"
+	// CredentialWorkloadDelegation is a workload-bound test identity issuer
+	// delegation: a pinned workload's Google ID token plus the id of the
+	// delegation a human issuer created (ptone/scion#4240). It acts for the
+	// delegation's grantor, within the delegation's single scope.
+	CredentialWorkloadDelegation CredentialKind = "workload_delegation"
 )
 
 // validCredentialKinds is the closed set of recognized credential kinds.
 var validCredentialKinds = map[CredentialKind]bool{
-	CredentialSessionJWT:     true,
-	CredentialScopedUAT:      true,
-	CredentialAgentJWT:       true,
-	CredentialBrokerToken:    true,
-	CredentialServiceAccount: true,
-	CredentialSystemInternal: true,
-	CredentialIdentityToken:  true,
-	CredentialDelegatedAgent: true,
+	CredentialSessionJWT:         true,
+	CredentialScopedUAT:          true,
+	CredentialAgentJWT:           true,
+	CredentialBrokerToken:        true,
+	CredentialServiceAccount:     true,
+	CredentialSystemInternal:     true,
+	CredentialIdentityToken:      true,
+	CredentialDelegatedAgent:     true,
+	CredentialWorkloadDelegation: true,
 }
 
 // SecurityEffect classifies the security-meaningful consequence of an
@@ -502,8 +508,9 @@ var validInvariantKinds = map[InvariantKind]bool{
 
 // AuditObligation specifies audit requirements for an operation.
 type AuditObligation struct {
-	// EventType is the audit event type (e.g., "membership.add",
-	// "constraint.relax").
+	// EventType is the audit event type: the mutation type the hub
+	// writes on the audit record (e.g., "group_member_add",
+	// "role_binding_create").
 	EventType string
 
 	// ContextFields lists context fields always required in the

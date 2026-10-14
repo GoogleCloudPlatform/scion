@@ -100,6 +100,16 @@ func Acknowledged(v bool) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldAcknowledged, v))
 }
 
+// DispatchAttempts applies equality check predicate on the "dispatch_attempts" field. It's identical to DispatchAttemptsEQ.
+func DispatchAttempts(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchAttempts, v))
+}
+
+// DispatchOutcome applies equality check predicate on the "dispatch_outcome" field. It's identical to DispatchOutcomeEQ.
+func DispatchOutcome(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchOutcome, v))
+}
+
 // Created applies equality check predicate on the "created" field. It's identical to CreatedEQ.
 func Created(v time.Time) predicate.Notification {
 	return predicate.Notification(sql.FieldEQ(FieldCreated, v))
@@ -503,6 +513,111 @@ func AcknowledgedEQ(v bool) predicate.Notification {
 // AcknowledgedNEQ applies the NEQ predicate on the "acknowledged" field.
 func AcknowledgedNEQ(v bool) predicate.Notification {
 	return predicate.Notification(sql.FieldNEQ(FieldAcknowledged, v))
+}
+
+// DispatchAttemptsEQ applies the EQ predicate on the "dispatch_attempts" field.
+func DispatchAttemptsEQ(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchAttempts, v))
+}
+
+// DispatchAttemptsNEQ applies the NEQ predicate on the "dispatch_attempts" field.
+func DispatchAttemptsNEQ(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldDispatchAttempts, v))
+}
+
+// DispatchAttemptsIn applies the In predicate on the "dispatch_attempts" field.
+func DispatchAttemptsIn(vs ...int) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldDispatchAttempts, vs...))
+}
+
+// DispatchAttemptsNotIn applies the NotIn predicate on the "dispatch_attempts" field.
+func DispatchAttemptsNotIn(vs ...int) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldDispatchAttempts, vs...))
+}
+
+// DispatchAttemptsGT applies the GT predicate on the "dispatch_attempts" field.
+func DispatchAttemptsGT(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldDispatchAttempts, v))
+}
+
+// DispatchAttemptsGTE applies the GTE predicate on the "dispatch_attempts" field.
+func DispatchAttemptsGTE(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldDispatchAttempts, v))
+}
+
+// DispatchAttemptsLT applies the LT predicate on the "dispatch_attempts" field.
+func DispatchAttemptsLT(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldDispatchAttempts, v))
+}
+
+// DispatchAttemptsLTE applies the LTE predicate on the "dispatch_attempts" field.
+func DispatchAttemptsLTE(v int) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldDispatchAttempts, v))
+}
+
+// DispatchOutcomeEQ applies the EQ predicate on the "dispatch_outcome" field.
+func DispatchOutcomeEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEQ(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeNEQ applies the NEQ predicate on the "dispatch_outcome" field.
+func DispatchOutcomeNEQ(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldNEQ(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeIn applies the In predicate on the "dispatch_outcome" field.
+func DispatchOutcomeIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldIn(FieldDispatchOutcome, vs...))
+}
+
+// DispatchOutcomeNotIn applies the NotIn predicate on the "dispatch_outcome" field.
+func DispatchOutcomeNotIn(vs ...string) predicate.Notification {
+	return predicate.Notification(sql.FieldNotIn(FieldDispatchOutcome, vs...))
+}
+
+// DispatchOutcomeGT applies the GT predicate on the "dispatch_outcome" field.
+func DispatchOutcomeGT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGT(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeGTE applies the GTE predicate on the "dispatch_outcome" field.
+func DispatchOutcomeGTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldGTE(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeLT applies the LT predicate on the "dispatch_outcome" field.
+func DispatchOutcomeLT(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLT(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeLTE applies the LTE predicate on the "dispatch_outcome" field.
+func DispatchOutcomeLTE(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldLTE(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeContains applies the Contains predicate on the "dispatch_outcome" field.
+func DispatchOutcomeContains(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContains(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeHasPrefix applies the HasPrefix predicate on the "dispatch_outcome" field.
+func DispatchOutcomeHasPrefix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasPrefix(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeHasSuffix applies the HasSuffix predicate on the "dispatch_outcome" field.
+func DispatchOutcomeHasSuffix(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldHasSuffix(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeEqualFold applies the EqualFold predicate on the "dispatch_outcome" field.
+func DispatchOutcomeEqualFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldEqualFold(FieldDispatchOutcome, v))
+}
+
+// DispatchOutcomeContainsFold applies the ContainsFold predicate on the "dispatch_outcome" field.
+func DispatchOutcomeContainsFold(v string) predicate.Notification {
+	return predicate.Notification(sql.FieldContainsFold(FieldDispatchOutcome, v))
 }
 
 // CreatedEQ applies the EQ predicate on the "created" field.

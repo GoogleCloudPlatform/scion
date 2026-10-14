@@ -1,0 +1,9 @@
+server:
+  broker:
+    instances:
+      - key: k8s-agents
+        name: k8s-agents
+        runtime_target:
+          type: kubernetes
+          namespace: agents
+          shared_dir_storage_backend: nfs

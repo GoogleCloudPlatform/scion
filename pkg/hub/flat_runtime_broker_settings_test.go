@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 package hub
 
@@ -47,6 +47,7 @@ func TestFlatRuntimeBrokerErrorCodes_FrozenValues(t *testing.T) {
 		ErrCodeRuntimeTargetChanged:             "runtime_target_changed",
 		ErrCodeRuntimeBrokerNotFlat:             "runtime_broker_not_flat",
 		ErrCodeRuntimeBrokerNameConflict:        "runtime_broker_name_conflict",
+		ErrCodeRuntimeTargetInUse:               "runtime_target_in_use",
 		ErrCodeRuntimeTargetMoveUnsupported:     "runtime_target_move_unsupported",
 		ErrCodeRuntimeTargetPinStale:            "runtime_target_pin_stale",
 		ErrCodeRuntimeBrokerNotLinked:           "runtime_broker_not_linked",
@@ -190,7 +191,9 @@ func TestServerConfigPut_FileModePreservesRuntimeBrokerInstances(t *testing.T) {
 		path := flatSettingsHome(t, flatInstanceSettingsYAML)
 		before, _ := os.ReadFile(path)
 		for _, body := range []string{
-			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"kubernetes"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"kubernetes","kubeconfig":"relative.kubeconfig"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"docker","kubernetes_block_service_account":"zero-priv"}}]}}}`,
+			`{"server":{"broker":{"instances":[{"key":"a","name":"x","runtime_target":{"type":"podman"}}]}}}`,
 			`{"server":{"broker":{"instances":[{"key":"a","name":"x","profile":"p","runtime_target":{"type":"docker"}}]}}}`,
 		} {
 			rr := putFlatFileModeServerConfig(t, body)

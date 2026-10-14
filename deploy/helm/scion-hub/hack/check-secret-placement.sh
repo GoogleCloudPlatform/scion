@@ -93,6 +93,7 @@ declare -A EXPECTED_NEEDLES=(
   [cluster-rbac]=1       # session secret
   [existing-secret]=0    # bring-your-own session Secret; nothing rendered
   [minimal]=1            # the chart-rendered session secret
+  [nfs-workspace]=1      # session secret
   [session-existing]=0   # bring-your-own session Secret; nothing rendered
   [settings]=1           # session secret; settings.yaml carries no credential
   [settings-oauth]=2     # session secret + the OAuth web client_secret

@@ -879,7 +879,18 @@ type engineStubDispatcher struct {
 	mu      sync.Mutex
 	calls   int
 	softArg []bool
-	fn      func(ctx context.Context, a *store.Agent) error
+	// deleteFilesArg and removeBranchArg record each delete's flags.
+	deleteFilesArg  []bool
+	removeBranchArg []bool
+	fn              func(ctx context.Context, a *store.Agent) error
+}
+
+// deleteFlags returns the deleteFiles and removeBranch flags of every
+// delete dispatched so far.
+func (d *engineStubDispatcher) deleteFlags() (deleteFiles, removeBranch []bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]bool(nil), d.deleteFilesArg...), append([]bool(nil), d.removeBranchArg...)
 }
 
 // blockingDelete returns a dispatch fn that signals entered and blocks
@@ -1657,7 +1668,7 @@ func wireWebBrokerForMentionTests(t *testing.T, srv *Server, s store.Store, proj
 	if srv.webChatStore == nil {
 		dbProvider, ok := s.(interface{ DB() *sql.DB })
 		require.True(t, ok)
-		wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+		wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 		require.NoError(t, wcs.Init())
 		srv.SetWebChatStore(wcs)
 	}
@@ -3049,10 +3060,12 @@ func (p *deleteRecordingPublisher) count(kind string) int {
 	return n
 }
 
-func (d *engineStubDispatcher) DispatchAgentDelete(ctx context.Context, a *store.Agent, _, _, soft bool, _ time.Time) error {
+func (d *engineStubDispatcher) DispatchAgentDelete(ctx context.Context, a *store.Agent, deleteFiles, removeBranch, soft bool, _ time.Time) error {
 	d.mu.Lock()
 	d.calls++
 	d.softArg = append(d.softArg, soft)
+	d.deleteFilesArg = append(d.deleteFilesArg, deleteFiles)
+	d.removeBranchArg = append(d.removeBranchArg, removeBranch)
 	fn := d.fn
 	d.mu.Unlock()
 	if fn == nil {
@@ -3755,7 +3768,8 @@ type credRecord func() *string
 //   - dupEdgeAgentID: that agent's active edge is reported twice;
 //   - edgeReadErr: every agent-delegate edge read fails;
 //   - auditFailInTx: the agent_scopes_reissued audit write inside a
-//     transaction fails.
+//     transaction fails;
+//   - beforeTx: runs once, before the next transaction begins.
 type reissueFaultStore struct {
 	store.Store
 	fault *storeFaultSwitch
@@ -3781,6 +3795,9 @@ type reissueFaultStore struct {
 	failUserID string
 	// uatReadErr: GetUserAccessToken fails.
 	uatReadErr bool
+	// beforeTx, when set, runs once before the next transaction begins,
+	// outside it: a write landing between a plan and its commit.
+	beforeTx func()
 }
 
 // fieldMutatingAfterMembersStore generalizes labelsNilToEmptyAfterMembersStore
@@ -4017,6 +4034,10 @@ func (s *reissueFaultStore) GetDelegationEdgesForDelegate(ctx context.Context, d
 func (s *reissueFaultStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
 	if !s.fault.Active() {
 		return s.Store.WithTx(ctx, fn)
+	}
+	if h := s.beforeTx; h != nil {
+		s.beforeTx = nil
+		h()
 	}
 	err := s.Store.WithTx(ctx, func(tx store.Store) error {
 		if s.auditFailInTx {

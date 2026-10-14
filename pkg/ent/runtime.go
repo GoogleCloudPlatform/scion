@@ -79,6 +79,8 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/skillversion"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/subscriptiontemplate"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/template"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitydelegation"
+	"github.com/GoogleCloudPlatform/scion/pkg/ent/testidentitylogincode"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/testinframarker"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroup"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/threadgroupmember"
@@ -277,48 +279,52 @@ func init() {
 	agentDescLaunchError := agentFields[63].Descriptor()
 	// agent.DefaultLaunchError holds the default value on creation for the launch_error field.
 	agent.DefaultLaunchError = agentDescLaunchError.Default.(string)
+	// agentDescLaunchCause is the schema descriptor for launch_cause field.
+	agentDescLaunchCause := agentFields[64].Descriptor()
+	// agent.DefaultLaunchCause holds the default value on creation for the launch_cause field.
+	agent.DefaultLaunchCause = agentDescLaunchCause.Default.(string)
 	// agentDescDeletionState is the schema descriptor for deletion_state field.
-	agentDescDeletionState := agentFields[64].Descriptor()
+	agentDescDeletionState := agentFields[65].Descriptor()
 	// agent.DefaultDeletionState holds the default value on creation for the deletion_state field.
 	agent.DefaultDeletionState = agentDescDeletionState.Default.(string)
 	// agentDescDeletionClaim is the schema descriptor for deletion_claim field.
-	agentDescDeletionClaim := agentFields[65].Descriptor()
+	agentDescDeletionClaim := agentFields[66].Descriptor()
 	// agent.DefaultDeletionClaim holds the default value on creation for the deletion_claim field.
 	agent.DefaultDeletionClaim = agentDescDeletionClaim.Default.(int64)
 	// agentDescDeletionCode is the schema descriptor for deletion_code field.
-	agentDescDeletionCode := agentFields[69].Descriptor()
+	agentDescDeletionCode := agentFields[70].Descriptor()
 	// agent.DefaultDeletionCode holds the default value on creation for the deletion_code field.
 	agent.DefaultDeletionCode = agentDescDeletionCode.Default.(string)
 	// agentDescDeletionError is the schema descriptor for deletion_error field.
-	agentDescDeletionError := agentFields[70].Descriptor()
+	agentDescDeletionError := agentFields[71].Descriptor()
 	// agent.DefaultDeletionError holds the default value on creation for the deletion_error field.
 	agent.DefaultDeletionError = agentDescDeletionError.Default.(string)
 	// agentDescDeletionPrior is the schema descriptor for deletion_prior field.
-	agentDescDeletionPrior := agentFields[71].Descriptor()
+	agentDescDeletionPrior := agentFields[72].Descriptor()
 	// agent.DefaultDeletionPrior holds the default value on creation for the deletion_prior field.
 	agent.DefaultDeletionPrior = agentDescDeletionPrior.Default.(string)
 	// agentDescDeletionRequest is the schema descriptor for deletion_request field.
-	agentDescDeletionRequest := agentFields[72].Descriptor()
+	agentDescDeletionRequest := agentFields[73].Descriptor()
 	// agent.DefaultDeletionRequest holds the default value on creation for the deletion_request field.
 	agent.DefaultDeletionRequest = agentDescDeletionRequest.Default.(string)
 	// agentDescStartClaimKind is the schema descriptor for start_claim_kind field.
-	agentDescStartClaimKind := agentFields[77].Descriptor()
+	agentDescStartClaimKind := agentFields[78].Descriptor()
 	// agent.DefaultStartClaimKind holds the default value on creation for the start_claim_kind field.
 	agent.DefaultStartClaimKind = agentDescStartClaimKind.Default.(string)
 	// agentDescStartClaimState is the schema descriptor for start_claim_state field.
-	agentDescStartClaimState := agentFields[78].Descriptor()
+	agentDescStartClaimState := agentFields[79].Descriptor()
 	// agent.DefaultStartClaimState holds the default value on creation for the start_claim_state field.
 	agent.DefaultStartClaimState = agentDescStartClaimState.Default.(string)
 	// agentDescStartClaimOwner is the schema descriptor for start_claim_owner field.
-	agentDescStartClaimOwner := agentFields[79].Descriptor()
+	agentDescStartClaimOwner := agentFields[80].Descriptor()
 	// agent.DefaultStartClaimOwner holds the default value on creation for the start_claim_owner field.
 	agent.DefaultStartClaimOwner = agentDescStartClaimOwner.Default.(string)
 	// agentDescStartClaimTarget is the schema descriptor for start_claim_target field.
-	agentDescStartClaimTarget := agentFields[80].Descriptor()
+	agentDescStartClaimTarget := agentFields[81].Descriptor()
 	// agent.DefaultStartClaimTarget holds the default value on creation for the start_claim_target field.
 	agent.DefaultStartClaimTarget = agentDescStartClaimTarget.Default.(string)
 	// agentDescStartClaimLaunchID is the schema descriptor for start_claim_launch_id field.
-	agentDescStartClaimLaunchID := agentFields[85].Descriptor()
+	agentDescStartClaimLaunchID := agentFields[86].Descriptor()
 	// agent.DefaultStartClaimLaunchID holds the default value on creation for the start_claim_launch_id field.
 	agent.DefaultStartClaimLaunchID = agentDescStartClaimLaunchID.Default.(string)
 	// agentDescID is the schema descriptor for id field.
@@ -1853,8 +1859,18 @@ func init() {
 	notificationDescAcknowledged := notificationFields[9].Descriptor()
 	// notification.DefaultAcknowledged holds the default value on creation for the acknowledged field.
 	notification.DefaultAcknowledged = notificationDescAcknowledged.Default.(bool)
+	// notificationDescDispatchAttempts is the schema descriptor for dispatch_attempts field.
+	notificationDescDispatchAttempts := notificationFields[10].Descriptor()
+	// notification.DefaultDispatchAttempts holds the default value on creation for the dispatch_attempts field.
+	notification.DefaultDispatchAttempts = notificationDescDispatchAttempts.Default.(int)
+	// notification.DispatchAttemptsValidator is a validator for the "dispatch_attempts" field. It is called by the builders before save.
+	notification.DispatchAttemptsValidator = notificationDescDispatchAttempts.Validators[0].(func(int) error)
+	// notificationDescDispatchOutcome is the schema descriptor for dispatch_outcome field.
+	notificationDescDispatchOutcome := notificationFields[11].Descriptor()
+	// notification.DefaultDispatchOutcome holds the default value on creation for the dispatch_outcome field.
+	notification.DefaultDispatchOutcome = notificationDescDispatchOutcome.Default.(string)
 	// notificationDescCreated is the schema descriptor for created field.
-	notificationDescCreated := notificationFields[10].Descriptor()
+	notificationDescCreated := notificationFields[12].Descriptor()
 	// notification.DefaultCreated holds the default value on creation for the created field.
 	notification.DefaultCreated = notificationDescCreated.Default.(func() time.Time)
 	// notificationDescID is the schema descriptor for id field.
@@ -2039,12 +2055,16 @@ func init() {
 	roledefinitionDescSystem := roledefinitionFields[5].Descriptor()
 	// roledefinition.DefaultSystem holds the default value on creation for the system field.
 	roledefinition.DefaultSystem = roledefinitionDescSystem.Default.(bool)
+	// roledefinitionDescConfersMembership is the schema descriptor for confers_membership field.
+	roledefinitionDescConfersMembership := roledefinitionFields[6].Descriptor()
+	// roledefinition.DefaultConfersMembership holds the default value on creation for the confers_membership field.
+	roledefinition.DefaultConfersMembership = roledefinitionDescConfersMembership.Default.(bool)
 	// roledefinitionDescCreated is the schema descriptor for created field.
-	roledefinitionDescCreated := roledefinitionFields[6].Descriptor()
+	roledefinitionDescCreated := roledefinitionFields[7].Descriptor()
 	// roledefinition.DefaultCreated holds the default value on creation for the created field.
 	roledefinition.DefaultCreated = roledefinitionDescCreated.Default.(func() time.Time)
 	// roledefinitionDescUpdated is the schema descriptor for updated field.
-	roledefinitionDescUpdated := roledefinitionFields[7].Descriptor()
+	roledefinitionDescUpdated := roledefinitionFields[8].Descriptor()
 	// roledefinition.DefaultUpdated holds the default value on creation for the updated field.
 	roledefinition.DefaultUpdated = roledefinitionDescUpdated.Default.(func() time.Time)
 	// roledefinition.UpdateDefaultUpdated holds the default value on update for the updated field.
@@ -2399,6 +2419,54 @@ func init() {
 	templateDescID := templateFields[0].Descriptor()
 	// template.DefaultID holds the default value on creation for the id field.
 	template.DefaultID = templateDescID.Default.(func() uuid.UUID)
+	testidentitydelegationFields := schema.TestIdentityDelegation{}.Fields()
+	_ = testidentitydelegationFields
+	// testidentitydelegationDescGrantorID is the schema descriptor for grantor_id field.
+	testidentitydelegationDescGrantorID := testidentitydelegationFields[1].Descriptor()
+	// testidentitydelegation.GrantorIDValidator is a validator for the "grantor_id" field. It is called by the builders before save.
+	testidentitydelegation.GrantorIDValidator = testidentitydelegationDescGrantorID.Validators[0].(func(string) error)
+	// testidentitydelegationDescWorkloadSub is the schema descriptor for workload_sub field.
+	testidentitydelegationDescWorkloadSub := testidentitydelegationFields[2].Descriptor()
+	// testidentitydelegation.WorkloadSubValidator is a validator for the "workload_sub" field. It is called by the builders before save.
+	testidentitydelegation.WorkloadSubValidator = testidentitydelegationDescWorkloadSub.Validators[0].(func(string) error)
+	// testidentitydelegationDescScope is the schema descriptor for scope field.
+	testidentitydelegationDescScope := testidentitydelegationFields[3].Descriptor()
+	// testidentitydelegation.ScopeValidator is a validator for the "scope" field. It is called by the builders before save.
+	testidentitydelegation.ScopeValidator = testidentitydelegationDescScope.Validators[0].(func(string) error)
+	// testidentitydelegationDescMemberCap is the schema descriptor for member_cap field.
+	testidentitydelegationDescMemberCap := testidentitydelegationFields[4].Descriptor()
+	// testidentitydelegation.MemberCapValidator is a validator for the "member_cap" field. It is called by the builders before save.
+	testidentitydelegation.MemberCapValidator = testidentitydelegationDescMemberCap.Validators[0].(func(int) error)
+	// testidentitydelegationDescLabel is the schema descriptor for label field.
+	testidentitydelegationDescLabel := testidentitydelegationFields[5].Descriptor()
+	// testidentitydelegation.DefaultLabel holds the default value on creation for the label field.
+	testidentitydelegation.DefaultLabel = testidentitydelegationDescLabel.Default.(string)
+	// testidentitydelegationDescID is the schema descriptor for id field.
+	testidentitydelegationDescID := testidentitydelegationFields[0].Descriptor()
+	// testidentitydelegation.DefaultID holds the default value on creation for the id field.
+	testidentitydelegation.DefaultID = testidentitydelegationDescID.Default.(func() uuid.UUID)
+	testidentitylogincodeFields := schema.TestIdentityLoginCode{}.Fields()
+	_ = testidentitylogincodeFields
+	// testidentitylogincodeDescCodeHash is the schema descriptor for code_hash field.
+	testidentitylogincodeDescCodeHash := testidentitylogincodeFields[2].Descriptor()
+	// testidentitylogincode.CodeHashValidator is a validator for the "code_hash" field. It is called by the builders before save.
+	testidentitylogincode.CodeHashValidator = testidentitylogincodeDescCodeHash.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuedBy is the schema descriptor for issued_by field.
+	testidentitylogincodeDescIssuedBy := testidentitylogincodeFields[3].Descriptor()
+	// testidentitylogincode.IssuedByValidator is a validator for the "issued_by" field. It is called by the builders before save.
+	testidentitylogincode.IssuedByValidator = testidentitylogincodeDescIssuedBy.Validators[0].(func(string) error)
+	// testidentitylogincodeDescIssuerCredentialID is the schema descriptor for issuer_credential_id field.
+	testidentitylogincodeDescIssuerCredentialID := testidentitylogincodeFields[4].Descriptor()
+	// testidentitylogincode.DefaultIssuerCredentialID holds the default value on creation for the issuer_credential_id field.
+	testidentitylogincode.DefaultIssuerCredentialID = testidentitylogincodeDescIssuerCredentialID.Default.(string)
+	// testidentitylogincodeDescCreatedAt is the schema descriptor for created_at field.
+	testidentitylogincodeDescCreatedAt := testidentitylogincodeFields[7].Descriptor()
+	// testidentitylogincode.DefaultCreatedAt holds the default value on creation for the created_at field.
+	testidentitylogincode.DefaultCreatedAt = testidentitylogincodeDescCreatedAt.Default.(func() time.Time)
+	// testidentitylogincodeDescID is the schema descriptor for id field.
+	testidentitylogincodeDescID := testidentitylogincodeFields[0].Descriptor()
+	// testidentitylogincode.DefaultID holds the default value on creation for the id field.
+	testidentitylogincode.DefaultID = testidentitylogincodeDescID.Default.(func() uuid.UUID)
 	testinframarkerFields := schema.TestInfraMarker{}.Fields()
 	_ = testinframarkerFields
 	// testinframarkerDescHubID is the schema descriptor for hub_id field.

@@ -65,7 +65,8 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 
 	hcDir, hcErr := config.ResolveHarnessConfigDir(opts.ConfigDirPath, opts.Name, opts.ProjectPath, opts.TemplatePaths...)
 
-	entry := EffectiveConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
+	declared := declaredConfig(opts.Name, hcDir, opts.Settings, opts.ProfileName)
+	entry := withBundleReady(declared)
 
 	// 1. Container-script harness (provisioner block present)
 	if entry.Provisioner != nil {
@@ -102,9 +103,11 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 	}
 
 	// 2. Declarative generic. If config.yaml has declarative metadata
-	// (command/env_template/capabilities), use the declarative wrapper so
-	// callers get those fields. Otherwise fall back to the legacy Generic.
-	if hasDeclarativeMetadata(entry) {
+	// (command/env_template/capabilities/ready/delivery), use the
+	// declarative wrapper so callers get those fields. Otherwise fall back
+	// to the legacy Generic. The check reads the declared entry: a ready
+	// block filled in from the built-in bundle is not declared metadata.
+	if hasDeclarativeMetadata(declared) {
 		return &ResolvedHarness{
 			Harness:        NewDeclarativeGenericHarness(entry),
 			ConfigName:     opts.Name,
@@ -114,8 +117,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
+	// The plain Generic harness still carries the entry's ready spec (which
+	// withBundleReady fills from the built-in bundle when the entry has no
+	// block), so a built-in harness type keeps its readiness here too.
+	ready := entry.ResolvedReady()
 	return &ResolvedHarness{
-		Harness:        &Generic{},
+		Harness:        &Generic{ready: &ready},
 		ConfigName:     opts.Name,
 		ConfigDir:      hcDir,
 		Config:         entry,
@@ -154,6 +161,14 @@ func SkillsDirForEntry(entry config.HarnessConfigEntry) string {
 // builds harnesses from this entry, and pkg/agent evaluates harness-config
 // policy against it.
 func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *config.VersionedSettings, profile string) config.HarnessConfigEntry {
+	return withBundleReady(declaredConfig(name, hcDir, settings, profile))
+}
+
+// declaredConfig returns the entry EffectiveConfig starts from: hcDir's
+// config.yaml (or a bare entry when hcDir is nil) with the settings overlay
+// for profile applied and Harness defaulted to name, before any ready block
+// is taken from the built-in bundle.
+func declaredConfig(name string, hcDir *config.HarnessConfigDir, settings *config.VersionedSettings, profile string) config.HarnessConfigEntry {
 	entry := config.HarnessConfigEntry{Harness: name}
 	if hcDir != nil {
 		entry = hcDir.Config
@@ -167,6 +182,20 @@ func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *conf
 
 	if entry.Harness == "" {
 		entry.Harness = name
+	}
+	return entry
+}
+
+// withBundleReady returns entry with its ready block filled in from the
+// built-in bundle when it has none.
+func withBundleReady(entry config.HarnessConfigEntry) config.HarnessConfigEntry {
+	// A harness-config written before the ready block existed has none.
+	// Take the built-in bundle's block for the same harness, so the config
+	// keeps the readiness it had when readiness was keyed on the harness
+	// name. An explicit block, from the dir or an overlay, always wins; a
+	// harness with no built-in bundle keeps the delay default.
+	if entry.Ready == nil {
+		entry.Ready = embeddedReadyConfig(entry.Harness)
 	}
 	return entry
 }
@@ -210,6 +239,14 @@ func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.H
 	if len(overlay.Secrets) > 0 {
 		base.Secrets = overlay.Secrets
 	}
+	// Ready and delivery are replaced as whole blocks, never merged field
+	// by field: a half-merged readiness or delivery rule is confusing.
+	if overlay.Ready != nil {
+		base.Ready = overlay.Ready
+	}
+	if overlay.Delivery != nil {
+		base.Delivery = overlay.Delivery
+	}
 	return base
 }
 
@@ -224,6 +261,9 @@ func hasDeclarativeMetadata(entry config.HarnessConfigEntry) bool {
 		return true
 	}
 	if entry.ConfigDir != "" || entry.SkillsDir != "" {
+		return true
+	}
+	if entry.Ready != nil || entry.Delivery != nil {
 		return true
 	}
 	return false

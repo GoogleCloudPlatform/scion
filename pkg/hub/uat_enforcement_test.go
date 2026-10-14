@@ -1,4 +1,4 @@
-//go:build !no_sqlite && (!hubshard || hubshard_5)
+//go:build !no_sqlite
 
 // Copyright 2026 Google LLC
 //
@@ -958,6 +958,8 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 			"project:clone",
 			// Agent manage alias
 			"agent:manage",
+			// Quota administration scopes (hub boundary only)
+			"quota:read", "quota:create", "quota:update", "quota:delete",
 		}
 		for _, scope := range expectedScopes {
 			assert.True(t, validScopes[scope], "ValidUATScopes should include %s", scope)
@@ -965,7 +967,7 @@ func TestValidUATScopes_Completeness(t *testing.T) {
 	})
 
 	t.Run("excludes authority-escalation scopes", func(t *testing.T) {
-		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "quota:", "hub:"}
+		excludedPrefixes := []string{"policy:", "role:", "role_binding:", "hub:"}
 		for scope := range validScopes {
 			for _, prefix := range excludedPrefixes {
 				assert.False(t, strings.HasPrefix(scope, prefix),
