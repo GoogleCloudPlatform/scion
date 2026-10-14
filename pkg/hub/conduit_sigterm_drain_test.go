@@ -165,7 +165,7 @@ func TestConduitShutdownDrain_CapWhicheverPathFirst(t *testing.T) {
 			}
 			select {
 			case g := <-goAways:
-				assert.Equal(t, tc.wantMs, g.GetDrainDeadlineMs())
+				assert.Equal(t, tc.wantMs, g.GetDrainDeadlineMs(), "GoAway drain_deadline_ms")
 			case <-ctx.Done():
 				t.Fatal("agent did not receive GoAway")
 			}

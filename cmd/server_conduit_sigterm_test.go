@@ -53,7 +53,7 @@ func TestRegisterConduitShutdownDrain_DrainsBeforeCancel(t *testing.T) {
 	q.addStep(shutdownPhaseMark, func() { record("mark") })
 
 	q.begin(syscall.SIGTERM)
-	assert.Equal(t, []string{"mark", "drain", "cancel"}, order)
+	assert.Equal(t, []string{"mark", "drain", "cancel"}, order, "conduit drain after the mark and before cancel")
 	assert.Error(t, ctx.Err())
 }
 

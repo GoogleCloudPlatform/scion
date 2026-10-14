@@ -267,7 +267,7 @@ func TestServerShutdownSequence_StepsInPhaseOrderBeforeCancel(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	assert.Equal(t, []string{"mark-hub", "mark-web", "drain", "cancel"}, order)
+	assert.Equal(t, []string{"mark-hub", "mark-web", "drain", "cancel"}, order, "pre-cancel steps in phase order, then cancel")
 }
 
 // PS-2: a SIGTERM-initiated shutdown runs the step-16 tail in order:

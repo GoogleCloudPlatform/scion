@@ -43,7 +43,7 @@ func TestReadyz_ShuttingDown(t *testing.T) {
 
 	srv.BeginShutdown()
 	rec = doRequestNoAuth(t, srv, http.MethodGet, "/readyz", nil)
-	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code, "readyz during shutdown")
 	var body map[string]string
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	assert.Equal(t, "not_ready", body["status"])
@@ -177,7 +177,7 @@ func TestBeginShutdown_StopsHubDispatch(t *testing.T) {
 	assert.True(t, srv.ShuttingDown())
 
 	err := d.DispatchAgentStop(ctx, agent)
-	require.Error(t, err)
+	require.Error(t, err, "a dispatch after the mark must fail")
 	assert.True(t, errors.Is(err, ErrHubShuttingDown), "got %v", err)
 	assert.False(t, client.stopCalled, "no broker call after the mark")
 	err = d.DispatchAgentMessage(ctx, agent, "hello", false, nil)
