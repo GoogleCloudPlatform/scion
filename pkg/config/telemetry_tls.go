@@ -34,7 +34,8 @@ func ValidateTelemetryTLS(tls *api.TelemetryTLS) error {
 
 // ValidateV1TelemetryTLS applies ValidateTelemetryTLS to a settings-file
 // (or hub telemetry section) telemetry.cloud.tls value. It is the one place
-// the V1 fields are copied to api.TelemetryTLS. A nil tls is valid.
+// the TLS rule is applied to V1 settings (the settings loader and the hub
+// settings validation both call it). A nil tls is valid.
 func ValidateV1TelemetryTLS(tls *V1TelemetryTLSConfig) error {
 	if tls == nil {
 		return nil
