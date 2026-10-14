@@ -80,25 +80,32 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 		return nil, fmt.Errorf("ent client driver does not expose a *sql.DB")
 	}
 	db := drv.DB()
-	if _, err := db.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
+	// foreign_keys is a per-connection setting and every pooled connection
+	// starts with it on, so turn it off and seed on one pinned connection.
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("acquiring seeding connection: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "PRAGMA foreign_keys = OFF"); err != nil {
 		return nil, fmt.Errorf("disabling foreign keys: %w", err)
 	}
 
 	columns := map[string]tableColumns{}
 	for _, tf := range Spec() {
-		tableCols, err := columnsForTable(ctx, db, tf.Table)
+		tableCols, err := columnsForTable(ctx, conn, tf.Table)
 		if err != nil {
 			return nil, err
 		}
 		columns[tf.Table] = tableCols
 		for i, r := range tf.Rows {
-			if err := insertRow(ctx, db, tf.Table, i, r, columns[tf.Table]); err != nil {
+			if err := insertRow(ctx, conn, tf.Table, i, r, columns[tf.Table]); err != nil {
 				return nil, fmt.Errorf("seeding %s row %d: %w", tf.Table, i, err)
 			}
 		}
 	}
 
-	report, err := checkCoverage(ctx, db, path)
+	report, err := checkCoverage(ctx, conn, path)
 	if err != nil {
 		return nil, err
 	}
@@ -107,7 +114,7 @@ func Generate(ctx context.Context, path string) (*Report, error) {
 
 // checkCoverage lists every domain table in the database and counts its rows.
 // A table with zero rows is recorded in Report.Missing.
-func checkCoverage(ctx context.Context, db *sql.DB, path string) (*Report, error) {
+func checkCoverage(ctx context.Context, db queryExecer, path string) (*Report, error) {
 	tables, err := listTables(ctx, db)
 	if err != nil {
 		return nil, err
@@ -129,7 +136,7 @@ func checkCoverage(ctx context.Context, db *sql.DB, path string) (*Report, error
 
 // listTables returns the sorted set of domain table names (excluding SQLite
 // internal tables and the schema_migrations bookkeeping table).
-func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
+func listTables(ctx context.Context, db queryExecer) ([]string, error) {
 	rows, err := db.QueryContext(ctx,
 		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
 	if err != nil {
@@ -155,7 +162,14 @@ func listTables(ctx context.Context, db *sql.DB) ([]string, error) {
 	return tables, nil
 }
 
-func columnsForTable(ctx context.Context, db *sql.DB, table string) (tableColumns, error) {
+// queryExecer is the part of *sql.DB and *sql.Conn that seeding uses.
+type queryExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func columnsForTable(ctx context.Context, db queryExecer, table string) (tableColumns, error) {
 	rows, err := db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%q)", table))
 	if err != nil {
 		return nil, fmt.Errorf("listing columns for %s: %w", table, err)
@@ -185,7 +199,7 @@ func columnsForTable(ctx context.Context, db *sql.DB, table string) (tableColumn
 
 // insertRow inserts a single fixture row using a parameterized statement so
 // values are escaped by the driver. Columns are sorted for deterministic SQL.
-func insertRow(ctx context.Context, db *sql.DB, table string, index int, r row, columns tableColumns) error {
+func insertRow(ctx context.Context, db queryExecer, table string, index int, r row, columns tableColumns) error {
 	cols := make([]string, 0, len(r))
 	values := make(row, len(r))
 	for c, v := range r {
