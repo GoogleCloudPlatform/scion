@@ -235,6 +235,36 @@ func TestRedactEndpointIn_UnparseableEndpointFailsClosed(t *testing.T) {
 		redactEndpointIn(text, endpoint))
 }
 
+// TestRedactEndpointIn_UnparseableEndpointEchoesNothing: an unparseable
+// endpoint is replaced whole also where Go quoted it with %q (escaping a
+// control character), and a password containing '@' leaves no part of
+// itself in the text, in that endpoint or in another URL.
+func TestRedactEndpointIn_UnparseableEndpointEchoesNothing(t *testing.T) {
+	// url.Parse rejects the control character; Go's error quotes the URL
+	// with %q, so the text holds it escaped.
+	escaped := "http://user:s3cret@hub.example.com/\x01"
+	text := `parse "http://user:s3cret@hub.example.com/\x01": net/url: invalid control character in URL`
+	got := redactEndpointIn(text, escaped)
+	require.Equal(t, `parse "[redacted hub URL]": net/url: invalid control character in URL`, got)
+	assertNoSecretSlice(t, got, "s3cret")
+
+	// url.Parse rejects the port; the password holds an '@'.
+	atPassword := "http://user:s3@cret@127.0.0.1:99999x"
+	text = `parse "http://user:s3@cret@127.0.0.1:99999x": invalid port; also http://other:s3@cret@hub.example.com/x`
+	got = redactEndpointIn(text, atPassword)
+	require.Equal(t, `parse "[redacted hub URL]": invalid port; also http://xxxxx@hub.example.com/x`, got)
+	assertNoSecretSlice(t, got, "s3@cret")
+}
+
+// assertNoSecretSlice fails when out contains any 3-character slice of
+// secret.
+func assertNoSecretSlice(t *testing.T, out, secret string) {
+	t.Helper()
+	for i := 0; i+3 <= len(secret); i++ {
+		assert.NotContains(t, out, secret[i:i+3], "a slice of the secret is visible")
+	}
+}
+
 // hubSettingsReadAllowed lists, by file, the lines outside server_*.go
 // that the hub settings guard accepts. Each one is not a CLI read of hub
 // configuration from settings:

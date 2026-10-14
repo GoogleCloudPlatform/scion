@@ -63,8 +63,8 @@ func ValidateHubURL(endpoint string) error {
 	return nil
 }
 
-// userInfoRe matches the user info of a URL that url.Parse rejects.
-var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@]*@`)
+// userInfoRe matches the user info of a URL that url.Parse rejects, up to the last '@' before the host.
+var userInfoRe = regexp.MustCompile(`^([A-Za-z][A-Za-z0-9+.-]*://)?[^/?#]*@`)
 
 // RedactURL returns raw for display with any credential in its user info
 // replaced: the password (see url.URL.Redacted), or a user name given

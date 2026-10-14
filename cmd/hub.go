@@ -27,6 +27,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -735,18 +736,67 @@ func redactEndpointIn(text, endpoint string) string {
 // located (see redactUnparsedEndpointIn).
 const redactedHubURL = "[redacted hub URL]"
 
-// urlUserInfoInTextRe matches the user info of a URL anywhere in a text.
-var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#@\s"'<>]*@`)
+// urlUserInfoInTextRe matches the user info of a URL anywhere in a text, up
+// to the last '@' of the authority (a password may contain '@').
+var urlUserInfoInTextRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9+.-]*://)[^/?#\s"'<>]*@`)
 
 // redactUnparsedEndpointIn is redactEndpointIn for an endpoint that
 // url.Parse rejects, so its user info cannot be located: it fails closed.
-// Every occurrence of the endpoint in text is replaced whole, and the user
-// info of any URL still in text is masked.
+// Every occurrence of the endpoint in text is replaced whole, both as given
+// and as %q writes it (Go quotes URLs that way in its errors, escaping
+// control and other special characters), and the user info of any URL
+// still in text is masked.
 func redactUnparsedEndpointIn(text, endpoint string) string {
 	if endpoint != "" {
 		text = strings.ReplaceAll(text, endpoint, redactedHubURL)
+		text = strings.ReplaceAll(text, quotedBody(strconv.Quote(endpoint)), redactedHubURL)
+		text = redactSecretForms(text, endpointUserInfo(endpoint))
 	}
 	return urlUserInfoInTextRe.ReplaceAllString(text, "${1}xxxxx@")
+}
+
+// endpointUserInfo returns the user info of an endpoint that url.Parse
+// rejects, read from the string itself: the text after "://" (or from the
+// start, without one) up to the last '@' before the first '/', '?' or '#'.
+// It returns "" when there is none.
+func endpointUserInfo(endpoint string) string {
+	rest := endpoint
+	if _, after, ok := strings.Cut(endpoint, "://"); ok {
+		rest = after
+	}
+	if i := strings.IndexAny(rest, "/?#"); i >= 0 {
+		rest = rest[:i]
+	}
+	if at := strings.LastIndex(rest, "@"); at > 0 {
+		return rest[:at]
+	}
+	return ""
+}
+
+// minSecretLen is the length below which a user info is not replaced on
+// its own: replacing a shorter string would rewrite unrelated text.
+const minSecretLen = 3
+
+// redactSecretForms replaces secret (a user info) everywhere in text: as
+// given, and as strconv.Quote, JSON, url.PathEscape and url.QueryEscape
+// write it, so no rendering of an error that quoted the endpoint shows it.
+func redactSecretForms(text, secret string) string {
+	if len(secret) < minSecretLen {
+		return text
+	}
+	forms := []string{secret, quotedBody(strconv.Quote(secret)), url.PathEscape(secret), url.QueryEscape(secret)}
+	if b, err := json.Marshal(secret); err == nil {
+		forms = append(forms, quotedBody(string(b)))
+	}
+	for _, f := range forms {
+		text = strings.ReplaceAll(text, f, "xxxxx")
+	}
+	return text
+}
+
+// quotedBody returns a strconv.Quote result without its outer quotes.
+func quotedBody(q string) string {
+	return q[1 : len(q)-1]
 }
 
 // hubStatusName returns the nickname of the hub at endpoint for hub
