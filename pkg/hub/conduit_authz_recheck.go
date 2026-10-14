@@ -376,6 +376,8 @@ type conduitUserStreamAuthz struct {
 	// ConfirmDeny, if set, is asked before an action deny is reported;
 	// false makes the decision unavailable instead.
 	ConfirmDeny func() bool
+	// Authorize decides each action; nil means authorizeConduitAction.
+	Authorize conduitActionAuthorizer
 }
 
 // authorizeConduitUserStream decides a user stream against current state.
@@ -408,8 +410,12 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 	if len(actions) == 0 {
 		return conduitAuthzDenied, "unknown stream kind", fmt.Errorf("%w: unknown stream kind %q", errConduitForbidden, req.Kind)
 	}
+	authorize := req.Authorize
+	if authorize == nil {
+		authorize = s.authorizeConduitAction
+	}
 	for _, action := range actions {
-		if err := s.authorizeConduitAction(ctx, req.Identity, req.Agent, action); err != nil {
+		if err := authorize(ctx, req.Identity, req.Agent, action); err != nil {
 			if errors.Is(err, errConduitAuthzUnavailable) {
 				return conduitAuthzUnavailable, "authorization lookup failed", err
 			}

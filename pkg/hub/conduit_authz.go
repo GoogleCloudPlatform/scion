@@ -16,12 +16,15 @@ package hub
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -50,6 +53,26 @@ func conduitStreamAction(kind string) Action {
 	default:
 		return ""
 	}
+}
+
+// conduitViaActions returns the actions a user stream of kind requires when
+// its origin is via, for the open and every re-check (design v2.21.29 §3.5,
+// Origin claim via):
+//
+//	tunnel + tcp → ActionPortAccess, ActionTunnel
+//	tunnel + ssh → ActionAttach, ActionTunnel
+//	tunnel + pty → ActionAttach, ActionTunnel
+//	proxy  + tcp → ActionPortAccess
+//	pty    + pty → ActionAttach
+//
+// The pairs are grant.ViaAllows, the one table shared with targets; the
+// actions are conduitStreamActions for the kind, with ActionTunnel for the
+// tunnel origin. It returns nil (no renewal) for any other pair.
+func conduitViaActions(via, kind string) []Action {
+	if !grant.ViaAllows(via, kind) {
+		return nil
+	}
+	return conduitStreamActions(kind, via == grant.ViaTunnel)
 }
 
 // conduitAuthzFor returns the authz action and registered permission that
@@ -345,4 +368,227 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	claims.KeyID = signer.KeyID
 	claims.Audience = grant.Audience
 	return tok, &claims, nil
+}
+
+// errConduitRenewalRefused marks a renewal request the hub refuses without
+// evaluating authorization: the presented grant does not verify in re-check
+// mode, does not match the stream named by the request, or names an origin
+// and kind outside the origin table. The stream keeps its current deadline.
+var errConduitRenewalRefused = errors.New("conduit renewal refused")
+
+// conduitRenewalRequest is what a relay presents to renew one user stream's
+// authorization deadline (design §3.5, Re-check). Only LatestGrant carries
+// authority. The other fields name the stream and must agree with it.
+type conduitRenewalRequest struct {
+	// LatestGrant is the stream's most recent hub-signed grant: its open
+	// grant or any renewal for the same open_jti.
+	LatestGrant []byte
+	// TargetSessionID and TargetStreamID name the stream on the target's
+	// own session, as the target knows it.
+	TargetSessionID string
+	TargetStreamID  uint32
+	// OpenJTI is the jti of the stream's open grant.
+	OpenJTI string
+	// PrincipalID and Kind, when set, are the user and stream kind the
+	// relay holds for the stream; they must equal the grant's.
+	PrincipalID string
+	Kind        string
+}
+
+// conduitRenewal is a minted renewal grant and the deadline it carries.
+type conduitRenewal struct {
+	Token      []byte
+	AuthzUntil time.Time
+	Claims     *grant.RenewalClaims
+}
+
+// renewConduitStream re-checks a user stream from its latest grant alone
+// and, if the principal still holds the stream's authorization, mints a
+// renewal grant moving its deadline to now plus the user stream
+// authorization interval. The hub keeps no per-stream state: the target's
+// identity comes from the registry, and the principal, project, kind,
+// params and origin from the grant's signed claims.
+//
+// Errors wrap errConduitDisabled, errConduitRenewalRefused (bad or
+// mismatched grant, no target session, origin and kind outside the table),
+// errConduitForbidden (authorization denied, including an inactive user),
+// errConduitAuthzUnavailable (a lookup failed: no renewal, and the stream
+// is not closed early), or errConduitAgentGone.
+func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalRequest) (*conduitRenewal, error) {
+	return s.renewConduitStreamWith(ctx, req, s.authorizeConduitAction)
+}
+
+// conduitActionAuthorizer decides one action for identity on agent, as
+// authorizeConduitAction does.
+type conduitActionAuthorizer func(ctx context.Context, identity Identity, agent *store.Agent, action Action) error
+
+// renewConduitStreamWith is renewConduitStream deciding each action with
+// authorize. renewConduitStream always passes authorizeConduitAction.
+func (s *Server) renewConduitStreamWith(ctx context.Context, req conduitRenewalRequest, authorize conduitActionAuthorizer) (*conduitRenewal, error) {
+	if !s.experimentEnabled(conduitExperiment) {
+		return nil, errConduitDisabled
+	}
+	if len(req.LatestGrant) == 0 || req.TargetSessionID == "" || req.TargetStreamID == 0 || req.OpenJTI == "" {
+		return nil, fmt.Errorf("%w: incomplete request", errConduitRenewalRefused)
+	}
+	target, err := s.conduitRenewalTarget(ctx, req.TargetSessionID)
+	if err != nil {
+		return nil, err
+	}
+	keys := s.conduitGrantKeySet()
+	recheck, err := keys.recheckKeys(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: grant keys: %v", errConduitAuthzUnavailable, err)
+	}
+	now := keys.now()
+	c, err := grant.VerifyRecheck(req.LatestGrant, recheck, grant.RecheckExpectation{
+		Issuer: conduitGrantIssuer, Target: target, OpenJTI: req.OpenJTI, StreamID: req.TargetStreamID,
+	}, now)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errConduitRenewalRefused, err)
+	}
+	userID, ok := strings.CutPrefix(c.Subject, grant.SubjectUserPrefix)
+	if !ok || userID == "" {
+		return nil, fmt.Errorf("%w: not a user stream", errConduitRenewalRefused)
+	}
+	if req.PrincipalID != "" && req.PrincipalID != userID {
+		return nil, fmt.Errorf("%w: principal does not match the grant", errConduitRenewalRefused)
+	}
+	if req.Kind != "" && req.Kind != c.Stream.Kind {
+		return nil, fmt.Errorf("%w: kind does not match the grant", errConduitRenewalRefused)
+	}
+	if conduitViaActions(c.Via, c.Stream.Kind) == nil {
+		return nil, fmt.Errorf("%w: origin %q does not carry kind %q", errConduitRenewalRefused, c.Via, c.Stream.Kind)
+	}
+	var port int
+	if c.Stream.Kind == grant.StreamKindTCP {
+		if port, err = conduitTCPTarget(c.Stream.Params, false); err != nil {
+			return nil, fmt.Errorf("%w: %v", errConduitRenewalRefused, err)
+		}
+	}
+
+	agent, err := s.store.GetAgent(ctx, target.ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, errConduitAgentGone
+	case err != nil:
+		return nil, fmt.Errorf("%w: agent lookup: %v", errConduitAuthzUnavailable, err)
+	case !agent.DeletedAt.IsZero():
+		return nil, errConduitAgentGone
+	case agent.ProjectID != c.ProjectID:
+		return nil, fmt.Errorf("%w: agent is no longer in the grant's project", errConduitForbidden)
+	}
+	ident, err := s.conduitRenewalIdentity(ctx, c, userID)
+	if err != nil {
+		return nil, err
+	}
+	verdict, reason, err := s.authorizeConduitUserStream(ctx, conduitUserStreamAuthz{
+		Identity:  ident,
+		Agent:     agent,
+		Kind:      c.Stream.Kind,
+		ViaTunnel: c.Via == grant.ViaTunnel,
+		Port:      port,
+		Authorize: authorize,
+		ConfirmDeny: func() bool {
+			_, err := s.store.GetAgent(ctx, agent.ID)
+			return err == nil && ctx.Err() == nil
+		},
+	})
+	switch verdict {
+	case conduitAuthzAllowed:
+	case conduitAuthzDenied:
+		if errors.Is(err, errConduitPrincipalInactive) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %s: %w", errConduitForbidden, reason, err)
+	default:
+		return nil, fmt.Errorf("%w: %s: %w", errConduitAuthzUnavailable, reason, err)
+	}
+
+	signer, err := keys.signer(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: grant keys: %v", errConduitAuthzUnavailable, err)
+	}
+	mintAt := now.Truncate(time.Second)
+	rc := grant.RenewalClaims{
+		Issuer:     conduitGrantIssuer,
+		Subject:    c.Subject,
+		ProjectID:  c.ProjectID,
+		Target:     target,
+		Stream:     c.Stream,
+		Via:        c.Via,
+		StreamID:   req.TargetStreamID,
+		OpenJTI:    req.OpenJTI,
+		AuthzUntil: mintAt.Add(s.conduitUserStreamAuthzInterval()),
+		NotBefore:  mintAt,
+		Expiry:     mintAt.Add(conduitGrantTTL),
+	}
+	jti, err := grant.NewJTI()
+	if err != nil {
+		return nil, err
+	}
+	rc.JTI = jti
+	tok, err := grant.MintRenewal(signer, rc)
+	if err != nil {
+		return nil, err
+	}
+	rc.KeyID, rc.Audience = signer.KeyID, grant.Audience
+	return &conduitRenewal{Token: tok, AuthzUntil: rc.AuthzUntil, Claims: &rc}, nil
+}
+
+// conduitRenewalIdentity returns the identity a renewal re-check evaluates
+// for the user named by a verified grant: the user's own current
+// permissions, read from the store. It is the single place that decides
+// which permissions a renewal evaluates. A user row that is gone wraps
+// errConduitPrincipalInactive; a failed lookup wraps
+// errConduitAuthzUnavailable.
+func (s *Server) conduitRenewalIdentity(ctx context.Context, _ *grant.RecheckClaims, userID string) (Identity, error) {
+	user, err := s.store.GetUser(ctx, userID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, fmt.Errorf("%w: user not found", errConduitPrincipalInactive)
+	case err != nil:
+		return nil, fmt.Errorf("%w: user lookup: %v", errConduitAuthzUnavailable, err)
+	}
+	return NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, ""), nil
+}
+
+// conduitUserStreamAuthzInterval is the user stream authorization interval,
+// with the 8h default.
+func (s *Server) conduitUserStreamAuthzInterval() time.Duration {
+	if d := s.config.ConduitUserStreamAuthzMax; d > 0 {
+		return d
+	}
+	return defaultConduitUserStreamAuthzMax
+}
+
+// conduitRenewalTarget returns the target identity of the live session
+// sessionID as the registry records it. Only agent sessions are renewal
+// targets: user streams to brokers are not renewed until brokers move to
+// conduit, and user sessions are never targets.
+func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (grant.Target, error) {
+	rt := s.conduit.Load()
+	if rt == nil || rt.store == nil {
+		return grant.Target{}, fmt.Errorf("%w: no conduit registry on this node", errConduitAuthzUnavailable)
+	}
+	ps, found, err := rt.store.ListPrincipalSessionsBySession(ctx, sessionID)
+	if err != nil {
+		return grant.Target{}, fmt.Errorf("%w: registry: %v", errConduitAuthzUnavailable, err)
+	}
+	if found {
+		for _, v := range ps.Sessions {
+			r := v.Session
+			if r.SessionID != sessionID {
+				continue
+			}
+			if r.PrincipalKind != registry.PrincipalAgent {
+				return grant.Target{}, fmt.Errorf("%w: session is not an agent target", errConduitRenewalRefused)
+			}
+			return grant.Target{
+				Kind: grant.TargetKindAgent, ID: r.PrincipalID, EndpointIncarnation: r.EndpointIncarnation,
+				SessionID: r.SessionID, ConnectionEpoch: r.ConnectionEpoch,
+			}, nil
+		}
+	}
+	return grant.Target{}, fmt.Errorf("%w: target session not found", errConduitRenewalRefused)
 }

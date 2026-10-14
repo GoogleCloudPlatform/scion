@@ -579,18 +579,14 @@ func (s *Server) requiresSharedSigningKeys() bool {
 // Raising the interval later extends retention on the next ring load; it
 // never shortens it.
 func (s *Server) conduitGrantKeyRetention() time.Duration {
-	d := s.config.ConduitUserStreamAuthzMax
-	if d <= 0 {
-		d = defaultConduitUserStreamAuthzMax
-	}
-	return d + 30*time.Second
+	return s.conduitUserStreamAuthzInterval() + 30*time.Second
 }
 
 // RevokeConduitGrantKey removes a grant key from the ring at once, for use
 // when the key may have been exposed: it stops verifying anything, and
 // streams whose latest grant it signed get no further renewal. The key that
 // signs now cannot be revoked; rotate first and wait for the new key to
-// activate. POST /api/v1/admin/conduit/grant-keys/{kid}/revoke calls it.
+// activate. POST /api/v1/admin/conduit/grant-keys/revoke calls it.
 func (s *Server) RevokeConduitGrantKey(ctx context.Context, kid string) error {
 	if !s.experimentEnabled(conduitExperiment) {
 		return errConduitDisabled
