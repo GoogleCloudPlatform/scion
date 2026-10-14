@@ -966,9 +966,7 @@ an upgraded broker has the template's image recorded as its explicit request ima
 sent it as `Config.Image`), and it keeps that image at the top tier, even over a profile override,
 until it is reincarnated. The broker cannot tell that image apart from a genuine request image.
 
-**Hub template records:** an image set only on the Hub template record (its stored config), and
-not in the template's `scion-agent.yaml`, is no longer applied, because the broker reads the
-template image from the template's files. Set it in the harness-config or a profile override.
+**Hub template records:** an image set on the Hub template record (its stored config) is not applied, and a template's own `image` is now ignored as well (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)). Set it in the harness-config or a profile override.
 
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
