@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sync"
 	"testing"
@@ -188,6 +189,43 @@ func TestStreamRenewalCrossesTheHop(t *testing.T) {
 	defer bridged.mu.Unlock()
 	if len(bridged.got) != 1 || !bytes.Equal(bridged.got[0], grant) {
 		t.Fatalf("bridged stream renewals %q; want one, the grant unchanged", bridged.got)
+	}
+}
+
+// TestHopRenewerWithoutAStreamFailsClosed: a stream to another relay with
+// no conduit.StreamRenewer gets a renewer that refuses every renewal with
+// ErrNoStreamRenewer instead of a nil one. A renewal for it does not panic
+// the scheduler, sends nothing, and leaves the stream open for the target
+// to end at its own deadline.
+func TestHopRenewerWithoutAStreamFailsClosed(t *testing.T) {
+	target := relay.TargetStream{SessionID: "agent-s3", StreamID: 9}
+	r := RenewerFor(remoteTargetSession{}, target, nil)
+	if r == nil {
+		t.Fatal("RenewerFor returned a nil renewer for a stream without a StreamRenewer")
+	}
+	if err := r.Renew([]byte("renewal-grant")); !errors.Is(err, ErrNoStreamRenewer) {
+		t.Fatalf("Renew = %v, want ErrNoStreamRenewer", err)
+	}
+	if HopRenewer(nil) == nil {
+		t.Fatal("HopRenewer(nil) returned a nil renewer")
+	}
+
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	hub.setAnswer(renewAnswer("renewal-grant-bytes-for-the-nil-test", t0.Add(20*time.Minute)))
+	rec := &streamRecorder{}
+	defer ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s3", Target: target,
+		OpenJTI: "jti-3", LatestGrant: []byte("open-grant"),
+		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
+		Renewer: r, Close: rec.close,
+	})()
+	clk.Advance(8 * time.Minute)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.renewed) != 0 || len(rec.closed) != 0 {
+		t.Fatalf("renewed %d, closed %v; want nothing sent and the stream left open", len(rec.renewed), rec.closed)
 	}
 }
 

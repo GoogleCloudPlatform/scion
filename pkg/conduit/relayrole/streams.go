@@ -16,6 +16,7 @@ package relayrole
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -60,7 +61,23 @@ func (l localRenewer) Renew(grant []byte) error { return l.ls.RefreshAuth(grant,
 // bridged stream toward it: the stream's Renew sends AuthRefresh{stream id,
 // grant} over the relay-to-relay hop, and the owner relay forwards it to
 // the target stream, the grant unchanged.
-func HopRenewer(st conduit.StreamRenewer) Renewer { return st }
+// Without a stream (st nil) it fails closed: every Renew returns
+// ErrNoStreamRenewer, nothing is sent, and the target ends the stream at its
+// own deadline.
+func HopRenewer(st conduit.StreamRenewer) Renewer {
+	if st == nil {
+		return noStreamRenewer{}
+	}
+	return st
+}
+
+// ErrNoStreamRenewer is returned by the renewer of a stream to another relay
+// that has no conduit.StreamRenewer to send the renewal on.
+var ErrNoStreamRenewer = errors.New("conduit relay: the stream toward the target relay accepts no renewals")
+
+type noStreamRenewer struct{}
+
+func (noStreamRenewer) Renew([]byte) error { return ErrNoStreamRenewer }
 
 // RenewerFor returns the renewer of the stream st opened on sess: local when
 // this relay holds the target's session, the bridged stream's own renewer
