@@ -110,9 +110,9 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 	case err != nil:
 		reason := launchWaitErrorText(err, time.Since(receivedAt))
 		h.log.Warn("Stopped following agent launch", "error", err, "agent_id", id, "slug", slug)
-		editStatus(fmt.Sprintf("⚠️ Stopped waiting for agent `%s` to start: %s.", slug, reason))
+		editStatus(fmt.Sprintf("⚠️ Couldn't confirm that agent `%s` started: %s.", slug, reason))
 		h.followup(s, i, fmt.Sprintf(
-			"Agent **%s** was accepted, but I stopped waiting for it to start: %s.\n"+
+			"Agent **%s** was accepted, but I couldn't confirm that it started: %s.\n"+
 				"Check it with `/scion status`. Once it is running, run `/scion default %s` in the thread to bind it.",
 			slug, reason, slug))
 		return false
@@ -138,7 +138,7 @@ func launchWaitErrorText(err error, waited time.Duration) string {
 	case errors.Is(err, hubclient.ErrAgentDeletedDuringLaunch):
 		return "the agent was deleted while it was starting"
 	case errors.Is(err, context.DeadlineExceeded):
-		return fmt.Sprintf("I stopped waiting after %d min", int(waited.Round(time.Minute)/time.Minute))
+		return fmt.Sprintf("gave up after %d min; the agent may still start", int(waited.Round(time.Minute)/time.Minute))
 	case errors.As(err, &rejected), errors.As(err, &unreadable):
 		return "the hub refused the status request"
 	default:

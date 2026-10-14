@@ -219,7 +219,7 @@ func TestHandleThread_AsyncCreate_WaitErrorNoKickoff(t *testing.T) {
 	runThreadCommand(e)
 
 	all := e.discord.allBodies()
-	assert.Contains(t, all, "⚠️ Stopped waiting for agent `"+asyncAgentSlug+"` to start: the hub refused the status request.")
+	assert.Contains(t, all, "⚠️ Couldn't confirm that agent `"+asyncAgentSlug+"` started: the hub refused the status request.")
 	assert.Contains(t, all, "/scion status")
 	assert.NotContains(t, all, asyncAgentID, "the agent ID stays in the log")
 	assert.NotContains(t, all, "400", "the raw hub error stays in the log")
@@ -320,7 +320,7 @@ func TestHandleThread_AsyncCreate_StopsAtInteractionDeadline(t *testing.T) {
 
 	assert.Less(t, time.Since(began), 10*time.Second, "the follow must end at the interaction's deadline, not a cap from the follow start")
 	all := e.discord.allBodies()
-	assert.Contains(t, all, "⚠️ Stopped waiting for agent `"+asyncAgentSlug+"` to start: I stopped waiting after 13 min.")
+	assert.Contains(t, all, "⚠️ Couldn't confirm that agent `"+asyncAgentSlug+"` started: gave up after 13 min; the agent may still start.")
 	assert.Empty(t, k.sends())
 	assert.Empty(t, threadBinding(t, e))
 }
@@ -356,7 +356,7 @@ func TestLaunchWaitErrorText(t *testing.T) {
 	}{
 		"budget":   {fmt.Errorf("agent %q: %w", asyncAgentID, hubclient.ErrLaunchWaitTimeout), "its launch is still running on the hub"},
 		"deleted":  {fmt.Errorf("agent %q: %w", asyncAgentID, hubclient.ErrAgentDeletedDuringLaunch), "the agent was deleted while it was starting"},
-		"deadline": {fmt.Errorf("stopped waiting: %w", context.DeadlineExceeded), "I stopped waiting after 13 min"},
+		"deadline": {fmt.Errorf("stopped waiting: %w", context.DeadlineExceeded), "gave up after 13 min; the agent may still start"},
 		"rejected": {&hubclient.LaunchStatusRejectedError{AgentID: asyncAgentID, Err: errors.New("status 400")}, "the hub refused the status request"},
 		"other":    {errors.New("boom"), "its status could not be read"},
 	}
