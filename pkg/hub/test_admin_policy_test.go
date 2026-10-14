@@ -1717,10 +1717,26 @@ func TestTestAdminPolicy_BrokerSettingsPerKeyStillChecked(t *testing.T) {
 			w := httptest.NewRecorder()
 			return srv.authorizeBrokerSettingsWrite(w, r, keys), w.Code
 		}
-		ok, _ := write(brokersettings.MaxAgents)
+		ok, _ := write()
+		assert.True(t, ok, "%s: no changed key, the quota.update leg alone is admitted", who)
+		ok, _ = write(brokersettings.MaxAgents)
 		assert.True(t, ok, "%s: maxAgents (quota.update) is admitted", who)
 		ok, code := write(brokersettings.MaxAgents, deniedKey)
 		assert.False(t, ok, "%s: a key declaring a deny-classified permission is refused", who)
 		assert.Equal(t, http.StatusForbidden, code, who)
+		// The refusal is the test-admin policy's, on the broker settings target.
+		d := srv.authzService.Decide(context.Background(), AuthzRequest{
+			Principal: principalContextForIdentity(id), Credential: credentialContextForIdentity(id),
+			Resource: brokerSettingsTarget(), Action: ActionUpdate, Permission: deniedKey.Permission,
+		})
+		assert.False(t, d.Allowed, who)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: %s", who, d.Reason)
 	}
+
+	// Human control: a human super-admin passes the same write, the denied
+	// key's permission included.
+	hid := tsaIdentity(t, s, issuer.ID)
+	r := httptest.NewRequest(http.MethodPut, "/api/v1/runtime-brokers/x/settings", nil).WithContext(contextWithIdentityAndUser(hid))
+	w := httptest.NewRecorder()
+	assert.True(t, srv.authorizeBrokerSettingsWrite(w, r, []brokersettings.KeyDef{brokersettings.MaxAgents, deniedKey}), "human super-admin: %d %s", w.Code, w.Body.String())
 }
