@@ -239,7 +239,9 @@ type LocalSession interface {
 	// NotifyGrantKeysChanged sends GrantKeysChanged{} from the relay side:
 	// the hub's published grant keys changed, and the target should fetch
 	// them again over its own authenticated channel (design v2.21.27 §3.5,
-	// Key-set freshness). The frame carries no keys. On a dialer it
+	// Key-set freshness). The frame carries no keys. It never waits on
+	// the session: with the outbound buffer full it returns
+	// ErrBufferBudget and the session is left as it is. On a dialer it
 	// returns ErrNotRelaySide and sends nothing.
 	NotifyGrantKeysChanged() error
 	// Stats returns scheduler and buffer counters.

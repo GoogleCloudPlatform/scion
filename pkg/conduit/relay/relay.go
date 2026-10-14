@@ -1010,7 +1010,9 @@ func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int
 // NotifyGrantKeysChanged sends GrantKeysChanged on every live local session
 // of a target (agent or broker) whose Hello advertised
 // conduit.FeatureStreamRenewal (design v2.21.27 §3.5, Key-set freshness),
-// and returns how many sessions it was sent on. The frame carries no keys.
+// and returns how many sessions it was queued on. The frame carries no
+// keys. Queuing never waits on a session, so a session with a full outbound
+// buffer (which is skipped and logged) does not delay the others.
 func (r *Relay) NotifyGrantKeysChanged() int {
 	r.mu.Lock()
 	var targets []*entry
@@ -1025,9 +1027,11 @@ func (r *Relay) NotifyGrantKeysChanged() int {
 		if !slices.Contains(e.sess.Info().Capabilities.GetFeatures(), conduit.FeatureStreamRenewal) {
 			continue
 		}
-		if e.sess.NotifyGrantKeysChanged() == nil {
-			n++
+		if err := e.sess.NotifyGrantKeysChanged(); err != nil {
+			r.log.Warn("Conduit relay: GrantKeysChanged not queued", "session_id", e.rec.SessionID, "error", err)
+			continue
 		}
+		n++
 	}
 	return n
 }

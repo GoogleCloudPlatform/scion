@@ -1305,7 +1305,10 @@ const reasonBadFrame = "bad_frame"
 // ErrNotRelaySide is returned by NotifyGrantKeysChanged on a dialer.
 var ErrNotRelaySide = errors.New("conduit: only the relay side sends GrantKeysChanged")
 
-// NotifyGrantKeysChanged implements LocalSession.
+// NotifyGrantKeysChanged implements LocalSession. It never waits: the
+// frame is queued as a protocol-internal control frame, and a session whose
+// outbound buffer is full gets ErrBufferBudget instead, leaving the session
+// as it is (the target's periodic key refresh still applies).
 func (s *session) NotifyGrantKeysChanged() error {
 	if s.adm == nil {
 		return ErrNotRelaySide
@@ -1313,7 +1316,8 @@ func (s *session) NotifyGrantKeysChanged() error {
 	if s.isDone() {
 		return ErrSessionClosed
 	}
-	return s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_GrantKeysChanged{GrantKeysChanged: &conduitv1.GrantKeysChanged{}}})
+	f := &conduitv1.Frame{Body: &conduitv1.Frame_GrantKeysChanged{GrantKeysChanged: &conduitv1.GrantKeysChanged{}}}
+	return s.sched.enqueueInternal(&outFrame{f: f, class: classControl, size: int64(proto.Size(f))})
 }
 
 // handleGrantKeysChanged handles GrantKeysChanged (design v2.21.27 §3.5,

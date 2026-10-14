@@ -21,6 +21,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
@@ -78,5 +79,48 @@ func TestNotifyGrantKeysChangedOnDialerRefused(t *testing.T) {
 	}
 	if got := FrameType(&conduitv1.Frame{Body: &conduitv1.Frame_GrantKeysChanged{GrantKeysChanged: &conduitv1.GrantKeysChanged{}}}); got != "grant_keys_changed" {
 		t.Fatalf("FrameType = %q", got)
+	}
+}
+
+// TestNotifyGrantKeysChangedNeverWaits: with the relay side's writer blocked
+// and its outbound buffer full, NotifyGrantKeysChanged returns
+// ErrBufferBudget at once and the session stays up, so a relay notifying
+// many sessions is never held up by one.
+func TestNotifyGrantKeysChangedNeverWaits(t *testing.T) {
+	release := make(chan struct{})
+	p := newPair(t, Config{}, Config{Interceptor: func(dir Direction, f *conduitv1.Frame) []*conduitv1.Frame {
+		if dir == Outbound && f.GetPing().GetNonce() == 777 {
+			<-release
+		}
+		return []*conduitv1.Frame{f}
+	}})
+	t.Cleanup(func() { close(release) })
+	sc := p.relay.sched
+	ping := func(nonce uint64, size int64) *outFrame {
+		return &outFrame{f: &conduitv1.Frame{Body: &conduitv1.Frame_Ping{Ping: &conduitv1.Ping{Nonce: nonce}}}, class: classControl, size: size}
+	}
+	if err := sc.enqueueInternal(ping(777, 1)); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the writer holds the blocking frame", func() bool {
+		sc.mu.Lock()
+		defer sc.mu.Unlock()
+		return sc.queuedLocked() == 0
+	})
+	if err := sc.enqueueInternal(ping(778, sc.budget+controlReserve)); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- p.relay.NotifyGrantKeysChanged() }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrBufferBudget) {
+			t.Fatalf("err = %v, want ErrBufferBudget", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("NotifyGrantKeysChanged waited on a session with a full buffer")
+	}
+	if p.relay.isDone() {
+		t.Fatal("the session ended")
 	}
 }
