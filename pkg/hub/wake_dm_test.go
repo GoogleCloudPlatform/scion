@@ -646,7 +646,10 @@ func TestBrokerQuota_WakeReadinessTimeoutThenConfirmedStopReleases(t *testing.T)
 	})
 	require.Equal(t, http.StatusOK, code)
 
-	assert.EqualValues(t, 0, brokerReservationCount(t, s, target.RuntimeBrokerID),
+	// Only the target's slot is asserted: the broker's first heartbeat on
+	// this Server also backfills the reservation of the fixture's running
+	// sender, which holds none (backfillRegisteredBrokerOnce).
+	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, target.ID),
 		"a confirmed container stop must free the slot")
 }
 

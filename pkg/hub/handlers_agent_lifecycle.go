@@ -1207,7 +1207,7 @@ func (s *Server) handleAgentLifecycle(w http.ResponseWriter, r *http.Request, id
 // Offline stop: the container status and message an agent gets when its
 // stop is queued for an offline broker.
 const (
-	containerStatusStopQueued = "stop_queued"
+	containerStatusStopQueued = store.ContainerStatusStopQueued
 	offlineStopMessage        = "Stop queued: broker offline; it will be applied when the broker reconnects."
 )
 

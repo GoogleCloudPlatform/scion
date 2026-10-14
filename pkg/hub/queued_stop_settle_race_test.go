@@ -290,9 +290,11 @@ func TestSettle_ReleaseCommitsFirst_StartGetsCheckedAdmission(t *testing.T) {
 		sf.settle()
 
 		assert.Equal(t, http.StatusTooManyRequests, code, "a checked admission at the cap")
-		assert.Nil(t, sf.held(t))
+		assert.Nil(t, sf.held(t), "no unchecked re-assert after the settle's own release")
 		assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
-		assert.Equal(t, "stopped", getAgent(t, sf.s, sf.agent.ID).ContainerStatus, "the stop is confirmed")
+		got := getAgent(t, sf.s, sf.agent.ID)
+		assert.Equal(t, store.RunIntentRunning, got.RunIntent, "the refused start left its run intent")
+		assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "a superseded stop is not confirmed")
 		assert.Zero(t, sf.backstops(backstopSiteSettle))
 	})
 }
@@ -461,4 +463,30 @@ func TestQueuedStop_SettleSkip_DrainClaimHeld(t *testing.T) {
 	assert.Equal(t, store.StartClaimStop, got.StartClaimKind, "the drain's claim is held")
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "not overwritten")
 	assert.Zero(t, sf.hook.statusWrites.Load(), "no status write after the drain claimed")
+}
+
+// A start that claims the agent between the settle's release and its
+// re-read, and reserves after the re-read, finds no reservation: its
+// admission is checked, so at a full instance it is refused. The settle
+// does not re-assert a slot it has just released safely.
+func TestSettle_ClaimBetweenReleaseAndReread_ReserveAfter_Checked(t *testing.T) {
+	sf := newSettleFixture(t, "claim-between")
+	setBrokerAgentCeiling(t, sf.s, 1)
+	filler := sf.addAgent("claim-between-filler", "running", "working")
+	sf.hook.afterRelease = func() {
+		_, err := sf.s.ClaimAgentStart(context.Background(), sf.agent.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		seedSlot(t, sf.s, sf.brokerID, filler.ID) // the freed slot is taken
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	assert.Nil(t, sf.held(t), "nothing re-asserted")
+	assert.Zero(t, sf.backstops(backstopSiteSettle))
+	created, err := sf.srv.checkAndReserveBrokerQuota(context.Background(), getAgent(t, sf.s, sf.agent.ID))
+	assert.ErrorIs(t, err, store.ErrQuotaExceeded, "the start's reserve is a checked admission at the full instance")
+	assert.False(t, created)
+	assert.Nil(t, sf.held(t))
+	assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
 }

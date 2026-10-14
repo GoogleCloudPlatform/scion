@@ -153,6 +153,21 @@ func TestPlanInstanceCapacity_Fixtures(t *testing.T) {
 			noReasons: []string{ReasonActiveAboveAllocation, ReasonNotEnforced},
 		},
 		{
+			name:    "an unknown receiving instance is flagged",
+			legacy:  LegacyCapacity{Override: i64(6), Enforced: true, ActiveReserved: 5, ReceivingInstanceID: "inst-x"},
+			ids:     ids,
+			outcome: OutcomePreserveBySplit,
+			alloc:   map[string]int64{"inst-a": 2, "inst-b": 2, "inst-c": 2},
+			reasons: []string{ReasonUnknownReceiver},
+		},
+		{
+			name:    "no override, a negative binding is unlimited (as ResolveEffectiveLimit)",
+			legacy:  LegacyCapacity{BrokerBindings: []int64{5, -1}, SystemDefault: 100, Enforced: true},
+			ids:     ids,
+			outcome: OutcomeOperatorDecisionRequired,
+			reasons: []string{ReasonInheritedAggregate},
+		},
+		{
 			name:    "no instances",
 			legacy:  LegacyCapacity{Override: i64(6), Enforced: true},
 			ids:     nil,

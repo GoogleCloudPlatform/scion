@@ -166,6 +166,14 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 				s.agentLifecycleLog.Info("Queued stop: the stop result settled it during the release; nothing re-asserted", "agent_id", a.ID)
 				continue
 			}
+			if released && after.RunIntent == store.RunIntentRunning {
+				// The release was proven safe on the locked row (no start
+				// held the slot), and a start superseded the stop after it.
+				// That start reserves with the cap check; a re-assert here
+				// would hand it an unchecked slot at a full instance.
+				s.agentLifecycleLog.Info("Queued stop: a start superseded it after the release; the start's own reserve decides", "agent_id", a.ID)
+				continue
+			}
 			s.reassertBrokerReservationAt(ctx, after, backstopSiteSettle)
 			s.agentLifecycleLog.Info("Queued stop: a start superseded it during the release; reservation kept", "agent_id", a.ID)
 			continue

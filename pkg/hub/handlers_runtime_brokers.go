@@ -530,6 +530,7 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 		writeErrorFromErr(w, err, "")
 		return
 	}
+	s.forgetBrokerBackfill(id)
 
 	// Clean up the broker's HMAC secret (best-effort, post-delete).
 	if err := s.store.DeleteBrokerSecret(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {

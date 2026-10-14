@@ -636,7 +636,10 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		// reservation (legacy agents predating the cap, or any other gap). A
 		// pinned agent's row on another broker is reported here only when
 		// that broker is not listed; the release pass reports it otherwise.
-		n, c, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, heldBroker, func(held string) bool { return !listedBrokers[held] })
+		n, c, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, func(agentID string) (string, bool, error) {
+			held, ok := heldBroker[agentID]
+			return held, ok, nil
+		}, func(held string) bool { return !listedBrokers[held] })
 		backfilled += n
 		conflicts += c
 		if err != nil {
@@ -768,22 +771,32 @@ func brokerBackfillHolds(agent *store.Agent) bool {
 
 // backfillBrokerAgents records, without the cap check, the reservation of
 // every agent on brokerID that holds capacity (brokerBackfillHolds) and has
-// no active reservation. heldBroker maps each agent holding an active row to
-// that row's broker: an agent with a row on brokerID is skipped, and a
-// pinned agent with a row on another broker is never backfilled; it is
-// reported as a scope conflict when reportHeld returns true for that broker.
-// An unpinned agent's backfill onto a row held elsewhere is refused by the
-// unique index and reported. Returns the number of reservations recorded and
-// of conflicts reported; err is the agent list's error.
-func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker map[string]string, reportHeld func(heldBrokerID string) bool) (backfilled, conflicts int, err error) {
+// no active reservation. heldBroker reports, for such an agent, the broker
+// its active row is on (ok false when it holds none; err when that cannot be
+// read, and the agent is skipped this time): an agent with a row on brokerID
+// is skipped, and a pinned agent with a row on another broker is never
+// backfilled; it is reported as a scope conflict when reportHeld returns true
+// for that broker. An unpinned agent's backfill onto a row held elsewhere is
+// refused by the unique index and reported. Returns the number of
+// reservations recorded and of conflicts reported; err is the agent list's
+// error.
+func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool) (backfilled, conflicts int, err error) {
 	agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: brokerID}, store.ListOptions{Limit: 10000})
 	if err != nil {
 		return 0, 0, err
 	}
 	for i := range agents.Items {
 		agent := &agents.Items[i]
-		held, hasHeld := heldBroker[agent.ID]
-		if (hasHeld && held == brokerID) || !brokerBackfillHolds(agent) {
+		if !brokerBackfillHolds(agent) {
+			continue
+		}
+		held, hasHeld, herr := heldBroker(agent.ID)
+		if herr != nil {
+			s.agentLifecycleLog.Warn("quota backfill: reading the agent's reservation failed",
+				"agent_id", agent.ID, "broker_id", brokerID, "error", herr)
+			continue
+		}
+		if hasHeld && held == brokerID {
 			continue
 		}
 		if hasHeld && agent.IsPinned() {
@@ -813,8 +826,11 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 }
 
 // backfillBrokerReservations runs the reconcile's backfill for one broker
-// (backfillBrokerAgents), outside the hourly pass. Reports whether it ran to
-// the end (true also when no max_agents_per_broker limit is defined).
+// (backfillBrokerAgents), outside the hourly pass. It reads only the active
+// reservation of each of that broker's agents that holds capacity (one
+// point read per such agent), not every reservation on the hub. Reports
+// whether it ran to the end (true also when no max_agents_per_broker limit
+// is defined).
 func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string) bool {
 	if s.quotaService == nil {
 		return true
@@ -828,14 +844,16 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 			"broker_id", brokerID, "error", err)
 		return false
 	}
-	all, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBroker)
-	if err != nil {
-		s.agentLifecycleLog.Warn("quota backfill: failed to list active reservations", "broker_id", brokerID, "error", err)
-		return false
-	}
-	heldBroker := make(map[string]string, len(all))
-	for _, res := range all {
-		heldBroker[res.ResourceID] = res.ScopeID
+	heldBroker := func(agentID string) (string, bool, error) {
+		res, err := s.store.GetActiveReservation(ctx, limitDef.ID, agentID)
+		switch {
+		case err == nil:
+			return res.ScopeID, true, nil
+		case errors.Is(err, store.ErrNotFound):
+			return "", false, nil
+		default:
+			return "", false, err
+		}
 	}
 	backfilled, conflicts, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true })
 	if err != nil {
@@ -869,5 +887,15 @@ func (s *Server) backfillRegisteredBrokerOnce(ctx context.Context, broker *store
 	}
 	if s.backfillBrokerReservations(ctx, broker.ID) {
 		s.quotaService.brokerRowsBackfilled.Store(broker.ID, broker.Created)
+	}
+}
+
+// forgetBrokerBackfill drops brokerID from this replica's record of
+// backfilled broker rows, when the broker is deregistered here. (A row
+// re-created under the same ID has a new Created anyway; this only keeps the
+// record from growing with deleted brokers.)
+func (s *Server) forgetBrokerBackfill(brokerID string) {
+	if s.quotaService != nil {
+		s.quotaService.brokerRowsBackfilled.Delete(brokerID)
 	}
 }

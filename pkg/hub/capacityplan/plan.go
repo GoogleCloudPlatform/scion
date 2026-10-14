@@ -49,6 +49,7 @@ const (
 	ReasonInvalidChoice         = "invalid_split_choice"
 	ReasonNotEnforced           = "not_enforced"
 	ReasonActiveAboveAllocation = "active_above_allocation"
+	ReasonUnknownReceiver       = "unknown_receiving_instance"
 )
 
 // LegacyCapacity is what the Hub knows about a legacy Runtime Broker's
@@ -120,7 +121,11 @@ func PlanInstanceCapacity(l LegacyCapacity, instanceIDs []string, choice *SplitC
 		if receiver == "" {
 			receiver = ids[0]
 		}
-		if alloc, ok := plan.Allocations[receiver]; ok && int64(l.ActiveReserved) > alloc {
+		alloc, ok := plan.Allocations[receiver]
+		if !ok {
+			plan.Reasons = append(plan.Reasons, fmt.Sprintf("%s: receiving instance %s is not one of the planned instances; the active reservations were not compared",
+				ReasonUnknownReceiver, receiver))
+		} else if int64(l.ActiveReserved) > alloc {
 			plan.Reasons = append(plan.Reasons, fmt.Sprintf("%s: %d active reservations on legacy Runtime Broker %s exceed the %d proposed for instance %s; drain the legacy agents before enforcing",
 				ReasonActiveAboveAllocation, l.ActiveReserved, l.LegacyBrokerID, alloc, receiver))
 		}
@@ -170,14 +175,15 @@ func planOutcome(l LegacyCapacity, ids []string, choice *SplitChoice) CapacityPl
 	return CapacityPlan{Outcome: OutcomePreserveBySplit, Allocations: alloc}
 }
 
-// inheritedLimit is the limit a broker with no maxAgents setting gets: the
-// most generous broker-scoped binding (0 is unlimited and wins), else the
-// system default (0 is unlimited).
+// inheritedLimit is the limit a broker with no maxAgents setting gets, with
+// the precedence of QuotaService.ResolveEffectiveLimit: the most generous
+// binding (a value <= 0 is unlimited and wins), else the limit definition's
+// default (<= 0 is unlimited).
 func inheritedLimit(l LegacyCapacity) (limit int64, unlimited bool) {
 	if len(l.BrokerBindings) > 0 {
 		var best int64
 		for _, v := range l.BrokerBindings {
-			if v == 0 {
+			if v <= 0 {
 				return 0, true
 			}
 			if v > best {
@@ -186,7 +192,10 @@ func inheritedLimit(l LegacyCapacity) (limit int64, unlimited bool) {
 		}
 		return best, false
 	}
-	return l.SystemDefault, l.SystemDefault == 0
+	if l.SystemDefault <= 0 {
+		return 0, true
+	}
+	return l.SystemDefault, false
 }
 
 // validateChoice returns "" when choice gives every instance, and only

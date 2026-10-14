@@ -738,11 +738,6 @@ func TestReleaseIfAgent_MissingRow_ReturnsNotFound_SweepStillReleases(t *testing
 	assert.False(t, hasReservation(t, s, store.LimitMaxAgentsPerBroker, ghost))
 }
 
-// The store's capacity predicates and the hub's container status agree.
-func TestCapacityPredicates_StoreAndHubAgree(t *testing.T) {
-	assert.Equal(t, containerStatusStopQueued, store.ContainerStatusStopQueued)
-}
-
 // hideAfterReadStore drops agentID from the sweep's batch read of the agents
 // holding rows, as a soft-deleted agent would look, and runs afterRead right
 // after that read, once, while armed.
