@@ -17,6 +17,7 @@ package entc
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -87,6 +88,12 @@ func (r fkReconcileResult) diagnostic() string {
 	b.WriteString("orphaned rows whose declared ON DELETE action cannot be applied automatically; " +
 		"repair them by hand (back up the database first) and restart:")
 	for _, g := range r.Unrepaired {
+		if g.reason == reasonNoParent {
+			fmt.Fprintf(&b, "\n  - %s(%s) -> %s ON DELETE %s: %d row(s) reference a table that does not exist",
+				g.info.table, strings.Join(g.info.from, ", "), g.info.parent, g.info.onDelete, g.count)
+			fmt.Fprintf(&b, "\n      inspect: SELECT * FROM %s WHERE %s;", quoteIdent(g.info.table), keyNotNull(g.info))
+			continue
+		}
 		fmt.Fprintf(&b, "\n  - %s(%s) -> %s(%s) ON DELETE %s: %d orphaned row(s) (%s)",
 			g.info.table, strings.Join(g.info.from, ", "), g.info.parent, strings.Join(g.info.to, ", "),
 			g.info.onDelete, g.count, g.reason)
@@ -103,6 +110,10 @@ func (r fkReconcileResult) diagnostic() string {
 const (
 	reasonNotAuto = "action is not applied automatically"
 	reasonNotNull = "SET NULL on a NOT NULL column"
+	// reasonNoParent: the referenced table does not exist, so every
+	// non-NULL reference is reported; no repair is suggested beyond
+	// inspecting those rows.
+	reasonNoParent = "parent table does not exist"
 )
 
 // fkViolations is the result of PRAGMA foreign_key_check: the violating
@@ -286,6 +297,16 @@ func orphanPredicate(fk fkInfo) string {
 	return strings.Join(parts, " AND ")
 }
 
+// keyNotNull returns a WHERE clause matching rows whose key columns are all
+// non-NULL, i.e. the rows SQLite checks against the parent.
+func keyNotNull(fk fkInfo) string {
+	parts := make([]string, len(fk.from))
+	for i, c := range fk.from {
+		parts[i] = quoteIdent(c) + " IS NOT NULL"
+	}
+	return strings.Join(parts, " AND ")
+}
+
 func setNullList(cols []string) string {
 	sets := make([]string, len(cols))
 	for i, c := range cols {
@@ -343,7 +364,11 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 		}
 		defer func() {
 			if _, err := conn.ExecContext(context.WithoutCancel(ctx), "PRAGMA foreign_keys = ON"); err != nil {
-				slog.Error("foreign key reconcile: re-enabling foreign_keys failed", "error", err)
+				// Never hand a connection with enforcement off back to the
+				// pool: returning ErrBadConn from Raw makes database/sql
+				// discard it.
+				slog.Error("foreign key reconcile: re-enabling foreign_keys failed; discarding the connection", "error", err)
+				_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 			}
 		}()
 	}
@@ -397,7 +422,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 			if !parentExists {
 				// The parent table itself is missing: that is not an orphan
 				// the declared action describes, so leave the rows alone.
-				skipped[k] = "parent table does not exist"
+				skipped[k] = reasonNoParent
 				continue
 			}
 			var stmt string
@@ -477,7 +502,7 @@ func reconcileSQLiteForeignKeys(ctx context.Context, db *sql.DB) (fkReconcileRes
 	return res, nil
 }
 
-func sortedFKKeys(m map[fkKey]int) []fkKey {
+func sortedFKKeys(m fkViolations) []fkKey {
 	keys := make([]fkKey, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)

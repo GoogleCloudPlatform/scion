@@ -1,15 +1,28 @@
 // Copyright 2026 Google LLC
-// SPDX-License-Identifier: Apache-2.0
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 //go:build !no_sqlite
 
 package entc
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,6 +54,16 @@ func mustExec(t *testing.T, db *sql.DB, stmts ...string) {
 		_, err := db.Exec(s)
 		require.NoError(t, err, s)
 	}
+}
+
+// captureSlog routes the default slog logger into a buffer for the test.
+func captureSlog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }
 
 func countRows(t *testing.T, db *sql.DB, query string) int {
@@ -169,6 +192,33 @@ func TestReconcileSQLiteForeignKeys_LeavesUnrepairableAndReports(t *testing.T) {
 		}
 	}
 	require.Zero(t, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+}
+
+// A key whose parent table does not exist is left alone, even with a
+// CASCADE action, and the diagnostic only suggests inspecting the rows.
+func TestReconcileSQLiteForeignKeys_MissingParentTableLeftAlone(t *testing.T) {
+	ctx := context.Background()
+	db := openFKTestDB(t)
+	mustExec(t, db,
+		`CREATE TABLE child (id TEXT PRIMARY KEY, pid TEXT REFERENCES nosuch(id) ON DELETE CASCADE)`,
+		`INSERT INTO child VALUES ('c1', 'x'), ('c2', NULL)`,
+	)
+	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM pragma_foreign_key_check`))
+
+	res, err := reconcileSQLiteForeignKeys(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, res.Unrepaired, 1)
+	require.Equal(t, reasonNoParent, res.Unrepaired[0].reason)
+	require.Equal(t, 2, countRows(t, db, `SELECT count(*) FROM child`))
+
+	d := res.diagnostic()
+	require.Contains(t, d, `child(pid) -> nosuch ON DELETE CASCADE: 1 row(s) reference a table that does not exist`)
+	const inspect = `SELECT * FROM "child" WHERE "pid" IS NOT NULL;`
+	require.Contains(t, d, "inspect: "+inspect)
+	require.NotContains(t, d, "DELETE FROM")
+	require.NotContains(t, d, "UPDATE")
+	// The suggested statement is valid SQL.
+	require.Equal(t, 1, countRows(t, db, `SELECT count(*) FROM (`+strings.TrimSuffix(inspect, ";")+`)`))
 }
 
 func TestReconcileSQLiteForeignKeys_RollsBackWhenRepairWouldOrphanRows(t *testing.T) {
@@ -350,7 +400,7 @@ func TestAutoMigrate_NullsOrphanedBindingReference(t *testing.T) {
 }
 
 // An orphan on a NO ACTION key in a table the migration does not rebuild
-// does not block startup: it is reported, and left alone.
+// does not block startup: it is reported at ERROR, and left alone.
 func TestAutoMigrate_NoActionOrphanWithoutRebuildStillMigrates(t *testing.T) {
 	ctx := context.Background()
 	path := openMigratedFile(t)
@@ -360,7 +410,10 @@ func TestAutoMigrate_NoActionOrphanWithoutRebuildStillMigrates(t *testing.T) {
 	insertRow(t, db, "entitlement_bindings", map[string]any{"id": rowID, "limit_definition_id": gone})
 	mustExec(t, db, "PRAGMA foreign_keys = ON")
 
+	logs := captureSlog(t)
 	require.NoError(t, AutoMigrate(ctx, client))
+	require.Contains(t, logs.String(), "level=ERROR")
+	require.Contains(t, logs.String(), `entitlement_bindings(limit_definition_id) -> limit_definitions(id) ON DELETE NO ACTION: 1 orphaned row(s)`)
 	require.Equal(t, 1, countRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM entitlement_bindings WHERE id = '%s' AND limit_definition_id = '%s'`, rowID, gone)))
 }
