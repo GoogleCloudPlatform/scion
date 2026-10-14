@@ -27,6 +27,9 @@ This command performs several actions simultaneously:
 1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080).
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
+4.  **Adds the Hub to your hub list** (a background start with the web server on, the default; `--foreground` does not add it): Registers the local Hub as `local` (or `local-2` and so on if that name is taken) in `~/.scion/context.yaml`, and makes it the current Hub when no Hub is current and your global settings name no other Hub (see [Working with several Hubs](/scion/hosted/user/hosted-user/#working-with-several-hubs)). It no longer writes `hub.endpoint` to your global settings.
+
+**Listen addresses.** `--host` sets the listen address of the Hub API and web server only. The Runtime Broker stays on `127.0.0.1` unless `server.broker.host` is set to another address (`0.0.0.0` counts as unset), so exposing the dashboard on your network does not expose the Runtime Broker.
 
 `scion server start` also adds the local Hub to your CLI's hub list as `local` if it is not there yet. It becomes the current Hub only when no Hub is current and your global settings name no other Hub in `hub.endpoint`. To use the local Hub together with remote ones, see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
 
@@ -63,11 +66,7 @@ If you are using **Podman** as your container runtime, Scion automatically creat
 
 If you are using other runtimes, you may need to ensure that the containers can route traffic back to the host machine's IP address on the port where the Hub is listening (e.g., `8080`).
 
-To configure the agents to find the Hub, you might need to adjust the `SCION_HUB_API_URL` setting passed to the agents in your template or via the CLI:
-
-```bash
-scion start my-agent --env SCION_HUB_API_URL=http://host.bridge.internal:8080
-```
+To set the address agents use to reach the Hub, set `server.broker.container_hub_endpoint` in `settings.yaml` (for example `http://host.containers.internal:8080`). See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution).
 
 ## Next Steps
 

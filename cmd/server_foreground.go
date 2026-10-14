@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
@@ -454,22 +455,27 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 		// applied one (ptone/scion#4903).
 		telemetryID := newHubTelemetryIdentity(hubSrv)
 
+		// Decide the hub's own exporters once, from the observability
+		// switches and the export project (ptone/scion#4914). Each
+		// exporter logs one line saying whether it runs and why.
+		obs := hubObservabilityExport(cfg, hubSrv)
+
 		// Wire hub OTel tracing export to Cloud Trace.
-		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
-			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.tracingOptions()...)
+		if obs.Tracing.Enabled {
+			tp, tpErr := hubtracing.NewTracerProvider(ctx, obs.Tracing.Project.ID, telemetryID.tracingOptions()...)
 			if tpErr != nil {
-				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
+				obs.Tracing = obs.Tracing.Failed(tpErr)
 			} else {
 				exit.addFlush(tp.Shutdown)
-				log.Printf("Hub OTel tracing enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
+		log.Print(obs.Tracing.LogLine())
 
 		// Wire hub OTel metrics export to Cloud Monitoring.
-		if cfg.Hub.GCPProjectID != "" {
-			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.metricsOptions()...)
+		if obs.Metrics.Enabled {
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, obs.Metrics.Project.ID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
-				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
+				obs.Metrics = obs.Metrics.Failed(mpErr)
 			} else {
 				exit.addFlush(mp.Shutdown)
 
@@ -499,10 +505,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					hubSrv.SetGoogleValidatorCacheMetrics(otelExtBearer)
 					hubSrv.SetGEExchangeMetrics(otelExtBearer)
 				}
-
-				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
+		log.Print(obs.Metrics.LogLine())
+		hubSrv.SetObservabilityExportStatus(obs)
 
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
@@ -2225,6 +2231,53 @@ func resolveSessionSecret() string {
 		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
 	}
 	return secret
+}
+
+// hubObservabilityExport decides at startup whether the hub's own metrics
+// and trace exporters run, and their export project (ptone/scion#4914).
+// See decideHubObservabilityExport for the inputs.
+func hubObservabilityExport(cfg *config.GlobalConfig, hubSrv *hub.Server) hubexport.Status {
+	return decideHubObservabilityExport(cfg, hubSrv.GetOperationalSettings(), hubObservabilityInputs{
+		getenv: os.Getenv,
+		// Relies on the earlier Policy Troubleshooter probe in
+		// initHubServer (ResolveGCPProjectID) for caching: the metadata
+		// client caches OnGCE and a resolved project ID.
+		metadata:   func() (string, error) { return hub.ResolveGCPProjectID("") },
+		tracingEnv: parseBoolEnv(hubexport.TracingEnv),
+	})
+}
+
+// hubObservabilityInputs are the process inputs of
+// decideHubObservabilityExport, passed in so the selection is testable.
+type hubObservabilityInputs struct {
+	getenv     func(string) string
+	metadata   func() (string, error)
+	tracingEnv bool
+}
+
+// decideHubObservabilityExport selects the inputs of the export decision.
+// The switches come from the Layer-1 snapshot, where a managed DB row wins
+// over the settings file and the environment; a hub without the
+// operational settings service (ops nil) reads them from the loaded
+// config. The export project is server.hub.gcp_project_id, else the
+// metadata-server project, resolved as for service-account minting
+// (ResolveGCPProjectID, which skips the lookup off GCP).
+func decideHubObservabilityExport(cfg *config.GlobalConfig, ops *hub.OperationalSettings, in hubObservabilityInputs) hubexport.Status {
+	metrics, tracing := cfg.Hub.Observability.MetricsEnabled, cfg.Hub.Observability.TracingEnabled
+	if ops != nil {
+		snap := ops.Snapshot()
+		metrics, tracing = snap.HubMetricsEnabled, snap.HubTracingEnabled
+	}
+	project := hubexport.ResolveProject(hubexport.ProjectInputs{
+		Configured: cfg.Hub.GCPProjectID,
+		EnvValue:   in.getenv(hubexport.ProjectIDEnv),
+		Metadata:   in.metadata,
+	})
+	return hubexport.Status{
+		Project: project,
+		Metrics: hubexport.DecideMetrics(metrics, project),
+		Tracing: hubexport.DecideTracing(tracing, in.tracingEnv, project),
+	}
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a

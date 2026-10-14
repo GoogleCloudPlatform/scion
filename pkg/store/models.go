@@ -1385,8 +1385,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"
