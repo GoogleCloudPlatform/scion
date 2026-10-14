@@ -37,6 +37,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Broker IDs for tests that need no broker row; the store requires UUIDs.
+const (
+	testColocatedBrokerID = "6b1f3a52-0c4e-4d6a-9a43-5f0e2d7c8b11"
+	testOtherBrokerID     = "0d9e6c24-7b1a-4f3e-8c55-2a6b9e4f1d07"
+)
+
 // storedGkeNFSProfiles is a stored profile set without the built-in local.
 func storedGkeNFSProfiles() map[string]config.V1ProfileConfig {
 	return map[string]config.V1ProfileConfig{
@@ -143,12 +149,12 @@ func TestProfileReferences_LinkToOtherBrokerAddsNothing(t *testing.T) {
 	require.NoError(t, s.CreateProject(ctx, project))
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	srv.EnableProfileReferences(ctx, overlay, "colocated-broker", t.TempDir())
+	srv.EnableProfileReferences(ctx, overlay, testColocatedBrokerID, t.TempDir())
 
-	srv.onColocatedPlacement(ctx, project.ID, "some-other-broker", "local")
+	srv.onColocatedPlacement(ctx, project.ID, testOtherBrokerID, "local")
 	assert.Error(t, resolvesThrough(overlay, "local"))
 
-	srv.onColocatedPlacement(ctx, project.ID, "colocated-broker", "")
+	srv.onColocatedPlacement(ctx, project.ID, testColocatedBrokerID, "")
 	assert.NoError(t, resolvesThrough(overlay, "local"))
 }
 
@@ -362,7 +368,7 @@ func TestProfileReferences_WorkerStopsWithPropagation(t *testing.T) {
 	}
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	publishTarget(srv, overlay, "b", t.TempDir())
+	publishTarget(srv, overlay, testColocatedBrokerID, t.TempDir())
 	ops := startPropagation(t, srv, s, time.Hour)
 
 	fault.Arm()
@@ -394,7 +400,7 @@ func TestProfileReferences_TriggersCoalesce(t *testing.T) {
 	srv, _, fs, fault := newRefFaultServer(t, "block")
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	publishTarget(srv, overlay, "b", t.TempDir())
+	publishTarget(srv, overlay, testColocatedBrokerID, t.TempDir())
 	fault.Arm()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -427,7 +433,7 @@ func TestProfileReferences_PollTickTriggersCount(t *testing.T) {
 	srv, s, fs, _ := newRefFaultServer(t, "block") // disarmed: counts pass through
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	publishTarget(srv, overlay, "b", t.TempDir())
+	publishTarget(srv, overlay, testColocatedBrokerID, t.TempDir())
 	ops := startPropagation(t, srv, s, 50*time.Millisecond)
 	t.Cleanup(ops.StopPropagation)
 	require.Eventually(t, func() bool {
@@ -441,7 +447,7 @@ func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
 	srv, _, fs, fault := newRefFaultServer(t, "fail")
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-	srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
+	srv.EnableProfileReferences(context.Background(), overlay, testColocatedBrokerID, t.TempDir())
 	fault.Arm()
 	logs := captureHubLogs(t, func() {
 		srv.runProfileReferenceCount(context.Background())
@@ -461,7 +467,7 @@ func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
 // A panicking count is recovered and the next count runs again.
 func TestProfileReferences_PanicRecovered(t *testing.T) {
 	srv, _, fs, fault := newRefFaultServer(t, "panic")
-	publishTarget(srv, config.NewSettingsOverlay(), "b", t.TempDir())
+	publishTarget(srv, config.NewSettingsOverlay(), testColocatedBrokerID, t.TempDir())
 	fault.Arm()
 	srv.runProfileReferenceCount(context.Background())
 	srv.runProfileReferenceCount(context.Background())
@@ -480,7 +486,7 @@ func TestProfileReferences_InstallFailureIsConservative(t *testing.T) {
 	overlay.Update(map[string]config.V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}}, storedGkeNFSProfiles(), nil, "")
 	var localErr, remoteErr error
 	logs := captureHubLogs(t, func() {
-		srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
+		srv.EnableProfileReferences(context.Background(), overlay, testColocatedBrokerID, t.TempDir())
 		localErr = resolvesThrough(overlay, "local")
 		remoteErr = resolvesThrough(overlay, "remote")
 	})
@@ -526,8 +532,7 @@ func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
 			srv, s := testServer(t)
 			ctx := context.Background()
 			broker := newLocalPathTestBroker(t, s, "pr-move-broker")
-			project := &store.Project{ID: tid("pr-move"), Name: "pr-move", Slug: "pr-move",
-				Annotations: map[string]string{projectSettingActiveProfile: "local"}}
+			project := &store.Project{ID: tid("pr-move"), Name: "pr-move", Slug: "pr-move", Annotations: map[string]string{}}
 			require.NoError(t, s.CreateProject(ctx, project))
 			if linked {
 				require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
@@ -539,6 +544,8 @@ func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
 			srv.EnableProfileReferences(ctx, overlay, broker.ID, t.TempDir())
 			require.Error(t, resolvesThrough(overlay, "local"))
 			require.Error(t, resolvesThrough(overlay, "remote"))
+			project.Annotations[projectSettingActiveProfile] = "local" // set after the count, so only the move adds it
+			require.NoError(t, s.UpdateProject(ctx, project))
 
 			require.NoError(t, srv.linkMoveTargetProvider(ctx, &reincarnationMove{
 				SourceBrokerID: "elsewhere", TargetBrokerID: broker.ID, ProjectID: project.ID, Profile: "remote",
@@ -595,7 +602,7 @@ func TestProfileReferences_ServerConfigGetShowsRetained(t *testing.T) {
 		map[string]config.V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local-nfs": {Runtime: "docker"}}, nil, "")
 	overlay.SetProfileReferences(config.ProfileReferences{Agents: map[string]int{"local": 2}})
 	require.NoError(t, resolvesThrough(overlay, "local"))
-	publishTarget(srv, overlay, "b", t.TempDir())
+	publishTarget(srv, overlay, testColocatedBrokerID, t.TempDir())
 
 	resp := getServerConfigDB(t, srv, ops)
 	require.Len(t, resp.RetainedBuiltinProfiles, 1)
@@ -633,7 +640,7 @@ func TestProfileReferences_FailedCountKeepsReferences(t *testing.T) {
 				ProjectID: project.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "local"}}))
 			overlay := config.NewSettingsOverlay()
 			overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
-			srv.EnableProfileReferences(ctx, overlay, "b", t.TempDir())
+			srv.EnableProfileReferences(ctx, overlay, testColocatedBrokerID, t.TempDir())
 			require.NoError(t, resolvesThrough(overlay, "local"))
 			ps, _ := overlay.RetainedState()
 			require.Len(t, ps, 1)
