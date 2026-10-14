@@ -82,7 +82,7 @@ func (noStreamRenewer) Renew([]byte) error { return ErrNoStreamRenewer }
 // RenewerFor returns the renewer of the stream st opened on sess: local when
 // this relay holds the target's session, the bridged stream's own renewer
 // otherwise.
-// TODO: wired into the relay's renewal scheduler in a later change (ptone/scion#3776)
+// TODO: stream tracking and renewal delivery are wired into the relay in a later change (ptone/scion#3776)
 func RenewerFor(sess conduit.Session, target relay.TargetStream, st conduit.StreamRenewer) Renewer {
 	if ls, ok := sess.(conduit.LocalSession); ok {
 		return LocalRenewer(ls, target.StreamID)
@@ -134,6 +134,7 @@ func newStreamScheduler(ro *Role) *StreamScheduler {
 
 // Track schedules ts until the returned function is called (when the stream
 // ends for any reason).
+// TODO: stream tracking and renewal delivery are wired into the relay in a later change (ptone/scion#3776)
 func (s *StreamScheduler) Track(ts TrackedStream) (untrack func()) {
 	st := &trackedStream{TrackedStream: ts, renewedFrom: s.ro.clk.Now()}
 	s.mu.Lock()
