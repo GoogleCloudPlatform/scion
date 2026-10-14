@@ -135,6 +135,46 @@ admin (the issuer). The `test-identity-session` suite
 (`e2e/test-identity-session/`, run in the Web E2E workflow) is the
 reference use.
 
+### Hub settings and a co-located broker
+
+Two more `startHub()` options, both off by default:
+
+- `env`: extra environment of the hub process, for supported
+  configuration such as `SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true'` or
+  `SCION_IMAGE_REGISTRY`. It is applied over the member-level hub's
+  `SCION_*`-free environment. Keys the harness sets itself
+  (`HARNESS_OWNED_ENV`: `HOME`, `SCION_CLI_MODE`, the hub id and hub class,
+  the broker host) and the test mode and test identity settings
+  (`SCION_SERVER_HUB_TEST*`, `SCION_SERVER_TEST*`) are refused: `startHub()`
+  throws before it starts anything.
+- `runtimeBroker: true` (needs `testIdentities: true`): runs the co-located
+  runtime broker in the hub process on a free loopback port with
+  `--auto-provide`, so a hub-managed project created on the hub gets it as
+  its provider. The broker registers whether or not a container runtime
+  works on the host; agents only start where one does. The broker needs an
+  image registry setting (`SCION_IMAGE_REGISTRY` in `env`).
+
+`E2E_KEEP_HUB_STATE=1` makes `stopHub()` keep the hub's temp dir (the
+SQLite database, the private HOME and the hub's files) and print its
+path, for inspecting a run afterwards. It is off by default. The dir
+contains hub credentials (dev token, session keys, test identity rows):
+do not copy it into evidence or artifacts, and remove it by hand when
+done.
+
+The `harness-selftest` suite (`e2e/harness-selftest/`) checks these
+options against a stand-in binary, without Go or a browser:
+`npm run test:e2e-support` (also run by the ci.yml web job).
+
+```typescript
+const state = await startHub({
+  testLogin: false,
+  testIdentities: true,
+  runtimeBroker: true,
+  env: { SCION_SERVER_HUB_ASYNCAGENTLAUNCH: 'true', SCION_IMAGE_REGISTRY: registry },
+  stateFile,
+});
+```
+
 ### Flow
 
 ```typescript

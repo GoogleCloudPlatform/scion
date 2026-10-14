@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -213,24 +212,25 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	// this run as the owner of the agent's files now (ptone/scion#2675). The
 	// hub keeps this run even if the start fails, so the files must name it
 	// too, or a delete for this run would leave them behind. A fresh
-	// provision records the run carried by ctx in agent-info.json.
+	// provision records the run carried by ctx itself.
 	//
 	// List failed: no pre-clean ran and a previous run's container may hold
 	// the name (ptone/scion#3242). If the create then collides, the hub may
 	// settle on that previous run, so keep the recorded owner (and record
 	// none on a fresh provision) and record this run only after a
 	// successful create, which proves the name was free.
+	//
+	// The run is recorded in the host-owned HostStateFile in the agent's
+	// directory (RecordRunOwner, ptone/scion#4771), never in the agent
+	// home. A failed record (including a project with no trusted root) is
+	// logged and the start carries on, as the agent-info.json record did:
+	// the broker then finds the previous owner, none, or an unknown one,
+	// and keeps the files when it is unknown.
 	recordAfterCreate := listErr != nil
-	runIDNeedsHomeRepair := false
 	if listErr == nil {
 		ctx = api.ContextWithRunID(ctx, opts.RunID)
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID); errors.Is(err, fs.ErrPermission) {
-			// The agent home is not writable by the agent runtime
-			// (ptone/scion#4330); retried after an ownership repair once
-			// the agent's image is resolved, below.
-			runIDNeedsHomeRepair = true
-		} else if err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+		if err := RecordRunOwner(RunOwnerTargetFor(opts), opts.RunID); err != nil {
+			slog.Warn("Start: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
 				"agent", opts.Name, "run_id", opts.RunID, "error", err)
 		}
 	} else {
@@ -565,6 +565,22 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 		applyEnvironmentResources(ctx, finalScionCfg, settings, envProfile, harnessConfigName)
 	}
 
+	// Limits (ptone/scion#623): the agent's own max_turns, max_model_calls
+	// and max_duration (template or requester values) are read from
+	// scion-agent.json on disk, for the same reason as ownEnv above, with
+	// any set by this start's inline config on top. The hub agent_defaults
+	// on ctx and the current settings defaults then fill what the agent
+	// leaves unset, so a changed default reaches the agent on this start.
+	// ownLimits is what the scion-agent.json rewrites below persist.
+	ownLimits := limitsOf(finalScionCfg)
+	if persisted, ok := readPersistedAgentLimits(agentDir); ok {
+		ownLimits = persisted.overlay(limitsOf(startInlineConfig))
+	}
+	if finalScionCfg != nil {
+		finalScionCfg = withLimits(finalScionCfg, ownLimits)
+		applyDefaultLimits(ctx, finalScionCfg, settings)
+	}
+
 	// Telemetry tiers applied per start: broker settings telemetry < hub
 	// default (ptone/scion#4218) < the agent's own config telemetry
 	// (requester inline telemetry from older hubs, and the stored config).
@@ -857,12 +873,6 @@ func (m *AgentManager) Start(ctx context.Context, opts api.StartOptions) (*api.A
 	homeOwner := advertisedAgentHomeOwner(settings)
 	warnAgentHomeOwnerMismatch(opts.Name, agentHome, homeOwner)
 	ctx = contextWithAgentHomeRepair(ctx, m.Runtime, agentHome, resolvedImage, homeOwner)
-	if runIDNeedsHomeRepair {
-		if err := writeAgentHome(ctx, func() error { return SetSavedRunID(opts.Name, opts.ProjectPath, opts.RunID) }); err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
-				"agent", opts.Name, "run_id", opts.RunID, "error", err)
-		}
-	}
 
 	// Resolve the harness implementation. When we have a harness-config name,
 	// route through harness.Resolve so container-script provisioners (and
@@ -1512,7 +1522,7 @@ authDone:
 			finalScionCfg = &api.ScionConfig{}
 		}
 		finalScionCfg.AuthSelectedType = opts.HarnessAuth
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal agent config: %w", marshalErr)
 		}
@@ -1523,7 +1533,7 @@ authDone:
 	} else if finalScionCfg != nil && harness.IsHarnessImplementationName(finalScionCfg.AuthSelectedType) {
 		// Active corruption repair: clear the corrupted value and rewrite.
 		finalScionCfg.AuthSelectedType = ""
-		cfgData, marshalErr := json.MarshalIndent(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), "", "  ")
+		cfgData, marshalErr := json.MarshalIndent(withLimits(withEnvironment(persistableAgentConfig(finalScionCfg, agentOwnTelemetry), ownEnv), ownLimits), "", "  ")
 		if marshalErr != nil {
 			return nil, fmt.Errorf("failed to marshal repaired agent config: %w", marshalErr)
 		}
@@ -2562,9 +2572,9 @@ authDone:
 	// files in the container (ptone/scion#4766). Once up, the container
 	// reports its own phase (sciontool init writes "running"). This covers
 	// only the running-phase write: the "error" write on a failed launch
-	// below, and the run ID record after the create when the pre-start
-	// List failed (recordAfterCreate, moving in ptone/scion#4771), still
-	// write agent-info.json after Run.
+	// below still writes agent-info.json after Run. (The run ID record
+	// after the create, when the pre-start List failed, goes to the
+	// host-owned host state file, ptone/scion#4771.)
 	//
 	// Phase is always "running" here, for both a fresh start and a resume:
 	// state.Phase has no "resumed" value, and a non-standard phase string
@@ -2591,11 +2601,13 @@ authDone:
 	}
 	slog.Info("agent start: runtime.Run complete", "agent", opts.Name,
 		"total_elapsed_ms", time.Since(startEntry).Milliseconds())
-	// This write runs while the container may be up; it moves out of
-	// agent-info.json in ptone/scion#4771.
+	// The run is recorded after the create when the pre-start List failed
+	// (see recordAfterCreate). It goes to the host-owned HostStateFile, so
+	// it does not matter that the container may be up; a failure is logged
+	// and the start carries on.
 	if recordAfterCreate {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, runID); err != nil {
-			slog.Warn("Start: failed to record the run ID in agent-info.json; a delete for this run may leave the agent's files behind",
+		if err := RecordRunOwner(RunOwnerTargetFor(opts), runID); err != nil {
+			slog.Warn("Start: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
 				"agent", opts.Name, "run_id", runID, "error", err)
 		}
 	}

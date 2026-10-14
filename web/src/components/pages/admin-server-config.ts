@@ -529,7 +529,7 @@ interface SectionMetadataInfo {
 /** A bootstrap-material key whose value differs from the DB value in a managed section. */
 interface SupersededKeyInfo {
   key: string;
-  source: string; // "seed_env" | "yaml" | "server_env"
+  source: string; // "seed_env" | "yaml" | "server_env" | "default"
 }
 
 /** A SCION_SERVER_* env var that targets a Layer-1 key (deprecated, migrate to SCION_SEED_*). */
@@ -3244,6 +3244,8 @@ export class ScionPageAdminServerConfig extends LitElement {
           return 'settings.yaml';
         case 'server_env':
           return 'SCION_SERVER_*';
+        case 'default':
+          return 'built-in default';
         default:
           return s;
       }

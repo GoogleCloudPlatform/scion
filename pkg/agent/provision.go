@@ -581,9 +581,13 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		cfg.AuthSelectedType = opts.HarnessAuth
 		// cfg carries the environment values ProvisionAgent merged in for
 		// its caller; the file keeps the agent's own (ptone/scion#4561).
+		// Likewise for the default limits (ptone/scion#623).
 		persisted := cfg
 		if env, ok := readPersistedAgentEnvironment(agentDir); ok {
 			persisted = withEnvironment(cfg, env)
+		}
+		if limits, ok := readPersistedAgentLimits(agentDir); ok {
+			persisted = withLimits(persisted, limits)
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
@@ -913,9 +917,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// it is started, and its first start records its run in place of this.
 	// If a runtime entry for the name still exists in this project (or the
 	// runtime cannot be listed), the files stay that entry's run's.
+	// The owner is recorded in the host-owned HostStateFile in agentDir
+	// (recordRunOwnerInAgentDir); a failure, including a record that would
+	// not land in agentDir, is logged and the provision carries on.
 	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
-			slog.Warn("Provision: failed to record the provision owner in agent-info.json",
+		if err := recordRunOwnerInAgentDir(RunOwnerTargetFor(opts), agentDir, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+			slog.Warn("Provision: failed to record the provision owner in the host state file",
 				"agent", opts.Name, "error", err)
 		}
 	}
@@ -2027,14 +2034,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if ref == nil || !ref.Optional {
 					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
 				}
-				util.Debugf("provision: optional skill %q skipped: %s", re.URI, re.Message)
+				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
+					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
 			}
 
 			// S1: verify every requested URI has an outcome
 			for uri, ref := range requestedURIs {
 				if !resolvedURIs[uri] && !errorURIs[uri] {
 					if ref.Optional {
-						util.Debugf("provision: optional skill %q missing from resolver response, skipping", uri)
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", uri, "reason", "missing from resolver response")
 					} else {
 						return "", "", nil, fmt.Errorf(
 							"required skill %q missing from resolver response — S1 fail-closed", uri)
@@ -2053,8 +2062,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
 				}
 				skillsDest := filepath.Join(agentHome, skillsDir)
-				record, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
 				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return "", "", nil, skillErr
+					}
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
@@ -2238,24 +2263,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Hub operational agent_defaults: below the template and below inline
-	// config (both of which have already populated finalScionCfg by the merge
-	// at step 2b), above this broker's own settings.yaml defaults (applied
-	// immediately below). Same only-if-zero shape as that block, so the two
-	// tiers compose without either needing to know about the other.
+	// Limits: the template and inline config (both merged into
+	// finalScionCfg at step 2b) are the agent's own and are persisted; the
+	// hub operational agent_defaults and then this broker's settings.yaml
+	// defaults fill only what they leave unset (applyDefaultLimits). Those
+	// defaults are applied to the returned config here and again by Start
+	// on every start, never persisted (ptone/scion#623), so a later change
+	// to either reaches the agent at its next start.
 	//
-	// The placement IS the design. Move this after the settings block and the
-	// hub tier loses to settings.yaml; stamp these values hub-side into
-	// InlineConfig instead and they arrive as top-of-chain and beat a
-	// template's explicit max_turns — the inversion this channel exists to
-	// avoid (design §3.2.1, rejected alternative A5).
-	//
-	// The hub sends nothing in file mode, so this never fires there and
-	// file-mode behaviour is unchanged: a co-located broker reads the same
-	// settings.yaml and applies these values itself at the BOTTOM tier below.
-	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
-	// the broker chain in file mode, just above broker settings in Postgres
-	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	// The hub sends nothing in file mode, so the hub tier never fires there
+	// and a co-located broker applies the same settings.yaml values itself
+	// at the bottom tier. The rank of hub agent_defaults is therefore
+	// mode-dependent — bottom of the broker chain in file mode, just above
+	// broker settings in Postgres mode. That is deliberate; see design
+	// §3.2.4 and alternative A7.
 	//
 	// Note the asymmetry for Resources: hub agent_defaults.resources ranks
 	// above default_resources ONLY. Broker profile resources and harness
@@ -2264,31 +2285,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// explicitly does not want hub defaults silently overriding broker
 	// profile resources). Resources are resolved by
 	// resolveEnvironmentResources below and again by Start, never persisted.
-	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
-			finalScionCfg.MaxTurns = hd.MaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = hd.MaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
-			finalScionCfg.MaxDuration = hd.MaxDuration
-		}
-	}
-
-	// Apply default limits from settings (hub global defaults) if not already set
-	// by template or inline config. Priority: agent > template > settings defaults.
-	if settings != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && settings.DefaultMaxTurns > 0 {
-			finalScionCfg.MaxTurns = settings.DefaultMaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && settings.DefaultMaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = settings.DefaultMaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
-			finalScionCfg.MaxDuration = settings.DefaultMaxDuration
-		}
-	}
+	ownLimits := limitsOf(finalScionCfg)
+	applyDefaultLimits(ctx, finalScionCfg, settings)
 
 	// Resources: settings default_resources < hub agent_defaults.resources
 	// < profile resources < the agent's own < profile harness_overrides, then
@@ -2363,15 +2361,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
-	// Record the run that owns these files (ptone/scion#2675): a delete
-	// naming a different run then leaves them alone. A provision with no run
-	// (provision-only, reprovision) keeps whatever run already owned them,
-	// since the files still belong to that run's runtime entry.
-	info.RunID = api.RunIDFromContext(ctx)
-	if info.RunID == "" {
-		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
-	}
-
 	// Persist the broker-provisioned worktree's repo root now, if the ctx
 	// signal validates against workspaceSource: run.go's Start does not
 	// always run after this call returns — the hub's provision-only flow
@@ -2393,7 +2382,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Start from current settings on every start, so a later settings or
 	// profile change reaches the agent on its next start (ptone/scion#4561).
 	// The returned config keeps the merged values (see the reload below).
-	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
+	// Likewise it carries only the agent's own limits (ptone/scion#623).
+	persistedCfg := withLimits(withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume)), ownLimits)
 	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -2417,6 +2407,46 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
+	}
+	// Record the run that owns these files (ptone/scion#2675) in the
+	// host-owned HostStateFile in agentDir, never in agent-info.json
+	// (ptone/scion#4771): a delete naming a different run then leaves them
+	// alone. A provision with no run (provision-only, reprovision) leaves
+	// the record as it is, since the files still belong to that run's
+	// runtime entry (and copies a legacy agent-info.json runId into it,
+	// below). A failure (including a record that would not land in
+	// agentDir) is logged and the provision carries on, as for the
+	// agent-info.json write below.
+	ownerTarget := RunOwnerTarget{
+		ProjectPath:     projectPath,
+		AgentName:       agentName,
+		HubProjectID:    api.HubProjectIDFromContext(ctx),
+		SharedWorkspace: sharedWorkspace,
+	}
+	// Transitional (ptone/scion#4771): the agent-info.json rewrite below
+	// would drop a runId an older broker left there, so a provision
+	// without a run (reincarnate, provision-only) first copies it into the
+	// host state file (migrateLegacyRunOwner, which never replaces a run
+	// already recorded), keeping the owner base carried over. When the
+	// copy does not succeed, the rewrite keeps the value as it was read.
+	if runID := api.RunIDFromContext(ctx); runID != "" {
+		if err := recordRunOwnerInAgentDir(ownerTarget, agentDir, runID); err != nil {
+			slog.Warn("Provision: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
+				"agent", agentName, "run_id", runID, "error", err)
+		}
+	} else {
+		recorded, legacy, err := migrateLegacyRunOwner(ownerTarget, func(legacy string) (bool, error) {
+			return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, legacy)
+		})
+		if err != nil {
+			slog.Warn("Provision: failed to copy the legacy run ID into the host state file; keeping it in agent-info.json",
+				"agent", agentName, "error", err)
+		}
+		if legacy != "" && !recorded {
+			// Not copied: keep it as it was read, as updateSavedAgentInfo
+			// does, for the legacy fallback read.
+			info.RunID = legacy
+		}
 	}
 
 	// Now attach Info to the config object for return and for writing agent-info.json
@@ -2515,11 +2545,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// returned config carries the effective ones merged above (for the
 	// create response and other callers), which Start re-derives from
 	// current settings on every start (ptone/scion#4561).
+	// The same holds for the default limits (ptone/scion#623).
 	effectiveEnv := environmentOf(finalScionCfg)
+	effectiveLimits := limitsOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
+		finalScionCfg = withLimits(withEnvironment(updatedCfg, effectiveEnv), effectiveLimits)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
@@ -2791,45 +2823,9 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 }
 
 // ProvisionOwnerPrefix prefixes the owner a provision-only create records
-// in agent-info.json runId in place of a run (see Provision). It never
+// (RecordRunOwner) in place of a run (see Provision). It never
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
-
-// readAgentInfoRunID returns the runId recorded in the agent-info.json at
-// path, or "" if the file is missing, unreadable or carries none.
-func readAgentInfoRunID(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var info struct {
-		RunID string `json:"runId"`
-	}
-	if json.Unmarshal(data, &info) != nil {
-		return ""
-	}
-	return info.RunID
-}
-
-// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
-// the run that owns the agent's files (ptone/scion#2675). It is "" for an
-// agent provisioned before run IDs were recorded, one provisioned but never
-// started, or one whose agent-info.json is missing or unreadable.
-func GetSavedRunID(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.RunID
-	}
-	return ""
-}
-
-// SetSavedRunID records runID in the agent's agent-info.json as the run that
-// owns the agent's files (ptone/scion#2675). It is a no-op when
-// agent-info.json does not exist yet.
-func SetSavedRunID(agentName string, projectPath string, runID string) error {
-	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.RunID = runID
-	})
-}
 
 func GetSavedProfile(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -2877,6 +2873,32 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		return nil
 	}
 
+	// Transitional (ptone/scion#4771): a runId an older broker left here
+	// is copied into the host state file before this update drops it, and
+	// it is dropped only once the host state file records a run. This
+	// caller holds no hub project ID or shared-workspace flag, so the copy
+	// is made only where the record's dir is the agent's own state dir
+	// (config.ResolveAgentDir, holding a regular scion-agent.json, which a
+	// shared-workspace agent's in-project dir never does). Otherwise, or
+	// when the copy fails, the value is left in place for the legacy
+	// fallback read; it is never written here.
+	ownerTarget := RunOwnerTarget{ProjectPath: projectPath, AgentName: agentName}
+	ownerRecorded, legacyRun, migrateErr := migrateLegacyRunOwner(ownerTarget, func(runID string) (bool, error) {
+		agentDir := config.ResolveAgentDir(projectDir, agentName)
+		if fi, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil || !fi.Mode().IsRegular() {
+			return false, fmt.Errorf("%w: %s holds no scion-agent.json", errRunOwnerDirMismatch, agentDir)
+		}
+		return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, runID)
+	})
+	if migrateErr != nil {
+		// Expected on every update of such an agent until it next starts
+		// (for example a hub-managed marker project, which this caller
+		// cannot resolve without the hub project ID), so not a warning.
+		slog.Debug("Did not copy the legacy agent-info.json run ID into the host state file; keeping it in agent-info.json",
+			"agent", agentName, "error", migrateErr)
+	}
+	keepLegacyRun := legacyRun != "" && !ownerRecorded
+
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
 	// process cannot lose this update or have its own lost (#4681).
@@ -2899,6 +2921,12 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		}
 
 		update(&info)
+		// The files-owner run lives in HostStateFile (ptone/scion#4771);
+		// a runId left by an older broker is dropped once HostStateFile
+		// records a run (see above), and otherwise left as it was read.
+		if !keepLegacyRun || info.RunID != legacyRun {
+			info.RunID = ""
+		}
 
 		newData, err := marshalAgentInfoKeepUnknown(data, &info)
 		if err != nil {

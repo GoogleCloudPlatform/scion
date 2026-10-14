@@ -52,6 +52,14 @@ func TestCompositeStore_CRUDParity(t *testing.T) {
 	storetest.RunStoreSuite(t, compositeFactory)
 }
 
+// TestCompositeStore_UsageReservation runs the usage reservation
+// conformance check (GetActiveReservation and the typed active-reservation
+// violation) against the CompositeStore on whichever backend
+// compositeFactory selects.
+func TestCompositeStore_UsageReservation(t *testing.T) {
+	storetest.UsageReservationConformance(t, compositeFactory)
+}
+
 // TestCompositeStore_GroupDirectParents runs the direct-parent group query
 // conformance check against the CompositeStore on whichever backend
 // compositeFactory selects.

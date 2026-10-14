@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,6 +62,30 @@ func TestBuildStartContext_SharedWorkspaceClone_KeepsWorkspaceMount(t *testing.T
 	for _, key := range []string{"SCION_GIT_CLONE_URL", "SCION_GIT_BRANCH", "SCION_GIT_DEPTH"} {
 		assert.NotContains(t, sc.Opts.Env, key)
 	}
+}
+
+// The broker no longer emits the legacy SCION_SHARED_WORKSPACE var for a
+// shared workspace (ptone/scion#575); SCION_WORKSPACE_MODE carries the mode.
+func TestBuildStartContext_SharedWorkspace_NoLegacyEnv(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.StateDir = t.TempDir()
+	srv := newTestServerForStartContext(t, cfg)
+
+	sc, err := srv.buildStartContext(context.Background(), startContextInputs{
+		Name:          "agent-1",
+		ProjectPath:   "/some/path",
+		WorkspaceMode: store.WorkspaceModeShared,
+		Config: &CreateAgentConfig{
+			Workspace:       t.TempDir(),
+			SharedWorkspace: true,
+		},
+		HTTPRequest: httptest.NewRequest("POST", "/api/v1/agents", nil),
+		Operation:   opCreate,
+	})
+	require.NoError(t, err)
+	assert.True(t, sc.Opts.SharedWorkspace)
+	assert.NotContains(t, sc.Opts.Env, "SCION_SHARED_WORKSPACE")
+	assert.Equal(t, "shared-plain", sc.Opts.Env["SCION_WORKSPACE_MODE"])
 }
 
 func TestBuildStartContext_SharedWorkspaceClone_IgnoredWithoutSharedWorkspaceOrWithGitClone(t *testing.T) {

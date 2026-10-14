@@ -185,7 +185,13 @@ export interface TerminalSession {
   /** Immediate transport write, including xterm protocol responses. Never queues input. */
   sendData(data: string): boolean;
   resize(cols: number, rows: number): void;
-  /** navigation is ONLY for the disposable legacy page, not retained workspace navigation. */
+  /**
+   * 'explicit' (the default) sends the tmux detach key before closing.
+   * 'navigation' closes without it, for sessions leaving this window: the
+   * coordinator's relinquish when the terminals move to another window, and
+   * terminal-move discarding sessions after a failed move. Retained
+   * workspace navigation never closes a session.
+   */
   close(reason?: 'explicit' | 'navigation'): void;
 }
 

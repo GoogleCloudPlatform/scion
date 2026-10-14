@@ -3715,24 +3715,12 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		if err := validateTelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
 			return nil, err
 		}
 	}
 
 	return settings, nil
-}
-
-// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings;
-// see ValidateTelemetryTLS.
-func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
-	return ValidateTelemetryTLS(&api.TelemetryTLS{
-		Enabled:            tls.Enabled,
-		InsecureSkipVerify: tls.InsecureSkipVerify,
-		CAFile:             tls.CAFile,
-		CertFile:           tls.CertFile,
-		KeyFile:            tls.KeyFile,
-	})
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing

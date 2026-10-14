@@ -235,3 +235,35 @@ func TestValidateTelemetryEnvAfterMerge(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateV1TelemetryTLS(t *testing.T) {
+	boolValue := func(v bool) *bool { return &v }
+	for _, tc := range []struct {
+		name      string
+		tls       *V1TelemetryTLSConfig
+		wantError string
+	}{
+		{"nil", nil, ""},
+		{"empty", &V1TelemetryTLSConfig{}, ""},
+		{"pair", &V1TelemetryTLSConfig{CertFile: "/c.pem", KeyFile: "/k.pem"}, ""},
+		{"certificate only", &V1TelemetryTLSConfig{CertFile: "/c.pem"}, "cert_file and key_file must be set together"},
+		{"key only", &V1TelemetryTLSConfig{KeyFile: "/k.pem"}, "cert_file and key_file must be set together"},
+		{"plaintext with CA", &V1TelemetryTLSConfig{Enabled: boolValue(false), CAFile: "/ca.pem"}, "conflicts"},
+		{"plaintext with skip verify", &V1TelemetryTLSConfig{Enabled: boolValue(false), InsecureSkipVerify: boolValue(true)}, "conflicts"},
+		{"plaintext with pair", &V1TelemetryTLSConfig{Enabled: boolValue(false), CertFile: "/c.pem", KeyFile: "/k.pem"}, "conflicts"},
+		{"plaintext alone", &V1TelemetryTLSConfig{Enabled: boolValue(false)}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateV1TelemetryTLS(tc.tls)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("error = %v, want it to contain %q", err, tc.wantError)
+			}
+		})
+	}
+}

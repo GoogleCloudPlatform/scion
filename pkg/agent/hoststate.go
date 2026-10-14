@@ -53,7 +53,8 @@ import (
 //     host-state.json with a nil error, so a non-error, non-zero result
 //     does not show that the root is right.
 //
-// Mapping project layouts to roots is the caller's job (ptone/scion#4771).
+// HostStateRootFor maps project layouts to roots from broker-held identity
+// (ptone/scion#4771); callers outside it must follow the same contract.
 // The agent name comes from the broker request or dispatch context, not
 // from the project tree. Symlinks in the root's own path are resolved once
 // (EvalSymlinks) and trusted; below the root, every component (.scion,
