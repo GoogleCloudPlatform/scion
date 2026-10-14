@@ -69,6 +69,9 @@ const (
 	// ActionSetMessagingPolicy covers changing a project's cross-project
 	// inbound messaging policy (project.set_messaging_policy).
 	ActionSetMessagingPolicy Action = "set_messaging_policy"
+	// ActionManageVisitors covers granting, changing and revoking project
+	// visitor access for federated accounts (project.manage_visitors).
+	ActionManageVisitors Action = "manage_visitors"
 
 	// Global-catalog write actions — see design doc §3.1.
 	// These distinguish hub-catalog mutation from project-scoped CRUD,
