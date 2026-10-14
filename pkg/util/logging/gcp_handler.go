@@ -203,6 +203,9 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 
 	// Grouped: nest the record attrs (and stack_trace/@type, as before) in
 	// the open groups ourselves, and keep the special fields top-level.
+	// The special fields go first: if every attr in a group is dropped
+	// (zero Attr, ReplaceAttr deletion), the JSON handler truncates the
+	// group without restoring its separator, so nothing may follow it.
 	inner := make([]slog.Attr, 0, r.NumAttrs()+len(errAttrs))
 	r.Attrs(func(a slog.Attr) bool {
 		inner = append(inner, a)
@@ -210,8 +213,8 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	})
 	inner = append(inner, errAttrs...)
 	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
-	out.AddAttrs(nestInGroups(h.groups, inner)...)
 	out.AddAttrs(top...)
+	out.AddAttrs(nestInGroups(h.groups, inner)...)
 	return h.handler.Handle(ctx, out)
 }
 
@@ -228,8 +231,9 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 		nh.handler = h.handler.WithAttrs(attrs)
 		return nh
 	}
-	// Inside a group: keep the attrs with the innermost group. Resolve
-	// LogValuers now, as the JSON handler does for WithAttrs.
+	// Inside a group: keep the attrs with the innermost group. Their
+	// top-level LogValuers are resolved now; nested values are resolved, and
+	// ReplaceAttr is applied, on each record rather than once.
 	last := len(nh.groups) - 1
 	g := nh.groups[last]
 	groupAttrs := make([]slog.Attr, len(g.attrs), len(g.attrs)+len(attrs))
@@ -261,36 +265,16 @@ func (h *GCPHandler) clone() *GCPHandler {
 }
 
 // nestInGroups wraps attrs in groups, innermost last, prepending each
-// group's own attrs. Like slog's JSON handler, a group with nothing to
-// show is omitted.
+// group's own attrs. Groups with nothing to show are dropped by
+// slog.GroupValue, Record.AddAttrs and the JSON handler, as in slog.
 func nestInGroups(groups []gcpGroup, attrs []slog.Attr) []slog.Attr {
 	for i := len(groups) - 1; i >= 0; i-- {
 		members := make([]slog.Attr, 0, len(groups[i].attrs)+len(attrs))
 		members = append(members, groups[i].attrs...)
 		members = append(members, attrs...)
-		v := slog.GroupValue(members...)
-		if !hasVisibleAttr(v.Group()) {
-			attrs = nil
-			continue
-		}
-		attrs = []slog.Attr{{Key: groups[i].name, Value: v}}
+		attrs = []slog.Attr{{Key: groups[i].name, Value: slog.GroupValue(members...)}}
 	}
 	return attrs
-}
-
-// hasVisibleAttr reports whether any attr would be written: not the zero
-// Attr and not an empty group.
-func hasVisibleAttr(attrs []slog.Attr) bool {
-	for _, a := range attrs {
-		if a.Equal(slog.Attr{}) {
-			continue
-		}
-		if v := a.Value.Resolve(); v.Kind() == slog.KindGroup && !hasVisibleAttr(v.Group()) {
-			continue
-		}
-		return true
-	}
-	return false
 }
 
 func extractTraceIDFromAttrs(preAttrs []slog.Attr, r slog.Record) string {

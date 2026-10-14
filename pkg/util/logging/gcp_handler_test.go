@@ -82,6 +82,12 @@ func TestGCPHandler_GroupsKeepSpecialFieldsTopLevel(t *testing.T) {
 		{"empty inner group", func(l *slog.Logger) {
 			l.WithGroup("g").With("p1", "y").WithGroup("h").Info("m")
 		}},
+		{"zero attr in record", func(l *slog.Logger) {
+			l.WithGroup("g").Info("m", slog.Attr{})
+		}},
+		{"zero attr in outer group", func(l *slog.Logger) {
+			l.WithGroup("g").With(slog.Attr{}).WithGroup("h").Info("m")
+		}},
 		{"empty record group attr", func(l *slog.Logger) {
 			l.WithGroup("g").WithGroup("h").Info("m", slog.Group("r"))
 		}},
@@ -160,6 +166,46 @@ func TestGCPHandler_GroupSiblingsIndependent(t *testing.T) {
 		if got := decodeLine(t, buf.Bytes())["g"]; !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("g = %v, want %v", got, tc.want)
 		}
+	}
+}
+
+// TestGCPHandler_GroupedDroppedAttrsValidJSON checks that a group whose
+// attrs are all deleted by ReplaceAttr (an empty trace_id) still yields one
+// valid JSON entry with the special fields top-level.
+func TestGCPHandler_GroupedDroppedAttrsValidJSON(t *testing.T) {
+	cases := []struct {
+		name   string
+		log    func(l *slog.Logger)
+		wantG  any
+		hasKey bool
+	}{
+		{"record attr dropped", func(l *slog.Logger) {
+			l.WithGroup("g").Info("m", AttrTraceID, "")
+		}, nil, false},
+		{"group attr dropped", func(l *slog.Logger) {
+			l.WithGroup("g").With(AttrTraceID, "").Info("m")
+		}, nil, false},
+		{"inner group dropped", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1).WithGroup("h").Info("m", AttrTraceID, "")
+		}, map[string]any{"a": float64(1)}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+			if !json.Valid(bytes.TrimSpace(buf.Bytes())) {
+				t.Fatalf("invalid JSON: %s", buf.Bytes())
+			}
+			data := decodeLine(t, buf.Bytes())
+			for _, k := range gcpSpecialKeys {
+				if _, ok := data[k].(map[string]any); !ok {
+					t.Errorf("%s missing at top level: %v", k, data)
+				}
+			}
+			if g, ok := data["g"]; ok != tc.hasKey || !reflect.DeepEqual(g, tc.wantG) {
+				t.Errorf("g = %v (present %v), want %v (present %v)", g, ok, tc.wantG, tc.hasKey)
+			}
+		})
 	}
 }
 
