@@ -207,8 +207,8 @@ func TestServerShutdownPlan_ExitSignal(t *testing.T) {
 // shutdown_grace = 10s, a server wait that never returns and an audit
 // close that blocks until its context ends, the whole exit sequence ends
 // the process (exitProcess) by T0 + G, without returning into the
-// deferred store close: the wait stops at T0+S, the audit close is cut at
-// T0+G-250ms, and the watchdog backs it.
+// deferred store close: the wait stops at T0+S and the audit close is cut
+// at T0+G-250ms (the watchdog backs it: TestShutdownExitWatchdog).
 func TestShutdownExitSequence_WithinGrace(t *testing.T) {
 	grace := 10 * time.Second
 	serverCtx, serverCancel := context.WithCancel(context.Background())
@@ -217,7 +217,9 @@ func TestShutdownExitSequence_WithinGrace(t *testing.T) {
 	exits := stubExitProcess(t, clk)
 	lifetime, stop := context.WithCancel(context.Background())
 	defer stop()
-	p.armExitWatchdog(lifetime.Done())
+	// The watchdog, which fires at the same instant, is pinned by
+	// TestShutdownExitWatchdog; it is not armed here, so exactly one exit
+	// (awaitServerExit's) is observed.
 
 	closeEntered := make(chan struct{})
 	returned := make(chan error, 1)
