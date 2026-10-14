@@ -142,10 +142,11 @@ func openAt(t *testing.T, key testKey, s core.LocalSession, port int, now time.T
 }
 
 // withDeadline gives a grant an authorization deadline, a jti and the
-// proxy origin.
+// tunnel origin (which carries every stream kind, so a renewal naming
+// another kind differs from the open grant only in its stream).
 func withDeadline(jti string, until time.Time, interval time.Duration) func(*grant.Claims) {
 	return func(c *grant.Claims) {
-		c.JTI, c.AuthzUntil, c.AuthzInterval, c.Via = jti, until, interval, grant.ViaProxy
+		c.JTI, c.AuthzUntil, c.AuthzInterval, c.Via = jti, until, interval, grant.ViaTunnel
 	}
 }
 
@@ -161,7 +162,7 @@ func renewalFor(t *testing.T, key testKey, s core.LocalSession, st core.Stream, 
 	}
 	c := grant.RenewalClaims{
 		Stream: grant.StreamHeader{Kind: string(kind), Params: open.GetParams()},
-		Via:    grant.ViaProxy, // withDeadline's origin
+		Via:    grant.ViaTunnel, // withDeadline's origin
 		Issuer: "scion-hub", Subject: "user:u1", ProjectID: testProjectID,
 		Target: grant.Target{
 			Kind: grant.TargetKindAgent, ID: testAgentID, EndpointIncarnation: "launch-1",

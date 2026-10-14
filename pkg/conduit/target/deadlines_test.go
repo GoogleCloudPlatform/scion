@@ -16,7 +16,10 @@ package target
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,7 +80,7 @@ func newDeadlineFixture(t *testing.T) *deadlineFixture {
 	df.open.JTI = "open-jti-1"
 	df.open.AuthzUntil = t0.Add(testInterval)
 	df.open.AuthzInterval = testInterval
-	df.open.Via = grant.ViaProxy
+	df.open.Via = grant.ViaTunnel
 	df.stop = df.d.Track(testBinding, 3, &df.open, df.rec.close)
 	t.Cleanup(df.stop)
 	return df
@@ -430,7 +433,7 @@ func TestDeadlinesRenewalViaMustMatch(t *testing.T) {
 	until := df.clk.Now().Add(testInterval + 10*time.Second)
 	const jti = "renewal-via"
 	jtis := df.cache.Len()
-	if _, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Via = jti, grant.ViaTunnel })); !errors.Is(err, grant.ErrVia) {
+	if _, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Via = jti, grant.ViaProxy })); !errors.Is(err, grant.ErrVia) {
 		t.Fatalf("err = %v, want ErrVia", err)
 	}
 	if got := df.deadline(t); !got.Equal(before) || df.rec.count() != 0 || df.cache.Len() != jtis {
@@ -438,5 +441,43 @@ func TestDeadlinesRenewalViaMustMatch(t *testing.T) {
 	}
 	if got, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = jti })); err != nil || !got.Equal(until) {
 		t.Fatalf("matching renewal with the same jti: %v, %v", got, err)
+	}
+}
+
+// resign returns tok with old replaced by repl in its payload, signed again
+// with priv under the same header. It builds grants Mint would not sign.
+func resign(t *testing.T, priv ed25519.PrivateKey, tok []byte, old, repl string) []byte {
+	t.Helper()
+	b64 := base64.RawURLEncoding
+	parts := strings.Split(string(tok), ".")
+	payload, err := b64.DecodeString(parts[1])
+	if err != nil || strings.Count(string(payload), old) != 1 {
+		t.Fatalf("payload %s does not hold %q once", payload, old)
+	}
+	in := parts[0] + "." + b64.EncodeToString([]byte(strings.Replace(string(payload), old, repl, 1)))
+	return []byte(in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in))))
+}
+
+// TestDeadlinesRenewalOutsideViaTableRefused: a renewal whose origin does not
+// carry its stream kind (grant.ViaAllows) is refused even when it matches
+// the tracked stream exactly; nothing changes and its jti stays unused
+// (design v2.21.29 §3.5).
+func TestDeadlinesRenewalOutsideViaTableRefused(t *testing.T) {
+	df := newDeadlineFixture(t)
+	ctx := context.Background()
+	df.stop()
+	df.open.Via = grant.ViaPTY // a tcp stream with the PTY attach origin
+	df.stop = df.d.Track(testBinding, 3, &df.open, df.rec.close)
+	t.Cleanup(df.stop)
+	before := df.deadline(t)
+	until := df.clk.Now().Add(testInterval + 10*time.Second)
+	valid := df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Via = "renewal-table", grant.ViaTunnel })
+	tok := resign(t, df.f.signer.Key, valid, `"via":"tunnel"`, `"via":"pty"`)
+	jtis := df.cache.Len()
+	if _, err := df.d.Renew(ctx, testBinding, 3, tok); !errors.Is(err, grant.ErrVia) {
+		t.Fatalf("err = %v, want ErrVia", err)
+	}
+	if got := df.deadline(t); !got.Equal(before) || df.rec.count() != 0 || df.cache.Len() != jtis {
+		t.Fatal("a renewal outside the via table changed something")
 	}
 }

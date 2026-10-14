@@ -101,6 +101,23 @@ func IsVia(via string) bool {
 	return false
 }
 
+// ViaAllows reports whether a stream of kind may have origin via: the one
+// table of origin and kind pairs (design v2.21.29 §3.5, Origin claim via).
+// The tunnel path carries tcp, ssh and pty streams, the port proxy tcp, and
+// PTY attach pty. The hub derives a stream's actions only for a pair in this
+// table, and a grant naming any other pair is refused.
+func ViaAllows(via, kind string) bool {
+	switch via {
+	case ViaTunnel:
+		return kind == StreamKindTCP || kind == StreamKindSSH || kind == StreamKindPTY
+	case ViaProxy:
+		return kind == StreamKindTCP
+	case ViaPTY:
+		return kind == StreamKindPTY
+	}
+	return false
+}
+
 // Stream params. A tcp grant names exactly one agent-local target with
 // ParamHost and ParamPort. ParamAgentID is reserved: the hub sets it on every
 // grant for a broker target to the agent the stream was authorized for, and
@@ -271,6 +288,8 @@ func (c *Claims) validate() error {
 		return fmt.Errorf("%w: authz_interval must be whole positive seconds", ErrInvalidClaims)
 	case c.Via != "" && !IsVia(c.Via):
 		return fmt.Errorf("%w: unknown via %q", ErrInvalidClaims, c.Via)
+	case c.Via != "" && !ViaAllows(c.Via, c.Stream.Kind):
+		return fmt.Errorf("%w: via %q does not carry stream kind %q", ErrVia, c.Via, c.Stream.Kind)
 	}
 	return nil
 }

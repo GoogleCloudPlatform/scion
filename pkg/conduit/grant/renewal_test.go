@@ -427,3 +427,91 @@ func TestGrantViaClaim(t *testing.T) {
 		t.Fatal("an unknown via was minted")
 	}
 }
+
+// resignReplacing returns tok with old replaced by repl in its payload,
+// signed again with priv under the same header: a grant Mint would refuse
+// to sign, with canonical encoding.
+func resignReplacing(t *testing.T, priv ed25519.PrivateKey, tok []byte, old, repl string) []byte {
+	t.Helper()
+	parts := strings.Split(string(tok), ".")
+	payload, err := b64.DecodeString(parts[1])
+	if err != nil || strings.Count(string(payload), old) != 1 {
+		t.Fatalf("payload %s does not hold %q once", payload, old)
+	}
+	in := parts[0] + "." + b64.EncodeToString([]byte(strings.Replace(string(payload), old, repl, 1)))
+	return []byte(in + "." + b64.EncodeToString(ed25519.Sign(priv, []byte(in))))
+}
+
+// TestViaAllows is the origin and kind table (design v2.21.29 §3.5).
+func TestViaAllows(t *testing.T) {
+	want := map[string][]string{
+		ViaTunnel: {StreamKindTCP, StreamKindSSH, StreamKindPTY},
+		ViaProxy:  {StreamKindTCP},
+		ViaPTY:    {StreamKindPTY},
+	}
+	for _, via := range []string{ViaTunnel, ViaProxy, ViaPTY, "", "elsewhere"} {
+		for _, kind := range []string{StreamKindTCP, StreamKindSSH, StreamKindPTY, StreamKindLogs, StreamKindEvents, "", "other"} {
+			allowed := false
+			for _, k := range want[via] {
+				allowed = allowed || k == kind
+			}
+			if got := ViaAllows(via, kind); got != allowed {
+				t.Errorf("ViaAllows(%q, %q) = %v, want %v", via, kind, got, allowed)
+			}
+		}
+	}
+}
+
+// TestViaOutsideTableRefused: a grant or renewal whose via does not carry
+// its stream kind cannot be minted, and one signed anyway is refused by
+// Verify, VerifyRenewal and VerifyRecheck with ErrVia, without consuming
+// its jti.
+func TestViaOutsideTableRefused(t *testing.T) {
+	f := newFixture(t)
+	now := t0.Add(time.Second)
+
+	open := baseClaims()
+	open.Via = ViaPTY // tcp stream
+	if _, err := Mint(f.signer, open); !errors.Is(err, ErrVia) {
+		t.Fatalf("Mint: %v, want ErrVia", err)
+	}
+	ren := baseRenewal()
+	ren.Via = ViaPTY
+	if _, err := MintRenewal(f.signer, ren); !errors.Is(err, ErrVia) {
+		t.Fatalf("MintRenewal: %v, want ErrVia", err)
+	}
+
+	open.Via = ViaTunnel
+	open.JTI = "open-table"
+	forgedOpen := resignReplacing(t, f.signer.Key, f.mint(t, open), `"via":"tunnel"`, `"via":"pty"`)
+	cache := newCache()
+	if _, err := Verify(context.Background(), forgedOpen, f.keys, baseExpect(), cache, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("Verify: %v, want ErrVia", err)
+	}
+	if cache.Len() != 0 {
+		t.Fatal("Verify consumed the jti of a refused grant")
+	}
+
+	ren.Via = ViaTunnel
+	ren.JTI = "renewal-table"
+	forgedRen := resignReplacing(t, f.signer.Key, f.mintRenewal(t, ren), `"via":"tunnel"`, `"via":"pty"`)
+	expect := baseRenewalExpect()
+	expect.Via = ViaPTY
+	if _, err := VerifyRenewal(context.Background(), forgedRen, f.keys, expect, cache, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRenewal: %v, want ErrVia", err)
+	}
+	if cache.Len() != 0 {
+		t.Fatal("VerifyRenewal consumed the jti of a refused renewal")
+	}
+
+	rx := RecheckExpectation{Issuer: "scion-hub", Target: baseTarget(), OpenJTI: testOpenJTI, StreamID: 3}
+	if _, err := VerifyRecheck(forgedRen, f.keys, rx, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRecheck renewal: %v, want ErrVia", err)
+	}
+	rc := recheckOpenClaims()
+	rc.Via = ViaTunnel
+	forgedRecheckOpen := resignReplacing(t, f.signer.Key, f.mint(t, rc), `"via":"tunnel"`, `"via":"pty"`)
+	if _, err := VerifyRecheck(forgedRecheckOpen, f.keys, rx, now); !errors.Is(err, ErrVia) {
+		t.Fatalf("VerifyRecheck open grant: %v, want ErrVia", err)
+	}
+}

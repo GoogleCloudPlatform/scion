@@ -90,6 +90,8 @@ func (c *RenewalClaims) validate() error {
 		return fmt.Errorf("%w: missing or unknown stream kind %q", ErrInvalidClaims, c.Stream.Kind)
 	case !IsVia(c.Via):
 		return fmt.Errorf("%w: missing or unknown via %q", ErrInvalidClaims, c.Via)
+	case !ViaAllows(c.Via, c.Stream.Kind):
+		return fmt.Errorf("%w: via %q does not carry stream kind %q", ErrVia, c.Via, c.Stream.Kind)
 	case c.StreamID == 0:
 		return fmt.Errorf("%w: missing stream_id", ErrInvalidClaims)
 	case c.OpenJTI == "":
