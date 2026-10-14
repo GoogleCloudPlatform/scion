@@ -784,6 +784,7 @@ func TestProjectVisitorRules_RevokeWhenRuleGone(t *testing.T) {
 		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *ruleGoneExclusionStore {
 			return &ruleGoneExclusionStore{Store: inner, fault: sw}
 		})
+		srv.membershipService.store = srv.store // the revoke runs in the membership service
 	})
 	ctx := context.Background()
 	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
@@ -791,7 +792,6 @@ func TestProjectVisitorRules_RevokeWhenRuleGone(t *testing.T) {
 	require.NotNil(t, v)
 	require.Len(t, f.ruleBindings(t, f.projectID, rule.ID), 1)
 	fault.Arm()
-
 	rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+v.ID(), nil)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.Empty(t, f.ruleBindings(t, f.projectID, rule.ID), "the binding is removed")
