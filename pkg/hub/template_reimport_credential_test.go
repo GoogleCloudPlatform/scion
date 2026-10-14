@@ -21,6 +21,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts/remotefetch"
@@ -262,6 +263,26 @@ func TestTemplateSourceFetcher_AuthorizedIsGuarded(t *testing.T) {
 			var fe *remotefetch.Error
 			require.ErrorAs(t, err, &fe)
 			assert.Equal(t, tc.want, fe.Reason)
+		})
+	}
+}
+
+// TestTemplateSourceHosts_CoverReimportURLs: every host a reimport contacts
+// (the public archive, the credentialed API tarball and the codeload
+// download both redirect to) is in templateSourceHosts.
+func TestTemplateSourceHosts_CoverReimportURLs(t *testing.T) {
+	src, err := parseTemplateGitHubSource(reimportCredSource)
+	require.NoError(t, err)
+	for name, rawURL := range map[string]string{
+		"public archive":     src.archiveURL(),
+		"api tarball":        src.apiTarballURL(),
+		"codeload (archive)": "https://codeload.github.com/acme-corp/private.templates/tar.gz/refs/heads/main",
+		"codeload (api)":     "https://codeload.github.com/acme-corp/private.templates/legacy.tar.gz/refs/heads/main",
+	} {
+		t.Run(name, func(t *testing.T) {
+			u, err := url.Parse(rawURL)
+			require.NoError(t, err)
+			assert.Contains(t, templateSourceHosts, u.Hostname())
 		})
 	}
 }

@@ -91,6 +91,7 @@ const (
 	ReasonTooLarge       Reason = "too_large"
 	ReasonType           Reason = "type_not_allowed"
 	ReasonHostNotAllowed Reason = "host_not_allowed"
+	ReasonAuthorization  Reason = "authorization_not_allowed"
 )
 
 // Error is a failed fetch.
@@ -204,8 +205,13 @@ func (f *Fetcher) FetchBytes(ctx context.Context, rawURL string) (*Result, error
 // first request and on any redirect hop back to that same host); a hop to
 // any other host, such as a download host that carries its own short-lived
 // access in the redirect URL, is sent without it. The value is never logged.
-// An empty authorization makes it identical to FetchBytes.
+// An empty authorization makes it identical to FetchBytes. A non-empty one
+// is refused (ReasonAuthorization, before any request) unless the Fetcher
+// has AllowedHosts.
 func (f *Fetcher) FetchBytesAuthorized(ctx context.Context, rawURL, authorization string) (*Result, error) {
+	if authorization != "" && len(f.cfg.AllowedHosts) == 0 {
+		return nil, fail(ReasonAuthorization, "authorization requires AllowedHosts")
+	}
 	return f.run(ctx, rawURL, modeBytes, authorization)
 }
 
@@ -216,10 +222,10 @@ func (f *Fetcher) run(ctx context.Context, rawURL string, mode fetchMode, author
 	if err != nil {
 		var fe *Error
 		if !errors.As(err, &fe) {
-			fe = fail(ReasonConnect, "%v", err)
+			fe = fail(ReasonConnect, "%v", innerError(err))
 		}
 		if ctx.Err() != nil && fe.Reason != ReasonDeniedAddress {
-			fe = fail(ReasonTimeout, "%v", err)
+			fe = fail(ReasonTimeout, "%s", fe.Detail)
 		}
 		msg := "artifacts: remote image not fetched"
 		if mode == modeBytes {
@@ -415,7 +421,7 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, fail(ReasonBadURL, "build request: %v", err)
+		return nil, fail(ReasonBadURL, "build request for %s: %v", redactURL(u.String()), innerError(err))
 	}
 	req.Header.Set("User-Agent", "scion-artifacts/1")
 	if mode == modeBytes {
@@ -428,7 +434,7 @@ func (f *Fetcher) get(ctx context.Context, u *url.URL, addr netip.Addr, mode fet
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fail(ReasonConnect, "%s via %s: %v", u.Hostname(), target, err)
+		return nil, fail(ReasonConnect, "%s via %s: %v", redactURL(u.String()), target, innerError(err))
 	}
 	return resp, nil
 }
@@ -467,7 +473,7 @@ func (f *Fetcher) readBytes(resp *http.Response) (*Result, error) {
 	var buf bytes.Buffer
 	n, err := io.Copy(&buf, io.LimitReader(resp.Body, f.cfg.MaxBytes+1))
 	if err != nil {
-		return nil, fail(ReasonConnect, "read body: %v", err)
+		return nil, fail(ReasonConnect, "read body: %v", innerError(err))
 	}
 	if n > f.cfg.MaxBytes {
 		return nil, fail(ReasonTooLarge, "body over %d bytes", f.cfg.MaxBytes)
@@ -501,4 +507,15 @@ func redactURL(raw string) string {
 	}
 	u.RawQuery, u.Fragment, u.User = "", "", nil
 	return u.String()
+}
+
+// innerError strips every *url.Error from err, whose message repeats the
+// full request URL (query string included), and returns the error it wraps.
+// Error details pair it with redactURL instead.
+func innerError(err error) error {
+	var ue *url.Error
+	for errors.As(err, &ue) {
+		err = ue.Err
+	}
+	return err
 }

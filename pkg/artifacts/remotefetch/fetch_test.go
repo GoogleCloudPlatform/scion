@@ -752,7 +752,7 @@ func TestFetchBytesAuthorizedSendsHeaderOnlyToFirstHost(t *testing.T) {
 		default:
 			http.NotFound(w, r)
 		}
-	}, Config{})
+	}, Config{AllowedHosts: []string{"example.com", "127.0.0.1"}})
 
 	res, err := env.fetcher.FetchBytesAuthorized(context.Background(), env.url("example.com", "/start"), authorization)
 	if err != nil {
@@ -800,5 +800,73 @@ func TestFetchBytesAuthorizedEmptyIsFetchBytes(t *testing.T) {
 	}
 	if _, ok := env.requests[0].Header["Authorization"]; ok {
 		t.Errorf("empty authorization sent an Authorization header")
+	}
+}
+
+// TestFetchBytesAuthorizedRequiresAllowedHosts: a non-empty authorization is
+// refused before any request when the Fetcher has no AllowedHosts.
+func TestFetchBytesAuthorizedRequiresAllowedHosts(t *testing.T) {
+	env := newTestEnv(t, serveBytes([]byte("ok"), ""), Config{})
+	_, err := env.fetcher.FetchBytesAuthorized(context.Background(), env.url("example.com", "/a"), "Bearer fake-unlisted-cred")
+	if got := reasonOf(t, err); got != ReasonAuthorization {
+		t.Fatalf("reason %q, want %q", got, ReasonAuthorization)
+	}
+	if strings.Contains(err.Error(), "fake-unlisted-cred") {
+		t.Errorf("error contains the Authorization value: %v", err)
+	}
+	if n := env.connections(); n != 0 {
+		t.Errorf("%d connections, want 0", n)
+	}
+}
+
+// TestFetchErrorDetailsOmitQuery: when a redirect hop whose URL carries a
+// query fails (TLS, timeout), neither the error detail nor the log line
+// contains the query.
+func TestFetchErrorDetailsOmitQuery(t *testing.T) {
+	const query = "access=hop-query-value"
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	var env *testEnv
+	env = newTestEnv(t, func(w http.ResponseWriter, r *http.Request) {
+		_, port, _ := net.SplitHostPort(env.srv.Listener.Addr().String())
+		switch r.URL.Path {
+		case "/to-other-name":
+			// other.test reaches the same server, whose certificate does
+			// not cover that name: the hop fails in the TLS handshake.
+			w.Header().Set("Location", "https://other.test:"+port+"/final?"+query)
+			w.WriteHeader(http.StatusFound)
+		case "/to-slow":
+			w.Header().Set("Location", "/slow?"+query)
+			w.WriteHeader(http.StatusFound)
+		case "/slow":
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}, Config{Timeout: 500 * time.Millisecond})
+
+	for path, want := range map[string]Reason{
+		"/to-other-name": ReasonConnect,
+		"/to-slow":       ReasonTimeout,
+	} {
+		t.Run(path, func(t *testing.T) {
+			_, err := env.fetcher.FetchBytes(context.Background(), env.url("example.com", path))
+			if got := reasonOf(t, err); got != want {
+				t.Fatalf("reason %q, want %q (%v)", got, want, err)
+			}
+			if strings.Contains(err.Error(), "hop-query-value") {
+				t.Errorf("error detail contains the query: %v", err)
+			}
+			logs := env.logs.String()
+			if !strings.Contains(logs, "remote content not fetched") {
+				t.Fatalf("failure not logged; logs:\n%s", logs)
+			}
+			if strings.Contains(logs, "hop-query-value") {
+				t.Errorf("log contains the query:\n%s", logs)
+			}
+		})
 	}
 }

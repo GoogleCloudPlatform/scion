@@ -362,7 +362,7 @@ func templateSourceFetchError(err error) error {
 	if errors.As(err, &fe) {
 		switch fe.Reason {
 		case remotefetch.ReasonStatus:
-			return errors.New("GitHub did not return the source archive; the repository or branch may not exist, or no repository credential that can read it is configured for the template's scope")
+			return errors.New("GitHub did not return the source archive; the repository or branch may not exist, or the template scope's repository credential (if any) cannot read it")
 		case remotefetch.ReasonTooLarge:
 			return errTemplateSourceTooLarge
 		case remotefetch.ReasonTimeout:

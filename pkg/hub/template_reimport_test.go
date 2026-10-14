@@ -321,7 +321,7 @@ func TestTemplateReimport_DownloadFailuresAreReported(t *testing.T) {
 		"too many redirects": {&remotefetch.Error{Reason: remotefetch.ReasonRedirects, Detail: "more than 3 redirects"}, "could not download"},
 		"internal address":   {&remotefetch.Error{Reason: remotefetch.ReasonDeniedAddress, Detail: "codeload.github.com resolves to denied address 10.0.0.5"}, "could not download"},
 		"host off the list":  {&remotefetch.Error{Reason: remotefetch.ReasonHostNotAllowed, Detail: `host "other.test" is not allowed`}, "could not download"},
-		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}, "no repository credential"},
+		"not found":          {&remotefetch.Error{Reason: remotefetch.ReasonStatus, Detail: "status 404"}, "repository credential (if any) cannot read it"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			srv.templateSourceFetcher = &fakeTemplateSourceFetcher{err: tc.err}
