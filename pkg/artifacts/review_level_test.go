@@ -474,9 +474,16 @@ func TestReviewGrantNeedsSubjectSupport(t *testing.T) {
 	r := withPrincipal(httptest.NewRequest(http.MethodPost, grantsPath(id),
 		strings.NewReader(reviewBody(SubjectPrincipal, reviewerID, GrantReview))), delegator)
 	rec := httptest.NewRecorder()
+	records := captureRefusalLogs(t)
 	svc.ServeHTTP(rec, r)
 	if got := response(rec); got != want {
 		t.Errorf("host without the subject check: %s", got)
+	}
+	// One refusal record, with reason subject_unreadable (the subject check
+	// cannot run, so it fails closed), the artifact id and the grantee.
+	if got := records(); len(got) != 1 || got[0]["reason"] != "subject_unreadable" ||
+		got[0]["artifact_id"] != id || got[0]["grantee"] != reviewerID {
+		t.Errorf("refusal records: %v", got)
 	}
 	if g := f.grantOf(id, reviewerID); g != nil {
 		t.Errorf("grant written: %+v", g)

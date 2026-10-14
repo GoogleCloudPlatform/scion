@@ -30,7 +30,9 @@ const (
 	// reviewRefusalBody: the body is not exactly a principal review grant
 	// to a user.
 	reviewRefusalBody reviewGrantRefusal = "body"
-	// reviewRefusalSubjectUnreadable: the user cannot read the artifact.
+	// reviewRefusalSubjectUnreadable: the user cannot read the artifact, or
+	// the host cannot check whether they can (no ReviewSubjectAuthority:
+	// the check fails closed, and the caller gets the uniform 403).
 	reviewRefusalSubjectUnreadable reviewGrantRefusal = "subject_unreadable"
 	// reviewRefusalExistingAccess: the user holds a principal read, write
 	// or admin grant, which a review grant would replace.
