@@ -47,7 +47,7 @@ local_experiments:
 agent_plugins: ignored: experiment hub.agent_plugins is off; plugins Scion installed earlier, if any, are removed
 ```
 
-Bundles staged while the experiment was on stay in the agent's control-plane record, so turning the experiment back on reinstalls them at the next start, without re-provisioning. An agent that was provisioned while the experiment was off has nothing staged: it gets plugins only when it is provisioned again.
+Bundles staged while the experiment was on stay in the agent's control-plane record, so turning the experiment back on reinstalls them at the next start, without re-provisioning. An agent that was provisioned while the experiment was off has nothing staged: it gets plugins only when it is provisioned again (see [When changes take effect](#when-changes-take-effect)).
 
 ## Declaring plugins in a template
 
@@ -126,7 +126,7 @@ The fields of an `agent_plugins` entry:
 
 | Change | Takes effect |
 | :--- | :--- |
-| Edit a bundle, or add or remove an `agent_plugins` entry | When the agent is provisioned again: a new agent, or a [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate). A plain restart or resume reuses the bundles staged at provisioning. |
+| Edit a bundle, or add or remove an `agent_plugins` entry | When the agent is provisioned again: delete the agent and create it again. On a Hub you can also use [`scion reincarnate`](/scion/reference/cli/#scion-reincarnate), except for agents in worktree-per-agent workspaces. A plain restart or resume reuses the bundles staged at provisioning. |
 | Turn the experiment off or on | At the next start of the agent. |
 | Switch harness-config at start (`--harness-config`) | At that start. Bundles are staged even for a harness that cannot install them, so the new harness installs them from the record. The old harness's install stays in the old harness's directories. |
 | Restart with no change | No plugin work: the harness checks a few files and makes no plugin CLI call. |
@@ -135,13 +135,15 @@ A plugin that a user removes by hand inside the agent is reinstalled at the next
 
 ## Harness support
 
-| Harness | Support | Minimum CLI | Tested with | Notes |
+| Harness | Support | Minimum CLI | Tested with¹ | Notes |
 | :--- | :--- | :--- | :--- | :--- |
 | `codex` | partial | 0.147.0 | 0.162.1 | Installed through a Scion-owned local marketplace. Codex skips `sse` MCP servers. |
 | `copilot` | yes | 1.0.74 | 1.0.97 | Installed with `copilot plugin install <dir>`. See the [copilot notes](#copilot). |
 | `muse-code` | partial | 1.4.6 | 1.4.6, 1.4.7 | Skills install natively with `muse plugins install`. muse 1.4.7 and earlier keeps Agent Plugins MCP servers **inactive**: they are listed but never started. |
 | `claude` | partial | 2.1.157 (approximate) | 2.1.296 | Installed as a skills-dir plugin with a generated manifest. See the [claude notes](#claude). |
 | `gemini-cli`, `grok-build`, `antigravity`, `hermes`, `opencode` | no | — | — | Bundles are staged but not installed. The start prints a warning. |
+
+¹ CLI-level smoke tests: the real harness CLI driven by Scion's installer with staged inputs. None of the four harnesses has yet been verified end to end in a Scion-provisioned agent; for claude in particular, the path through `scion start` is not yet verified.
 
 If the harness CLI in the image is older than the minimum, the harness skips plugin install with a warning and changes nothing. The claude minimum is approximate: only 2.1.296 has been tested.
 
@@ -179,15 +181,19 @@ Claude has no plugin install command for local bundles, so Scion writes the plug
 - **Claude-specific files in a bundle are not installed.** Claude loads these from a plugin root by default, and they would bypass Scion's validation. Each one a bundle ships is removed from the installed copy, with a warning (`ignored claude-specific <path> in bundle`):
   - `.mcp.json`, `.lsp.json`, `settings.json`;
   - `hooks/`, `commands/`, `agents/`, `monitors/`, `output-styles/`, `workflows/`, `themes/`;
-  - `.claude-plugin/` (replaced by the generated manifest);
-  - a root `SKILL.md` (Agent Plugins skills live under `skills/`).
+  - `.claude-plugin/` (replaced by the generated manifest).
+
+  A root `SKILL.md` is not installed either, with its own warning: `agent plugin <name>: ignored root SKILL.md in bundle (Agent Plugins skills live under skills/)`. Agent Plugins skills live under `skills/`.
 
   An MCP server whose command points into a removed path is skipped.
 - **Name conflicts with skills.** If a template, platform or Skill Bank skill has the same name as a plugin, the plugin is not installed for claude (`plugin <name> not installed for claude: a skill named <name> is already installed in the skills dir`). A directory in `~/.claude/skills/` that Scion did not install is never replaced or removed (`… exists and was not installed by Scion`).
 - **Scion removes only what it wrote.** Scion records every file it installs, with its checksum, in `~/.scion/agent-plugins/state-claude.json`. On removal or update it deletes only recorded files whose content is unchanged.
-- **Presence check.** At each start, Scion checks that the generated `.claude-plugin/plugin.json` and the bundle's root `plugin.json` are still in place. If either is missing, the plugin is installed again.
+- **Presence check.** At each start, Scion checks that the generated `.claude-plugin/plugin.json` and the bundle's root `plugin.json` are still in place and unchanged (by checksum), and that `~/.scion/agent-plugins/data/<name>/` exists.
+  - If either manifest or the data dir is missing, the plugin is installed again.
+  - If the generated manifest was changed, Scion gives the directory up (see the next item).
+  - If the root `plugin.json` was edited, the reinstall carries the edited file over like runtime output, so it is blocked at that path (see below) and the old copy stays.
 - **When Scion gives a directory up.** Only signs that something else now lives in the plugin directory make Scion hand it back: a skill with the same name (see above), a root `SKILL.md`, or a `.claude-plugin/` that is a symlink or whose `plugin.json` is not the one Scion generated. Scion then removes only its own files, drops the plugin from its state, and warns (`… removed only the files Scion installed`).
-- **Runtime output is kept.** Other files that appear in the plugin directory, such as `__pycache__/` or logs that an MCP server writes, are treated as runtime output and never deleted:
+- **Runtime output is kept.** Other files that appear in the plugin directory, such as `__pycache__/` or logs that an MCP server writes, and installed files that were edited, are treated as runtime output and never deleted:
   - On an update they are carried into the new copy. If one sits at a path the new version also uses, the update is blocked and the old version stays installed (`plugin <name> not updated for claude: … move them away to update`).
   - On removal they stay behind in a directory that no longer has a plugin manifest, which Claude does not load. Delete `~/.claude/skills/<name>/` by hand if you want it gone.
 - The `claude` harness-config's `provisioner.timeout` stays at 30s: the install is a file write with no extra CLI call.
@@ -204,7 +210,7 @@ Inside the agent container:
 | `~/.scion/agent-plugins/status-<harness>.json` | The result of the last start: `installed`, `stale` (an older version kept after a failed upgrade, or a removal deferred to the next start), `skipped` (each with a reason), `removed`, `cli_version` and `updated_at`. |
 | `~/.scion/agent-plugins/.agents/plugins/marketplace.json` | codex only: the `scion-agent-plugins` local marketplace. |
 | `~/.scion/agent-plugins/data/<name>/` | claude only: the plugin's `${PLUGIN_DATA}` directory. |
-| `~/.scion/agent-plugins/pending-claude.json` | claude only: an intent record written just before a plugin directory is swapped in. If provisioning stops before the state file is saved, the next start uses it to adopt the new copy or keep the old one. |
+| `~/.scion/agent-plugins/pending-claude.json` | claude only: an intent record written just before a plugin directory is swapped in. If provisioning stops before the state file is saved, the next start uses it to adopt the new copy or keep the old one. See [Claude recovery](#claude-recovery) for the case it does not cover. |
 
 The native install, per harness:
 
@@ -225,17 +231,19 @@ Scion's own checks run when it provisions or starts the agent. Their messages st
 
 | Message | Meaning |
 | :--- | :--- |
-| `ignored: experiment hub.agent_plugins is off` | The template declares plugins, but the experiment is off. Nothing is staged. |
+| `ignored: experiment hub.agent_plugins is off` | Plugins are declared (by a template or inline), but the experiment is off. Nothing is staged. |
 | `ignored: experiment hub.agent_plugins is off; plugins Scion installed earlier, if any, are removed` | Same, at a start of an agent that has staged plugins. |
 | `ignored: harness "<h>" is not a container-script harness` | The harness-config does not use a container-script provisioner, so it cannot install plugins. |
 | `entry "<path>" ignored: only template-relative paths are supported` | The entry does not come from a template. |
 | `template <t>: path "<p>" must be relative to the template directory` | The path is absolute, has `..`, or leaves the template directory. |
 | `template <t>: plugin dir "<p>" not found or is a symlink` | The directory is missing, is not a directory, or is (or sits under) a symlink. |
+| `template <t>: plugin dir "<p>": <error>` | Any other error opening the plugin directory, such as an unreadable template directory. |
 | `plugin at "<p>": plugin.json …` | `plugin.json` is missing, not a regular file, not valid JSON, has a field of the wrong type, or has an invalid name. |
 | `plugin "<n>": unsupported Agent Plugins version "<x>"; Scion supports 1.0.0` | The manifest's `$schema` is not the 1.0.0 schema. |
 | `plugin "<n>": bundle exceeds <limit>` | The bundle is over 10,000 files, 100 MiB, or a directory depth of 32. |
 | `plugin "<n>": skipped <k> symlink(s) or special file(s) (not followed): …` | Those entries were not copied. |
 | `plugin "<n>": unknown manifest field "<f>" ignored` | Unknown `plugin.json` fields are ignored. |
+| `plugin "<n>": manifest field "extensions" is not an object; ignored` | `extensions` must be a JSON object; anything else is ignored. |
 | `plugin "<n>": MCP disabled: <reason>` | `mcp.json` is invalid as a whole, so none of the plugin's MCP servers is installed. Its skills still are. |
 | `plugin "<n>": mcp server "<s>" skipped: <reason>` | One server is invalid; the others are kept. |
 | `plugin "<n>": skills ignored: <reason>` | `skills/` is not a usable directory. |
@@ -282,6 +290,7 @@ To fix this:
 ### Claude recovery
 
 - **Lost Scion state.** If `~/.scion/agent-plugins/state-claude.json` is missing or corrupt, Scion no longer knows which `~/.claude/skills/` directories it installed. It treats them as user content and does not replace or remove them, so the plugin is not updated (`… exists and was not installed by Scion`). To recover, delete `~/.claude/skills/<name>/` in the agent; the next start installs the plugin again.
+- **Interrupted update.** If the provisioner is killed in a narrow window during an update of a plugin directory, carried runtime output can be lost, or the old copy can be left behind without Scion managing it. `pending-claude.json` covers most interruptions, but not this one. To recover, delete `~/.claude/skills/<name>/`; the next start installs the plugin again.
 - **Changing `skills_dir`.** If you change the claude harness-config's `skills_dir`, the plugin is installed in the new directory, and the copy in the old directory stays behind. Delete `<old skills_dir>/<plugin name>/` by hand.
 
 ## Security notes
