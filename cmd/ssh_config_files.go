@@ -30,6 +30,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/tunnelclient"
 )
 
@@ -88,20 +89,20 @@ func sshHostName(label, projectSlug, agentSlug string) string {
 // without user info, query or fragment, are accepted.
 func sshEndpointURL(endpoint string) (*url.URL, error) {
 	if hasSpaceOrControl(endpoint) {
-		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: contains whitespace or control characters", config.RedactURL(endpoint))
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", config.RedactURL(endpoint))
 	}
 	if u.Hostname() == "" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: missing host", config.RedactURL(endpoint))
 	}
 	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
-		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", endpoint)
+		return nil, fmt.Errorf("invalid hub endpoint %q: user info, query and fragment are not allowed", config.RedactURL(endpoint))
 	}
 	return u, nil
 }

@@ -133,7 +133,7 @@ func runClean(cmd *cobra.Command, args []string) error {
 				} else {
 					// Hub unreachable - warn user
 					fmt.Println()
-					fmt.Printf("Warning: Hub at %s is not reachable.\n", endpoint)
+					fmt.Printf("Warning: Hub at %s is not reachable.\n", config.RedactURL(endpoint))
 					fmt.Println("Cleaning this project may leave it orphaned on the Hub.")
 					fmt.Println("You may need to manually remove it from the Hub later.")
 					fmt.Println()

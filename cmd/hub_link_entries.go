@@ -35,9 +35,15 @@ const localHubName = "local"
 // is linked to the hub project hubProjectID on the hub at endpoint. The
 // hub gets an entry when it has none, and the new entry is announced on
 // out. A failure is a warning on stderr: the link itself succeeded. Inside
-// an agent the hub list is not used, and nothing is recorded.
+// an agent the hub list is not used, and nothing is recorded. An endpoint
+// that is not a valid hub URL (config.ValidateHubURL: one with user info,
+// a query or a fragment) is not saved.
 func recordLinkEntry(out, stderr io.Writer, endpoint, hubProjectID, slug, name, projectDir string) {
 	if contextDisabled(resolveMode()) || endpoint == "" || hubProjectID == "" {
+		return
+	}
+	if err := config.ValidateHubURL(endpoint); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Warning: could not record the link in the hub list: %v; link again with a plain http(s) hub URL (no user info, query or fragment)\n", err)
 		return
 	}
 	localPath := config.LinkPathForProject(projectDir)

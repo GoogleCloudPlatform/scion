@@ -137,7 +137,7 @@ func runHubAuthLogin(cmd *cobra.Command, args []string) error {
 		return errHubNotConfigured
 	}
 
-	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", hubURL)
+	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Authenticating with Hub at %s\n", config.RedactURL(hubURL))
 
 	provider, err := cmd.Flags().GetString("provider")
 	if err != nil {
@@ -252,10 +252,10 @@ func recordLoginHub(out, stderr io.Writer, hubURL string) {
 	}
 	switch {
 	case hubAuthHubURL == "" && hubSource == targetSourceContext:
-		_, _ = fmt.Fprintf(out, "Logged in to %s (current hub, selected with 'scion use').\n", hubURL)
+		_, _ = fmt.Fprintf(out, "Logged in to %s (current hub, selected with 'scion use').\n", config.RedactURL(hubURL))
 		return
 	case hubAuthHubURL == "" && hubSource == targetSourceDirectory:
-		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", hubURL)
+		_, _ = fmt.Fprintf(out, "Logged in to %s (the hub this directory is linked to).\n", config.RedactURL(hubURL))
 		return
 	case hubAuthHubURL == "" && hubFlagEndpoint() == "":
 		return

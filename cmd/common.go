@@ -467,7 +467,7 @@ func PrintUsingHub(endpoint string) {
 	if isJSONOutput() {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "Using hub: %s\n", endpoint)
+	fmt.Fprintf(os.Stderr, "Using hub: %s\n", config.RedactURL(endpoint))
 }
 
 // hubCheckHint is appended to hub errors where the hub may be down or
