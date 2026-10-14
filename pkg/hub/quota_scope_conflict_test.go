@@ -35,6 +35,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -405,31 +406,52 @@ func TestReserve_FailedRetryDoesNotReleaseExisting(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// pinnedQuotaAgent creates an agent on broker pinned to it, in phase.
+// newQuotaTestFlatBrokerAndProject is newQuotaTestBrokerAndProject for a flat
+// Runtime Broker: the broker row serves one runtime target, so an agent
+// pinned to it (pinnedQuotaAgent) has a valid placement.
+func newQuotaTestFlatBrokerAndProject(t *testing.T, s store.Store, suffix string) (*store.RuntimeBroker, *store.Project) {
+	t.Helper()
+	ctx := context.Background()
+	broker := &store.RuntimeBroker{
+		ID:            tid("broker-quota-flat-" + suffix),
+		Name:          "Quota Flat Broker " + suffix,
+		Slug:          "quota-flat-broker-" + suffix,
+		Status:        store.BrokerStatusOnline,
+		RuntimeTarget: &api.RuntimeTargetDescriptor{ID: tid("target-quota-" + suffix), Type: "docker", DisplayName: "Local Docker"},
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+	project := &store.Project{
+		ID:   tid("proj-quota-flat-" + suffix),
+		Name: "Quota Flat Project " + suffix,
+		Slug: "quota-flat-project-" + suffix,
+	}
+	require.NoError(t, s.CreateProject(ctx, project))
+	require.NoError(t, s.AddProjectProvider(ctx, &store.ProjectProvider{
+		ProjectID:  project.ID,
+		BrokerID:   broker.ID,
+		BrokerName: broker.Name,
+		Status:     broker.Status,
+	}))
+	project.DefaultRuntimeBrokerID = broker.ID
+	require.NoError(t, s.UpdateProject(ctx, project))
+	got, err := s.GetRuntimeBroker(ctx, broker.ID)
+	require.NoError(t, err)
+	require.True(t, got.IsFlat())
+	return got, project
+}
+
+// pinnedQuotaAgent creates an agent on the flat broker, pinned to the
+// broker's runtime target (a valid placement), in phase.
 func pinnedQuotaAgent(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, phase state.Phase) *store.Agent {
 	t.Helper()
-	a := &store.Agent{
-		ID:                      tid("agent-" + name),
-		Slug:                    name,
-		Name:                    name,
-		ProjectID:               project.ID,
-		RuntimeBrokerID:         broker.ID,
-		Phase:                   string(phase),
-		PinnedRuntimeBrokerID:   broker.ID,
-		PinnedRuntimeTargetID:   "target-" + name,
-		PinnedRuntimeTargetType: "docker",
-	}
-	require.NoError(t, s.CreateAgent(context.Background(), a))
-	got, err := s.GetAgent(context.Background(), a.ID)
-	require.NoError(t, err)
-	require.True(t, got.IsPinned())
-	return got
+	return pinnedQuotaAgentWith(t, s, broker, project, name, phase, func(*store.Agent) {})
 }
 
 // pinnedQuotaAgentWith is pinnedQuotaAgent with mutate applied before the
 // store write.
 func pinnedQuotaAgentWith(t *testing.T, s store.Store, broker *store.RuntimeBroker, project *store.Project, name string, phase state.Phase, mutate func(*store.Agent)) *store.Agent {
 	t.Helper()
+	require.True(t, broker.IsFlat(), "pinned agents need a flat Runtime Broker")
 	a := &store.Agent{
 		ID:                      tid("agent-" + name),
 		Slug:                    name,
@@ -438,8 +460,8 @@ func pinnedQuotaAgentWith(t *testing.T, s store.Store, broker *store.RuntimeBrok
 		RuntimeBrokerID:         broker.ID,
 		Phase:                   string(phase),
 		PinnedRuntimeBrokerID:   broker.ID,
-		PinnedRuntimeTargetID:   "target-" + name,
-		PinnedRuntimeTargetType: "docker",
+		PinnedRuntimeTargetID:   broker.RuntimeTarget.ID,
+		PinnedRuntimeTargetType: broker.RuntimeTarget.Type,
 	}
 	mutate(a)
 	require.NoError(t, s.CreateAgent(context.Background(), a))
@@ -453,7 +475,7 @@ func TestReassert_DifferentScopeNotOverwritten(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "reassert-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "reassert-b")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "reassert-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 
@@ -486,7 +508,8 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	srv, s := testServer(t)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "sweep-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "sweep-b")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "sweep-b")
+	brokerC, projectC := newQuotaTestBrokerAndProject(t, s, "sweep-c")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	old := time.Now().Add(-2 * reconcileMinReservationAge)
@@ -504,7 +527,7 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 	orphanedRow := seedBrokerRow(t, s, def.ID, tid("broker-deleted"), orphaned.ID, old)
 	// Control: an unpinned agent keeps today's rule (an old row of a stopped
 	// agent is released wherever it is).
-	unpinned := newQuotaTestAgent(t, s, brokerB, projectB, "sweep-unpinned", state.PhaseStopped)
+	unpinned := newQuotaTestAgent(t, s, brokerC, projectC, "sweep-unpinned", state.PhaseStopped)
 	seedBrokerRow(t, s, def.ID, brokerA.ID, unpinned.ID, old)
 
 	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
@@ -526,8 +549,9 @@ func TestSweep_PinnedScopeConflictReportedNotMoved(t *testing.T) {
 
 func TestUsage_ScopeConflictFlag(t *testing.T) {
 	srv, s := testServer(t)
-	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "usage-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "usage-b")
+	brokerA, projectA := newQuotaTestFlatBrokerAndProject(t, s, "usage-a")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "usage-b")
+	brokerC, projectC := newQuotaTestBrokerAndProject(t, s, "usage-c")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 
@@ -535,7 +559,7 @@ func TestUsage_ScopeConflictFlag(t *testing.T) {
 	seedBrokerRow(t, s, def.ID, brokerA.ID, conflicted.ID, time.Time{})
 	aligned := pinnedQuotaAgent(t, s, brokerA, projectA, "usage-aligned", state.PhaseRunning)
 	seedBrokerRow(t, s, def.ID, brokerA.ID, aligned.ID, time.Time{})
-	unpinned := newQuotaTestAgent(t, s, brokerB, projectB, "usage-unpinned", state.PhaseRunning)
+	unpinned := newQuotaTestAgent(t, s, brokerC, projectC, "usage-unpinned", state.PhaseRunning)
 	seedBrokerRow(t, s, def.ID, brokerA.ID, unpinned.ID, time.Time{})
 
 	rec := doRequest(t, srv, http.MethodGet, "/api/v1/admin/usage/"+def.ID, nil)
@@ -615,8 +639,8 @@ func TestReleaseRacesReconcile(t *testing.T) {
 
 	t.Run("concurrent release, reconcile and reserve keep the agent on its broker", func(t *testing.T) {
 		srv, s := testServer(t)
-		brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "race-a")
-		brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "race-b")
+		brokerA, projectA := newQuotaTestFlatBrokerAndProject(t, s, "race-a")
+		brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "race-b")
 		def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 		require.NoError(t, err)
 		agent := pinnedQuotaAgent(t, s, brokerA, projectA, "race-x", state.PhaseRunning)
@@ -678,8 +702,8 @@ func TestQuotaScopeConflictMetrics_CountsOncePerConflictWithSite(t *testing.T) {
 		return out
 	}
 
-	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "metric-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "metric-b")
+	brokerA, projectA := newQuotaTestFlatBrokerAndProject(t, s, "metric-a")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "metric-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	agent := pinnedQuotaAgent(t, s, brokerB, projectB, "metric-x", state.PhaseRunning)
@@ -695,7 +719,7 @@ func TestQuotaScopeConflictMetrics_CountsOncePerConflictWithSite(t *testing.T) {
 	assert.Equal(t, map[string]int64{scopeConflictSiteReserve: 1, scopeConflictSiteReassert: 1}, collect())
 
 	// A same-scope retry is not a conflict.
-	ok := pinnedQuotaAgent(t, s, brokerA, projectB, "metric-ok", state.PhaseRunning)
+	ok := pinnedQuotaAgent(t, s, brokerA, projectA, "metric-ok", state.PhaseRunning)
 	_, err = srv.checkAndReserveBrokerQuota(context.Background(), ok)
 	require.NoError(t, err)
 	_, err = srv.checkAndReserveBrokerQuota(context.Background(), ok)
@@ -827,7 +851,7 @@ func TestSweep_PinnedConflictWithoutCapacityReleasedThenStartSucceeds(t *testing
 	srv.SetDispatcher(disp)
 	conflicts := scopeConflictCounter(t, srv.quotaService)
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "stuck-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "stuck-b")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "stuck-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	old := time.Now().Add(-2 * reconcileMinReservationAge)
@@ -837,9 +861,16 @@ func TestSweep_PinnedConflictWithoutCapacityReleasedThenStartSucceeds(t *testing
 	errored := pinnedQuotaAgent(t, s, brokerB, projectB, "stuck-error", state.PhaseError)
 	seedBrokerRow(t, s, def.ID, brokerA.ID, errored.ID, old)
 
-	// Before the sweep the start is refused by the scope conflict.
-	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+stopped.ID+"/start", nil)
-	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	// Before the sweep the start of either agent is refused by the scope
+	// conflict, by status and by code: the placement is valid, so the
+	// refusal can only come from Reserve.
+	for _, a := range []*store.Agent{stopped, errored} {
+		rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+a.ID+"/start", nil)
+		require.Equal(t, http.StatusConflict, rec.Code, "%s: %s", a.Slug, rec.Body.String())
+		var pre ErrorResponse
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &pre), rec.Body.String())
+		require.Equal(t, ErrCodeBrokerReservationScopeConflict, pre.Error.Code, "%s: %s", a.Slug, rec.Body.String())
+	}
 
 	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
 
@@ -870,7 +901,7 @@ func TestSweep_ReleasedConflictStalePinStillRefused(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &quotaLifecycleDispatcher{}
 	srv.SetDispatcher(disp)
-	brokerA, projectA := newQuotaTestBrokerAndProject(t, s, "stalepin-a")
+	brokerA, projectA := newQuotaTestFlatBrokerAndProject(t, s, "stalepin-a")
 	brokerB, _ := newQuotaTestBrokerAndProject(t, s, "stalepin-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
@@ -934,7 +965,7 @@ func TestSweep_StaleObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
 		return &reReserveAfterReadStore{Store: inner, fault: f}
 	})
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "rerez-a")
-	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "rerez-b")
+	brokerB, projectB := newQuotaTestFlatBrokerAndProject(t, s, "rerez-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
 	agent := pinnedQuotaAgent(t, s, brokerB, projectB, "rerez-x", state.PhaseStopped)
@@ -956,4 +987,41 @@ func TestSweep_StaleObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
 	require.NotNil(t, held, "the re-reserved slot is not freed by the stale observation")
 	assert.Equal(t, fresh.ID, held.ID)
 	assert.Equal(t, brokerB.ID, held.ScopeID)
+}
+
+// Placement is checked before capacity: a pinned agent whose pin is stale
+// (it names flat Runtime Broker A, but the agent is assigned to flat Runtime
+// Broker B) and whose reservation is still on A is refused at start with
+// runtime_target_pin_stale, not the scope conflict. The reservation on A is
+// unchanged and nothing is reserved on B.
+func TestStart_StalePinRefusedBeforeReservationScopeConflict(t *testing.T) {
+	srv, s := testServer(t)
+	disp := &quotaLifecycleDispatcher{}
+	srv.SetDispatcher(disp)
+	brokerA, projectA := newQuotaTestFlatBrokerAndProject(t, s, "order-a")
+	brokerB, _ := newQuotaTestFlatBrokerAndProject(t, s, "order-b")
+	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
+	require.NoError(t, err)
+
+	agent := pinnedQuotaAgent(t, s, brokerA, projectA, "order-x", state.PhaseStopped)
+	row := seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Time{})
+	agent.RuntimeBrokerID = brokerB.ID // the pin still names A
+	require.NoError(t, s.UpdateAgent(context.Background(), agent))
+	agent, err = s.GetAgent(context.Background(), agent.ID)
+	require.NoError(t, err)
+	require.True(t, agent.IsPinned())
+	require.False(t, agent.PinValid())
+
+	rec := doRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/start", nil)
+	require.Equal(t, http.StatusConflict, rec.Code, rec.Body.String())
+	var resp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	assert.Equal(t, ErrCodeRuntimeTargetPinStale, resp.Error.Code, "placement is refused before the reservation is looked at")
+
+	got := activeReservation(t, s, def.ID, agent.ID)
+	require.NotNil(t, got, "the reservation on A is kept")
+	assert.Equal(t, row.ID, got.ID)
+	assert.Equal(t, brokerA.ID, got.ScopeID)
+	assert.Zero(t, brokerReservationCount(t, s, brokerB.ID), "nothing is reserved on B")
+	assert.Zero(t, disp.startCount.Load(), "nothing was dispatched")
 }

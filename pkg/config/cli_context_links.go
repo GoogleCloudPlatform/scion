@@ -107,7 +107,9 @@ func (c *CLIContext) SetLinkEntry(hubName string, p KnownProject, localPath stri
 }
 
 // RemoveLinkEntry removes the link entry for localPath and reports whether
-// there was one. Entries from other sources are kept.
+// there was one. Entries from other sources are kept. A removed link entry
+// marks the path as imported (see LinkEntryForProject), so the one-time
+// import of a project's settings never brings the link back.
 func (c *CLIContext) RemoveLinkEntry(localPath string) bool {
 	if localPath == "" {
 		return false
@@ -124,6 +126,9 @@ func (c *CLIContext) RemoveLinkEntry(localPath string) bool {
 	c.Projects = kept
 	if len(c.Projects) == 0 {
 		c.Projects = nil
+	}
+	if removed {
+		c.markProjectImported(localPath, time.Now())
 	}
 	return removed
 }

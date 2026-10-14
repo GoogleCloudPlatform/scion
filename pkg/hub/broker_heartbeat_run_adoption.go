@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -76,12 +77,14 @@ import (
 // Q.
 
 // runAdoptionQuietPeriod returns Q, the time run_id must have been
-// unchanged before a heartbeat may adopt another run: twice the dispatch
-// timeout (syncDispatchTimeout, the hub-to-broker request limit), so a
-// launch still in flight, or one whose outcome is about to be reconciled,
-// is never overtaken. Off-broker reports older than Q are pruned.
+// unchanged before a heartbeat may adopt another run: the broker's bound
+// on a synchronous start that runs on after the hub gave up on it
+// (api.SyncStartCeiling, ptone/scion#4817) plus twice the dispatch timeout
+// (syncDispatchTimeout, the hub-to-broker request limit), so a launch
+// still in flight, or one whose outcome is about to be reconciled, is
+// never overtaken. Off-broker reports older than Q are pruned.
 func runAdoptionQuietPeriod() time.Duration {
-	return 2 * syncDispatchTimeout
+	return api.SyncStartCeiling + 2*syncDispatchTimeout
 }
 
 // runAdoptionLogWindow is how long an empty or unrecognised label of an

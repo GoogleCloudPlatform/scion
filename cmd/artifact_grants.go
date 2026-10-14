@@ -16,7 +16,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -61,7 +60,7 @@ Examples:
   scion artifact grants scion://artifact/5f1c2d3e-... --remove <grant-id>`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
@@ -200,11 +199,4 @@ func grantsErrorHint(err error) string {
 		return h + "\nOnly the artifact's owner, or a user it granted admin, can see or change its grants."
 	}
 	return ""
-}
-
-// writeJSONTo writes v to out as indented JSON.
-func writeJSONTo(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }

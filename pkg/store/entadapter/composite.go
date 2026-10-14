@@ -177,6 +177,19 @@ type CompositeStore struct {
 	// schemaShadowLogger receives the shadow check's warning. Nil means
 	// slog.Default().
 	schemaShadowLogger *slog.Logger
+
+	// beforeFKReconcile is passed to entc.AutoMigrate by Migrate; see
+	// SetBeforeFKReconcile.
+	beforeFKReconcile entc.BeforeFKReconcileFunc
+}
+
+// SetBeforeFKReconcile makes Migrate pass fn to entc.AutoMigrate, which
+// calls it on SQLite just before the foreign key reconcile changes rows
+// (after PreMigrate); an error from fn aborts Migrate before the reconcile
+// writes. Hub startup and the cmd maintenance commands use it to snapshot
+// the database first.
+func (c *CompositeStore) SetBeforeFKReconcile(fn entc.BeforeFKReconcileFunc) {
+	c.beforeFKReconcile = fn
 }
 
 // EnableSchemaShadowGuard makes Migrate, on PostgreSQL, first check that the
@@ -742,7 +755,7 @@ func (c *CompositeStore) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if err := entc.AutoMigrate(ctx, c.client); err != nil {
+	if err := entc.AutoMigrate(ctx, c.client, entc.WithBeforeFKReconcile(c.beforeFKReconcile)); err != nil {
 		return err
 	}
 

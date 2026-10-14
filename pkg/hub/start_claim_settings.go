@@ -20,6 +20,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config/opsettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
@@ -36,8 +37,9 @@ type StartClaimSettings struct {
 	// blocks other starts, sized from the broker's whole start budget
 	// (pod ready 10m, exec ready 90s, 10s, plus a margin).
 	UnconfirmedHold time.Duration
-	// CreateUnconfirmedHold is UnconfirmedHold for create-and-start (and
-	// for a queued-stop drain's stop claim).
+	// CreateUnconfirmedHold is UnconfirmedHold for create-and-start. A
+	// queued-stop drain's stop claim has its own fixed hold
+	// (stopUnconfirmedHold).
 	CreateUnconfirmedHold time.Duration
 }
 
@@ -47,11 +49,21 @@ const (
 	maxStartClaimLeaseTTL = 5 * time.Minute
 	// minStartMaxDuration is the broker's pod-ready bound plus a minute.
 	minStartMaxDuration = 10*time.Minute + time.Minute
-	// minStartUnconfirmedHold is pod ready plus exec ready plus a minute.
-	minStartUnconfirmedHold = 10*time.Minute + 100*time.Second + time.Minute
-	// minStartCreateUnconfirmedHold is the hub's synchronous dispatch
-	// bound (120s) plus two heartbeat intervals.
-	minStartCreateUnconfirmedHold = 120*time.Second + 2*30*time.Second
+	// minStartUnconfirmedHold covers the broker's bound on a synchronous
+	// start that runs on after the hub gave up on it (api.SyncStartCeiling,
+	// which itself covers pod ready plus exec ready), plus a minute, so the
+	// create hold below fits under it.
+	minStartUnconfirmedHold = api.SyncStartCeiling + time.Minute
+	// minStartCreateUnconfirmedHold covers a create whose dispatch outcome
+	// was unknown: the broker may go on starting it for up to
+	// api.SyncStartCeiling (ptone/scion#4817), plus two heartbeat
+	// intervals for the inventory that shows the outcome. Below it, the
+	// reaper would stop a start that is still legitimately coming up.
+	minStartCreateUnconfirmedHold = api.SyncStartCeiling + 2*30*time.Second
+	// stopUnconfirmedHold is the hold of a stop claim (a queued stop being
+	// applied), kept at the create hold's old default when the create hold
+	// grew to cover api.SyncStartCeiling: a stop has no start to wait for.
+	stopUnconfirmedHold = 5 * time.Minute
 )
 
 // DefaultStartClaimSettings returns the defaults.
@@ -59,46 +71,66 @@ func DefaultStartClaimSettings() StartClaimSettings {
 	return StartClaimSettings{
 		LeaseTTL:              90 * time.Second,
 		MaxDuration:           12 * time.Minute,
-		UnconfirmedHold:       13 * time.Minute,
-		CreateUnconfirmedHold: 5 * time.Minute,
+		UnconfirmedHold:       minStartUnconfirmedHold + time.Minute,
+		CreateUnconfirmedHold: minStartCreateUnconfirmedHold,
 	}
 }
 
 // Holds returns the unconfirmed holds by kind.
 func (c StartClaimSettings) Holds() store.StartClaimHolds {
-	return store.StartClaimHolds{Default: c.UnconfirmedHold, Create: c.CreateUnconfirmedHold}
+	return store.StartClaimHolds{Default: c.UnconfirmedHold, Create: c.CreateUnconfirmedHold, Stop: stopUnconfirmedHold}
 }
 
 // normalized returns c with each zero value replaced by its default and
 // each out-of-range value replaced by its default, plus one warning per
 // replaced non-zero value.
 func (c StartClaimSettings) normalized() (StartClaimSettings, []string) {
+	c, hard, soft := c.normalize()
+	return c, append(hard, soft...)
+}
+
+// normalize is normalized with its warnings split: hard ones replace a
+// value that is invalid in any configuration (a PUT refuses it), soft ones
+// raise an unconfirmed hold that an earlier release accepted but that is
+// below today's minimum (api.SyncStartCeiling grew the minimums,
+// ptone/scion#4817). A configuration written for an earlier release keeps
+// working: such a hold is raised to the minimum, with a warning, and never
+// refused.
+func (c StartClaimSettings) normalize() (StartClaimSettings, []string, []string) {
 	d := DefaultStartClaimSettings()
-	var warns []string
+	var hard, soft []string
 	check := func(name string, v *time.Duration, def time.Duration, ok bool, rule string) {
 		if *v == 0 {
 			*v = def
 			return
 		}
 		if !ok {
-			warns = append(warns, fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def))
+			hard = append(hard, fmt.Sprintf("%s %s is out of range (%s); using default %s", name, *v, rule, def))
 			*v = def
+		}
+	}
+	raise := func(name string, v *time.Duration, min time.Duration) {
+		if *v > 0 && *v < min {
+			soft = append(soft, fmt.Sprintf("%s %s is below the minimum %s (the runtime broker's start bound); using %s", name, *v, min, min))
+			*v = min
 		}
 	}
 	check("start_claim_lease_ttl", &c.LeaseTTL, d.LeaseTTL,
 		c.LeaseTTL >= minStartClaimLeaseTTL && c.LeaseTTL <= maxStartClaimLeaseTTL, "30s to 5m")
 	check("start_max_duration", &c.MaxDuration, d.MaxDuration,
 		c.MaxDuration >= minStartMaxDuration, "at least 11m")
+	raise("start_unconfirmed_hold", &c.UnconfirmedHold, minStartUnconfirmedHold)
 	check("start_unconfirmed_hold", &c.UnconfirmedHold, d.UnconfirmedHold,
-		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least 12m40s")
+		c.UnconfirmedHold >= minStartUnconfirmedHold, "at least "+minStartUnconfirmedHold.String())
+	raise("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, minStartCreateUnconfirmedHold)
 	check("start_create_unconfirmed_hold", &c.CreateUnconfirmedHold, d.CreateUnconfirmedHold,
 		c.CreateUnconfirmedHold >= minStartCreateUnconfirmedHold && c.CreateUnconfirmedHold <= c.UnconfirmedHold,
-		"3m up to start_unconfirmed_hold")
+		minStartCreateUnconfirmedHold.String()+" up to start_unconfirmed_hold")
 	// The default create hold must itself fit under a configured hold.
 	if c.CreateUnconfirmedHold > c.UnconfirmedHold {
 		c.CreateUnconfirmedHold = c.UnconfirmedHold
 	}
-	return c, warns
+	return c, hard, soft
 }
 
 // parseStartClaimSettings parses the four duration strings of a settings
@@ -167,8 +199,10 @@ func validateStartClaimSettingStrings(base StartClaimSettings, d opsettings.Life
 	// already been replaced by its default, so it must not fail a PUT.
 	base, _ = base.normalized()
 	c, _ := parseStartClaimSettings(base, d.StartClaimLeaseTTL, d.StartMaxDuration, d.StartUnconfirmedHold, d.StartCreateUnconfirmedHold)
-	if _, warns := c.normalized(); len(warns) > 0 {
-		return errors.New(warns[0])
+	// A hold below today's minimum is raised, not refused (normalize's
+	// soft warnings): a configuration from an earlier release still saves.
+	if _, hard, _ := c.normalize(); len(hard) > 0 {
+		return errors.New(hard[0])
 	}
 	return nil
 }
