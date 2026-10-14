@@ -506,11 +506,16 @@ pin "(m) asymmetric class, ns=core-agents: truncated, so digested" \
 # --------------------------------------------------------------------------
 # (n) THE ORPHAN DISCLOSURE IN NOTES.txt.
 # --------------------------------------------------------------------------
-# The fix does not remediate anyone who already has the defect - it only stops
-# new ones - so an upgraded install keeps a live cluster-scoped object under the
-# OLD name. NOTES tells the operator, and that text is a deliverable of this fix
-# rather than a courtesy: it is the only thing standing between an operator and
-# a dangling cluster-wide secrets grant.
+# A release whose name the old code truncated gets a new cluster-scoped name.
+# What happens to the object under the OLD name depends on the install path. A
+# successful `helm upgrade` deletes it after creating the new pair, unless the
+# live object has helm.sh/resource-policy: keep, or on helm 3 the read or delete
+# fails and is only logged, or on helm 4 the read fails and is skipped.
+# `helm template | kubectl apply` leaves it in place, and NOTES is not printed
+# on that path, so the docs page carries the same steps.
+# NOTES names the old object and gives the steps for both paths. That text is a
+# deliverable of this fix rather than a courtesy. This arm is static: it checks
+# the names and the text, not what helm does on upgrade.
 #
 # `helm template` does not emit NOTES and `helm install --dry-run` needs a
 # cluster, so the text is rendered through the SAME template engine by wrapping
@@ -542,7 +547,7 @@ notes_has_disclosure() { # notes_has_disclosure <release> <namespace> [extra arg
 if [ "$(notes_has_disclosure "$R41" team-alpha-production)" = yes ]; then
   pass "(n) a release whose cluster-scoped name changed gets the orphan disclosure in NOTES"
 else
-  fail "(n) a release whose name changed got NO orphan disclosure. Its old ClusterRoleBinding is still in the cluster with cluster-wide secrets and pods/exec authority, and nothing tells the operator it is there."
+  fail "(n) a release whose name changed got NO orphan disclosure. Its old ClusterRoleBinding may still be in the cluster (it remains on the rendered-manifest path, and on the helm path when the delete did not happen), and nothing tells the operator it is there."
 fi
 if [ "$(notes_has_disclosure myhub team-alpha-production)" = no ]; then
   pass "(n) a release whose name did NOT change gets no disclosure (there is no orphan to report)"

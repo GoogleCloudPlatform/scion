@@ -576,6 +576,18 @@ type ScionConfig struct {
 	// worktree/branch cleanup for it.
 	EmptyPerAgentWorkspace bool `json:"empty_per_agent_workspace,omitempty" yaml:"empty_per_agent_workspace,omitempty"`
 
+	// ClearedFields lists the config paths the agent's owner cleared after
+	// the agent was created, so the inherited value applies again
+	// (ptone/scion#3906). The Hub records it on the agent's live inline
+	// config and sends it with every start; a Runtime Broker removes each
+	// path from the agent's persisted config after merging the inline
+	// config over it (see ClearableConfigPath and ApplyClearedFields), and
+	// never writes the list itself to disk. It is wire-only: it is ignored
+	// if a template sets it (yaml:"-", and config.MergeScionConfig does not
+	// carry it). A broker that ignores it starts the agent exactly as before
+	// the field existed.
+	ClearedFields []string `json:"cleared_fields,omitempty" yaml:"-"`
+
 	// Info contains persisted metadata about the agent
 	Info *AgentInfo `json:"-" yaml:"-"`
 }
@@ -1454,9 +1466,11 @@ type KubernetesBlockIdentity struct {
 // ResourceHandle identifies one runtime resource created during a launch
 // (design t1-async-create-v11.md §3.8.4), reported by the runtime via
 // StartOptions.OnResourceCreated after each true create. UID is the
-// identity a cleanup deletes by: the Kubernetes object UID, or the
-// container ID for container runtimes. Namespace is empty for runtimes
-// that have no namespaces.
+// identity a cleanup deletes by: the Kubernetes object UID, the
+// container ID for container runtimes, or, for sandboxes, the launch's run
+// ID (scion.run_id), checked against the run label of the sandbox's state
+// entry before deleting. Namespace is empty for runtimes that have no
+// namespaces.
 type ResourceHandle struct {
 	Kind      string // one of the ResourceKind* constants
 	Namespace string
@@ -1522,6 +1536,9 @@ const (
 	ResourceKindSecretProviderClass = "secretproviderclass"
 	ResourceKindPod                 = "pod"
 	ResourceKindContainer           = "container"
+	// ResourceKindSandbox is a cloudrun-sandbox sandbox; its handle's UID
+	// is the launch's run ID, not a container ID.
+	ResourceKindSandbox = "sandbox"
 )
 
 type StatusEvent struct {

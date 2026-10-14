@@ -102,6 +102,10 @@ type Client interface {
 	// Conversations returns the conversation operations interface.
 	Conversations() ConversationService
 
+	// ThreadGroups returns the project-scoped chat thread group operations
+	// interface (ptone/scion#4424).
+	ThreadGroups() ThreadGroupService
+
 	// AllowList returns the allow list management operations interface.
 	AllowList() AllowListService
 
@@ -169,6 +173,7 @@ type client struct {
 	subscriptionTemplates *subscriptionTemplateService
 	messages              *messageService
 	conversations         *conversationService
+	threadGroups          *threadGroupService
 	allowList             *allowListService
 	invites               *inviteService
 	messaging             *messagingService
@@ -226,6 +231,7 @@ func New(baseURL string, opts ...Option) (Client, error) {
 	c.subscriptionTemplates = &subscriptionTemplateService{c: c}
 	c.messages = &messageService{c: c}
 	c.conversations = &conversationService{c: c}
+	c.threadGroups = &threadGroupService{c: c}
 	c.allowList = &allowListService{c: c}
 	c.invites = &inviteService{c: c}
 	c.messaging = &messagingService{c: c}
@@ -349,6 +355,11 @@ func (c *client) Messages() MessageService {
 // Conversations returns the conversation operations interface.
 func (c *client) Conversations() ConversationService {
 	return c.conversations
+}
+
+// ThreadGroups returns the project-scoped chat thread group operations interface.
+func (c *client) ThreadGroups() ThreadGroupService {
+	return c.threadGroups
 }
 
 // AllowList returns the allow list management operations interface.

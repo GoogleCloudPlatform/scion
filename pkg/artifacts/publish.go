@@ -58,6 +58,16 @@ func BlobPath(hubID, digest string) string {
 	return "hubs/" + hubID + "/artifacts/blobs/sha256/" + digest[0:2] + "/" + digest[2:4] + "/" + digest
 }
 
+// canCreateIn reports whether the caller may publish artifacts in scope:
+// its credential permits artifact.create there and the host authorizes it.
+// It is the create decision: handlePublish and handleCreate refuse with 403
+// when it is false (explaining a missing credential scope first), a move
+// refuses a target project it is false for, and the list reports it as
+// canCreate.
+func canCreateIn(ctx context.Context, host Host, scope string) bool {
+	return host.Permits(ctx, scope, PermissionCreate) && host.Authorize(ctx, scope, PermissionCreate)
+}
+
 // handlePublish implements the single-file fast path: the raw request body
 // becomes the only file of a new artifact's first version, which is ready
 // at once. The artifact is owned by the caller, homed in the requested or
@@ -112,11 +122,12 @@ func (s *Service) handlePublish(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "bad_request", "scope is required")
 		return
 	}
-	permitted := s.host.Permits(ctx, scope, PermissionCreate)
-	if !permitted && s.writeMissingScope(w, r) {
-		return
-	}
-	if !permitted || !s.host.Authorize(ctx, scope, PermissionCreate) {
+	if !canCreateIn(ctx, s.host, scope) {
+		// A credential that does not permit artifact.create may be
+		// explained; the decision itself is canCreateIn's.
+		if !s.host.Permits(ctx, scope, PermissionCreate) && s.writeMissingScope(w, r) {
+			return
+		}
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish artifacts in this scope")
 		return
 	}

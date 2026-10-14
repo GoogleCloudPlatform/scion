@@ -158,8 +158,18 @@ func ReadProjectMarker(path string) (*ProjectMarker, error) {
 	return &marker, nil
 }
 
+// ErrEmptyProjectSlug is returned by WriteProjectMarker for a marker without
+// a project slug. ReadProjectMarker rejects such a marker, and its external
+// project path would be named only by the project ID.
+var ErrEmptyProjectSlug = errors.New("project marker requires a non-empty project-slug")
+
 // WriteProjectMarker writes a ProjectMarker to the given path as a YAML file.
+// A marker with an empty ProjectSlug is refused with ErrEmptyProjectSlug and
+// nothing is written.
 func WriteProjectMarker(path string, marker *ProjectMarker) error {
+	if marker == nil || marker.ProjectSlug == "" {
+		return fmt.Errorf("refusing to write project marker at %s: %w", path, ErrEmptyProjectSlug)
+	}
 	data, err := yaml.Marshal(marker)
 	if err != nil {
 		return fmt.Errorf("failed to marshal project marker: %w", err)
@@ -259,11 +269,25 @@ func ExtractSlugFromExternalDir(dirName string) string {
 // ReadProjectID reads the project-id file from a git project's .scion
 // directory. A value that does not match the project ID format (see
 // ValidateProjectID) is reported as an error wrapping ErrInvalidProjectID.
+// A project-id entry that is a symbolic link is followed; callers that must
+// stay inside projectDir (project setup) use readProjectIDInDir instead.
 func ReadProjectID(projectDir string) (string, error) {
 	path := filepath.Join(projectDir, projectkeys.ProjectIDFile)
 	data, err := os.ReadFile(path)
 	if err == nil {
 		return checkedProjectID(path, strings.TrimSpace(string(data)))
+	}
+	return "", err
+}
+
+// readProjectIDInDir is ReadProjectID for project setup: the file is read
+// through an os.Root opened on projectDir, so a project-id entry that is a
+// symbolic link leading out of projectDir is refused with an error rather
+// than followed.
+func readProjectIDInDir(projectDir string) (string, error) {
+	data, err := readFileInDir(projectDir, projectkeys.ProjectIDFile)
+	if err == nil {
+		return checkedProjectID(filepath.Join(projectDir, projectkeys.ProjectIDFile), strings.TrimSpace(string(data)))
 	}
 	return "", err
 }
@@ -311,6 +335,44 @@ func mkdirUnderProjectConfigs(dir string, perm os.FileMode) error {
 // WriteProjectID writes a project-id file to a git project's .scion directory.
 func WriteProjectID(projectDir string, projectID string) error {
 	return os.WriteFile(filepath.Join(projectDir, projectkeys.ProjectIDFile), []byte(projectID+"\n"), 0644)
+}
+
+// writeProjectIDInDir is WriteProjectID for project setup: the file is
+// written through an os.Root opened on projectDir, so a project-id entry
+// that is a symbolic link leading out of projectDir is refused rather than
+// followed.
+func writeProjectIDInDir(projectDir string, projectID string) error {
+	root, err := os.OpenRoot(projectDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.WriteFile(projectkeys.ProjectIDFile, []byte(projectID+"\n"), 0644)
+}
+
+// readFileInDir reads the file name inside dir through an os.Root opened on
+// dir, so an entry that is a symbolic link leading out of dir is refused
+// rather than followed. A missing dir or file reports an error for which
+// os.IsNotExist is true.
+func readFileInDir(dir, name string) ([]byte, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }()
+	return root.ReadFile(name)
+}
+
+// mkdirAllInDir creates the directory name, and any missing parents, inside
+// dir through an os.Root opened on dir, so an existing entry that is a
+// symbolic link leading out of dir is refused rather than followed.
+func mkdirAllInDir(dir, name string, perm os.FileMode) error {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return root.MkdirAll(name, perm)
 }
 
 // GetGitProjectExternalConfigDir returns the external config directory for a git project.

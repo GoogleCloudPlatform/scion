@@ -1315,6 +1315,13 @@ authDone:
 	if _, ok := opts.Env["SCION_HARNESS"]; !ok && harnessName != "" {
 		opts.Env["SCION_HARNESS"] = harnessName
 	}
+	// The resolved ready spec for sciontool init, which records it in the
+	// init-run file for the host's readiness wait. Always written: the
+	// resolved harness config is the source of truth, and a template value
+	// must not override it.
+	if h != nil {
+		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
+	}
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model
 	}
