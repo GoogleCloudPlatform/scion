@@ -694,6 +694,45 @@ func readSandboxCommandOutput(f *os.File) string {
 	return strings.TrimSpace(readSandboxCommandOutputRaw(f, maxSandboxCommandOutput))
 }
 
+// runSandboxProbe runs the liveness probe `sandbox exec <name> --
+// /bin/true` under ctx (the start probe and the reconcile probe both use
+// it) and returns its output and error as runSimpleCommand would: the
+// error is wrapped as "<bin> failed: %w", and the output is
+// trimmed, bounded by maxSandboxCommandOutput.
+//
+// The output is captured in an unlinked temporary file
+// (newSandboxCommandOutput), never a pipe (ptone/scion#5003). Processes
+// the CLI leaves behind may inherit and hold its stdout and stderr; with
+// a pipe, Wait would block until every holder exits, past ctx's deadline,
+// since the deadline kills only the CLI. With a file, Wait returns when
+// the CLI exits or is killed. A WaitDelay on the shared runSimpleCommand
+// would also bound the wait, but it would change every other runtime's
+// commands and kill a holder with SIGPIPE on its next write (see
+// newSandboxCommandOutput). If the file cannot be created, the output is
+// discarded (stdio is /dev/null), so the probe gives no not-found answer
+// (sandboxProbeSaysGone) and reconcile keeps the entry.
+func runSandboxProbe(ctx context.Context, bin, name string) (string, error) {
+	args := []string{"exec", name, "--", "/bin/true"}
+	runtimeLog().Debug("Executing command", "cmd", bin, "argc", len(args))
+	begin := time.Now()
+	cmd := exec.CommandContext(ctx, bin, args...)
+	outFile := newSandboxCommandOutput("exec")
+	if outFile != nil {
+		defer func() { _ = outFile.Close() }()
+		cmd.Stdout = outFile
+		cmd.Stderr = outFile
+	}
+	err := cmd.Run()
+	elapsed := time.Since(begin)
+	out := readSandboxCommandOutput(outFile)
+	if err != nil {
+		logCommandFailure(ctx, bin, len(args), elapsed, []byte(sandboxCommandOutputForLog(out)))
+		return out, fmt.Errorf("%s failed: %w", bin, err)
+	}
+	runtimeLog().Debug("Command completed", "cmd", bin, "argc", len(args), "duration", elapsed)
+	return out, nil
+}
+
 // maxSandboxLaunchOutputRead bounds how much `sandbox run` output is read
 // back: 4 MiB, above Linux's whole-argv limit (ARG_MAX, 2 MiB by default),
 // so an echo of the CLI's argv, which carries every --env KEY=VALUE, is
@@ -862,7 +901,7 @@ func (s *sandboxStateStore) reconcile(bin string) {
 			// R1: absolute path required — the sandbox launcher resolves argv[0]
 			// before the sandbox environment (including PATH) is in effect.
 			ctx, cancel := context.WithTimeout(context.Background(), sandboxReconcileProbeTimeout)
-			out, err := runSimpleCommand(ctx, bin, "exec", name, "--", "/bin/true")
+			out, err := runSandboxProbe(ctx, bin, name)
 			gone := sandboxProbeSaysGone(ctx, out, err)
 			cancel()
 			switch {
@@ -2211,7 +2250,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	// flaky in practice, lengthen the ladder rather than removing the probe.
 	probeDelays := []time.Duration{500 * time.Millisecond, 1 * time.Second, 2 * time.Second}
 	probeErr := waitForSandboxLiveness(ctx, probeDelays, func(probeCtx context.Context) error {
-		_, err := runSimpleCommand(probeCtx, r.bin, "exec", slug, "--", "/bin/true")
+		_, err := runSandboxProbe(probeCtx, r.bin, slug)
 		return err
 	}, slug)
 	if probeErr != nil {
