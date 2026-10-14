@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -138,30 +137,15 @@ func (s *Server) authorizeConduitAction(ctx context.Context, identity Identity, 
 	return nil
 }
 
-// authorizeConduitStreamKind refuses ssh under disable_ssh: an agent started
-// before the setting changed may still serve it.
-func (s *Server) authorizeConduitStreamKind(kind string) error {
-	if kind == grant.StreamKindSSH && s.config.ConduitSSHDisabled {
-		return fmt.Errorf("%w: ssh is disabled by server.hub.conduit.disable_ssh", errConduitForbidden)
-	}
-	return nil
-}
-
 // conduitAgentPolicy returns the localpolicy.EnvPolicy value, or "" when
 // nothing is restricted.
 func (s *Server) conduitAgentPolicy() string {
-	doc := localpolicy.PolicyDoc{
-		DisableSSH:  s.config.ConduitSSHDisabled,
-		DenyPorts:   s.config.ConduitDenyPorts,
-		DenySockets: s.config.ConduitDenySockets,
-	}
-	if !doc.DisableSSH && len(doc.DenyPorts) == 0 && len(doc.DenySockets) == 0 {
-		return ""
-	}
-	b, err := json.Marshal(doc)
+	b, err := json.Marshal(s.config.ConduitPolicy)
 	if err != nil {
-		// Marshalling these field types cannot fail.
 		panic(fmt.Sprintf("conduit agent policy: %v", err))
+	}
+	if string(b) == "{}" {
+		return ""
 	}
 	return string(b)
 }
@@ -257,7 +241,7 @@ func (s *Server) authorizeConduitTCPTarget(agent *store.Agent, port int) error {
 	if reason := deniedExposedPorts[port]; reason != "" {
 		return fmt.Errorf("%w: port %d is reserved for %s", errConduitForbidden, port, reason)
 	}
-	if slices.Contains(s.config.ConduitDenyPorts, port) {
+	if slices.Contains(s.config.ConduitPolicy.DenyPorts, port) {
 		return fmt.Errorf("%w: port %d is denied by server.hub.conduit.deny_ports", errConduitForbidden, port)
 	}
 	if findExposedPort(agent.ExposedPorts, port) != nil || slices.Contains(s.config.ConduitTCPAllowedPorts, port) {
@@ -330,10 +314,6 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 		if err := s.authorizeConduitAction(ctx, req.Identity, agent, ActionTunnel); err != nil {
 			return nil, nil, err
 		}
-	}
-
-	if err := s.authorizeConduitStreamKind(req.Stream.Kind); err != nil {
-		return nil, nil, err
 	}
 
 	params, err := conduitStreamParams(req)

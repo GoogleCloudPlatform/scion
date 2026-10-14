@@ -42,63 +42,26 @@ func TestReservedSocketsEmpty(t *testing.T) {
 	}
 }
 
-// TestParsePolicy: an invalid value fails closed and is reported.
 func TestParsePolicy(t *testing.T) {
-	for _, raw := range []string{"", "  "} {
-		p, err := ParsePolicy(raw)
-		if err != nil || p.SSHDisabled || p.PortDenied(9999) || p.SocketDenied("/run/x.sock") {
-			t.Errorf("ParsePolicy(%q) = %+v, %v; want no restriction", raw, p, err)
-		}
+	p, err := ParsePolicy("")
+	if err != nil || p.DisableSSH || p.DisableSSHSocketForwarding || p.PortDenied(9999) {
+		t.Errorf("ParsePolicy(\"\") = %+v, %v; want no restriction", p, err)
 	}
-	p, err := ParsePolicy(`{"disable_ssh":true,"deny_ports":[9999],"deny_sockets":["/run/x.sock","/srv/private"]}`)
-	if err != nil {
-		t.Fatal(err)
+	p, err = ParsePolicy(`{"disable_ssh":true,"deny_ports":[9999],"disable_ssh_socket_forwarding":true}`)
+	if err != nil || !p.DisableSSH || !p.DisableSSHSocketForwarding || !p.PortDenied(9999) || p.PortDenied(8463) {
+		t.Errorf("ParsePolicy = %+v, %v", p, err)
 	}
-	if !p.SSHDisabled {
-		t.Error("ssh not disabled")
-	}
-	for _, port := range []int{9999, 9810, 18380} {
-		if !p.PortDenied(port) {
-			t.Errorf("port %d allowed", port)
-		}
-	}
-	if p.PortDenied(8463) {
-		t.Error("port 8463 denied")
-	}
-	for _, path := range []string{"/run/x.sock", "/srv/private/a.sock", "/srv/private/d/b.sock"} {
-		if !p.SocketDenied(path) {
-			t.Errorf("socket %s allowed", path)
-		}
-	}
-	for _, path := range []string{"/run/x.sock2", "/run/y.sock", "/srv/private2/a.sock", "/srv"} {
-		if p.SocketDenied(path) {
-			t.Errorf("socket %s denied", path)
-		}
-	}
-	all, err := ParsePolicy(`{"deny_sockets":["/"]}`)
-	if err != nil || !all.SocketDenied("/tmp/a.sock") || all.PortDenied(22) {
-		t.Errorf("deny_sockets [/] = %+v, %v; want every socket and no port denied", all, err)
-	}
+}
 
-	for _, raw := range []string{
-		`{`,
-		`[]`,
-		`{"deny_ports":[0]}`,
-		`{"deny_ports":[65536]}`,
-		`{"deny_sockets":["relative.sock"]}`,
-		`{"deny_sockets":["/a/../b"]}`,
-		`{"allow_ports":[22]}`,
-		`{"disable_ssh":false} {}`,
-		`null`,
-		`{"disable_ssh":true}}`,
-		`{"disable_ssh":true}]`,
-	} {
+// TestParsePolicyFailsClosed: a value from a newer hub (unknown field) too.
+func TestParsePolicyFailsClosed(t *testing.T) {
+	for _, raw := range []string{`{`, `[]`, `null`, `{"allow_ports":[22]}`, `{} {}`, `{"disable_ssh":true}}`} {
 		p, err := ParsePolicy(raw)
 		if err == nil || !strings.Contains(err.Error(), EnvPolicy) {
 			t.Errorf("ParsePolicy(%q) error = %v, want an error naming %s", raw, err, EnvPolicy)
 		}
-		if !p.SSHDisabled || !p.PortDenied(22) || !p.SocketDenied("/tmp/a.sock") {
-			t.Errorf("ParsePolicy(%q) = %+v, want ssh disabled and everything denied", raw, p)
+		if !p.DisableSSH || !p.DisableSSHSocketForwarding || !p.PortDenied(22) {
+			t.Errorf("ParsePolicy(%q) = %+v, want everything refused", raw, p)
 		}
 	}
 }

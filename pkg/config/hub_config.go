@@ -1670,7 +1670,7 @@ var snakeCaseFields = map[string]string{
 	"tcpallowedports":            "tcp_allowed_ports",
 	"disablessh":                 "disable_ssh",
 	"denyports":                  "deny_ports",
-	"denysockets":                "deny_sockets",
+	"disablesshsocketforwarding": "disable_ssh_socket_forwarding",
 	"internallisten":             "internal_listen",
 	"internaladvertise":          "internal_advertise",
 	"peerauth":                   "peer_auth",
@@ -1795,7 +1795,7 @@ var camelCaseFields = map[string]string{
 	"tcpallowedports":               "tcpAllowedPorts",
 	"disablessh":                    "disableSsh",
 	"denyports":                     "denyPorts",
-	"denysockets":                   "denySockets",
+	"disablesshsocketforwarding":    "disableSshSocketForwarding",
 	"internallisten":                "internalListen",
 	"internaladvertise":             "internalAdvertise",
 	"peerauth":                      "peerAuth",
@@ -2228,7 +2228,6 @@ var commaSplitKoanfKeys = []string{
 	"server.hub.conduit.peer_service_accounts",
 	"server.hub.conduit.tcp_allowed_ports",
 	"server.hub.conduit.deny_ports",
-	"server.hub.conduit.deny_sockets",
 	"server.federation.algorithms",
 }
 
@@ -2239,7 +2238,6 @@ var envListConfigKeys = []string{
 	"hub.conduit.peerServiceAccounts",
 	"hub.conduit.tcpAllowedPorts",
 	"hub.conduit.denyPorts",
-	"hub.conduit.denySockets",
 }
 
 // splitCommaSeparatedKoanfKeys splits comma-separated string values into slices

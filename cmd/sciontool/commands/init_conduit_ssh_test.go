@@ -78,11 +78,11 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 		env := map[string]string{envProjectID: "project-1", conduit.EnvLaunchID: "launch-1"}
 		getenv := func(k string) string { return env[k] }
-		ssh := prepareConduitSSH(client, true, localpolicy.Policy{}, conduit.PTYUser{}, nil, getenv)
+		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
 		if ssh != nil {
 			t.Fatal("SSH server prepared with conduit off")
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, localpolicy.Policy{}, getenv))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
 		waitSignal(t, h.tunnel, "the legacy tunnel")
 		if got := n.Load(); got != 0 {
 			t.Fatalf("SSH server built %d times with conduit off", got)
@@ -99,7 +99,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		h := newPFHub(t, true)
 		client := hub.NewClientWithConfig(h.srv.URL, "token-1", "agent-1")
 		env := map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit}
-		if ssh := prepareConduitSSH(client, false, localpolicy.Policy{}, conduit.PTYUser{}, nil, func(k string) string { return env[k] }); ssh != nil || n.Load() != 0 {
+		if ssh := prepareConduitSSH(client, false, conduit.PTYUser{}, nil, func(k string) string { return env[k] }); ssh != nil || n.Load() != 0 {
 			t.Fatal("SSH server prepared with conduit disabled")
 		}
 		if posts := h.statusPosts(); len(posts) != 0 {
@@ -118,14 +118,13 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			localpolicy.EnvPolicy:     `{"disable_ssh":true}`,
 		}
 		getenv := func(k string) string { return env[k] }
-		policy := conduitPolicy(getenv)
-		if ssh := prepareConduitSSH(client, true, policy, conduit.PTYUser{}, nil, getenv); ssh != nil || n.Load() != 0 {
+		if ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv); ssh != nil || n.Load() != 0 {
 			t.Fatal("SSH server prepared with ssh disabled by policy")
 		}
 		if posts := h.statusPosts(); len(posts) != 0 {
 			t.Fatalf("%d status POSTs with ssh disabled, want none", len(posts))
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, policy, getenv))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, nil, getenv))
 		select {
 		case hello := <-h.hellos:
 			if kinds := hello.GetCapabilities().GetStreamKinds(); slices.Contains(kinds, grant.StreamKindSSH) || !slices.Contains(kinds, grant.StreamKindTCP) {
@@ -144,11 +143,15 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 			conduit.EnvHubExperiments: conduit.ExperimentConduit,
 			envProjectID:              "project-1",
 			conduit.EnvLaunchID:       "launch-1",
+			localpolicy.EnvPolicy:     `{"deny_ports":[9999]}`,
 		}
 		getenv := func(k string) string { return env[k] }
-		ssh := prepareConduitSSH(client, true, localpolicy.Policy{}, conduit.PTYUser{}, nil, getenv)
+		ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, getenv)
 		if ssh == nil {
 			t.Fatal("no SSH server with conduit on")
+		}
+		if !ssh.Policy.PortDenied(9999) {
+			t.Fatal("SSH server did not get the operator policy")
 		}
 		if got := n.Load(); got != 1 {
 			t.Fatalf("SSH server built %d times, want 1", got)
@@ -163,7 +166,7 @@ func TestConduitSSHOnlyWithConduit(t *testing.T) {
 		if len(posts[0]) != 1 || posts[0]["sshHostKey"] != want {
 			t.Fatalf("status POST %v, want only sshHostKey=%q", posts[0], want)
 		}
-		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, localpolicy.Policy{}, getenv))
+		runPortForwarding(t, newPortForwarding(client, false, conduit.PTYUser{}, ssh, getenv))
 		select {
 		case hello := <-h.hellos:
 			if kinds := hello.GetCapabilities().GetStreamKinds(); !slices.Contains(kinds, grant.StreamKindSSH) {
@@ -197,7 +200,7 @@ func TestPrepareConduitSSHFirstReportBounded(t *testing.T) {
 	client := hub.NewClientWithConfig(hung.URL, "token-1", "agent-1")
 	env := map[string]string{conduit.EnvHubExperiments: conduit.ExperimentConduit, conduit.EnvLaunchID: "launch-1"}
 	start := time.Now()
-	ssh := prepareConduitSSH(client, true, localpolicy.Policy{}, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
+	ssh := prepareConduitSSH(client, true, conduit.PTYUser{}, nil, func(k string) string { return env[k] })
 	if ssh == nil {
 		t.Fatal("no SSH server when the hub does not answer")
 	}
@@ -441,43 +444,5 @@ func TestRunInit_ReportsSSHHostKeyBeforeHarnessStarts(t *testing.T) {
 	lines := strings.Fields(string(raw))
 	if len(lines) < 2 || lines[0] != "host-key-report" || !slices.Contains(lines, "harness-child") {
 		t.Fatalf("order = %v, want the host key report first, then the harness child", lines)
-	}
-}
-
-// TestConduitPolicyEnv: an unparsable policy fails closed.
-func TestConduitPolicyEnv(t *testing.T) {
-	for _, tt := range []struct {
-		name, raw   string
-		sshDisabled bool
-		denied      []int
-		allowed     []int
-	}{
-		{name: "unset", allowed: []int{22, 9999}, denied: []int{9810}},
-		{name: "ports", raw: `{"deny_ports":[9999]}`, allowed: []int{22}, denied: []int{9999, 9810}},
-		{name: "ssh off", raw: `{"disable_ssh":true}`, sshDisabled: true, allowed: []int{9999}},
-		{name: "malformed", raw: `{"deny_ports":`, sshDisabled: true, denied: []int{22, 9999}},
-		{name: "unknown field", raw: `{"allow_ports":[22]}`, sshDisabled: true, denied: []int{22}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			p := conduitPolicy(func(k string) string {
-				if k == localpolicy.EnvPolicy {
-					return tt.raw
-				}
-				return ""
-			})
-			if p.SSHDisabled != tt.sshDisabled {
-				t.Errorf("SSHDisabled = %v, want %v", p.SSHDisabled, tt.sshDisabled)
-			}
-			for _, port := range tt.denied {
-				if !p.PortDenied(port) {
-					t.Errorf("port %d allowed, want denied", port)
-				}
-			}
-			for _, port := range tt.allowed {
-				if p.PortDenied(port) {
-					t.Errorf("port %d denied, want allowed", port)
-				}
-			}
-		})
 	}
 }

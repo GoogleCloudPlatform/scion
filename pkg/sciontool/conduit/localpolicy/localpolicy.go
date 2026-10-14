@@ -21,13 +21,10 @@
 package localpolicy
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
-	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -48,36 +45,29 @@ func IsReservedPort(port int) bool { return slices.Contains(ReservedPorts, port)
 // on the socket deny-list.
 func IsReservedSocket(path string) bool { return slices.Contains(ReservedSockets, path) }
 
-// EnvPolicy carries the operator's conduit policy as JSON (PolicyDoc). The
+// EnvPolicy carries the operator's conduit policy as JSON (Policy). The
 // hub sets or removes it on every dispatch, so absence means no restriction.
 const EnvPolicy = "SCION_CONDUIT_POLICY"
 
-// PolicyDoc is the JSON form of EnvPolicy.
-type PolicyDoc struct {
-	DisableSSH  bool     `json:"disable_ssh,omitempty"`
-	DenyPorts   []int    `json:"deny_ports,omitempty"`
-	DenySockets []string `json:"deny_sockets,omitempty"`
-}
-
 // Policy is the operator's conduit restriction; the zero value adds nothing.
 type Policy struct {
-	SSHDisabled bool
-	denyPorts   []int
-	denySockets []string
-	denyAll     bool
+	DisableSSH                 bool  `json:"disable_ssh,omitempty"`
+	DenyPorts                  []int `json:"deny_ports,omitempty"`
+	DisableSSHSocketForwarding bool  `json:"disable_ssh_socket_forwarding,omitempty"`
+	denyAllPorts               bool
 }
 
-// ParsePolicy reads EnvPolicy. An invalid value, including one with unknown
-// fields, fails closed: ssh is disabled and every destination denied.
+// ParsePolicy reads EnvPolicy. An invalid value, including one with an
+// unknown field, fails closed: SSH off and every port denied.
 func ParsePolicy(raw string) (Policy, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Policy{}, nil
 	}
-	var docp *PolicyDoc
-	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
+	var p *Policy
+	dec := json.NewDecoder(strings.NewReader(raw))
 	dec.DisallowUnknownFields()
-	err := dec.Decode(&docp)
-	if err == nil && docp == nil {
+	err := dec.Decode(&p)
+	if err == nil && p == nil {
 		err = errors.New("not an object")
 	}
 	if err == nil {
@@ -85,86 +75,14 @@ func ParsePolicy(raw string) (Policy, error) {
 			err = errors.New("trailing data")
 		}
 	}
-	var doc PolicyDoc
-	if err == nil {
-		doc = *docp
-		err = doc.validate()
-	}
 	if err != nil {
-		return Policy{SSHDisabled: true, denyAll: true}, fmt.Errorf("invalid %s: %w", EnvPolicy, err)
+		return Policy{DisableSSH: true, DisableSSHSocketForwarding: true, denyAllPorts: true},
+			fmt.Errorf("invalid %s: %w", EnvPolicy, err)
 	}
-	return Policy{
-		SSHDisabled: doc.DisableSSH,
-		denyPorts:   slices.Clone(doc.DenyPorts),
-		denySockets: slices.Clone(doc.DenySockets),
-	}, nil
+	return *p, nil
 }
 
-func (d PolicyDoc) validate() error {
-	for _, p := range d.DenyPorts {
-		if p < 1 || p > 65535 {
-			return fmt.Errorf("deny_ports: port %d is outside 1-65535", p)
-		}
-	}
-	for _, s := range d.DenySockets {
-		if !filepath.IsAbs(s) || filepath.Clean(s) != s || strings.ContainsRune(s, 0) {
-			return fmt.Errorf("deny_sockets: %q is not a clean absolute path", s)
-		}
-	}
-	return nil
-}
-
-// PortDenied reports whether port is reserved or denied by p.
+// PortDenied reports whether p denies port; IsReservedPort is separate.
 func (p Policy) PortDenied(port int) bool {
-	return p.denyAll || IsReservedPort(port) || slices.Contains(p.denyPorts, port)
-}
-
-// SocketDenied reports whether path is reserved, or equal to or below a
-// denied entry, comparing paths as written.
-func (p Policy) SocketDenied(path string) bool {
-	if p.denyAll || IsReservedSocket(path) {
-		return true
-	}
-	return underAny(path, p.denySockets)
-}
-
-// SocketDeniedOnDisk is SocketDenied with symbolic links resolved in both
-// path and entries; a path that fails to resolve, other than not existing,
-// is denied. A link swapped in after the check is not seen.
-func (p Policy) SocketDeniedOnDisk(path string) bool {
-	if p.SocketDenied(path) {
-		return true
-	}
-	if len(p.denySockets) == 0 {
-		return false
-	}
-	paths := []string{path}
-	switch resolved, err := filepath.EvalSymlinks(path); {
-	case err == nil:
-		paths = append(paths, resolved)
-	case !errors.Is(err, fs.ErrNotExist):
-		return true
-	}
-	entries := slices.Clone(p.denySockets)
-	for _, e := range p.denySockets {
-		if r, err := filepath.EvalSymlinks(e); err == nil && r != e {
-			entries = append(entries, r)
-		}
-	}
-	for _, q := range paths {
-		if underAny(q, entries) {
-			return true
-		}
-	}
-	return false
-}
-
-// underAny reports whether path equals one of entries or lies below it.
-func underAny(path string, entries []string) bool {
-	for _, e := range entries {
-		if e == "/" || path == e || strings.HasPrefix(path, e+"/") {
-			return true
-		}
-	}
-	return false
+	return p.denyAllPorts || slices.Contains(p.DenyPorts, port)
 }

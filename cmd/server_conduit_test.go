@@ -31,6 +31,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/knadh/koanf/v2"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -616,18 +617,13 @@ func TestBuildHubServerConfig_ConduitTCPAllowedPorts(t *testing.T) {
 
 func TestBuildHubServerConfig_ConduitPolicy(t *testing.T) {
 	cfg := config.DefaultGlobalConfig()
-	sc := buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
-	assert.False(t, sc.ConduitSSHDisabled)
-	assert.Empty(t, sc.ConduitDenyPorts)
-	assert.Empty(t, sc.ConduitDenySockets)
+	assert.Zero(t, buildHubServerConfig(&cfg, "", "", nil, false, "", nil).ConduitPolicy)
 
 	cfg.Hub.Conduit.DisableSSH = true
 	cfg.Hub.Conduit.DenyPorts = []int{9999}
-	cfg.Hub.Conduit.DenySockets = []string{"/run/x.sock"}
-	sc = buildHubServerConfig(&cfg, "", "", nil, false, "", nil)
-	assert.True(t, sc.ConduitSSHDisabled)
-	assert.Equal(t, []int{9999}, sc.ConduitDenyPorts)
-	assert.Equal(t, []string{"/run/x.sock"}, sc.ConduitDenySockets)
+	cfg.Hub.Conduit.DisableSSHSocketForwarding = true
+	want := localpolicy.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
+	assert.Equal(t, want, buildHubServerConfig(&cfg, "", "", nil, false, "", nil).ConduitPolicy)
 }
 
 // TestBuildHubServerConfig_ConduitUserStreamAuthzMax: the hub receives the

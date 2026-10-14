@@ -33,6 +33,7 @@ import (
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -426,5 +427,14 @@ func sendConduitErr(errCh chan<- error, err error) {
 	case errCh <- err:
 	default:
 		slog.Error("Conduit fatal error (server already stopping)", "error", err)
+	}
+}
+
+func conduitPolicySetting(cfg *config.GlobalConfig) localpolicy.Policy {
+	c := cfg.Hub.Conduit
+	return localpolicy.Policy{
+		DisableSSH:                 c.DisableSSH,
+		DenyPorts:                  append([]int(nil), c.DenyPorts...),
+		DisableSSHSocketForwarding: c.DisableSSHSocketForwarding,
 	}
 }

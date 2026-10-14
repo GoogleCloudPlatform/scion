@@ -364,14 +364,16 @@ func applyAgentExperiments(env map[string]string, cls *map[string]api.EnvKind, d
 	classifyEnv(cls, envHubExperiments, api.EnvKindPlain)
 }
 
-// applyAgentConduitPolicy sets or removes localpolicy.EnvPolicy. The hub
-// owns the variable so a project or template cannot relax the policy.
-func applyAgentConduitPolicy(env map[string]string, cls *map[string]api.EnvKind, policy string) {
+// applyConduitPolicy sets or removes localpolicy.EnvPolicy. The hub owns
+// the variable so a project or template cannot relax the policy.
+func (d *HTTPAgentDispatcher) applyConduitPolicy(env map[string]string, cls *map[string]api.EnvKind) {
+	policy := ""
+	if d.conduitPolicyProvider != nil {
+		policy = d.conduitPolicyProvider()
+	}
 	if policy == "" {
 		delete(env, localpolicy.EnvPolicy)
-		if *cls != nil {
-			delete(*cls, localpolicy.EnvPolicy)
-		}
+		delete(*cls, localpolicy.EnvPolicy)
 		return
 	}
 	env[localpolicy.EnvPolicy] = policy
@@ -472,14 +474,6 @@ func (d *HTTPAgentDispatcher) SetDispatchExperimentsProvider(fn func() []string)
 // SetConduitPolicyProvider sets the source of the agent conduit policy.
 func (d *HTTPAgentDispatcher) SetConduitPolicyProvider(fn func() string) {
 	d.conduitPolicyProvider = fn
-}
-
-// conduitPolicy returns the agent conduit policy value, or "".
-func (d *HTTPAgentDispatcher) conduitPolicy() string {
-	if d.conduitPolicyProvider == nil {
-		return ""
-	}
-	return d.conduitPolicyProvider()
 }
 
 // dispatchExperiments returns the enabled dispatch experiments, or nil.
@@ -1328,7 +1322,7 @@ func (d *HTTPAgentDispatcher) buildCreateRequestFor(ctx context.Context, agent *
 		req.ResolvedEnv = make(map[string]string)
 	}
 	applyAgentExperiments(req.ResolvedEnv, &req.EnvClassifications, experiments)
-	applyAgentConduitPolicy(req.ResolvedEnv, &req.EnvClassifications, d.conduitPolicy())
+	d.applyConduitPolicy(req.ResolvedEnv, &req.EnvClassifications)
 
 	resolvedSkillsCount := 0
 	if req.PreResolvedSkills != nil {
@@ -3434,7 +3428,7 @@ func (d *HTTPAgentDispatcher) buildStartEnv(ctx context.Context, agent *store.Ag
 	// Read once: DispatchAgentStart/Restart send the same set to the broker.
 	experiments := d.dispatchExperiments()
 	applyAgentExperiments(resolvedEnv, &envClassifications, experiments)
-	applyAgentConduitPolicy(resolvedEnv, &envClassifications, d.conduitPolicy())
+	d.applyConduitPolicy(resolvedEnv, &envClassifications)
 
 	return startEnvResult{
 		env:             resolvedEnv,

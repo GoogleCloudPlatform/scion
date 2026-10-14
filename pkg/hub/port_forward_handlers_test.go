@@ -173,7 +173,7 @@ func TestAgentPortProxyNoTunnelReturns503(t *testing.T) {
 // TestAgentPortProxyDeniedPortReturns403: covers the port-forward tunnel path.
 func TestAgentPortProxyDeniedPortReturns403(t *testing.T) {
 	srv, s := testServer(t)
-	srv.config.ConduitDenyPorts = []int{3000}
+	srv.config.ConduitPolicy.DenyPorts = []int{3000}
 	agent, token := createPortForwardAgent(t, srv, s)
 
 	rec := doAgentTokenRequest(t, srv, http.MethodPost, "/api/v1/agents/"+agent.ID+"/ports", map[string]any{

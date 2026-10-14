@@ -419,8 +419,9 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			return conduitAuthzDenied, "permission no longer held", err
 		}
 	}
-	if err := s.authorizeConduitStreamKind(req.Kind); err != nil {
-		return conduitAuthzDenied, "stream kind disabled", err
+	// An agent started before disable_ssh was set may still serve ssh.
+	if req.Kind == grant.StreamKindSSH && s.config.ConduitPolicy.DisableSSH {
+		return conduitAuthzDenied, "ssh disabled", fmt.Errorf("%w: ssh is disabled by server.hub.conduit.disable_ssh", errConduitForbidden)
 	}
 	if req.Kind == grant.StreamKindTCP {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {

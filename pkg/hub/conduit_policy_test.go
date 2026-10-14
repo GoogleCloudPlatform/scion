@@ -22,7 +22,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -30,36 +29,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestMintConduitGrant_SSHDisabled: other stream kinds are unaffected.
-func TestMintConduitGrant_SSHDisabled(t *testing.T) {
-	f := newConduitFixture(t)
-	_, _, err := f.mint(f.owner, grant.StreamHeader{Kind: grant.StreamKindSSH})
-	require.NoError(t, err, "ssh grant before the switch")
-
-	f.srv.config.ConduitSSHDisabled = true
-	_, _, err = f.mint(f.owner, grant.StreamHeader{Kind: grant.StreamKindSSH})
-	assert.ErrorIs(t, err, errConduitForbidden)
-	_, _, err = f.mint(f.owner, tcpHeader("3000"))
-	assert.NoError(t, err, "tcp")
-	_, _, err = f.mint(f.owner, ptyHeader("80", "24"))
-	assert.NoError(t, err, "pty")
-}
-
-func TestAuthorizeConduitUserStream_SSHDisabled(t *testing.T) {
-	f := newConduitFixture(t)
-	f.srv.config.ConduitSSHDisabled = true
-	verdict, _, err := f.srv.authorizeConduitUserStream(context.Background(), conduitUserStreamAuthz{
-		Identity: f.owner, Agent: f.agent, Kind: grant.StreamKindSSH, ViaTunnel: true,
-	})
-	assert.Equal(t, conduitAuthzDenied, verdict)
-	assert.ErrorIs(t, err, errConduitForbidden)
-}
-
 // TestAuthorizeConduitTCPTarget_DenyPorts: deny wins over exposed and allowed.
 func TestAuthorizeConduitTCPTarget_DenyPorts(t *testing.T) {
 	f := newConduitFixture(t) // the agent exposes 3000
 	f.srv.config.ConduitTCPAllowedPorts = []int{8080, 9999}
-	f.srv.config.ConduitDenyPorts = []int{3000, 9999}
+	f.srv.config.ConduitPolicy.DenyPorts = []int{3000, 9999}
 	for port, ok := range map[int]bool{3000: false, 9999: false, 8080: true} {
 		err := f.srv.authorizeConduitTCPTarget(f.agent, port)
 		if ok {
@@ -68,8 +42,6 @@ func TestAuthorizeConduitTCPTarget_DenyPorts(t *testing.T) {
 			assert.ErrorIs(t, err, errConduitForbidden, "port %d", port)
 		}
 	}
-	_, _, err := f.mint(f.owner, tcpHeader("3000"))
-	assert.ErrorIs(t, err, errConduitForbidden, "mint to a denied exposed port")
 }
 
 // TestConduitAgentPolicy: the value round-trips through ParsePolicy.
@@ -77,36 +49,10 @@ func TestConduitAgentPolicy(t *testing.T) {
 	s := &Server{}
 	assert.Empty(t, s.conduitAgentPolicy())
 
-	s.config.ConduitSSHDisabled = true
-	s.config.ConduitDenyPorts = []int{9999}
-	s.config.ConduitDenySockets = []string{"/run/private"}
+	s.config.ConduitPolicy = localpolicy.Policy{DisableSSH: true, DenyPorts: []int{9999}, DisableSSHSocketForwarding: true}
 	p, err := localpolicy.ParsePolicy(s.conduitAgentPolicy())
 	require.NoError(t, err)
-	assert.True(t, p.SSHDisabled)
-	assert.True(t, p.PortDenied(9999))
-	assert.False(t, p.PortDenied(8463))
-	assert.True(t, p.SocketDenied("/run/private/a.sock"))
-}
-
-func TestApplyAgentConduitPolicyOwnsTheVariable(t *testing.T) {
-	for _, tt := range []struct{ name, policy string }{
-		{name: "forged value removed"},
-		{name: "forged value replaced", policy: `{"disable_ssh":true}`},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			env := map[string]string{localpolicy.EnvPolicy: "{}"}
-			cls := map[string]api.EnvKind{localpolicy.EnvPolicy: api.EnvKindPlain}
-			applyAgentConduitPolicy(env, &cls, tt.policy)
-			got, ok := env[localpolicy.EnvPolicy]
-			_, classified := cls[localpolicy.EnvPolicy]
-			if tt.policy == "" {
-				assert.False(t, ok || classified, "env %q (present %v) classified %v, want removed", got, ok, classified)
-				return
-			}
-			assert.Equal(t, tt.policy, got)
-			assert.True(t, classified)
-		})
-	}
+	assert.Equal(t, s.config.ConduitPolicy, p)
 }
 
 // TestDispatchConduitPolicyEnv: covers create, start and restart.
@@ -166,44 +112,23 @@ func TestDispatchConduitPolicyEnv(t *testing.T) {
 	}
 }
 
-// TestConduitTunnel_OperatorPolicy: hub- and agent-side refusals both give 403.
 func TestConduitTunnel_OperatorPolicy(t *testing.T) {
-	t.Run("hub", func(t *testing.T) {
-		tf := newTunnelFixture(t)
-		tf.srv.config.ConduitSSHDisabled = true
-		tf.srv.config.ConduitDenyPorts = []int{3000}
-		tf.startAgent(t, tf.public.URL, tf.launched)
-		c := tf.ownerClient(t)
-		for _, k := range []struct {
-			kind   string
-			params map[string]string
-		}{{grant.StreamKindSSH, nil}, {grant.StreamKindTCP, tcpParams("3000")}} {
-			r := c.post(t, tf.launched.ID, k.kind, k.params)
-			require.Equal(t, http.StatusForbidden, r.status, r.body)
-			assert.Equal(t, ErrCodeForbidden, r.err.Code, r.body)
-		}
-		select {
-		case conn := <-tf.dials:
-			_ = conn.Close()
-			t.Fatal("the agent dialed a denied port")
-		default:
-		}
-	})
-	t.Run("agent", func(t *testing.T) {
-		tf := newTunnelFixture(t)
-		p, err := localpolicy.ParsePolicy(`{"deny_ports":[3000]}`)
-		require.NoError(t, err)
-		tf.agentPolicy = p
-		tf.startAgent(t, tf.public.URL, tf.launched)
-		c := tf.ownerClient(t)
-		r := c.post(t, tf.launched.ID, grant.StreamKindTCP, tcpParams("3000"))
+	tf := newTunnelFixture(t)
+	tf.srv.config.ConduitPolicy = localpolicy.Policy{DisableSSH: true, DenyPorts: []int{3000}}
+	tf.startAgent(t, tf.public.URL, tf.launched)
+	c := tf.ownerClient(t)
+	for _, k := range []struct {
+		kind   string
+		params map[string]string
+	}{{grant.StreamKindSSH, nil}, {grant.StreamKindTCP, tcpParams("3000")}} {
+		r := c.post(t, tf.launched.ID, k.kind, k.params)
 		require.Equal(t, http.StatusForbidden, r.status, r.body)
 		assert.Equal(t, ErrCodeForbidden, r.err.Code, r.body)
-		select {
-		case conn := <-tf.dials:
-			_ = conn.Close()
-			t.Fatal("the agent dialed a denied port")
-		default:
-		}
-	})
+	}
+	select {
+	case conn := <-tf.dials:
+		_ = conn.Close()
+		t.Fatal("the agent dialed a denied port")
+	default:
+	}
 }

@@ -36,7 +36,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/transport/ws"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
-	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
@@ -54,8 +53,6 @@ type tunnelFixture struct {
 	// dials receives the agent-side end of every tcp connection a
 	// sciontool agent of this fixture dialed (it echoes).
 	dials chan net.Conn
-	// agentPolicy is applied by agents that startAgent starts.
-	agentPolicy localpolicy.Policy
 }
 
 const tunnelSweep = 30 * time.Second
@@ -117,7 +114,6 @@ func (tf *tunnelFixture) startAgent(t *testing.T, hubURL string, a *store.Agent)
 		LaunchID:  a.RunID,
 		Token:     func() string { return tok },
 		OnSession: func(w *conduitv1.Welcome) { admitted <- w },
-		Policy:    tf.agentPolicy,
 		Backoff:   &conduit.Backoff{Rand: func(int64) int64 { return 0 }},
 		Clock:     fixtureClock{Fake: clock.NewFake(tf.clock.Now()), now: tf.clock.Now},
 		DialLocal: func(_ context.Context, _, _ string) (net.Conn, error) {

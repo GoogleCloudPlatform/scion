@@ -157,7 +157,7 @@ type Options struct {
 	// §3.8). When nil the agent neither advertises nor serves the ssh
 	// kind. New validates it.
 	SSH *sshd.Config
-	// Policy is the operator's conduit policy; New also applies it to SSH.
+	// Policy is the operator's conduit policy for TCP streams.
 	Policy localpolicy.Policy
 	// OnSession is called after each session is admitted. Optional.
 	OnSession func(*conduitv1.Welcome)
@@ -252,11 +252,7 @@ func New(opts Options) (*Agent, error) {
 		d := &net.Dialer{Timeout: localDialTimeout}
 		opts.DialLocal = d.DialContext
 	}
-	if opts.Policy.SSHDisabled {
-		opts.SSH = nil
-	}
 	if opts.SSH != nil {
-		opts.SSH.Policy = opts.Policy
 		if err := opts.SSH.Validate(); err != nil {
 			return nil, err
 		}

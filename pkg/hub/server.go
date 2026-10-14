@@ -60,6 +60,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit/localpolicy"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -126,12 +127,9 @@ type ServerConfig struct {
 	// the agent's exposed ports. The reserved ports (9810, 18380) are always
 	// refused. Only used behind the hub.conduit experiment.
 	ConduitTCPAllowedPorts []int
-	// ConduitSSHDisabled is server.hub.conduit.disable_ssh.
-	ConduitSSHDisabled bool
-	// ConduitDenyPorts is server.hub.conduit.deny_ports.
-	ConduitDenyPorts []int
-	// ConduitDenySockets is server.hub.conduit.deny_sockets; only agents enforce it.
-	ConduitDenySockets []string
+	// ConduitPolicy is server.hub.conduit.disable_ssh, deny_ports and
+	// disable_ssh_socket_forwarding, also sent to agents.
+	ConduitPolicy localpolicy.Policy
 	// ConduitGrantKeyActivation is how long a rotated-in Conduit grant key
 	// is published before it signs (default 15m). It must be at least the
 	// maximum interval at which grant targets refresh their key set

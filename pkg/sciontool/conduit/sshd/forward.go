@@ -197,8 +197,8 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 		return
 	}
 	err := SocketPathAllowed(m.SocketPath)
-	if err == nil {
-		err = c.socketPolicy(m.SocketPath)
+	if err == nil && c.Policy.DisableSSHSocketForwarding {
+		err = errors.New("socket forwarding is disabled by the operator policy")
 	}
 	if err != nil {
 		log.Debug("Conduit SSH: refused direct-streamlocal: %v", err)
@@ -224,12 +224,4 @@ func (c *Config) handleStreamlocal(ctx context.Context, nc ssh.NewChannel) {
 	}
 	go ssh.DiscardRequests(reqs)
 	splice(ctx, ch, conn)
-}
-
-// socketPolicy applies the operator's socket deny-list, following symlinks.
-func (c *Config) socketPolicy(path string) error {
-	if c.Policy.SocketDeniedOnDisk(path) {
-		return fmt.Errorf("socket %s is denied by the operator policy", path)
-	}
-	return nil
 }
