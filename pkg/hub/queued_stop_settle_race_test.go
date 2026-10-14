@@ -36,8 +36,7 @@ import (
 )
 
 // settleHookStore runs beforeRelease and afterRelease, once each, around
-// the settle's conditional release of agentID (the call with the
-// queued-stop condition), and counts that agent's status writes while
+// the settle's conditional release of agentID, and counts that agent's status writes while
 // countWrites is set. Transparent until armed.
 type settleHookStore struct {
 	store.Store
@@ -53,7 +52,11 @@ type settleHookStore struct {
 }
 
 func (h *settleHookStore) ReleaseReservationIfAgent(ctx context.Context, limitDefID, agentID string, cond store.AgentReleaseCond) (bool, error) {
-	if !h.fault.Active() || agentID != h.agentID || !cond.QueuedStopIntent {
+	// The settle's call is the only conditional release with neither
+	// NoStartKindClaim nor NotCounted (the observed-phase release,
+	// releaseSlotIfIdle and the sweep all set at least one), so a mutant that
+	// changes the settle's queued-stop condition still reaches the hooks.
+	if !h.fault.Active() || agentID != h.agentID || cond.NoStartKindClaim || cond.NotCounted {
 		return h.Store.ReleaseReservationIfAgent(ctx, limitDefID, agentID, cond)
 	}
 	if h.releaseErr != nil {
@@ -247,6 +250,7 @@ func TestSettle_SupersedingStart_KeepsReservation(t *testing.T) {
 
 	sf.settle()
 
+	require.Nil(t, sf.hook.beforeRelease, "the claim was injected before the settle's release")
 	held := sf.held(t)
 	require.NotNil(t, held, "the start keeps its slot")
 	assert.Equal(t, sf.slot.ID, held.ID, "the same reservation, never released and re-created")
@@ -512,8 +516,8 @@ func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.
 	require.Equal(t, http.StatusTooManyRequests, code)
 	assert.Nil(t, sf.held(t))
 
-	sf.settle() // a later heartbeat
 	sf.srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	sf.settle() // a later heartbeat
 	assert.Nil(t, sf.held(t), "no reservation is ever created for the refused start")
 	got := getAgent(t, sf.s, sf.agent.ID)
 	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "display only, until the next lifecycle action")
@@ -528,4 +532,52 @@ func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.
 	require.NotNil(t, sf.held(t), "the next start reserves with the cap check")
 	assert.Equal(t, "running", getAgent(t, sf.s, sf.agent.ID).ContainerStatus, "stop_queued is replaced")
 	assert.Zero(t, sf.backstops(backstopSiteSettle))
+}
+
+// The two conjuncts of the settle's no-re-assert rule: the intent goes back
+// to running at the SAME time as the stop (a revert, as a failed
+// system-initiated stop does), not a newer start. The settle released
+// safely, but the agent is meant to run on the same intent, so the backstop
+// re-asserts (counted).
+func TestSettle_SameTimeRevertToRunning_Reasserts(t *testing.T) {
+	sf := newSettleFixture(t, "same-time-revert")
+	require.NotNil(t, sf.agent.RunIntentAt)
+	sf.hook.afterRelease = func() {
+		reverted, err := sf.s.RevertRunIntent(context.Background(), sf.agent.ID, store.RunIntentStopped, *sf.agent.RunIntentAt, store.RunIntentRunning)
+		require.NoError(t, err)
+		require.True(t, reverted)
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	require.Nil(t, sf.hook.afterRelease, "the revert ran after the settle's release")
+	got := getAgent(t, sf.s, sf.agent.ID)
+	require.Equal(t, store.RunIntentRunning, got.RunIntent)
+	assert.True(t, sameTime(got.RunIntentAt, sf.agent.RunIntentAt), "the same intent time")
+	assert.NotNil(t, sf.held(t), "re-asserted: not a newer start")
+	assert.EqualValues(t, 1, sf.backstops(backstopSiteSettle))
+}
+
+// The released conjunct of the settle's no-re-assert rule: a start claims
+// the agent before the settle's release (so the conditional release does
+// not happen), and its slot is then freed by an unguarded path. The settle
+// did not release, so the backstop re-asserts, once, counted and audited.
+func TestSettle_SupersedingStart_UnguardedReleaseSlipped_BackstopOnce(t *testing.T) {
+	sf := newSettleFixture(t, "supersede-slip")
+	sf.hook.beforeRelease = func() {
+		_, err := sf.s.ClaimAgentStart(context.Background(), sf.agent.ID, "other-hub", store.StartClaimUser, "", time.Minute)
+		require.NoError(t, err)
+		sf.srv.quotaService.Release(context.Background(), store.LimitMaxAgentsPerBroker, sf.agent.ID) // unguarded
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+
+	require.Nil(t, sf.hook.beforeRelease, "the claim and the slip happened before the settle's release")
+	assert.NotNil(t, sf.held(t), "the backstop put the slot back")
+	assert.EqualValues(t, 1, sf.backstops(backstopSiteSettle), "the backstop fired once")
+	audits := capacityAudits(t, sf.s, auditQuotaBackstopReassert, sf.agent.ID)
+	require.Len(t, audits, 1)
+	assert.Contains(t, audits[0].AfterSummary, sf.brokerID)
 }

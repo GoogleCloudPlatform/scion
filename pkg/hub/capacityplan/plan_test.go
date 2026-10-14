@@ -161,13 +161,6 @@ func TestPlanInstanceCapacity_Fixtures(t *testing.T) {
 			reasons: []string{ReasonUnknownReceiver},
 		},
 		{
-			name:    "no override, a negative binding is unlimited (as ResolveEffectiveLimit)",
-			legacy:  LegacyCapacity{BrokerBindings: []int64{5, -1}, SystemDefault: 100, Enforced: true},
-			ids:     ids,
-			outcome: OutcomeOperatorDecisionRequired,
-			reasons: []string{ReasonInheritedAggregate},
-		},
-		{
 			name:    "no instances",
 			legacy:  LegacyCapacity{Override: i64(6), Enforced: true},
 			ids:     nil,
@@ -215,6 +208,18 @@ func TestPlanInstanceCapacity_InheritedAggregateIsStated(t *testing.T) {
 	require.Len(t, plan.Reasons, 1)
 	assert.Contains(t, plan.Reasons[0], "aggregate of 200")
 	assert.Nil(t, plan.Allocations)
+
+	// A binding or a default <= 0 is unlimited, as in ResolveEffectiveLimit.
+	for _, l := range []LegacyCapacity{
+		{BrokerBindings: []int64{5, -1}, SystemDefault: 100, Enforced: true},
+		{SystemDefault: -1, Enforced: true},
+		{SystemDefault: 0, Enforced: true},
+	} {
+		plan := PlanInstanceCapacity(l, []string{"a", "b"}, nil)
+		require.Equal(t, OutcomeOperatorDecisionRequired, plan.Outcome)
+		require.Len(t, plan.Reasons, 1)
+		assert.Contains(t, plan.Reasons[0], "inherits an unlimited limit", "%+v", l)
+	}
 
 	// The most generous binding is the inherited limit; 0 (unlimited) wins.
 	plan = PlanInstanceCapacity(LegacyCapacity{BrokerBindings: []int64{5, 0}, SystemDefault: 100, Enforced: true},

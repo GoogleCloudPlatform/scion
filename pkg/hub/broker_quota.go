@@ -636,7 +636,7 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		// reservation (legacy agents predating the cap, or any other gap). A
 		// pinned agent's row on another broker is reported here only when
 		// that broker is not listed; the release pass reports it otherwise.
-		n, c, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, func(agentID string) (string, bool, error) {
+		n, c, _, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, func(agentID string) (string, bool, error) {
 			held, ok := heldBroker[agentID]
 			return held, ok, nil
 		}, func(held string) bool { return !listedBrokers[held] })
@@ -778,12 +778,13 @@ func brokerBackfillHolds(agent *store.Agent) bool {
 // backfilled; it is reported as a scope conflict when reportHeld returns true
 // for that broker. An unpinned agent's backfill onto a row held elsewhere is
 // refused by the unique index and reported. Returns the number of
-// reservations recorded and of conflicts reported; err is the agent list's
+// reservations recorded, of conflicts reported and of agents skipped
+// because their reservation could not be read; err is the agent list's
 // error.
-func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool) (backfilled, conflicts int, err error) {
+func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker func(agentID string) (held string, ok bool, err error), reportHeld func(heldBrokerID string) bool) (backfilled, conflicts, skipped int, err error) {
 	agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: brokerID}, store.ListOptions{Limit: 10000})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	for i := range agents.Items {
 		agent := &agents.Items[i]
@@ -794,6 +795,7 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 		if herr != nil {
 			s.agentLifecycleLog.Warn("quota backfill: reading the agent's reservation failed",
 				"agent_id", agent.ID, "broker_id", brokerID, "error", herr)
+			skipped++
 			continue
 		}
 		if hasHeld && held == brokerID {
@@ -822,15 +824,15 @@ func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID 
 			backfilled++
 		}
 	}
-	return backfilled, conflicts, nil
+	return backfilled, conflicts, skipped, nil
 }
 
 // backfillBrokerReservations runs the reconcile's backfill for one broker
 // (backfillBrokerAgents), outside the hourly pass. It reads only the active
 // reservation of each of that broker's agents that holds capacity (one
 // point read per such agent), not every reservation on the hub. Reports
-// whether it ran to the end (true also when no max_agents_per_broker limit
-// is defined).
+// whether it ran to the end with every agent read (true also when no
+// max_agents_per_broker limit is defined).
 func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string) bool {
 	if s.quotaService == nil {
 		return true
@@ -855,7 +857,7 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 			return "", false, err
 		}
 	}
-	backfilled, conflicts, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true })
+	backfilled, conflicts, skipped, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true })
 	if err != nil {
 		s.agentLifecycleLog.Warn("quota backfill: failed to list agents for broker", "broker_id", brokerID, "error", err)
 		return false
@@ -864,7 +866,9 @@ func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string
 		s.agentLifecycleLog.Info("quota backfill: recorded reservations of a Runtime Broker's agents",
 			"broker_id", brokerID, "backfilled", backfilled, "scope_conflicts", conflicts)
 	}
-	return true
+	// A skipped agent is retried on the next heartbeat (the backfill is
+	// idempotent): the broker row is not recorded as done.
+	return skipped == 0
 }
 
 // backfillRegisteredBrokerOnce runs backfillBrokerReservations for broker

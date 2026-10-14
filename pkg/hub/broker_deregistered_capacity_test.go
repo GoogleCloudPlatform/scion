@@ -424,3 +424,40 @@ func TestReRegistered_BackfillRestoresRunningAgents(t *testing.T) {
 	require.NotNil(t, held, "restored on the first heartbeat, before any sweep")
 	assert.Equal(t, id, held.ScopeID)
 }
+
+// errReservationRead is returned by reservationReadFaultStore while armed.
+var errReservationRead = errors.New("injected reservation read fault")
+
+// reservationReadFaultStore fails GetActiveReservation of agentID while armed.
+type reservationReadFaultStore struct {
+	store.Store
+	fault   *storeFaultSwitch
+	agentID string
+}
+
+func (r *reservationReadFaultStore) GetActiveReservation(ctx context.Context, limitDefID, resourceID string) (*store.UsageReservation, error) {
+	if r.fault.Active() && resourceID == r.agentID {
+		return nil, errReservationRead
+	}
+	return r.Store.GetActiveReservation(ctx, limitDefID, resourceID)
+}
+
+// A reservation read that fails during a broker's first-heartbeat backfill
+// does not mark the broker row as backfilled: the next heartbeat retries,
+// and the agent is counted then, not at the hourly pass.
+func TestFirstHeartbeatBackfill_ReadError_RetriedNextHeartbeat(t *testing.T) {
+	f := newReconcileFixture(t)
+	hook, fault := installStoreFault(t, f.srv, func(inner store.Store, fs *storeFaultSwitch) *reservationReadFaultStore {
+		return &reservationReadFaultStore{Store: inner, fault: fs}
+	})
+	a := f.addAgent("bf-retry", "running", "working")
+	hook.agentID = a.ID
+	fault.Arm()
+
+	f.heartbeat(completeInventory(), a.Slug)
+	require.False(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "the read failed: not backfilled")
+
+	hook.agentID = ""
+	f.heartbeat(completeInventory(), a.Slug)
+	assert.True(t, hasReservation(t, f.s, store.LimitMaxAgentsPerBroker, a.ID), "retried on the next heartbeat")
+}
