@@ -17,6 +17,7 @@ package cmd
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -109,17 +110,33 @@ func TestConduitDrainStepBound(t *testing.T) {
 
 // TestHubServerPathSubscribesToSignalsOnce (conduit review F2,
 // ptone/scion#5105): on the hub server path, installServerShutdownSignals
-// is the only SIGINT/SIGTERM subscriber that can cancel; no other file on
-// that path calls signal.Notify or signal.NotifyContext. (cmd/broker.go's
-// foreground SIGTERM handler is the known exception: it removes the
-// broker record and calls the same run-once shutdown.)
+// is the only SIGINT/SIGTERM subscriber that can cancel; no non-test
+// cmd/server_*.go file calls signal.Notify or signal.NotifyContext, except
+// the listed ones. (cmd/broker.go's foreground SIGTERM handler is the known
+// exception outside these files: it removes the broker record and calls the
+// same run-once shutdown.)
 func TestHubServerPathSubscribesToSignalsOnce(t *testing.T) {
+	// Files allowed their own subscription, with the reason. Empty today;
+	// the relay role (server_relay.go, a separate process mode dispatched
+	// before installServerShutdownSignals) joins it after its rebase.
+	exceptions := map[string]string{}
 	call := regexp.MustCompile(`signal\.Notify(Context)?\(`)
-	for _, f := range []string{"server_foreground.go", "server_conduit.go", "server_shutdown.go", "server_flat_host.go"} {
+	files, err := filepath.Glob("server_*.go")
+	require.NoError(t, err)
+	scanned := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		if _, ok := exceptions[f]; ok {
+			continue
+		}
 		src, err := os.ReadFile(f)
 		require.NoError(t, err)
+		scanned++
 		assert.Empty(t, call.FindAllString(string(src), -1), "%s subscribes to signals; only installServerShutdownSignals may (ptone/scion#5054)", f)
 	}
+	assert.GreaterOrEqual(t, scanned, 4, "server_*.go files scanned")
 	src, err := os.ReadFile("server_foreground.go")
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(src), "installServerShutdownSignals(signalsCtx, signal.Notify, "), "the server subscribes exactly once, through installServerShutdownSignals")
