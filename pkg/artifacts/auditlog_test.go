@@ -240,8 +240,8 @@ func TestDecisionLogLifecycleEvents(t *testing.T) {
 }
 
 // TestDecisionLogReviewGrant: a review grant is logged with the clause that
-// allowed it: delegating_user for the owning agent's delegating user,
-// project_admin for an administrator of the home project.
+// allowed it: steward_delegator for the owning agent's delegating user,
+// steward_project_owner for an owner or administrator of the home project.
 func TestDecisionLogReviewGrant(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
 	f.host.allowAdmin(projAdmin, "project-1")
@@ -252,8 +252,8 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 		subject   string
 		authority string
 	}{
-		{delegator, reviewerID, logAuthorityDelegatingUser},
-		{projAdmin, memberID, logAuthorityProjectAdmin},
+		{delegator, reviewerID, logAuthorityStewardDelegator},
+		{projAdmin, memberID, logAuthorityStewardProjectOwner},
 	} {
 		f.host.mu.Lock()
 		f.host.calls = nil
@@ -304,6 +304,14 @@ func TestDecisionLogRefusals(t *testing.T) {
 	f.host.deny(agentX, "project-2", PermissionCreate)
 	c.take(t)
 	manifest := `{"entry":"a.md","files":[{"path":"a.md","size":1,"sha256":"` + sha([]byte("x")) + `"}]}`
+	scope64 := strings.Repeat("a", 64)
+	noManage := principal{PrincipalKindUser, "user-no-manage", ""}
+	f.host.allow(noManage, "project-1", PermissionRead)
+	f.host.deny(noManage, "project-1", PermissionManage)
+	agentC := principal{PrincipalKindAgent, "agent-c-uuid", "project-1"}
+	f.host.allow(agentC, "project-1", PermissionRead)
+	insertGrant(f, id, SubjectPrincipal, PrincipalRef(agentC.kind, agentC.ref), GrantWrite, nil)
+	f.host.deny(agentC, "project-1", PermissionCreate)
 
 	cases := []struct {
 		name     string
@@ -336,6 +344,16 @@ func TestDecisionLogRefusals(t *testing.T) {
 			logActionWrite, logReasonNotVersionPublisher, "PUT /api/v1/artifacts/{id}/versions/{seq}/files/{path}", true},
 		{"credential does not permit publishing", agentX, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=project-2", `x`, http.StatusForbidden,
 			logActionCreate, logReasonCredentialNotPermit, "POST /api/v1/artifacts", false},
+		{"publish into a 64-byte scope", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=" + scope64, `x`, http.StatusForbidden,
+			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
+		{"publish into a 65-byte scope", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=" + scope64 + "a", `x`, http.StatusForbidden,
+			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
+		{"publish into a scope with a disallowed character", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=" + url.QueryEscape("project.2"), `x`, http.StatusForbidden,
+			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
+		{"reader whose credential does not permit managing", noManage, http.MethodPatch, artifactPath(id), `{"expiresAt":null}`, http.StatusForbidden,
+			logActionAdminister, logReasonCredentialNotPermit, "PATCH /api/v1/artifacts/{id}", true},
+		{"agent whose credential does not permit publishing versions", agentC, http.MethodPost, "/api/v1/artifacts/" + id + "/versions", manifest, http.StatusForbidden,
+			logActionWrite, logReasonCredentialNotPermit, "POST /api/v1/artifacts/{id}/versions", true},
 		{"publish into a garbage scope", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=" + url.QueryEscape("forged\nlabel="+strings.Repeat("x", 300)), `x`, http.StatusForbidden,
 			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
 		{"move into a project the owner cannot publish in", userU, http.MethodPatch, artifactPath(id), `{"scopeRef":"project-3"}`, http.StatusForbidden,
@@ -358,8 +376,12 @@ func TestDecisionLogRefusals(t *testing.T) {
 		} else {
 			want[logKeyArtifactID] = nil
 			want[logKeyProjectID] = "project-2"
-			if tc.name == "publish into a garbage scope" {
-				want[logKeyProjectID] = nil // caller text without a project id's shape is not logged
+			// Caller text is logged as the project only with a project id's shape.
+			switch tc.name {
+			case "publish into a 64-byte scope":
+				want[logKeyProjectID] = scope64
+			case "publish into a garbage scope", "publish into a 65-byte scope", "publish into a scope with a disallowed character":
+				want[logKeyProjectID] = nil
 			}
 		}
 		checkEntry(t, tc.name, one(t, tc.name, entries), "WARN", want)
@@ -727,7 +749,7 @@ type noClauseHost struct {
 }
 
 // TestDecisionLogReviewGrantUnnamedClause: on a host that does not name the
-// clause, a review grant is logged with authority review_grantor, and the
+// clause, a review grant is logged without an authority, and the
 // host is asked once (MayGrantReview), never a second question.
 func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
@@ -741,7 +763,7 @@ func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
 	}
 	entries, _ := c.take(t)
 	checkEntry(t, "unnamed clause", one(t, "unnamed clause", entries), "INFO", map[string]any{
-		logKeyAction: logActionGrantCreated, logKeyAuthority: logAuthorityReviewGrantor, logKeyPrincipalID: delegator.ref,
+		logKeyAction: logActionGrantCreated, logKeyAuthority: nil, logKeyPrincipalID: delegator.ref,
 	})
 	f.host.mu.Lock()
 	defer f.host.mu.Unlock()
@@ -757,8 +779,7 @@ func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
 }
 
 // TestDecisionLogProjectAdminDelete: a delete by an administrator of the
-// home project is logged with authority project_admin (the event authority
-// custodian_project_admin is not a log value).
+// home project is logged with the event authority custodian_project_admin.
 func TestDecisionLogProjectAdminDelete(t *testing.T) {
 	f, id := newLinkFixture(t)
 	admin := principal{PrincipalKindUser, "user-home-admin", ""}
@@ -770,7 +791,177 @@ func TestDecisionLogProjectAdminDelete(t *testing.T) {
 	}
 	entries, _ := c.take(t)
 	checkEntry(t, "project admin delete", one(t, "project admin delete", entries), "INFO", map[string]any{
-		logKeyAction: logActionDeleted, logKeyAuthority: logAuthorityProjectAdmin, logKeyPrincipalID: admin.ref,
+		logKeyAction: logActionDeleted, logKeyAuthority: logAuthorityCustodianProjectAdmin, logKeyPrincipalID: admin.ref,
 		logKeyArtifactID: id, logKeyProjectID: "project-1", logKeyOwnerKind: PrincipalKindUser,
 	})
+}
+
+// TestProjectIDShaped pins the shape a caller-supplied scope must have to be
+// logged as project_id: 1 to 64 ASCII letters, digits, '-' or '_'.
+func TestProjectIDShaped(t *testing.T) {
+	for s, want := range map[string]bool{
+		"":                                     false,
+		strings.Repeat("a", 64):                true,
+		strings.Repeat("a", 65):                false,
+		"0b4f1d2e-9c3a-4e5f-8a7b-6c5d4e3f2a1b": true,
+		"project_2-B9":                         true,
+		"project.2":                            false,
+		"project 2":                            false,
+		"project\n2":                           false,
+		"projé":                                false,
+		"project/2":                            false,
+	} {
+		if got := projectIDShaped(s); got != want {
+			t.Errorf("projectIDShaped(%q) = %v, want %v", s, got, want)
+		}
+	}
+}
+
+// TestDecisionLogRefusalReasonsOnlyWhenWritten: the reason of a refusal is
+// worked out (with extra host questions) only when the entry is written.
+// With the logger above WARN, each refusal asks the host strictly less than
+// with it at WARN.
+func TestDecisionLogRefusalReasonsOnlyWhenWritten(t *testing.T) {
+	f, id := newLinkFixture(t)
+	reader := principal{PrincipalKindUser, "user-reader", ""}
+	f.host.allow(reader, "project-1", PermissionRead)
+	manifest := `{"entry":"a.md","files":[{"path":"a.md","size":1,"sha256":"` + sha([]byte("x")) + `"}]}`
+	calls := func(level slog.Level, p principal, method, target, body string) int {
+		t.Helper()
+		captureLog(f, level)
+		f.host.mu.Lock()
+		f.host.calls = nil
+		f.host.mu.Unlock()
+		if rec := jsonDo(f, p, method, target, body); rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s: %d %s", method, target, rec.Code, rec.Body.String())
+		}
+		f.host.mu.Lock()
+		defer f.host.mu.Unlock()
+		return len(f.host.calls)
+	}
+	for _, tc := range []struct {
+		name         string
+		p            principal
+		method, path string
+		body         string
+	}{
+		{"administer", reader, http.MethodPatch, artifactPath(id), `{"expiresAt":null}`},
+		{"delete", reader, http.MethodDelete, artifactPath(id), ``},
+		{"write", agentB, http.MethodPost, "/api/v1/artifacts/" + id + "/versions", manifest},
+		{"create", agentA, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=project-2", `x`},
+	} {
+		off := calls(slog.LevelError, tc.p, tc.method, tc.path, tc.body)
+		on := calls(slog.LevelWarn, tc.p, tc.method, tc.path, tc.body)
+		if off >= on {
+			t.Errorf("%s: %d host calls with the refusal not logged, %d logged; want fewer when not logged", tc.name, off, on)
+		}
+	}
+}
+
+// grantCountStore counts ListGrants calls.
+type grantCountStore struct {
+	Store
+	mu sync.Mutex
+	n  int
+}
+
+func (s *grantCountStore) ListGrants(ctx context.Context, id string) ([]Grant, error) {
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	return s.Store.ListGrants(ctx, id)
+}
+
+// TestDecisionLogGrantRemovalReadOnlyWhenWritten: the grant read that gives
+// a removal entry its subject happens only when the entry is written.
+func TestDecisionLogGrantRemovalReadOnlyWhenWritten(t *testing.T) {
+	f, id := newLinkFixture(t)
+	st := &grantCountStore{Store: f.store}
+	f.svc.SetStore(st)
+	remove := func(level slog.Level) int {
+		t.Helper()
+		rec := jsonDo(f, userU, http.MethodPost, grantsPath(id), reviewBody(SubjectPrincipal, "user:user-g", GrantRead))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("grant: %d %s", rec.Code, rec.Body.String())
+		}
+		grantID := decodeInto[GrantResponse](t, rec).Grant.ID
+		captureLog(f, level)
+		st.mu.Lock()
+		st.n = 0
+		st.mu.Unlock()
+		if rec := f.do(&userU, http.MethodDelete, grantsPath(id)+"/"+grantID, nil, nil); rec.Code != http.StatusNoContent {
+			t.Fatalf("delete grant: %d %s", rec.Code, rec.Body.String())
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.n
+	}
+	if off, on := remove(slog.LevelWarn), remove(slog.LevelInfo); off >= on {
+		t.Errorf("grant reads: %d with the removal not logged, %d logged; want fewer when not logged", off, on)
+	}
+}
+
+// sweepFailStore deletes one artifact, then fails, as a sweep that broke
+// partway would.
+type sweepFailStore struct{ Store }
+
+func (sweepFailStore) SweepExpired(context.Context, time.Time, int) ([]ArtifactRef, error) {
+	return []ArtifactRef{{ID: "a-swept", ScopeRef: "project-1"}}, errStoreDown
+}
+
+// TestMaintenanceLogSweepFailure: a sweep that fails partway logs what it
+// deleted and a WARN summary with reason store_error.
+func TestMaintenanceLogSweepFailure(t *testing.T) {
+	f := newFixture(t, false)
+	c := &logCapture{}
+	l := slog.New(slog.NewJSONHandler(c, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	n, err := SweepExpired(context.Background(), sweepFailStore{f.store}, time.Now(), 10, l)
+	if n != 1 || err == nil {
+		t.Fatalf("SweepExpired = %d, %v; want 1 and the error", n, err)
+	}
+	entries, _ := c.take(t)
+	if len(entries) != 2 {
+		t.Fatalf("%d entries, want the deletion and a summary: %v", len(entries), entries)
+	}
+	checkEntry(t, "deletion", entries[0], "INFO", map[string]any{
+		logKeyAction: logActionDeleted, logKeyArtifactID: "a-swept", logKeyProjectID: "project-1"})
+	checkEntry(t, "summary", entries[1], "WARN", map[string]any{
+		logKeyAction: logActionRetentionPass, logKeyOutcome: logOutcomeError, logKeyReason: logReasonStoreError, logKeyCount: 1.0})
+}
+
+// TestDecisionLogVersionsThroughGrants: a version written through a grant is
+// logged with the grant's permission and no authority: write for a write
+// grantee, review for a review grantee.
+func TestDecisionLogVersionsThroughGrants(t *testing.T) {
+	f := newReviewLevelFixture(t)
+	c := captureLog(f.fixture, slog.LevelDebug)
+	f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+	entries, _ := c.take(t)
+	checkEntry(t, "write grantee", one(t, "write grantee", entries), "INFO", map[string]any{
+		logKeyAction: logActionVersionCreated, logKeyPermission: GrantWrite, logKeyAuthority: nil, logKeyPrincipalID: userU.ref})
+	f.startReview(rvOnly, with(f.v1, "plan.md", reviewMarked), "plan.md")
+	entries, _ = c.take(t)
+	checkEntry(t, "review grantee", one(t, "review grantee", entries), "INFO", map[string]any{
+		logKeyAction: logActionVersionCreated, logKeyPermission: GrantReview, logKeyAuthority: nil, logKeyPrincipalID: rvOnly.ref})
+}
+
+// sweepFailFirstStore fails before deleting anything.
+type sweepFailFirstStore struct{ Store }
+
+func (sweepFailFirstStore) SweepExpired(context.Context, time.Time, int) ([]ArtifactRef, error) {
+	return nil, errStoreDown
+}
+
+// TestMaintenanceLogSweepFailsFirst: a sweep that fails before deleting
+// anything still logs its WARN summary.
+func TestMaintenanceLogSweepFailsFirst(t *testing.T) {
+	f := newFixture(t, false)
+	c := &logCapture{}
+	l := slog.New(slog.NewJSONHandler(c, nil))
+	if n, err := SweepExpired(context.Background(), sweepFailFirstStore{f.store}, time.Now(), 10, l); n != 0 || err == nil {
+		t.Fatalf("SweepExpired = %d, %v; want 0 and the error", n, err)
+	}
+	entries, _ := c.take(t)
+	checkEntry(t, "summary", one(t, "summary", entries), "WARN", map[string]any{
+		logKeyAction: logActionRetentionPass, logKeyOutcome: logOutcomeError, logKeyReason: logReasonStoreError})
 }

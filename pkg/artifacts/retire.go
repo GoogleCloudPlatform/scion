@@ -88,7 +88,7 @@ func (s *Service) handleDeleteArtifact(w http.ResponseWriter, r *http.Request, i
 		slog.ErrorContext(ctx, "artifacts: delete artifact failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "internal", "could not delete the artifact")
 	default:
-		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: eventLogAuthority(authority)})
+		s.logAllowed(r, logEntry{action: logActionDeleted, artifact: a, authority: authority})
 		w.Header().Set("Cache-Control", "private, no-store")
 		w.WriteHeader(http.StatusNoContent)
 	}

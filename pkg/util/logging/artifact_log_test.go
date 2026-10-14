@@ -22,6 +22,9 @@ import (
 	"testing"
 
 	gcplog "cloud.google.com/go/logging"
+	"google.golang.org/api/option"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 func TestNewArtifactLogger_StdoutFallbackWithoutCloud(t *testing.T) {
@@ -120,5 +123,67 @@ func TestArtifactCloudHandler_WithGroupKeepsType(t *testing.T) {
 	}
 	if _, ok := h.WithAttrs([]slog.Attr{slog.String("k", "v")}).(*artifactCloudHandler); !ok {
 		t.Error("WithAttrs should return an *artifactCloudHandler")
+	}
+}
+
+// fakeCloudClient is a Cloud Logging client that never reaches a server.
+func fakeCloudClient(t *testing.T) *gcplog.Client {
+	t.Helper()
+	client, err := gcplog.NewClient(context.Background(), "projects/fake-project",
+		option.WithoutAuthentication(),
+		option.WithGRPCDialOption(grpc.WithTransportCredentials(insecure.NewCredentials())),
+		option.WithEndpoint("localhost:1"),
+	)
+	if err != nil {
+		t.Fatalf("fake gcplog client: %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// TestNewArtifactLogger_CloudRunWithCloudClient: on Cloud Run with a cloud
+// client the stdout handler is dropped (the runtime forwards stdout), the
+// cloud handler is gated by the circuit when one is given, and request ids
+// are still added.
+func TestNewArtifactLogger_CloudRunWithCloudClient(t *testing.T) {
+	t.Setenv("K_SERVICE", "my-service")
+	client := fakeCloudClient(t)
+	logger, cleanup, err := NewArtifactLogger(ArtifactLoggerConfig{Component: "test-hub", CloudClient: client, Level: slog.LevelInfo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	rh, ok := logger.Handler().(*requestIDHandler)
+	if !ok {
+		t.Fatalf("handler = %T, want *requestIDHandler", logger.Handler())
+	}
+	if _, ok := rh.inner.(*artifactCloudHandler); !ok {
+		t.Errorf("inner = %T, want only the *artifactCloudHandler", rh.inner)
+	}
+
+	gated, cleanup2, err := NewArtifactLogger(ArtifactLoggerConfig{Component: "test-hub", CloudClient: client,
+		CircuitOpen: func() bool { return false }, Level: slog.LevelInfo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup2()
+	if g, ok := gated.Handler().(*requestIDHandler).inner.(*circuitGatedHandler); !ok {
+		t.Errorf("inner = %T, want *circuitGatedHandler with a circuit", gated.Handler().(*requestIDHandler).inner)
+	} else if _, ok := g.inner.(*artifactCloudHandler); !ok {
+		t.Errorf("gated inner = %T, want *artifactCloudHandler", g.inner)
+	}
+}
+
+// TestNewArtifactLogger_CloudClientOffCloudRunKeepsStdout: off Cloud Run a
+// cloud client adds the cloud handler next to stdout.
+func TestNewArtifactLogger_CloudClientOffCloudRunKeepsStdout(t *testing.T) {
+	t.Setenv("K_SERVICE", "")
+	logger, cleanup, err := NewArtifactLogger(ArtifactLoggerConfig{Component: "test-hub", CloudClient: fakeCloudClient(t), Level: slog.LevelInfo})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	if _, ok := logger.Handler().(*requestIDHandler).inner.(*multiHandler); !ok {
+		t.Errorf("inner = %T, want the cloud and stdout handlers (*multiHandler)", logger.Handler().(*requestIDHandler).inner)
 	}
 }

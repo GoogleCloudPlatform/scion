@@ -117,20 +117,21 @@ const (
 	logReasonCheckerError          = "principal_check_failed"
 )
 
-// Log authorities: why the actor was allowed. owner and admin_grant are
-// the event authorities of the same name; project_admin is the event
-// authority custodian_project_admin, and also a review grant given as an
-// administrator of the home project; delegating_user is a review grant
-// given as the owning agent's delegating user; review_grantor is a review
-// grant on a host that does not name the clause (no ReviewGrantClauser).
-// The maintenance pass logs the event authorities retention and
+// Log authorities: why the actor was allowed. The values follow the artifact
+// share-authority design, so they match the artifact_event authorities:
+// owner, admin_grant and custodian_project_admin are the event authorities
+// of the same name; steward_project_owner and steward_delegator are a review
+// grant given as an owner or administrator of the home project or as the
+// owning agent's delegating user (the clause a ReviewGrantClauser names). A
+// review grant on a host that does not name the clause is logged without an
+// authority. The maintenance pass logs the event authorities retention and
 // reconciler.
 const (
-	logAuthorityOwner          = AuthorityOwner
-	logAuthorityAdminGrant     = AuthorityAdminGrant
-	logAuthorityProjectAdmin   = "project_admin"
-	logAuthorityReviewGrantor  = "review_grantor"
-	logAuthorityDelegatingUser = "delegating_user"
+	logAuthorityOwner                 = AuthorityOwner
+	logAuthorityAdminGrant            = AuthorityAdminGrant
+	logAuthorityCustodianProjectAdmin = AuthorityCustodianProjectAdmin
+	logAuthorityStewardProjectOwner   = "steward_project_owner"
+	logAuthorityStewardDelegator      = "steward_delegator"
 )
 
 // SetLogger sets the function that yields the artifact decision logger.
@@ -175,14 +176,6 @@ type logEntry struct {
 	subjectRef  string
 	permission  string
 	count       int
-}
-
-// eventLogAuthority maps an event authority to its log authority.
-func eventLogAuthority(eventAuthority string) string {
-	if eventAuthority == AuthorityCustodianProjectAdmin {
-		return logAuthorityProjectAdmin
-	}
-	return eventAuthority
 }
 
 // logDecision writes e for the request r, as its caller.
@@ -367,7 +360,7 @@ func (s *Service) grantForLog(r *http.Request, b backend, a *Artifact, grantID s
 // logGrantRemoved writes the removal of grant g (nil when it could not be
 // read beforehand) by actor.
 func (s *Service) logGrantRemoved(r *http.Request, a *Artifact, g *Grant, actor *Actor) {
-	e := logEntry{action: logActionGrantRemoved, artifact: a, authority: eventLogAuthority(actor.Authority)}
+	e := logEntry{action: logActionGrantRemoved, artifact: a, authority: actor.Authority}
 	if g != nil {
 		e.subjectKind, e.subjectRef, e.permission = g.SubjectKind, g.SubjectRef, g.Permission
 	}
@@ -378,7 +371,7 @@ func (s *Service) logGrantRemoved(r *http.Request, a *Artifact, g *Grant, actor 
 // after: a move (logged in the old home project, with the new home as its
 // scope subject) and an expiry set or cleared.
 func (s *Service) logPatch(r *http.Request, before, after *Artifact, u ArtifactUpdate) {
-	authority := eventLogAuthority(u.Actor.Authority)
+	authority := u.Actor.Authority
 	if u.HomeGrant != nil {
 		s.logAllowed(r, logEntry{action: logActionMoved, artifact: before, authority: authority,
 			subjectKind: SubjectScope, subjectRef: u.HomeGrant.SubjectRef, permission: u.HomeGrant.Permission})
@@ -395,7 +388,7 @@ func (s *Service) logPatch(r *http.Request, before, after *Artifact, u ArtifactU
 // logLink writes a share link created or revoked by actor. The link is
 // logged by kind only: never its token, the token's hash or its id.
 func (s *Service) logLink(r *http.Request, a *Artifact, action string, actor *Actor) {
-	s.logAllowed(r, logEntry{action: action, artifact: a, authority: eventLogAuthority(actor.Authority),
+	s.logAllowed(r, logEntry{action: action, artifact: a, authority: actor.Authority,
 		subjectKind: SubjectLink, permission: GrantRead})
 }
 
@@ -510,14 +503,14 @@ type reviewClauseNote struct{}
 const reviewClauseUnnamed = "unnamed"
 
 // reviewGrantLogAuthority is the log authority of a review grant allowed by
-// clause: project_admin or delegating_user as the host named it, and
-// review_grantor when the host did not name it.
+// clause: steward_project_owner or steward_delegator as the host named it,
+// and none ("", the field is left out) when the host did not name it.
 func reviewGrantLogAuthority(clause string) string {
 	switch clause {
 	case ReviewClauseProjectAdmin:
-		return logAuthorityProjectAdmin
+		return logAuthorityStewardProjectOwner
 	case ReviewClauseDelegatingUser:
-		return logAuthorityDelegatingUser
+		return logAuthorityStewardDelegator
 	}
-	return logAuthorityReviewGrantor
+	return ""
 }
