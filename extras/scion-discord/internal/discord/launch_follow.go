@@ -48,16 +48,16 @@ func (h *CommandHandler) SetAsyncCreate(enabled bool) {
 	h.asyncCreate = enabled
 }
 
-// launchAgentReader is the agent service hubclient.WaitForLaunch polls. It
-// implements only Get, through the Discord hub client so each read is
-// signed and made for the linked user who created the agent. WaitForLaunch
-// calls no other method; the embedded interface is nil.
+// launchAgentReader is the hubclient.AgentGetter that hubclient.WaitForLaunch
+// polls. It reads through the Discord hub client, so each read is signed
+// and made for the linked user who created the agent.
 type launchAgentReader struct {
-	hubclient.AgentService
 	hub        HubClient
 	projectID  string
 	onBehalfOf string
 }
+
+var _ hubclient.AgentGetter = launchAgentReader{}
 
 // Get reads the agent. A hub error is returned as *apiclient.APIError so
 // WaitForLaunch can tell not-found, refused and transient answers apart.
