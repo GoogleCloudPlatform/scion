@@ -182,7 +182,7 @@ const ROWS: Record<string, RowSpec> = {
   'R2-21': { role: 'member', title: 'HTML bundle in the chat preview', where: 'skip' },
   'DIAG-member-roundtrip': {
     role: 'member',
-    title: 'diagnostic leg, no oracle row: v1 link click after a History/Preview round-trip',
+    title: 'diagnostic leg, no oracle row: R2-11 path (v2, View v1, round-trip) as the member',
     graded: false,
     where: 'diagnostic',
   },
@@ -789,7 +789,9 @@ async function frameDetached(page: Page): Promise<boolean | null> {
     .elementHandle({ timeout: 2_000 })
     .catch(() => null);
   const frame = el ? await el.contentFrame().catch(() => null) : null;
-  return frame ? frame.isDetached() : null;
+  const detached = frame ? frame.isDetached() : null;
+  await el?.dispose().catch(() => undefined);
+  return detached;
 }
 
 /**
@@ -815,6 +817,8 @@ async function clickInFrameLink(
   ((r.ui.clickDiag ??= []) as Array<Record<string, unknown>>).push(rec);
   const target = `/${targetEntry}`;
   const frameEl = page.locator(RENDER_SELECTORS.htmlFrame).first();
+  // How long the pre-click captures take, so a result can be judged against it.
+  const captureStart = Date.now();
   const beforeFrames = viewFrameStates(page);
   const linkBox = await htmlFrame(page)
     .locator(link)
@@ -833,15 +837,16 @@ async function clickInFrameLink(
     viewFrames: beforeFrames,
     targetRequests: bundleRequestsFor(target),
   };
+  const centre = linkBox
+    ? { x: linkBox.x + linkBox.width / 2, y: linkBox.y + linkBox.height / 2 }
+    : null;
   if (DIAG_LEGS_ON) {
-    const centre = linkBox
-      ? { x: linkBox.x + linkBox.width / 2, y: linkBox.y + linkBox.height / 2 }
-      : null;
     (rec.before as Record<string, unknown>).banner = await bannerState(page, centre);
     (rec.before as Record<string, unknown>).documentHeaders = JSON.parse(
       JSON.stringify(r2.documentHeaders)
     ) as unknown;
   }
+  rec.preClickMs = Date.now() - captureStart;
   const alreadyThere = beforeFrames.some((f) => f.entry === targetEntry && f.urlSeq === seq);
   rec.firstClick = await htmlFrame(page)
     .locator(link)
@@ -850,7 +855,7 @@ async function clickInFrameLink(
     .catch((err: unknown) => redactViews(firstLine(err)));
   if (DIAG_LEGS_ON) {
     // Right after the click: did the banner (in normal flow) move or appear?
-    rec.bannerAfterClick = await bannerState(page, null);
+    rec.bannerAfterClick = await bannerState(page, centre);
   }
   await page.waitForTimeout(1_000);
   rec.after1s = { viewFrames: viewFrameStates(page), frameDetached: await frameDetached(page) };
@@ -981,7 +986,18 @@ async function runDiagnosticLegs(): Promise<void> {
     async (r) => {
       const started = Date.now();
       try {
-        const page = await openV1('member', r);
+        // R2-11's exact path, as the member: current page, v2 through the
+        // Version menu, History, View v1, Preview, the History/Preview
+        // round-trip, then the click. Only the role differs.
+        const page = await openArtifact('member', artifactPage(bundleId()));
+        await page.locator(SELECTORS.versionMenu).click({ timeout: 15_000 });
+        await versionMenuItem(page, 2).click({ timeout: 15_000 });
+        await page.waitForURL(new RegExp(`/artifacts/${bundleId()}/v/2$`), { timeout: 15_000 });
+        await tab(page, 'history').click({ timeout: 15_000 });
+        await historyViewButton(page, 1).click({ timeout: 15_000 });
+        await page.waitForURL(new RegExp(`/artifacts/${bundleId()}/v/1$`), { timeout: 15_000 });
+        await tab(page, 'preview').click({ timeout: 15_000 });
+        r.ui.v1HeadingSeen = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1');
         await tab(page, 'history').click({ timeout: 15_000 });
         await page
           .locator(RENDER_SELECTORS.historyVersionRow)
@@ -991,7 +1007,7 @@ async function runDiagnosticLegs(): Promise<void> {
         await clickInFrameLink(
           page,
           r,
-          'member v1 after round-trip',
+          'member v1 via R2-11 path',
           '#to-page2',
           'page2.html',
           1,
