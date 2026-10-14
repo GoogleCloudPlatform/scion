@@ -567,17 +567,17 @@ func deduplicateByDestName(ctx context.Context, skills []ResolvedSkill) ([]Resol
 		if loser.Optional {
 			slog.DebugContext(ctx, "skill destination-name collision resolved (optional skill dropped)",
 				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		} else {
 			slog.WarnContext(ctx, "skill destination-name collision resolved",
 				"dest_name", dest,
-				"winner_uri", winner.URI,
+				"winner_uri", LoggedSkillRef(winner.URI),
 				"winner_scope", winner.Scope,
-				"dropped_uri", loser.URI,
+				"dropped_uri", LoggedSkillRef(loser.URI),
 				"dropped_scope", loser.Scope,
 			)
 		}
@@ -643,14 +643,16 @@ func installResolvedSkills(
 			reason := publicInstallReason(err)
 			if skill.Optional {
 				slog.WarnContext(ctx, "optional skill could not be installed; skipped",
-					"skill_uri", skill.URI, "skill_name", skill.Name,
-					"reason", reason, "error", err)
+					"skill_uri", LoggedSkillRef(skill.URI), "skill_name", skill.Name,
+					"reason", ResolverReasonForLog(skill.URI, reason),
+					"error", ResolverReasonForLog(skill.URI, err.Error()))
 				skipped = append(skipped, SkippedSkill{URI: skill.URI, Reason: reason})
 				continue
 			}
 			slog.WarnContext(ctx, "required skill could not be installed",
-				"skill_uri", skill.URI, "skill_name", skill.Name,
-				"reason", reason, "error", err)
+				"skill_uri", LoggedSkillRef(skill.URI), "skill_name", skill.Name,
+				"reason", ResolverReasonForLog(skill.URI, reason),
+				"error", ResolverReasonForLog(skill.URI, err.Error()))
 			return nil, nil, &SkillResolutionError{URI: skill.URI, Code: SkillErrCodeInstallFailed, Message: reason}
 		}
 		record.Skills = append(record.Skills, *entry)

@@ -2064,7 +2064,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
 				}
 				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
-					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
+					"skill_uri", LoggedSkillRef(re.URI), "code", re.Code,
+					"reason", ResolverReasonForLog(re.URI, re.Message))
 			}
 
 			// S1: verify every requested URI has an outcome
@@ -2072,10 +2073,10 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if !resolvedURIs[uri] && !errorURIs[uri] {
 					if ref.Optional {
 						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
-							"skill_uri", uri, "reason", "missing from resolver response")
+							"skill_uri", LoggedSkillRef(uri), "reason", "missing from resolver response")
 					} else {
 						return "", "", nil, fmt.Errorf(
-							"required skill %q missing from resolver response — S1 fail-closed", uri)
+							"required skill %q missing from resolver response — S1 fail-closed", LoggedSkillRef(uri))
 					}
 				}
 			}
