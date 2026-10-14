@@ -57,8 +57,8 @@ func captureSecretEnvSlog(t *testing.T) *bytes.Buffer {
 
 func TestScrubServerSecretEnv_UnsetsNamesAndKeepsSecret(t *testing.T) {
 	isolateServerSecretEnv(t)
-	if strings.Join(serverSecretEnvNames, ",") != "SCION_SERVER_SESSION_SECRET,SESSION_SECRET" {
-		t.Fatalf("serverSecretEnvNames = %v, want both session secret spellings", serverSecretEnvNames)
+	if strings.Join(serverSecretEnvNames, ",") != "SCION_SERVER_SESSION_SECRET,SESSION_SECRET,SCION_SERVER_HUB_CONDUIT_PEERSECRET,SCION_SERVER_HUB_CONDUIT_PEER_SECRET" {
+		t.Fatalf("serverSecretEnvNames = %v, want both session secret and both peer secret spellings", serverSecretEnvNames)
 	}
 	for _, name := range serverSecretEnvNames {
 		t.Setenv(name, "value-of-"+name)
@@ -122,6 +122,38 @@ func TestScrubServerSecretEnv_PrefixedNameWinsWithoutWarning(t *testing.T) {
 	}
 	if strings.Contains(logs.String(), "deprecated") {
 		t.Errorf("deprecation warning logged although %s is set", sessionSecretEnv)
+	}
+}
+
+// TestScrubServerSecretEnv_PeerSecretNamesAreTheSetting: each peer secret
+// name on the scrub list is a real env spelling of
+// server.hub.conduit.peer_secret (it loads into the config), and the scrub
+// removes it once the config holds the value.
+func TestScrubServerSecretEnv_PeerSecretNamesAreTheSetting(t *testing.T) {
+	const value = "peer-secret-for-scrub-tests-0123456789abcdef"
+	for _, name := range []string{peerSecretEnv, underscoredPeerSecretEnv} {
+		t.Run(name, func(t *testing.T) {
+			isolateServerSecretEnv(t)
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			t.Setenv(name, value)
+			cfg, err := config.LoadGlobalConfig("")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.Hub.Conduit.PeerSecretValue() != value {
+				t.Fatalf("%s did not load into server.hub.conduit.peer_secret", name)
+			}
+
+			scrubServerSecretEnv()
+
+			if _, ok := os.LookupEnv(name); ok {
+				t.Errorf("%s is still set in the process env after the scrub", name)
+			}
+			if cfg.Hub.Conduit.PeerSecretValue() != value {
+				t.Error("the loaded config lost the peer secret")
+			}
+		})
 	}
 }
 

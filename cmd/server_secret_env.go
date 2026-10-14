@@ -22,6 +22,10 @@ import (
 const (
 	sessionSecretEnv       = "SCION_SERVER_SESSION_SECRET"
 	legacySessionSecretEnv = "SESSION_SECRET"
+	// The two env spellings of server.hub.conduit.peer_secret (the
+	// canonical one and the underscored one; both bind to the setting).
+	peerSecretEnv            = "SCION_SERVER_HUB_CONDUIT_PEERSECRET"
+	underscoredPeerSecretEnv = "SCION_SERVER_HUB_CONDUIT_PEER_SECRET"
 )
 
 // serverSecretEnvNames are the server secret env names that
@@ -31,6 +35,8 @@ const (
 var serverSecretEnvNames = []string{
 	sessionSecretEnv,
 	legacySessionSecretEnv,
+	peerSecretEnv,
+	underscoredPeerSecretEnv,
 }
 
 // capturedSessionSecret holds the session secret read from the env by
