@@ -579,3 +579,62 @@ func TestBrokerMaterial_TestAdminIdentitiesRefused(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code, "human super-admin %s session read: %s", u.ID, rec.Body.String())
 	}
 }
+
+// TestBrokerUpdateDelete_TestAdminIdentitiesOnlyOwnBroker pins the
+// test-admin policy gates of broker update and deregistration: a test
+// identity with an admin role is refused PATCH and DELETE on a broker it did
+// not register and admitted on a broker it registered; the refusals are
+// recorded as the updateRuntimeBroker and deleteRuntimeBroker role gates. A
+// human super-admin updates and deregisters another user's broker.
+func TestBrokerUpdateDelete_TestAdminIdentitiesOnlyOwnBroker(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "bud-ta-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "bud-ta-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	mkBroker := func(name, owner string) *store.RuntimeBroker {
+		b := &store.RuntimeBroker{
+			ID: tid(name), Name: name, Slug: name, Status: store.BrokerStatusOffline,
+			CreatedBy: owner, Created: time.Now(), Updated: time.Now(),
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		return b
+	}
+	path := func(b *store.RuntimeBroker) string { return "/api/v1/runtime-brokers/" + b.ID }
+
+	others := mkBroker("bud-others", issuer.ID)
+	for who, k := range kinds {
+		own := mkBroker("bud-own-"+who, k.Identity.ID)
+
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPatch, path(others), map[string]interface{}{"name": "bud-renamed-" + who})
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s update of another user's broker: %s", who, rec.Body.String())
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(others), nil)
+		assert.Equal(t, http.StatusForbidden, rec.Code, "%s delete of another user's broker: %s", who, rec.Body.String())
+		_, err := s.GetRuntimeBroker(ctx, others.ID)
+		require.NoError(t, err, "%s: the other user's broker is kept", who)
+
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPatch, path(own), map[string]interface{}{"name": "bud-own-renamed-" + who})
+		assert.Equal(t, http.StatusOK, rec.Code, "%s update of its own broker: %s", who, rec.Body.String())
+		rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodDelete, path(own), nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "%s delete of its own broker: %s", who, rec.Body.String())
+	}
+
+	gates := map[string]bool{}
+	for _, d := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
+		if d["class"] == "role_gate" {
+			gates[d["subject"].(string)] = true
+		}
+	}
+	assert.True(t, gates["handlers_runtime_brokers.go:updateRuntimeBroker"], "update refusal recorded: %v", gates)
+	assert.True(t, gates["handlers_runtime_brokers.go:deleteRuntimeBroker"], "delete refusal recorded: %v", gates)
+
+	// A human super-admin who did not register the broker is admitted.
+	human := taUser(t, s, "bud-human", store.SystemRoleSuperAdmin)
+	rec := doRequestAsUser(t, srv, human, http.MethodPatch, path(others), map[string]interface{}{"name": "bud-human-renamed"})
+	assert.Equal(t, http.StatusOK, rec.Code, "human super-admin update: %s", rec.Body.String())
+	rec = doRequestAsUser(t, srv, human, http.MethodDelete, path(others), nil)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "human super-admin delete: %s", rec.Body.String())
+}

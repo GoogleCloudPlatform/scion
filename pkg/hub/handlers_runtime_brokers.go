@@ -408,13 +408,21 @@ func (s *Server) updateRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	// Updating a broker is a governance action on a hub-level record that
 	// user access tokens cannot take (GOV_PENDING); broker.update is then
 	// checked on the record.
-	if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending); !ok {
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
 		return
 	}
 
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// A test identity with an admin role updates only a broker it
+	// registered (test-admin policy).
+	if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:updateRuntimeBroker") {
+		Forbidden(w)
 		return
 	}
 
@@ -494,7 +502,8 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 
 	// Deregistering a broker is a governance action that user access tokens
 	// cannot take (GOV_PENDING); broker.delete is then checked on the record.
-	if _, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending); !ok {
+	actor, ok := s.requireSessionCredentialFor(w, ctx, authzop.ReasonGovernancePending)
+	if !ok {
 		return
 	}
 
@@ -502,6 +511,13 @@ func (s *Server) deleteRuntimeBroker(w http.ResponseWriter, r *http.Request, id 
 	broker, err := s.store.GetRuntimeBroker(ctx, id)
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+
+	// A test identity with an admin role deregisters only a broker it
+	// registered (test-admin policy).
+	if broker.CreatedBy != actor.ID() && s.testAdminPolicyRefuses(ctx, "handlers_runtime_brokers.go:deleteRuntimeBroker") {
+		Forbidden(w)
 		return
 	}
 
