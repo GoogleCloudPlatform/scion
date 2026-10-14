@@ -104,6 +104,11 @@ import { DisplayZoneController } from '../../utils/display-zone-controller.js';
 import { DEFAULT_TRIGGERS } from '../../shared/notification-triggers.js';
 import { navigateTo, stripBasePath } from '../../client/navigation.js';
 
+/** Display text for a launch failure cause (api.BrokerRuntimeCause*). */
+function launchCauseLabel(cause: string): string {
+  return cause.replace(/_/g, ' ');
+}
+
 /** Display text for a launch step the broker reported. */
 function launchStepLabel(step: string): string {
   return step.replace(/_/g, ' ');
@@ -387,6 +392,11 @@ export class ScionPageAgentDetail extends LitElement {
     .agent-error-banner .error-code {
       font-size: 0.8125rem;
       font-family: var(--scion-font-mono, monospace);
+      color: var(--sl-color-danger-700, #b91c1c);
+      margin-bottom: 0.25rem;
+    }
+    .agent-error-banner .error-cause {
+      font-size: 0.8125rem;
       color: var(--sl-color-danger-700, #b91c1c);
       margin-bottom: 0.25rem;
     }
@@ -1461,6 +1471,11 @@ export class ScionPageAgentDetail extends LitElement {
           ${code || reason
             ? html`<div class="error-code" data-testid="launch-error-code">
                 ${codeEl}${code && reason ? ' — ' : ''}${reasonEl}
+              </div>`
+            : nothing}
+          ${launch.cause
+            ? html`<div class="error-cause" data-testid="launch-error-cause">
+                Cause: ${launchCauseLabel(launch.cause)}
               </div>`
             : nothing}
           ${messageEl}

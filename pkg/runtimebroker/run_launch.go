@@ -200,7 +200,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		default:
 			// ctx' expired without any answer: follow the failure rule
 			// (step 7) with failed{hub_unreachable}.
-			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable")
+			s.failLaunch(ctx, sender, rec, lc, false, currentStep, api.LaunchCodeHubUnreachable, "claim: hub unreachable", "")
 			return
 		}
 	}
@@ -247,7 +247,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			s.agentLifecycleLog.Error("runLaunch: failed to write launch marker; failing the launch rather than risk undeletable files",
 				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
 				"launch_id", rec.ID, "error", err)
-			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error())
+			s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, runtimeOpError("write launch marker", err).Error(), "")
 			return
 		}
 	}
@@ -276,7 +276,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		// too: admission (beginAsyncLaunch) normally answers those with the
 		// sync 400/422, and one only found here reports the same text,
 		// under runtime_error.
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, dlMessage)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, currentStep, api.LaunchCodeRuntimeError, dlMessage, "")
 		return
 	}
 	lc.opts = opts
@@ -388,7 +388,10 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			// definitive Hub answer (design §3.8.2: failed{hub_unreachable}).
 			code, message = api.LaunchCodeHubUnreachable, "checkpoint: hub unreachable"
 		}
-		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, step, code, message)
+		// Computed from the final code: only a runtime_error carries a
+		// cause, so the hub_unreachable override above carries none.
+		cause := launchFailureCause(code, sr.err)
+		s.failLaunch(ctx, sender, rec, lc, alreadyCompleted, step, code, message, cause)
 		return
 	}
 
@@ -420,7 +423,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 			WorkspacePlacement:  sr.info.WorkspacePlacement,
 		}
 	}
-	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", info)
+	result, err := sender.SendTerminal(terminalCtx, true, "", "", "", "", info)
 	if err != nil {
 		// No definitive answer by the TTL: no cleanup (same rule as a
 		// failed report, design §3.8.2 step 7).
@@ -467,8 +470,10 @@ func (s *Server) handleKeepaliveAbort(sender *launchSender, rec *launchRecord, l
 // clean up only if the Hub confirms the agent never ran"). alreadyCompleted
 // skips the report entirely, per "if an earlier gate or keepalive already
 // answered completed, send nothing and do not clean up". step records which
-// generic step (claim/launching) the launch was in (design §3.9).
-func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted bool, step, errorCode, message string) {
+// generic step (claim/launching) the launch was in (design §3.9). cause is
+// the fixed runtime cause code for a runtime_error (launchFailureCause), or
+// "".
+func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *launchRecord, lc launchCtx, alreadyCompleted bool, step, errorCode, message, cause string) {
 	if alreadyCompleted || sender.IsCompleted() {
 		return
 	}
@@ -479,7 +484,7 @@ func (s *Server) failLaunch(ctx context.Context, sender *launchSender, rec *laun
 	terminalCtx, cancel := terminalContext(rec.Deadline)
 	defer cancel()
 
-	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, nil)
+	result, err := sender.SendTerminal(terminalCtx, false, step, errorCode, message, cause, nil)
 	if err != nil {
 		// No definitive answer by the TTL: the Hub has reaped the record by
 		// then, and `scion delete` removes the resources. No cleanup here.
@@ -546,6 +551,20 @@ func (s *Server) cleanupLaunchResources(mgr agent.Manager, rec *launchRecord) {
 	key := rec.ownedRun
 	rec.ownedRunMu.Unlock()
 	s.finishCleanedRun(key, handles)
+}
+
+// launchFailureCause returns the cause code a failed launch report carries
+// for a Manager.Start error classified as code (ptone/scion#4666): the
+// fixed details.cause code a synchronous create's runtime_error answer
+// would carry (runtimeFailureCause, writeCreateRuntimeError), and only for a
+// runtime_error, which is the code a cause qualifies. Never the error's
+// text.
+func launchFailureCause(code string, err error) string {
+	if code != ErrCodeRuntimeError {
+		return ""
+	}
+	_, cause, _ := runtimeFailureCause(err)
+	return cause
 }
 
 // terminalContext returns a fresh context bounded at deadline + 10 min
