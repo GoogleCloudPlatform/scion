@@ -137,7 +137,8 @@ func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 	// cannot be minted.
 	_, projectMintErr := f.mint(f.owner, projectBoundary(f.project), "broker:read")
 	require.Error(t, projectMintErr, "a project token with broker:read must not be mintable")
-	viewerToken, viewerMintErr := f.mint(f.viewer, hubBoundary(), "broker:read")
+	viewerToken, err := f.mint(f.viewer, hubBoundary(), "broker:read")
+	require.NoError(t, err, "a hub-viewer holds broker.read, so it mints broker:read on a hub boundary")
 
 	for name, path := range brokerMaterialReadPaths(f.broker.ID) {
 		t.Run(name, func(t *testing.T) {
@@ -150,12 +151,8 @@ func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 			// broker.update.
 			rec = doRequestAsUser(t, f.srv, f.viewer, http.MethodGet, path, nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "hub-viewer session: %s", rec.Body.String())
-			if viewerMintErr != nil {
-				t.Logf("a hub-viewer hub token with broker:read cannot be minted: %v", viewerMintErr)
-			} else {
-				rec = doRequestWithToken(t, f.srv, viewerToken, http.MethodGet, path, nil)
-				assert.Equal(t, http.StatusForbidden, rec.Code, "hub-viewer hub token with broker:read: %s", rec.Body.String())
-			}
+			rec = doRequestWithToken(t, f.srv, viewerToken, http.MethodGet, path, nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "hub-viewer hub token with broker:read: %s", rec.Body.String())
 
 			rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet, path, nil)
 			assert.Equal(t, http.StatusOK, rec.Code, "owner session: %s", rec.Body.String())
@@ -392,6 +389,9 @@ func TestBrokerListing_TokenWithoutBrokerReadListsNoBrokers(t *testing.T) {
 	assert.Contains(t, decodeBrokerListing(t, doRequestWithToken(t, f.srv, with, http.MethodGet, "/api/v1/runtime-brokers", nil)), f.broker.ID)
 }
 
+// brokerImageOpRefusal is the 403 message of the image-op broker check.
+const brokerImageOpRefusal = "You do not have permission to perform image operations on this broker"
+
 // TestHarnessImageOps_DispatchAuthorityCheckedFirst pins the broker check of
 // the harness-config image operations with broker_id: broker.dispatch is
 // decided first; a user access token it refuses is refused even on an
@@ -399,9 +399,6 @@ func TestBrokerListing_TokenWithoutBrokerReadListsNoBrokers(t *testing.T) {
 // auto-provide broker and is refused on any other; a holder of
 // broker.dispatch is admitted. An admitted request reaches the broker call,
 // which fails against the unreachable test endpoint (not 403).
-// brokerImageOpRefusal is the 403 message of the image-op broker check.
-const brokerImageOpRefusal = "You do not have permission to perform image operations on this broker"
-
 func TestHarnessImageOps_DispatchAuthorityCheckedFirst(t *testing.T) {
 	srv, s := testServer(t)
 	srv.brokerClient = &HybridBrokerClient{
