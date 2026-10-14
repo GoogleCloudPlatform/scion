@@ -61,6 +61,10 @@ const (
 	// target that a role binding could authorize. See TargetClassKindSelf.
 	ResourceInbox              = "inbox"
 	ResourceUserSkillInjection = "user_skill_injection"
+	// ResourceFederationToken is the self-scoped resource of a user access
+	// credential for a peer hub that the holder obtains for themselves
+	// (POST /api/v1/auth/federation-token).
+	ResourceFederationToken = "federation_token"
 
 	ActionCreate         = "create"
 	ActionRead           = "read"
@@ -224,6 +228,7 @@ var Registry = []Permission{
 	{ID: "project.manage", Resource: ResourceProject, Action: ActionManage, CapabilityKind: CapabilityResource, UATScope: "project:manage", Description: "Manage project administration (RS1 membership operations)", Enforcement: []string{"pkg/hub/handlers_projects_core.go", "pkg/hub/artifacts_host.go:func (h *artifactHost) MayGrantReview"}},
 	{ID: "project.register", Resource: ResourceProject, Action: ActionRegister, CapabilityKind: CapabilityResource, Description: "Register projects", Enforcement: []string{"pkg/hub/handlers_projects_core.go"}},
 	{ID: "project.set_messaging_policy", Resource: ResourceProject, Action: "set_messaging_policy", CapabilityKind: CapabilityResource, UATScope: "project:set_messaging_policy", Description: "Set project cross-project messaging policy (owner/admin only)", Enforcement: []string{"pkg/hub/project_messaging_policy.go"}},
+	{ID: "project.manage_visitors", Resource: ResourceProject, Action: "manage_visitors", CapabilityKind: CapabilityResource, Description: "Grant and revoke project visitor access for federated accounts (owner/admin)", NonRouteUse: []string{"visitor grant routes (ptone/scion#4603)"}},
 
 	{ID: "artifact.read", Resource: ResourceArtifact, Action: ActionRead, CapabilityKind: CapabilityResource, UATScope: "artifact:read", AgentScopes: []string{"project:artifact:read"}, Description: "Read artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/read.go:PermissionRead"}},
 	{ID: "artifact.create", Resource: ResourceArtifact, Action: ActionCreate, CapabilityKind: CapabilityScope, UATScope: "artifact:create", AgentScopes: []string{"project:artifact:write"}, Description: "Publish artifacts", Enforcement: []string{"pkg/hub/artifacts_host.go:func (h *artifactHost) Authorize", "pkg/artifacts/publish.go:PermissionCreate", "pkg/artifacts/versions.go:PermissionCreate"}},
@@ -409,6 +414,7 @@ var Registry = []Permission{
 	{ID: "inbox.read", Resource: ResourceInbox, Action: ActionRead, UATScope: "inbox:read", Description: "Read your own inbox, notifications and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_conversation_resolve.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "inbox.write", Resource: ResourceInbox, Action: ActionWrite, UATScope: "inbox:write", Description: "Send, change and remove your own inbox items and direct messages", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_messages.go", "pkg/hub/handlers_conversations.go", "pkg/hub/handlers_notifications.go"}},
 	{ID: "user_skill_injection.update", Resource: ResourceUserSkillInjection, Action: ActionUpdate, UATScope: "user_skill_injection:update", Description: "Change the skills injected into your own agents", Enforcement: []string{"pkg/hub/authorize.go:authorizeSelfScoped", "pkg/hub/handlers_skills_injection.go"}},
+	{ID: "federation_token.mint", Resource: ResourceFederationToken, Action: ActionMint, UATScope: "federation_token:mint", Description: "Obtain a short-lived user access credential for yourself to present to a peer hub", Enforcement: []string{"pkg/hub/authorize.go:selfScopedDecision", "pkg/hub/handlers_federation_token.go:handleFederationToken"}},
 }
 
 // IsReserved reports whether p is a reserved row (see Permission.Reserved).

@@ -92,11 +92,7 @@ server:
           safe_to_evict: false
 ```
 
-One process starts every configured instance. A process with `server.broker.instances` hosts only flat instances, not a regular Runtime Broker. Startup is refused if an entry does not validate.
-
-- **With the Hub in the same process**, each instance registers with it when the process starts.
-- **With a remote Hub**, register each instance once with `scion runtime-broker register --instance <key>`, which saves credentials for that instance only. At each start, an instance activates only after the Hub has confirmed its identity and runtime target.
-- **An instance that cannot serve** is refused and reported, and the other instances keep running. If the Hub refuses a registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated.
+Each `key` must be unique. A process with `server.broker.instances` hosts only the flat instances, not a regular Runtime Broker. With the Hub in the same process, the instances register through it. A process without the Hub hosts them remotely: register each one first with `scion runtime-broker register --instance <key>`, which saves the instance's own credentials, and they are checked against the Hub at every start. Startup is refused if an entry does not validate. An instance that cannot serve is refused and reported, and the other instances keep running. If the Hub refuses the registration, for example a first registration while the `hub.flat_runtime_brokers` experiment is off, the process still starts and logs that the instance was not activated. See [`server.broker`](/scion/reference/server-config/#broker-settings-serverbroker) for the fields.
 
 A flat instance never uses Runtime Broker Profiles: not the active profile, and not a profile named in a request. Defaults that a profile or its runtime entry supplied to a regular Runtime Broker are set on the instance's `runtime_target` instead. These are:
 

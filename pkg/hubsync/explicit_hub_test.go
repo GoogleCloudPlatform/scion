@@ -42,42 +42,22 @@ func projectByIDHub(t *testing.T, projectID string) *httptest.Server {
 	return server
 }
 
-// TestEnsureHubReady_ExplicitHub checks that a hub project reference from
-// the CLI's current context (ExplicitHub) resolves without hub.enabled, and
-// that without the option the hub-mode error is unchanged.
-func TestEnsureHubReady_ExplicitHub(t *testing.T) {
+// TestEnsureHubReady_HubProjectRefWithoutHubEnabled checks that a hub
+// project reference resolves on the configured hub with no hub.enabled
+// setting: local-only mode was removed, so there is no hub-mode gate (and no
+// ExplicitHub option to bypass one).
+func TestEnsureHubReady_HubProjectRefWithoutHubEnabled(t *testing.T) {
 	const projectID = "1dfdd6c7-0000-4000-8000-000000000001"
-
-	t.Run("explicit hub bypasses the hub.enabled gate", func(t *testing.T) {
-		home := clearHubCredentialEnv(t)
-		t.Chdir(home)
-		server := projectByIDHub(t, projectID)
-		hubCtx, err := EnsureHubReady(projectID, EnsureHubReadyOptions{
-			EndpointOverride: server.URL,
-			ExplicitHub:      true,
-			SkipSync:         true,
-		})
-		if err != nil {
-			t.Fatalf("EnsureHubReady: %v", err)
-		}
-		if hubCtx == nil || hubCtx.ProjectID != projectID || hubCtx.Endpoint != server.URL {
-			t.Fatalf("hub context = %+v, want project %s on %s", hubCtx, projectID, server.URL)
-		}
-	})
-
-	t.Run("without it the gate error is unchanged", func(t *testing.T) {
-		home := clearHubCredentialEnv(t)
-		t.Chdir(home)
-		server := projectByIDHub(t, projectID)
-		_, err := EnsureHubReady(projectID, EnsureHubReadyOptions{
-			EndpointOverride: server.URL,
-			SkipSync:         true,
-		})
-		want := "hub project references (slugs, names, git URLs) require hub mode to be enabled\n\nEnable with: scion hub enable"
-		if err == nil || err.Error() != want {
-			t.Fatalf("err = %v, want %q", err, want)
-		}
-	})
+	home := clearHubCredentialEnv(t)
+	t.Chdir(home)
+	server := projectByIDHub(t, projectID)
+	hubCtx, err := EnsureHubReady(projectID, EnsureHubReadyOptions{EndpointOverride: server.URL})
+	if err != nil {
+		t.Fatalf("EnsureHubReady: %v", err)
+	}
+	if hubCtx == nil || hubCtx.ProjectID != projectID || hubCtx.Endpoint != server.URL {
+		t.Fatalf("hub context = %+v, want project %s on %s", hubCtx, projectID, server.URL)
+	}
 }
 
 func TestResolveProjectOnHub_TypedErrors(t *testing.T) {

@@ -26,6 +26,8 @@ const (
 	FieldPermissions = "permissions"
 	// FieldSystem holds the string denoting the system field in the database.
 	FieldSystem = "system"
+	// FieldConfersMembership holds the string denoting the confers_membership field in the database.
+	FieldConfersMembership = "confers_membership"
 	// FieldCreated holds the string denoting the created field in the database.
 	FieldCreated = "created"
 	// FieldUpdated holds the string denoting the updated field in the database.
@@ -51,6 +53,7 @@ var Columns = []string{
 	FieldScopeType,
 	FieldPermissions,
 	FieldSystem,
+	FieldConfersMembership,
 	FieldCreated,
 	FieldUpdated,
 }
@@ -70,6 +73,8 @@ var (
 	NameValidator func(string) error
 	// DefaultSystem holds the default value on creation for the "system" field.
 	DefaultSystem bool
+	// DefaultConfersMembership holds the default value on creation for the "confers_membership" field.
+	DefaultConfersMembership bool
 	// DefaultCreated holds the default value on creation for the "created" field.
 	DefaultCreated func() time.Time
 	// DefaultUpdated holds the default value on creation for the "updated" field.
@@ -129,6 +134,11 @@ func ByScopeType(opts ...sql.OrderTermOption) OrderOption {
 // BySystem orders the results by the system field.
 func BySystem(opts ...sql.OrderTermOption) OrderOption {
 	return sql.OrderByField(FieldSystem, opts...).ToFunc()
+}
+
+// ByConfersMembership orders the results by the confers_membership field.
+func ByConfersMembership(opts ...sql.OrderTermOption) OrderOption {
+	return sql.OrderByField(FieldConfersMembership, opts...).ToFunc()
 }
 
 // ByCreated orders the results by the created field.

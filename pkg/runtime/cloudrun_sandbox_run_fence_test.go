@@ -109,7 +109,8 @@ func TestCloudRunSandboxRun_DoesNotTakeOverNewerRun(t *testing.T) {
 	}
 }
 
-// A stopped entry of another run, or the same run's entry, does not block.
+// A stopped entry of another run or with no run, or the same run's live
+// entry, does not block.
 func TestCloudRunSandboxRun_StoppedOrOwnEntryDoesNotBlock(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -118,7 +119,9 @@ func TestCloudRunSandboxRun_StoppedOrOwnEntryDoesNotBlock(t *testing.T) {
 	}{
 		{"stopped entry of another run", "run-b", true},
 		{"own run", "run-a", false},
-		{"legacy entry with no run", "", false},
+		{"stopped legacy entry with no run", "", true},
+		// A LIVE legacy entry with no run now blocks (ptone/scion#4757):
+		// TestCloudRunSandboxStarting_ObservedLiveEntry.
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rt, _ := newFenceSandboxRuntime(t, 0)

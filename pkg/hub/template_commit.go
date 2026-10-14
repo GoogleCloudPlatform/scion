@@ -552,10 +552,10 @@ func templateHasAgentConfigFile(tmpl *store.Template) bool {
 // snapshot the way a commit does (deriveTemplateIndex), sets it on tmpl, and
 // persists it with store.SetTemplateAgentConfig. That writes only the
 // snapshot column, only while the row still has no snapshot and the content
-// hash and layout read, so a concurrent commit is never reverted and no
-// metadata column is touched. It re-sets Updated to the value it read, so a
-// metadata edit landing between that read and the write can see its Updated
-// time (only) rolled back; tightening that is a follow-up.
+// hash, layout and Updated time read, so a concurrent commit is never
+// reverted and no metadata column is touched. A metadata edit landing between
+// that read and the write makes it write nothing (its Updated time is kept);
+// the next read derives the snapshot again (ptone/scion#4674).
 //
 // A file that cannot be read or does not parse yields nil and writes
 // nothing. A parse failure or a missing object is remembered and not read
@@ -610,9 +610,9 @@ func (s *Server) ensureTemplateAgentConfig(ctx context.Context, tmpl *store.Temp
 
 // persistTemplateAgentConfig stores cfg as the AgentConfig of template id
 // through store.SetTemplateAgentConfig: only that column is written, and
-// only while the row still has no snapshot and the content hash and layout
-// it was derived from. Failures are logged; the caller already has the
-// derived value.
+// only while the row still has no snapshot, the content hash and layout it
+// was derived from, and the Updated time the store read. Failures are
+// logged; the caller already has the derived value.
 func (s *Server) persistTemplateAgentConfig(ctx context.Context, id, name, contentHash, layout string, cfg *api.ScionConfig) {
 	written, err := s.store.SetTemplateAgentConfig(ctx, id, cfg, store.TemplateContentPrecondition{ContentHash: contentHash, Layout: layout})
 	switch {
@@ -623,7 +623,8 @@ func (s *Server) persistTemplateAgentConfig(ctx context.Context, id, name, conte
 		slog.InfoContext(ctx, "template agent config: derived and stored the missing snapshot",
 			"template", name, "template_id", id)
 	}
-	// Not written: a concurrent commit or delete owns the row now.
+	// Not written: a concurrent commit, metadata edit or delete owns the
+	// row now.
 }
 
 // templateAgentConfigBackfillPage and templateAgentConfigBackfillLimit bound

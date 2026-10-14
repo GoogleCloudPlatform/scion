@@ -41,6 +41,7 @@ var (
 	_ UIDPreconditionDeleter = (*runtime.DockerRuntime)(nil)
 	_ UIDPreconditionDeleter = (*runtime.PodmanRuntime)(nil)
 	_ UIDPreconditionDeleter = (*runtime.AppleContainerRuntime)(nil)
+	_ UIDPreconditionDeleter = (*runtime.CloudRunSandboxRuntime)(nil)
 )
 
 // newUIDEnforcingK8sRuntime returns a real KubernetesRuntime over a fake

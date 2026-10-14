@@ -55,7 +55,8 @@ Controls the central Hub API server.
 | `public_url` | string | | The externally accessible URL of the Hub (used for callbacks). Also editable in the admin UI; resolved at startup with operator settings first (`SCION_SERVER_HUB_ENDPOINT`, `SCION_SERVER_BASE_URL`, `--base-url`), then a value saved in the database, then this file. See [`server.hub.public_url`: environment first](/scion/reference/admin-settings/#serverhubpublic_url-environment-first). |
 | `agent_endpoint` | string | | Optional override of `public_url` used **only** for the Hub URL injected into agents (`SCION_HUB_ENDPOINT`). Use when agents reach the Hub on a different address than users — e.g. an internal VPC URL — while invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep using `public_url`. Must be `scheme://host[:port]` only: `http` or `https`, an IP literal or a hostname of letters, digits, `_`, `-`, and `.`, no path, query, fragment, or credentials (a trailing `/` is stripped); the Hub fails to start otherwise. When unset, agents receive the Hub's regular endpoint (`public_url`, or the endpoint the Hub resolves when `public_url` is unset). **Scope:** injected into agents on every broker attached to this Hub, including remote brokers — see [Splitting the agent endpoint from the public URL](#splitting-the-agent-endpoint-from-the-public-url). **Security:** an `http://` value sends agent bearer tokens and fetched secrets unencrypted; prefer `https://` unless the network is trusted and isolated. |
 | `monitoring_dashboard_url` | string | | Optional link to an external monitoring dashboard for this Hub, such as a Cloud Monitoring or Grafana dashboard. Must be an absolute `http` or `https` URL with a host, at most 2048 characters, with no user credentials, a port (if any) from 1 to 65535, and no whitespace (including Unicode spaces such as U+00A0), control characters (C0, DEL or C1), bidirectional formatting characters, invisible format characters (U+00AD, U+180E, U+200B to U+200D, U+2060, U+FEFF) or U+FFFD; a path, query and fragment are allowed. Any other value is rejected with `422` when saved through the admin API. When set, the Health page header shows **Open monitoring dashboard**, which opens the URL in a new tab; when unset, no link is shown. Editable in **Server Config** and applied without a restart. Only callers with `hub.health.read` receive it (as `links.monitoring_dashboard` in the health summary); it is not part of `/api/v1/settings/public`. Env: `SCION_SERVER_HUB_MONITORINGDASHBOARDURL` (seed: `SCION_SEED_SERVER_HUB_MONITORINGDASHBOARDURL`). |
-| `gcp_project_id` | string | | GCP project ID used for minting GCP Service Accounts. Auto-detected if running on GCE/Cloud Run. |
+| `gcp_project_id` | string | | The Hub's GCP project. Layer-0: set it with `SCION_SERVER_HUB_GCPPROJECTID`, or with `hub.gcpProjectId` in a legacy `server.yaml`. A `server.hub.gcp_project_id` key in `settings.yaml` is **not read**. Used as the project for service account minting and as the Policy Troubleshooter quota project; when it is unset, both use the project of the GCP metadata server on GCE, GKE or Cloud Run. It is also the export project of the Hub's own metrics and traces, and turns metrics export on when [`observability.metrics_enabled`](#observability-export-serverhubobservability) is unset. Not editable in the admin UI. |
+| `observability` | object | | Switches for the Hub's own metrics and trace export. See [Observability export](#observability-export-serverhubobservability). |
 | `gcp_iam_check_mode` | string | `"off"` | Controls whether IAM `actAs` permission is checked when binding a GCP service account to an agent. Supported values: `"off"` (no check; default) or `"enforce"` (uses Policy Troubleshooter to enforce `iam.serviceAccounts.actAs`). `"enforce"` is strongly recommended for any Hub where agents receive GCP identities; see the caution under [GCP IAM Check Mode](#gcp-iam-check-mode) for what `"off"` permits. See the security/permissions reference for details on roles and caches. |
 | `gcp_iam_deny_unknown_policy` | string | `"fail-open"` | Behavior when Policy Troubleshooter cannot evaluate deny policies (e.g. if the Hub lacks org-level reviewer roles). Supported values: `"fail-open"` (allow if no explicit deny is found; default) or `"fail-closed"` (treat as indeterminate and deny). |
 | `read_timeout` | duration | `"30s"` | HTTP read timeout. |
@@ -128,6 +129,29 @@ Settings for the agent port proxy (`/api/v1/agents/{id}/ports/{port}/...`) when 
 | :--- | :--- | :--- | :--- |
 | `response_header_timeout` | duration | `"60s"` | How long the proxy waits for the service on the agent port to send its response headers, counted from when the request has been sent. This includes the WebSocket handshake. If the headers do not arrive in time, the proxy cancels the upstream request, answers `504` (code `runtime_error`; a browser gets the proxy error page) and counts it in `scion.hub.port_proxy.upstream_timeout`. The response body has no time limit: server-sent events, downloads, chunked responses and upgraded WebSockets keep flowing once the headers have arrived. Between `"5s"` and `"10m"`; `0` is not accepted. Env: `SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT`. |
 
+#### Observability export (`server.hub.observability`)
+
+Switches for the Hub's own metrics export (Cloud Monitoring) and trace export (Cloud Trace). These switches are separate from the agent `telemetry.*` settings. Both are Layer-1 settings in the `hub_observability` section. You can set them on the **Server Config** page (Hub Server tab), through `PUT /api/v1/admin/server-config` as a Hub admin, in `settings.yaml`, or with the environment variables below. The Hub creates its exporters once at startup, so a change applies after a restart. A save lists both keys under `pending_restart` ("applies after restart").
+
+| Field | Type | Default | Environment variable | Layer | Restart | Description |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| `metrics_enabled` | bool | unset | `SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED` | 1 (`hub_observability`) | required | `true`: the Hub exports its metrics. `false`: it does not. Unset: metrics export runs when `server.hub.gcp_project_id` is set, as before this switch existed. |
+| `tracing_enabled` | bool | unset | `SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED` | 1 (`hub_observability`) | required | `true`: the Hub exports traces. `false`: it does not. Unset: trace export runs when `SCION_TRACING_ENABLED` and `server.hub.gcp_project_id` are both set, as before this switch existed. |
+
+**Precedence.** The general rule for Layer-1 keys applies (see [Precedence](#precedence)). A database row an admin has saved wins over `settings.yaml` and the environment, and the environment and `settings.yaml` only seed the row and act as the fallback. A key set by its environment variable gets the "Overridden by environment on this node" badge on the page.
+
+**Export project.** When a switch is `true`, the exporter sends data to `server.hub.gcp_project_id` if the operator set it (environment or legacy `server.yaml`). Otherwise it uses the project of the GCP metadata server, the same fallback service account minting uses; off GCP the metadata server is not queried. If no project resolves, the Hub logs a warning that names `SCION_SERVER_HUB_GCPPROJECTID` and starts without that exporter. Startup never fails for this. An unset switch keeps the earlier rule, which only considers an operator-set project ID. The export project, endpoint and credentials cannot be edited in the admin UI. The page shows the export project and its source (`env`, `file` or `metadata`) read-only, together with each exporter's state at startup and the reason for it.
+
+**Startup log.** The Hub logs one line for each exporter. The line says whether the exporter is on or off and why, and names the export project when it is on. For example:
+
+```text
+Hub trace export: off (server.hub.observability.tracing_enabled unset; off because SCION_TRACING_ENABLED is not set)
+Hub metrics export: on (project: my-project (source: metadata); server.hub.observability.metrics_enabled=true)
+WARNING: Hub metrics export: off (server.hub.observability.metrics_enabled=true but no export project resolved (...); starting without the exporter. Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud)
+```
+
+Metrics are exported every 60 seconds and every trace is sampled. Neither can be configured.
+
 #### Asynchronous agent create
 
 By default, a Hub agent create is synchronous: the Hub holds the create request open while the Runtime Broker provisions the workspace and starts the agent. That request is bounded by the CLI's HTTP client timeout (30s) and by the Hub's `write_timeout` (`60s` by default), so the synchronous path is not suited to agents that take several minutes to start.
@@ -139,7 +163,7 @@ With `async_agent_launch: true`, the Hub instead answers as soon as the broker a
 - **Bounded by `launch_timeout`.** A launch that has not reached a terminal Hub state by its deadline is ended: the broker stops it shortly before the deadline, and the Hub sets the agent to `error` with launch error `launch_timeout` shortly after. Starting such an agent is refused with `agent_create_incomplete`; delete it and create it again.
 - **Starts during a launch.** While a launch is in progress and before its deadline, a start or restart of that agent returns the launching agent with HTTP 200 instead of starting it again (a restart adds the warning `agent is launching; restart not performed`), and `scion start` keeps waiting. Restore, reincarnate, and wake are refused with `agent_launching`.
 
-**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch also falls back to the synchronous create.
+**Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate`, `cloudrun`, and `cloudrun-sandbox`) also falls back to the synchronous create.
 
 **Slow pod starts.** On clusters with slow node provisioning, for example GKE Autopilot cold starts where a new node is added and the agent image takes several minutes to pull, raise `launch_timeout` so the launch is not ended first:
 
@@ -204,7 +228,7 @@ Controls the Runtime Broker service.
 | `container_hub_endpoint` | string | | Overrides `hub_endpoint` when injecting the Hub URL into agent containers. Use when containers cannot reach the Hub at the broker's address (e.g. `http://host.containers.internal:8080` for local development). |
 | `broker_token` | string | | Authentication token for the Hub. |
 | `auto_provide` | bool | `false` | Automatically add as provider for new projects. |
-| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters; it must be unique), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). The `agent_defaults` key is reserved and refused in this release. |
+| `instances` | list | | Experimental. Flat Runtime Broker instances this process hosts; see [Flat Runtime Brokers](/scion/hosted/ha/multi-broker/#flat-runtime-brokers-experimental). Empty or absent means the regular Runtime Broker. Several entries are accepted, each with a unique `key`; the Hub may run in the same process or remotely (see the link). Read only from the global `settings.yaml` (not `server.yaml` or project settings). Each entry has `key` (immutable local key: lower-case letters, digits and `-`, starting and ending with a letter or digit, up to 63 characters), `name` (the name registered with the Hub), and `runtime_target` (see [Flat instance runtime target](#flat-instance-runtime-target-serverbrokerinstancesruntime_target)). The `agent_defaults` key is reserved and refused in this release. |
 
 #### Flat instance runtime target (`server.broker.instances[].runtime_target`)
 
@@ -817,6 +841,8 @@ Configuration for the Hub's built-in OIDC Identity Provider feature.
 | `enabled` | bool | `false` | Enable the OIDC Identity Provider endpoints. |
 | `issuer_url` | string | | The public issuer URL of this Hub. If empty, the hub public URL is used. |
 | `token_lifetime` | duration | `"15m"` | Validity duration for minted OIDC identity tokens (e.g. `"15m"`, `"1h"`). |
+| `user_token_audiences` | list | `[]` | Peer hub issuer URLs for which this hub issues user access credentials to its own users (`POST /api/v1/auth/federation-token`, `scion hub auth federation-token`). Empty means none are issued. Experimental: also needs the `federation.project_visitors` experiment. Read at startup; a change needs a restart. |
+| `user_token_lifetime` | duration | `"15m"` | Validity of those user access credentials; a whole number of seconds, at most `"1h"`. Read at startup. |
 
 ### OIDC Federation (`server.federation`)
 
@@ -897,6 +923,8 @@ There are two exceptions to the pattern:
 - `server.hub.admin_emails` -> `SCION_SERVER_HUB_ADMINEMAILS`
 - `server.hub.stalled_threshold` -> `SCION_SERVER_HUB_STALLEDTHRESHOLD`
 - `server.hub.monitoring_dashboard_url` -> `SCION_SERVER_HUB_MONITORINGDASHBOARDURL`
+- `server.hub.observability.metrics_enabled` -> `SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED`
+- `server.hub.observability.tracing_enabled` -> `SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED`
 - `server.auth.user_access_mode` -> `SCION_SERVER_AUTH_USERACCESSMODE`
 - `server.broker.enabled` -> `SCION_SERVER_RUNTIMEBROKER_ENABLED`
 - `server.broker.container_hub_endpoint` -> `SCION_SERVER_RUNTIMEBROKER_CONTAINERHUBENDPOINT`
@@ -910,6 +938,8 @@ There are two exceptions to the pattern:
 - `server.secrets.gcp_replication_locations` -> `SCION_SERVER_SECRETS_GCPREPLICATIONLOCATIONS`
 - `server.scheduler.interval_seconds` -> `SCION_SERVER_SCHEDULER_INTERVALSECONDS`
 - `server.scheduler.max_concurrency` -> `SCION_SERVER_SCHEDULER_MAXCONCURRENCY`
+
+A value in `settings.yaml`, or in a `SCION_*` environment variable, that does not parse for its key (for example a string where a number is expected) is ignored for that key only. The key falls back to its default, or stays unset, even when the bad value came from the environment and overrode a valid file value. A warning naming the key (never the value) is logged once. Every other key still applies, so one bad value no longer turns off unrelated Hub features. The server's own configuration is not covered: a value in the `server` section of `settings.yaml`, or a `SCION_SERVER_*` variable, that does not parse can make the server ignore the whole `server` section, at startup or when it reloads settings.
 
 ### Logging Environment Variables
 
@@ -976,7 +1006,7 @@ Server logging is best effort. Losses in the modes below are counted, never retr
 - `/healthz` key `audit_log_writer`: `healthy`, `degraded: recent write failures` (a failure in the last 5 minutes), `degraded: writer stalled` or `degraded: writer closed`.
 - `/healthz` key `cloud_logging`, present only when direct Cloud Logging is configured: `healthy`, `degraded: circuit open` or `degraded: recent write failures` (any `writer="cloud"` failure in the last 5 minutes).
 
-Both health keys are non-critical: they can make `/healthz` report `degraded`, never `unhealthy`, and they do not affect `/readyz`. The metrics are exported only when Hub metrics export is on (`server.hub.gcp_project_id`, metric group `SCION_METRICS_LOGGING`); the counters and health keys work without it. `deploy/monitoring/alert-policies.yaml` defines WARNING policies for write failures, a stalled writer and an open circuit. They take effect only when applied to Cloud Monitoring.
+Both health keys are non-critical: they can make `/healthz` report `degraded`, never `unhealthy`, and they do not affect `/readyz`. The metrics are exported only when Hub metrics export is on ([`server.hub.observability.metrics_enabled`](#observability-export-serverhubobservability), or `server.hub.gcp_project_id` while that switch is unset; metric group `SCION_METRICS_LOGGING`); the counters and health keys work without it. `deploy/monitoring/alert-policies.yaml` defines WARNING policies for write failures, a stalled writer and an open circuit. They take effect only when applied to Cloud Monitoring.
 
 **Shutdown.** On a graceful shutdown (which signals trigger it, and when, is described in [Shutdown and Signals](#shutdown-and-signals)) the Hub drains its servers, closes the audit writer (up to 5 seconds), flushes and shuts down metrics and traces, then flushes the message and request logs, stops the circuit breaker, and flushes and closes the Cloud Logging client. Because the metric exporter has already shut down, failures counted during these final log flushes are never exported; a failed final flush of the main Cloud log still prints `error flushing Cloud Logging: ...` to stderr. A process that ends without a graceful shutdown skips these steps, for example: a `SIGINT` or `SIGTERM` during early startup, another termination signal the server does not handle (for example `SIGHUP` or `SIGQUIT`), or `SIGKILL`. Queued audit records and buffered Cloud Logging entries are then lost and not counted. A Hub startup failure (`Hub server failed to start`) returns an error instead of exiting immediately, so the deferred log flush runs before the process exits with status 1. Known third-party hazard (pre-existing, not observed): in the Cloud Logging client (`cloud.google.com/go/logging` v1.13.2), a record logged after the client is closed whose send then fails reports the error on a closed channel, which panics; whether this can happen during Hub shutdown has not been determined.
 
@@ -995,7 +1025,7 @@ For server and infrastructure configurations, Scion parses several boolean envir
 | Variable | Description | Default |
 | :--- | :--- | :--- |
 | `SCION_SERVER_ADMIN_MODE` | Forces the server into emergency maintenance mode (break-glass removal). | `false` |
-| `SCION_TRACING_ENABLED` | Enables OpenTelemetry tracing when a GCP Project ID is configured. | `false` |
+| `SCION_TRACING_ENABLED` | Enables Hub trace export when `server.hub.gcp_project_id` is set and [`server.hub.observability.tracing_enabled`](#observability-export-serverhubobservability) is unset. Ignored when that switch is set. | `false` |
 | `SCION_LOG_GCP` | Enables Google Cloud Logging JSON format on standard output. | `false` |
 | `SCION_REQUIRE_STABLE_SIGNING_KEY` | Demands a persistent session/JWT signing key. When enabled, startup aborts (fail-closed) if no stable key/secret can be resolved in hosted mode, preventing JWT signature mismatches across replica restarts. | `false` |
 
@@ -1006,13 +1036,15 @@ The operator-configured Hub endpoint is resolved from the environment, flags and
 When `server.hub.public_url` is not explicitly set, the Hub endpoint injected into agents is resolved in this order:
 
 1. `SCION_SERVER_HUB_ENDPOINT` or `server.hub.public_url` — explicit Hub public URL.
-2. Project-level `hub.endpoint` setting.
-3. `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+2. The `--base-url` flag or `SCION_SERVER_BASE_URL` — the server's public base URL (also used for OAuth redirects).
+3. `hub.endpoint` (or `SCION_HUB_ENDPOINT`) — deprecated, see below.
 4. **IAP Audience Derivation** (in Hosted HA mode with IAP authentication):
    - For **Cloud Run** IAP audiences (`/projects/<number>/locations/<region>/services/<service>`), Scion can auto-derive the Hub's URL using the legacy Cloud Run URL format (`https://<service>-<number>.<region>.run.app`). Newer Cloud Run services use a different URL format (`https://<service>-<hash>-<region>.a.run.app`) where the hash cannot be derived from the project number — for those services, set `SCION_SERVER_BASE_URL` explicitly instead of relying on auto-derivation.
      The derived URL is the IAP front end, which the Hub's own host does not serve. On a co-located broker (for example, the single-node VM deployment), agents dispatched to Docker therefore receive `http://scion-hub.internal:<hub listen port>` instead. That hostname is mapped to the Docker host gateway, so the agents reach the Hub directly while staying on bridge networking. Agents dispatched to Podman receive `http://host.containers.internal:<port>`, which Podman resolves itself. On rootless Podman 5.0 to 5.2 with pasta networking, that name can be missing or unreachable (fixed in Podman 5.3). A host-gateway mapping has the same gap there, so upgrade Podman if agents cannot reach the Hub. This applies whatever the broker's default runtime is, including Docker or Podman runtime profiles on a Kubernetes-default broker. Agents dispatched to Kubernetes runtime profiles, Cloud Run, or Apple container still receive the derived URL.
    - For **GKE/GCLB** backend-service IAP audiences (`/projects/<number>/global/backendServices/<id>`), a URL cannot be derived from the ID. If `SCION_SERVER_BASE_URL` (or other explicit URL settings) is not set, Scion will log a warning at startup and fall back to `localhost`, which is likely unreachable from dispatched agents.
 5. Auto-computed `http://localhost:{port}` (last resort).
+
+Taking the server's endpoint from `hub.endpoint` (or `SCION_HUB_ENDPOINT`) is deprecated: the server logs a warning at startup, `scion doctor` reports it, and the fallback is removed in the next release. Set `server.hub.public_url` or `server.broker.hub_endpoint` instead. A server that runs only the Runtime Broker uses `hub.endpoint` right after item 1. A workstation whose `hub.endpoint` is its own loopback URL is not affected.
 
 For local development where the Hub runs on `localhost` but agents are in containers, set `server.broker.container_hub_endpoint` to a container-accessible address like `http://host.containers.internal:8080`.
 
@@ -1223,6 +1255,7 @@ Settings that can be changed at runtime and are shared across all replicas. Stor
 | `agent_defaults` | `default_template`, `default_harness_config`, `default_max_turns`, `default_max_model_calls`, `default_max_duration`, `default_resources`, `default_model`, `default_thinking_level`, `default_max_agent_role`, `default_agent_role`, `default_runtime_broker`, `default_timezone`, `default_gcp_identity_mode`, `default_gcp_identity_service_account_id` |
 | `federation` | `enabled`, `trusted_issuers[]`, `algorithms`, `refresh_interval`, `debounce_interval` |
 | `endpoints` | `hub.public_url`, `hub.hub_name`, `hub.monitoring_dashboard_url`, `image_registry` |
+| `hub_observability` | `hub.observability.metrics_enabled`, `hub.observability.tracing_enabled` (restart required) |
 | `github_app` | `app_id`, `api_base_url`, `webhooks_enabled`, `installation_url`, `private_key_path` |
 | `notifications` | `notification_channels[]` |
 | `project_defaults` | `default_scratchpad` |
