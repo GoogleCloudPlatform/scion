@@ -848,9 +848,9 @@ func TestFederatedVisitor_IssuerFlagCheckedOnEveryRequest(t *testing.T) {
 // errVisitorAuditFault is visitorAuditFaultStore's injected failure.
 var errVisitorAuditFault = errors.New("injected visitor audit write fault")
 
-// visitorAuditFaultStore fails the audit write of a visitor grant, revoke
-// or first-contact link, inside transactions too, once its switch is
-// armed.
+// visitorAuditFaultStore fails the audit write of a visitor grant, window
+// update, revoke or first-contact link, inside transactions too, once its
+// switch is armed.
 type visitorAuditFaultStore struct {
 	store.Store
 	fault *storeFaultSwitch
@@ -865,11 +865,23 @@ func (s *visitorAuditFaultStore) WithTx(ctx context.Context, fn func(tx store.St
 func (s *visitorAuditFaultStore) CreateMutationAudit(ctx context.Context, r *store.MutationAuditRecord) error {
 	if s.fault.Active() {
 		switch r.MutationType {
-		case mutationTypeProjectVisitorGrant, mutationTypeProjectVisitorRevoke, mutationTypeVisitorLinked:
+		case mutationTypeProjectVisitorGrant, mutationTypeProjectVisitorUpdate, mutationTypeProjectVisitorRevoke, mutationTypeVisitorLinked:
 			return errVisitorAuditFault
 		}
 	}
 	return s.Store.CreateMutationAudit(ctx, r)
+}
+
+// installVisitorAuditFault installs a visitorAuditFaultStore on the server
+// and on its membership service, which revokes visitor grants with its own
+// store, and returns the fault switch.
+func installVisitorAuditFault(t *testing.T, srv *Server) *storeFaultSwitch {
+	t.Helper()
+	wrapped, fault := installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *visitorAuditFaultStore {
+		return &visitorAuditFaultStore{Store: inner, fault: sw}
+	})
+	srv.membershipService.store = wrapped
+	return fault
 }
 
 // A grant, a revoke and a first-contact link each write their audit record
@@ -878,9 +890,7 @@ func (s *visitorAuditFaultStore) CreateMutationAudit(ctx context.Context, r *sto
 func TestProjectVisitors_AuditFailureLeavesNoChange(t *testing.T) {
 	var fault *storeFaultSwitch
 	f := newVisitorGrantFixture(t, func(srv *Server) {
-		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *visitorAuditFaultStore {
-			return &visitorAuditFaultStore{Store: inner, fault: sw}
-		})
+		fault = installVisitorAuditFault(t, srv)
 	})
 	ctx := context.Background()
 	kept := f.grantOK(t, grantTestIssuer, "olga@corp.example")

@@ -404,7 +404,11 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	var out ProjectVisitor
+	var (
+		out      ProjectVisitor
+		updated  *store.RoleBinding
+		narrowed bool
+	)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		u, before, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
 		if err != nil {
@@ -413,7 +417,10 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
 			return errVisitorWindowNotAmplifiable
 		}
-		updated, err := tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
+		// The old window admits a time the new one does not: a later or
+		// added start, or an earlier or added expiry.
+		narrowed = visitorWindowExtends(req.NotBefore, req.ExpiresAt, before.NotBefore, before.ExpiresAt)
+		updated, err = tx.UpdateVisitorRoleBindingWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
 		}
@@ -436,31 +443,29 @@ func (s *Server) handleUpdateProjectVisitor(w http.ResponseWriter, r *http.Reque
 		writeVisitorItemError(w, err)
 		return
 	}
+	// A narrower window can end the visitor's authorization, so once the
+	// change has committed the visitor's conduit streams on the project
+	// are re-checked. A window that only widens ends nothing.
+	if narrowed {
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(updated))
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}.
+// handleRemoveProjectVisitor answers DELETE /visitors/{visitorId}. The
+// membership service revokes the grant; once that has committed, the
+// conduit streams of the visitor on the project are re-checked.
 func (s *Server) handleRemoveProjectVisitor(w http.ResponseWriter, r *http.Request, project *store.Project, visitorID string) {
-	ctx := r.Context()
-	err := s.store.WithTx(ctx, func(tx store.Store) error {
-		u, rb, err := projectVisitorBinding(ctx, tx, project.ID, visitorID)
-		if err != nil {
-			return err
-		}
-		if err := tx.DeleteRoleBinding(ctx, rb.ID); err != nil {
-			return err
-		}
-		subject, err := federationSubjectOf(ctx, tx, u.ID)
-		if err != nil {
-			return err
-		}
-		return writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRevoke, project.ID,
-			visitorAuditSummary(u, rb, subject), nil)
-	})
+	if s.membershipService == nil {
+		http.Error(w, "membership service not configured", http.StatusInternalServerError)
+		return
+	}
+	removed, err := s.membershipService.RemoveVisitor(r.Context(), project.ID, visitorID)
 	if err != nil {
 		writeVisitorItemError(w, err)
 		return
 	}
+	s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(removed))
 	w.WriteHeader(http.StatusNoContent)
 }
 
