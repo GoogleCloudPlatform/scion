@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build volume_test && !no_sqlite
+//go:build !no_sqlite
 
 package cmd
 
@@ -30,6 +30,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// volumeMalformedThreadIDs are the malformed DM ThreadIDs seedVolumeMessages
+// uses; backfill key derivation fails on each of them.
+var volumeMalformedThreadIDs = []string{
+	"dm:invalid:bad:format",
+	"dm:not-a-uuid:also-not",
+	"dm:user:notauuid:agent:alsonotauuid",
+	"dm:foo:bar:baz:qux",
+	"dm:user:123:agent:456",
+}
 
 // seedVolumeMessages creates count messages with a realistic distribution:
 //
@@ -69,14 +79,6 @@ func seedVolumeMessages(t *testing.T, ctx context.Context, s store.Store, projec
 		dmKeys[i] = key
 	}
 
-	malformedThreadIDs := []string{
-		"dm:invalid:bad:format",
-		"dm:not-a-uuid:also-not",
-		"dm:user:notauuid:agent:alsonotauuid",
-		"dm:foo:bar:baz:qux",
-		"dm:user:123:agent:456",
-	}
-
 	baseTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 	// Distribute categories uniformly via modular arithmetic so any
@@ -109,7 +111,7 @@ func seedVolumeMessages(t *testing.T, ctx context.Context, s store.Store, projec
 
 		case category < 85:
 			// 10% — malformed DM ThreadID → key-derivation errors.
-			msg.ThreadID = malformedThreadIDs[rng.Intn(len(malformedThreadIDs))]
+			msg.ThreadID = volumeMalformedThreadIDs[rng.Intn(len(volumeMalformedThreadIDs))]
 			malformedCount++
 
 		case category < 95:
@@ -133,9 +135,10 @@ func seedVolumeMessages(t *testing.T, ctx context.Context, s store.Store, projec
 // across the full spectrum of ThreadID shapes. It validates dry-run fidelity,
 // execute correctness, and idempotency in three sequential phases.
 //
-// Run explicitly:
+// It needs only the in-memory SQLite test store, so it carries no extra
+// build tag. Run it alone:
 //
-//	go test ./cmd/... -run TestBackfillVolume -tags volume_test -v -count=1 -timeout 300s
+//	go test ./cmd -run '^TestBackfillVolume$' -v -count=1
 func TestBackfillVolume(t *testing.T) {
 	const totalMessages = 50_000
 
@@ -269,18 +272,30 @@ func verifyNoStamping(t *testing.T, ctx context.Context, s store.Store, projectI
 	assert.Greater(t, unstamped, 0, "dry-run: at least some sampled messages should have no ConversationID")
 }
 
-// verifyStamped samples messages and confirms that a meaningful fraction now
-// have ConversationID set (proving execute actually persisted changes).
+// verifyStamped samples messages and confirms that execute stamped every one
+// it could: each sampled message has a ConversationID unless its ThreadID is
+// one of volumeMalformedThreadIDs (key derivation fails, so it stays
+// unstamped). Pre-backfilled messages were stamped before the run, so a
+// check that only some messages are stamped would pass with no writes.
 func verifyStamped(t *testing.T, ctx context.Context, s store.Store, projectID string, sampleSize int) {
 	t.Helper()
 	msgs, err := s.ListMessages(ctx, store.MessageFilter{ProjectID: projectID}, store.ListOptions{Limit: sampleSize})
 	require.NoError(t, err)
+	require.Len(t, msgs.Items, sampleSize, "execute: sample size")
 
-	stamped := 0
+	malformed := make(map[string]bool, len(volumeMalformedThreadIDs))
+	for _, id := range volumeMalformedThreadIDs {
+		malformed[id] = true
+	}
+	var missing, unexpected []string
 	for _, msg := range msgs.Items {
-		if msg.ConversationID != "" {
-			stamped++
+		switch {
+		case malformed[msg.ThreadID] && msg.ConversationID != "":
+			unexpected = append(unexpected, msg.ID)
+		case !malformed[msg.ThreadID] && msg.ConversationID == "":
+			missing = append(missing, msg.ID)
 		}
 	}
-	assert.Greater(t, stamped, 0, "execute: at least some sampled messages should have ConversationID")
+	assert.Empty(t, missing, "execute: sampled messages with a derivable key but no ConversationID")
+	assert.Empty(t, unexpected, "execute: sampled messages with a malformed ThreadID but a ConversationID")
 }
