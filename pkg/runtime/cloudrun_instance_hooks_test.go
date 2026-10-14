@@ -261,6 +261,23 @@ func TestCloudRunInstanceHooks_StartHandleOwnRunOnly(t *testing.T) {
 	}
 }
 
+// An async create whose operation succeeds is observed: its mark is
+// cleared, so a later cleanup's NotFound is not re-polled.
+func TestCloudRunInstanceHooks_CreateOKClearsMark(t *testing.T) {
+	fake, rt := ciSetup(t)
+	fake.getErr = notFoundErr()
+
+	if _, err := rt.Run(context.Background(), ciCfg(ciRunA, &sandboxHookRecorder{})); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(fake.createReqs) != 1 {
+		t.Fatalf("CreateInstance called %d times, want 1", len(fake.createReqs))
+	}
+	if ciMarked(ciInstanceName, ciRunA) {
+		t.Error("a create whose operation succeeded is still in doubt")
+	}
+}
+
 // The synchronous path (no hooks) marks nothing in doubt, even when the
 // create's wait fails.
 func TestCloudRunInstanceHooks_SyncPathNoMark(t *testing.T) {
@@ -429,19 +446,24 @@ func TestCloudRunInstanceDeleteResource_OtherRun(t *testing.T) {
 	}
 }
 
-// C9: FailedPrecondition refusals (the etag unchanged, the instance not
-// reconciling) are retried with backoff until the delete is accepted.
+// C9: FailedPrecondition or Aborted refusals (the etag unchanged, the
+// instance not reconciling) are retried with backoff until the delete is
+// accepted.
 func TestCloudRunInstanceDeleteResource_RefusedThenDeleted(t *testing.T) {
-	fake, rt := ciSetup(t)
-	fake.getInstance = ciInstance(ciRunA)
-	refused := status.Error(codes.FailedPrecondition, "precondition failed")
-	fake.deleteErrSeq = []error{refused, refused, nil}
+	for _, code := range []codes.Code{codes.FailedPrecondition, codes.Aborted} {
+		t.Run(code.String(), func(t *testing.T) {
+			fake, rt := ciSetup(t)
+			fake.getInstance = ciInstance(ciRunA)
+			refused := status.Error(code, "refused")
+			fake.deleteErrSeq = []error{refused, refused, nil}
 
-	if _, err := ciCleanup(rt); err != nil {
-		t.Fatalf("DeleteResource = %v, want nil after two refusals", err)
-	}
-	if len(fake.deleteReqs) != 3 {
-		t.Errorf("DeleteInstance called %d times, want 3", len(fake.deleteReqs))
+			if _, err := ciCleanup(rt); err != nil {
+				t.Fatalf("DeleteResource = %v, want nil after two refusals", err)
+			}
+			if len(fake.deleteReqs) != 3 {
+				t.Errorf("DeleteInstance called %d times, want 3", len(fake.deleteReqs))
+			}
+		})
 	}
 }
 

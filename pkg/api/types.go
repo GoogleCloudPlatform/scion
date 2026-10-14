@@ -1469,8 +1469,8 @@ type KubernetesBlockIdentity struct {
 // identity a cleanup deletes by: the Kubernetes object UID, the
 // container ID for container runtimes, or, for Cloud Run instances and
 // sandboxes, the launch's run ID (scion.run_id), checked against the
-// resource's run label (a sandbox's: its state entry's) before deleting. Namespace is empty for runtimes that have no
-// namespaces.
+// resource's run label (a sandbox's: its state entry's) before deleting.
+// Namespace is empty for runtimes that have no namespaces.
 type ResourceHandle struct {
 	Kind      string // one of the ResourceKind* constants
 	Namespace string
