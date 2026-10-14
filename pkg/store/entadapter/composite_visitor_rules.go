@@ -212,17 +212,20 @@ func (c *CompositeStore) ListActiveProjectVisitorRules(ctx context.Context, issu
 }
 
 // UpdateProjectVisitorRuleWindow replaces the window of a rule and of every
-// binding it created, in one transaction (see
+// binding it created, in one transaction, and returns both (see
 // store.Store.UpdateProjectVisitorRuleWindow).
-func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*store.ProjectVisitorRule, error) {
+func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*store.ProjectVisitorRule, []*store.RoleBinding, error) {
 	uid, err := parseGetID(id)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if notBefore != nil && expiresAt != nil && !expiresAt.After(*notBefore) {
-		return nil, fmt.Errorf("%w: a visitor rule's expiry must be after its start", store.ErrInvalidInput)
+		return nil, nil, fmt.Errorf("%w: a visitor rule's expiry must be after its start", store.ErrInvalidInput)
 	}
-	var updated *store.ProjectVisitorRule
+	var (
+		updated  *store.ProjectVisitorRule
+		bindings []*store.RoleBinding
+	)
 	err = c.WithTx(ctx, func(tx store.Store) error {
 		txc, ok := tx.(*CompositeStore)
 		if !ok {
@@ -255,13 +258,24 @@ func (c *CompositeStore) UpdateProjectVisitorRuleWindow(ctx context.Context, id 
 		if _, err := bindingUpdate.Save(ctx); err != nil {
 			return mapError(err)
 		}
+		rbs, err := txc.client.RoleBinding.Query().
+			Where(rolebinding.SourceRuleIDEQ(uid)).
+			Order(ent.Asc(rolebinding.FieldCreated), ent.Asc(rolebinding.FieldID)).
+			All(ctx)
+		if err != nil {
+			return mapError(err)
+		}
 		updated = entProjectVisitorRuleToStore(r)
+		bindings = make([]*store.RoleBinding, len(rbs))
+		for i, rb := range rbs {
+			bindings[i] = entRoleBindingToStore(rb)
+		}
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return updated, nil
+	return updated, bindings, nil
 }
 
 // DeleteProjectVisitorRule deletes a rule, the bindings it created and its

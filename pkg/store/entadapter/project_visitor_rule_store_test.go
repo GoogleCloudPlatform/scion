@@ -236,10 +236,14 @@ func TestUpdateProjectVisitorRuleWindow_AppliesToItsBindings(t *testing.T) {
 
 	notBefore := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
 	expiresAt := notBefore.Add(48 * time.Hour)
-	updated, err := env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, &notBefore, &expiresAt)
+	updated, bindings, err := env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, &notBefore, &expiresAt)
 	require.NoError(t, err)
 	require.NotNil(t, updated.ExpiresAt)
 	assert.True(t, updated.ExpiresAt.Equal(expiresAt))
+	require.Len(t, bindings, 1, "only the rule's own binding is returned")
+	assert.Equal(t, a.ID, bindings[0].ID)
+	require.NotNil(t, bindings[0].ExpiresAt)
+	assert.True(t, bindings[0].ExpiresAt.Equal(expiresAt), "the returned binding has the new window")
 
 	got, err := env.cs.GetRoleBinding(ctx, a.ID)
 	require.NoError(t, err)
@@ -251,14 +255,14 @@ func TestUpdateProjectVisitorRuleWindow_AppliesToItsBindings(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, untouched.ExpiresAt, "a grant by email is not changed by a rule")
 
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, nil)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, nil)
 	require.NoError(t, err)
 	got, err = env.cs.GetRoleBinding(ctx, a.ID)
 	require.NoError(t, err)
 	assert.Nil(t, got.NotBefore)
 	assert.Nil(t, got.ExpiresAt)
 
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, uuid.NewString(), nil, nil)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, uuid.NewString(), nil, nil)
 	assert.ErrorIs(t, err, store.ErrNotFound)
 }
 
@@ -320,7 +324,7 @@ func TestCreateVisitorRoleBinding_SourceRuleWindow(t *testing.T) {
 	shorter := now.Add(time.Hour)
 	bob := createFederatedUser(t, env.cs, testFedIssuer, "bob@corp.com", store.UserStatusActive)
 	require.NoError(t, env.cs.WithTx(ctx, func(tx store.Store) error {
-		if _, err := tx.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &shorter); err != nil {
+		if _, _, err := tx.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &shorter); err != nil {
 			return err
 		}
 		b := env.ruleBinding(bob.ID, rule)
@@ -338,16 +342,16 @@ func TestCreateVisitorRoleBinding_SourceRuleWindow(t *testing.T) {
 	// A rule that has ended, or has not started, binds no one.
 	carol := createFederatedUser(t, env.cs, testFedIssuer, "carol@corp.com", store.UserStatusActive)
 	past := now.Add(-time.Minute)
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &past)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &past)
 	require.NoError(t, err)
 	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
 	assert.ErrorIs(t, err, store.ErrVisitorBindingRefused, "the rule has ended")
 	future := now.Add(time.Hour)
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, &future, nil)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, &future, nil)
 	require.NoError(t, err)
 	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
 	assert.ErrorIs(t, err, store.ErrVisitorBindingRefused, "the rule has not started")
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, nil)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, nil)
 	require.NoError(t, err)
 	_, err = env.cs.CreateVisitorRoleBinding(ctx, env.ruleBinding(carol.ID, rule))
 	assert.NoError(t, err, "an unbounded rule binds")
@@ -515,7 +519,7 @@ func TestProjectVisitorRuleChange_LocksProjectRowFirst(t *testing.T) {
 	rule := env.createVisitorRule(t, testFedIssuer, "corp.com")
 	expires := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
 	take()
-	_, err := env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &expires)
+	_, _, err := env.cs.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &expires)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"rule", "project", "rule"}, take(), "window change: rule read, project row lock, rule lock")
 
@@ -527,7 +531,7 @@ func TestProjectVisitorRuleChange_LocksProjectRowFirst(t *testing.T) {
 
 	orphan := &store.ProjectVisitorRule{ProjectID: uuid.NewString(), Issuer: testFedIssuer, Domain: "corp.com"}
 	require.NoError(t, env.cs.CreateProjectVisitorRule(ctx, orphan))
-	_, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, orphan.ID, nil, &expires)
+	_, _, err = env.cs.UpdateProjectVisitorRuleWindow(ctx, orphan.ID, nil, &expires)
 	require.NoError(t, err, "window change of a rule whose project row is missing")
 	_, err = env.cs.DeleteProjectVisitorRule(ctx, orphan.ID)
 	require.NoError(t, err, "removal of a rule whose project row is missing")

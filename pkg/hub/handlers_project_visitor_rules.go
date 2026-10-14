@@ -229,7 +229,11 @@ func (s *Server) handleUpdateProjectVisitorRule(w http.ResponseWriter, r *http.R
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	var out ProjectVisitorRuleView
+	var (
+		out      ProjectVisitorRuleView
+		changed  []*store.RoleBinding
+		narrowed bool
+	)
 	err = s.store.WithTx(ctx, func(tx store.Store) error {
 		before, err := projectVisitorRule(ctx, tx, project.ID, ruleID)
 		if err != nil {
@@ -238,10 +242,14 @@ func (s *Server) handleUpdateProjectVisitorRule(w http.ResponseWriter, r *http.R
 		if !holdsAll && visitorWindowExtends(before.NotBefore, before.ExpiresAt, req.NotBefore, req.ExpiresAt) {
 			return errVisitorWindowNotAmplifiable
 		}
-		updated, err := tx.UpdateProjectVisitorRuleWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
+		// The old window admits a time the new one does not: a later or
+		// added start, or an earlier or added expiry.
+		narrowed = visitorWindowExtends(req.NotBefore, req.ExpiresAt, before.NotBefore, before.ExpiresAt)
+		updated, bindings, err := tx.UpdateProjectVisitorRuleWindow(ctx, before.ID, req.NotBefore, req.ExpiresAt)
 		if err != nil {
 			return err
 		}
+		changed = bindings
 		if err := writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRuleUpdate, project.ID,
 			visitorRuleAuditSummary(before, nil), visitorRuleAuditSummary(updated, nil)); err != nil {
 			return err
@@ -257,6 +265,15 @@ func (s *Server) handleUpdateProjectVisitorRule(w http.ResponseWriter, r *http.R
 		writeVisitorRuleItemError(w, err)
 		return
 	}
+	// A narrower window can end the authorization of the rule's
+	// visitors, so once the change has committed their conduit streams on
+	// the project are re-checked, as for a grant. A window that only
+	// widens ends nothing.
+	if narrowed {
+		for _, rb := range changed {
+			s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(rb))
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -266,6 +283,7 @@ func (s *Server) handleUpdateProjectVisitorRule(w http.ResponseWriter, r *http.R
 // needs no non-amplification.
 func (s *Server) handleRemoveProjectVisitorRule(w http.ResponseWriter, r *http.Request, project *store.Project, ruleID string) {
 	ctx := r.Context()
+	var removed []*store.RoleBinding
 	err := s.store.WithTx(ctx, func(tx store.Store) error {
 		rule, err := projectVisitorRule(ctx, tx, project.ID, ruleID)
 		if err != nil {
@@ -275,12 +293,21 @@ func (s *Server) handleRemoveProjectVisitorRule(w http.ResponseWriter, r *http.R
 		if err != nil {
 			return err
 		}
-		return writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRuleRemove, project.ID,
-			visitorRuleAuditSummary(rule, deleted), nil)
+		if err := writeVisitorAudit(ctx, tx, mutationTypeProjectVisitorRuleRemove, project.ID,
+			visitorRuleAuditSummary(rule, deleted), nil); err != nil {
+			return err
+		}
+		removed = deleted
+		return nil
 	})
 	if err != nil {
 		writeVisitorRuleItemError(w, err)
 		return
+	}
+	// Once the removal has committed, the conduit streams on the project
+	// of each visitor whose binding it deleted are re-checked.
+	for _, rb := range removed {
+		s.publishConduitAuthzChanged(conduitAuthzMatchForRoleBinding(rb))
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

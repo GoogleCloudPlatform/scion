@@ -22,6 +22,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -530,7 +531,7 @@ func TestProjectVisitorRules_WindowHonoured(t *testing.T) {
 	// Once the rule's expiry passes, its visitor's binding stops
 	// authorizing with it, and the expired rule binds no one new.
 	past := time.Now().Add(-time.Minute)
-	_, err := f.st.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &past)
+	_, _, err := f.st.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &past)
 	require.NoError(t, err)
 	assert.NotContains(t, f.visitorPermissions(t, token), "agent.message")
 	assert.Nil(t, f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-uma", "uma@any.example", boolPtr(true))))
@@ -697,7 +698,7 @@ func TestFederatedVisitor_RuleChangedAfterReadBindsCurrentRule(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, read, 1)
 		short := time.Now().Add(2 * time.Hour).UTC().Truncate(time.Second)
-		_, err = f.st.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &short)
+		_, _, err = f.st.UpdateProjectVisitorRuleWindow(ctx, rule.ID, nil, &short)
 		require.NoError(t, err)
 		stale.rules.Store(&read)
 
@@ -1088,5 +1089,91 @@ func TestProjectVisitorRules_RevokeExcludesBeforeDelete(t *testing.T) {
 		require.Len(t, bindings, 1, "the binding remains")
 		assert.Equal(t, pim.ID(), bindings[0].PrincipalID)
 		assert.Len(t, f.audits(t, mutationTypeProjectVisitorRevoke), 1, "only the first revoke is audited")
+	})
+}
+
+// conduitAuthzUsers returns the user IDs of conduit authorization change
+// events, sorted, and checks that each names projectID.
+func conduitAuthzUsers(t *testing.T, events []string, projectID string) []string {
+	t.Helper()
+	users := make([]string, 0, len(events))
+	for _, e := range events {
+		var m struct {
+			UserID    string `json:"userId"`
+			ProjectID string `json:"projectId"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(e), &m))
+		assert.Equal(t, projectID, m.ProjectID)
+		users = append(users, m.UserID)
+	}
+	sort.Strings(users)
+	return users
+}
+
+// After a rule window change that narrows the window, or a rule removal,
+// has committed, the conduit streams on the project of each of the rule's
+// visitors are re-checked, as for a grant. A widened window, and a change
+// or removal that rolls back, publish nothing.
+func TestProjectVisitorRules_ConduitAuthzChangedAfterCommit(t *testing.T) {
+	var fault *storeFaultSwitch
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		_, fault = installStoreFault(t, srv, func(inner store.Store, sw *storeFaultSwitch) *ruleAuditFaultStore {
+			return &ruleAuditFaultStore{Store: inner, fault: sw}
+		})
+	})
+	ctx := context.Background()
+	setConduitExperiment(t, f.srv, true)
+	pub := NewChannelEventPublisher()
+	f.srv.SetEventPublisher(pub)
+	ch, unsubscribe := pub.Subscribe(conduitAuthzChangedSubject)
+	defer unsubscribe()
+
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	other := f.addRuleOK(t, grantTestOtherIssuer, "other.example")
+	ola := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-ola", "ola@any.example", boolPtr(true)))
+	pim := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-pim", "pim@any.example", boolPtr(true)))
+	su := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-su", "su@other.example", boolPtr(true)))
+	require.NotNil(t, ola)
+	require.NotNil(t, pim)
+	require.NotNil(t, su)
+	ruleVisitors := []string{ola.ID(), pim.ID()}
+	sort.Strings(ruleVisitors)
+	conduitAuthzEvents(ch)
+	patch := func(t *testing.T, ruleID string, body map[string]interface{}) int {
+		t.Helper()
+		return doRequestAsUser(t, f.srv, f.owner, http.MethodPatch, f.rulesPath()+"/"+ruleID, body).Code
+	}
+	expiry := time.Now().Add(48 * time.Hour).UTC().Truncate(time.Second)
+
+	t.Run("narrowed window", func(t *testing.T) {
+		require.Equal(t, http.StatusOK, patch(t, rule.ID, map[string]interface{}{"expiresAt": expiry}))
+		assert.Equal(t, ruleVisitors, conduitAuthzUsers(t, conduitAuthzEvents(ch), f.projectID))
+	})
+
+	t.Run("widened window", func(t *testing.T) {
+		require.Equal(t, http.StatusOK, patch(t, rule.ID, map[string]interface{}{"expiresAt": expiry.Add(24 * time.Hour)}))
+		assert.Empty(t, conduitAuthzEvents(ch))
+	})
+
+	t.Run("removal", func(t *testing.T) {
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.rulesPath()+"/"+rule.ID, nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.Equal(t, ruleVisitors, conduitAuthzUsers(t, conduitAuthzEvents(ch), f.projectID))
+	})
+
+	// The switch stays armed: this subtest runs last.
+	t.Run("rolled back", func(t *testing.T) {
+		fault.Arm()
+		assert.Equal(t, http.StatusInternalServerError, patch(t, other.ID, map[string]interface{}{"expiresAt": expiry}))
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.rulesPath()+"/"+other.ID, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assert.Empty(t, conduitAuthzEvents(ch))
+		got, err := f.st.GetProjectVisitorRule(ctx, other.ID)
+		require.NoError(t, err, "the rule remains")
+		assert.Nil(t, got.ExpiresAt, "the rule's window is unchanged")
+		bindings := f.ruleBindings(t, f.projectID, other.ID)
+		require.Len(t, bindings, 1, "the binding remains")
+		assert.Equal(t, su.ID(), bindings[0].PrincipalID)
+		assert.Nil(t, bindings[0].ExpiresAt, "the binding's window is unchanged")
 	})
 }
