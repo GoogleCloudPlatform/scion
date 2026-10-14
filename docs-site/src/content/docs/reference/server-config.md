@@ -151,7 +151,7 @@ server:
 
 `launch_timeout` and `launch_keepalive_seconds` are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
 
-**Retired setting.** The `server.hub.async_agent_launch` setting (env `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`) has been retired and is ignored. A Hub that still has it set logs this warning at startup: "server.hub.async_agent_launch is retired; enable the hub.async_agent_launch experiment instead". Remove it, and turn on the experiment to keep asynchronous create.
+**Retired setting.** The `server.hub.async_agent_launch` setting (env `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`) has been retired and is ignored. A Hub that still has it set logs this warning at startup: "server.hub.async_agent_launch is retired; enable the hub.async_agent_launch experiment instead". Remove it, and turn on the experiment to keep asynchronous create. An admin server-config save (`PUT /api/v1/admin/server-config`) that still carries the key is refused with 422 and the same message.
 
 **Brokers on a Cloud Run service.** An asynchronous launch keeps running in the Runtime Broker after the create response. A broker hosted on a Cloud Run service therefore needs CPU allocated outside requests: deploy the service with `--no-cpu-throttling`, and keep its minimum instances above zero.
 

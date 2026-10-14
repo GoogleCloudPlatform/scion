@@ -939,8 +939,8 @@ Internal endpoint for a runtime broker to report progress and the terminal
 outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
 meaningful for an agent whose create request opted in via
 `acceptAsyncLaunch` while the `hub.async_agent_launch` experiment is on;
-with the feature off and no earlier launch left (no agent has a launch), every authorized, well-formed call ends in a
-404 or 409 below.
+with the feature off and no earlier launch left (no agent has a launch),
+every authorized, well-formed call ends in a 404 or 409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not

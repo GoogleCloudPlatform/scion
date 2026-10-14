@@ -102,8 +102,8 @@ func TestLaunchReaperTickHandler_ReapsDeadlineAndPublishes(t *testing.T) {
 
 // TestLaunchReaperTickHandler_NoOpWhenNothingDue verifies a tick with no
 // active launches at all — the state while the hub.async_agent_launch
-// experiment is off and no earlier launch is left — completes without publishing
-// anything and without error. See registerLaunchReaper's doc comment for the
+// experiment is off and no earlier launch is left — completes without
+// publishing anything and without error. See registerLaunchReaper's doc comment for the
 // exact per-tick statement list and cost with the feature off.
 func TestLaunchReaperTickHandler_NoOpWhenNothingDue(t *testing.T) {
 	srv, s := testServer(t)

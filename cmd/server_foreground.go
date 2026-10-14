@@ -1197,8 +1197,6 @@ func validateHubWorkspaceStorage(cfg *config.GlobalConfig) error {
 	return nil
 }
 
-// loadAndReconcileConfig loads the server configuration file and reconciles
-// it with command-line flags and workstation defaults.
 // warnRetiredServerSettings logs one warning for each retired server setting
 // still set in the server config or environment. The loader ignores them, so
 // without this a hub would silently change behaviour after an upgrade
@@ -1209,6 +1207,8 @@ func warnRetiredServerSettings(logger *slog.Logger, configPath string) {
 	}
 }
 
+// loadAndReconcileConfig loads the server configuration file and reconciles
+// it with command-line flags and workstation defaults.
 func loadAndReconcileConfig(cmd *cobra.Command) (*config.GlobalConfig, error) {
 	cfg, err := config.LoadGlobalConfig(serverConfigPath)
 	if err != nil {
