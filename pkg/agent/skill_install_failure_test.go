@@ -17,6 +17,7 @@ package agent
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -227,6 +228,7 @@ func TestProvisionAgent_OptionalSkillInstallFailure_CreateSucceeds(t *testing.T)
 	// must still apply.
 	resolver := &mockResolver{resolved: installFailSkills(srv.URL, content, false)}
 	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	records := captureSlog(t)
 
 	agentHome, _, _, err := ProvisionAgent(ctx, "install-fail-agent", "install-fail-tpl", "", "", projectScionDir, "", "", "", "")
 	if err != nil {
@@ -242,6 +244,9 @@ func TestProvisionAgent_OptionalSkillInstallFailure_CreateSucceeds(t *testing.T)
 	}
 	if strings.Contains(string(data), installFailMissingURI) {
 		t.Errorf("resolution record must not list the skipped skill, got: %s", data)
+	}
+	if !hasSkipWarning(*records, "optional skill could not be installed; skipped", installFailMissingURI, installFail404Reason) {
+		t.Errorf("expected a Warn naming %s and reason %q, got %d records", installFailMissingURI, installFail404Reason, len(*records))
 	}
 }
 
@@ -266,5 +271,64 @@ func TestProvisionAgent_RequiredSkillInstallFailure_YieldsSkillResolutionError(t
 	}
 	if skillErr.Code != SkillErrCodeInstallFailed {
 		t.Errorf("error code = %q, want %q", skillErr.Code, SkillErrCodeInstallFailed)
+	}
+}
+
+// captureSlog routes the default slog logger to a collector for the test.
+func captureSlog(t *testing.T) *[]slog.Record {
+	t.Helper()
+	var records []slog.Record
+	old := slog.Default()
+	slog.SetDefault(slog.New(&collectHandler{records: &records}))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return &records
+}
+
+// hasSkipWarning reports whether records hold a Warn with message msg whose
+// skill_uri is uri and whose reason is reason.
+func hasSkipWarning(records []slog.Record, msg, uri, reason string) bool {
+	for _, r := range records {
+		if r.Level != slog.LevelWarn || r.Message != msg {
+			continue
+		}
+		var gotURI, gotReason string
+		r.Attrs(func(a slog.Attr) bool {
+			switch a.Key {
+			case "skill_uri":
+				gotURI = a.Value.String()
+			case "reason":
+				gotReason = a.Value.String()
+			}
+			return true
+		})
+		if gotURI == uri && gotReason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+// TestProvisionAgent_OptionalSkillResolveFailure_WarnsAndSucceeds checks that
+// an optional skill whose resolution fails is skipped with a Warn naming the
+// skill and the reason, not only a debug line.
+func TestProvisionAgent_OptionalSkillResolveFailure_WarnsAndSucceeds(t *testing.T) {
+	content := []byte("# Good Skill")
+	srv := newInstallFailServer(t, content)
+	projectScionDir := writeInstallFailTemplate(t, true)
+
+	const reason = "expected gh://owner/repo/skill-name"
+	resolver := &mockResolver{
+		resolved: installFailSkills(srv.URL, content, false)[:1],
+		errors:   []ResolveError{{URI: installFailMissingURI, Code: "invalid_uri", Message: reason}},
+	}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	records := captureSlog(t)
+
+	_, _, _, err := ProvisionAgent(ctx, "resolve-fail-agent", "install-fail-tpl", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent must succeed when only an optional skill fails to resolve, got: %v", err)
+	}
+	if !hasSkipWarning(*records, "optional skill could not be resolved; skipped", installFailMissingURI, reason) {
+		t.Errorf("resolve skip: expected a Warn naming %s and reason %q, got %d records", installFailMissingURI, reason, len(*records))
 	}
 }
