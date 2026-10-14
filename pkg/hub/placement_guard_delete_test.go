@@ -248,7 +248,7 @@ func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+			f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true, storeWrap: brokerReadFaultWrap(boom)})
 			a := f.pinnedAgent(t, "pinned-read-fail-"+tc.name, string(state.PhaseRunning))
 			// Move the pin and the assignment together onto the legacy row,
 			// through the placement compare-and-set the store allows.
@@ -269,11 +269,11 @@ func TestAgentDelete_PinnedPlacementReadFailureNeverFinalizes(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, 1, n)
 
-			faulty := &brokerReadErrStore{Store: f.s, err: boom}
-			f.srv.store = faulty
-			t.Cleanup(func() { f.srv.store = f.s })
+			// Every Runtime Broker row read fails, in the Hub's store and in
+			// the dispatcher's (the same switch-gated wrapper).
 			client := &countingBrokerClient{}
-			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(faulty, client, false, slog.Default()))
+			f.srv.SetDispatcher(NewHTTPAgentDispatcherWithClient(f.storeWrapper, client, false, slog.Default()))
+			f.storeFault.Arm()
 
 			rec := doRequest(t, f.srv, http.MethodDelete, "/api/v1/agents/"+a.ID+tc.query, nil)
 			require.Equal(t, http.StatusBadGateway, rec.Code, "the rollback's runtime_error, never a success: %s", rec.Body.String())

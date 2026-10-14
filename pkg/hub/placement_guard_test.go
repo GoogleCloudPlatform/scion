@@ -174,14 +174,28 @@ func (s *agentOverrideStore) GetAgent(ctx context.Context, id string) (*store.Ag
 	return s.Store.GetAgent(ctx, id)
 }
 
-// brokerReadErrStore fails every GetRuntimeBroker with err.
+// brokerReadErrStore fails GetRuntimeBroker with err: always when fault is
+// nil, otherwise only while fault is armed (installed through the store
+// fault switch, so the server's store is never reassigned).
 type brokerReadErrStore struct {
 	store.Store
-	err error
+	err   error
+	fault *storeFaultSwitch
 }
 
-func (s *brokerReadErrStore) GetRuntimeBroker(context.Context, string) (*store.RuntimeBroker, error) {
-	return nil, s.err
+func (s *brokerReadErrStore) GetRuntimeBroker(ctx context.Context, id string) (*store.RuntimeBroker, error) {
+	if s.fault.Active() {
+		return nil, s.err
+	}
+	return s.Store.GetRuntimeBroker(ctx, id)
+}
+
+// brokerReadFaultWrap is a flatHubOpts.storeWrap (and installStoreFault
+// wrapper) that fails every Runtime Broker row read with err once armed.
+func brokerReadFaultWrap(err error) func(inner store.Store, fault *storeFaultSwitch) store.Store {
+	return func(inner store.Store, fault *storeFaultSwitch) store.Store {
+		return &brokerReadErrStore{Store: inner, err: err, fault: fault}
+	}
 }
 
 // requirePlacementRefusal asserts err is a placement refusal raised on this
@@ -752,10 +766,9 @@ func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
 	boom := errors.New("injected broker read failure")
 
 	t.Run("PTY", func(t *testing.T) {
-		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true, storeWrap: brokerReadFaultWrap(boom)})
 		a := f.pinnedAgent(t, "pty-fault", string(state.PhaseRunning))
-		f.srv.store = &brokerReadErrStore{Store: f.s, err: boom}
-		t.Cleanup(func() { f.srv.store = f.s })
+		f.storeFault.Arm()
 		d := f.srv.resolvePTYPath(context.Background(), nil, a)
 		assert.Equal(t, ptyPathNone, d.Path)
 		assert.Equal(t, http.StatusServiceUnavailable, d.Status)
@@ -764,10 +777,9 @@ func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
 	})
 
 	t.Run("PTY, unpinned agent keeps today's decision", func(t *testing.T) {
-		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true})
+		f := newFlatHubFixture(t, flatHubOpts{experimentOn: true, linkFlat: true, storeWrap: brokerReadFaultWrap(boom)})
 		a := f.unpinnedAgentOn(t, "pty-fault-unpinned", f.legacy.ID, string(state.PhaseRunning))
-		f.srv.store = &brokerReadErrStore{Store: f.s, err: boom}
-		t.Cleanup(func() { f.srv.store = f.s })
+		f.storeFault.Arm()
 		d := f.srv.resolvePTYPath(context.Background(), nil, a)
 		assert.NotEqual(t, ptyReasonRegistryUnavailable, d.Reason, "the placement check fails open for an unpinned agent")
 		assert.NotEqual(t, http.StatusConflict, d.Status)
@@ -776,8 +788,8 @@ func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
 	t.Run("conduit grant, unpinned and managed agents are not refused", func(t *testing.T) {
 		cf := newConduitFixture(t)
 		ctx := context.Background()
-		cf.srv.store = &brokerReadErrStore{Store: cf.store, err: boom}
-		t.Cleanup(func() { cf.srv.store = cf.store })
+		_, fault := installStoreFault(t, cf.srv, brokerReadFaultWrap(boom))
+		fault.Arm()
 		mint := func(a *store.Agent) error {
 			_, _, err := cf.srv.mintConduitGrant(ctx, conduitGrantRequest{Identity: cf.owner, Agent: a, Stream: tcpHeader("3000"),
 				Target: grant.Target{Kind: grant.TargetKindAgent, ID: a.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}})
@@ -801,8 +813,8 @@ func TestPlacementGuard_ConduitStoreFaultIsRegistryUnavailable(t *testing.T) {
 		a.PinnedRuntimeBrokerID = flat.ID
 		a.PinnedRuntimeTargetID = flat.RuntimeTarget.ID
 		a.PinnedRuntimeTargetType = "docker"
-		cf.srv.store = &brokerReadErrStore{Store: cf.store, err: boom}
-		t.Cleanup(func() { cf.srv.store = cf.store })
+		_, fault := installStoreFault(t, cf.srv, brokerReadFaultWrap(boom))
+		fault.Arm()
 
 		_, _, err := cf.srv.mintConduitGrant(ctx, conduitGrantRequest{Identity: cf.owner, Agent: &a, Stream: tcpHeader("3000"),
 			Target: grant.Target{Kind: grant.TargetKindAgent, ID: a.ID, EndpointIncarnation: "inc-1", SessionID: "sess-1", ConnectionEpoch: 3}})
