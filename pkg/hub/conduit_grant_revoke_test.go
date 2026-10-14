@@ -25,6 +25,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 )
 
 // Grant key retention, seed removal and revocation on the hub (design §3.5,
@@ -138,4 +140,45 @@ func TestConduitGrantKeyRetentionFollowsInterval(t *testing.T) {
 	assert.Equal(t, defaultConduitUserStreamAuthzMax+30*time.Second, srv.conduitGrantKeyRetention())
 	srv.config.ConduitUserStreamAuthzMax = 2 * time.Hour
 	assert.Equal(t, 2*time.Hour+30*time.Second, srv.conduitGrantKeyRetention())
+}
+
+// TestConduitGrantRingSettledWithoutTraffic: with no grant traffic at all,
+// the stored ring loses the outgoing key's seed within one settle period
+// (conduitGrantKeyRefresh) after the rotated-in key activates.
+func TestConduitGrantRingSettledWithoutTraffic(t *testing.T) {
+	srv, _ := testServer(t)
+	keyClock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, keyClock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	first, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	rot := rotateConduitGrantKeyAsAdmin(t, srv)
+
+	start := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	loopClock := clock.NewFake(start)
+	runCtx, cancel := context.WithCancel(ctx)
+	t.Cleanup(cancel)
+	_, stop, err := srv.startConduitStreamAuthz(runCtx, loopClock, -1)
+	require.NoError(t, err)
+	t.Cleanup(stop)
+
+	seed := func() []byte {
+		ring, _, err := mem.Load(ctx)
+		require.NoError(t, err)
+		for _, k := range ring.Keys {
+			if k.KeyID == first.KeyID {
+				return k.Seed
+			}
+		}
+		t.Fatal("the outgoing key left the ring")
+		return nil
+	}
+	require.NotEmpty(t, seed(), "the stored ring holds the outgoing seed before activation")
+	keyClock.Advance(rot.ActivateAt.Sub(keyClock.Now()) + time.Second)
+	require.True(t, loopClock.WaitForTimer(5*time.Second, start.Add(conduitGrantKeyRefresh)), "the settle is not armed")
+	loopClock.Advance(conduitGrantKeyRefresh)
+	require.Eventually(t, func() bool { return len(seed()) == 0 }, 5*time.Second, 10*time.Millisecond,
+		"the stored ring still holds the outgoing seed one settle period after activation")
 }

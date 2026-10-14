@@ -381,6 +381,16 @@ func (k *conduitGrantKeys) signer(ctx context.Context) (*grant.Signer, error) {
 	return ring.Signer(k.now())
 }
 
+// settleNow rereads the stored ring and settles it, whatever the cache's
+// age; currentLocked writes a ring that changed back to storage.
+func (k *conduitGrantKeys) settleNow(ctx context.Context) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.ring = nil
+	_, err := k.currentLocked(ctx)
+	return err
+}
+
 // conduitGrantKeyRecheckFresh is the oldest a cached ring may be when
 // re-check verification uses it; an older one is read again first.
 const conduitGrantKeyRecheckFresh = 5 * time.Second

@@ -16,7 +16,10 @@ package hub
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 )
 
 // Grant key changes across hub nodes (design v2.21.27 §3.5, Key-set
@@ -126,6 +129,28 @@ func (s *Server) bindConduitGrantKeyEvents() {
 		go s.receiveConduitGrantKeysChanged(ctx, ch)
 	}
 	s.conduitGrantKeysChangedHere()
+}
+
+// runConduitGrantKeySettle settles the stored ring every
+// conduitGrantKeyRefresh on clk until ctx ends, while hub.conduit is on, so
+// once a rotated-in key activates, the outgoing key's seed leaves storage
+// within a minute even on a hub that serves no grant traffic.
+func (s *Server) runConduitGrantKeySettle(ctx context.Context, clk clock.Clock) {
+	for {
+		ch, stop := clock.After(clk, conduitGrantKeyRefresh)
+		select {
+		case <-ctx.Done():
+			stop()
+			return
+		case <-ch:
+		}
+		if !s.experimentEnabled(conduitExperiment) {
+			continue
+		}
+		if err := s.conduitGrantKeySet().settleNow(ctx); err != nil && ctx.Err() == nil {
+			slog.Warn("Conduit grant key ring: periodic settle failed", "error", err)
+		}
+	}
 }
 
 // receiveConduitGrantKeysChanged applies every grant key change event until

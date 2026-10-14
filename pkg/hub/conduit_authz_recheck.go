@@ -82,6 +82,7 @@ func (s *Server) startConduitStreamAuthz(ctx context.Context, clk clock.Clock, i
 	a.Start(runCtx)
 	s.bindConduitAuthzEvents()
 	s.bindConduitGrantKeyEvents()
+	go s.runConduitGrantKeySettle(runCtx, a.cfg.Clock)
 	stop = func() {
 		cancel()
 		s.conduitAuthz.CompareAndSwap(a, nil)
