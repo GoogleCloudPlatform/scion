@@ -380,7 +380,6 @@ type conduitUserStreamAuthz struct {
 	ConfirmDeny func() bool
 }
 
-
 // authorizeConduitUserStream decides a user stream against current state.
 // The tunnel open path and every re-check of an open user stream decide
 // with it, so a re-check evaluates the same authorization as the open:
