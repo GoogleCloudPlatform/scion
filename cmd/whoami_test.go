@@ -429,8 +429,30 @@ func TestWhoamiFullPlainTextMessageMode(t *testing.T) {
 		require.NoError(t, cmd.RunE(cmd, nil))
 	})
 
-	assert.Contains(t, out, "Phase:    running")
-	assert.Contains(t, out, "Msg Mode: lineage")
+	// The hub also answers the experiments query here, so the output ends
+	// with "Experiments: (none)" and every value is aligned past that label.
+	assert.Contains(t, out, "Phase:       running")
+	assert.Contains(t, out, "Msg Mode:    lineage")
+}
+
+// TestPrintFullPlainTextAlignment: every value starts in the same column,
+// sized to fit the longest label present.
+func TestPrintFullPlainTextAlignment(t *testing.T) {
+	var buf bytes.Buffer
+	require.NoError(t, printFullPlainText(&buf, WhoamiResult{Slug: "a", Scopes: []string{"s"}}))
+	assert.Equal(t, "Agent:  a\nScopes: s\n", buf.String())
+
+	r := WhoamiResult{Slug: "a", Name: "A", Template: "developer", Phase: "running"}
+	buf.Reset()
+	require.NoError(t, printFullPlainText(&buf, r))
+	assert.Equal(t, "Agent:    a (A)\nTemplate: developer\nPhase:    running\n", buf.String())
+
+	r.Experiments = &[]string{}
+	buf.Reset()
+	require.NoError(t, printFullPlainText(&buf, r))
+	assert.Equal(t,
+		"Agent:       a (A)\nTemplate:    developer\nPhase:       running\nExperiments: (none)\n",
+		buf.String())
 }
 
 func TestWhoamiNameOnly(t *testing.T) {
@@ -511,7 +533,7 @@ func TestWhoamiFullListsTokenScopes(t *testing.T) {
 	var result WhoamiResult
 	require.NoError(t, json.Unmarshal([]byte(run(cliutil.RootOptions{OutputFormat: "json"})), &result))
 	assert.Equal(t, []string{"project:read", "project:artifact:read"}, result.Scopes)
-	assert.Contains(t, run(cliutil.RootOptions{}), "Scopes:   project:read, project:artifact:read")
+	assert.Contains(t, run(cliutil.RootOptions{}), "Scopes: project:read, project:artifact:read")
 
 	whoamiFull = false
 	var raw map[string]any

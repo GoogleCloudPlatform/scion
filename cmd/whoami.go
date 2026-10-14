@@ -19,9 +19,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -143,8 +145,7 @@ When run outside an agent container, falls back to the system whoami command.`,
 		}
 
 		if whoamiFull {
-			printFullPlainText(result)
-			return nil
+			return printFullPlainText(cmd.OutOrStdout(), result)
 		}
 
 		fmt.Println(slug)
@@ -219,56 +220,59 @@ func enrichFromHub(cmd *cobra.Command, result *WhoamiResult) {
 	result.Experiments = &enabled
 }
 
-// printFullPlainText prints a human-readable multi-line summary of all available fields.
-func printFullPlainText(r WhoamiResult) {
+// printFullPlainText writes a human-readable multi-line summary of all
+// available fields to w, with the values aligned in one column.
+func printFullPlainText(w io.Writer, r WhoamiResult) error {
+	tw := tabwriter.NewWriter(w, 0, 0, 1, ' ', 0)
 	if r.Name != "" {
-		fmt.Printf("Agent:    %s (%s)\n", r.Slug, r.Name)
+		_, _ = fmt.Fprintf(tw, "Agent:\t%s (%s)\n", r.Slug, r.Name)
 	} else {
-		fmt.Printf("Agent:    %s\n", r.Slug)
+		_, _ = fmt.Fprintf(tw, "Agent:\t%s\n", r.Slug)
 	}
 	if r.ID != "" {
-		fmt.Printf("ID:       %s\n", r.ID)
+		_, _ = fmt.Fprintf(tw, "ID:\t%s\n", r.ID)
 	}
 	if r.Project != "" {
-		fmt.Printf("Project:  %s\n", r.Project)
+		_, _ = fmt.Fprintf(tw, "Project:\t%s\n", r.Project)
 	}
 	if r.Template != "" {
-		fmt.Printf("Template: %s\n", r.Template)
+		_, _ = fmt.Fprintf(tw, "Template:\t%s\n", r.Template)
 	}
 	if r.Harness != "" {
-		fmt.Printf("Harness:  %s\n", r.Harness)
+		_, _ = fmt.Fprintf(tw, "Harness:\t%s\n", r.Harness)
 	}
 	if r.Model != "" {
-		fmt.Printf("Model:    %s\n", r.Model)
+		_, _ = fmt.Fprintf(tw, "Model:\t%s\n", r.Model)
 	}
 	if r.Creator != "" {
-		fmt.Printf("Creator:  %s\n", r.Creator)
+		_, _ = fmt.Fprintf(tw, "Creator:\t%s\n", r.Creator)
 	}
 	if r.BrokerName != "" {
-		fmt.Printf("Broker:   %s\n", r.BrokerName)
+		_, _ = fmt.Fprintf(tw, "Broker:\t%s\n", r.BrokerName)
 	}
 	if r.Phase != "" {
-		fmt.Printf("Phase:    %s\n", r.Phase)
+		_, _ = fmt.Fprintf(tw, "Phase:\t%s\n", r.Phase)
 	}
 	if r.Activity != "" {
-		fmt.Printf("Activity: %s\n", r.Activity)
+		_, _ = fmt.Fprintf(tw, "Activity:\t%s\n", r.Activity)
 	}
 	if r.MessageMode != "" {
-		fmt.Printf("Msg Mode: %s\n", r.MessageMode)
+		_, _ = fmt.Fprintf(tw, "Msg Mode:\t%s\n", r.MessageMode)
 	}
 	if r.HubURL != "" {
-		fmt.Printf("Hub:      %s\n", r.HubURL)
+		_, _ = fmt.Fprintf(tw, "Hub:\t%s\n", r.HubURL)
 	}
 	if len(r.Scopes) > 0 {
-		fmt.Printf("Scopes:   %s\n", strings.Join(r.Scopes, ", "))
+		_, _ = fmt.Fprintf(tw, "Scopes:\t%s\n", strings.Join(r.Scopes, ", "))
 	}
 	if r.Experiments != nil {
 		list := strings.Join(*r.Experiments, ", ")
 		if list == "" {
 			list = "(none)"
 		}
-		fmt.Printf("Experiments: %s\n", list)
+		_, _ = fmt.Fprintf(tw, "Experiments:\t%s\n", list)
 	}
+	return tw.Flush()
 }
 
 func runSystemWhoami() error {
