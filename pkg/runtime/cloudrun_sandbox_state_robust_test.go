@@ -95,6 +95,18 @@ func TestSandboxStateNullEntryListReconcile(t *testing.T) {
 	if e := readStateForTest(t, path)["live"]; e == nil {
 		t.Errorf("state file lost the live entry after reconcile")
 	}
+
+	// The next write leaves the null key out of the file.
+	if _, err := ss.casPut("other", nonceAbsent, runEntry("other", "run-o")); err != nil {
+		t.Fatalf("casPut: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"gone"`) {
+		t.Errorf("state file still holds the null key after a write:\n%s", data)
+	}
 }
 
 // robustPids reads the pid file the mock wait writes, one pid per line.
@@ -132,25 +144,34 @@ esac`, pidFile))
 	rt := newWorkaroundTestRuntime(t, bin)
 	cancelWatchersOnCleanup(t, rt)
 
-	for i := 0; i < 2; i++ {
-		if _, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a")); err != nil {
-			t.Fatalf("Run %d: %v", i+1, err)
+	// waitPids waits up to 10 s for n wait processes to have started.
+	waitPids := func(n int) []int {
+		t.Helper()
+		var pids []int
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if pids = robustPids(t, pidFile); len(pids) >= n {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
 		}
+		if len(pids) != n {
+			t.Fatalf("wait processes started = %v, want %d", pids, n)
+		}
+		return pids
 	}
 
-	var pids []int
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if pids = robustPids(t, pidFile); len(pids) >= 2 {
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
+	// The first watcher's wait is running before the second start.
+	if _, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a")); err != nil {
+		t.Fatalf("Run 1: %v", err)
 	}
-	if len(pids) != 2 {
-		t.Fatalf("wait processes started = %v, want 2", pids)
+	waitPids(1)
+	if _, err := rt.Run(context.Background(), fenceRunConfig(t, "run-a")); err != nil {
+		t.Fatalf("Run 2: %v", err)
 	}
+	pids := waitPids(2)
 
-	deadline = time.Now().Add(5 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for robustAlive(pids[0]) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
 	}

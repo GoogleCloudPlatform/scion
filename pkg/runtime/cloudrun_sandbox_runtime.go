@@ -1379,7 +1379,7 @@ type CloudRunSandboxRuntime struct {
 	// watchCancels for each name (installWatcher), so a watcher removes
 	// only its own cancel. Created on first use.
 	watchTokens map[string]uint64
-	watchSeq    uint64 // last token issued
+	watchSeq    uint64 // last token issued; tokens start at 1, so 0 is never issued
 }
 
 // NewCloudRunSandboxRuntime returns a new CloudRunSandboxRuntime.
@@ -2377,7 +2377,8 @@ func (r *CloudRunSandboxRuntime) deleteOrWorkaround(ctx context.Context, id stri
 // the name is cancelled first (ptone/scion#4819): it watches an older
 // entry, and left running it would keep a `sandbox wait` and a log tailer
 // alive with no cancel in the map. A cancelled watcher returns without
-// touching the state or the map.
+// touching the state or the map. Tokens start at 1: a watcher run with
+// token 0 is never registered and never releases a registration.
 func (r *CloudRunSandboxRuntime) installWatcher(name string) (context.Context, uint64) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.watchMu.Lock()
