@@ -1522,10 +1522,17 @@ func ApplySnapshot(s *Server, snap Layer1Snapshot) map[string]interface{} {
 	}
 
 	// Propagate hub_name to the GCP secret backend so new secrets get the
-	// correct label value. Log handlers have a similar limitation (§7.4).
+	// correct label value.
 	if gcpBackend, ok := s.secretBackend.(*secret.GCPBackend); ok {
 		gcpBackend.SetHubName(hubName)
 	}
+	// Log handlers are built before the stored settings load; label their
+	// records with the applied name, at startup and on every later rename,
+	// so the hub's own log queries (which filter on this name) match them
+	// (ptone/scion#4903). The value is process-wide: tests that apply a
+	// snapshot set it too. Metrics resource attributes cannot follow a
+	// rename; see newHubTelemetryIdentity in cmd.
+	logging.SetHubName(hubName)
 
 	// Runtimes, profiles, and harness configs: update the global settings
 	// overlay so that the co-located broker (which reads via

@@ -31,3 +31,14 @@ func TestHasAttachSupport_CloudRunSandboxRuntimeSupported(t *testing.T) {
 		t.Error("HasAttachSupport(&CloudRunSandboxRuntime{}) = false, want true: the cloudrun-sandbox runtime supports attach")
 	}
 }
+
+// Neither Cloud Run runtime calls RunConfig.Checkpoint or
+// RunConfig.OnResourceCreated, so both must opt out of async launch until
+// they do; otherwise an aborted launch would clean up nothing.
+func TestHasAsyncLaunchSupport_CloudRunRuntimesOptOut(t *testing.T) {
+	for _, rt := range []Runtime{&CloudRunRuntime{}, &CloudRunSandboxRuntime{}} {
+		if HasAsyncLaunchSupport(rt) {
+			t.Errorf("HasAsyncLaunchSupport(%T) = true, want false: Run calls neither Checkpoint nor OnResourceCreated", rt)
+		}
+	}
+}

@@ -54,7 +54,8 @@ var schemaDriftAllowList = map[string]string{
 	// oidc.token_lifetime is a time.Duration. koanf's
 	// StringToTimeDurationHook accepts a Go duration string ("15m"), and
 	// an integer is taken as nanoseconds.
-	"type-union: server.oidc.token_lifetime": "time.Duration: Go duration string or integer nanoseconds",
+	"type-union: server.oidc.token_lifetime":      "time.Duration: Go duration string or integer nanoseconds",
+	"type-union: server.oidc.user_token_lifetime": "time.Duration: Go duration string or integer nanoseconds",
 	// map[string]string values decode weakly (WeaklyTypedInput), so an
 	// unquoted number or boolean loads as its string form.
 	// (Notification params are deliberately string-only: the hub decodes
