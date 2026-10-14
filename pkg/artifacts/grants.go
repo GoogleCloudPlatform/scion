@@ -397,7 +397,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
-	s.logGrantPut(r, a, g, created, logAuthorityReviewGrantor)
+	s.logGrantPut(r, a, g, created, s.reviewGrantLogAuthority(r, a))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated

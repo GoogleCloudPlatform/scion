@@ -256,7 +256,7 @@ func TestStoreSweepExpired(t *testing.T) {
 			t.Fatal(err)
 		}
 		ids, err := st.SweepExpired(ctx, now, 10)
-		if err != nil || len(ids) != 1 || ids[0] != expired.ID {
+		if err != nil || len(ids) != 1 || ids[0] != (ArtifactRef{ID: expired.ID, ScopeRef: expired.ScopeRef}) {
 			t.Fatalf("SweepExpired: %v %v", ids, err)
 		}
 		if _, err := st.GetArtifact(ctx, expired.ID); !errors.Is(err, ErrNotFound) {

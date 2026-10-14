@@ -119,14 +119,18 @@ const (
 
 // Log authorities: why the actor was allowed. owner and admin_grant are
 // the event authorities of the same name; project_admin is the event
-// authority custodian_project_admin; review_grantor is a caller allowed a
-// review grant by the host's ReviewGrantAuthority. The maintenance pass
-// logs the event authorities retention and reconciler.
+// authority custodian_project_admin, and also a review grant given as an
+// administrator of the home project; delegating_user is a review grant
+// given as the owning agent's delegating user; review_grantor is a review
+// grant on a host that cannot tell the two apart (no ScopeAdministrator).
+// The maintenance pass logs the event authorities retention and
+// reconciler.
 const (
-	logAuthorityOwner         = AuthorityOwner
-	logAuthorityAdminGrant    = AuthorityAdminGrant
-	logAuthorityProjectAdmin  = "project_admin"
-	logAuthorityReviewGrantor = "review_grantor"
+	logAuthorityOwner          = AuthorityOwner
+	logAuthorityAdminGrant     = AuthorityAdminGrant
+	logAuthorityProjectAdmin   = "project_admin"
+	logAuthorityReviewGrantor  = "review_grantor"
+	logAuthorityDelegatingUser = "delegating_user"
 )
 
 // SetLogger sets the function that yields the artifact decision logger.
@@ -470,4 +474,25 @@ func (s *Service) logVersionError(r *http.Request, a *Artifact, seq int, reason 
 		outcome = logOutcomeError
 	}
 	s.logDecision(r, slog.LevelInfo, logEntry{action: logActionVersionFailed, outcome: outcome, reason: reason, artifact: a, seq: seq})
+}
+
+// reviewGrantLogAuthority is the authority a review grant the caller of r
+// just gave on a was allowed by. The host's ReviewGrantAuthority answers
+// one bool for its two clauses and checks home-project administration
+// first, so asking ScopeAdministrator the same question again tells them
+// apart: project_admin when it answers yes, delegating_user otherwise. A
+// host without ScopeAdministrator logs review_grantor. It asks only when
+// the entry is written.
+func (s *Service) reviewGrantLogAuthority(r *http.Request, a *Artifact) string {
+	if !s.decisionLogger().Enabled(r.Context(), slog.LevelInfo) {
+		return ""
+	}
+	admin, ok := s.host.(ScopeAdministrator)
+	if !ok {
+		return logAuthorityReviewGrantor
+	}
+	if admin.AdministersScope(r.Context(), a.ScopeRef) {
+		return logAuthorityProjectAdmin
+	}
+	return logAuthorityDelegatingUser
 }

@@ -201,7 +201,7 @@ func TestBuildLogFilter_Whitelist(t *testing.T) {
 			name:      "whitelist excludes Cloud SQL logs implicitly",
 			opts:      LogQueryOptions{},
 			projectID: "my-project",
-			// The whitelist only admits scion-server, scion-agents, scion-messages.
+			// The whitelist only admits scion-server, scion-agents, scion-messages, scion-artifacts.
 			// A Cloud SQL logName like "projects/my-project/logs/cloudsql.googleapis.com%2Fpostgres.log"
 			// would NOT match any of these, so it is excluded.
 			expected: `(logName = "projects/my-project/logs/scion-server" OR logName = "projects/my-project/logs/scion-agents" OR logName = "projects/my-project/logs/scion-messages" OR logName = "projects/my-project/logs/scion-artifacts")`,

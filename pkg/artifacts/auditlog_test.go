@@ -18,6 +18,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -236,20 +238,32 @@ func TestDecisionLogLifecycleEvents(t *testing.T) {
 	}))
 }
 
-// TestDecisionLogReviewGrant: a review grant given by a review grantor
-// is logged with that authority.
+// TestDecisionLogReviewGrant: a review grant is logged with the clause that
+// allowed it: delegating_user for the owning agent's delegating user,
+// project_admin for an administrator of the home project.
 func TestDecisionLogReviewGrant(t *testing.T) {
 	f, id := newReviewGrantFixture(t)
+	f.host.allowAdmin(projAdmin, "project-1")
 	c := captureLog(f, slog.LevelDebug)
-	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusCreated {
-		t.Fatalf("review grant: %d %s", rec.Code, rec.Body.String())
+	memberID := PrincipalRef(member.kind, member.ref)
+	for _, tc := range []struct {
+		caller    principal
+		subject   string
+		authority string
+	}{
+		{delegator, reviewerID, logAuthorityDelegatingUser},
+		{projAdmin, memberID, logAuthorityProjectAdmin},
+	} {
+		if rec := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, tc.subject, GrantReview)); rec.Code != http.StatusCreated {
+			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
+		}
+		entries, _ := c.take(t)
+		checkEntry(t, "review grant by "+tc.caller.ref, one(t, "review grant", entries), "INFO", map[string]any{
+			logKeyAction: logActionGrantCreated, logKeyAuthority: tc.authority,
+			logKeyPrincipalID: tc.caller.ref, logKeySubjectKind: SubjectPrincipal, logKeySubjectRef: tc.subject,
+			logKeyPermission: GrantReview, logKeyOwnerKind: PrincipalKindAgent,
+		})
 	}
-	entries, _ := c.take(t)
-	checkEntry(t, "review grant", one(t, "review grant", entries), "INFO", map[string]any{
-		logKeyAction: logActionGrantCreated, logKeyAuthority: logAuthorityReviewGrantor,
-		logKeyPrincipalID: delegator.ref, logKeySubjectKind: SubjectPrincipal, logKeySubjectRef: reviewerID,
-		logKeyPermission: GrantReview, logKeyOwnerKind: PrincipalKindAgent,
-	})
 }
 
 // TestDecisionLogRefusals: refusals on management and write routes are
@@ -259,6 +273,17 @@ func TestDecisionLogRefusals(t *testing.T) {
 	c := captureLog(f, slog.LevelInfo)
 	reader := principal{PrincipalKindUser, "user-reader", ""}
 	f.host.allow(reader, "project-1", PermissionRead)
+	// A review grantee that reads the artifact through its home project, a
+	// writer that did not start the pending version, a credential that
+	// does not permit publishing in project-2.
+	reviewGrantee := principal{PrincipalKindUser, "user-review", ""}
+	f.host.allow(reviewGrantee, "project-1", PermissionRead)
+	insertGrant(f, id, SubjectPrincipal, PrincipalRef(reviewGrantee.kind, reviewGrantee.ref), GrantReview, nil)
+	insertGrant(f, id, SubjectPrincipal, PrincipalRef(agentA.kind, agentA.ref), GrantWrite, nil)
+	pending := f.createPending(userU, "/api/v1/artifacts/"+id+"/versions", bundle{"doc.md": []byte("# v2")}.manifest("doc.md"))
+	f.host.deny(agentX, "project-2", PermissionCreate)
+	c.take(t)
+	manifest := `{"entry":"a.md","files":[{"path":"a.md","size":1,"sha256":"` + sha([]byte("x")) + `"}]}`
 
 	cases := []struct {
 		name     string
@@ -285,6 +310,14 @@ func TestDecisionLogRefusals(t *testing.T) {
 			logActionCreate, logReasonNotAuthorizedInScope, "POST /api/v1/artifacts", false},
 		{"cross-project share", userU, http.MethodPost, grantsPath(id), reviewBody(SubjectScope, "project-2", GrantRead), http.StatusForbidden,
 			logActionShare, logReasonCrossProjectDisabled, "POST /api/v1/artifacts/{id}/grants", true},
+		{"review grantee publishes", reviewGrantee, http.MethodPost, "/api/v1/artifacts/" + id + "/versions", manifest, http.StatusForbidden,
+			logActionWrite, logReasonReviewOnly, "POST /api/v1/artifacts/{id}/versions", true},
+		{"writer uploads to another's version", agentA, http.MethodPut, fmt.Sprintf("/api/v1/artifacts/%s/versions/%d/files/doc.md", id, pending.Version.Seq), "# v2", http.StatusForbidden,
+			logActionWrite, logReasonNotVersionPublisher, "PUT /api/v1/artifacts/{id}/versions/{seq}/files/{path}", true},
+		{"credential does not permit publishing", agentX, http.MethodPost, "/api/v1/artifacts?name=x.md&scope=project-2", `x`, http.StatusForbidden,
+			logActionCreate, logReasonCredentialNotPermit, "POST /api/v1/artifacts", false},
+		{"move into a project the owner cannot publish in", userU, http.MethodPatch, artifactPath(id), `{"scopeRef":"project-3"}`, http.StatusForbidden,
+			logActionMove, logReasonNotAuthorizedInScope, "PATCH /api/v1/artifacts/{id}", true},
 	}
 	for _, tc := range cases {
 		rec := jsonDo(f, tc.p, tc.method, tc.target, tc.body)
@@ -452,7 +485,7 @@ func TestMaintenanceLog(t *testing.T) {
 	for _, e := range entries[:2] {
 		checkEntry(t, "orphaned", e, "INFO", map[string]any{
 			logKeyAction: logActionOrphaned, logKeyOutcome: logOutcomeAllowed, logKeyOwnerKind: PrincipalKindAgent,
-			logKeyOrphaned: true, logKeyPrincipalKind: ActorKindSystem, logKeyAuthority: AuthorityReconciler, logKeyRoute: nil,
+			logKeyOrphaned: true, logKeyPrincipalKind: ActorKindSystem, logKeyAuthority: AuthorityReconciler, logKeyRoute: nil, logKeyProjectID: "project-1",
 		})
 		marked[e[logKeyArtifactID]] = true
 	}
@@ -473,6 +506,14 @@ func TestMaintenanceLog(t *testing.T) {
 	entries, _ = c.take(t)
 	if len(entries) != 3 || entries[0][logKeyAction] != logActionUnorphaned || entries[0][logKeyOrphaned] != false {
 		t.Errorf("unorphan pass entries: %v", entries)
+	}
+
+	// A pass that changes no mark writes nothing.
+	if _, err := ReconcileOwners(ctx, f.store, checker, time.Now(), l); err != nil {
+		t.Fatal(err)
+	}
+	if entries, raw := c.take(t); len(entries) != 0 {
+		t.Errorf("a pass that changed nothing logged: %s", raw)
 	}
 
 	// A failing checker: a WARN summary with the reason.
@@ -500,7 +541,7 @@ func TestMaintenanceLog(t *testing.T) {
 		t.Fatalf("sweep: %d entries, want 1 and a summary: %v", len(entries), entries)
 	}
 	checkEntry(t, "retention delete", entries[0], "INFO", map[string]any{
-		logKeyAction: logActionDeleted, logKeyArtifactID: gone1.ID, logKeyPrincipalKind: ActorKindSystem,
+		logKeyAction: logActionDeleted, logKeyArtifactID: gone1.ID, logKeyPrincipalKind: ActorKindSystem, logKeyProjectID: "project-1",
 		logKeyPrincipalID: AuthorityRetention, logKeyAuthority: AuthorityRetention,
 	})
 	checkEntry(t, "retention pass", entries[1], "INFO", map[string]any{logKeyAction: logActionRetentionPass, logKeyCount: 1.0})
@@ -548,4 +589,106 @@ func merge(a, b map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// failingStore fails every request-driven version write, as a store outage
+// would.
+type failingStore struct{ Store }
+
+var errStoreDown = errors.New("store down")
+
+func (failingStore) CreatePublished(context.Context, *Artifact, *Version, []File, []Grant) error {
+	return errStoreDown
+}
+func (failingStore) CreatePending(context.Context, *Artifact, *Version, []File, []Grant) error {
+	return errStoreDown
+}
+func (failingStore) CreateVersion(context.Context, *Version, []File, int) error { return errStoreDown }
+func (failingStore) FinalizeVersion(context.Context, string, int, time.Time, []File, int) (*Artifact, error) {
+	return nil, errStoreDown
+}
+
+// TestDecisionLogVersionFailed: a version that could not be recorded or
+// finalized is logged as version_failed with outcome error and reason
+// store_error at each write site; a discarded review with outcome refused
+// and its discard reason.
+func TestDecisionLogVersionFailed(t *testing.T) {
+	t.Run("store errors", func(t *testing.T) {
+		f := newFixture(t, false)
+		files := bundle{"a.md": []byte("# a")}
+		existing := f.publish(userU, "e.md", []byte("# e"), "scope=project-1").Artifact.ID
+		manifest := files.manifest("a.md")
+		manifest.Scope = "project-1"
+		pend := f.createPending(userU, "/api/v1/artifacts", manifest)
+		if rec := f.put(userU, pend.Artifact.ID, 1, "a.md", files["a.md"]); rec.Code != http.StatusNoContent {
+			t.Fatalf("put: %d %s", rec.Code, rec.Body.String())
+		}
+		c := captureLog(f, slog.LevelDebug)
+		f.svc.SetStore(failingStore{f.store})
+		for _, tc := range []struct {
+			name  string
+			do    func() *httptest.ResponseRecorder
+			id    string
+			seq   any
+			route string
+		}{
+			{"single-file publish", func() *httptest.ResponseRecorder {
+				return f.do(&userU, http.MethodPost, "/api/v1/artifacts?name=b.md&scope=project-1", []byte("# b"), nil)
+			}, "", 1.0, "POST /api/v1/artifacts"},
+			{"manifest create", func() *httptest.ResponseRecorder { return f.postJSON(&userU, "/api/v1/artifacts", manifest) },
+				"", 1.0, "POST /api/v1/artifacts"},
+			{"appended version", func() *httptest.ResponseRecorder {
+				return f.postJSON(&userU, "/api/v1/artifacts/"+existing+"/versions", files.manifest("a.md"))
+			}, existing, nil, "POST /api/v1/artifacts/{id}/versions"},
+			{"finalize", func() *httptest.ResponseRecorder { return f.finalize(userU, pend.Artifact.ID, 1) },
+				pend.Artifact.ID, 1.0, "POST /api/v1/artifacts/{id}/versions/{seq}/finalize"},
+		} {
+			if rec := tc.do(); rec.Code != http.StatusInternalServerError {
+				t.Fatalf("%s: status %d, want 500: %s", tc.name, rec.Code, rec.Body.String())
+			}
+			entries, _ := c.take(t)
+			e := one(t, tc.name, entries)
+			want := map[string]any{
+				logKeyAction: logActionVersionFailed, logKeyOutcome: logOutcomeError, logKeyReason: logReasonStoreError,
+				logKeyRoute: tc.route, logKeyProjectID: "project-1", logKeyPrincipalID: userU.ref, logKeyVersionSeq: tc.seq,
+			}
+			if tc.id != "" {
+				want[logKeyArtifactID] = tc.id
+			} else if id, _ := e[logKeyArtifactID].(string); id == "" {
+				t.Errorf("%s: no artifact_id", tc.name)
+			}
+			checkEntry(t, tc.name, e, "INFO", want)
+		}
+	})
+	t.Run("discarded review", func(t *testing.T) {
+		f := newReviewFixture(t)
+		seq := f.startReview(userU, with(f.v1, "plan.md", reviewMarked), "plan.md")
+		v3 := with(f.v1, "plan.md", reviewParent+"More.\n")
+		f.publishBundle(agentA, "/api/v1/artifacts/"+f.id+"/versions", v3.manifest("plan.md"), v3)
+		c := captureLog(f.fixture, slog.LevelDebug)
+		if rec := f.finalizeReview(userU, seq, 1); rec.Code != http.StatusConflict {
+			t.Fatalf("stale review: %d %s", rec.Code, rec.Body.String())
+		}
+		entries, _ := c.take(t)
+		checkEntry(t, "discard", one(t, "discard", entries), "INFO", map[string]any{
+			logKeyAction: logActionVersionFailed, logKeyOutcome: logOutcomeRefused, logKeyReason: FailReasonStaleReview,
+			logKeyArtifactID: f.id, logKeyVersionSeq: float64(seq), logKeyProjectID: "project-1",
+			logKeyOwnerKind: PrincipalKindAgent, logKeyPrincipalID: userU.ref,
+			logKeyRoute: "POST /api/v1/artifacts/{id}/versions/{seq}/finalize",
+		})
+	})
+}
+
+// TestDecisionLogLinkSubjectRefNeverWritten: a share link's subject ref (the
+// token's hash) is dropped even when an entry carries it.
+func TestDecisionLogLinkSubjectRefNeverWritten(t *testing.T) {
+	c := &logCapture{}
+	l := slog.New(slog.NewJSONHandler(c, nil))
+	writeDecision(context.Background(), l, slog.LevelInfo, "", "user", "u1",
+		logEntry{action: logActionLinkCreated, subjectKind: SubjectLink, subjectRef: "token-hash-sentinel"})
+	entries, raw := c.take(t)
+	checkEntry(t, "link", one(t, "link", entries), "INFO", map[string]any{logKeySubjectKind: SubjectLink, logKeySubjectRef: nil})
+	if strings.Contains(raw, "token-hash-sentinel") {
+		t.Errorf("the link subject ref reached the entry: %s", raw)
+	}
 }

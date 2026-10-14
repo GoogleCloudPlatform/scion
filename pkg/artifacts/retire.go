@@ -139,13 +139,14 @@ func (e *CheckerError) Unwrap() error { return e.Err }
 // counts as live.
 //
 // It writes one decision log entry to log per artifact it marks or clears,
-// and a summary of the pass; a nil log discards them.
+// and a summary of the pass when it changed a mark or failed; a nil log
+// discards them.
 func ReconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, now time.Time, log *slog.Logger) (ReconcileResult, error) {
 	if log == nil {
 		log = discardLogger
 	}
 	res, err := reconcileOwners(ctx, st, checker, now, log)
-	if st != nil && checker != nil {
+	if st != nil && checker != nil && (res.Orphaned+res.Unorphaned > 0 || err != nil) {
 		logOwnerPass(ctx, log, res, err)
 	}
 	return res, err
@@ -210,7 +211,7 @@ func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.T
 	total := 0
 	for {
 		ids, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
-		logOwnerMarks(ctx, log, o, orphaned, now, ids)
+		logOwnerMarks(ctx, log, st, o, orphaned, now, ids)
 		n := len(ids)
 		total += n
 		if err != nil || n < orphanMarkBatch {
@@ -220,16 +221,24 @@ func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.T
 }
 
 // logOwnerMarks writes one entry per artifact of owner o whose orphan mark
-// a pass set (orphaned) or cleared.
-func logOwnerMarks(ctx context.Context, log *slog.Logger, o Owner, orphaned bool, now time.Time, ids []string) {
+// a pass set (orphaned) or cleared. Each entry carries the artifact's home
+// project, read back from st only when the entries are written (the marked
+// artifacts are live); a failed read leaves it out of that entry.
+func logOwnerMarks(ctx context.Context, log *slog.Logger, st Store, o Owner, orphaned bool, now time.Time, ids []string) {
+	if len(ids) == 0 || !log.Enabled(ctx, slog.LevelInfo) {
+		return
+	}
 	action := logActionUnorphaned
 	var at *time.Time
 	if orphaned {
 		action, at = logActionOrphaned, &now
 	}
 	for _, id := range ids {
-		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action,
-			artifact: &Artifact{ID: id, OwnerKind: o.Kind, OrphanedAt: at}})
+		logged := &Artifact{ID: id, OwnerKind: o.Kind, OrphanedAt: at}
+		if a, err := st.GetArtifact(ctx, id); err == nil {
+			logged.ScopeRef = a.ScopeRef
+		}
+		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action, artifact: logged})
 	}
 }
 
@@ -263,11 +272,11 @@ func SweepExpired(ctx context.Context, st Store, now time.Time, limit int, log *
 	if log == nil {
 		log = discardLogger
 	}
-	ids, err := st.SweepExpired(ctx, now, limit)
-	for _, id := range ids {
-		writeSystemDecision(ctx, log, retentionActor, logEntry{action: logActionDeleted, artifact: &Artifact{ID: id}})
+	swept, err := st.SweepExpired(ctx, now, limit)
+	for _, ref := range swept {
+		writeSystemDecision(ctx, log, retentionActor, logEntry{action: logActionDeleted, artifact: &Artifact{ID: ref.ID, ScopeRef: ref.ScopeRef}})
 	}
-	if len(ids) > 0 || err != nil {
+	if len(swept) > 0 || err != nil {
 		outcome, level := logOutcomeAllowed, slog.LevelInfo
 		attrs := []slog.Attr{}
 		if err != nil {
@@ -276,8 +285,8 @@ func SweepExpired(ctx context.Context, st Store, now time.Time, limit int, log *
 		}
 		attrs = append(attrs, slog.String(logKeyAction, logActionRetentionPass), slog.String(logKeyOutcome, outcome),
 			slog.String(logKeyPrincipalKind, retentionActor.Kind), slog.String(logKeyPrincipalID, retentionActor.Ref),
-			slog.String(logKeyAuthority, retentionActor.Authority), slog.Int(logKeyCount, len(ids)))
+			slog.String(logKeyAuthority, retentionActor.Authority), slog.Int(logKeyCount, len(swept)))
 		log.LogAttrs(ctx, level, "artifacts: "+logActionRetentionPass, attrs...)
 	}
-	return len(ids), err
+	return len(swept), err
 }

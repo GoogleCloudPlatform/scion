@@ -162,6 +162,7 @@ func (s *Service) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "artifacts: create pending version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the artifact")
 		return
 	}
@@ -248,6 +249,7 @@ func (s *Service) appendVersion(w http.ResponseWriter, r *http.Request, b backen
 		return
 	case err != nil:
 		slog.ErrorContext(ctx, "artifacts: create version failed", "error", err)
+		s.logVersionError(r, a, v.Seq, logReasonStoreError)
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the version")
 		return
 	}
@@ -821,11 +823,11 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 	updated, err := b.store.FinalizeVersion(work, a.ID, seq, claim, extra, base)
 	if errors.Is(err, ErrStaleBase) {
 		// A version was published between the review check and now.
-		s.discardStaleReview(w, r, b, a.ID, seq, claim)
+		s.discardStaleReview(w, r, b, a, seq, claim)
 		return
 	}
 	if errors.Is(err, ErrPendingNewer) {
-		s.discardReview(w, r, b, a.ID, seq, claim, FailReasonNewerPublishPending,
+		s.discardReview(w, r, b, a, seq, claim, FailReasonNewerPublishPending,
 			"a newer version of the artifact is being published; the review was discarded. Review that version once it is finalized")
 		return
 	}
@@ -849,6 +851,8 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
 		return
 	}
+	// The version is committed: log it before the read-back, which may fail.
+	s.logVersion(r, logActionVersionFinalized, updated, seq, access)
 	ready, err := b.store.GetVersion(ctx, a.ID, seq)
 	if err == nil {
 		files, err = b.store.ListFiles(ctx, ready.ID)
@@ -858,7 +862,6 @@ func (s *Service) handleFinalize(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "internal", "could not read the version")
 		return
 	}
-	s.logVersion(r, logActionVersionFinalized, updated, seq, access)
 	if ready.Kind == VersionKindReview {
 		s.notifyReview(ctx, updated, ready)
 	}

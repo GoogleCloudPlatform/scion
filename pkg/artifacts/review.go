@@ -199,7 +199,7 @@ func (s *Service) readBlob(ctx context.Context, b backend, f *File) ([]byte, err
 func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, v *Version, files []File, claim time.Time, base int) (int, bool) {
 	ctx := r.Context()
 	if base != a.CurrentSeq || base >= v.Seq {
-		s.discardStaleReview(w, r, b, a.ID, v.Seq, claim)
+		s.discardStaleReview(w, r, b, a, v.Seq, claim)
 		return 0, true
 	}
 	check, err := s.checkReview(ctx, b, a, v, files, base)
@@ -214,7 +214,7 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 	if len(check.files) == 0 {
 		return base, false
 	}
-	if !s.discard(w, r, b, a.ID, v.Seq, claim, FailReasonUnmarkedChanges) {
+	if !s.discard(w, r, b, a, v.Seq, claim, FailReasonUnmarkedChanges) {
 		return 0, true
 	}
 	writeJSON(w, http.StatusUnprocessableEntity, errorResponse{Error: errorBody{
@@ -228,15 +228,15 @@ func (s *Service) finalizeReviewCheck(w http.ResponseWriter, r *http.Request, b 
 
 // discardStaleReview discards a review overtaken by a newer version and
 // answers 409.
-func (s *Service) discardStaleReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time) {
-	s.discardReview(w, r, b, id, seq, claim, FailReasonStaleReview,
+func (s *Service) discardStaleReview(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int, claim time.Time) {
+	s.discardReview(w, r, b, a, seq, claim, FailReasonStaleReview,
 		"the version the review was started from is no longer the latest; the review was discarded. Review the current version")
 }
 
 // discardReview discards a claimed review, recording reason, and answers
 // 409 stale_review with message.
-func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, reason, message string) {
-	if !s.discard(w, r, b, id, seq, claim, reason) {
+func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int, claim time.Time, reason, message string) {
+	if !s.discard(w, r, b, a, seq, claim, reason) {
 		return
 	}
 	writeError(w, http.StatusConflict, CodeStaleReview, message)
@@ -244,8 +244,8 @@ func (s *Service) discardReview(w http.ResponseWriter, r *http.Request, b backen
 
 // discard fails a claimed version, recording reason (a FailReason
 // constant). ok=false means the response was written.
-func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, id string, seq int, claim time.Time, reason string) bool {
-	err := b.store.DiscardFinalize(context.WithoutCancel(r.Context()), id, seq, claim, reason)
+func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, a *Artifact, seq int, claim time.Time, reason string) bool {
+	err := b.store.DiscardFinalize(context.WithoutCancel(r.Context()), a.ID, seq, claim, reason)
 	switch {
 	case errors.Is(err, ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", "the version is not pending or not complete")
@@ -255,6 +255,6 @@ func (s *Service) discard(w http.ResponseWriter, r *http.Request, b backend, id 
 		writeError(w, http.StatusInternalServerError, "internal", "could not finalize the version")
 		return false
 	}
-	s.logVersionError(r, &Artifact{ID: id}, seq, reason)
+	s.logVersionError(r, a, seq, reason)
 	return true
 }
