@@ -1016,3 +1016,77 @@ func TestFederatedVisitor_ConcurrentFirstContactThroughRule(t *testing.T) {
 	assert.Equal(t, winner.ID(), bindings[0].PrincipalID)
 	assert.Len(t, f.audits(t, mutationTypeVisitorLinked), 2, "the losing request wrote no record")
 }
+
+// visitorRevokeOrderStore records, in order, the exclusions and binding
+// deletes made through it, inside transactions too, and fails every
+// binding delete while failDelete is set.
+type visitorRevokeOrderStore struct {
+	store.Store
+	calls      *[]string
+	failDelete *atomic.Bool
+}
+
+var errRevokeDeleteFault = errors.New("injected visitor binding delete failure")
+
+func (s *visitorRevokeOrderStore) WithTx(ctx context.Context, fn func(tx store.Store) error) error {
+	return s.Store.WithTx(ctx, func(tx store.Store) error {
+		return fn(&visitorRevokeOrderStore{Store: tx, calls: s.calls, failDelete: s.failDelete})
+	})
+}
+
+func (s *visitorRevokeOrderStore) CreateProjectVisitorExclusion(ctx context.Context, ruleID, userID, createdBy string) error {
+	*s.calls = append(*s.calls, "exclusion")
+	return s.Store.CreateProjectVisitorExclusion(ctx, ruleID, userID, createdBy)
+}
+
+func (s *visitorRevokeOrderStore) DeleteRoleBinding(ctx context.Context, id string) error {
+	*s.calls = append(*s.calls, "delete")
+	if s.failDelete.Load() {
+		return errRevokeDeleteFault
+	}
+	return s.Store.DeleteRoleBinding(ctx, id)
+}
+
+// Revoking a rule visitor records the exclusion before it deletes the
+// binding, in one transaction: the revoke reaches the rule before the
+// binding, as rule changes do. When the delete then fails, neither the
+// exclusion nor any other change remains.
+func TestProjectVisitorRules_RevokeExcludesBeforeDelete(t *testing.T) {
+	var calls []string
+	failDelete := &atomic.Bool{}
+	f := newVisitorGrantFixture(t, func(srv *Server) {
+		srv.membershipService.store = &visitorRevokeOrderStore{Store: srv.membershipService.store, calls: &calls, failDelete: failDelete}
+	})
+	ctx := context.Background()
+	rule := f.addRuleOK(t, grantTestOtherIssuer, "any.example")
+	ola := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-ola", "ola@any.example", boolPtr(true)))
+	pim := f.visitorThrough(t, f.token(t, grantTestOtherIssuer, "sub-pim", "pim@any.example", boolPtr(true)))
+	require.NotNil(t, ola)
+	require.NotNil(t, pim)
+
+	t.Run("exclusion first", func(t *testing.T) {
+		calls = nil
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+ola.ID(), nil)
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		assert.Equal(t, []string{"exclusion", "delete"}, calls)
+		excluded, err := f.st.IsProjectVisitorExcluded(ctx, rule.ID, ola.ID())
+		require.NoError(t, err)
+		assert.True(t, excluded)
+	})
+
+	t.Run("failed delete leaves no change", func(t *testing.T) {
+		calls = nil
+		failDelete.Store(true)
+		t.Cleanup(func() { failDelete.Store(false) })
+		rec := doRequestAsUser(t, f.srv, f.owner, http.MethodDelete, f.visitorsPath()+"/"+pim.ID(), nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+		assert.Equal(t, []string{"exclusion", "delete"}, calls)
+		excluded, err := f.st.IsProjectVisitorExcluded(ctx, rule.ID, pim.ID())
+		require.NoError(t, err)
+		assert.False(t, excluded, "the exclusion is rolled back with the delete")
+		bindings := f.ruleBindings(t, f.projectID, rule.ID)
+		require.Len(t, bindings, 1, "the binding remains")
+		assert.Equal(t, pim.ID(), bindings[0].PrincipalID)
+		assert.Len(t, f.audits(t, mutationTypeProjectVisitorRevoke), 1, "only the first revoke is audited")
+	})
+}
