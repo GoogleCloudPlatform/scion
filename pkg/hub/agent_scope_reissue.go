@@ -22,6 +22,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 
@@ -461,7 +462,7 @@ func (s *Server) planAgentDelegatorReissue(ctx context.Context, plan *scopeReiss
 	ceiling.PermissionIDs = append([]string(nil), ceiling.PermissionIDs...)
 	for _, scope := range candidates {
 		for _, perm := range scopeCeilingPermissions(scope) {
-			if selfOperationSet[perm] || !containsString(ceiling.PermissionIDs, perm) {
+			if selfOperationSet[perm] || !slices.Contains(ceiling.PermissionIDs, perm) {
 				continue
 			}
 			switch liveCheck(perm) {
@@ -577,7 +578,7 @@ func (s *Server) planUserDelegatorReissue(ctx context.Context, plan *scopeReissu
 			if selfOperationSet[perm] || faulted[perm] {
 				continue
 			}
-			if ceiling.Kind == store.EffectCeilingBounded && !containsString(ceiling.PermissionIDs, perm) {
+			if ceiling.Kind == store.EffectCeilingBounded && !slices.Contains(ceiling.PermissionIDs, perm) {
 				continue
 			}
 			if s.reissueUserDelegatorFault(ctx, agent, user.ID, perm) {
