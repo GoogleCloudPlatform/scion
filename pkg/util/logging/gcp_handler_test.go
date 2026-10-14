@@ -572,14 +572,14 @@ type traceValuer struct{ id string }
 
 func (v traceValuer) LogValue() slog.Value { return slog.StringValue(v.id) }
 
-// emptyTraceCase is one entry logged with a trace_id that normalizes to
-// empty (or a valid one after one), and the entry wanted: its exact
-// top-level keys, and the trace ID of both the trace field and the trace
-// label, "" meaning neither is present.
+// emptyTraceCase is one entry logged with trace_ids from With and the
+// record, and the entry wanted: top lists its top-level keys besides
+// gcpBaseKeys, and trace is the trace ID of both the trace field and the
+// trace label, "" meaning neither is present.
 type emptyTraceCase struct {
 	name  string
 	log   func(l *slog.Logger)
-	keys  []string
+	top   []string
 	trace string
 }
 
@@ -593,7 +593,7 @@ func runEmptyTraceCases(t *testing.T, cases []emptyTraceCase) {
 			var buf bytes.Buffer
 			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
 
-			assertKeys(t, buf.Bytes(), withBaseKeys(tc.keys...)...)
+			assertKeys(t, buf.Bytes(), withBaseKeys(tc.top...)...)
 			data := decodeLine(t, buf.Bytes())
 			field, hasField := data[GCPKeyTrace]
 			labels, _ := data[GCPKeyLabels].(map[string]any)
