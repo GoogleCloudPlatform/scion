@@ -533,8 +533,10 @@ func TestSetNotificationDispatchOutcome_Rejects(t *testing.T) {
 	assert.False(t, got.Dispatched, "a rejected outcome must write nothing")
 	assert.Empty(t, got.DispatchOutcome)
 
-	_, err = s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), store.NotificationOutcomeFailed)
-	assert.ErrorIs(t, err, store.ErrNotFound)
+	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
+		_, err = s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), outcome)
+		assert.ErrorIs(t, err, store.ErrNotFound, "outcome %q on a missing row", outcome)
+	}
 }
 
 // Once an outcome is recorded, a revert is refused and the row stays
