@@ -300,7 +300,7 @@ func TestUseShow_ContextJSON(t *testing.T) {
 	require.Len(t, lines, 3, stdout)
 	assert.Regexp(t, `^Hub:\s+local\s+`+srv.URL+`\s+\(current context\)$`, lines[0])
 	assert.Regexp(t, `^Project:\s+foo\s+`+ctxTestProjectID+`\s+\(current context\)$`, lines[1])
-	assert.True(t, strings.HasPrefix(lines[2], "Auth:     Dev auth ("), lines[2])
+	assert.Equal(t, "Auth:     Dev auth (SCION_DEV_TOKEN env var), not verified; run 'scion hub status' to check", lines[2])
 }
 
 func TestUseShow_DirectoryOverridesContext(t *testing.T) {
@@ -390,7 +390,7 @@ func TestUseThenHubAvailability(t *testing.T) {
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	require.Equal(t, ctxTestProjectID, projectPath)
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	require.NoError(t, err)
 	require.NotNil(t, hubCtx)
 	assert.Equal(t, ctxTestProjectID, hubCtx.ProjectID)

@@ -71,3 +71,32 @@ func TestValidateThreadGroupName(t *testing.T) {
 		}
 	}
 }
+
+func TestSanitizeThreadGroupName(t *testing.T) {
+	cases := map[string]string{
+		"Release":                       "Release",
+		"  Release  ":                   "Release",
+		"Re\x00lea\tse\n":               "Release",
+		"\u0085\x07":                    "",
+		"   ":                           "",
+		"":                              "",
+		strings.Repeat("é", 101):        strings.Repeat("é", 100),
+		strings.Repeat("x", 99) + " yz": strings.Repeat("x", 99),
+	}
+	for in, want := range cases {
+		got := SanitizeThreadGroupName(in)
+		if got != want {
+			t.Errorf("SanitizeThreadGroupName(%q) = %q, want %q", in, got, want)
+			continue
+		}
+		if got == "" {
+			continue
+		}
+		if v, err := ValidateThreadGroupName(got); err != nil || v != got {
+			t.Errorf("ValidateThreadGroupName(SanitizeThreadGroupName(%q)) = %q, %v; want it accepted unchanged", in, v, err)
+		}
+		if ThreadGroupNameKey(got) != ThreadGroupNameKey(in) && len([]rune(strings.TrimSpace(in))) <= MaxThreadGroupNameRunes {
+			t.Errorf("sanitizing %q changed its name key", in)
+		}
+	}
+}

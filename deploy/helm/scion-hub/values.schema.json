@@ -155,10 +155,16 @@
           "minimum": 1,
           "maximum": 65535
         },
+        "hubClass": {
+          "type": "string",
+          "enum": ["", "test"],
+          "default": "",
+          "description": "Deploy-time class of this hub, rendered as server.hub.class. Empty (the default) means not a test hub. Required, as \"test\", by testIdentities.enabled."
+        },
         "testIdentities": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Hub-issued test identities, for test hubs only. enabled=true renders --enable-test-identities and nothing else; the binary's default-off startup gate stays the only switch.",
+          "description": "Hub-issued test identities, for test hubs only. enabled=true renders --test-mode=member:<hub.hubId> and nothing else, and requires hubClass: test. No chart value renders an admin level. The hub refuses to start unless its database also carries a test infrastructure marker for this hub id, written offline by an operator with `scion server test-infra mark`.",
           "properties": {
             "enabled": {
               "type": "boolean",

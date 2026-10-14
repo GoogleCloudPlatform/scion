@@ -124,6 +124,11 @@ _Avoid_: home mount, config dir
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
 _Avoid_: server, master, coordinator
 
+**Hub nickname**:
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). Lowercase letters, digits and `-`, at most 63 characters; one nickname per Hub URL. The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings.
+_Avoid_: hub profile, hub alias, hub name (for the nickname), hub connection (that is the Runtime Broker's registration with a Hub)
+_See also_: Hub list, Current context, Hub
+
 **Runtime Broker**:
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. Always write in full; "broker" alone is forbidden because it collides with Message Broker. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
 _Avoid_: broker, node, runner, worker
@@ -189,8 +194,19 @@ _Avoid_: hub-native, hub-native project, hub workspace, hub-project, hosted proj
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
 _Avoid_: local project, imported project, registered project
 
+**Hub list**:
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
+
+**Current context**:
+The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+_Avoid_: current project (alone, when the Hub is meant too), default hub, active profile, kube-style context
+_See also_: Hub nickname, Hub list, Link entry
+
+**Link entry**:
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
+
 **Shadowed project**:
-A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine.
+A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine. Created by the removed `scion hub shadow`; existing ones still resolve and print a cleanup notice. Use `scion use <project>` instead.
 _Avoid_: linked, mounted, cloned
 _See also_: Hub-managed project
 
@@ -260,7 +276,7 @@ _See also_: User Access Token (UAT)
 **Group**:
 A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion.
 _Avoid_: team, org, role
-_See also_: Message Group (different concept — message recipients, not users)
+_See also_: Message Group (different concept — message recipients, not users), Thread Group (different concept — a project's threads, not users)
 
 **User Access Token (UAT)**:
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**.
@@ -305,7 +321,7 @@ _Avoid_: ancestry mode, parent-only mode
 **Message Group**:
 A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project.
 _Avoid_: group, set, group chat, room, thread
-_See also_: Group (different concept — hub users, not recipients)
+_See also_: Group (different concept — hub users, not recipients), Thread Group (different concept — a project's threads, not recipients)
 
 **Message Mode**:
 A per-agent setting that controls which actors (users and agents) can send messages to that agent. One of five values: **none**, **lineage**, **branch**, **project** (the default), or **hub**. Set by the agent's owner or a project admin via the `set_message_mode` action; changeable at any time with immediate effect. Stored on the agent record as `message_mode`.
@@ -346,6 +362,11 @@ _Avoid_: override, bypass (too generic)
 **Project mode** (message mode):
 The default message mode. Any user with the `agent:message` permission in the project scope can message the agent, and any same-project agent in project or branch mode can message it. The most permissive mode.
 _Avoid_: open mode, public mode
+
+**Thread Group**:
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Served at `/api/v1/thread-groups` and managed with `scion conversation group`, behind the `hub.chat_thread_groups` experiment (ptone/scion#4424). It is not a permissions **Group** and not a **Message Group**. The older per-user groups in a user's chat preferences are *personal groups*.
+_Avoid_: group (bare), folder, channel, conversation group, thread folder
+_See also_: Group (hub users, not threads), Message Group (recipients of one send, not threads), Native Web Chat
 
 ## Identity & State
 

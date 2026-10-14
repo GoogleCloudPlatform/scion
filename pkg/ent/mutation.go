@@ -4617,6 +4617,7 @@ type AgentMutation struct {
 	addlaunch_seq              *int64
 	launch_step                *string
 	launch_error               *string
+	launch_cause               *string
 	deletion_state             *string
 	deletion_claim             *int64
 	adddeletion_claim          *int64
@@ -7911,6 +7912,55 @@ func (m *AgentMutation) ResetLaunchError() {
 	delete(m.clearedFields, agent.FieldLaunchError)
 }
 
+// SetLaunchCause sets the "launch_cause" field.
+func (m *AgentMutation) SetLaunchCause(s string) {
+	m.launch_cause = &s
+}
+
+// LaunchCause returns the value of the "launch_cause" field in the mutation.
+func (m *AgentMutation) LaunchCause() (r string, exists bool) {
+	v := m.launch_cause
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldLaunchCause returns the old "launch_cause" field's value of the Agent entity.
+// If the Agent object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *AgentMutation) OldLaunchCause(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldLaunchCause is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldLaunchCause requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldLaunchCause: %w", err)
+	}
+	return oldValue.LaunchCause, nil
+}
+
+// ClearLaunchCause clears the value of the "launch_cause" field.
+func (m *AgentMutation) ClearLaunchCause() {
+	m.launch_cause = nil
+	m.clearedFields[agent.FieldLaunchCause] = struct{}{}
+}
+
+// LaunchCauseCleared returns if the "launch_cause" field was cleared in this mutation.
+func (m *AgentMutation) LaunchCauseCleared() bool {
+	_, ok := m.clearedFields[agent.FieldLaunchCause]
+	return ok
+}
+
+// ResetLaunchCause resets all changes to the "launch_cause" field.
+func (m *AgentMutation) ResetLaunchCause() {
+	m.launch_cause = nil
+	delete(m.clearedFields, agent.FieldLaunchCause)
+}
+
 // SetDeletionState sets the "deletion_state" field.
 func (m *AgentMutation) SetDeletionState(s string) {
 	m.deletion_state = &s
@@ -9322,7 +9372,7 @@ func (m *AgentMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *AgentMutation) Fields() []string {
-	fields := make([]string, 0, 88)
+	fields := make([]string, 0, 89)
 	if m.fixture_root_id != nil {
 		fields = append(fields, agent.FieldFixtureRootID)
 	}
@@ -9517,6 +9567,9 @@ func (m *AgentMutation) Fields() []string {
 	}
 	if m.launch_error != nil {
 		fields = append(fields, agent.FieldLaunchError)
+	}
+	if m.launch_cause != nil {
+		fields = append(fields, agent.FieldLaunchCause)
 	}
 	if m.deletion_state != nil {
 		fields = append(fields, agent.FieldDeletionState)
@@ -9725,6 +9778,8 @@ func (m *AgentMutation) Field(name string) (ent.Value, bool) {
 		return m.LaunchStep()
 	case agent.FieldLaunchError:
 		return m.LaunchError()
+	case agent.FieldLaunchCause:
+		return m.LaunchCause()
 	case agent.FieldDeletionState:
 		return m.DeletionState()
 	case agent.FieldDeletionClaim:
@@ -9910,6 +9965,8 @@ func (m *AgentMutation) OldField(ctx context.Context, name string) (ent.Value, e
 		return m.OldLaunchStep(ctx)
 	case agent.FieldLaunchError:
 		return m.OldLaunchError(ctx)
+	case agent.FieldLaunchCause:
+		return m.OldLaunchCause(ctx)
 	case agent.FieldDeletionState:
 		return m.OldDeletionState(ctx)
 	case agent.FieldDeletionClaim:
@@ -10420,6 +10477,13 @@ func (m *AgentMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetLaunchError(v)
 		return nil
+	case agent.FieldLaunchCause:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetLaunchCause(v)
+		return nil
 	case agent.FieldDeletionState:
 		v, ok := value.(string)
 		if !ok {
@@ -10845,6 +10909,9 @@ func (m *AgentMutation) ClearedFields() []string {
 	if m.FieldCleared(agent.FieldLaunchError) {
 		fields = append(fields, agent.FieldLaunchError)
 	}
+	if m.FieldCleared(agent.FieldLaunchCause) {
+		fields = append(fields, agent.FieldLaunchCause)
+	}
 	if m.FieldCleared(agent.FieldDeletionState) {
 		fields = append(fields, agent.FieldDeletionState)
 	}
@@ -11071,6 +11138,9 @@ func (m *AgentMutation) ClearField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ClearLaunchError()
+		return nil
+	case agent.FieldLaunchCause:
+		m.ClearLaunchCause()
 		return nil
 	case agent.FieldDeletionState:
 		m.ClearDeletionState()
@@ -11340,6 +11410,9 @@ func (m *AgentMutation) ResetField(name string) error {
 		return nil
 	case agent.FieldLaunchError:
 		m.ResetLaunchError()
+		return nil
+	case agent.FieldLaunchCause:
+		m.ResetLaunchCause()
 		return nil
 	case agent.FieldDeletionState:
 		m.ResetDeletionState()
@@ -59308,23 +59381,26 @@ func (m *NonceCacheMutation) ResetEdge(name string) error {
 // NotificationMutation represents an operation that mutates the Notification nodes in the graph.
 type NotificationMutation struct {
 	config
-	op              Op
-	typ             string
-	id              *uuid.UUID
-	subscription_id *uuid.UUID
-	agent_id        *uuid.UUID
-	project_id      *uuid.UUID
-	subscriber_type *string
-	subscriber_id   *string
-	status          *string
-	message         *string
-	dispatched      *bool
-	acknowledged    *bool
-	created         *time.Time
-	clearedFields   map[string]struct{}
-	done            bool
-	oldValue        func(context.Context) (*Notification, error)
-	predicates      []predicate.Notification
+	op                   Op
+	typ                  string
+	id                   *uuid.UUID
+	subscription_id      *uuid.UUID
+	agent_id             *uuid.UUID
+	project_id           *uuid.UUID
+	subscriber_type      *string
+	subscriber_id        *string
+	status               *string
+	message              *string
+	dispatched           *bool
+	acknowledged         *bool
+	dispatch_attempts    *int
+	adddispatch_attempts *int
+	dispatch_outcome     *string
+	created              *time.Time
+	clearedFields        map[string]struct{}
+	done                 bool
+	oldValue             func(context.Context) (*Notification, error)
+	predicates           []predicate.Notification
 }
 
 var _ ent.Mutation = (*NotificationMutation)(nil)
@@ -59755,6 +59831,98 @@ func (m *NotificationMutation) ResetAcknowledged() {
 	m.acknowledged = nil
 }
 
+// SetDispatchAttempts sets the "dispatch_attempts" field.
+func (m *NotificationMutation) SetDispatchAttempts(i int) {
+	m.dispatch_attempts = &i
+	m.adddispatch_attempts = nil
+}
+
+// DispatchAttempts returns the value of the "dispatch_attempts" field in the mutation.
+func (m *NotificationMutation) DispatchAttempts() (r int, exists bool) {
+	v := m.dispatch_attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchAttempts returns the old "dispatch_attempts" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldDispatchAttempts(ctx context.Context) (v int, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchAttempts is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchAttempts requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchAttempts: %w", err)
+	}
+	return oldValue.DispatchAttempts, nil
+}
+
+// AddDispatchAttempts adds i to the "dispatch_attempts" field.
+func (m *NotificationMutation) AddDispatchAttempts(i int) {
+	if m.adddispatch_attempts != nil {
+		*m.adddispatch_attempts += i
+	} else {
+		m.adddispatch_attempts = &i
+	}
+}
+
+// AddedDispatchAttempts returns the value that was added to the "dispatch_attempts" field in this mutation.
+func (m *NotificationMutation) AddedDispatchAttempts() (r int, exists bool) {
+	v := m.adddispatch_attempts
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// ResetDispatchAttempts resets all changes to the "dispatch_attempts" field.
+func (m *NotificationMutation) ResetDispatchAttempts() {
+	m.dispatch_attempts = nil
+	m.adddispatch_attempts = nil
+}
+
+// SetDispatchOutcome sets the "dispatch_outcome" field.
+func (m *NotificationMutation) SetDispatchOutcome(s string) {
+	m.dispatch_outcome = &s
+}
+
+// DispatchOutcome returns the value of the "dispatch_outcome" field in the mutation.
+func (m *NotificationMutation) DispatchOutcome() (r string, exists bool) {
+	v := m.dispatch_outcome
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldDispatchOutcome returns the old "dispatch_outcome" field's value of the Notification entity.
+// If the Notification object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *NotificationMutation) OldDispatchOutcome(ctx context.Context) (v string, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldDispatchOutcome is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldDispatchOutcome requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldDispatchOutcome: %w", err)
+	}
+	return oldValue.DispatchOutcome, nil
+}
+
+// ResetDispatchOutcome resets all changes to the "dispatch_outcome" field.
+func (m *NotificationMutation) ResetDispatchOutcome() {
+	m.dispatch_outcome = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *NotificationMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -59825,7 +59993,7 @@ func (m *NotificationMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *NotificationMutation) Fields() []string {
-	fields := make([]string, 0, 10)
+	fields := make([]string, 0, 12)
 	if m.subscription_id != nil {
 		fields = append(fields, notification.FieldSubscriptionID)
 	}
@@ -59852,6 +60020,12 @@ func (m *NotificationMutation) Fields() []string {
 	}
 	if m.acknowledged != nil {
 		fields = append(fields, notification.FieldAcknowledged)
+	}
+	if m.dispatch_attempts != nil {
+		fields = append(fields, notification.FieldDispatchAttempts)
+	}
+	if m.dispatch_outcome != nil {
+		fields = append(fields, notification.FieldDispatchOutcome)
 	}
 	if m.created != nil {
 		fields = append(fields, notification.FieldCreated)
@@ -59882,6 +60056,10 @@ func (m *NotificationMutation) Field(name string) (ent.Value, bool) {
 		return m.Dispatched()
 	case notification.FieldAcknowledged:
 		return m.Acknowledged()
+	case notification.FieldDispatchAttempts:
+		return m.DispatchAttempts()
+	case notification.FieldDispatchOutcome:
+		return m.DispatchOutcome()
 	case notification.FieldCreated:
 		return m.Created()
 	}
@@ -59911,6 +60089,10 @@ func (m *NotificationMutation) OldField(ctx context.Context, name string) (ent.V
 		return m.OldDispatched(ctx)
 	case notification.FieldAcknowledged:
 		return m.OldAcknowledged(ctx)
+	case notification.FieldDispatchAttempts:
+		return m.OldDispatchAttempts(ctx)
+	case notification.FieldDispatchOutcome:
+		return m.OldDispatchOutcome(ctx)
 	case notification.FieldCreated:
 		return m.OldCreated(ctx)
 	}
@@ -59985,6 +60167,20 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 		}
 		m.SetAcknowledged(v)
 		return nil
+	case notification.FieldDispatchAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchAttempts(v)
+		return nil
+	case notification.FieldDispatchOutcome:
+		v, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetDispatchOutcome(v)
+		return nil
 	case notification.FieldCreated:
 		v, ok := value.(time.Time)
 		if !ok {
@@ -59999,13 +60195,21 @@ func (m *NotificationMutation) SetField(name string, value ent.Value) error {
 // AddedFields returns all numeric fields that were incremented/decremented during
 // this mutation.
 func (m *NotificationMutation) AddedFields() []string {
-	return nil
+	var fields []string
+	if m.adddispatch_attempts != nil {
+		fields = append(fields, notification.FieldDispatchAttempts)
+	}
+	return fields
 }
 
 // AddedField returns the numeric value that was incremented/decremented on a field
 // with the given name. The second boolean return value indicates that this field
 // was not set, or was not defined in the schema.
 func (m *NotificationMutation) AddedField(name string) (ent.Value, bool) {
+	switch name {
+	case notification.FieldDispatchAttempts:
+		return m.AddedDispatchAttempts()
+	}
 	return nil, false
 }
 
@@ -60014,6 +60218,13 @@ func (m *NotificationMutation) AddedField(name string) (ent.Value, bool) {
 // type.
 func (m *NotificationMutation) AddField(name string, value ent.Value) error {
 	switch name {
+	case notification.FieldDispatchAttempts:
+		v, ok := value.(int)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.AddDispatchAttempts(v)
+		return nil
 	}
 	return fmt.Errorf("unknown Notification numeric field %s", name)
 }
@@ -60067,6 +60278,12 @@ func (m *NotificationMutation) ResetField(name string) error {
 		return nil
 	case notification.FieldAcknowledged:
 		m.ResetAcknowledged()
+		return nil
+	case notification.FieldDispatchAttempts:
+		m.ResetDispatchAttempts()
+		return nil
+	case notification.FieldDispatchOutcome:
+		m.ResetDispatchOutcome()
 		return nil
 	case notification.FieldCreated:
 		m.ResetCreated()
@@ -67832,6 +68049,7 @@ type RoleDefinitionMutation struct {
 	permissions          *[]string
 	appendpermissions    []string
 	system               *bool
+	confers_membership   *bool
 	created              *time.Time
 	updated              *time.Time
 	clearedFields        map[string]struct{}
@@ -68169,6 +68387,42 @@ func (m *RoleDefinitionMutation) ResetSystem() {
 	m.system = nil
 }
 
+// SetConfersMembership sets the "confers_membership" field.
+func (m *RoleDefinitionMutation) SetConfersMembership(b bool) {
+	m.confers_membership = &b
+}
+
+// ConfersMembership returns the value of the "confers_membership" field in the mutation.
+func (m *RoleDefinitionMutation) ConfersMembership() (r bool, exists bool) {
+	v := m.confers_membership
+	if v == nil {
+		return
+	}
+	return *v, true
+}
+
+// OldConfersMembership returns the old "confers_membership" field's value of the RoleDefinition entity.
+// If the RoleDefinition object wasn't provided to the builder, the object is fetched from the database.
+// An error is returned if the mutation operation is not UpdateOne, or the database query fails.
+func (m *RoleDefinitionMutation) OldConfersMembership(ctx context.Context) (v bool, err error) {
+	if !m.op.Is(OpUpdateOne) {
+		return v, errors.New("OldConfersMembership is only allowed on UpdateOne operations")
+	}
+	if m.id == nil || m.oldValue == nil {
+		return v, errors.New("OldConfersMembership requires an ID field in the mutation")
+	}
+	oldValue, err := m.oldValue(ctx)
+	if err != nil {
+		return v, fmt.Errorf("querying old value for OldConfersMembership: %w", err)
+	}
+	return oldValue.ConfersMembership, nil
+}
+
+// ResetConfersMembership resets all changes to the "confers_membership" field.
+func (m *RoleDefinitionMutation) ResetConfersMembership() {
+	m.confers_membership = nil
+}
+
 // SetCreated sets the "created" field.
 func (m *RoleDefinitionMutation) SetCreated(t time.Time) {
 	m.created = &t
@@ -68329,7 +68583,7 @@ func (m *RoleDefinitionMutation) Type() string {
 // order to get all numeric fields that were incremented/decremented, call
 // AddedFields().
 func (m *RoleDefinitionMutation) Fields() []string {
-	fields := make([]string, 0, 7)
+	fields := make([]string, 0, 8)
 	if m.name != nil {
 		fields = append(fields, roledefinition.FieldName)
 	}
@@ -68344,6 +68598,9 @@ func (m *RoleDefinitionMutation) Fields() []string {
 	}
 	if m.system != nil {
 		fields = append(fields, roledefinition.FieldSystem)
+	}
+	if m.confers_membership != nil {
+		fields = append(fields, roledefinition.FieldConfersMembership)
 	}
 	if m.created != nil {
 		fields = append(fields, roledefinition.FieldCreated)
@@ -68369,6 +68626,8 @@ func (m *RoleDefinitionMutation) Field(name string) (ent.Value, bool) {
 		return m.Permissions()
 	case roledefinition.FieldSystem:
 		return m.System()
+	case roledefinition.FieldConfersMembership:
+		return m.ConfersMembership()
 	case roledefinition.FieldCreated:
 		return m.Created()
 	case roledefinition.FieldUpdated:
@@ -68392,6 +68651,8 @@ func (m *RoleDefinitionMutation) OldField(ctx context.Context, name string) (ent
 		return m.OldPermissions(ctx)
 	case roledefinition.FieldSystem:
 		return m.OldSystem(ctx)
+	case roledefinition.FieldConfersMembership:
+		return m.OldConfersMembership(ctx)
 	case roledefinition.FieldCreated:
 		return m.OldCreated(ctx)
 	case roledefinition.FieldUpdated:
@@ -68439,6 +68700,13 @@ func (m *RoleDefinitionMutation) SetField(name string, value ent.Value) error {
 			return fmt.Errorf("unexpected type %T for field %s", value, name)
 		}
 		m.SetSystem(v)
+		return nil
+	case roledefinition.FieldConfersMembership:
+		v, ok := value.(bool)
+		if !ok {
+			return fmt.Errorf("unexpected type %T for field %s", value, name)
+		}
+		m.SetConfersMembership(v)
 		return nil
 	case roledefinition.FieldCreated:
 		v, ok := value.(time.Time)
@@ -68532,6 +68800,9 @@ func (m *RoleDefinitionMutation) ResetField(name string) error {
 		return nil
 	case roledefinition.FieldSystem:
 		m.ResetSystem()
+		return nil
+	case roledefinition.FieldConfersMembership:
+		m.ResetConfersMembership()
 		return nil
 	case roledefinition.FieldCreated:
 		m.ResetCreated()

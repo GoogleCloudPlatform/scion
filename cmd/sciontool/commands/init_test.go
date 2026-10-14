@@ -29,44 +29,37 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/procreap"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/services"
 	"github.com/GoogleCloudPlatform/scion/pkg/sciontool/supervisor"
+	"github.com/GoogleCloudPlatform/scion/pkg/testutil"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
 )
 
-// hubEnvVars lists the environment variables used by the Hub client.
-// Leaking these to a subprocess (e.g., sciontool init) causes the child
-// to talk to the real Hub and corrupt agent state. See issue #123.
-var hubEnvVars = []string{
-	"SCION_HUB_ENDPOINT",
-	"SCION_HUB_URL",
-	"SCION_AUTH_TOKEN",
-	"SCION_AGENT_ID",
-	"SCION_AGENT_MODE",
-	"SCION_TRANSPORT_TOKEN",
-	"SCION_TRANSPORT_TOKEN_FILE",
-}
-
-// scrubHubEnv clears all Hub-related environment variables for the
-// duration of the test, preventing accidental communication with a
-// real Hub when tests run inside an agent container.
-func scrubHubEnv(t *testing.T) {
-	t.Helper()
-	for _, key := range hubEnvVars {
-		t.Setenv(key, "")
-	}
-}
-
-// filterHubEnv returns a copy of the environment with all Hub-related
-// variables removed. Use when constructing exec.Cmd.Env to prevent
-// credential leakage to child processes.
+// filterHubEnv returns a copy of the environment with every variable in
+// testutil.HubEnvKeys removed. Use when constructing exec.Cmd.Env so a child
+// process does not inherit Hub client credentials.
 func filterHubEnv(env []string) []string {
+	keys := testutil.HubEnvKeys()
 	var filtered []string
 	for _, e := range env {
 		key, _, _ := strings.Cut(e, "=")
-		if !slices.Contains(hubEnvVars, key) {
+		if !slices.Contains(keys, key) {
 			filtered = append(filtered, e)
 		}
 	}
 	return filtered
+}
+
+// TestFilterHubEnv_DropsSharedHubEnvKeys checks that filterHubEnv removes
+// every key in testutil.HubEnvKeys and keeps everything else, so the
+// child-process environment follows the shared key list.
+func TestFilterHubEnv_DropsSharedHubEnvKeys(t *testing.T) {
+	keep := []string{"PATH=/usr/bin", "SCION_HUB_ENDPOINTX=kept", "HOME=/tmp/h"}
+	env := slices.Clone(keep)
+	for _, key := range testutil.HubEnvKeys() {
+		env = append(env, key+"=set")
+	}
+	if got := filterHubEnv(env); !reflect.DeepEqual(got, keep) {
+		t.Errorf("filterHubEnv() = %q, want %q", got, keep)
+	}
 }
 
 // TestInitProjectDataIsolation is a canary test that verifies sciontool source code
@@ -195,7 +188,7 @@ func TestInitCommand_Integration(t *testing.T) {
 
 	// Clear Hub env vars so the subprocess cannot talk to the real Hub
 	// and corrupt agent state. See issue #123.
-	scrubHubEnv(t)
+	testutil.ScrubHubEnv(t)
 
 	// Build sciontool if needed for integration testing
 	binPath := filepath.Join(t.TempDir(), "sciontool-test")

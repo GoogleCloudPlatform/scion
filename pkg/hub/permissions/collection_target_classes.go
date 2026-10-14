@@ -94,7 +94,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	"project.create": {TargetClassKindHubResource}, "project.read": {},
 	"project.update": {}, "project.delete": {}, "project.manage": {},
 	"project.register": {}, "project.set_messaging_policy": {}, "project.clone": {},
-	"project.list": {TargetClassKindHubResource},
+	"project.manage_visitors": {}, "project.list": {TargetClassKindHubResource},
 
 	// artifact.* — create is CapabilityScope (publish into a project);
 	// read is also collection-level, because the artifact list route
@@ -264,6 +264,7 @@ var CollectionTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions — always the holder's own existing records,
 	// never a collection-level target.
 	"inbox.read": {}, "inbox.write": {}, "user_skill_injection.update": {},
+	"federation_token.mint": {},
 }
 
 // CollectionTargetClassesFor returns the reviewed classes for permissionID

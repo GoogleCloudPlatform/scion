@@ -44,8 +44,9 @@ const projectListGoldenEnv = "SCION_TEST_UPDATE_GOLDEN"
 
 // writeLocalProjectFixture creates, under HOME, one project directory of
 // each kind the machine-local list shows: the global project, an external
-// project whose workspace is gone, a git project with agents, a legacy git
-// project (agents next to the config directory) and an orphaned leftover.
+// project whose workspace is gone, a git project with agents, a git project
+// with no agents and no recorded workspace (unverified), a legacy git project
+// (agents next to the config directory) and an orphaned leftover.
 func writeLocalProjectFixture(t *testing.T) {
 	t.Helper()
 	home := os.Getenv("HOME")
@@ -56,6 +57,7 @@ func writeLocalProjectFixture(t *testing.T) {
 		filepath.Join(configs, "ext__9abc", ".scion"),
 		filepath.Join(configs, "gitcfg__def0", ".scion", "agents", "a"),
 		filepath.Join(configs, "gitcfg__def0", ".scion", "agents", "b"),
+		filepath.Join(configs, "idle__4321", ".scion", "agents"),
 		filepath.Join(configs, "legacy__5678", "agents", "bob"),
 		filepath.Join(configs, "orphan__1234"),
 	} {
@@ -303,4 +305,40 @@ func TestProjectList_EnvEndpointKeepsLinkedRow(t *testing.T) {
 	require.Len(t, got, 4, stdout)
 	assert.Equal(t, "p-foo", got[0]["id"])
 	assert.Equal(t, filepath.Join(os.Getenv("HOME"), "src", "foo"), got[0]["local_path"])
+}
+
+// --refresh leaves the hubs' global projects out of the known-project
+// list and of the list across hubs.
+func TestProjectList_RefreshLeavesOutHubGlobalProject(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects(prodFoo, hubGlobalProject("p-global"))
+	staging.setProjects(hubGlobalProject("s-global"), stagingFoo)
+
+	stdout, _, err := runScion(t, "project", "list", "--refresh", "--format", "json")
+	require.NoError(t, err)
+	var got []map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+	var ids []string
+	for _, r := range got {
+		if r["hub"] != nil { // rows of directories on this machine have no hub
+			ids = append(ids, r["id"].(string))
+		}
+	}
+	assert.ElementsMatch(t, []string{"p-foo", "s-foo"}, ids, stdout)
+	var known []string
+	for _, p := range readTestContext(t).Projects {
+		known = append(known, p.ID)
+	}
+	assert.ElementsMatch(t, []string{"p-foo", "s-foo"}, known)
+}
+
+// A hub that refuses the credential during --refresh is named as such.
+func TestProjectList_RefreshNamesRefusedHub(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.refuse.Store(true)
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: login refused")
+	assert.NotEmpty(t, prod.authHeaders(), "the refusing hub was asked")
+	assert.Positive(t, staging.lists.Load())
 }

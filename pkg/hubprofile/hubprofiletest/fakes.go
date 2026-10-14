@@ -147,6 +147,14 @@ type Identity struct {
 type Request struct {
 	Method, Path string
 	Header       http.Header
+	// Identity is the fixture identity a fixture-token request
+	// authenticated as ("" for the issuance routes and refused requests).
+	Identity string
+}
+
+// WebCode is a web-login code the target minted.
+type WebCode struct {
+	IdentityID, Code, CodeID string
 }
 
 type Target struct {
@@ -161,9 +169,14 @@ type Target struct {
 	tokenTTL  time.Duration
 	idLife    time.Duration
 	tokenHits int
+	webCodes  []WebCode
 	// AudienceOverride, when set, replaces the issuer audience the
 	// target publishes (set before use).
 	AudienceOverride *string
+	// Handle, when set, serves the fixture-token routes other than
+	// /api/v1/auth/me, for the fixture identity identityID; it returns
+	// false to fall through to the default answer (set before use).
+	Handle func(w http.ResponseWriter, r *http.Request, identityID string) bool
 }
 
 func NewTarget(t testing.TB, clk *Clock, iap bool) *Target {
@@ -197,6 +210,7 @@ func bearerOf(r *http.Request) string {
 func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, Request{Method: r.Method, Path: r.URL.Path, Header: r.Header.Clone()})
+	reqIndex := len(f.requests) - 1
 	f.mu.Unlock()
 
 	if f.iap {
@@ -238,10 +252,16 @@ func (f *Target) serve(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusUnauthorized, "unauthorized", "not authenticated")
 		return
 	}
+	f.mu.Lock()
+	f.requests[reqIndex].Identity = u.ID
+	f.mu.Unlock()
 	switch r.URL.Path {
 	case "/api/v1/auth/me":
 		writeJSON(w, http.StatusOK, map[string]any{"id": u.ID, "email": u.Email, "role": u.Role})
 	default:
+		if f.Handle != nil && f.Handle(w, r, u.ID) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	}
 }
@@ -275,6 +295,17 @@ func (f *Target) serveIssuance(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"items": items, "truncated": false})
+	case strings.HasSuffix(rest, "/web-login-code") && r.Method == http.MethodPost:
+		// Like the hub: only for a live identity of this delegation.
+		u := f.ids[strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/web-login-code")]
+		if u == nil || u.deleted || u.Delegation != Delegation || !now.Before(u.ExpiresAt) {
+			apiError(w, http.StatusNotFound, "not_found", "test identity not found")
+			return
+		}
+		wc := WebCode{IdentityID: u.ID, Code: fmt.Sprintf("tiwc_FAKE-WEB-CODE-%d", len(f.webCodes)+1), CodeID: fmt.Sprintf("code-%d", len(f.webCodes)+1)}
+		f.webCodes = append(f.webCodes, wc)
+		w.Header().Set("Cache-Control", "no-store")
+		writeJSON(w, http.StatusCreated, map[string]any{"code": wc.Code, "codeId": wc.CodeID, "expiresAt": now.Add(5 * time.Minute)})
 	case strings.HasSuffix(rest, "/token") && r.Method == http.MethodPost:
 		u := f.ids[strings.TrimSuffix(strings.TrimPrefix(rest, "/"), "/token")]
 		if u == nil || u.deleted {
@@ -322,6 +353,13 @@ func (f *Target) Expire(id string) {
 	if u := f.ids[id]; u != nil {
 		u.ExpiresAt = f.clk.Now().Add(-time.Minute)
 	}
+}
+
+// WebCodes returns the web-login codes the target minted.
+func (f *Target) WebCodes() []WebCode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]WebCode(nil), f.webCodes...)
 }
 
 // TokenHits returns how many token re-issues the target served.

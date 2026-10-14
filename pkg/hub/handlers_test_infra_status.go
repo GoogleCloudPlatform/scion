@@ -21,7 +21,7 @@ import "net/http"
 // changes it at runtime. The web client shows a test-hub banner whenever
 // any of them is on (ptone/scion#4240, phase W).
 type testInfraGates struct {
-	// TestIdentities is the member tier (--enable-test-identities).
+	// TestIdentities is the member tier (--test-mode=member or above).
 	TestIdentities bool
 	// TestHubAdmin and TestSuperAdmin are the admin tier, read from its
 	// immutable startup gate (testAdminTierEnabled, test_admin_gate.go).

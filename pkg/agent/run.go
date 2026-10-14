@@ -1321,6 +1321,13 @@ authDone:
 	if _, ok := opts.Env["SCION_HARNESS"]; !ok && harnessName != "" {
 		opts.Env["SCION_HARNESS"] = harnessName
 	}
+	// The resolved ready spec for sciontool init, which records it in the
+	// init-run file for the host's readiness wait. Always written: the
+	// resolved harness config is the source of truth, and a template value
+	// must not override it.
+	if h != nil {
+		opts.Env[state.HarnessReadyEnv] = state.FormatReadySpecEnv(h.ReadySpec())
+	}
 	if _, ok := opts.Env["SCION_MODEL"]; !ok && finalScionCfg != nil && finalScionCfg.Model != "" {
 		opts.Env["SCION_MODEL"] = finalScionCfg.Model
 	}
@@ -1428,13 +1435,10 @@ authDone:
 	// final priority. This allows templates to specify a container-
 	// accessible endpoint (e.g. http://host.docker.internal:8080)
 	// that differs from the host-level hub endpoint.
-	if !hubDisabled && finalScionCfg != nil && finalScionCfg.Env != nil {
-		if ep, ok := finalScionCfg.Env["SCION_HUB_ENDPOINT"]; ok && ep != "" {
-			expandedEp, _ := util.ExpandEnv(ep)
-			if expandedEp != "" {
-				opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
-				opts.Env["SCION_HUB_URL"] = expandedEp
-			}
+	if !hubDisabled && finalScionCfg != nil {
+		if expandedEp := expandConfigHubEndpoint(opts.Name, finalScionCfg.Env); expandedEp != "" {
+			opts.Env["SCION_HUB_ENDPOINT"] = expandedEp
+			opts.Env["SCION_HUB_URL"] = expandedEp
 		}
 	}
 
@@ -1612,6 +1616,14 @@ authDone:
 		}
 	}
 	warnings = append(warnings, envWarnings...)
+
+	// Check the OTLP TLS settings in the final env, after every merge. Only
+	// a warning: in the container sciontool logs a failed telemetry start
+	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
+	// start that worked without telemetry must not fail here.
+	if err := config.ValidateTelemetryEnv(agentEnv); err != nil {
+		warnings = append(warnings, fmt.Sprintf("Warning: %v; with cloud telemetry export configured, the agent starts without telemetry", err))
+	}
 
 	// Determine the effective workspace path. If agentWorkspace is empty but we have
 	// a volume mounted to /workspace (e.g., shared worktree case), use that source path.
@@ -2282,6 +2294,17 @@ authDone:
 		return nil, err
 	}
 
+	// The container-script provisioner reads the manifest inside the
+	// container, where the workspace is mounted at containerWorkspace, not at
+	// the host path Provision staged it with above. Claude's provisioner, for
+	// one, pre-trusts agent_workspace; a host path there leaves the agent
+	// blocked on Claude Code's folder-trust dialog.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := writeAgentHome(ctx, func() error { return harness.SetManifestAgentWorkspace(agentHome, containerWorkspace) }); err != nil {
+			return nil, fmt.Errorf("stage harness manifest workspace: %w", err)
+		}
+	}
+
 	runCfg := runtime.RunConfig{
 		Name:                 containerName(projectName, opts.Name),
 		Template:             template,
@@ -2516,6 +2539,7 @@ authDone:
 		// §3.8.4); nil on the synchronous path.
 		Checkpoint:        opts.Checkpoint,
 		OnResourceCreated: opts.OnResourceCreated,
+		Progress:          opts.Progress,
 		// Observes every created resource (flat instance ownership
 		// records) without changing cleanup ownership.
 		ObserveResourceCreated: opts.ObserveResourceCreated,
@@ -3043,9 +3067,13 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 
 	if scionCfg != nil && scionCfg.Env != nil {
 		for k, v := range scionCfg.Env {
-			// Support variable substitution in keys and values
-			expandedKey, _ := util.ExpandEnv(k)
-			expandedValue, warned := util.ExpandEnv(v)
+			// Support variable substitution in keys and values. Names
+			// reserved for the server process expand to empty.
+			expandedKey, _, refusedInKey := util.ExpandEnvRefusing(k, refuseHostEnvForAgent)
+			expandedValue, warned, refusedInValue := util.ExpandEnvRefusing(v, refuseHostEnvForAgent)
+			for _, name := range append(refusedInKey, refusedInValue...) {
+				warnings = append(warnings, refusedHostEnvWarning(name))
+			}
 
 			if expandedKey == "" {
 				continue
@@ -3057,14 +3085,21 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 				continue
 			}
 			// If the value is empty and we warned about a missing variable,
-			// skip adding it to combined to avoid a redundant warning later.
-			if expandedValue == "" && warned {
+			// or the value referenced only refused names (already warned
+			// above), skip adding it to combined to avoid a redundant warning
+			// later.
+			if expandedValue == "" && (warned || len(refusedInValue) > 0) {
 				continue
 			}
 			// If the value is empty (no variable reference was used),
 			// treat the key as an implicit host env passthrough: look up
-			// the environment variable of the same name on the host.
+			// the environment variable of the same name on the host. A
+			// name reserved for the server is omitted with a warning.
 			if expandedValue == "" {
+				if refuseHostEnvForAgent(expandedKey) {
+					warnings = append(warnings, refusedHostEnvWarning(expandedKey))
+					continue
+				}
 				if hostVal, ok := os.LookupEnv(expandedKey); ok && hostVal != "" {
 					expandedValue = hostVal
 				}
@@ -3097,6 +3132,37 @@ func buildAgentEnv(scionCfg *api.ScionConfig, extraEnv map[string]string, defaul
 	}
 	sortDroppedBrokerEnv(dropped)
 	return agentEnv, warnings, missingKeys, dropped
+}
+
+// refuseHostEnvForAgent reports whether the host env value of name must never
+// be copied into an agent's env, whether by an empty-value passthrough or by
+// ${VAR} expansion (see util.IsAgentRefusedHostEnvName). Values set
+// explicitly by the caller (opts.Env) are not host passthrough and are
+// unaffected.
+func refuseHostEnvForAgent(name string) bool {
+	return util.IsAgentRefusedHostEnvName(name)
+}
+
+// expandConfigHubEndpoint returns the SCION_HUB_ENDPOINT value from a scion
+// config env section with ${VAR} references expanded from the host env, or ""
+// when it is unset. Names refused by refuseHostEnvForAgent expand to empty
+// and are logged by name.
+func expandConfigHubEndpoint(agentName string, cfgEnv map[string]string) string {
+	ep := cfgEnv["SCION_HUB_ENDPOINT"]
+	if ep == "" {
+		return ""
+	}
+	expanded, _, refused := util.ExpandEnvRefusing(ep, refuseHostEnvForAgent)
+	for _, name := range refused {
+		slog.Warn("Start: host environment variable is reserved for the server and is not passed to agents", "agent", agentName, "variable", name)
+	}
+	return expanded
+}
+
+// refusedHostEnvWarning is the warning for a refused host env name. It names
+// the variable only, never its value.
+func refusedHostEnvWarning(name string) string {
+	return fmt.Sprintf("Warning: host environment variable '%s' is reserved for the server and is not passed to agents.", name)
 }
 
 // envLaunchID is the container env variable carrying the run ID, which

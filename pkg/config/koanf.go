@@ -112,6 +112,7 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 	// For git projects with split storage, the in-repo settings provide
 	// project-level defaults checked into the repo.
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {
@@ -287,6 +288,53 @@ func loadSettingsKoanf(projectPath string, ignoreEnvProjectID bool) (*Settings, 
 	}
 
 	return settings, nil
+}
+
+// dropInheritedHubProjectID removes the global layer's hub project ID from k
+// when the load is for a project other than the global one, that is, when a
+// project settings layer (the in-repo .scion directory, or the external
+// directory of a git project with split storage) follows. Call it right after
+// the global layer is loaded.
+//
+// A project's hub project ID comes only from its own settings files, falling
+// back to its local project_id. Inheriting the global value would send a
+// project whose own settings have no hub.project_id (for example after 'scion
+// hub unlink' and 'scion hub link') to the hub project the global settings
+// are linked to. The global project itself keeps the value.
+func dropInheritedHubProjectID(k *koanf.Koanf, projectPath, effectiveProjectPath, globalDir string) {
+	if !loadsProjectLayer(projectPath, effectiveProjectPath, globalDir) {
+		return
+	}
+	k.Delete(projectkeys.ConfigHubProjectIDKey)
+	k.Delete(projectkeys.ConfigHubProjectIDJSON)
+}
+
+// loadsProjectLayer reports whether a settings load for projectPath merges a
+// project layer above the global one. It follows the in-repo and external
+// project steps of LoadSettingsKoanf and LoadVersionedSettings, but compares
+// against the global directory by resolved path: FindProjectRoot returns a
+// symlink-resolved path, so a working directory under a symlinked $HOME still
+// names the global project. The "global" and "home" aliases name the global
+// project.
+func loadsProjectLayer(projectPath, effectiveProjectPath, globalDir string) bool {
+	if projectPath == "global" || projectPath == "home" {
+		return false
+	}
+	isProject := func(p string) bool { return p != "" && !sameDirForComparison(p, globalDir) }
+	return isProject(projectPath) || (effectiveProjectPath != projectPath && isProject(effectiveProjectPath))
+}
+
+// sameDirForComparison reports whether a and b name the same directory,
+// literally or after resolving symlinks (see resolvePathForComparison). An
+// empty b never matches a non-empty a.
+func sameDirForComparison(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if a == "" || b == "" {
+		return false
+	}
+	return resolvePathForComparison(a) == resolvePathForComparison(b)
 }
 
 // LoadSettingsFromDir loads settings from a single directory's settings file
