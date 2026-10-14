@@ -167,6 +167,8 @@ interface AgentStatusBadgeOptions {
   /** Badge label; defaults to stateLabel(status). */
   label?: string;
   size?: 'small' | 'medium' | 'large';
+  /** A data-testid for the badge, for UI automation. */
+  testId?: string;
 }
 
 /**
@@ -175,7 +177,7 @@ interface AgentStatusBadgeOptions {
  */
 export function agentStatusBadge(
   agent: Agent,
-  { status = getAgentDisplayStatus(agent), label, size }: AgentStatusBadgeOptions = {}
+  { status = getAgentDisplayStatus(agent), label, size, testId }: AgentStatusBadgeOptions = {}
 ): TemplateResult {
   const po = isProvisionedOnly(agent);
   const hint = po ? `Not started yet. Use Start, or run: scion start ${agent.name}` : undefined;
@@ -184,5 +186,6 @@ export function agentStatusBadge(
     label=${po ? PROVISIONED_ONLY_LABEL : (label ?? stateLabel(status))}
     title=${ifDefined(hint)}
     size=${ifDefined(size)}
+    data-testid=${ifDefined(testId)}
   ></scion-status-badge>`;
 }

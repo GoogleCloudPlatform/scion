@@ -52,7 +52,7 @@ func TestAdminSignalIntegration_PublishReceiveRoundTrip(t *testing.T) {
 	sent := AdminSignal{
 		Integration: "discord",
 		Kind:        "update",
-		ID:          "test-round-trip-id",
+		ID:          "550e8400-e29b-41d4-a716-446655440000",
 	}
 	if err := PublishAdminSignalDB(ctx, db, sent); err != nil {
 		t.Fatalf("publish: %v", err)

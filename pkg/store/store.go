@@ -1640,22 +1640,24 @@ type TemplateStore interface {
 
 	// UpdateTemplateContent writes the columns a commit owns (Files,
 	// ContentHash, Harness, DefaultHarnessConfig, AgentConfig, Layout,
-	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, Config,
-	// UpdatedBy) only if the stored row still matches expected
-	// (compare-and-swap). It never writes the metadata UpdateTemplate owns
-	// (Name, Slug, DisplayName, Description, Image, BaseTemplate, OwnerID,
-	// Scope, ScopeID, ProjectID), so neither writer can revert the other
-	// (ptone/scion#4221). Config is on the list only until the
-	// file-telemetry helper is removed (ptone/scion#4223). Returns ErrTemplateConflict when the row exists
-	// but no longer matches, and ErrNotFound when it does not exist.
+	// StoragePath, StorageBucket, StorageURI, Status, SourceURL, UpdatedBy)
+	// only if the stored row still matches expected (compare-and-swap). It
+	// never writes the metadata UpdateTemplate owns (Name, Slug,
+	// DisplayName, Description, Image, BaseTemplate, OwnerID, Scope,
+	// ScopeID, ProjectID), so neither writer can revert the other
+	// (ptone/scion#4221), and it never writes Config (ptone/scion#4223).
+	// Returns ErrTemplateConflict when the row exists but no longer
+	// matches, and ErrNotFound when it does not exist.
 	UpdateTemplateContent(ctx context.Context, template *Template, expected TemplateContentPrecondition) error
 
 	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
 	// template id, and only while the stored row has no snapshot and still
-	// matches expected (one conditional UPDATE). No other column changes,
-	// Updated included. It reports whether a row was written: false with a
-	// nil error means the row already has a snapshot, its content or layout
-	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// matches expected and the Updated time it read (one conditional
+	// UPDATE). No other column changes, Updated included. It reports whether
+	// a row was written: false with a nil error means the row already has a
+	// snapshot, its content or layout changed, a concurrent write changed its
+	// Updated time (ptone/scion#4674), or it no longer exists. A nil cfg
+	// writes nothing. Used to
 	// backfill rows committed before the snapshot existed (ptone/scion#4222).
 	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
 

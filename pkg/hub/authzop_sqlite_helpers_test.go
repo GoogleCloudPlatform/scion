@@ -211,6 +211,10 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	return r
 }
 
+// liveInventoryFederationAudience is the peer hub audience the live
+// inventory server allows for POST /api/v1/auth/federation-token.
+const liveInventoryFederationAudience = "https://peer-hub.example.com"
+
 // seedLiveInventoryFixtures creates one real store row per resource family
 // (plus a second, disposable instance for families with a destructive
 // catalog operation, so a DELETE entry tested earlier in catalog
@@ -512,13 +516,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
-	// too, so their experiment-gated routes are live: the registry above
-	// with all three also defaulting on (no operational settings, which
-	// the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
+	// federation.project_visitors on too, so their experiment-gated routes
+	// are live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -530,6 +534,12 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
+	// provider is off: install a test key manager and allow the audience
+	// that bodyOverrides sends, so the route reaches its caller checks.
+	installTestOIDCKeyManager(t, srv)
+	srv.config.OIDCConfig.UserTokenAudiences = []string{liveInventoryFederationAudience}
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
@@ -633,6 +643,14 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
 		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+		"/api/v1/artifacts/{id}/grants":                      {"id": f.artifact},
+		"/api/v1/artifacts/{id}/grants/{grantId}":            {"id": f.artifact},
+		"/api/v1/artifacts/{id}/links":                       {"id": f.artifact},
+		"/api/v1/artifacts/{id}/links/{linkId}":              {"id": f.artifact},
+		"/api/v1/artifacts/{id}/versions":                    {"id": f.artifact},
+		"/api/v1/artifacts/{id}/versions/{seq}":              {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/finalize":     {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/view":         {"id": f.artifact, "seq": "1"},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
@@ -882,6 +900,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
+		// User access credential for a peer hub: an allowed audience, so
+		// an admitted caller gets 200 instead of a body 400
+		// (seedLiveInventoryFixtures allows it).
+		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
