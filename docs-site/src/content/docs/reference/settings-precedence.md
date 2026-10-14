@@ -921,9 +921,9 @@ overwritten with the image the broker reports. The broker's provision-only respo
 image `Start` will run. The field never feeds a later dispatch, so a hub restart re-resolves the
 profile-override, settings and file tiers live rather than freezing the image applied at creation.
 [Reincarnating an Agent](/scion/local/agent-lifecycle/#reincarnating-an-agent)'s plan preview
-approximates this image precedence from the Hub's own view. It can differ from what the broker
-runs: when the broker resolves the agent's harness config itself the preview cannot look up
-the profile override. The broker resolves the final image, including the profile override, and the
+approximates this image precedence from the Hub's own view. It can differ from what the Runtime
+Broker runs: when the Runtime Broker resolves the agent's harness config itself the preview cannot
+look up the profile override. The Runtime Broker resolves the final image, including the profile override, and the
 image it reports replaces the preview once the agent starts.
 
 :::note[Two different processes' settings, not one]
