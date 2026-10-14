@@ -131,7 +131,7 @@ export default defineConfig({
 					],
 				},
 				{
-					label: 'Local Mode',
+					label: 'Agents on Your Machine',
 					items: [
 						{ label: 'Local Configuration', slug: 'local/local-governance' },
 						{ label: 'Working with Agents', slug: 'local/agent-lifecycle' },
