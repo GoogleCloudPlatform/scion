@@ -938,17 +938,17 @@ POST /api/v1/runtime-brokers/{brokerId}/agents/{agentId}/launch
 Internal endpoint for a runtime broker to report progress and the terminal
 outcome of a non-blocking ("async") agent launch (design §3.2, §3.7). Only
 meaningful for an agent whose create request opted in via
-`acceptAsyncLaunch` while `hub.asyncAgentLaunch` is enabled; with the feature
-off (no agent has a launch), every authorized, well-formed call ends in a
+`acceptAsyncLaunch` while the `hub.async_agent_launch` experiment is on;
+with the feature off and no earlier launch left (no agent has a launch), every authorized, well-formed call ends in a
 404 or 409 below.
 
 Only the broker itself may call this endpoint (HMAC broker identity must
 match `{brokerId}`); a non-broker caller, or a broker identity that does not
 match, gets `403 Forbidden` with the standard error body
 (`{"error": {"code": "forbidden", ...}}`), not the `{code, reason}` shape
-below. The endpoint is intentionally not gated by `hub.asyncAgentLaunch`, so
-an in-flight launch can still report and drain if the flag is turned off
-mid-launch.
+below. The endpoint is intentionally not gated by the `hub.async_agent_launch`
+experiment, so an in-flight launch can still report and drain if the
+experiment is turned off mid-launch.
 
 **Request Body:**
 ```json
@@ -1035,9 +1035,9 @@ POST /api/v1/agents
 
 The create request body accepts an optional `acceptAsyncLaunch: boolean`
 field (default `false`). It is the client's opt-in to a non-blocking launch
-and is persisted as-is regardless of whether `hub.asyncAgentLaunch` is
-enabled; the flag and the opt-in must both be true for a launch to actually
-be non-blocking.
+and is persisted as-is regardless of whether the `hub.async_agent_launch`
+experiment is on; the experiment (checked at each create send) and the
+opt-in must both be on for a launch to actually be non-blocking.
 
 ---
 

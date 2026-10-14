@@ -1905,9 +1905,6 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
 			}
-			if hub.AsyncAgentLaunch != nil {
-				keys = append(keys, "server.hub.async_agent_launch")
-			}
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
 			}

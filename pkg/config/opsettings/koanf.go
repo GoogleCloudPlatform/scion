@@ -80,7 +80,6 @@ var layer0Prefixes = []string{
 	"server.native_chat",
 	// Async agent create (design §3.7) — the reaper's dedicated scheduler
 	// ticker and the clamp on LaunchTimeout are both established at startup.
-	"server.hub.async_agent_launch",
 	"server.hub.launch_timeout",
 	"server.hub.launch_keepalive_seconds",
 	// Request performance tracing — the middleware and the authorization

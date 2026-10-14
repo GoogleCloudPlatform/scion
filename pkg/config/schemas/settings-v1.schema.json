@@ -1389,12 +1389,6 @@
           "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
           "x-since": "1"
         },
-        "async_agent_launch": {
-          "type": "boolean",
-          "description": "Turns on asynchronous agent create, off by default. A create is asynchronous only when this is on AND the client request also opts in (acceptAsyncLaunch); other requests, provision-only creates and reprovisioning stay synchronous, as do creates sent to a broker without async launch support. Restart required to change.",
-          "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
-          "x-since": "1"
-        },
         "perf_trace": {
           "type": "boolean",
           "default": false,

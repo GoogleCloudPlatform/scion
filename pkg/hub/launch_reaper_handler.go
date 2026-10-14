@@ -48,8 +48,9 @@ const launchReaperDisarmedWarnEvery = 10 * time.Minute
 
 // registerLaunchReaper wires the async-create launch reaper onto its own
 // dedicated scheduler ticker (design §3.7). This runs unconditionally,
-// regardless of hub.asyncAgentLaunch. With the flag off no agent ever has
-// launch_state='active', so the deadline/staleness/wind-down selections
+// regardless of the hub.async_agent_launch experiment, so launches accepted
+// before the experiment was turned off are still reaped. Once none is
+// left, no agent has launch_state='active', so the deadline/staleness/wind-down selections
 // always use the partial index on launch_deadline (§3.3) and return zero
 // rows — but every tick is still a real write transaction on one pooled
 // connection (pkg/store/entadapter/launch_reaper.go, RunLaunchReaperTick),

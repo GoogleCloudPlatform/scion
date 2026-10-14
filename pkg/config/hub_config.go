@@ -169,12 +169,6 @@ type HubServerConfig struct {
 
 	// --- Async agent create (design §3.7) ---
 
-	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
-	// by default; even when on, a launch is only non-blocking for a request
-	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
-	// stay synchronous permanently, regardless of this flag.
-	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
-
 	// PerfTrace turns on per-request performance tracing (phase timings,
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
@@ -1732,7 +1726,6 @@ var camelCaseFields = map[string]string{
 	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
-	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
 	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
