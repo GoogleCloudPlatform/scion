@@ -19,6 +19,8 @@ import (
 	"encoding/json"
 	"log/slog"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -147,27 +149,201 @@ func TestGCPHandler_GroupsKeepSpecialFieldsTopLevel(t *testing.T) {
 	}
 }
 
-// TestGCPHandler_GroupedErrorKeepsSpecialFieldsTopLevel checks the ERROR
-// path in a group: special fields top-level, Error Reporting fields still
-// written.
-func TestGCPHandler_GroupedErrorKeepsSpecialFieldsTopLevel(t *testing.T) {
-	var buf bytes.Buffer
-	slog.New(NewGCPHandler(&buf, nil, "test-component", "")).WithGroup("g").Error("boom", "a", 1)
-
-	data := decodeLine(t, buf.Bytes())
-	for _, k := range gcpSpecialKeys {
-		if _, ok := data[k].(map[string]any); !ok {
-			t.Errorf("%s missing at top level: %v", k, data)
+// topLevelKeys returns the keys of the JSON object in b in order,
+// duplicates included, so a test can assert the exact key set.
+func topLevelKeys(t *testing.T, b []byte) []string {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if tok, err := dec.Token(); err != nil || tok != json.Delim('{') {
+		t.Fatalf("entry %q is not a JSON object: %v %v", b, tok, err)
+	}
+	var keys []string
+	for dec.More() {
+		tok, err := dec.Token()
+		if err != nil {
+			t.Fatalf("decode key in %q: %v", b, err)
+		}
+		keys = append(keys, tok.(string))
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			t.Fatalf("decode value of %q in %q: %v", tok, b, err)
 		}
 	}
-	g, ok := data["g"].(map[string]any)
-	if !ok {
-		t.Fatalf("group g missing: %v", data)
+	return keys
+}
+
+// assertKeys fails unless the top-level keys of entry b are exactly want,
+// in any order, each once.
+func assertKeys(t *testing.T, b []byte, want ...string) {
+	t.Helper()
+	got := topLevelKeys(t, b)
+	sort.Strings(got)
+	want = append([]string(nil), want...)
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("top-level keys = %v, want %v\nentry: %s", got, want, b)
 	}
-	if g["a"] != float64(1) || g["@type"] != errorReportingType || g["stack_trace"] == nil {
-		t.Errorf("group g = %v, want a, @type and stack_trace", g)
+}
+
+// gcpBaseKeys are the top-level keys of every GCPHandler entry logged
+// through a slog.Logger with a message.
+var gcpBaseKeys = []string{GCPKeyTimestamp, GCPKeySeverity, GCPKeyMessage, GCPKeyLabels, GCPKeySourceLocation, "serviceContext"}
+
+func withBaseKeys(keys ...string) []string {
+	return append(append([]string(nil), gcpBaseKeys...), keys...)
+}
+
+// TestGCPHandler_GroupedErrorKeepsSpecialFieldsTopLevel checks the ERROR
+// path in a group: special fields top-level, and the Error Reporting
+// fields written at the top level too, not in the group (ptone/scion#4996).
+func TestGCPHandler_GroupedErrorKeepsSpecialFieldsTopLevel(t *testing.T) {
+	var buf bytes.Buffer
+	slog.New(NewGCPHandler(&buf, nil, "test-component", "")).WithGroup("g").WithGroup("h").Error("boom", "a", 1)
+
+	assertKeys(t, buf.Bytes(), withBaseKeys(gcpKeyStackTrace, gcpKeyType, "g")...)
+	data := decodeLine(t, buf.Bytes())
+	if data[gcpKeyType] != errorReportingType {
+		t.Errorf("@type = %v, want %s", data[gcpKeyType], errorReportingType)
 	}
-	assertNoNestedSpecial(t, "g", g)
+	if st, _ := data[gcpKeyStackTrace].(string); !strings.Contains(st, "goroutine") {
+		t.Errorf("stack_trace = %q, want a Go stack trace", st)
+	}
+	want := map[string]any{"h": map[string]any{"a": float64(1)}}
+	if !reflect.DeepEqual(data["g"], want) {
+		t.Errorf("g = %v, want %v", data["g"], want)
+	}
+}
+
+// TestGCPHandler_GroupedCallerErrorFieldsTopLevel checks that stack_trace
+// and @type given by the caller inside a group, on the record or with With,
+// are written at the top level with the caller's values (ptone/scion#4996).
+func TestGCPHandler_GroupedCallerErrorFieldsTopLevel(t *testing.T) {
+	cases := []struct {
+		name string
+		log  func(l *slog.Logger)
+	}{
+		{"record", func(l *slog.Logger) {
+			l.WithGroup("g").Error("boom", "a", 1, gcpKeyStackTrace, "my stack", gcpKeyType, "my type")
+		}},
+		{"With", func(l *slog.Logger) {
+			l.WithGroup("g").With(gcpKeyStackTrace, "my stack").With("a", 1, gcpKeyType, "my type").Error("boom")
+		}},
+		{"With, INFO", func(l *slog.Logger) {
+			l.WithGroup("g").With(gcpKeyStackTrace, "my stack", gcpKeyType, "my type").Info("m", "a", 1)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(gcpKeyStackTrace, gcpKeyType, "g")...)
+			data := decodeLine(t, buf.Bytes())
+			if data[gcpKeyStackTrace] != "my stack" || data[gcpKeyType] != "my type" {
+				t.Errorf("stack_trace = %v, @type = %v, want caller values", data[gcpKeyStackTrace], data[gcpKeyType])
+			}
+			if want := map[string]any{"a": float64(1)}; !reflect.DeepEqual(data["g"], want) {
+				t.Errorf("g = %v, want %v", data["g"], want)
+			}
+		})
+	}
+}
+
+// TestGCPHandler_GroupedTraceIDTopLevel checks that a trace ID attribute
+// inside a group becomes the top-level trace field, as it does without a
+// group, and leaves no renamed copy in the group (ptone/scion#4996).
+func TestGCPHandler_GroupedTraceIDTopLevel(t *testing.T) {
+	t.Setenv(EnvGCPProjectID, "test-proj")
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	wantTrace := "projects/test-proj/traces/" + traceID
+
+	cases := []struct {
+		name string
+		log  func(l *slog.Logger)
+	}{
+		{"no group", func(l *slog.Logger) {
+			l.Info("m", AttrTraceID, traceID, "a", 1)
+		}},
+		{"record", func(l *slog.Logger) {
+			l.WithGroup("g").Info("m", AttrTraceID, traceID, "a", 1)
+		}},
+		{"With", func(l *slog.Logger) {
+			l.WithGroup("g").With(AttrTraceID, traceID).Info("m", "a", 1)
+		}},
+		{"nested groups", func(l *slog.Logger) {
+			l.WithGroup("g").With("a", 1).WithGroup("h").Info("m", AttrTraceID, traceID)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			data := decodeLine(t, buf.Bytes())
+			userKey := "g"
+			if tc.name == "no group" {
+				userKey = "a"
+			}
+			assertKeys(t, buf.Bytes(), withBaseKeys(GCPKeyTrace, userKey)...)
+			if data[GCPKeyTrace] != wantTrace {
+				t.Errorf("%s = %v, want %s", GCPKeyTrace, data[GCPKeyTrace], wantTrace)
+			}
+			labels, _ := data[GCPKeyLabels].(map[string]any)
+			if labels[gcpTraceIDLabelKey] != traceID {
+				t.Errorf("trace label = %v, want %s", labels[gcpTraceIDLabelKey], traceID)
+			}
+			if tc.name != "no group" {
+				if want := map[string]any{"a": float64(1)}; !reflect.DeepEqual(data["g"], want) {
+					t.Errorf("g = %v, want %v", data["g"], want)
+				}
+			}
+		})
+	}
+}
+
+// TestGCPHandler_GroupRendersEmptyValidJSON checks that a record whose open
+// group renders empty, because its only attrs are written at the top level
+// or are deleted by ReplaceAttr, is one valid JSON entry without the group.
+func TestGCPHandler_GroupRendersEmptyValidJSON(t *testing.T) {
+	const traceID = "4bf92f3577b34da6a3ce929d0e0e4736"
+	cases := []struct {
+		name string
+		log  func(l *slog.Logger)
+		want []string
+	}{
+		{"error, only lifted record attr", func(l *slog.Logger) {
+			l.WithGroup("g").Error("boom", AttrTraceID, traceID)
+		}, withBaseKeys(GCPKeyTrace, gcpKeyStackTrace, gcpKeyType)},
+		{"info, only lifted With attr", func(l *slog.Logger) {
+			l.WithGroup("g").With(gcpKeyStackTrace, "s").WithGroup("h").Info("m")
+		}, withBaseKeys(gcpKeyStackTrace)},
+		{"error, only dropped attrs", func(l *slog.Logger) {
+			l.WithGroup("g").With("drop", 1).Error("boom", "drop", 2)
+		}, withBaseKeys(gcpKeyStackTrace, gcpKeyType)},
+		{"empty trace ID in group", func(l *slog.Logger) {
+			l.WithGroup("g").Info("m", AttrTraceID, "")
+		}, withBaseKeys()},
+	}
+	dropDrop := func(_ []string, a slog.Attr) slog.Attr {
+		if a.Key == "drop" {
+			return slog.Attr{}
+		}
+		return a
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, &slog.HandlerOptions{ReplaceAttr: dropDrop}, "test-component", "")))
+
+			if n := bytes.Count(buf.Bytes(), []byte("\n")); n != 1 {
+				t.Fatalf("got %d lines, want 1: %s", n, buf.Bytes())
+			}
+			if !json.Valid(bytes.TrimSpace(buf.Bytes())) {
+				t.Fatalf("invalid JSON entry: %s", buf.Bytes())
+			}
+			assertKeys(t, buf.Bytes(), tc.want...)
+		})
+	}
 }
 
 // TestGCPHandler_GroupSiblingsIndependent checks that handlers derived from

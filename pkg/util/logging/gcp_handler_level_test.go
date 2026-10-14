@@ -138,3 +138,73 @@ func TestGCPHandler_SeverityMapping(t *testing.T) {
 		})
 	}
 }
+
+// TestGCPHandler_CustomLevelSeverity verifies that a level between or
+// beyond the standard ones maps to the nearest lower standard severity
+// (ptone/scion#4998).
+func TestGCPHandler_CustomLevelSeverity(t *testing.T) {
+	tests := []struct {
+		level slog.Level
+		want  string
+	}{
+		{slog.LevelDebug - 4, "DEBUG"},
+		{slog.LevelDebug + 1, "DEBUG"},
+		{slog.LevelInfo - 1, "DEBUG"},
+		{slog.LevelInfo + 1, "INFO"},
+		{slog.LevelWarn - 1, "INFO"},
+		{slog.LevelWarn + 1, "WARNING"},
+		{slog.LevelError - 1, "WARNING"},
+		{slog.LevelError + 4, "ERROR"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.level.String(), func(t *testing.T) {
+			var buf bytes.Buffer
+			opts := &slog.HandlerOptions{Level: slog.LevelDebug - 4}
+			slog.New(NewGCPHandler(&buf, opts, "test-component", "")).Log(t.Context(), tt.level, "msg")
+
+			want := withBaseKeys()
+			if tt.level >= slog.LevelError {
+				want = withBaseKeys(gcpKeyStackTrace, gcpKeyType)
+			}
+			assertKeys(t, buf.Bytes(), want...)
+			if got := decodeLine(t, buf.Bytes())[GCPKeySeverity]; got != tt.want {
+				t.Errorf("severity = %v, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity verifies that a
+// top-level caller attr keyed "level" holding a slog.Level is logged as
+// its name and does not add a second severity key (ptone/scion#4998).
+func TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity(t *testing.T) {
+	tests := []struct {
+		name  string
+		logFn func(*slog.Logger)
+	}{
+		{"record", func(l *slog.Logger) { l.Info("msg", "level", slog.LevelWarn) }},
+		{"With", func(l *slog.Logger) { l.With("level", slog.LevelWarn).Info("msg") }},
+		{"With before group", func(l *slog.Logger) { l.With("level", slog.LevelWarn).WithGroup("g").Info("msg") }},
+		{"LogValuer", func(l *slog.Logger) { l.Info("msg", "level", levelValuer(slog.LevelWarn)) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tt.logFn(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(slog.LevelKey)...)
+			data := decodeLine(t, buf.Bytes())
+			if got := data[GCPKeySeverity]; got != "INFO" {
+				t.Errorf("severity = %v, want INFO", got)
+			}
+			if got := data[slog.LevelKey]; got != "WARN" {
+				t.Errorf("level attr = %v, want WARN", got)
+			}
+		})
+	}
+}
+
+// levelValuer is a slog.LogValuer that resolves to a slog.Level.
+type levelValuer slog.Level
+
+func (v levelValuer) LogValue() slog.Value { return slog.AnyValue(slog.Level(v)) }
