@@ -94,7 +94,8 @@ func TestMessagesProjectCreatedIDIndex_AutoMigrate(t *testing.T) {
 // ListMessages page (the shape the conversation backfill issues) is served
 // by the (project_id, created, id) index in index order: the SQLite plan for
 // the exact SQL ListMessages issues, for the first page and for a keyset
-// page, must name the index and must not sort with a TEMP B-TREE.
+// page, must name the index and must not sort with a TEMP B-TREE (full or
+// partial: "FOR RIGHT PART OF ORDER BY" counts too).
 func TestListMessages_ProjectPageUsesIndexOrder(t *testing.T) {
 	enttest.SkipOnPostgres(t, "inspects SQLite EXPLAIN QUERY PLAN output")
 	ctx := context.Background()
@@ -152,7 +153,7 @@ func TestListMessages_ProjectPageUsesIndexOrder(t *testing.T) {
 			require.NoError(t, rows.Err())
 			require.NoError(t, rows.Close())
 			assert.Contains(t, plan, messageProjectCreatedIDIndex, "query: %s", q.sql)
-			assert.NotContains(t, plan, "TEMP B-TREE FOR ORDER BY", "query: %s", q.sql)
+			assert.NotContains(t, plan, "TEMP B-TREE", "query: %s", q.sql)
 		})
 	}
 }
