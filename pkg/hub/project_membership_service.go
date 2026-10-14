@@ -1560,11 +1560,11 @@ func (svc *ProjectMembershipService) RemoveVisitor(ctx context.Context, projectI
 			return err
 		}
 		if rb.SourceRuleID != nil {
-			// The exclusion is recorded before the binding is deleted, so
-			// the revoke reaches the rule's row before the binding's, in
-			// the order the rule changes use (rule, then its bindings).
-			// A binding whose rule no longer exists is still removed;
-			// with no rule there is nothing to exclude the visitor from.
+			// The exclusion is recorded before the binding is deleted. The rule
+			// read is plain and the exclusion table has no foreign key, so the
+			// revoke locks no rule or project row and cannot wait in a cycle
+			// with a rule change or a project deletion. A binding whose rule no
+			// longer exists is still removed, with no rule to exclude them from.
 			err := tx.CreateProjectVisitorExclusion(ctx, *rb.SourceRuleID, u.ID, actorID)
 			if err != nil && !errors.Is(err, store.ErrNotFound) {
 				return err

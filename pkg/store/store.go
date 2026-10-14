@@ -273,16 +273,16 @@ type Store interface {
 	// (ProjectVisitorRule.ActiveAt), oldest first.
 	ListActiveProjectVisitorRules(ctx context.Context, issuer, domain string, at time.Time) ([]*ProjectVisitorRule, error)
 
-	// UpdateProjectVisitorRuleWindow replaces the NotBefore and ExpiresAt
-	// of the project visitor rule id (nil clears a bound) and of every
-	// role binding the rule created (SourceRuleID), in one transaction,
-	// and returns the updated rule and the updated bindings. The project
-	// row (as
-	// LockProjectForMembership does) and then the rule row are locked
-	// before the bindings are changed, so a rule binding created
-	// concurrently either is changed too or takes the new window, and a
-	// concurrent deletion of the project runs before or after it. A
-	// missing rule returns ErrNotFound. It is safe to call on the store
+	// UpdateProjectVisitorRuleWindow replaces the NotBefore and
+	// ExpiresAt of the project visitor rule id (nil clears a bound)
+	// and of every role binding the rule created (SourceRuleID), in
+	// one transaction, and returns the updated rule and the updated
+	// bindings. The project row (as LockProjectForMembership does)
+	// and then the rule row are locked before the bindings are
+	// changed, so a rule binding created concurrently either
+	// is changed too or takes the new window, and a concurrent
+	// deletion of the project runs before or after it. A missing
+	// rule returns ErrNotFound. It is safe to call on the store
 	// passed to WithTx.
 	UpdateProjectVisitorRuleWindow(ctx context.Context, id string, notBefore, expiresAt *time.Time) (*ProjectVisitorRule, []*RoleBinding, error)
 

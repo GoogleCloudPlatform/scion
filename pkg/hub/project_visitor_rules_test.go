@@ -1049,9 +1049,9 @@ func (s *visitorRevokeOrderStore) DeleteRoleBinding(ctx context.Context, id stri
 }
 
 // Revoking a rule visitor records the exclusion before it deletes the
-// binding, in one transaction: the revoke reaches the rule before the
-// binding, as rule changes do. When the delete then fails, neither the
-// exclusion nor any other change remains.
+// binding, in one transaction (the order the membership service uses).
+// When the delete then fails, neither the exclusion nor any other change
+// remains.
 func TestProjectVisitorRules_RevokeExcludesBeforeDelete(t *testing.T) {
 	var calls []string
 	failDelete := &atomic.Bool{}
