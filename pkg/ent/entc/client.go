@@ -117,10 +117,13 @@ func withUTCTimezone(dsn string) string {
 //
 // The driver runs the "_pragma" options in its own sorted order, not in DSN
 // order, so appending cannot be relied on to override a caller's value.
-// Instead, any caller "_pragma" option that sets one of the same pragmas (in
-// any spelling or value) is removed, leaving ours as the only one. Other
-// caller options, including other "_pragma" options, are kept. Callers also
-// check the result after opening (requireSQLitePragmaOn).
+// Instead, any caller "_pragma" option that sets one of the same pragmas, in
+// any value and in the spellings sqlitePragmaName recognizes (case,
+// whitespace, a schema prefix, identifier quotes), is removed, leaving ours
+// as the only one. Other caller options, including other "_pragma" options,
+// are kept. A spelling it does not recognize (for example one with a leading
+// SQL comment) is kept; the post-open check (requireSQLitePragmaOn) then
+// fails the open if that option turned the pragma off.
 //
 // As in withUTCTimezone, a query string that fails to parse is returned
 // unchanged so the driver reports the caller's error at open time.
