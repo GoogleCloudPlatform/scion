@@ -1624,3 +1624,57 @@ func TestTestAdminPolicy_VisitorBindingRefused(t *testing.T) {
 	assert.ErrorIs(t, err, store.ErrNonMembershipRoleRefused)
 	assert.False(t, hasVisitor(u.ID))
 }
+
+// federation_token.mint (GoogleCloudPlatform/scion#3598) is deny for both
+// admin kinds: a test hub is not federated (A0 gate), like the other
+// federation surfaces. The route answers 404 while
+// federation.project_visitors is off (the test hub default; test admins
+// cannot turn experiments on) and while the hub's OIDC provider is off.
+// With both on, federationTokenCaller still refuses every non-human stored
+// kind with 403 ("stored user kind is not human"), which covers both
+// admin kinds; a human super-admin passes that check.
+func TestTestAdminPolicy_FederationTokenRefused(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "tsa-ft-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-ft-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	human := taUser(t, s, "tsa-ft-human", store.SystemRoleSuperAdmin)
+	assert.True(t, testAdminPermissionDenied(permissionFederationTokenMint))
+
+	for who, k := range kinds {
+		// The route: 404 while federation.project_visitors is off.
+		rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/auth/federation-token", map[string]any{"audience": "https://peer.example"})
+		assert.Equal(t, http.StatusNotFound, rec.Code, "%s federation token route: %s", who, rec.Body.String())
+
+		id := tsaIdentity(t, s, k.Identity.ID)
+		// decide refuses the permission (step 0c).
+		d := srv.authzService.Decide(ctx, AuthzRequest{
+			Principal: principalContextForIdentity(id), Credential: credentialContextForIdentity(id),
+			Resource: Resource{Type: permissions.ResourceFederationToken}, Action: Action(permissions.ActionMint), Permission: permissionFederationTokenMint,
+		})
+		assert.False(t, d.Allowed, who)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: %s", who, d.Reason)
+
+		// The handler's caller check refuses the admin kind by stored kind.
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/federation-token", nil).WithContext(contextWithIdentityAndUser(id))
+		w := httptest.NewRecorder()
+		u, ok := srv.federationTokenCaller(w, r)
+		assert.False(t, ok, "%s federationTokenCaller", who)
+		assert.Nil(t, u, who)
+		assert.Equal(t, http.StatusForbidden, w.Code, "%s federationTokenCaller: %s", who, w.Body.String())
+	}
+
+	// Human control: the same caller check admits a human super-admin.
+	hid := tsaIdentity(t, s, human.ID)
+	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/federation-token", nil).WithContext(contextWithIdentityAndUser(hid))
+	w := httptest.NewRecorder()
+	u, ok := srv.federationTokenCaller(w, r)
+	assert.True(t, ok, "human super-admin passes federationTokenCaller: %s", w.Body.String())
+	if assert.NotNil(t, u) {
+		assert.Equal(t, human.ID, u.ID)
+	}
+}

@@ -231,6 +231,7 @@ var testAdminPermissionPolicy = map[string]testAdminPolicy{
 	"hub.scheduler.update":           testAdminPolicyDeny,
 	"hub.federation.read":            testAdminPolicyDeny,
 	"hub.federation.update":          testAdminPolicyDeny,
+	"federation_token.mint":          testAdminPolicyDeny, // a test hub is not federated (A0 gate); the handler also refuses non-human kinds
 	"hub.teams_manifest.read":        testAdminPolicyAllow,
 	"hub.teams_manifest.update":      testAdminPolicyDeny,
 	"hub.validate.execute":           testAdminPolicyAllow,
