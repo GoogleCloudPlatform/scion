@@ -42,7 +42,7 @@ func TestRunAll_OrderAndCounts(t *testing.T) {
 		Finding{Code: "a.first.i", Severity: SeverityInfo},
 		Finding{Code: "a.first.b", Severity: SeverityBlock},
 	)))
-	rep := r.RunAll(context.Background(), nil)
+	rep := r.RunAll(context.Background(), Env{})
 	if rep.Version != 1 || strings.Join(rep.Checks, ",") != "a.first,z.last" {
 		t.Fatalf("version %d checks %v, want 1 and [a.first z.last]", rep.Version, rep.Checks)
 	}
@@ -68,7 +68,7 @@ func TestRunAll_CouldNotRun(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		return nil, nil
 	}})
-	rep := r.RunAll(context.Background(), nil)
+	rep := r.RunAll(context.Background(), Env{})
 	want := map[string]string{"c.err": "boom", "c.panic": "panic: bad", "c.slow": "timed out"}
 	if len(rep.Findings) != 3 || rep.Blocking != 3 {
 		t.Fatalf("findings %+v, want 3 blocking could_not_run", rep.Findings)
@@ -80,13 +80,16 @@ func TestRunAll_CouldNotRun(t *testing.T) {
 	}
 }
 
-// A finding with an unknown severity becomes an invalid_finding block.
-func TestRunAll_InvalidSeverity(t *testing.T) {
+// A finding with an unknown severity, or a code outside the check's name,
+// becomes an invalid_finding block.
+func TestRunAll_InvalidFinding(t *testing.T) {
 	r := NewRegistry()
 	r.Register(check("c.bad", findings(Finding{Code: "c.bad.x", Severity: "fatal"})))
-	rep := r.RunAll(context.Background(), nil)
-	if len(rep.Findings) != 1 || rep.Findings[0].Code != "c.bad.invalid_finding" || rep.Blocking != 1 {
-		t.Fatalf("findings %+v, want one c.bad.invalid_finding block", rep.Findings)
+	r.Register(check("c.other", findings(Finding{Code: "elsewhere.x", Severity: SeverityInfo})))
+	rep := r.RunAll(context.Background(), Env{})
+	if len(rep.Findings) != 2 || rep.Blocking != 2 ||
+		rep.Findings[0].Code != "c.bad.invalid_finding" || rep.Findings[1].Code != "c.other.invalid_finding" {
+		t.Fatalf("findings %+v, want c.bad.invalid_finding and c.other.invalid_finding, both block", rep.Findings)
 	}
 }
 
@@ -98,7 +101,7 @@ func TestRunAll_SubjectsCapped(t *testing.T) {
 	}
 	r := NewRegistry()
 	r.Register(check("c.many", findings(Finding{Code: "c.many.x", Severity: SeverityWarn, Subjects: subjects})))
-	f := r.RunAll(context.Background(), nil).Findings[0]
+	f := r.RunAll(context.Background(), Env{}).Findings[0]
 	if len(f.Subjects) != MaxSubjects || f.SubjectCount != MaxSubjects+5 {
 		t.Fatalf("subjects %d, count %d; want %d and %d", len(f.Subjects), f.SubjectCount, MaxSubjects, MaxSubjects+5)
 	}

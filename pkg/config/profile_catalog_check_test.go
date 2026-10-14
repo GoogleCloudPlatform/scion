@@ -54,22 +54,33 @@ func catalogHome(t *testing.T, active string, fileProfiles ...string) string {
 	if len(fileProfiles) > 0 {
 		b.WriteString("profiles:\n")
 		for _, p := range fileProfiles {
-			b.WriteString("  " + p + ":\n    runtime: docker\n")
+			name, runtime := profileSpec(p)
+			b.WriteString("  " + name + ":\n    runtime: " + runtime + "\n")
 		}
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "settings.yaml"), []byte(b.String()), 0o644))
 	return globalDir
 }
 
-// storedProfiles is a stored profile set of the named profiles, each on the
-// "docker" runtime; nil for no stored set.
+// profileSpec splits a fixture profile "name" or "name:runtime"; the runtime
+// defaults to "docker".
+func profileSpec(p string) (name, runtime string) {
+	if i := strings.IndexByte(p, ':'); i >= 0 {
+		return p[:i], p[i+1:]
+	}
+	return p, "docker"
+}
+
+// storedProfiles is a stored profile set of the named profiles ("name" or
+// "name:runtime"); nil for no stored set.
 func storedProfiles(names []string) map[string]V1ProfileConfig {
 	if names == nil {
 		return nil
 	}
 	profiles := map[string]V1ProfileConfig{}
 	for _, p := range names {
-		profiles[p] = V1ProfileConfig{Runtime: "docker"}
+		name, runtime := profileSpec(p)
+		profiles[name] = V1ProfileConfig{Runtime: runtime}
 	}
 	return profiles
 }
@@ -280,6 +291,19 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			after: []string{"gke", "local-nfs"}, afterRT: []string{"k8s"}, agents: map[string]int{"gke": 2, "": 1},
 			want: []ProfileCatalogFinding{
 				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "gke", Agents: 3, Source: ProfileSourceStored, PreExisting: true},
+			},
+		},
+		{
+			// The default moves onto a profile whose runtime was already
+			// missing: the agents without a saved profile worked before, so
+			// the change breaks them (not pre-existing).
+			name: "default moves onto a broken runtime", active: "local", fileProfiles: []string{"gke", "bad:nope"},
+			after: []string{"bad:nope"}, agents: map[string]int{"": 2},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin, Previous: "local"},
+				{Kind: ProfileFindingDroppedUnused, Profile: "gke", Source: ProfileSourceFile},
+				{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "bad", Agents: 2, Source: ProfileSourceFile},
 			},
 		},
 		{

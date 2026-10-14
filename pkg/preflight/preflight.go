@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"regexp"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -67,9 +68,20 @@ type Check struct {
 	Run     func(ctx context.Context, env Env) ([]Finding, error)
 }
 
-// Env is what a check reads. It is opaque to the registry; the preflight
-// command fills it.
-type Env any
+// Env is what a check reads; the preflight command fills it. pkg/preflight
+// imports no hub or store package: the database reader the next slice adds
+// is an interface declared in this package (ReadOnlyQueries) and implemented
+// by the command, so the dependency points from the command to this package.
+// That field is optional and keeps the report at version 1.
+type Env struct {
+	// GlobalDir is the hub's global settings directory (~/.scion).
+	GlobalDir string
+	// ServerConfigPath is the path the server was started with, or "".
+	ServerConfigPath string
+	// ColocatedBrokerID is the hub's co-located broker, or "" for a hub
+	// with none.
+	ColocatedBrokerID string
+}
 
 // ReportVersion is the version of Report. Adding optional fields keeps it;
 // removing or renaming a field, or changing a meaning, bumps it.
@@ -117,9 +129,12 @@ func (r *Registry) Register(c Check) {
 
 // RunAll runs every registered check in name order, each under its own
 // timeout, and returns the report. A check that errors, times out or panics
-// gives one block finding with code "<name>.could_not_run"; a finding with a
-// severity the registry does not know gives "<name>.invalid_finding"
-// (block) in its place. Findings are sorted by check, code and subjects.
+// gives one block finding with code "<name>.could_not_run": findings it
+// returned with an error are dropped, and a timed-out check's late result is
+// discarded (its context is cancelled). A finding whose severity the
+// registry does not know, or whose code does not start with "<name>.",
+// gives "<name>.invalid_finding" (block) in its place. RunAll sets each
+// finding's Check, and sorts findings by check, code and subjects.
 func (r *Registry) RunAll(ctx context.Context, env Env) Report {
 	r.mu.Lock()
 	names := make([]string, 0, len(r.checks))
@@ -133,9 +148,9 @@ func (r *Registry) RunAll(ctx context.Context, env Env) Report {
 	rep := Report{Version: ReportVersion, Checks: names, Findings: []Finding{}}
 	for _, name := range names {
 		for _, f := range runOne(ctx, checks[name], env) {
-			if !f.Severity.valid() {
+			if !f.Severity.valid() || !strings.HasPrefix(f.Code, name+".") {
 				f = Finding{Check: name, Code: name + ".invalid_finding", Severity: SeverityBlock,
-					Message: fmt.Sprintf("check %s returned a finding with unknown severity %q (code %q)", name, f.Severity, f.Code)}
+					Message: fmt.Sprintf("check %s returned an invalid finding: severity %q, code %q", name, f.Severity, f.Code)}
 			}
 			f.Check = name
 			rep.Findings = append(rep.Findings, capSubjects(f))

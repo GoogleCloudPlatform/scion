@@ -236,9 +236,15 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 		if !hasProfile(after, name) || profileRuntimeResolves(after, name) {
 			continue
 		}
+		pre := before != nil && !profileRuntimeResolves(before, name)
+		// Agents without a saved profile ran on BEFORE's default: when that
+		// worked and the default now lands on this profile, the change breaks
+		// them, whatever this profile's own state was before.
+		if name == afterDefault && agents[""] > 0 && beforeDefault != "" && profileRuntimeResolves(before, beforeDefault) {
+			pre = false
+		}
 		out = append(out, ProfileCatalogFinding{Kind: ProfileFindingProfileRuntimeMissing,
-			Profile: name, Agents: n, Source: source(name),
-			PreExisting: before != nil && !profileRuntimeResolves(before, name)})
+			Profile: name, Agents: n, Source: source(name), PreExisting: pre})
 	}
 
 	// Profiles before has and after drops, with no reference.
