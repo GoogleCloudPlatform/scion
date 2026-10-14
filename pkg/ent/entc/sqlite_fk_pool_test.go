@@ -73,7 +73,7 @@ func TestOpenSQLiteForeignKeysOnEveryPooledConnection(t *testing.T) {
 		"file":          "file:" + filepath.Join(t.TempDir(), "fk.db"),
 		"file-pragma":   "file:" + filepath.Join(t.TempDir(), "fk.db") + "?_pragma=busy_timeout(5000)",
 		"shared-memory": "file:" + t.Name() + "?mode=memory&cache=shared",
-		// A caller-supplied foreign_keys(0) is overridden.
+		// A caller-supplied foreign_keys(0) is removed from the DSN.
 		"file-fk-off": "file:" + filepath.Join(t.TempDir(), "fk.db") + "?_pragma=foreign_keys(0)",
 	}
 	for name, dsn := range dsns {
@@ -166,10 +166,18 @@ func TestWithSQLitePragmas(t *testing.T) {
 			wantOther:   map[string]string{"mode": "memory", "cache": "shared"},
 		},
 		{
-			name:        "caller pragmas are kept and come first",
-			dsn:         "file:hub.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(0)",
+			name:        "other caller pragmas are kept",
+			dsn:         "file:hub.db?_pragma=busy_timeout(5000)&_pragma=synchronous(NORMAL)",
 			wantBase:    "file:hub.db",
-			wantPragmas: []string{"busy_timeout(5000)", "foreign_keys(0)", "foreign_keys(1)"},
+			wantPragmas: []string{"busy_timeout(5000)", "synchronous(NORMAL)", "foreign_keys(1)"},
+		},
+		{
+			name: "caller foreign_keys pragmas are removed in any spelling",
+			dsn: "file:hub.db?_pragma=busy_timeout(5000)&_pragma=foreign_keys(0)&_pragma=foreign_keys(off)" +
+				"&_pragma=foreign_keys%3D0&_pragma=FOREIGN_KEYS%20%3D%20OFF&_pragma=main.foreign_keys%3Dfalse" +
+				"&_pragma=%22foreign_keys%22(no)&_pragma=foreign_keys(1)",
+			wantBase:    "file:hub.db",
+			wantPragmas: []string{"busy_timeout(5000)", "foreign_keys(1)"},
 		},
 	}
 	for _, tc := range tests {
@@ -188,20 +196,84 @@ func TestWithSQLitePragmas(t *testing.T) {
 		})
 	}
 
+	got := withSQLitePragmas("file:hub.db?_pragma=query_only(0)&_pragma=foreign_keys(off)", "foreign_keys(1)", "query_only(1)")
+	_, rawQuery, _ := strings.Cut(got, "?")
+	values, err := url.ParseQuery(rawQuery)
+	require.NoError(t, err)
+	require.Equal(t, []string{"foreign_keys(1)", "query_only(1)"}, values["_pragma"])
+
 	malformed := "file:/data/hub.db?mode=ro&_pragma=foo%zz"
 	require.Equal(t, malformed, withSQLitePragmas(malformed, "foreign_keys(1)"),
 		"a malformed query must be returned unchanged")
 }
 
-// TestRequireSQLitePragmaOnNamesTheCause checks the open-time error when the
-// DSN pragma did not take effect.
-func TestRequireSQLitePragmaOnNamesTheCause(t *testing.T) {
-	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "plain.db"))
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = db.Close() })
-	err = requireSQLitePragmaOn(db, "foreign_keys")
+// TestOpenSQLiteRemovesCallerForeignKeysOff checks that a caller DSN option
+// turning foreign keys off, in any spelling, does not reach any connection.
+func TestOpenSQLiteRemovesCallerForeignKeysOff(t *testing.T) {
+	ctx := context.Background()
+	for name, pragma := range map[string]string{
+		"paren-0":   "foreign_keys(0)",
+		"paren-off": "foreign_keys(off)",
+		"eq-0":      "foreign_keys=0",
+		"eq-OFF":    "FOREIGN_KEYS = OFF",
+		"schema":    "main.foreign_keys=false",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dsn := "file:" + filepath.Join(t.TempDir(), "fk.db") + "?_pragma=" + url.QueryEscape(pragma)
+			_, db := openFKPoolTestClient(t, dsn, PoolConfig{MaxOpenConns: 2, MaxIdleConns: 2})
+			conns := make([]*sql.Conn, 2)
+			for i := range conns {
+				c, err := db.Conn(ctx)
+				require.NoError(t, err)
+				conns[i] = c
+			}
+			for i, c := range conns {
+				requireForeignKeysOn(t, ctx, c, "connection "+string(rune('0'+i)))
+			}
+			for _, c := range conns {
+				require.NoError(t, c.Close())
+			}
+		})
+	}
+}
+
+// TestSQLiteOpenersFailClosed checks that an opener refuses to return a
+// database whose connections lack a required pragma. The DSN builder is
+// stubbed so the pragma is not set.
+func TestSQLiteOpenersFailClosed(t *testing.T) {
+	orig := sqliteDSNPragmas
+	t.Cleanup(func() { sqliteDSNPragmas = orig })
+	path := filepath.Join(t.TempDir(), "plain.db")
+
+	sqliteDSNPragmas = func(dsn string, _ ...string) string { return dsn }
+	client, err := OpenSQLite("file:"+path, PoolConfig{})
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "PRAGMA foreign_keys is 0")
-	require.Contains(t, err.Error(), "_pragma=foreign_keys(1)")
-	require.Contains(t, err.Error(), "modernc.org/sqlite")
+	require.Nil(t, client)
+	require.EqualError(t, err, "enabling foreign keys: the connection's foreign_keys pragma is 0 after opening, want 1")
+
+	client, err = OpenSQLiteReadOnly("file:" + path)
+	require.Error(t, err)
+	require.Nil(t, client)
+	require.EqualError(t, err, "enabling foreign keys: the connection's foreign_keys pragma is 0 after opening, want 1")
+
+	sqliteDSNPragmas = func(dsn string, _ ...string) string { return orig(dsn, "foreign_keys(1)") }
+	client, err = OpenSQLiteReadOnly("file:" + path)
+	require.Error(t, err)
+	require.Nil(t, client)
+	require.EqualError(t, err, "enabling query_only mode: the connection's query_only pragma is 0 after opening, want 1")
+}
+
+func TestSQLitePragmaName(t *testing.T) {
+	for in, want := range map[string]string{
+		"foreign_keys(1)":             "foreign_keys",
+		"FOREIGN_KEYS = OFF":          "foreign_keys",
+		" foreign_keys (0)":           "foreign_keys",
+		"main.foreign_keys=false":     "foreign_keys",
+		"main . \"foreign_keys\"(no)": "foreign_keys",
+		"[query_only](1)":             "query_only",
+		"busy_timeout(5000)":          "busy_timeout",
+		"synchronous":                 "synchronous",
+	} {
+		require.Equal(t, want, sqlitePragmaName(in), "sqlitePragmaName(%q)", in)
+	}
 }
