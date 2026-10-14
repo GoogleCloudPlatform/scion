@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -33,11 +34,38 @@ const (
 	adminSignalChannel = "scion_integration_admin"
 )
 
-// AdminSignal is the JSON payload published via NOTIFY on the admin signal channel.
+// AdminSignal is the JSON payload published via NOTIFY on the admin signal
+// channel. It carries identifiers only: Kind is "config" or "update", and ID,
+// set only for "update", is the canonical UUID of the integration update row.
+// marshalAdminSignal enforces this before any publish.
 type AdminSignal struct {
 	Integration string `json:"integration"`
 	Kind        string `json:"kind"` // "config" or "update"
 	ID          string `json:"id,omitempty"`
+}
+
+// marshalAdminSignal validates signal and encodes it as a NOTIFY payload.
+// Kind must be "config" or "update"; ID must be empty for "config" and a
+// canonical UUID for "update", so no free-form text reaches the channel.
+func marshalAdminSignal(signal AdminSignal) (string, error) {
+	switch signal.Kind {
+	case "config":
+		if signal.ID != "" {
+			return "", fmt.Errorf("admin signal: kind %q takes no id", signal.Kind)
+		}
+	case "update":
+		parsed, err := uuid.Parse(signal.ID)
+		if err != nil || parsed.String() != signal.ID {
+			return "", fmt.Errorf("admin signal: kind %q requires a canonical UUID id", signal.Kind)
+		}
+	default:
+		return "", fmt.Errorf("admin signal: unknown kind %q", signal.Kind)
+	}
+	payload, err := json.Marshal(signal)
+	if err != nil {
+		return "", fmt.Errorf("marshal admin signal: %w", err)
+	}
+	return string(payload), nil
 }
 
 // adminSignalExecutor is satisfied by both *pgx.Conn and pgx.Tx, letting the
@@ -50,11 +78,11 @@ type adminSignalExecutor interface {
 // signal payload. The exec parameter should be a pgx.Tx to make the NOTIFY
 // transactional with the associated row write.
 func PublishAdminSignal(ctx context.Context, exec adminSignalExecutor, signal AdminSignal) error {
-	payload, err := json.Marshal(signal)
+	payload, err := marshalAdminSignal(signal)
 	if err != nil {
-		return fmt.Errorf("marshal admin signal: %w", err)
+		return err
 	}
-	_, err = exec.Exec(ctx, `SELECT pg_notify($1, $2)`, adminSignalChannel, string(payload))
+	_, err = exec.Exec(ctx, `SELECT pg_notify($1, $2)`, adminSignalChannel, payload)
 	if err != nil {
 		return fmt.Errorf("pg_notify on %s: %w", adminSignalChannel, err)
 	}
@@ -65,11 +93,11 @@ func PublishAdminSignal(ctx context.Context, exec adminSignalExecutor, signal Ad
 // standard library driver, as used by Ent). This is used when the caller has
 // an Ent-managed database connection rather than a raw pgx connection.
 func PublishAdminSignalDB(ctx context.Context, db *sql.DB, signal AdminSignal) error {
-	payload, err := json.Marshal(signal)
+	payload, err := marshalAdminSignal(signal)
 	if err != nil {
-		return fmt.Errorf("marshal admin signal: %w", err)
+		return err
 	}
-	_, err = db.ExecContext(ctx, "SELECT pg_notify($1, $2)", adminSignalChannel, string(payload))
+	_, err = db.ExecContext(ctx, "SELECT pg_notify($1, $2)", adminSignalChannel, payload)
 	if err != nil {
 		return fmt.Errorf("pg_notify on %s: %w", adminSignalChannel, err)
 	}
@@ -79,14 +107,14 @@ func PublishAdminSignalDB(ctx context.Context, db *sql.DB, signal AdminSignal) e
 // publishAdminSignalTx sends a NOTIFY within an Ent transaction so that the
 // signal is delivered atomically with the associated row write.
 func publishAdminSignalTx(ctx context.Context, tx *ent.Tx, signal AdminSignal) error {
-	payload, err := json.Marshal(signal)
+	payload, err := marshalAdminSignal(signal)
 	if err != nil {
-		return fmt.Errorf("marshal admin signal: %w", err)
+		return err
 	}
 	var result sql.Result
 	err = tx.Client().Driver().Exec(ctx,
 		"SELECT pg_notify($1, $2)",
-		[]any{adminSignalChannel, string(payload)},
+		[]any{adminSignalChannel, payload},
 		&result,
 	)
 	if err != nil {

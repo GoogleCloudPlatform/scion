@@ -39,11 +39,16 @@ Source can be:
   - An rclone URI (:gcs:bucket/path)
   - An archive URL (.tgz, .zip)
 
+For a GitHub URL the fetch authenticates with the first of these
+environment variables that is set: GH_{OWNER}__{REPO}, GH_{OWNER}, then
+GITHUB_TOKEN (OWNER and REPO uppercased, with "-" and "." as "_"). Other
+sources are fetched without a credential.
+
 The installed name is, in order of precedence: --name; the "name" field in
 the source's config.yaml; its "harness" field; the source directory name.
 
-Without --global the config is installed into the current project (locally,
-or in the project's scope on the Hub when Hub mode is enabled); with
+Without --global the config is installed into the current project's scope
+on the Hub; with
 --global it is installed globally. If a harness-config with the same name
 already exists in the target scope, install fails unless --force is given.
 
@@ -100,7 +105,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 	}
 	printHarnessConfigWarnings(cmd.ErrOrStderr(), name, hcDir.Warnings)
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHub(gp)
 	if err != nil {
 		return err
 	}
@@ -136,7 +141,7 @@ func resolveInstallSource(source string) (localPath string, cleanup func(), err 
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized)
+		cachePath, fetchErr := config.FetchRemoteTemplate(context.Background(), normalized, remoteFetchCredential(normalized))
 		if fetchErr != nil {
 			return "", nil, fmt.Errorf("failed to fetch remote source: %w", fetchErr)
 		}

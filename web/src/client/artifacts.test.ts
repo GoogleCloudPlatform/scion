@@ -25,6 +25,7 @@ import {
   formatArtifactRef,
   formatBytes,
   isInlineType,
+  linkLifetimeChoices,
   listProjectArtifacts,
   orderArtifactRefs,
   parseArtifactPagePath,
@@ -70,6 +71,46 @@ describe('artifactFileUrl', () => {
     expect(artifactFileUrl('a/1', 0, 'x?y#z.md')).toBe(
       '/api/v1/artifacts/a%2F1/files/x%3Fy%23z.md'
     );
+  });
+});
+
+describe('linkLifetimeChoices', () => {
+  const hours = (c: ReturnType<typeof linkLifetimeChoices>): number[] =>
+    c.options.map((o) => o.hours);
+
+  it('offers the presets up to the maximum, plus the default and maximum, and selects the default', () => {
+    const c = linkLifetimeChoices(48, 240);
+    expect(hours(c)).toEqual([24, 48, 168, 240]);
+    expect(c.options.map((o) => o.label)).toEqual(['1 day', '2 days', '7 days', '10 days']);
+    expect(c.selected).toBe(48);
+  });
+
+  it('never offers more than the maximum, labelling short lifetimes in hours', () => {
+    const c = linkLifetimeChoices(1, 12);
+    expect(hours(c)).toEqual([1, 12]);
+    expect(c.options.map((o) => o.label)).toEqual(['1 hour', '12 hours']);
+    expect(linkLifetimeChoices(168, 720)).toEqual({
+      options: [
+        { label: '1 day', hours: 24 },
+        { label: '7 days', hours: 168 },
+        { label: '30 days', hours: 720 },
+      ],
+      selected: 168,
+    });
+  });
+
+  it('keeps the presets and the 7-day default when the hub does not say', () => {
+    const cases: Array<[number | undefined, number | undefined]> = [
+      [undefined, undefined],
+      [24, undefined],
+      [0, 720],
+      [1.5, 720],
+    ];
+    for (const [d, m] of cases) {
+      const c = linkLifetimeChoices(d, m);
+      expect(hours(c)).toEqual([24, 168, 720]);
+      expect(c.selected).toBe(168);
+    }
   });
 });
 

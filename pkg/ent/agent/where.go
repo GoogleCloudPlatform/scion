@@ -346,6 +346,11 @@ func LaunchError(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldLaunchError, v))
 }
 
+// LaunchCause applies equality check predicate on the "launch_cause" field. It's identical to LaunchCauseEQ.
+func LaunchCause(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchCause, v))
+}
+
 // DeletionState applies equality check predicate on the "deletion_state" field. It's identical to DeletionStateEQ.
 func DeletionState(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldEQ(FieldDeletionState, v))
@@ -3994,6 +3999,81 @@ func LaunchErrorEqualFold(v string) predicate.Agent {
 // LaunchErrorContainsFold applies the ContainsFold predicate on the "launch_error" field.
 func LaunchErrorContainsFold(v string) predicate.Agent {
 	return predicate.Agent(sql.FieldContainsFold(FieldLaunchError, v))
+}
+
+// LaunchCauseEQ applies the EQ predicate on the "launch_cause" field.
+func LaunchCauseEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEQ(FieldLaunchCause, v))
+}
+
+// LaunchCauseNEQ applies the NEQ predicate on the "launch_cause" field.
+func LaunchCauseNEQ(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldNEQ(FieldLaunchCause, v))
+}
+
+// LaunchCauseIn applies the In predicate on the "launch_cause" field.
+func LaunchCauseIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldIn(FieldLaunchCause, vs...))
+}
+
+// LaunchCauseNotIn applies the NotIn predicate on the "launch_cause" field.
+func LaunchCauseNotIn(vs ...string) predicate.Agent {
+	return predicate.Agent(sql.FieldNotIn(FieldLaunchCause, vs...))
+}
+
+// LaunchCauseGT applies the GT predicate on the "launch_cause" field.
+func LaunchCauseGT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGT(FieldLaunchCause, v))
+}
+
+// LaunchCauseGTE applies the GTE predicate on the "launch_cause" field.
+func LaunchCauseGTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldGTE(FieldLaunchCause, v))
+}
+
+// LaunchCauseLT applies the LT predicate on the "launch_cause" field.
+func LaunchCauseLT(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLT(FieldLaunchCause, v))
+}
+
+// LaunchCauseLTE applies the LTE predicate on the "launch_cause" field.
+func LaunchCauseLTE(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldLTE(FieldLaunchCause, v))
+}
+
+// LaunchCauseContains applies the Contains predicate on the "launch_cause" field.
+func LaunchCauseContains(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContains(FieldLaunchCause, v))
+}
+
+// LaunchCauseHasPrefix applies the HasPrefix predicate on the "launch_cause" field.
+func LaunchCauseHasPrefix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasPrefix(FieldLaunchCause, v))
+}
+
+// LaunchCauseHasSuffix applies the HasSuffix predicate on the "launch_cause" field.
+func LaunchCauseHasSuffix(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldHasSuffix(FieldLaunchCause, v))
+}
+
+// LaunchCauseIsNil applies the IsNil predicate on the "launch_cause" field.
+func LaunchCauseIsNil() predicate.Agent {
+	return predicate.Agent(sql.FieldIsNull(FieldLaunchCause))
+}
+
+// LaunchCauseNotNil applies the NotNil predicate on the "launch_cause" field.
+func LaunchCauseNotNil() predicate.Agent {
+	return predicate.Agent(sql.FieldNotNull(FieldLaunchCause))
+}
+
+// LaunchCauseEqualFold applies the EqualFold predicate on the "launch_cause" field.
+func LaunchCauseEqualFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldEqualFold(FieldLaunchCause, v))
+}
+
+// LaunchCauseContainsFold applies the ContainsFold predicate on the "launch_cause" field.
+func LaunchCauseContainsFold(v string) predicate.Agent {
+	return predicate.Agent(sql.FieldContainsFold(FieldLaunchCause, v))
 }
 
 // DeletionStateEQ applies the EQ predicate on the "deletion_state" field.

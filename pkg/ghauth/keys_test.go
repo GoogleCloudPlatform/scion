@@ -86,3 +86,37 @@ func TestOwnerKey(t *testing.T) {
 		})
 	}
 }
+
+// TestLookup verifies the convention order: the repo key beats the owner key,
+// empty values count as unset, and GITHUB_TOKEN is never consulted.
+func TestLookup(t *testing.T) {
+	tests := []struct {
+		name      string
+		values    map[string]string
+		wantValue string
+		wantName  string
+	}{
+		{"repo key beats owner key", map[string]string{"GH_ACME_CORP__TEMPLATES": "fake-repo", "GH_ACME_CORP": "fake-owner"}, "fake-repo", "GH_ACME_CORP__TEMPLATES"},
+		{"owner key when no repo key", map[string]string{"GH_ACME_CORP": "fake-owner"}, "fake-owner", "GH_ACME_CORP"},
+		{"empty repo value falls through", map[string]string{"GH_ACME_CORP__TEMPLATES": "", "GH_ACME_CORP": "fake-owner"}, "fake-owner", "GH_ACME_CORP"},
+		{"default key is not consulted", map[string]string{DefaultKey: "fake-default"}, "", ""},
+		{"another owner is ignored", map[string]string{"GH_OTHER": "fake-other"}, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var asked []string
+			gotValue, gotName := Lookup("acme-corp", "templates", func(name string) string {
+				asked = append(asked, name)
+				return tt.values[name]
+			})
+			if gotValue != tt.wantValue || gotName != tt.wantName {
+				t.Errorf("Lookup = (%q, %q), want (%q, %q)", gotValue, gotName, tt.wantValue, tt.wantName)
+			}
+			for _, name := range asked {
+				if name == DefaultKey {
+					t.Errorf("Lookup asked for %s", DefaultKey)
+				}
+			}
+		})
+	}
+}

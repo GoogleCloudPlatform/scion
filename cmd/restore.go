@@ -33,13 +33,9 @@ var restoreCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		agentName := api.Slugify(args[0])
 
-		hubCtx, err := CheckHubAvailability(projectPath)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
-		}
-
-		if hubCtx == nil {
-			return fmt.Errorf("restore requires Hub integration (soft-delete is a Hub feature)")
 		}
 
 		PrintUsingHub(hubCtx.Endpoint)

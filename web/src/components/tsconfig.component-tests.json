@@ -33,7 +33,8 @@
     "pages/agent-detail-reincarnate.test.ts",
     "pages/project-detail-agent-window.test.ts",
     "pages/login.test.ts",
-    "pages/admin-server-config-env-keys.test.ts"
+    "pages/admin-server-config-env-keys.test.ts",
+    "pages/broker-capabilities-contract.test.ts"
   ],
   "exclude": []
 }

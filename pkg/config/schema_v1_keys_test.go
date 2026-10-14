@@ -227,6 +227,8 @@ func TestValidateSettings_DriftKeysRejectBadInput(t *testing.T) {
 		{"oidc token_lifetime empty", "server:\n  oidc:\n    token_lifetime: \"\"\n", "server/oidc/token_lifetime"},
 		{"notification params number", "server:\n  notification_channels:\n    - type: webhook\n      params:\n        retries: 3\n", "server/notification_channels/0/params/retries"},
 		{"oidc token_lifetime quoted integer", "server:\n  oidc:\n    token_lifetime: \"900000000000\"\n", "server/oidc/token_lifetime"},
+		{"oidc user_token_lifetime not a duration", "server:\n  oidc:\n    user_token_lifetime: soon\n", "server/oidc/user_token_lifetime"},
+		{"oidc user_token_audiences not a list", "server:\n  oidc:\n    user_token_audiences: https://peer.example.com\n", "server/oidc/user_token_audiences"},
 		{"server.shared_dir_storage.nfs.auto_mount (ignored there)", "server:\n  shared_dir_storage:\n    nfs:\n      auto_mount: true\n", "server/shared_dir_storage/nfs"},
 	}
 	for _, tt := range tests {
@@ -269,6 +271,8 @@ func TestValidateSettings_DurationsAndWeakMapValues(t *testing.T) {
 		{"federation intervals signed zero", "server:\n  federation:\n    refresh_interval: \"-0\"\n    debounce_interval: \"+0\"\n"},
 		{"token_lifetime signed zero", "server:\n  oidc:\n    token_lifetime: \"-0\"\n"},
 		{"token_lifetime plus zero", "server:\n  oidc:\n    token_lifetime: \"+0\"\n"},
+		{"user token settings", "server:\n  oidc:\n    user_token_audiences: [https://peer.example.com]\n    user_token_lifetime: 30m\n"},
+		{"user_token_lifetime integer nanoseconds", "server:\n  oidc:\n    user_token_lifetime: 900000000000\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -47,7 +47,7 @@ func TestEnsureHubReady_GlobalHubProjectIDDoesNotLeak(t *testing.T) {
 	server, _, registers := registeredHub(t, localID)
 	withPromptIO(t, strings.NewReader(""), false)
 
-	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL, SkipSync: true})
+	hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: server.URL})
 	if err != nil {
 		t.Fatalf("EnsureHubReady: %v", err)
 	}

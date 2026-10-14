@@ -416,6 +416,122 @@ func TestUnmarkNotificationDispatched(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Dispatch attempts and outcome tests (ptone/scion#4800)
+// ---------------------------------------------------------------------------
+
+// createAgentNotification stores an undispatched agent-targeted notification
+// and returns its ID.
+func createAgentNotification(t *testing.T, s *NotificationStore) string {
+	t.Helper()
+	id := uuid.NewString()
+	require.NoError(t, s.CreateNotification(context.Background(), &store.Notification{
+		ID:             id,
+		SubscriptionID: uuid.NewString(),
+		AgentID:        uuid.NewString(),
+		ProjectID:      uuid.NewString(),
+		SubscriberType: "agent",
+		SubscriberID:   "some-agent",
+		Status:         "COMPLETED",
+		Message:        "done",
+	}))
+	return id
+}
+
+func TestNotificationDispatchFields_DefaultOnCreate(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Zero(t, got.DispatchAttempts)
+	assert.Empty(t, got.DispatchOutcome, "a new notification has no outcome")
+	assert.False(t, got.Dispatched)
+}
+
+func TestRecordNotificationDispatchAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	for i := 0; i < 3; i++ {
+		require.NoError(t, s.RecordNotificationDispatchAttempt(ctx, id))
+	}
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, 3, got.DispatchAttempts)
+	assert.False(t, got.Dispatched, "recording an attempt must not claim the notification")
+	assert.Empty(t, got.DispatchOutcome, "recording an attempt must not set an outcome")
+
+	assert.ErrorIs(t, s.RecordNotificationDispatchAttempt(ctx, uuid.NewString()), store.ErrNotFound)
+}
+
+func TestRecordNotificationDispatchAttempt_Concurrent(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	const recorders = 8
+	var wg sync.WaitGroup
+	errs := make(chan error, recorders)
+	wg.Add(recorders)
+	for i := 0; i < recorders; i++ {
+		go func() {
+			defer wg.Done()
+			errs <- s.RecordNotificationDispatchAttempt(ctx, id)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.Equal(t, recorders, got.DispatchAttempts, "the increment must be atomic")
+}
+
+func TestSetNotificationDispatchOutcome(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+
+	for _, outcome := range []string{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed} {
+		t.Run(outcome, func(t *testing.T) {
+			id := createAgentNotification(t, s)
+			require.NoError(t, s.RecordNotificationDispatchAttempt(ctx, id))
+			require.NoError(t, s.SetNotificationDispatchOutcome(ctx, id, outcome))
+
+			got, err := s.GetNotification(ctx, id)
+			require.NoError(t, err)
+			assert.Equal(t, outcome, got.DispatchOutcome)
+			assert.True(t, got.Dispatched, "an outcome is terminal: the row must be dispatched")
+			assert.Equal(t, 1, got.DispatchAttempts, "setting the outcome must keep the attempt count")
+
+			claimed, err := s.ClaimNotificationForDispatch(ctx, id)
+			require.NoError(t, err)
+			assert.False(t, claimed, "a notification with an outcome must not be claimable for a retry")
+		})
+	}
+}
+
+func TestSetNotificationDispatchOutcome_Rejects(t *testing.T) {
+	ctx := context.Background()
+	s := newTestNotificationStore(t)
+	id := createAgentNotification(t, s)
+
+	for _, bad := range []string{"", "pending", "FAILED"} {
+		assert.ErrorIs(t, s.SetNotificationDispatchOutcome(ctx, id, bad), store.ErrInvalidInput, "outcome %q", bad)
+	}
+	got, err := s.GetNotification(ctx, id)
+	require.NoError(t, err)
+	assert.False(t, got.Dispatched, "a rejected outcome must write nothing")
+	assert.Empty(t, got.DispatchOutcome)
+
+	assert.ErrorIs(t, s.SetNotificationDispatchOutcome(ctx, uuid.NewString(), store.NotificationOutcomeFailed), store.ErrNotFound)
+}
+
+// ---------------------------------------------------------------------------
 // GetUndispatchedAgentNotifications tests
 // ---------------------------------------------------------------------------
 

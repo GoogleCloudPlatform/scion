@@ -797,7 +797,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// provisioned, and recorded only after provisioning succeeds.
 	var sdChange *pendingSharedDirBackendChange
 	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
-		c, err := prepareSharedDirBackendChange(projectDir, agentDir, opts)
+		c, err := prepareSharedDirBackendChange(ctx, projectDir, agentDir, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -3103,7 +3103,7 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 // writer never sees or keeps only half of the soft-delete mark.
 func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.Phase = "deleted"
+		info.Phase = softDeletedPhase
 		if !deletedAt.IsZero() {
 			info.DeletedAt = deletedAt
 		}

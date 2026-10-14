@@ -38,7 +38,8 @@ var messagesCmd = &cobra.Command{
 	Short:   "View messages from agents",
 	Long: `View and manage messages sent to you by agents.
 
-Messages require Hub mode. Enable with 'scion hub enable <endpoint>'.
+Messages go through the hub (start the local one with 'scion server start',
+or set a remote one with 'scion config set hub.endpoint <url>').
 
 Commands:
   scion messages                            List your unread messages

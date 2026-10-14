@@ -114,13 +114,61 @@ interface MaintenanceStateResponse {
 }
 
 /**
+ * One failed agent in a reset-auth-all result. For a classified failure
+ * `error` is a plain reason, not the raw error; `code` names the category.
+ */
+interface ResetAuthAllFailure {
+  id: string;
+  name: string;
+  error: string;
+  /** Failure category, e.g. delegation_creator_missing or agent_not_in_standing. */
+  code?: string;
+  /** Deny cause of a structural delegation denial. */
+  cause?: string;
+  /** Creator (depth 1) or ancestor whose delegation is missing. */
+  ancestor_id?: string;
+  ancestor_depth?: number;
+}
+
+/**
  * Result of POST /api/v1/admin/agents/reset-auth-all. The hub sends null
- * for an empty list.
+ * for an empty list. failed_by_code counts the failures per code, with
+ * "unclassified" for failures that carry none.
  */
 interface ResetAuthAllResult {
   succeeded: { id: string; name: string }[] | null;
-  failed: { id: string; name: string; error: string }[] | null;
+  failed: ResetAuthAllFailure[] | null;
   total: number;
+  failed_by_code?: Record<string, number>;
+}
+
+/** Display labels for reset-auth-all failure codes. */
+const RESET_AUTH_CODE_LABELS: Record<string, string> = {
+  delegation_creator_missing: 'Creator delegation missing',
+  delegation_own_missing: 'Own delegation missing',
+  delegation_ceiling: 'Delegation chain invalid',
+  agent_not_in_standing: 'Not in good standing',
+  runtime_unavailable: 'Runtime unavailable',
+  internal_error: 'Internal error',
+  unclassified: 'Other',
+};
+
+function resetAuthCodeLabel(code: string): string {
+  return RESET_AUTH_CODE_LABELS[code] ?? code;
+}
+
+/** The per-category failure counts, sorted by code, on one line. */
+function resetAuthCategorySummary(result: ResetAuthAllResult): string {
+  return Object.entries(result.failed_by_code ?? {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([code, n]) => `${resetAuthCodeLabel(code)}: ${n}`)
+    .join(' \u00b7 ');
+}
+
+/** One failed agent: its name, the reason and, when coded, the category. */
+function resetAuthFailureLine(f: ResetAuthAllFailure): string {
+  const category = f.code ? ` [${resetAuthCodeLabel(f.code)}]` : '';
+  return `${f.name || f.id}: ${f.error}${category}`;
 }
 
 @customElement('scion-page-admin-maintenance')
@@ -1252,12 +1300,17 @@ export class ScionPageAdminMaintenance extends LitElement {
                       ${this.resetAuthAllResult.failed?.length ?? 0}
                     </span>
                   </div>
+                  ${Object.keys(this.resetAuthAllResult.failed_by_code ?? {}).length > 0
+                    ? html`
+                        <div class="card-meta reset-auth-categories">
+                          <span>${resetAuthCategorySummary(this.resetAuthAllResult)}</span>
+                        </div>
+                      `
+                    : nothing}
                   ${(this.resetAuthAllResult.failed?.length ?? 0) > 0
                     ? html`
                         <div class="result-log result-error">
-                          ${this.resetAuthAllResult
-                            .failed!.map((f) => `${f.name || f.id}: ${f.error}`)
-                            .join('\n')}
+                          ${this.resetAuthAllResult.failed!.map(resetAuthFailureLine).join('\n')}
                         </div>
                       `
                     : nothing}
