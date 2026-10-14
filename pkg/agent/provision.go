@@ -581,9 +581,13 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		cfg.AuthSelectedType = opts.HarnessAuth
 		// cfg carries the environment values ProvisionAgent merged in for
 		// its caller; the file keeps the agent's own (ptone/scion#4561).
+		// Likewise for the default limits (ptone/scion#623).
 		persisted := cfg
 		if env, ok := readPersistedAgentEnvironment(agentDir); ok {
 			persisted = withEnvironment(cfg, env)
+		}
+		if limits, ok := readPersistedAgentLimits(agentDir); ok {
+			persisted = withLimits(persisted, limits)
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
@@ -2238,24 +2242,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Hub operational agent_defaults: below the template and below inline
-	// config (both of which have already populated finalScionCfg by the merge
-	// at step 2b), above this broker's own settings.yaml defaults (applied
-	// immediately below). Same only-if-zero shape as that block, so the two
-	// tiers compose without either needing to know about the other.
+	// Limits: the template and inline config (both merged into
+	// finalScionCfg at step 2b) are the agent's own and are persisted; the
+	// hub operational agent_defaults and then this broker's settings.yaml
+	// defaults fill only what they leave unset (applyDefaultLimits). Those
+	// defaults are applied to the returned config here and again by Start
+	// on every start, never persisted (ptone/scion#623), so a later change
+	// to either reaches the agent at its next start.
 	//
-	// The placement IS the design. Move this after the settings block and the
-	// hub tier loses to settings.yaml; stamp these values hub-side into
-	// InlineConfig instead and they arrive as top-of-chain and beat a
-	// template's explicit max_turns — the inversion this channel exists to
-	// avoid (design §3.2.1, rejected alternative A5).
-	//
-	// The hub sends nothing in file mode, so this never fires there and
-	// file-mode behaviour is unchanged: a co-located broker reads the same
-	// settings.yaml and applies these values itself at the BOTTOM tier below.
-	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
-	// the broker chain in file mode, just above broker settings in Postgres
-	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	// The hub sends nothing in file mode, so the hub tier never fires there
+	// and a co-located broker applies the same settings.yaml values itself
+	// at the bottom tier. The rank of hub agent_defaults is therefore
+	// mode-dependent — bottom of the broker chain in file mode, just above
+	// broker settings in Postgres mode. That is deliberate; see design
+	// §3.2.4 and alternative A7.
 	//
 	// Note the asymmetry for Resources: hub agent_defaults.resources ranks
 	// above default_resources ONLY. Broker profile resources and harness
@@ -2264,31 +2264,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// explicitly does not want hub defaults silently overriding broker
 	// profile resources). Resources are resolved by
 	// resolveEnvironmentResources below and again by Start, never persisted.
-	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
-			finalScionCfg.MaxTurns = hd.MaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = hd.MaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
-			finalScionCfg.MaxDuration = hd.MaxDuration
-		}
-	}
-
-	// Apply default limits from settings (hub global defaults) if not already set
-	// by template or inline config. Priority: agent > template > settings defaults.
-	if settings != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && settings.DefaultMaxTurns > 0 {
-			finalScionCfg.MaxTurns = settings.DefaultMaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && settings.DefaultMaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = settings.DefaultMaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
-			finalScionCfg.MaxDuration = settings.DefaultMaxDuration
-		}
-	}
+	ownLimits := limitsOf(finalScionCfg)
+	applyDefaultLimits(ctx, finalScionCfg, settings)
 
 	// Resources: settings default_resources < hub agent_defaults.resources
 	// < profile resources < the agent's own < profile harness_overrides, then
@@ -2393,7 +2370,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Start from current settings on every start, so a later settings or
 	// profile change reaches the agent on its next start (ptone/scion#4561).
 	// The returned config keeps the merged values (see the reload below).
-	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
+	// Likewise it carries only the agent's own limits (ptone/scion#623).
+	persistedCfg := withLimits(withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume)), ownLimits)
 	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -2515,11 +2493,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// returned config carries the effective ones merged above (for the
 	// create response and other callers), which Start re-derives from
 	// current settings on every start (ptone/scion#4561).
+	// The same holds for the default limits (ptone/scion#623).
 	effectiveEnv := environmentOf(finalScionCfg)
+	effectiveLimits := limitsOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
+		finalScionCfg = withLimits(withEnvironment(updatedCfg, effectiveEnv), effectiveLimits)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}

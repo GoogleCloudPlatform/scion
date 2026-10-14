@@ -1,0 +1,233 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package agent
+
+import (
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+)
+
+// Tests for ptone/scion#623: the hub agent_defaults limits (max_turns,
+// max_model_calls, max_duration) and the broker's settings.yaml limit
+// defaults are applied on every start and never persisted, so a changed
+// default reaches the agent on its next start or restart, while a limit the
+// agent sets itself (template or requester) still wins.
+
+// hubLimitsCtx returns a context carrying hub agent_defaults limits, the shape
+// the hub sends on create, start and restart.
+func hubLimitsCtx(turns, calls int, duration string) context.Context {
+	return api.ContextWithHubAgentDefaults(context.Background(), &api.HubAgentDefaults{
+		MaxTurns: turns, MaxModelCalls: calls, MaxDuration: duration,
+	})
+}
+
+// wantLimitEnv checks the SCION_MAX_* env Start handed to the runtime. An
+// empty want means the key must be absent.
+func wantLimitEnv(t *testing.T, label string, rc runtime.RunConfig, turns, calls, duration string) {
+	t.Helper()
+	for _, c := range []struct{ key, want string }{
+		{"SCION_MAX_TURNS", turns},
+		{"SCION_MAX_MODEL_CALLS", calls},
+		{"SCION_MAX_DURATION", duration},
+	} {
+		got, set := envValue(rc.Env, c.key)
+		switch {
+		case c.want == "" && set:
+			t.Errorf("%s: %s = %q, want unset", label, c.key, got)
+		case c.want != "" && got != c.want:
+			t.Errorf("%s: %s = %q (set=%v), want %q", label, c.key, got, set, c.want)
+		}
+	}
+}
+
+// wantPersistedLimits checks the limits in the agent's scion-agent.json.
+func wantPersistedLimits(t *testing.T, label, project string, turns, calls int, duration string) {
+	t.Helper()
+	cfg, raw := persistedEnvAgentConfig(t, project)
+	if cfg.MaxTurns != turns || cfg.MaxModelCalls != calls || cfg.MaxDuration != duration {
+		t.Errorf("%s: persisted limits = (%d, %d, %q), want (%d, %d, %q): %s", label,
+			cfg.MaxTurns, cfg.MaxModelCalls, cfg.MaxDuration, turns, calls, duration, raw)
+	}
+}
+
+// globalTemplatePath is the default template envFixture writes.
+func globalTemplatePath(project string) string {
+	return filepath.Join(filepath.Dir(filepath.Dir(project)), ".scion", "templates", "default", "scion-agent.json")
+}
+
+// A changed hub default reaches the next start and restart, and is never
+// written into scion-agent.json.
+func TestStart_HubDefaultLimitsAppliedPerStart(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+
+	rc := startEnvCtx(t, hubLimitsCtx(10, 100, "1h"), project, nil)
+	wantLimitEnv(t, "first start", rc, "10", "100", "1h")
+	wantPersistedLimits(t, "after first start", project, 0, 0, "")
+
+	rc = startEnvCtx(t, hubLimitsCtx(10, 100, "1h"), project, nil)
+	wantLimitEnv(t, "restart", rc, "10", "100", "1h")
+
+	rc = startEnvCtx(t, hubLimitsCtx(20, 200, "2h"), project, nil)
+	wantLimitEnv(t, "restart after hub change", rc, "20", "200", "2h")
+	wantPersistedLimits(t, "after hub change", project, 0, 0, "")
+}
+
+// The agent's own limits (template, then requester inline config) win over
+// the hub default and the settings default, on the first start and on every
+// later one, and are what scion-agent.json keeps. The hub default fills only
+// the limit the agent leaves unset, and the requester's inline config is not
+// written to.
+func TestStart_OwnLimitsWinOverDefaults(t *testing.T) {
+	project, settingsPath := envFixture(t, envSettingsV1)
+	mustWrite(t, globalTemplatePath(project), `{"default_harness_config": "test-harness", "max_turns": 5}`)
+	mustWrite(t, settingsPath, envSettingsV1.yaml()+"default_max_turns: 9\ndefault_max_model_calls: 99\ndefault_max_duration: 9m\n")
+
+	inline := &api.ScionConfig{MaxModelCalls: 7}
+	rc := startEnvCtx(t, hubLimitsCtx(20, 200, "2h"), project, func(o *api.StartOptions) { o.InlineConfig = inline })
+	wantLimitEnv(t, "first start", rc, "5", "7", "2h")
+	wantPersistedLimits(t, "after first start", project, 5, 7, "")
+	if inline.MaxTurns != 0 || inline.MaxModelCalls != 7 || inline.MaxDuration != "" {
+		t.Errorf("Start wrote defaults into the requester's inline config: %+v", inline)
+	}
+
+	rc = startEnvCtx(t, hubLimitsCtx(30, 300, "3h"), project, nil)
+	wantLimitEnv(t, "restart after hub change", rc, "5", "7", "3h")
+	wantPersistedLimits(t, "after restart", project, 5, 7, "")
+}
+
+// With no hub default and no settings default, no limit is set and nothing
+// is persisted.
+func TestStart_NoDefaultLimitsNoChange(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	rc := startEnv(t, project, nil)
+	wantLimitEnv(t, "first start", rc, "", "", "")
+	rc = startEnv(t, project, nil)
+	wantLimitEnv(t, "restart", rc, "", "", "")
+	wantPersistedLimits(t, "after restart", project, 0, 0, "")
+}
+
+// The broker's settings.yaml defaults sit below the hub default, and a
+// change to them also reaches the next start.
+func TestStart_SettingsDefaultLimitsPerStartBelowHub(t *testing.T) {
+	project, settingsPath := envFixture(t, envSettingsV1)
+	mustWrite(t, settingsPath, envSettingsV1.yaml()+"default_max_turns: 9\n")
+
+	wantLimitEnv(t, "no hub default", startEnv(t, project, nil), "9", "", "")
+	wantLimitEnv(t, "hub default", startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, nil), "20", "", "")
+
+	mustWrite(t, settingsPath, envSettingsV1.yaml()+"default_max_turns: 8\n")
+	wantLimitEnv(t, "settings change", startEnv(t, project, nil), "8", "", "")
+	wantPersistedLimits(t, "after settings change", project, 0, 0, "")
+}
+
+// A limit the user cleared on the hub is not re-pinned to the hub default as
+// if it were the agent's own. The broker applies a clear by writing the
+// template's value (here none) into scion-agent.json before Start
+// (applyClearedFields); the hub default then fills the limit on each start
+// without being persisted, so a later hub change still reaches the agent.
+func TestStart_ClearedLimitNotRepinnedToHubDefault(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	inline := &api.ScionConfig{MaxTurns: 5}
+	rc := startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, func(o *api.StartOptions) { o.InlineConfig = inline })
+	wantLimitEnv(t, "explicit", rc, "5", "", "")
+	wantPersistedLimits(t, "explicit", project, 5, 0, "")
+
+	// The clear, as the broker applies it: the template sets no max_turns.
+	cfg, _ := persistedEnvAgentConfig(t, project)
+	if ignored := api.ApplyClearedFields(&cfg, []string{"max_turns"}, &api.ScionConfig{}); len(ignored) != 0 {
+		t.Fatalf("ApplyClearedFields ignored %v", ignored)
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustWrite(t, filepath.Join(project, "agents", "env-agent", "scion-agent.json"), string(data))
+
+	rc = startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, nil)
+	wantLimitEnv(t, "after clear", rc, "20", "", "")
+	wantPersistedLimits(t, "after clear", project, 0, 0, "")
+
+	rc = startEnvCtx(t, hubLimitsCtx(30, 0, ""), project, nil)
+	wantLimitEnv(t, "after clear and hub change", rc, "30", "", "")
+}
+
+// A Start that rewrites scion-agent.json (here the corrupted
+// auth_selectedType repair) persists the agent's own limits only.
+func TestStart_RewriteDoesNotPersistDefaultLimits(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	startEnvCtx(t, hubLimitsCtx(10, 100, "1h"), project, nil)
+
+	cfgPath := filepath.Join(project, "agents", "env-agent", "scion-agent.json")
+	cfg, _ := persistedEnvAgentConfig(t, project)
+	cfg.AuthSelectedType = "generic"
+	data, _ := json.Marshal(cfg)
+	mustWrite(t, cfgPath, string(data))
+
+	rc := startEnvCtx(t, hubLimitsCtx(10, 100, "1h"), project, nil)
+	wantLimitEnv(t, "rewrite start", rc, "10", "100", "1h")
+	cfg, raw := persistedEnvAgentConfig(t, project)
+	if cfg.AuthSelectedType != "" {
+		t.Fatalf("test precondition: Start did not rewrite scion-agent.json: %s", raw)
+	}
+	wantPersistedLimits(t, "after rewrite", project, 0, 0, "")
+}
+
+// An agent provisioned before ptone/scion#623 has the defaults of that time
+// in scion-agent.json. They read back as the agent's own limits and keep
+// applying over a changed hub default (a documented limitation).
+func TestStart_LegacyPersistedLimitsKeepApplying(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	startEnv(t, project, nil)
+
+	cfgPath := filepath.Join(project, "agents", "env-agent", "scion-agent.json")
+	cfg, _ := persistedEnvAgentConfig(t, project)
+	cfg.MaxTurns = 50
+	data, _ := json.Marshal(cfg)
+	mustWrite(t, cfgPath, string(data))
+
+	wantLimitEnv(t, "legacy", startEnvCtx(t, hubLimitsCtx(20, 0, ""), project, nil), "50", "", "")
+}
+
+func TestApplyDefaultLimits(t *testing.T) {
+	cfg := &api.ScionConfig{MaxTurns: 3}
+	applyDefaultLimits(hubLimitsCtx(20, 200, ""), cfg, nil)
+	if cfg.MaxTurns != 3 || cfg.MaxModelCalls != 200 || cfg.MaxDuration != "" {
+		t.Errorf("applyDefaultLimits = %+v, want own max_turns 3 kept and hub max_model_calls 200 filled", cfg)
+	}
+	applyDefaultLimits(context.Background(), nil, nil) // nil config is a no-op
+}
+
+func TestReadPersistedAgentLimits(t *testing.T) {
+	dir := t.TempDir()
+	if _, ok := readPersistedAgentLimits(dir); ok {
+		t.Error("missing file: ok = true")
+	}
+	if _, ok := readPersistedAgentLimits(""); ok {
+		t.Error("empty dir: ok = true")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "scion-agent.json"), []byte(`{"max_turns": 4, "max_duration": "4m"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	l, ok := readPersistedAgentLimits(dir)
+	if !ok || l != (agentLimits{MaxTurns: 4, MaxDuration: "4m"}) {
+		t.Errorf("readPersistedAgentLimits = %+v, %v", l, ok)
+	}
+}

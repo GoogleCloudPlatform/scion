@@ -1085,16 +1085,24 @@ ranks that do not move, and read this table for where the hub tier lands in your
 read both under the `Pending` box above: **issue #623 leaves even the Postgres-mode reading
 unsettled**, so neither position is something to build on yet.
 
-### `Known gap` — hub `agent_defaults` are provision-time-only
+### `Changed in this release` — hub `agent_defaults` limits and resources apply on every start
 
-Hub `agent_defaults` **bind once, at agent create.** Editing them and restarting an agent has no
-effect, and every already-running agent keeps the values it was created with. A restart refreshes
-inline config but not hub `agent_defaults`.
+**Before:** the hub `agent_defaults` limits (`default_max_turns`, `default_max_model_calls`,
+`default_max_duration`) took effect only once, when the agent was created. If you edited them
+and then restarted an agent, nothing changed.
 
-This is [issue #623](https://github.com/ptone/scion/issues/623) and it is the motivation for the
-follow-up workstream referenced above. It is the **same symptom** as the mode-dependent-rank
-problem, and any fix for the rank must not land without a fix for this one — otherwise the
-corrected rank simply becomes a value that is correct at create time and stale forever after.
+**After:** the hub sends its current limits and `resources` defaults with every start and
+restart. The Runtime Broker applies them on each start and does not save them in the agent's
+`scion-agent.json`. The same holds for the broker's own `settings.yaml` limit defaults. A limit
+the agent sets itself (from its template or its own config) still wins over both. A limit
+cleared on the hub falls back to the template's value, or to the current defaults when the
+template sets none. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
+
+Agents created before this change keep the limits they have stored. Their saved values look
+the same as values set on the agent itself, so a changed default does not reach them.
+
+The hub's other `agent_defaults` (default template, harness config, harness auth, model,
+thinking level) are still applied only at agent create.
 
 ### `Known gap` — file mode with a *remote* broker cannot reach hub `agent_defaults`
 

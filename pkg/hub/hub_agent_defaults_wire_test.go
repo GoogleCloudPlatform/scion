@@ -371,47 +371,58 @@ func TestRemoteHubAgentDefaults_NilWhenEmpty(t *testing.T) {
 }
 
 // TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart: hub
-// agent_defaults.resources ride the start and restart wires as well as
-// create, because the broker applies them per start and no longer persists
-// them into the agent config (ptone/scion#4561). The limits stay create-only.
+// agent_defaults.resources and limits ride the start and restart wires as
+// well as create, because the broker applies them per start and no longer
+// persists them into the agent config (ptone/scion#4561, ptone/scion#623).
 // A changed hub value reaches the next start and restart.
 func TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart(t *testing.T) {
 	ctx := context.Background()
 	d, client, ag := autoExposeDispatchFixture(t)
 	defaults := opsettings.AgentDefaultsSettings{
-		DefaultMaxTurns:  50,
-		DefaultResources: &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}},
+		DefaultMaxTurns:      50,
+		DefaultMaxModelCalls: 500,
+		DefaultMaxDuration:   "2h",
+		DefaultResources:     &api.ResourceSpec{Limits: api.ResourceList{CPU: "3"}},
 	}
 	d.SetHubAgentDefaultsProvider(func() opsettings.AgentDefaultsSettings { return defaults })
 
-	check := func(label string, hd *RemoteHubAgentDefaults, wantCPU string) {
+	check := func(label string, hd *RemoteHubAgentDefaults, wantCPU string, wantTurns, wantCalls int, wantDuration string) {
 		t.Helper()
 		if hd == nil || hd.Resources == nil || hd.Resources.Limits.CPU != wantCPU {
 			t.Fatalf("%s: hub defaults = %+v, want resources limits.cpu %q", label, hd, wantCPU)
 		}
-		if hd.MaxTurns != 0 {
-			t.Errorf("%s: maxTurns = %d, want none (limits are create-only)", label, hd.MaxTurns)
+		if hd.MaxTurns != wantTurns || hd.MaxModelCalls != wantCalls || hd.MaxDuration != wantDuration {
+			t.Errorf("%s: limits = (%d, %d, %q), want (%d, %d, %q)", label,
+				hd.MaxTurns, hd.MaxModelCalls, hd.MaxDuration, wantTurns, wantCalls, wantDuration)
 		}
 	}
 
 	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
 		t.Fatalf("DispatchAgentStart: %v", err)
 	}
-	check("start", client.lastStartExtras.HubAgentDefaults, "3")
+	check("start", client.lastStartExtras.HubAgentDefaults, "3", 50, 500, "2h")
+	// The limits ride only the low-precedence hubAgentDefaults field, never
+	// the top-of-chain inline config (rejected alternative A5).
+	if ic := client.lastInlineConfig; ic != nil && (ic.MaxTurns != 0 || ic.MaxModelCalls != 0 || ic.MaxDuration != "") {
+		t.Errorf("start inline config carries hub limits: %+v", ic)
+	}
 	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
 		t.Fatalf("DispatchAgentRestart: %v", err)
 	}
-	check("restart", client.lastRestartExtras.HubAgentDefaults, "3")
+	check("restart", client.lastRestartExtras.HubAgentDefaults, "3", 50, 500, "2h")
 
 	defaults.DefaultResources = &api.ResourceSpec{Limits: api.ResourceList{CPU: "5"}}
+	defaults.DefaultMaxTurns = 60
+	defaults.DefaultMaxModelCalls = 600
+	defaults.DefaultMaxDuration = "3h"
 	if err := d.DispatchAgentStart(ctx, ag, "", false); err != nil {
 		t.Fatalf("DispatchAgentStart: %v", err)
 	}
-	check("start after change", client.lastStartExtras.HubAgentDefaults, "5")
+	check("start after change", client.lastStartExtras.HubAgentDefaults, "5", 60, 600, "3h")
 	if err := d.DispatchAgentRestart(ctx, ag); err != nil {
 		t.Fatalf("DispatchAgentRestart: %v", err)
 	}
-	check("restart after change", client.lastRestartExtras.HubAgentDefaults, "5")
+	check("restart after change", client.lastRestartExtras.HubAgentDefaults, "5", 60, 600, "3h")
 
 	// The broker decodes the same names.
 	blob, err := json.Marshal(client.lastRestartExtras.HubAgentDefaults)
@@ -424,5 +435,8 @@ func TestDispatch_HubAgentDefaults_ResourcesOnStartAndRestart(t *testing.T) {
 	}
 	if got.Resources == nil || got.Resources.Limits.CPU != "5" {
 		t.Errorf("broker side does not see the resources in %s", blob)
+	}
+	if got.MaxTurns != 60 || got.MaxModelCalls != 600 || got.MaxDuration != "3h" {
+		t.Errorf("broker side does not see the limits in %s", blob)
 	}
 }
