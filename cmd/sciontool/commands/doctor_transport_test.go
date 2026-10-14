@@ -197,8 +197,10 @@ func TestCheckAuthentication_DoesNotRevokeOriginalToken(t *testing.T) {
 	authGuard := func(w http.ResponseWriter, r *http.Request) bool {
 		agentToken := r.Header.Get("X-Scion-Agent-Token")
 		if agentToken != originalToken || revoked.Load() {
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = fmt.Fprint(w, `{"error":"token has been revoked"}`)
+			_, _ = fmt.Fprint(w, `{"error":{"code":"invalid_token","message":"invalid token"}}`+"\n")
 			return false
 		}
 		return true

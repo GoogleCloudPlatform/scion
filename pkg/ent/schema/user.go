@@ -60,8 +60,12 @@ func (User) Fields() []ent.Field {
 		field.Enum("role").
 			Values("admin", "member", "viewer").
 			Default("member"),
+		// pending is used only by federated rows: an account recorded for a
+		// user of a trusted external issuer before that user's first
+		// verified request. It is distinct from invited, which feeds the
+		// local invite and sign-up flow.
 		field.Enum("status").
-			Values("active", "suspended", "invited").
+			Values("active", "suspended", "invited", "pending").
 			Default("active"),
 		field.JSON("preferences", &UserPreferences{}).
 			Optional(),
@@ -92,9 +96,11 @@ func (User) Fields() []ent.Field {
 		// once at create and no update path can change it in either
 		// direction. Only the store's CreateTestFixtureUser writes
 		// test_fixture and only CreateTestAdminUser the admin kinds; the
-		// general CreateUser refuses all three.
+		// general CreateUser refuses all three. federated is a local
+		// account for a user of a trusted external issuer; only
+		// CreateFederatedUser writes it.
 		field.Enum("kind").
-			Values("human", "test_fixture", "test_hub_admin", "test_super_admin").
+			Values("human", "test_fixture", "test_hub_admin", "test_super_admin", "federated").
 			Default("human").
 			Immutable(),
 		// expires_at, issued_by and purpose are set only on test identity
@@ -127,6 +133,21 @@ func (User) Fields() []ent.Field {
 			Nillable().
 			Immutable().
 			Comment("ID of the issuer's user access token for an admin-kind test identity; null for a session issuer"),
+		// federated_email and home_issuer are set only on federated rows,
+		// at create, and never change. A federated row's email column holds
+		// a synthetic address in the reserved .invalid TLD, so no
+		// email-keyed lookup can match it; the user's real address (lower
+		// case) lives here, scoped by the issuer that vouches for it.
+		field.String("federated_email").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Lower-cased email of a federated user, as asserted by home_issuer"),
+		field.String("home_issuer").
+			Optional().
+			Nillable().
+			Immutable().
+			Comment("Canonical issuer URL of a federated user"),
 		// issuer_delegation_id is set only on a test_fixture row issued
 		// through a workload-bound issuer delegation
 		// (test_identity_delegations), at create, and never changes. The
@@ -155,6 +176,8 @@ func (User) Annotations() []schema.Annotation {
 				// The admin kinds carry an expiry too. A separate CHECK,
 				// so the migration only adds a constraint.
 				"users_test_admin_expiry_check": "(kind NOT IN ('test_hub_admin', 'test_super_admin') OR expires_at IS NOT NULL)",
+				// A federated row always names its issuer and email.
+				"users_federated_identity_check": "(kind <> 'federated' OR (home_issuer IS NOT NULL AND federated_email IS NOT NULL))",
 			},
 		},
 	}
@@ -167,6 +190,10 @@ func (User) Indexes() []ent.Index {
 		index.Fields("last_seen"),
 		// Supports the live test-fixture counts behind the issuance caps.
 		index.Fields("kind", "issued_by"),
+		// One federated account per (issuer, email).
+		index.Fields("home_issuer", "federated_email").
+			Unique().
+			Annotations(entsql.IndexWhere("kind = 'federated'")),
 		// Supports the live per-delegation count behind the delegation cap.
 		index.Fields("kind", "issuer_delegation_id"),
 	}

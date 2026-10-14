@@ -69,7 +69,17 @@ type ControlChannelManager struct {
 	log          *slog.Logger
 	upgrader     websocket.Upgrader
 	onDisconnect func(brokerID, sessionID string)
+
+	// closed is set by Shutdown. HandleUpgrade refuses new connections
+	// once it is set, so a broker that reconnects while the hub shuts down
+	// does not start connect work that races the store close
+	// (ptone/scion#4869).
+	closed bool
 }
+
+// errControlChannelClosed is returned by HandleUpgrade once Shutdown has
+// run. HandleUpgrade has already answered the request when it returns it.
+var errControlChannelClosed = errors.New("control channel is shut down")
 
 // NewControlChannelManager creates a new control channel manager.
 func NewControlChannelManager(config ControlChannelConfig, log *slog.Logger) *ControlChannelManager {
@@ -297,6 +307,14 @@ func (s *StreamProxy) closeLocked(code int, reason string) {
 // It returns the sessionID generated for the new connection so the caller can
 // claim broker affinity for this exact session.
 func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Request, brokerID string) (string, error) {
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		http.Error(w, "hub is shutting down", http.StatusServiceUnavailable)
+		return "", errControlChannelClosed
+	}
+
 	conn, err := m.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return "", fmt.Errorf("websocket upgrade failed: %w", err)
@@ -329,6 +347,14 @@ func (m *ControlChannelManager) HandleUpgrade(w http.ResponseWriter, r *http.Req
 
 	// Register the connection
 	m.mu.Lock()
+	if m.closed {
+		// Shutdown ran during the upgrade: it no longer sees this
+		// connection, so close it here.
+		m.mu.Unlock()
+		cancel()
+		_ = conn.Close()
+		return "", errControlChannelClosed
+	}
 	if existing, ok := m.connections[brokerID]; ok {
 		// Close existing connection
 		existing.Close()
@@ -719,6 +745,7 @@ func (m *ControlChannelManager) Shutdown() {
 	// async callbacks from accessing resources (e.g. database)
 	// that may be closed after shutdown completes.
 	m.onDisconnect = nil
+	m.closed = true
 	conns := make(map[string]*BrokerConnection, len(m.connections))
 	for k, v := range m.connections {
 		conns[k] = v

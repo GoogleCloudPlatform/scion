@@ -1,0 +1,1170 @@
+// Copyright 2026 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/credentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/transportauth"
+	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// fakeProjectHub is a fake hub with a fixed set of projects. It answers a
+// project by ID, the slug, name and git remote filters, and the unfiltered
+// listing one project per page. It counts the calls by ID and the
+// listings.
+type fakeProjectHub struct {
+	srv   *httptest.Server
+	gets  atomic.Int32
+	lists atomic.Int32
+	// refuse makes the hub answer every project request with 401, as a
+	// hub does that rejects the credential sent.
+	refuse atomic.Bool
+
+	mu       sync.Mutex
+	projects []hubclient.Project
+	// authz are the Authorization headers of the project requests.
+	authz []string
+	// proxyAuthz are the Proxy-Authorization headers of all requests
+	// (the transport token in IAP mode).
+	proxyAuthz []string
+}
+
+func newFakeProjectHub(t *testing.T, projects ...hubclient.Project) *fakeProjectHub {
+	t.Helper()
+	h := &fakeProjectHub{projects: projects}
+	h.srv = httptest.NewServer(http.HandlerFunc(h.serve))
+	t.Cleanup(h.srv.Close)
+	return h
+}
+
+func (h *fakeProjectHub) URL() string { return h.srv.URL }
+
+func (h *fakeProjectHub) setProjects(projects ...hubclient.Project) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.projects = projects
+}
+
+func (h *fakeProjectHub) serve(w http.ResponseWriter, r *http.Request) {
+	h.mu.Lock()
+	projects := append([]hubclient.Project(nil), h.projects...)
+	if strings.HasPrefix(r.URL.Path, "/api/v1/projects") {
+		h.authz = append(h.authz, r.Header.Get("Authorization"))
+	}
+	h.proxyAuthz = append(h.proxyAuthz, r.Header.Get("Proxy-Authorization"))
+	h.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	q := r.URL.Query()
+	switch {
+	case h.refuse.Load() && strings.HasPrefix(r.URL.Path, "/api/v1/projects"):
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"code":"unauthorized","message":"invalid credentials"}}`))
+	case r.URL.Path == "/healthz":
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	case strings.HasPrefix(r.URL.Path, "/api/v1/projects/"):
+		h.gets.Add(1)
+		id := strings.TrimPrefix(r.URL.Path, "/api/v1/projects/")
+		for _, p := range projects {
+			if p.ID == id {
+				_ = json.NewEncoder(w).Encode(p)
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"not_found","message":"project not found"}}`))
+	case r.URL.Path == "/api/v1/projects":
+		h.lists.Add(1)
+		var out []hubclient.Project
+		filtered := q.Get("slug") != "" || q.Get("name") != "" || q.Get("gitRemote") != ""
+		for _, p := range projects {
+			switch {
+			case q.Get("slug") != "" && p.Slug == q.Get("slug"),
+				q.Get("name") != "" && p.Name == q.Get("name"),
+				q.Get("gitRemote") != "" && p.GitRemote == q.Get("gitRemote"):
+				out = append(out, p)
+			}
+		}
+		resp := map[string]interface{}{}
+		if !filtered {
+			// One project per page, to exercise the paging.
+			i, _ := strconv.Atoi(q.Get("cursor"))
+			if i < len(projects) {
+				out = projects[i : i+1]
+			}
+			if i+1 < len(projects) {
+				resp["nextCursor"] = strconv.Itoa(i + 1)
+			}
+		}
+		if out == nil {
+			out = []hubclient.Project{}
+		}
+		resp["projects"] = out
+		_ = json.NewEncoder(w).Encode(resp)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (h *fakeProjectHub) calls() int32 { return h.gets.Load() + h.lists.Load() }
+
+// takeProxyHeaders returns the distinct Proxy-Authorization headers the hub
+// received since the last call ("" for none), and forgets them.
+func (h *fakeProjectHub) takeProxyHeaders() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range h.proxyAuthz {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	h.proxyAuthz = nil
+	return out
+}
+
+// authHeaders returns the distinct Authorization headers the hub received.
+func (h *fakeProjectHub) authHeaders() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, a := range h.authz {
+		if !seen[a] {
+			seen[a] = true
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// Projects named "foo" on two hubs.
+var (
+	prodFoo    = hubclient.Project{ID: "p-foo", Slug: "foo", Name: "Foo"}
+	stagingFoo = hubclient.Project{ID: "s-foo", Slug: "foo", Name: "Foo"}
+)
+
+// setupTwoHubs registers two fake hubs, prod and staging, both with a
+// project "foo", and logs in to both. No hub is current, and there is no
+// terminal (see setupRegistryTest).
+func setupTwoHubs(t *testing.T) (prod, staging *fakeProjectHub) {
+	t.Helper()
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	prod = newFakeProjectHub(t, prodFoo)
+	staging = newFakeProjectHub(t, stagingFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("prod", prod.URL()); err != nil {
+			return err
+		}
+		return c.AddHub("staging", staging.URL())
+	}))
+	storeTestLogin(t, prod.URL())
+	storeTestLogin(t, staging.URL())
+	return prod, staging
+}
+
+// withTerminal makes 'scion use' see (or not see) a terminal.
+func withTerminal(t *testing.T, tty bool) {
+	t.Helper()
+	orig := isInteractiveTerminal
+	t.Cleanup(func() { isInteractiveTerminal = orig })
+	isInteractiveTerminal = func() bool { return tty }
+}
+
+// stubPicker replaces the picker. It records the options it was shown and
+// answers with choice; with choice < -1 a call fails the test.
+func stubPicker(t *testing.T, choice int) *[][]string {
+	t.Helper()
+	orig := useChooseProject
+	t.Cleanup(func() { useChooseProject = orig })
+	var shown [][]string
+	useChooseProject = func(title string, options []string) (int, error) {
+		if choice < -1 {
+			t.Errorf("the picker must not be called (title %q, options %v)", title, options)
+		}
+		shown = append(shown, options)
+		return choice, nil
+	}
+	return &shown
+}
+
+func currentProjectOf(t *testing.T, hub string) string {
+	t.Helper()
+	c := readTestContext(t)
+	h := c.Hubs[hub]
+	require.NotNil(t, h, "hub %s", hub)
+	if h.CurrentProject == nil {
+		return ""
+	}
+	return h.CurrentProject.ID
+}
+
+// In a terminal, a project on two hubs is offered in the picker with both
+// hubs, and the hub follows the chosen project.
+func TestUseMultiHub_PickerOffersBoth(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	withTerminal(t, true)
+	shown := stubPicker(t, 1)
+
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	require.Len(t, *shown, 1)
+	assert.Equal(t, []string{
+		"foo on prod (" + prod.URL() + ")",
+		"foo on staging (" + staging.URL() + ")",
+	}, (*shown)[0])
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Equal(t, "staging", readTestContext(t).CurrentHub)
+	assert.Equal(t, "s-foo", currentProjectOf(t, "staging"))
+	assert.Equal(t, "", currentProjectOf(t, "prod"))
+}
+
+// Cancelling the picker selects nothing.
+func TestUseMultiHub_PickerCancelled(t *testing.T) {
+	setupTwoHubs(t)
+	withTerminal(t, true)
+	stubPicker(t, -1)
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "no project selected")
+	assert.Empty(t, readTestContext(t).CurrentHub)
+}
+
+// --non-interactive never asks: it fails with one --hub line per hub, in
+// text and in JSON.
+func TestUseMultiHub_NonInteractiveAmbiguity(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	withTerminal(t, true)
+	stubPicker(t, -2)
+
+	_, _, err := runScion(t, "--non-interactive", "use", "foo")
+	require.Error(t, err)
+	// The --hub column is aligned: "prod" is padded to the width of
+	// "staging" plus three spaces.
+	assert.Equal(t, "project 'foo' exists on several hubs; choose one with --hub:\n"+
+		"  scion use foo --hub prod      ("+prod.URL()+", id p-foo)\n"+
+		"  scion use foo --hub staging   ("+staging.URL()+", id s-foo)", err.Error())
+
+	stdout, _, err := runScion(t, "--non-interactive", "use", "foo", "--format", "json")
+	require.Error(t, err)
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+	assert.Equal(t, map[string]interface{}{
+		"error": "ambiguous",
+		"candidates": []interface{}{
+			map[string]interface{}{"hub": "prod", "endpoint": prod.URL(), "id": "p-foo", "slug": "foo"},
+			map[string]interface{}{"hub": "staging", "endpoint": staging.URL(), "id": "s-foo", "slug": "foo"},
+		},
+	}, got)
+	assert.Empty(t, readTestContext(t).CurrentHub, "nothing is selected")
+}
+
+// --yes does not pick a candidate: without a terminal it is the ambiguity
+// error, and in a terminal the picker still asks.
+func TestUseMultiHub_YesDoesNotPick(t *testing.T) {
+	setupTwoHubs(t)
+	withTerminal(t, false)
+	stubPicker(t, -2)
+	_, _, err := runScion(t, "--yes", "use", "foo")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "project 'foo' exists on several hubs; choose one with --hub:")
+	assert.Empty(t, readTestContext(t).CurrentHub)
+
+	withTerminal(t, true)
+	shown := stubPicker(t, 0)
+	_, _, err = runScion(t, "--yes", "use", "foo")
+	require.NoError(t, err)
+	assert.Len(t, *shown, 1, "the picker asks even with --yes")
+	assert.Equal(t, "prod", readTestContext(t).CurrentHub)
+}
+
+// --hub restricts the lookup to that hub, which picks the project.
+func TestUseMultiHub_HubFlagPicks(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	stubPicker(t, -2)
+	stdout, _, err := runScion(t, "use", "foo", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Equal(t, "s-foo", currentProjectOf(t, "staging"))
+	assert.Zero(t, prod.calls(), "the other hub is not asked")
+}
+
+// A name known on exactly one hub is checked with one call by ID on that
+// hub: no listing, and no call to the other hubs.
+func TestUseMultiHub_FastPathNoListing(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+		return nil
+	}))
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Equal(t, int32(1), prod.gets.Load())
+	assert.Zero(t, prod.lists.Load(), "no listing call")
+	assert.Zero(t, staging.calls())
+}
+
+// With --refresh a known name is looked up on the hubs anyway.
+func TestUseMultiHub_RefreshLooksUpKnownName(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	staging.setProjects()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo"}})
+		return nil
+	}))
+	_, _, err := runScion(t, "use", "foo", "--refresh")
+	require.NoError(t, err)
+	assert.Positive(t, prod.lists.Load(), "the hub is searched")
+	assert.Positive(t, staging.lists.Load(), "every hub is searched")
+	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
+
+	_, _, err = runScion(t, "use", "--refresh")
+	require.EqualError(t, err, "--refresh needs a project")
+}
+
+// A known entry that its hub no longer has is dropped, and the name is
+// looked up on the hubs again.
+func TestUseMultiHub_StaleEntryDroppedAndLookedUp(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	staging.setProjects()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-old", Slug: "foo"}})
+		return nil
+	}))
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
+	for _, p := range readTestContext(t).Projects {
+		assert.NotEqual(t, "p-old", p.ID, "the stale entry is dropped")
+	}
+	assert.Positive(t, staging.lists.Load(), "the lookup asks every hub")
+}
+
+// A stale known entry with no match left anywhere: the entry is still
+// dropped, and the error names the hubs searched.
+func TestUseMultiHub_StaleEntryNotFoundAnywhere(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects()
+	staging.setProjects()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-old", Slug: "foo"}})
+		return nil
+	}))
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "project 'foo' not found on hubs: prod, staging")
+	assert.Empty(t, readTestContext(t).Projects)
+}
+
+// One hub does not answer: a warning names it, and the other hub's result
+// is used.
+func TestUseMultiHub_OneHubUnreachable(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	staging.srv.Close()
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: unreachable: ")
+}
+
+// A known project whose hub does not answer is selected anyway, with a
+// warning.
+func TestUseMultiHub_KnownProjectHubUnreachable(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo"}})
+		return nil
+	}))
+	url := prod.URL()
+	prod.srv.Close()
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+url+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: could not check project 'foo' on hub 'prod': ")
+	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
+}
+
+// A hub without a login is skipped and named; a known project on it is
+// selected with the login hint, without calling it.
+func TestUseMultiHub_NotLoggedIn(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	// staging moves to a hub this machine has no login for.
+	staging2 := newFakeProjectHub(t, stagingFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Endpoint = staging2.URL()
+		return nil
+	}))
+
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: not logged in")
+	assert.Zero(t, staging2.calls())
+
+	// A known project on the hub without a login: selected, with the hint.
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("staging", []config.KnownProject{{ID: "s-bar", Slug: "bar"}})
+		return nil
+	}))
+	stdout, _, err = runScion(t, "use", "bar")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'bar' on hub 'staging' ("+staging2.URL()+").\n"+
+		"Not logged in to hub 'staging'. Run: scion hub auth login --hub staging\n", stdout)
+	assert.Zero(t, staging2.calls())
+
+	// Not found on the logged-in hub: the error names the skipped hub and
+	// its login command.
+	_, _, err = runScion(t, "use", "nope")
+	require.EqualError(t, err, "project 'nope' not found on the hubs searched (prod); it may be on the hub that could not be searched (staging: not logged in)\n\n"+
+		"Log in with: scion hub auth login --hub staging")
+}
+
+// In a terminal, when the only hub that could have the project is not
+// logged in, 'scion use' offers the login and then looks the project up.
+func TestUseMultiHub_LoginOffer(t *testing.T) {
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	staging := newFakeProjectHub(t, stagingFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", staging.URL())
+	}))
+	withTerminal(t, true)
+
+	origConfirm, origLogin := useConfirm, useLoginToHub
+	t.Cleanup(func() { useConfirm, useLoginToHub = origConfirm, origLogin })
+	var asked []string
+	useConfirm = func(prompt string, defaultYes, auto bool) bool {
+		asked = append(asked, prompt)
+		assert.False(t, auto, "--yes never starts a login by itself")
+		return true
+	}
+	var loggedIn []string
+	useLoginToHub = func(_ *cobra.Command, endpoint string) error {
+		loggedIn = append(loggedIn, endpoint)
+		storeTestLogin(t, endpoint)
+		return nil
+	}
+
+	stdout, _, err := runScion(t, "--yes", "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Log in to staging now?"}, asked)
+	assert.Equal(t, []string{staging.URL()}, loggedIn)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+
+	// With --non-interactive no offer is made.
+	require.NoError(t, credentials.Remove(staging.URL()))
+	asked = nil
+	_, _, err = runScion(t, "--non-interactive", "use", "bar")
+	require.EqualError(t, err, "project 'bar' could not be looked up (staging: not logged in)\n\n"+
+		"Log in with: scion hub auth login --hub staging")
+	assert.Empty(t, asked)
+}
+
+// Switching hubs restores the project each hub remembers.
+func TestUseMultiHub_SwitchRestoresEachHubsProject(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	_, _, err := runScion(t, "use", "foo", "--hub", "prod")
+	require.NoError(t, err)
+	_, _, err = runScion(t, "use", "foo", "--hub", "staging")
+	require.NoError(t, err)
+
+	stdout, _, err := runScion(t, "use", "--hub", "prod")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Equal(t, "prod", readTestContext(t).CurrentHub)
+
+	stdout, _, err = runScion(t, "use", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	c := readTestContext(t)
+	assert.Equal(t, "staging", c.CurrentHub)
+	assert.Equal(t, "p-foo", c.Hubs["prod"].CurrentProject.ID)
+	assert.Equal(t, "s-foo", c.Hubs["staging"].CurrentProject.ID)
+}
+
+// After an ambiguous lookup the candidates are known, so the next run is
+// ambiguous without a lookup.
+func TestUseMultiHub_KnownAmbiguityNeedsNoLookup(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	_, _, err := runScion(t, "--non-interactive", "use", "foo")
+	require.Error(t, err)
+	before := prod.calls() + staging.calls()
+
+	_, _, err = runScion(t, "--non-interactive", "use", "foo")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exists on several hubs")
+	assert.Equal(t, before, prod.calls()+staging.calls(), "no hub call")
+}
+
+func TestUseMultiHub_HubTimeoutIsFiveSeconds(t *testing.T) {
+	assert.Equal(t, 5*time.Second, useHubTimeout)
+}
+
+// withFanOutLocalHub decides whether the fake hubs count as local
+// workstation hubs, where dev auth applies in a fan-out.
+func withFanOutLocalHub(t *testing.T, local bool) {
+	t.Helper()
+	orig := fanOutLocalHub
+	t.Cleanup(func() { fanOutLocalHub = orig })
+	fanOutLocalHub = func(string) bool { return local }
+}
+
+// setupTwoHubsNoLogins is setupTwoHubs without the OAuth logins, with
+// SCION_HUB_TOKEN and SCION_DEV_TOKEN set, and the fake hubs treated as
+// remote hubs.
+func setupTwoHubsNoLogins(t *testing.T) (prod, staging *fakeProjectHub) {
+	t.Helper()
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	prod = newFakeProjectHub(t, prodFoo)
+	staging = newFakeProjectHub(t, stagingFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("prod", prod.URL()); err != nil {
+			return err
+		}
+		return c.AddHub("staging", staging.URL())
+	}))
+	t.Setenv("SCION_HUB_TOKEN", "scoped-token")
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	withFanOutLocalHub(t, false)
+	return prod, staging
+}
+
+// A lookup across hubs never sends a token that is not tied to a hub
+// (SCION_HUB_TOKEN, the dev token of a remote hub): with no hub login, no
+// hub is contacted and both are reported as not logged in.
+func TestUseMultiHub_FanOutNeverSendsUnboundTokens(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "project 'foo' could not be looked up (prod: not logged in; staging: not logged in)\n\n"+
+		"Log in with: scion hub auth login --hub prod\n"+
+		"Log in with: scion hub auth login --hub staging")
+	assert.Zero(t, prod.calls())
+	assert.Zero(t, staging.calls())
+
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: not logged in; staging: not logged in")
+	assert.Zero(t, prod.calls())
+	assert.Zero(t, staging.calls())
+}
+
+// A single hub chosen with --hub keeps the full credential chain, so
+// SCION_HUB_TOKEN is used there, for the lookup and for the refresh.
+func TestUseMultiHub_ExplicitHubUsesFullCredentialChain(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+
+	stdout, _, err := runScion(t, "use", "foo", "--hub", "staging")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Equal(t, []string{"Bearer scoped-token"}, staging.authHeaders())
+	assert.Zero(t, prod.calls())
+
+	_, _, err = runScion(t, "project", "list", "--refresh", "--hub", "prod")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+}
+
+// With an OAuth login on one hub only, a fan-out queries that hub, with
+// its login, and skips the other.
+func TestUseMultiHub_FanOutUsesOnlyHubLogins(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	storeTestLogin(t, prod.URL())
+
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: not logged in")
+	assert.Equal(t, []string{"Bearer tok"}, prod.authHeaders())
+	assert.Zero(t, staging.calls())
+
+	_, stderr, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: staging: not logged in")
+	assert.Equal(t, []string{"Bearer tok"}, prod.authHeaders())
+	assert.Zero(t, staging.calls())
+}
+
+// Dev auth counts in a fan-out only for a local workstation hub.
+func TestUseMultiHub_FanOutDevAuthOnlyForLocalHubs(t *testing.T) {
+	prod, staging := setupTwoHubsNoLogins(t)
+	staging.setProjects()
+	withFanOutLocalHub(t, true)
+
+	_, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, prod.authHeaders())
+	assert.Equal(t, []string{"Bearer scion_dev_test"}, staging.authHeaders())
+}
+
+// SCION_HUB_ENDPOINT restricts the lookup to that hub, even with other
+// hubs registered.
+func TestUseMultiHub_EnvHubRestrictsCandidates(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	t.Setenv("SCION_HUB_ENDPOINT", staging.URL())
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Zero(t, prod.calls())
+}
+
+// The hub in the settings joins the registered hubs when it has no entry.
+func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects()
+	staging.setProjects()
+	other := newFakeProjectHub(t, hubclient.Project{ID: "o-foo", Slug: "foo", Name: "Foo"})
+	storeTestLogin(t, other.URL())
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+other.URL()+"\n")
+
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Positive(t, prod.lists.Load(), "the registered hubs are searched too")
+	assert.Positive(t, staging.lists.Load(), "the registered hubs are searched too")
+	// The settings hub gets an entry with a nickname derived from its URL
+	// (not "local": that is only for a hub reached with dev auth), and is
+	// now the current hub. The test server listens on 127.0.0.1, an IPv4
+	// address, whose nickname is the address with '-' for '.'.
+	c := readTestContext(t)
+	name, h := c.HubByEndpoint(other.URL())
+	require.NotNil(t, h, "the settings hub got an entry")
+	assert.Equal(t, "127-0-0-1", name)
+	assert.Equal(t, name, c.CurrentHub)
+	assert.Equal(t, "Now using project 'foo' on hub '127-0-0-1' ("+other.URL()+").\n", stdout)
+}
+
+// Each hub's lookup has its own timeout: a hub that never answers is
+// reported unreachable, and the other hub's result is used.
+func TestUseMultiHub_HangingHubTimesOut(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	orig := useHubTimeout
+	t.Cleanup(func() { useHubTimeout = orig })
+	useHubTimeout = 100 * time.Millisecond
+
+	hanging := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(hanging.Close)
+	storeTestLogin(t, hanging.URL)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Endpoint = hanging.URL
+		return nil
+	}))
+
+	start := time.Now()
+	stdout, stderr, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: staging: unreachable: ")
+}
+
+// setupOneHubNoLogin registers one fake hub, prod, with a project "foo"
+// and no login, with SCION_HUB_TOKEN and SCION_DEV_TOKEN set and the fake
+// hubs treated as remote hubs.
+func setupOneHubNoLogin(t *testing.T) *fakeProjectHub {
+	t.Helper()
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	prod := newFakeProjectHub(t, prodFoo)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("prod", prod.URL())
+	}))
+	t.Setenv("SCION_HUB_TOKEN", "scoped-token")
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+	withFanOutLocalHub(t, false)
+	return prod
+}
+
+// The only registered hub is not the hub this invocation targets
+// (SCION_HUB_ENDPOINT names another): it gets nothing that is not bound to
+// it, from --refresh or from 'use'.
+func TestUseMultiHub_LoneHubThatIsNotEffectiveGetsNoUnboundToken(t *testing.T) {
+	prod := setupOneHubNoLogin(t)
+	envHub := newFakeProjectHub(t)
+	t.Setenv("SCION_HUB_ENDPOINT", envHub.URL())
+
+	_, stderr, err := runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Contains(t, stderr, "Warning: not refreshed: prod: not logged in")
+	assert.Zero(t, prod.calls())
+
+	_, _, err = runScion(t, "use", "foo")
+	require.Error(t, err)
+	assert.Zero(t, prod.calls(), "'use' searches only the environment's hub")
+	assert.Equal(t, []string{"Bearer scoped-token"}, envHub.authHeaders(), "the hub the user chose gets the full chain")
+}
+
+// --hub naming the lone hub, or the lone hub being the effective hub, gives
+// it the full credential chain.
+func TestUseMultiHub_LoneHubChosenOrEffectiveGetsFullChain(t *testing.T) {
+	t.Run("--hub", func(t *testing.T) {
+		prod := setupOneHubNoLogin(t)
+		t.Setenv("SCION_HUB_ENDPOINT", newFakeProjectHub(t).URL())
+		_, _, err := runScion(t, "project", "list", "--refresh", "--hub", "prod")
+		require.NoError(t, err)
+		_, _, err = runScion(t, "use", "foo", "--hub", "prod")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+	})
+	t.Run("effective hub", func(t *testing.T) {
+		prod := setupOneHubNoLogin(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"/\n")
+		_, _, err := runScion(t, "project", "list", "--refresh")
+		require.NoError(t, err)
+		assert.Positive(t, prod.lists.Load())
+		_, _, err = runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+	})
+}
+
+// The check of a known project follows the same rule: on a hub that is
+// neither chosen nor effective, only that hub's own login counts, so with
+// unbound tokens only the project is selected unchecked, with the login
+// hint; on the effective hub the full chain is used.
+func TestUseMultiHub_KnownProjectCheckFollowsCredentialRule(t *testing.T) {
+	seed := func(t *testing.T) {
+		t.Helper()
+		require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+			c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+			return nil
+		}))
+	}
+	t.Run("not effective", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		seed(t)
+		stdout, _, err := runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
+			"Not logged in to hub 'prod'. Run: scion hub auth login --hub prod\n", stdout)
+		assert.Zero(t, prod.calls())
+		assert.Zero(t, staging.calls())
+	})
+	t.Run("effective", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		seed(t)
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		stdout, _, err := runScion(t, "use", "foo")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders())
+		assert.Equal(t, int32(1), prod.gets.Load())
+		assert.Zero(t, staging.calls())
+	})
+}
+
+// In a fan-out only the hub entry's own transport applies: never the
+// transport token from the environment, never hub.transport in settings.
+func TestFanOutTransport_OnlyTheHubEntrysOwn(t *testing.T) {
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "hub:\n  transport:\n    mode: iap\n    audience: settings-audience\n")
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-token")
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	var audiences []string
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
+		audiences = append(audiences, audience)
+		return nil, nil
+	}
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		if err := c.AddHub("plain", "https://plain.example.com"); err != nil {
+			return err
+		}
+		if err := c.AddHub("iap", "https://iap.example.com"); err != nil {
+			return err
+		}
+		c.Hubs["iap"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "entry-audience"}
+		return nil
+	}))
+
+	src, _, err := fanOutTransport("https://plain.example.com")
+	require.NoError(t, err)
+	assert.Nil(t, src, "no entry transport: nothing, not the environment's or the settings' transport")
+	assert.Empty(t, audiences)
+
+	_, mode, err := fanOutTransport("https://iap.example.com")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"entry-audience"}, audiences)
+	assert.Equal(t, transportauth.ModeFromString("iap"), mode)
+}
+
+// staticTransportSource is a transport token source with a fixed token.
+type staticTransportSource struct{ token string }
+
+func (s staticTransportSource) Token() (string, error)     { return s.token, nil }
+func (s staticTransportSource) SetToken(string, time.Time) {}
+func (s staticTransportSource) Expiry() time.Time          { return time.Time{} }
+
+// withEnvTransport sets an IAP transport token in the environment, and
+// makes a hub entry's own transport build a source with the token
+// "<audience>-token" (not on GCE).
+func withEnvTransport(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCION_TRANSPORT_TOKEN", "env-transport-token")
+	t.Setenv("SCION_TRANSPORT_MODE", "iap")
+	origGCE, origADC := transportauth.IsOnGCEFunc, fanOutADCSource
+	t.Cleanup(func() { transportauth.IsOnGCEFunc, fanOutADCSource = origGCE, origADC })
+	transportauth.IsOnGCEFunc = func() bool { return false }
+	fanOutADCSource = func(audience string) (transportauth.TokenSource, error) {
+		return staticTransportSource{token: audience + "-token"}, nil
+	}
+}
+
+const envTransportHeader = "Bearer env-transport-token"
+
+// The environment's transport token goes only to the chosen or effective
+// hub. Any other hub contacted by 'use' (lookup and the check of a known
+// project), 'project list --refresh' or 'hub list --check' gets only the
+// transport of its own hub entry, or none.
+func TestFanOut_EnvironmentTransportOnlyForChosenOrEffectiveHub(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	withEnvTransport(t)
+	prod.setProjects(prodFoo, hubclient.Project{ID: "p-bar", Slug: "bar", Name: "Bar"})
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "staging-aud"}
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-bar", Slug: "bar"}})
+		return nil
+	}))
+
+	// Lookup across both hubs (the result is ambiguous; the calls are made).
+	_, _, err := runScion(t, "use", "foo")
+	require.Error(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "lookup: no transport for a hub without entry transport")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "lookup: the entry's own transport")
+
+	_, _, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "refresh")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "refresh")
+
+	_, _, err = runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "hub list --check")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders(), "hub list --check")
+
+	// The check of a project known on prod. Selecting it makes prod the
+	// current hub, and so the effective hub of the runs that follow.
+	_, _, err = runScion(t, "use", "bar")
+	require.NoError(t, err)
+	assert.Equal(t, []string{""}, prod.takeProxyHeaders(), "check of a known project")
+	require.Equal(t, "prod", readTestContext(t).CurrentHub)
+
+	// prod is the effective hub now: it gets the environment's transport,
+	// staging still only its own.
+	_, _, err = runScion(t, "use", "bar")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "check on the effective hub")
+	_, _, err = runScion(t, "project", "list", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "refresh of the effective hub")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders())
+	_, _, err = runScion(t, "hub", "list", "--check")
+	require.NoError(t, err)
+	assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "hub list --check of the effective hub")
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, staging.takeProxyHeaders())
+}
+
+// The login offer's OAuth client gets the environment's transport only for
+// the effective hub; for a hub the lookup picked, only its entry's own.
+func TestUseLoginOffer_TransportOnlyTheHubsOwn(t *testing.T) {
+	setupRegistryTest(t)
+	writeHomeGlobalSettings(t, "")
+	withEnvTransport(t)
+	staging := newFakeProjectHub(t)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("staging", staging.URL())
+	}))
+	origNoBrowser := hubAuthNoBrowser
+	t.Cleanup(func() { hubAuthNoBrowser = origNoBrowser })
+	hubAuthNoBrowser = true // the device flow: its first request fails on the fake hub
+
+	login := func() []string {
+		t.Helper()
+		c := &cobra.Command{}
+		c.SetContext(context.Background())
+		c.SetOut(io.Discard)
+		c.SetErr(io.Discard)
+		require.Error(t, useLoginToHub(c, staging.URL()), "the fake hub has no login endpoints")
+		headers := staging.takeProxyHeaders()
+		require.NotEmpty(t, headers, "the login flow contacted the hub")
+		return headers
+	}
+	assert.Equal(t, []string{""}, login(), "a hub the lookup picked: no environment transport")
+
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.Hubs["staging"].Transport = &config.HubTransportConfig{Mode: "iap", Audience: "staging-aud"}
+		return nil
+	}))
+	assert.Equal(t, []string{"Bearer staging-aud-token"}, login(), "a hub the lookup picked: exactly its entry's own transport")
+
+	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+staging.URL()+"\n")
+	assert.Equal(t, []string{envTransportHeader}, login(), "the effective hub: environment transport as for 'hub auth login'")
+}
+
+// The lone registered hub, neither chosen nor effective, is searched only
+// with a credential bound to it: with only unbound tokens, 'use' makes no
+// call and reports it as not logged in.
+func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
+	prod := setupOneHubNoLogin(t)
+	for _, args := range [][]string{{"use", "foo"}, {"use", "foo", "--refresh"}} {
+		_, _, err := runScion(t, args...)
+		require.EqualError(t, err, "project 'foo' could not be looked up (prod: not logged in)\n\n"+
+			"Log in with: scion hub auth login --hub prod", "%v", args)
+	}
+	assert.Zero(t, prod.calls())
+}
+
+// In a search across hubs the rule is decided per hub: the effective hub
+// gets the full credential chain (here SCION_HUB_TOKEN and the
+// environment's transport), every other hub only what is bound to it.
+func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
+	t.Run("other hub without a login", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t) // both have "foo"
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+
+		stdout, stderr, err := runScion(t, "use", "foo", "--refresh")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
+		assert.Zero(t, staging.calls(), "another hub: not sent the effective hub's token")
+		assert.Contains(t, stderr, "Warning: skipped hubs: staging: not logged in")
+	})
+	t.Run("other hub with its own login", func(t *testing.T) {
+		prod, staging := setupTwoHubsNoLogins(t)
+		withEnvTransport(t)
+		storeTestLogin(t, staging.URL())
+		staging.setProjects()
+		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+
+		stdout, _, err := runScion(t, "use", "foo", "--refresh")
+		require.NoError(t, err)
+		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
+		assert.Equal(t, []string{"Bearer scoped-token"}, prod.authHeaders(), "the effective hub: full chain")
+		assert.Equal(t, []string{envTransportHeader}, prod.takeProxyHeaders(), "the effective hub: the environment's transport")
+		assert.Equal(t, []string{"Bearer tok"}, staging.authHeaders(), "another hub: only its own login, never SCION_HUB_TOKEN")
+		assert.Equal(t, []string{""}, staging.takeProxyHeaders(), "another hub: not the environment's transport")
+	})
+}
+
+// A hub that refuses the credential is not reported as having no such
+// project: the error names the hubs searched, and says the project may be
+// on the hub that refused the login, with its login command.
+func TestUseMultiHub_NotFoundNamesRefusedHub(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.refuse.Store(true) // prod has "foo" but refuses the login
+	staging.setProjects()
+
+	want := "project 'foo' not found on the hubs searched (staging); " +
+		"it may be on the hub that could not be searched (prod: login refused)\n\n" +
+		"Log in with: scion hub auth login --hub prod"
+	for _, args := range [][]string{{"use", "foo"}, {"use", "foo", "--refresh"}} {
+		_, _, err := runScion(t, args...)
+		require.EqualError(t, err, want, "%v", args)
+	}
+	assert.NotEmpty(t, prod.authHeaders(), "the refusing hub was asked")
+
+	// When another hub has the project, the refusing hub is named in the
+	// warning.
+	staging.setProjects(stagingFoo)
+	stdout, stderr, err := runScion(t, "use", "foo", "--refresh")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'staging' ("+staging.URL()+").\n", stdout)
+	assert.Contains(t, stderr, "Warning: skipped hubs: prod: login refused")
+}
+
+// The candidates of an ambiguous name are listed in one order, by hub and
+// then by project ID, whether they come from the known-project list or
+// from a lookup, in the error, its JSON and the picker.
+func TestUseMultiHub_CandidateOrderIsStable(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	// The known list has staging's entry first.
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("staging", []config.KnownProject{{ID: "s-foo", Slug: "foo", Name: "Foo"}})
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+		return nil
+	}))
+	want := "project 'foo' exists on several hubs; choose one with --hub:\n" +
+		"  scion use foo --hub prod      (" + prod.URL() + ", id p-foo)\n" +
+		"  scion use foo --hub staging   (" + staging.URL() + ", id s-foo)"
+	for _, args := range [][]string{{"use", "foo"}, {"use", "foo", "--refresh"}} {
+		_, _, err := runScion(t, args...)
+		require.Error(t, err, "%v", args)
+		assert.Equal(t, want, err.Error(), "%v", args)
+
+		stdout, _, err := runScion(t, append(args, "--format", "json")...)
+		require.Error(t, err, "%v", args)
+		var got struct {
+			Candidates []useCandidateJSON `json:"candidates"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(stdout), &got), stdout)
+		require.Len(t, got.Candidates, 2, "%v", args)
+		assert.Equal(t, "prod", got.Candidates[0].Hub, "%v", args)
+		assert.Equal(t, "staging", got.Candidates[1].Hub, "%v", args)
+	}
+
+	withTerminal(t, true)
+	shown := stubPicker(t, -1)
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "no project selected")
+	require.Len(t, *shown, 1)
+	assert.Equal(t, []string{
+		"foo on prod (" + prod.URL() + ")",
+		"foo on staging (" + staging.URL() + ")",
+	}, (*shown)[0])
+}
+
+// Candidates on the same hub are ordered by project ID; a hub without a
+// nickname is ordered by its URL.
+func TestSortUseCandidates(t *testing.T) {
+	a := useHub{Name: "a", Endpoint: "https://z.example.com"}
+	b := useHub{Name: "b", Endpoint: "https://a.example.com"}
+	bare := useHub{Endpoint: "https://m.example.com"}
+	got := []useMatch{{Hub: b, ID: "2"}, {Hub: bare, ID: "1"}, {Hub: b, ID: "1"}, {Hub: a, ID: "9"}}
+	sortUseCandidates(got)
+	assert.Equal(t, []useMatch{{Hub: a, ID: "9"}, {Hub: b, ID: "1"}, {Hub: b, ID: "2"}, {Hub: bare, ID: "1"}}, got)
+}
+
+// hubGlobalProject is a hub's built-in global project, with the labels the
+// hub gives it.
+func hubGlobalProject(id string) hubclient.Project {
+	return hubclient.Project{ID: id, Slug: "global", Name: "Global",
+		Labels: map[string]string{"scion.io/system": "true", "scion.io/global": "true"}}
+}
+
+// A hub's global project is not a project 'scion use' selects, and it is
+// not recorded in the known-project list. A known entry for one, recorded
+// before, is dropped.
+func TestUseMultiHub_HubGlobalProjectExcluded(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects(prodFoo, hubGlobalProject("p-global"))
+	staging.setProjects(hubGlobalProject("s-global"))
+
+	_, _, err := runScion(t, "use", "global")
+	require.EqualError(t, err, "project 'global' not found on hubs: prod, staging")
+	assert.Positive(t, prod.lists.Load(), "the hubs were asked")
+	assert.Empty(t, readTestContext(t).Projects, "no global project recorded")
+
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-global", Slug: "global", Name: "Global"}})
+		return nil
+	}))
+	_, _, err = runScion(t, "use", "global")
+	require.EqualError(t, err, "project 'global' not found on hubs: prod, staging")
+	assert.Positive(t, prod.gets.Load(), "the known entry was checked")
+	assert.Empty(t, readTestContext(t).Projects, "the known entry is dropped")
+	assert.Empty(t, readTestContext(t).CurrentHub, "nothing is selected")
+}
+
+// A link entry for a hub's global project, which 'scion hub link' records
+// for the global directory, is kept when 'scion use' finds that project
+// unselectable; only the selection fails.
+func TestUseMultiHub_HubGlobalProjectLinkEntryKept(t *testing.T) {
+	prod, _ := setupTwoHubs(t)
+	prod.setProjects(hubGlobalProject("p-global"))
+	link := config.KnownProject{Hub: "prod", ID: "p-global", Slug: "global", Name: "Global", Source: config.KnownProjectSourceLink}
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.SetLinkEntry("prod", link, "/home/alice/.scion", time.Now())
+	}))
+
+	_, _, err := runScion(t, "use", "global")
+	require.EqualError(t, err, "project 'global' not found on hubs: prod, staging")
+	assert.Positive(t, prod.gets.Load(), "the link entry was checked")
+	var kept []config.KnownProject
+	for _, p := range readTestContext(t).Projects {
+		kept = append(kept, config.KnownProject{Hub: p.Hub, ID: p.ID, Slug: p.Slug, Name: p.Name, Source: p.Source})
+	}
+	assert.Equal(t, []config.KnownProject{link}, kept, "the link entry is kept")
+	assert.Empty(t, readTestContext(t).CurrentHub, "nothing is selected")
+}
+
+// Only a project with both labels the hub gives its global project is
+// left out: a project that carries one of them is an ordinary project.
+func TestIsHubGlobalProject(t *testing.T) {
+	for _, tc := range []struct {
+		labels map[string]string
+		want   bool
+	}{
+		{map[string]string{"scion.io/system": "true", "scion.io/global": "true"}, true},
+		{map[string]string{"scion.io/global": "true"}, false},
+		{map[string]string{"scion.io/system": "true"}, false},
+		{map[string]string{"scion.io/system": "true", "scion.io/global": "false"}, false},
+		{nil, false},
+	} {
+		assert.Equal(t, tc.want, isHubGlobalProject(hubclient.Project{Labels: tc.labels}), "%v", tc.labels)
+	}
+}
+
+// A known project whose hub refuses the login is selected, with a hint
+// that says so.
+func TestUseMultiHub_KnownProjectHubRefusesLogin(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.refuse.Store(true)
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.RememberProjects("prod", []config.KnownProject{{ID: "p-foo", Slug: "foo", Name: "Foo"}})
+		return nil
+	}))
+	stdout, _, err := runScion(t, "use", "foo")
+	require.NoError(t, err)
+	assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n"+
+		"Hub 'prod' refused the login. Run: scion hub auth login --hub prod\n", stdout)
+	assert.Equal(t, "p-foo", currentProjectOf(t, "prod"))
+	assert.Zero(t, staging.calls())
+}
+
+// The not-found error names one hub that could not be searched in the
+// singular and several in the plural, whatever the reason.
+func TestUseMultiHub_NotFoundSkippedHubsWording(t *testing.T) {
+	prod, staging := setupTwoHubs(t)
+	prod.setProjects()
+	staging.srv.Close()
+
+	_, _, err := runScion(t, "use", "foo")
+	require.Error(t, err)
+	want := "project 'foo' not found on the hubs searched (prod); it may be on the hub that could not be searched (staging: unreachable: "
+	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
+
+	dev := newFakeProjectHub(t, hubclient.Project{ID: "d-foo", Slug: "foo", Name: "Foo"})
+	dev.refuse.Store(true)
+	storeTestLogin(t, dev.URL())
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		return c.AddHub("dev", dev.URL())
+	}))
+	_, _, err = runScion(t, "use", "foo")
+	require.Error(t, err)
+	want = "project 'foo' not found on the hubs searched (prod); it may be on the hubs that could not be searched (dev: login refused; staging: unreachable: "
+	assert.True(t, strings.HasPrefix(err.Error(), want), err.Error())
+	assert.True(t, strings.HasSuffix(err.Error(), "\n\nLog in with: scion hub auth login --hub dev"), err.Error())
+}

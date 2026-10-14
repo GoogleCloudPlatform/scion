@@ -222,11 +222,7 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 			// (the agent token middleware will have validated it or rejected it)
 			if r.Header.Get("X-Scion-Agent-Token") != "" {
 				// Agent token was present but not validated - reject
-				if debug {
-					slog.Debug("Auth failed: X-Scion-Agent-Token present but not validated")
-				}
-				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-					"invalid agent token", nil)
+				refuseAgentToken(r.Context(), w, slog.Default(), agentTokenCauseHeaderNotValidated)
 				return
 			}
 
@@ -259,18 +255,11 @@ func DevAuthMiddlewareWithDebug(validToken string, userCfg DevUserConfig, debug 
 			// Validate token (constant-time comparison)
 			if !apiclient.ValidateDevToken(token, validToken) {
 				if debug {
-					// Log token prefix for debugging (safe: only shows first chars)
-					tokenPrefix := token
-					if len(tokenPrefix) > 20 {
-						tokenPrefix = tokenPrefix[:20] + "..."
-					}
-					expectedPrefix := validToken
-					if len(expectedPrefix) > 20 {
-						expectedPrefix = expectedPrefix[:20] + "..."
-					}
-					slog.Debug("Auth failed: token mismatch",
-						"provided_prefix", tokenPrefix,
-						"expected_prefix", expectedPrefix,
+					// Log only the lengths: no part of either token
+					// value goes into the log.
+					slog.Debug("Auth failed: dev token mismatch",
+						"provided_length", len(token),
+						"expected_length", len(validToken),
 					)
 				}
 				writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,

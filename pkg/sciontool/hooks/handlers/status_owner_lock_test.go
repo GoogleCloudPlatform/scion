@@ -100,8 +100,10 @@ func TestStatusHandlerOwnerListAndStatusWritersLoseNothing(t *testing.T) {
 
 	info := readInfo(t, path)
 	assert.Empty(t, notificationWaitOwners(info), "every owner was released")
-	assert.Equal(t, "waiting_for_input", info["activity"])
-	assert.Equal(t, activitySourceNotification, info[activitySourceKey])
+	// The last owner's release clears the wait to working.
+	assert.Equal(t, "working", info["activity"])
+	assert.Equal(t, activitySourceSubagentEnd, info[activitySourceKey])
+	assert.NotContains(t, info, notificationWaitAgentsKey)
 	detail, _ := info["detail"].(map[string]any)
 	assert.Equal(t, fmt.Sprintf("m-%d", nMsgs-1), detail["message"])
 }

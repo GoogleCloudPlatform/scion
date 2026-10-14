@@ -1492,6 +1492,48 @@ class VertexAIAuthTest(unittest.TestCase):
                 content,
             )
 
+    def test_vertex_location_wins_over_region_with_warning(self) -> None:
+        """When GOOGLE_CLOUD_LOCATION and GOOGLE_CLOUD_REGION differ, the
+        location wins and one warning is emitted (ptone/scion#4719)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            inputs_dir = os.path.join(tmp, "inputs")
+            os.makedirs(inputs_dir)
+            paths = {}
+            for key, value in (
+                ("GOOGLE_CLOUD_PROJECT", "my-gcp-project"),
+                ("GOOGLE_CLOUD_REGION", "us-central1"),
+                ("GOOGLE_CLOUD_LOCATION", "europe-west4"),
+            ):
+                paths[key] = os.path.join(tmp, key.lower())
+                with open(paths[key], "w") as f:
+                    f.write(value)
+            scion_harness.atomic_write_json(
+                os.path.join(inputs_dir, "auth-candidates.json"),
+                {
+                    "env_vars": list(paths),
+                    "env_secret_files": paths,
+                    "file_secret_files": {},
+                },
+            )
+            ctx = _make_ctx({"harness_bundle_dir": tmp})
+            warnings: list[str] = []
+            ctx.warn = warnings.append
+            env: dict[str, str] = {}
+            with temporary_home(tmp):
+                provision._configure_vertex_ai(ctx, env)
+                config_path = os.path.join(tmp, ".grok", "config.toml")
+                with open(config_path) as f:
+                    content = f.read()
+            self.assertIn(
+                "https://europe-west4-aiplatform.googleapis.com"
+                "/v1beta1/projects/my-gcp-project/locations/europe-west4/endpoints/openapi",
+                content,
+            )
+            self.assertEqual(env.get("GOOGLE_CLOUD_LOCATION"), "europe-west4")
+            self.assertNotIn("GOOGLE_CLOUD_REGION", env)
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("GOOGLE_CLOUD_LOCATION", warnings[0])
+
     def test_vertex_global_region_uses_plain_hostname(self) -> None:
         """When GOOGLE_CLOUD_REGION is set to 'global', the base_url must use
         the plain hostname (aiplatform.googleapis.com), NOT

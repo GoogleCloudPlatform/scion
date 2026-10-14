@@ -534,6 +534,12 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 			return nil, errProjectMustBeLinked()
 		}
 
+		// Do not auto-link the global project from a git repository that
+		// is not a scion project.
+		if err := RefuseGlobalFallbackLink(isGlobal, explicitTarget); err != nil {
+			return nil, err
+		}
+
 		// Get project name for the prompt
 		projectName := getProjectName(resolvedPath, isGlobal)
 
@@ -1649,6 +1655,7 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 		Name:      projectName,
 		GitRemote: util.NormalizeGitRemote(gitRemote),
 		Path:      hubCtx.ProjectPath,
+		Labels:    LinkedProjectLabels(hubCtx.Endpoint, gitRemote),
 		Broker: &hubclient.BrokerInfo{
 			ID:   hubCtx.BrokerID,
 			Name: brokerName,
@@ -1683,10 +1690,12 @@ func registerProject(ctx context.Context, hubCtx *HubContext, projectName string
 	} else {
 		_, _ = fmt.Fprintf(promptOut, "Linked to existing project: %s (ID: %s)\n", resp.Project.Name, resp.Project.ID)
 	}
-	// Store the hub project ID separately if it differs from the local project_id.
-	// Don't overwrite project_id — changing it shifts the external config
-	// directory, orphaning settings.
-	if resp.Project.ID != hubCtx.ProjectID {
+	// Always store the hub project ID in the project's own settings, even
+	// when it equals the local project_id, so the link never depends on a
+	// value inherited from another settings file. Don't overwrite
+	// project_id: changing it shifts the external config directory,
+	// orphaning settings.
+	if resp.Project.ID != "" {
 		if err := config.UpdateSetting(hubCtx.ProjectPath, "hub.projectId", resp.Project.ID, isGlobal); err != nil {
 			_, _ = fmt.Fprintf(promptOut, "Warning: failed to save hub project ID: %v\n", err)
 		} else {
@@ -1828,6 +1837,23 @@ func selectHubCredential(endpoint string) (hubclient.Option, CredentialKind) {
 
 	// 4. Fallback to auto dev auth
 	return hubclient.WithAutoDevAuth(), CredentialKindDevAuto
+}
+
+// LinkedProjectLabels returns the labels a CLI registration of a local
+// project directory sends to the hub. A git project registered on the local
+// workstation hub is labelled worktree-per-agent, so the co-located broker
+// gives each new agent a git worktree of the user's own checkout instead of
+// a clone. Any other registration (no git remote, or any other hub) sends
+// no labels and keeps the hub's default.
+//
+// The hub stores the label only when the registration creates the project;
+// it is ignored for a project that already exists, and it cannot be added
+// later.
+func LinkedProjectLabels(endpoint, gitRemote string) map[string]string {
+	if gitRemote == "" || !IsLocalWorkstationEndpoint(endpoint) {
+		return nil
+	}
+	return map[string]string{store.LabelWorkspaceMode: store.WorkspaceModeWorktreePerAgent}
 }
 
 // IsLocalWorkstationEndpoint reports whether endpoint is the local

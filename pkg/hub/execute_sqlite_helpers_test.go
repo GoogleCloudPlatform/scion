@@ -283,7 +283,7 @@ func (e *agentKeysEventSpy) PublishAgentPorts(_ context.Context, _ *store.Agent)
 func (e *agentKeysEventSpy) PublishAllowListChanged(_ context.Context, _, _ string) {
 	e.record("PublishAllowListChanged")
 }
-func (e *agentKeysEventSpy) PublishInviteChanged(_ context.Context, _, _, _ string) {
+func (e *agentKeysEventSpy) PublishInviteChanged(_ context.Context, _, _ string) {
 	e.record("PublishInviteChanged")
 }
 func (e *agentKeysEventSpy) PublishDispatchDone(_ context.Context, _ string) {
@@ -291,6 +291,9 @@ func (e *agentKeysEventSpy) PublishDispatchDone(_ context.Context, _ string) {
 }
 func (e *agentKeysEventSpy) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 	e.record("PublishChatTopicEvent")
+}
+func (e *agentKeysEventSpy) PublishChatThreadGroupEvent(_ context.Context, _ string, _ string, _ ThreadGroupResponse) {
+	e.record("PublishChatThreadGroupEvent")
 }
 func (e *agentKeysEventSpy) PublishChatReadStateEvent(_ context.Context, _, _, _ string) {
 	e.record("PublishChatReadStateEvent")

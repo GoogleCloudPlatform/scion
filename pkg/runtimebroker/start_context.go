@@ -434,7 +434,9 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// A saved profile that no longer resolves fails here, with the same
 	// 503 as start/restart's own later resolution, rather than classifying
 	// the dispatch against the default runtime first (ptone/scion#2709).
-	// Create and a start without a saved profile stay non-strict.
+	// Create and a start without a saved profile stay non-strict, except
+	// that, on a co-located broker, a profile missing from the Hub's stored
+	// profiles is refused (errProfileUnresolved / errDefaultProfileUnresolved).
 	mgr, dispatchRuntimeType, err := s.resolveExistingAgentManager(api.StartOptions{
 		Name:        in.Name,
 		ProjectPath: in.ProjectPath,
@@ -989,6 +991,56 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 		}
 	}
 
+	// --- Worktree-per-agent mode, linked checkout on the workstation ---
+	// A worktree-per-agent dispatch for a linked project, sent by the
+	// co-located hub to a non-Kubernetes runtime, gets a worktree of the
+	// project's own checkout from ProvisionAgent's local worktree engine
+	// (<repo>/.scion/agents/<slug>/workspace): no clone, no base clone, and
+	// the user's local commits and branches are visible. GitClone and
+	// Workspace stay empty so ProvisionAgent takes that path. If the
+	// checkout fails verification the dispatch is refused rather than falling
+	// back to a clone; see resolveLinkedCheckout. Start and restart re-send
+	// the same workspace inputs and are routed the same way, so
+	// ProvisionAgent reuses the agent's worktree by branch; an agent whose
+	// workspace is a broker-managed worktree (its own or joined) or a clone
+	// keeps it (existingNonLocalWorkspace). Only workstation-mode servers
+	// route.
+	linkedCheckout := false
+	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+		decision := resolveLinkedCheckout(linkedCheckoutInput{
+			WorkspaceMode:                in.WorkspaceMode,
+			GitClone:                     in.Config.GitClone,
+			ProjectPath:                  in.ProjectPath,
+			ProjectPathFromContainer:     in.ProjectPathFromContainer,
+			HubGlobalProject:             in.HubGlobalProject,
+			Colocated:                    s.dispatchFromColocatedHub(ctx, in.HTTPRequest, hubConn),
+			RuntimeName:                  dispatchRuntimeType,
+			HasExistingNonLocalWorkspace: in.Operation != opCreate && existingNonLocalWorkspace(in),
+			WorkstationMode:              s.config.WorkstationMode,
+		})
+		switch {
+		case decision.Refusal != "":
+			span.SetStatus(codes.Error, decision.Refusal)
+			return nil, &startContextError{
+				Status:  http.StatusConflict,
+				Message: decision.Refusal,
+				Code:    ErrCodeLocalWorktreeRefused,
+				Details: map[string]interface{}{api.BrokerErrDetailReason: decision.Refusal},
+			}
+		case decision.Route:
+			linkedCheckout = true
+			opts.Workspace = ""
+			opts.GitClone = nil
+			s.agentLifecycleLog.Info("Worktree-per-agent: using a local worktree of the linked checkout",
+				"agent_id", in.AgentID, "repo_root", decision.RepoRoot)
+		default:
+			if s.config.Debug {
+				s.agentLifecycleLog.Debug("Worktree-per-agent: linked checkout not used",
+					"agent_id", in.AgentID, "reason", decision.Reason)
+			}
+		}
+	}
+
 	// --- Worktree-per-agent mode ---
 	// When the hub sets WorkspaceMode to worktree-per-agent and the project
 	// is git-backed, provision a shared base clone + per-agent worktree on
@@ -998,7 +1050,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// created the agent's own worktree; see tryProvisionWorktree.
 	worktreeProvisioned := false
 	var provisionedWorktreeRoot string
-	if in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
+	if !linkedCheckout && in.Config != nil && in.Config.GitClone != nil && in.WorkspaceMode == store.WorkspaceModeWorktreePerAgent {
 		var err error
 		worktreeProvisioned, provisionedWorktreeRoot, err = s.tryProvisionWorktree(ctx, in, &opts, env, dispatchRuntimeType)
 		if err != nil {
@@ -1008,7 +1060,7 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	}
 
 	// --- Git clone mode ---
-	if !worktreeProvisioned && in.Config != nil && in.Config.GitClone != nil {
+	if !worktreeProvisioned && !linkedCheckout && in.Config != nil && in.Config.GitClone != nil {
 		gc := in.Config.GitClone
 		env["SCION_GIT_CLONE_URL"] = gc.URL
 		// Clone URL may embed credentials — the original #127 bug.
@@ -1060,12 +1112,13 @@ func (s *Server) buildStartContext(ctx context.Context, in startContextInputs) (
 	// insufficient because shared-plain may or may not be git-backed.
 	//
 	// Priority:
-	//  1. worktreeProvisioned: host-side worktree was set up — always git.
+	//  1. worktreeProvisioned or linkedCheckout: host-side worktree was (or
+	//     will be) set up — always git.
 	//  2. opts.GitClone != nil: in-container clone configured — always git.
 	//  3. opts.Workspace on disk: shared-plain git workspace (check .git).
 	//  4. in.ResolvedEnv fallback: hub-injected on start/restart paths before
 	//     the on-disk workspace exists (e.g. clone-per-agent pre-clone).
-	isGitWorkspace := worktreeProvisioned || opts.GitClone != nil
+	isGitWorkspace := worktreeProvisioned || linkedCheckout || opts.GitClone != nil
 	if !isGitWorkspace && opts.Workspace != "" {
 		isGitWorkspace = util.IsGitRepoDir(opts.Workspace)
 	}
@@ -2038,8 +2091,9 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	if id := globalSettingsProjectID(globalDir); id != "" {
 		return id == projectID
 	}
-	// The global marker may carry an empty slug, which ReadProjectMarker
-	// rejects, so only its project-id is read here.
+	// The global marker may carry an empty slug (see
+	// writeGlobalDirIDRecord), which ReadProjectMarker rejects, so only its
+	// project-id is read here.
 	markerPath := filepath.Join(globalDir, config.DotScion)
 	if !config.IsProjectMarkerFile(markerPath) {
 		return false
@@ -2050,6 +2104,20 @@ func isGlobalDirProjectID(globalDir, projectID string) bool {
 	}
 	var marker config.ProjectMarker
 	return yaml.Unmarshal(data, &marker) == nil && marker.ProjectID != "" && marker.ProjectID == projectID
+}
+
+// writeGlobalDirIDRecord records projectID, the global project's hub id, in
+// the global directory's .scion file at markerPath. The record is
+// deliberately written without a project slug: the global project's dispatch
+// carries none, and config.WriteProjectMarker refuses an empty slug. Such a
+// record is not a readable project marker (config.ReadProjectMarker rejects
+// it); only isGlobalDirProjectID reads it, for its project-id.
+func writeGlobalDirIDRecord(markerPath, projectID string) error {
+	data, err := yaml.Marshal(&config.ProjectMarker{ProjectID: projectID})
+	if err != nil {
+		return fmt.Errorf("failed to marshal the global project id record: %w", err)
+	}
+	return os.WriteFile(markerPath, data, 0644)
 }
 
 // globalSettingsProjectID returns the hub project id recorded in the global
@@ -2181,6 +2249,20 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 	// then find it matching.
 	s.alignHubManagedProjectIdentity(ctx, in.AgentID, in.ProjectPath, in.ProjectSlug, in.ProjectID)
 
+	// A linked project's path is often its own .scion config directory
+	// (the provider path that linking records). That project already has
+	// its config: there is no marker to write inside it, and no external
+	// config dir to create for it. Treating the .scion directory as a
+	// project root would write a stray <repo>/.scion/.scion marker and a
+	// project-configs entry the project never uses.
+	if isOwnProjectConfigDir(in.ProjectPath) {
+		if s.config.Debug {
+			s.agentLifecycleLog.Debug("Project path is the project's own .scion directory; not recording hub project files",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+		}
+		return
+	}
+
 	scionPath := filepath.Join(in.ProjectPath, config.DotScion)
 
 	if config.IsProjectMarkerFile(scionPath) {
@@ -2214,10 +2296,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				}
 			}
 			// Ensure external split storage directories exist.
-			if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-				_ = os.MkdirAll(extPath, 0755)
-				_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-			}
+			ensureMarkerExternalDirs(marker)
 			if s.config.Debug {
 				s.agentLifecycleLog.Debug("Hub-managed project has marker with split storage",
 					"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", marker.ProjectID, "path", scionPath)
@@ -2260,10 +2339,35 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	} else if in.ProjectID != "" {
-		// .scion doesn't exist — create project dir and write a marker file
+		// .scion doesn't exist — create project dir and write a marker file.
+		// A marker needs a slug: ReadProjectMarker rejects one without, and
+		// its external dir would be named "__<id>". Without a slug nothing
+		// is written, except for the global directory, whose marker records
+		// the global project's id with an empty slug (see
+		// isGlobalDirProjectID); it still gets no external dir.
+		if in.ProjectSlug == "" && !config.IsGlobalProjectDir(in.ProjectPath) {
+			s.agentLifecycleLog.Info("Hub-managed project dispatch has no project slug; not writing a .scion marker",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
+			return
+		}
 		if err := os.MkdirAll(in.ProjectPath, 0755); err != nil {
 			s.agentLifecycleLog.Warn("Failed to create project dir for hub-managed project",
 				"agent_id", in.AgentID, "slug", in.ProjectSlug, "path", in.ProjectPath, "error", err)
+		} else if in.ProjectSlug == "" && config.IsGlobalProjectDir(in.ProjectPath) {
+			// The global project's dispatch carries no slug (see
+			// splitHubGlobalSlug); globalDirProjectConflict has already
+			// refused any other project at this path. Only the id is
+			// recorded, for isGlobalDirProjectID.
+			if wErr := writeGlobalDirIDRecord(scionPath, in.ProjectID); wErr != nil {
+				s.agentLifecycleLog.Warn("Failed to record the global project id",
+					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
+			}
+		} else if in.ProjectSlug == "" {
+			// A marker needs a slug (config.WriteProjectMarker refuses an
+			// empty one), so none is written for a dispatch that names
+			// only the project ID.
+			s.agentLifecycleLog.Warn("Not writing .scion marker for hub-managed project: the dispatch names no project slug",
+				"agent_id", in.AgentID, "project_id", in.ProjectID, "path", in.ProjectPath)
 		} else {
 			marker := &config.ProjectMarker{
 				ProjectID:   in.ProjectID,
@@ -2274,10 +2378,7 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 				s.agentLifecycleLog.Warn("Failed to write .scion marker for hub-managed project",
 					"agent_id", in.AgentID, "project_id", in.ProjectID, "error", wErr)
 			} else {
-				if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
-					_ = os.MkdirAll(extPath, 0755)
-					_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
-				}
+				ensureMarkerExternalDirs(marker)
 				if s.config.Debug {
 					s.agentLifecycleLog.Debug("Initialized hub-managed project with split storage",
 						"agent_id", in.AgentID, "slug", in.ProjectSlug, "project_id", in.ProjectID, "path", scionPath)
@@ -2285,6 +2386,35 @@ func (s *Server) recordHubProjectFiles(ctx context.Context, in startContextInput
 			}
 		}
 	}
+}
+
+// ensureMarkerExternalDirs creates the external split storage directories
+// (<project-configs>/<slug>__<id>/.scion and its agents dir) of a marker. A
+// marker without a slug gets none: "__<id>" names no project.
+func ensureMarkerExternalDirs(marker *config.ProjectMarker) {
+	if marker.ProjectSlug == "" {
+		return
+	}
+	if extPath, err := marker.ExternalProjectPath(); err == nil && extPath != "" {
+		_ = os.MkdirAll(extPath, 0755)
+		_ = os.MkdirAll(filepath.Join(extPath, "agents"), 0755)
+	}
+}
+
+// isOwnProjectConfigDir reports whether projectPath is itself an existing
+// project's .scion config directory, such as a linked checkout's
+// <repo>/.scion, rather than a project root that holds one. The broker's
+// global directory is excluded: it is the global project's root, and its
+// marker is handled by recordHubProjectFiles as before.
+func isOwnProjectConfigDir(projectPath string) bool {
+	if filepath.Base(filepath.Clean(projectPath)) != config.DotScion {
+		return false
+	}
+	info, err := os.Stat(projectPath)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	return !config.IsGlobalProjectDir(projectPath)
 }
 
 // telemetryPolicy returns the telemetry policy for this dispatch: the start or
@@ -2337,7 +2467,25 @@ func resolveTelemetryOverride(policy *bool, env map[string]string) *bool {
 //   - use_host_credentials, re-read from the global settings on every start
 //     so turning it off applies to the next start, is on (fails closed).
 func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
-	if !s.config.HostCredentials || hubConn == nil || !hubConn.IsColocated {
+	if !s.config.HostCredentials || !s.dispatchFromColocatedHub(ctx, r, hubConn) {
+		return false
+	}
+	globalDir, err := config.GetGlobalDir()
+	if err != nil {
+		return false
+	}
+	return config.UseHostCredentials(globalDir)
+}
+
+// dispatchFromColocatedHub reports whether this dispatch is bound to the hub
+// co-located in this process, and that binding is not just a guess: when
+// HMAC auth identified the sending hub it must be the co-located one, and
+// with more than one hub connection the X-Scion-Hub-Connection header must
+// name it (so the unauthenticated fallback in resolveHubConnection never
+// picks it for a remote hub). As defence in depth, the co-located hub
+// endpoint must also be on a loopback host.
+func (s *Server) dispatchFromColocatedHub(ctx context.Context, r *http.Request, hubConn *HubConnection) bool {
+	if hubConn == nil || !hubConn.IsColocated {
 		return false
 	}
 	authName := authenticatingHubConnFromContext(ctx)
@@ -2359,14 +2507,7 @@ func (s *Server) colocatedHostCredentials(ctx context.Context, r *http.Request, 
 			return false
 		}
 	}
-	if !isLoopbackEndpointURL(hubConn.HubEndpoint) {
-		return false
-	}
-	globalDir, err := config.GetGlobalDir()
-	if err != nil {
-		return false
-	}
-	return config.UseHostCredentials(globalDir)
+	return isLoopbackEndpointURL(hubConn.HubEndpoint)
 }
 
 // isLoopbackEndpointURL reports whether endpoint is a URL whose host is

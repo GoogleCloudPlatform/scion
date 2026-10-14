@@ -17,7 +17,6 @@ package hub
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -156,15 +155,6 @@ func validWorkspaceIdentity() *ValidatedGoogleIdentity {
 		UpstreamExpiry: time.Now().Add(30 * time.Minute),
 		HostedDomain:   "company.com",
 	}
-}
-
-func sqliteDriverName() string {
-	for _, driver := range sql.Drivers() {
-		if driver == "sqlite" || driver == "sqlite3" {
-			return driver
-		}
-	}
-	return ""
 }
 
 func (f *fakeGEExchangeMetrics) RecordGEExchangeRequest(outcome GEExchangeOutcome) {

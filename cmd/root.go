@@ -200,6 +200,10 @@ return an error instead of blocking.`,
 					autoConfirm = true
 				}
 			}
+
+			if projectPath == "" {
+				printShadowNotice(cmd)
+			}
 		}
 
 		// Agent mode implies non-interactive: prompts that require stdin
@@ -310,6 +314,14 @@ func Execute() {
 		rootCmd.Long = ""
 	}
 
+	// "<group> <unknown> --help" is an unknown command, not the group's
+	// help (ptone/scion#4579). Checked after the mode restrictions, so a
+	// subcommand the mode removed is unknown too.
+	if err := unknownSubcommandHelpError(rootCmd, cliArgs); err != nil {
+		fmt.Fprint(os.Stderr, formatCLIError(os.Stderr, err))
+		os.Exit(1)
+	}
+
 	cmd, err := rootCmd.ExecuteC()
 	if err != nil && topLevelName(cmd) == "ssh" {
 		// scion ssh follows the ssh convention: any failure before the
@@ -340,6 +352,7 @@ func Execute() {
 var plainErrorCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh-config": true,
+	"vscode":     true,
 }
 
 // formatCLIError renders a failed command's error for f. The error banner is

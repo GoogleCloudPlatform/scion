@@ -252,7 +252,7 @@ func TestFlatAsyncLaunch_LocalCancelDuringClaimReleasesOwnershipMirror(t *testin
 		t.Fatalf("%d ownership mirror(s) after the 201, want 1 held for the launch", n)
 	}
 
-	f.srv.launchRegistry.CancelLocal(launchKey{ProjectID: flatTestProjectID, Slug: "launch-cancel"})
+	f.srv.launchRegistry.CancelLocalFor(launchKey{ProjectID: flatTestProjectID, Slug: "launch-cancel"}, "", "")
 	// runLaunch releases the mirror after its other deferred steps (the
 	// registry's Finish among them), so wait for both.
 	if !waitUntil(t, 5*time.Second, func() bool { return launchEnded(f) && ownedStartCount(f.srv) == 0 }) {
