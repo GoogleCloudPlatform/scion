@@ -140,7 +140,7 @@ The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kep
 The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
 
 ### Link entry
-The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link`. It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after you switch the current context.
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
 
 ### Server
 The `scion server` command group, and the single combined process it manages — one or more server components run together as a background daemon (or with `--foreground`) via `start`/`stop`/`restart`/`status`.

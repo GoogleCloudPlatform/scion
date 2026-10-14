@@ -117,7 +117,7 @@ An agent created by an older Hub may have a `TZ` saved in its applied config env
 
 - a pin, including a `legacy` pin, is carried to the new agent;
 - an unpin is carried too, so a create-time `TZ` does not come back;
-- an agent with neither re-derives its pin from its original create inputs (a template cannot set `TZ`).
+- an agent with neither re-derives its pin from its original create inputs and its Hub harness config (a template cannot set `TZ`).
 
 ## Cron schedules are UTC only
 

@@ -85,7 +85,7 @@ A template describes the agent's job, not the environment it runs in. These keys
 
 Template uploads that contain them are not rejected. Set these values in [settings](/scion/reference/settings-precedence/), a profile, the harness-config or the Hub defaults instead. Hub administrators can find templates that still set them in the `templateConfigFindings` section of `GET /api/v1/admin/validate-resources` (finding kind `environment_keys`).
 
-The remaining `env` entries are a separate, lowest-precedence layer: each is set only when no other source (settings, profile, harness-config, Hub or project env, secrets) sets that variable. It never sets the harness-config's credential variables. Values are literal: `${VAR}` is not expanded, and an empty value is skipped with a warning instead of being filled from the Runtime Broker's environment. For Hub-dispatched agents a template `TZ` is not applied; see [Times and timezones](/scion/reference/times-and-timezones/).
+The remaining `env` entries are a separate, lowest-precedence layer: each is set only when no other source (settings, profile, harness-config, Hub or project env, secrets) sets that variable. It never sets the harness-config's credential variables. Values are literal: `${VAR}` is not expanded, and an empty value is skipped (with a warning in the `scion start` output) instead of being taken from the host environment. For Hub-dispatched agents a template `TZ` is not applied; see [Times and timezones](/scion/reference/times-and-timezones/).
 
 ## Creating an agent from a template
 
