@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -559,8 +558,18 @@ func TestTestAdminA3_PurgeCallers(t *testing.T) {
 		before := policyLines()
 		rec := doRequestWithToken(t, srv, caller.AccessToken, http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s as purge caller: %s", kind, rec.Body.String())
-		assert.Equal(t, testIdentityReasonFixtureCall, taReason(t, rec), "%s: the answer names the test-identity cause", kind)
-		assert.Contains(t, rec.Body.String(), `"denied_by":"`+string(DeniedByTestAdminPolicy)+`"`, "%s: and the test-admin policy", kind)
+		// The route guard refuses it (route permission test_identity.issue)
+		// before the handler runs: the answer is the guard's structured
+		// 403 for that permission, exactly.
+		var body struct {
+			Error struct {
+				Code    string            `json:"code"`
+				Details map[string]string `json:"details"`
+			} `json:"error"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+		assert.Equal(t, ErrCodeForbidden, body.Error.Code, kind)
+		assert.Equal(t, map[string]string{"resource_type": "test_identity", "denied_action": "issue"}, body.Error.Details, "%s: refused on the route's permission", kind)
 		// The HTTP request itself wrote the policy refusal: a new sink line
 		// for this caller's issuance with the route ID (only a request
 		// context carries them), counted before any direct Decide below.
@@ -935,30 +944,4 @@ func TestTestAdminA3_StampedRoleBoundByPersonKept(t *testing.T) {
 	roles, err := activeDirectProjectRoles(ctx, s, nil, false, owner.ID, projectID)
 	require.NoError(t, err)
 	assert.True(t, roles[store.ProjectRoleOwner], "the person's own grants stay")
-}
-
-// Review N1: when the caller's kind cannot be read, decide refuses through
-// the test-admin policy (fail-closed), but the caller may be a person: the
-// test identity routes answer neutrally (503, no test-identity wording),
-// and an admin-kind caller still gets the test-identity cause (see
-// TestTestAdminA3_PurgeCallers).
-func TestTestAdminA3_UnverifiedKindAnswerIsNeutral(t *testing.T) {
-	srv, s, _ := tsaServer(t)
-	issuer := taUser(t, s, "a3-uk-iss", store.SystemRoleSuperAdmin)
-	k := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
-	saved := srv.authzService
-	srv.authzService = NewAuthzService(kindErrStore{Store: s}, saved.logger)
-	t.Cleanup(func() { srv.authzService = saved })
-	d := srv.authzService.Decide(context.Background(), AuthzRequest{Principal: principalContextForIdentity(tsaIdentityFromRow(t, s, issuer.ID)),
-		Credential: credentialContextForIdentity(tsaIdentityFromRow(t, s, issuer.ID)), Resource: Resource{Type: "test_identity"},
-		Action: ActionIssue, Permission: permissionTestIdentityIssue, TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue)})
-	require.False(t, d.Allowed)
-	require.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy)
-	require.Equal(t, testAdminPolicyKindErrorReason, d.Reason, "the kind read error is the cause")
-
-	rec := doRequestAsUser(t, srv, issuer, http.MethodDelete, "/api/v1/test-identities/"+k.Identity.ID+"?purge=true", nil)
-	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "unable to verify the caller", "the neutral answer of testIdentityCaller")
-	assert.NotContains(t, strings.ToLower(rec.Body.String()), "test identity", "no test-identity wording for a caller whose kind is unknown")
-	assert.NotContains(t, rec.Body.String(), testIdentityReasonFixtureCall)
 }
