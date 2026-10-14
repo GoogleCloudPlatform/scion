@@ -31,7 +31,7 @@ type ProfileRefAgent struct {
 // ProfileRefProject is one project row for CountProfileReferences.
 type ProfileRefProject struct {
 	ID string
-	// ActiveProfile is the project's scion.io/active-profile annotation.
+	// ActiveProfile is the project's active-profile annotation (its activeProfile setting).
 	ActiveProfile string
 	// ProvidedByColocated is true when the co-located Runtime Broker is
 	// one of the project's providers.
