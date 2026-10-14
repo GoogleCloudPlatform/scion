@@ -34,18 +34,6 @@ import (
 // MessageScopeHost, whether the caller reads the message), so this file
 // holds no read decision of its own.
 
-// attachmentService returns the artifact service over this server's
-// artifacts.Host, for the attachment paths. Like artifactRefResolver it
-// asks the server for its store and storage on each call; the chat routes
-// that use it admit only request-authenticated users, so the host sees
-// only identities derived from request credentials.
-func (s *Server) attachmentService() *artifacts.Service {
-	svc := artifacts.NewService(newArtifactHost(s))
-	svc.SetLimits(s.artifactLimits)
-	svc.SetBackendProvider(s.artifactBackend)
-	return svc
-}
-
 // attachmentArtifactsReady reports whether attachments stored as artifacts
 // can be served: the artifacts settings section is enabled and the
 // artifact store and storage are installed. hub.artifacts is not required.
@@ -69,7 +57,7 @@ func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 	if !s.experimentEnabled(experiments.AttachmentArtifacts) || !s.attachmentArtifactsReady() {
 		return false
 	}
-	return newArtifactHost(s).PermitsMessageRead(ctx)
+	return s.attachmentCallerIsSession(ctx)
 }
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file
@@ -156,7 +144,7 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 	}
 	// Only a caller the artifact service lets read attachments (a session)
 	// sees them listed; user access tokens do not (ptone/scion#4596).
-	if !newArtifactHost(s).PermitsMessageRead(ctx) {
+	if !s.attachmentCallerIsSession(ctx) {
 		return byMessage
 	}
 	found, err := s.attachmentService().MessageAttachments(ctx, msgIDs)

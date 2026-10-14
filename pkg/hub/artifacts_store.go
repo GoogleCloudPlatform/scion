@@ -105,6 +105,27 @@ func (s *Server) artifactRefResolver() *artifacts.Service {
 	return svc
 }
 
+// attachmentService returns the artifact service over this server's
+// artifacts.Host, for the attachment paths. Like artifactRefResolver it
+// asks the server for its store and storage on each call; the chat routes
+// that use it admit only request-authenticated users, so the host sees
+// only identities derived from request credentials.
+func (s *Server) attachmentService() *artifacts.Service {
+	svc := artifacts.NewService(newArtifactHost(s))
+	svc.SetLimits(s.artifactLimits)
+	svc.SetBackendProvider(s.artifactBackend)
+	return svc
+}
+
+// attachmentCallerIsSession reports whether the request's caller is one the
+// artifact service lets read attachments (artifactHost.PermitsMessageRead:
+// a session of a user or the dev user). The attachment upload, send,
+// history and event paths use it to keep every other credential on the
+// AttachmentStore path (user access tokens: ptone/scion#4596).
+func (s *Server) attachmentCallerIsSession(ctx context.Context) bool {
+	return newArtifactHost(s).PermitsMessageRead(ctx)
+}
+
 // artifactBackend reports the server's current artifact store, resource
 // storage and hub id.
 func (s *Server) artifactBackend() artifacts.Backend {

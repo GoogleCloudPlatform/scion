@@ -599,7 +599,7 @@ func TestRetireAttachmentsBoundedPerPass(t *testing.T) {
 type staleStore struct{ Store }
 
 func (s staleStore) GetArtifact(ctx context.Context, id string) (*Artifact, error) {
-	a, err := s.Store.GetAttachment(ctx, id)
+	a, err := s.GetAttachment(ctx, id)
 	if err != nil {
 		return s.Store.GetArtifact(ctx, id)
 	}

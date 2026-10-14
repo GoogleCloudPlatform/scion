@@ -383,7 +383,7 @@ func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentit
 		// AttachmentStore only, so an artifact id gets the answer of an
 		// unknown one (user access tokens: ptone/scion#4596).
 		var svc *artifacts.Service
-		if s.attachmentArtifactsReady() && newArtifactHost(s).PermitsMessageRead(ctx) {
+		if s.attachmentArtifactsReady() && s.attachmentCallerIsSession(ctx) {
 			svc = s.attachmentService()
 		}
 		for _, aid := range in.Attachments {
