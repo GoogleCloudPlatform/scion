@@ -24,18 +24,19 @@ import (
 )
 
 // TestDMPeerToken_HubTokenRefusedAtUserPeerCheck pins that a hub-boundary
-// user access token holding user:read, alone or with inbox:write, is
-// refused at the user DM peer check: it gets the same answer as a missing
-// thread, and nothing is stored.
+// user access token holding user:read and inbox:write is refused at the
+// user DM peer check: the chat route's inbox:write selector check admits
+// it, and the peer check then gives it the same answer as a missing
+// thread, with nothing stored. A token without inbox:write is refused by
+// the selector check before the peer check runs (see
+// TestChatHumanDirectMessage_RequiresHubBoundary).
 func TestDMPeerToken_HubTokenRefusedAtUserPeerCheck(t *testing.T) {
-	for _, scopes := range [][]string{{"user:read"}, {"user:read", "inbox:write"}} {
-		e := setupDMPeerEnv(t)
-		want := e.nonParticipantRefusal(t, e.send)
-		key := userDMKey(t, e.alice.ID, e.bob.ID)
-		token := mintHubConfigToken(t, e.srv, e.alice.ID, hubBoundary(), scopes...)
-		rr := doRequestWithUAT(t, e.srv, token, http.MethodPost,
-			"/api/v1/chat/conversations/"+key+"/messages", map[string]string{"content": "hello"})
-		require.Equal(t, want, refusalOf(rr), "scopes %v", scopes)
-		e.assertNothingStored(t, e.alice, key)
-	}
+	e := setupDMPeerEnv(t)
+	want := e.nonParticipantRefusal(t, e.send)
+	key := userDMKey(t, e.alice.ID, e.bob.ID)
+	token := mintHubConfigToken(t, e.srv, e.alice.ID, hubBoundary(), "user:read", "inbox:write")
+	rr := doRequestWithUAT(t, e.srv, token, http.MethodPost,
+		"/api/v1/chat/conversations/"+key+"/messages", map[string]string{"content": "hello"})
+	require.Equal(t, want, refusalOf(rr))
+	e.assertNothingStored(t, e.alice, key)
 }
