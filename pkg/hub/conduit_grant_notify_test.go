@@ -179,3 +179,49 @@ func TestConduitGrantKeyChangeHintsHubHeldTargets(t *testing.T) {
 	require.Eventually(t, func() bool { _, ok := f.sciontool.Keys().Lookup(rot.KeyID); return ok },
 		10*time.Second, 10*time.Millisecond, "the agent installs the rotated-in key after the hint")
 }
+
+// revokedOnA rotates and activates a new key and caches the ring on b, then
+// revokes the outgoing key on a; b receives no event. It returns the
+// revoked kid.
+func revokedOnA(t *testing.T, n *grantKeyNodes) string {
+	t.Helper()
+	ctx := context.Background()
+	first, err := n.a.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	rot, err := n.a.RotateConduitGrantKey(ctx)
+	require.NoError(t, err)
+	n.clock.Advance(rot.ActivateAt.Sub(n.clock.Now()) + conduitGrantKeyRefresh)
+	require.True(t, publishedKIDs(t, n.b)[first.KeyID], "b caches a ring holding the outgoing key")
+	require.True(t, recheckHas(t, n.b, first.KeyID))
+	require.NoError(t, n.a.RevokeConduitGrantKey(ctx, first.KeyID))
+	return first.KeyID
+}
+
+// TestConduitGrantKeysHubDirectReadIsFresh: a target's key fetch served by
+// a node that has not received the change event, and still caches the old
+// ring, reflects a revocation stored by another node at once, through both
+// hub-direct paths (the grant-key route and the token-refresh response).
+func TestConduitGrantKeysHubDirectReadIsFresh(t *testing.T) {
+	n := newGrantKeyNodes(t, false) // b is not subscribed
+	kid := revokedOnA(t, n)
+	assert.True(t, publishedKIDs(t, n.b)[kid], "b's cache still holds the revoked kid")
+	keys, err := n.b.conduitHubDirectGrantKeys(context.Background())
+	require.NoError(t, err)
+	for _, k := range keys {
+		assert.NotEqual(t, kid, k.KeyID, "the grant-key route on b serves the revoked kid")
+	}
+	for _, k := range n.b.conduitRefreshGrantKeys(context.Background()) {
+		assert.NotEqual(t, kid, k.KeyID, "the token-refresh response on b carries the revoked kid")
+	}
+}
+
+// TestConduitGrantRecheckKeysFreshWithinSeconds: on a node that has not
+// received the change event, the re-check key set refuses a kid revoked by
+// another node once its cached ring is conduitGrantKeyRecheckFresh old.
+func TestConduitGrantRecheckKeysFreshWithinSeconds(t *testing.T) {
+	n := newGrantKeyNodes(t, false)
+	kid := revokedOnA(t, n)
+	assert.True(t, recheckHas(t, n.b, kid), "within conduitGrantKeyRecheckFresh the cached ring is used")
+	n.clock.Advance(conduitGrantKeyRecheckFresh)
+	assert.False(t, recheckHas(t, n.b, kid), "b's re-check set still accepts the revoked kid")
+}

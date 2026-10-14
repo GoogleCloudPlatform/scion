@@ -381,6 +381,26 @@ func (k *conduitGrantKeys) signer(ctx context.Context) (*grant.Signer, error) {
 	return ring.Signer(k.now())
 }
 
+// conduitGrantKeyRecheckFresh is the oldest a cached ring may be when
+// re-check verification uses it; an older one is read again first.
+const conduitGrantKeyRecheckFresh = 5 * time.Second
+
+// freshPublicKeys returns every published verification key from a fresh
+// read of the stored ring (one secret row), bypassing the cache, and
+// caches that read. The hub-direct channel (the grant-key route and the
+// token-refresh response) uses it, so a target's fetch reflects every
+// stored rotation and revocation whichever hub node serves it.
+func (k *conduitGrantKeys) freshPublicKeys(ctx context.Context) ([]grant.PublicKey, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.ring = nil
+	ring, err := k.currentLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ring.PublicKeys(k.now()), nil
+}
+
 // publicKeys returns every published verification key.
 func (k *conduitGrantKeys) publicKeys(ctx context.Context) ([]grant.PublicKey, error) {
 	k.mu.Lock()
@@ -528,9 +548,15 @@ func (k *conduitGrantKeys) invalidate() {
 // recheckKeys returns the verify-only key set for re-check verification:
 // the ring's keys and its retained public halves (grant.KeyRing.RecheckKeys).
 // It is never published and never verifies a stream grant at admission.
+//
+// A cached ring older than conduitGrantKeyRecheckFresh is read again first,
+// so a revocation stored by another node applies here within that time.
 func (k *conduitGrantKeys) recheckKeys(ctx context.Context) (grant.KeySet, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	if k.ring != nil && k.now().Sub(k.loadedAt) >= conduitGrantKeyRecheckFresh {
+		k.ring = nil
+	}
 	ring, err := k.currentLocked(ctx)
 	if err != nil {
 		return nil, err
@@ -625,6 +651,17 @@ func (s *Server) ConduitGrantPublicKeys(ctx context.Context) ([]grant.PublicKey,
 	return s.conduitGrantKeySet().publicKeys(ctx)
 }
 
+// conduitHubDirectGrantKeys returns the grant verification keys for the
+// hub-direct channel (GET /api/v1/conduit/grant-keys and the token-refresh
+// response), from a fresh read of the stored ring (freshPublicKeys). It
+// returns errConduitDisabled when the experiment is off.
+func (s *Server) conduitHubDirectGrantKeys(ctx context.Context) ([]grant.PublicKey, error) {
+	if !s.experimentEnabled(conduitExperiment) {
+		return nil, errConduitDisabled
+	}
+	return s.conduitGrantKeySet().freshPublicKeys(ctx)
+}
+
 // RotateConduitGrantKey adds a new grant signing key, activating after
 // ServerConfig.ConduitGrantKeyActivation, and retires every older key one
 // conduitGrantKeyDefaultOverlap after that. POST
@@ -647,8 +684,8 @@ type conduitGrantKeysResponse struct {
 }
 
 // handleConduitGrantKeys serves GET /api/v1/conduit/grant-keys: the public
-// verification keys only. Targets never trust this unauthenticated-to-them
-// fetch alone; they take keys from Welcome and the token refresh.
+// verification keys only, from a fresh read of the stored ring
+// (conduitHubDirectGrantKeys), so the answer is the same on every hub node.
 //
 // The experiment is checked per request (404 when off) rather than with
 // requireExperiment at route registration, the same as the gcs/object
@@ -663,7 +700,7 @@ func (s *Server) handleConduitGrantKeys(w http.ResponseWriter, r *http.Request) 
 		MethodNotAllowed(w, http.MethodGet)
 		return
 	}
-	keys, err := s.conduitGrantKeySet().publicKeys(r.Context())
+	keys, err := s.conduitHubDirectGrantKeys(r.Context())
 	if err != nil {
 		slog.Error("conduit grant keys unavailable", "error", err)
 		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant keys unavailable", nil)
