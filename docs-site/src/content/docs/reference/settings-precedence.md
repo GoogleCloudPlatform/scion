@@ -909,7 +909,7 @@ reincarnate's reprovision), and as the start/restart body's `image`. All of thes
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
 agent written before `CreateInputs` existed. A configure-page Save that only echoes the current
 image back writes nothing into `InlineConfig`. A template's image is **not** sent as the top tier.
-Historically, on create the broker read it from the hydrated template, at the template tier, and on
+Historically, on create the Runtime Broker read it from the hydrated template, at the template tier, and on
 a later start or restart from the template's own value recorded at provision. A template's image is
 now ignored (see
 [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).

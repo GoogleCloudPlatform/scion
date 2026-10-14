@@ -93,7 +93,7 @@ scion hub env set --broker=<broker> --always TZ Europe/Berlin
   - the broker settings' harness-config entry `env`;
   - the agent's persisted `scion-agent.json`.
 
-  For the other two sources, it logs a warning, and adds a start warning, for each non-empty value it drops that differs from the value the Hub sent. An empty `TZ: ""` marker never passes the broker host's `TZ` through.
+  For the other two sources, it logs a warning, and adds a start warning, for each non-empty value it drops that differs from the value the Hub sent. An empty `TZ: ""` marker never passes the Runtime Broker host's `TZ` through.
 - **`config.env` on update.** A `TZ` key in `config.env` on an agent `PATCH` is ignored with the warning `TZ in config.env is ignored; use explicitTimezone`.
 - **Secrets.** A secret that targets `TZ` is dropped with a warning.
 

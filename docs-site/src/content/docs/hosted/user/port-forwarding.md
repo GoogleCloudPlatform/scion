@@ -217,7 +217,7 @@ Administrators can control whether port forwarding and auto-expose are permitted
 3. **Harness-config env.** A template cannot set `SCION_*` keys.
 4. **The Hub default** `auto_expose_ports.enabled` (see below).
 
-A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
+A lower source applies only when no higher one sets the variable. The Hub default is not stored on the agent: it is sent on every start, so changing it affects every agent that inherits it at that agent's next start. A value set with `scion hub env set` outranks harness-config env but loses to the agent and project settings. An agent started from the `scion` CLI directly on a Runtime Broker host, rather than through the Hub, does not receive the Hub default. See [Settings Precedence](/scion/reference/settings-precedence/#a6-scion_auto_expose_ports-has-its-own-four-tier-order) for details.
 
 ### Global Server Configuration
 The Hub-wide default, the lowest tier above, is configured via `settings.yaml` under the operational (Layer-1) settings hierarchy:
