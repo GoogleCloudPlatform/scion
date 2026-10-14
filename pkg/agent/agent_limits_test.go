@@ -191,7 +191,9 @@ func TestStart_RewriteDoesNotPersistDefaultLimits(t *testing.T) {
 }
 
 // The HarnessAuth rewrite of scion-agent.json in Start persists the agent's
-// own limits only.
+// own limits only. The harness auth check below is only a precondition: the
+// provision write already stores it, so it does not prove this rewrite ran;
+// the limits checks hold whichever write was last.
 func TestStart_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	project, _ := envFixture(t, envSettingsV1)
 	withAuth := func(o *api.StartOptions) { o.HarnessAuth = "api-key" }
@@ -200,7 +202,7 @@ func TestStart_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	wantLimitEnv(t, "first start", rc, "10", "100", "1h")
 	cfg, raw := persistedEnvAgentConfig(t, project)
 	if cfg.AuthSelectedType != "api-key" {
-		t.Fatalf("test precondition: Start did not rewrite scion-agent.json with the harness auth: %s", raw)
+		t.Fatalf("test precondition: harness auth not persisted in scion-agent.json: %s", raw)
 	}
 	wantPersistedLimits(t, "after HarnessAuth rewrite", project, 0, 0, "")
 
@@ -211,7 +213,7 @@ func TestStart_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 
 // finishProvision's HarnessAuth rewrite (a provision-only create) persists
 // the agent's own limits only, while the returned config carries the
-// effective ones.
+// effective ones. As above, the harness auth check is only a precondition.
 func TestProvision_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	project, _ := envFixture(t, envSettingsV1)
 	mockRT := &runtime.MockRuntime{
@@ -234,7 +236,7 @@ func TestProvision_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	}
 	persisted, raw := persistedEnvAgentConfig(t, project)
 	if persisted.AuthSelectedType != "api-key" {
-		t.Fatalf("test precondition: finishProvision did not rewrite scion-agent.json: %s", raw)
+		t.Fatalf("test precondition: harness auth not persisted in scion-agent.json: %s", raw)
 	}
 	wantPersistedLimits(t, "after finishProvision rewrite", project, 0, 0, "")
 }

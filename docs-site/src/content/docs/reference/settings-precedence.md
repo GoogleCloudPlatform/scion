@@ -672,7 +672,7 @@ only what is still unset:
 | Highest | the agent-create request / inline config |
 | | the project's `scion.io/default-*` annotation (e.g., `scion.io/default-harness-config`, `scion.io/default-model`, `scion.io/default-thinking-level`) |
 | | the template's `scion-agent.yaml` (for `harness_config`: only a declared `harness_config` / `default_harness_config`, never the template's `harness` type) |
-| | hub `agent_defaults` — **see [Bucket 4](#bucket-4--operatoradmin-settings), the position is not settled** |
+| | hub `agent_defaults`: for `max_turns`, `max_model_calls` and `max_duration`, applied on every start at this rank in Postgres mode (in file mode the hub sends nothing, so the broker's `settings.yaml` defaults apply alone); for `harness_config`, `model` and `thinking_level`, resolved at create. See [Where hub `agent_defaults` rank](#where-hub-agent_defaults-rank) |
 | Lowest | the broker's own `settings.yaml` defaults (e.g., `default_max_turns` / `default_max_model_calls` / `default_max_duration`) |
 
 For `model`, one more layer sits below the template on the broker. `ProvisionAgent`
@@ -741,7 +741,7 @@ contributes at different ranks in different deployments. Same defect, same remed
 positions, do not manufacture a rung.
 
 Stated against the scalar table above: **"hub `agent_defaults` sit above the broker's own
-`settings.yaml`" is true of the three scalars, and for `resources` it reaches at most
+`settings.yaml`" is true of the three scalars in Postgres mode, and for `resources` it reaches at most
 `default_resources` — and in file mode not even that.** The same broker file also supplies profile
 and harness-override resources, merged *above* the template, so those beat the hub tier per field
 in either mode, while broker `default_max_turns` **loses** to hub `default_max_turns`. The hub tier
