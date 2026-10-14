@@ -490,3 +490,42 @@ func TestSettle_ClaimBetweenReleaseAndReread_ReserveAfter_Checked(t *testing.T) 
 	assert.Nil(t, sf.held(t))
 	assert.EqualValues(t, 1, brokerReservationCount(t, sf.s, sf.brokerID))
 }
+
+// A superseding start refused at a full instance (429) after the settle's
+// release: no reservation is ever created for the agent (no settle
+// re-assert, no backfill, nothing from the sweep or a later heartbeat). Its
+// container status stays stop_queued with run intent running, display only,
+// until the agent's next lifecycle action; here a start once a slot frees,
+// which reserves with the cap check and replaces the status.
+func TestSettle_RefusedSupersedingStart_NoReservationUntilNextAction(t *testing.T) {
+	sf := newSettleFixture(t, "refused-start")
+	setBrokerAgentCeiling(t, sf.s, 1)
+	filler := sf.addAgent("refused-start-filler", "running", "working")
+	var code int
+	sf.hook.afterRelease = func() {
+		seedSlot(t, sf.s, sf.brokerID, filler.ID)
+		code = doRequest(t, sf.srv, http.MethodPost, "/api/v1/agents/"+sf.agent.ID+"/start", nil).Code
+	}
+	sf.fault.Arm()
+
+	sf.settle()
+	require.Equal(t, http.StatusTooManyRequests, code)
+	assert.Nil(t, sf.held(t))
+
+	sf.settle() // a later heartbeat
+	sf.srv.ReconcileStaleBrokerQuotaReservations(context.Background())
+	assert.Nil(t, sf.held(t), "no reservation is ever created for the refused start")
+	got := getAgent(t, sf.s, sf.agent.ID)
+	assert.Equal(t, containerStatusStopQueued, got.ContainerStatus, "display only, until the next lifecycle action")
+	assert.Equal(t, store.RunIntentRunning, got.RunIntent)
+
+	require.NoError(t, sf.s.ReleaseReservation(context.Background(), brokerLimitDefID(t, sf.s), filler.ID))
+	sf.disp.start = func(ctx context.Context, cur *store.Agent) error {
+		cur.ContainerStatus = "running"
+		return nil
+	}
+	require.Equal(t, http.StatusOK, doRequest(t, sf.srv, http.MethodPost, "/api/v1/agents/"+sf.agent.ID+"/start", nil).Code)
+	require.NotNil(t, sf.held(t), "the next start reserves with the cap check")
+	assert.Equal(t, "running", getAgent(t, sf.s, sf.agent.ID).ContainerStatus, "stop_queued is replaced")
+	assert.Zero(t, sf.backstops(backstopSiteSettle))
+}

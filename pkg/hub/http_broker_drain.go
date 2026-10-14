@@ -166,9 +166,10 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 				s.agentLifecycleLog.Info("Queued stop: the stop result settled it during the release; nothing re-asserted", "agent_id", a.ID)
 				continue
 			}
-			if released && after.RunIntent == store.RunIntentRunning {
+			if released && after.RunIntent == store.RunIntentRunning && supersededAfter(after.RunIntentAt, a.RunIntentAt) {
 				// The release was proven safe on the locked row (no start
-				// held the slot), and a start superseded the stop after it.
+				// held the slot), and a newer start (a running intent
+				// written after the stop's) superseded the stop after it.
 				// That start reserves with the cap check; a re-assert here
 				// would hand it an unchecked slot at a full instance.
 				s.agentLifecycleLog.Info("Queued stop: a start superseded it after the release; the start's own reserve decides", "agent_id", a.ID)
@@ -195,6 +196,12 @@ func (s *Server) settleQueuedStops(ctx context.Context, brokerID string, prev *s
 // conditional release evaluates on the locked row.
 func queuedStopStillIntended(a *store.Agent) bool {
 	return store.QueuedStopStillIntended(a)
+}
+
+// supersededAfter reports whether a run intent written at at is newer than
+// the queued stop's intent written at stopAt (both set).
+func supersededAfter(at, stopAt *time.Time) bool {
+	return at != nil && stopAt != nil && at.After(*stopAt)
 }
 
 // queuedStopAppliedElsewhere reports whether after shows the queued stop
