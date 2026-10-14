@@ -58,15 +58,20 @@ func TestRunAll_OrderAndCounts(t *testing.T) {
 	}
 }
 
-// An error, a panic and a timeout each give one could_not_run block finding.
+// An error, a panic and a timeout each give one could_not_run block finding:
+// findings returned together with an error are dropped, and a timed-out
+// check's late result is discarded.
 func TestRunAll_CouldNotRun(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
 	r := NewRegistry()
-	r.Register(check("c.err", func(context.Context, Env) ([]Finding, error) { return nil, errors.New("boom") }))
+	r.Register(check("c.err", func(context.Context, Env) ([]Finding, error) {
+		return []Finding{{Code: "c.err.partial", Severity: SeverityInfo}}, errors.New("boom")
+	}))
 	r.Register(check("c.panic", func(context.Context, Env) ([]Finding, error) { panic("bad") }))
-	r.Register(Check{Name: "c.slow", Timeout: 10 * time.Millisecond, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
-		<-ctx.Done()
-		time.Sleep(50 * time.Millisecond)
-		return nil, nil
+	r.Register(Check{Name: "c.slow", Timeout: 10 * time.Millisecond, Run: func(context.Context, Env) ([]Finding, error) {
+		<-release // returns only after RunAll is done: its result is late
+		return []Finding{{Code: "c.slow.late", Severity: SeverityInfo}}, nil
 	}})
 	rep := r.RunAll(context.Background(), Env{})
 	want := map[string]string{"c.err": "boom", "c.panic": "panic: bad", "c.slow": "timed out"}
@@ -90,6 +95,34 @@ func TestRunAll_InvalidFinding(t *testing.T) {
 	if len(rep.Findings) != 2 || rep.Blocking != 2 ||
 		rep.Findings[0].Code != "c.bad.invalid_finding" || rep.Findings[1].Code != "c.other.invalid_finding" {
 		t.Fatalf("findings %+v, want c.bad.invalid_finding and c.other.invalid_finding, both block", rep.Findings)
+	}
+}
+
+// A cancelled parent context reads as cancelled, not as a timeout.
+func TestRunAll_ParentCancelled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := NewRegistry()
+	r.Register(Check{Name: "c.wait", Timeout: time.Hour, Run: func(ctx context.Context, _ Env) ([]Finding, error) {
+		<-ctx.Done()
+		select {} // never returns: only the select in RunAll decides
+	}})
+	rep := r.RunAll(ctx, Env{})
+	if len(rep.Findings) != 1 || !strings.Contains(rep.Findings[0].Message, "cancelled") {
+		t.Fatalf("findings %+v, want one could_not_run saying cancelled", rep.Findings)
+	}
+}
+
+// Findings with the same check and code are ordered by their subjects.
+func TestRunAll_SubjectTieBreak(t *testing.T) {
+	r := NewRegistry()
+	r.Register(check("c.tie", findings(
+		Finding{Code: "c.tie.x", Severity: SeverityWarn, Subjects: []string{"p/b"}},
+		Finding{Code: "c.tie.x", Severity: SeverityWarn, Subjects: []string{"p/a"}},
+	)))
+	rep := r.RunAll(context.Background(), Env{})
+	if got := rep.Findings[0].Subjects[0] + "," + rep.Findings[1].Subjects[0]; got != "p/a,p/b" {
+		t.Fatalf("subject order %s, want p/a,p/b", got)
 	}
 }
 

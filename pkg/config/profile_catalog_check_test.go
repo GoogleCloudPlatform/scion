@@ -294,6 +294,15 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 			},
 		},
 		{
+			// A profile referenced only by a project activeProfile, whose
+			// runtime the stored runtimes drop: a change with no agents.
+			name: "runtime missing, project reference only", active: "local", fileProfiles: []string{"gke", "local-nfs"},
+			after: []string{"gke", "local", "remote:kubernetes", "local-nfs"}, afterRT: []string{"docker"}, projectActive: map[string]string{"p1": "remote"},
+			want: []ProfileCatalogFinding{
+				{Kind: ProfileFindingProfileRuntimeMissing, Profile: "remote", Source: ProfileSourceBuiltin},
+			},
+		},
+		{
 			// The default moves onto a profile whose runtime was already
 			// missing: the agents without a saved profile worked before, so
 			// the change breaks them (not pre-existing).
@@ -356,6 +365,18 @@ func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("findings with a global overlay installed:\n got  %+v\n want %+v", got, want)
+	}
+}
+
+// A nil before with a missing runtime: the runtime finding is not
+// pre-existing, and nothing dereferences the missing before.
+func TestCheckProfileCatalog_NilBeforeRuntimeMissing(t *testing.T) {
+	globalDir := catalogHome(t, "gke", "gke", "local-nfs")
+	after := catalogViewRT(t, globalDir, []string{"gke", "local-nfs"}, []string{"k8s"})
+	got := CheckProfileCatalog(after, nil, catalogOrigins(t, globalDir), nil, map[string]int{"gke": 1, "": 2})
+	want := []ProfileCatalogFinding{{Kind: ProfileFindingProfileRuntimeMissing, Profile: "gke", Agents: 3, Source: ProfileSourceFile}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings:\n got  %+v\n want %+v", got, want)
 	}
 }
 

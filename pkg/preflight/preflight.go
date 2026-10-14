@@ -20,6 +20,7 @@ package preflight
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -61,7 +62,9 @@ type Finding struct {
 }
 
 // Check is a named check. Run returns the check's findings; an error, a
-// timeout or a panic becomes one block finding "<name>.could_not_run".
+// timeout or a panic becomes one block finding "<name>.could_not_run", whose
+// message quotes the error or the panic value, so Run must return errors
+// that name what failed (its class) without settings values.
 type Check struct {
 	Name    string
 	Timeout time.Duration
@@ -137,17 +140,21 @@ func (r *Registry) Register(c Check) {
 // finding's Check, and sorts findings by check, code and subjects.
 func (r *Registry) RunAll(ctx context.Context, env Env) Report {
 	r.mu.Lock()
-	names := make([]string, 0, len(r.checks))
-	for name := range r.checks {
-		names = append(names, name)
+	checks := make([]Check, 0, len(r.checks))
+	for _, c := range r.checks {
+		checks = append(checks, c)
 	}
-	checks := r.checks
 	r.mu.Unlock()
-	sort.Strings(names)
+	sort.Slice(checks, func(i, j int) bool { return checks[i].Name < checks[j].Name })
+	names := make([]string, 0, len(checks))
+	for _, c := range checks {
+		names = append(names, c.Name)
+	}
 
 	rep := Report{Version: ReportVersion, Checks: names, Findings: []Finding{}}
-	for _, name := range names {
-		for _, f := range runOne(ctx, checks[name], env) {
+	for _, c := range checks {
+		name := c.Name
+		for _, f := range runOne(ctx, c, env) {
 			if !f.Severity.valid() || !strings.HasPrefix(f.Code, name+".") {
 				f = Finding{Check: name, Code: name + ".invalid_finding", Severity: SeverityBlock,
 					Message: fmt.Sprintf("check %s returned an invalid finding: severity %q, code %q", name, f.Severity, f.Code)}
@@ -202,7 +209,11 @@ func runOne(ctx context.Context, c Check, env Env) []Finding {
 		}
 		return res.findings
 	case <-ctx.Done():
-		return []Finding{couldNotRun(c.Name, fmt.Sprintf("timed out after %s", c.Timeout))}
+		why := fmt.Sprintf("timed out after %s", c.Timeout)
+		if errors.Is(ctx.Err(), context.Canceled) {
+			why = "cancelled"
+		}
+		return []Finding{couldNotRun(c.Name, why)}
 	}
 }
 
