@@ -574,17 +574,23 @@ func TestUnmarkNotificationDispatched_RefusedAfterOutcome(t *testing.T) {
 	assert.False(t, reverted, "a missing row is not reverted")
 }
 
-// The first recorded outcome wins: a second write, of either value, is
-// refused without error and leaves the first outcome in place
-// (ptone/scion#5030).
-func TestSetNotificationDispatchOutcome_FirstWriterWins(t *testing.T) {
+// Racing outcome writes keep the most informative outcome: delivered
+// replaces failed (the message did reach the subscriber), and nothing
+// replaces delivered or re-applies failed. A refused write returns no
+// error and leaves the recorded outcome in place (ptone/scion#5030).
+func TestSetNotificationDispatchOutcome_DeliveredBeatsFailed(t *testing.T) {
 	ctx := context.Background()
 	s := newTestNotificationStore(t)
 
-	cases := []struct{ first, second string }{
-		{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed},
-		{store.NotificationOutcomeFailed, store.NotificationOutcomeDelivered},
-		{store.NotificationOutcomeDelivered, store.NotificationOutcomeDelivered},
+	cases := []struct {
+		first, second string
+		wantApplied   bool
+		want          string
+	}{
+		{store.NotificationOutcomeDelivered, store.NotificationOutcomeFailed, false, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeFailed, store.NotificationOutcomeDelivered, true, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeDelivered, store.NotificationOutcomeDelivered, false, store.NotificationOutcomeDelivered},
+		{store.NotificationOutcomeFailed, store.NotificationOutcomeFailed, false, store.NotificationOutcomeFailed},
 	}
 	for _, tc := range cases {
 		t.Run(tc.first+"_then_"+tc.second, func(t *testing.T) {
@@ -595,11 +601,11 @@ func TestSetNotificationDispatchOutcome_FirstWriterWins(t *testing.T) {
 
 			applied, err = s.SetNotificationDispatchOutcome(ctx, id, tc.second)
 			require.NoError(t, err, "a refused second outcome is not an error")
-			assert.False(t, applied, "a second outcome must not apply")
+			assert.Equal(t, tc.wantApplied, applied, "whether the second outcome applies")
 
 			got, err := s.GetNotification(ctx, id)
 			require.NoError(t, err)
-			assert.Equal(t, tc.first, got.DispatchOutcome, "the first outcome must be kept")
+			assert.Equal(t, tc.want, got.DispatchOutcome, "the recorded outcome")
 			assert.True(t, got.Dispatched)
 		})
 	}

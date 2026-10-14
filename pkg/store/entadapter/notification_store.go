@@ -652,12 +652,14 @@ func (s *NotificationStore) RecordNotificationDispatchAttempt(ctx context.Contex
 }
 
 // SetNotificationDispatchOutcome records a terminal dispatch outcome and sets
-// dispatched=true so the sweep stops considering the notification. The first
-// outcome wins (ptone/scion#5030): the update is conditional on an empty
-// dispatch_outcome, so it applies only while no outcome is recorded and racing
-// writers cannot replace delivered with failed or the reverse. Returns false
-// (no error) when an outcome was already recorded, and ErrNotFound when the
-// row does not exist.
+// dispatched=true so the sweep stops considering the notification. The update
+// is conditional so racing writers keep the most informative outcome
+// (ptone/scion#5030): delivered is a fact (the broker accepted the message)
+// and failed is a verdict reached by a caller that did not see it, so a
+// delivered write applies unless the row is already delivered (it replaces
+// failed), and a failed write applies only while no outcome is recorded.
+// Returns false (no error) when the write is refused, and ErrNotFound when
+// the row does not exist.
 func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (bool, error) {
 	if outcome != store.NotificationOutcomeDelivered && outcome != store.NotificationOutcomeFailed {
 		return false, store.ErrInvalidInput
@@ -666,10 +668,16 @@ func (s *NotificationStore) SetNotificationDispatchOutcome(ctx context.Context, 
 	if err != nil {
 		return false, err
 	}
+	// failed only over no outcome; delivered over no outcome or failed, never
+	// re-applied over delivered.
+	pred := notification.DispatchOutcomeEQ("")
+	if outcome == store.NotificationOutcomeDelivered {
+		pred = notification.DispatchOutcomeNEQ(store.NotificationOutcomeDelivered)
+	}
 	affected, err := s.client.Notification.Update().
 		Where(
 			notification.IDEQ(uid),
-			notification.DispatchOutcomeEQ(""),
+			pred,
 		).
 		SetDispatched(true).
 		SetDispatchOutcome(outcome).

@@ -1045,6 +1045,15 @@ func runDrainVsPrimary(t *testing.T, age time.Duration) (*notificationTestEnv, *
 		defer close(drainDone)
 		env.nd.RetryDispatch(ctx, &pending[0])
 	}()
+	// A failure below must not leave the drain goroutine blocked in the
+	// gate: release it and wait for it before the env cleanups (LIFO) close
+	// the store.
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(gated.release) }) }
+	t.Cleanup(func() {
+		release()
+		<-drainDone
+	})
 	select {
 	case <-gated.entered:
 	case <-drainDone:
@@ -1058,7 +1067,7 @@ func runDrainVsPrimary(t *testing.T, age time.Duration) (*notificationTestEnv, *
 	require.Equal(t, store.NotificationOutcomeDelivered, getNotification(t, env, notifID).DispatchOutcome)
 
 	// The drain's attempt now fails.
-	close(gated.release)
+	release()
 	<-drainDone
 	return env, gated, notifID
 }
@@ -1097,7 +1106,8 @@ func TestRetryDispatch_DrainFailureAfterPrimaryDelivered_KeepsDelivered(t *testi
 
 // A drain attempt that fails past notificationRetryMaxAge gives up with
 // the failed outcome; when the primary dispatch has already recorded
-// delivered, the first outcome is kept (ptone/scion#5030).
+// delivered, the failed write is refused and delivered is kept
+// (ptone/scion#5030).
 func TestRetryDispatch_DrainGiveUpAfterPrimaryDelivered_KeepsDelivered(t *testing.T) {
 	env, gated, notifID := runDrainVsPrimary(t, notificationRetryMaxAge+time.Hour)
 	assertDeliveredOnce(t, env, gated, notifID)

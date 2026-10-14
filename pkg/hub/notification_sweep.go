@@ -242,8 +242,10 @@ func (nd *NotificationDispatcher) recordAttempt(ctx context.Context, notificatio
 
 // setOutcome stores the notification's terminal dispatch outcome. Like
 // revertClaim it runs on a context the caller's deadline cannot cancel, so an
-// attempt that ended at that deadline still records its outcome. The first
-// recorded outcome wins (ptone/scion#5030); a later one is dropped quietly.
+// attempt that ended at that deadline still records its outcome. The store
+// keeps the most informative outcome (ptone/scion#5030): delivered replaces
+// failed, and a refused write (failed over any outcome, delivered over
+// delivered) is dropped quietly.
 func (nd *NotificationDispatcher) setOutcome(ctx context.Context, notificationID, outcome string) {
 	octx, cancel := context.WithTimeout(context.WithoutCancel(ctx), revertClaimTimeout)
 	defer cancel()

@@ -2469,10 +2469,12 @@ type NotificationStore interface {
 	// SetNotificationDispatchOutcome records a notification's terminal
 	// dispatch outcome (NotificationOutcomeDelivered or
 	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
-	// not pick it up again. The first outcome wins: the write applies only
-	// while the outcome is still empty, so concurrent writers cannot replace
-	// one another's outcome. applied reports whether this call recorded it;
-	// (false, nil) means an outcome was already recorded and is kept.
+	// not pick it up again. Concurrent writers keep the most informative
+	// outcome: a delivered write applies unless the outcome is already
+	// delivered (it replaces failed, since the message did reach the
+	// subscriber), and a failed write applies only while no outcome is
+	// recorded. applied reports whether this call recorded it; (false, nil)
+	// means the write was refused and the recorded outcome is kept.
 	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
 	// notification doesn't exist.
 	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
