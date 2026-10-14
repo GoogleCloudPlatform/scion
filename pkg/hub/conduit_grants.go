@@ -302,8 +302,9 @@ func (k *conduitGrantKeys) retention() time.Duration {
 // creating it when absent. A reloaded ring is settled (grant.KeyRing.Settle):
 // a key with an activated successor loses its seed, retired keys move to
 // the verify-only retained set, and retention only grows. A settled ring
-// that changed is written back with a compare-and-swap; losing that race
-// only means another writer got there first. Callers must hold k.mu.
+// that changed is written back with a compare-and-swap. If that write loses
+// to another writer, the newer stored ring is read once more and used
+// instead. Callers must hold k.mu.
 func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, error) {
 	now := k.now()
 	if k.ring != nil && now.Sub(k.loadedAt) < conduitGrantKeyRefresh {
@@ -313,10 +314,23 @@ func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, e
 	if err == nil {
 		next := cloneKeyRing(ring)
 		if next.Settle(now, k.retention()) {
-			if _, cerr := k.store.CompareAndSwap(ctx, next, rev); cerr != nil {
+			applied, cerr := k.store.CompareAndSwap(ctx, next, rev)
+			switch {
+			case cerr != nil:
 				slog.Warn("Conduit grant key ring: could not store the settled ring", "error", cerr)
+				ring = next
+			case applied:
+				ring = next
+			default:
+				// Another writer stored a newer ring (for example a
+				// revocation): read that one instead of caching a ring
+				// settled from the superseded revision. It is settled in
+				// memory only; the next load writes it back.
+				if ring, _, err = k.store.Load(ctx); err == nil {
+					ring = cloneKeyRing(ring)
+					ring.Settle(now, k.retention())
+				}
 			}
-			ring = next
 		}
 	}
 	if errors.Is(err, store.ErrNotFound) {

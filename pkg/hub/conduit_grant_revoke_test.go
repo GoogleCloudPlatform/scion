@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 )
 
 // Grant key retention, seed removal and revocation on the hub (design §3.5,
@@ -206,4 +207,50 @@ func TestConduitGrantRingSingleKeyNotRewritten(t *testing.T) {
 	_, after, err := mem.Load(ctx)
 	require.NoError(t, err)
 	assert.Equal(t, rev, after, "the single-key ring was rewritten")
+}
+
+// racingGrantKeyStore runs beforeCAS once, just before the first
+// compare-and-swap reaches the store: a concurrent writer that gets there
+// first.
+type racingGrantKeyStore struct {
+	*memoryConduitGrantKeyStore
+	beforeCAS func()
+}
+
+func (r *racingGrantKeyStore) CompareAndSwap(ctx context.Context, ring *grant.KeyRing, rev int) (bool, error) {
+	if f := r.beforeCAS; f != nil {
+		r.beforeCAS = nil
+		f()
+	}
+	return r.memoryConduitGrantKeyStore.CompareAndSwap(ctx, ring, rev)
+}
+
+// TestConduitGrantRingLostSettleWriteRereads: when a node's write of a
+// settled ring loses to another node's revocation, the node uses the newer
+// stored ring, not the one it settled from the superseded revision, so it
+// does not cache the revoked kid.
+func TestConduitGrantRingLostSettleWriteRereads(t *testing.T) {
+	ctx := context.Background()
+	clk := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	a := newConduitGrantKeys(mem, clk.Now)
+	first, err := a.signer(ctx)
+	require.NoError(t, err)
+	rot, err := a.rotate(ctx, 15*time.Minute, time.Hour)
+	require.NoError(t, err)
+	clk.Advance(rot.ActivateAt.Sub(clk.Now()) + time.Second) // b's next load settles the ring
+
+	racing := &racingGrantKeyStore{memoryConduitGrantKeyStore: mem}
+	racing.beforeCAS = func() { require.NoError(t, a.revoke(ctx, first.KeyID)) }
+	b := newConduitGrantKeys(racing, clk.Now)
+	pubs, err := b.publicKeys(ctx)
+	require.NoError(t, err)
+	require.Nil(t, racing.beforeCAS, "b's load did not try to store a settled ring")
+	for _, k := range pubs {
+		assert.NotEqual(t, first.KeyID, k.KeyID, "b caches the kid revoked while its settle write was in flight")
+	}
+	recheck, err := b.recheckKeys(ctx)
+	require.NoError(t, err)
+	_, ok := recheck.Lookup(first.KeyID)
+	assert.False(t, ok)
 }
