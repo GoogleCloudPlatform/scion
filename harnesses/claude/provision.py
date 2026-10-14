@@ -423,6 +423,32 @@ STDIO_CWD_WRAPPER = 'cd -- "$1" || exit 127; shift; exec "$@"'
 
 _PLUGIN_PLACEHOLDER_RE = re.compile(r"\$\{PLUGIN_(ROOT|DATA)\}")
 
+# Paths Claude loads by default from a plugin root (claude 2.1.296: probed
+# with `claude plugin details`, and read from the binary's plugin loader).
+# An Agent Plugins bundle gets no Claude component beyond its skills/ and the
+# Go-validated MCP servers in the generated manifest (design 3.1), so these
+# are never installed, and a bundle that ships one gets a warning:
+#   .mcp.json         MCP servers, loaded in addition to manifest mcpServers
+#   .lsp.json         LSP server processes
+#   hooks/            hooks/hooks.json: commands run on Claude events
+#   commands/         slash commands (loaded as skills)
+#   agents/           subagents
+#   monitors/         monitors/monitors.json: unsandboxed background scripts
+#   output-styles/    output styles (change the system prompt)
+#   workflows/        plugin workflows
+#   themes/           themes
+#   settings.json     plugin settings
+#   .claude-plugin/   replaced by the generated manifest
+# Kept: skills/ (the spec component), plugin.json and mcp.json (Claude
+# ignores both), and every other file, which MCP servers may need. bin/ is
+# kept too: stdio commands live there (./bin/x), and Claude appends a
+# plugin's bin/ to the PATH of its Bash tool (append only, so it cannot
+# shadow existing commands).
+CLAUDE_STRIPPED_PATHS = (
+    ".mcp.json", ".lsp.json", "hooks", "commands", "agents", "monitors",
+    "output-styles", "workflows", "themes", "settings.json",
+)
+
 
 class McpServerSkipped(Exception):
     """A server that cannot be expressed faithfully in Claude's config."""
@@ -452,6 +478,19 @@ def _translate_cwd(cwd: str | None, root: str, data: str) -> str:
     return _expand_plugin_placeholders(cwd, root, data)
 
 
+def _stripped_ref(path: str | None) -> str | None:
+    """The stripped top-level entry a plugin-relative path ("./x/...",
+    "${PLUGIN_ROOT}/x/...") points into, or None."""
+    if not path:
+        return None
+    for prefix in ("./", "${PLUGIN_ROOT}/"):
+        if path.startswith(prefix):
+            first = os.path.normpath(path[len(prefix):]).split("/", 1)[0]
+            if first in CLAUDE_STRIPPED_PATHS or first == CLAUDE_PLUGIN_MANIFEST_DIR:
+                return first
+    return None
+
+
 def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any]:
     """Translate one Go-validated mcp.json server into a Claude mcpServers
     entry (design 3.2). Raises McpServerSkipped when the server holds
@@ -475,6 +514,9 @@ def translate_mcp_server(server: dict[str, Any], data_dir: str) -> dict[str, Any
             or (cwd is not None and _has_foreign_placeholder(cwd, True))
         ):
             raise McpServerSkipped("placeholder")
+        stripped = _stripped_ref(command) or (_stripped_ref(cwd) if cwd else None)
+        if stripped:
+            raise McpServerSkipped(f"it uses {stripped}, which is not installed for claude")
         if command.startswith("./"):
             command = f"{root}/{command[2:]}"
         out_env = {k: _expand_plugin_placeholders(v, root, data_dir) for k, v in env.items()}
@@ -635,19 +677,23 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
     def release_stale(self) -> None:
         """Stale ownership (design 2.5): a plugin Scion installed now shares
         its name with a skill (a template added one, and Go merged it into
-        the plugin's directory on re-provision). Remove only the generated
-        .claude-plugin/ so Claude treats the directory as that skill again,
-        drop the plugin from the state file, and warn. Runs before
+        the plugin's directory on re-provision). Remove the generated
+        .claude-plugin/ so Claude treats the directory as that skill again
+        (and the root plugin.json when it is the bundle's own, so the Go
+        skills-dir skips do not hide the skill), drop the plugin from the
+        state file, and warn. Runs before
         reconcile_agent_plugins, which then reports the conflict."""
         recorded = self._recorded_plugins()
         stale = sorted(n for n in self.conflicts if n in recorded)
         if not stale:
             return
         for name in stale:
-            gen = os.path.join(self.target(name), CLAUDE_PLUGIN_MANIFEST_DIR)
-            if os.path.lexists(gen) and not os.path.islink(self.target(name)):
+            target = self.target(name)
+            gen = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
+            if os.path.lexists(gen) and not os.path.islink(target):
                 try:
                     _remove_path(gen)
+                    self._remove_stray_manifest(name)
                 except OSError as exc:
                     self.ctx.warn(f"agent plugin {name}: cannot remove {gen}: {exc}")
                     continue
@@ -663,6 +709,23 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             "plugins": recorded,
         })
 
+    def _remove_stray_manifest(self, name: str) -> None:
+        """Remove the root plugin.json left in a released dir when it is
+        byte-identical to the staged bundle's. Otherwise the Go skills-dir
+        skips (design 2.7) would keep treating the template skill that now
+        owns the dir as a plugin dir."""
+        stray = os.path.join(self.target(name), AGENT_PLUGIN_MANIFEST)
+        staged = os.path.join(self.ctx.inputs_dir, "plugins", name, AGENT_PLUGIN_MANIFEST)
+        try:
+            if os.path.islink(stray) or os.path.islink(staged):
+                return
+            with open(stray, "rb") as a, open(staged, "rb") as b:
+                same = a.read() == b.read()
+        except OSError:
+            return
+        if same:
+            os.unlink(stray)
+
     def detect_version(self) -> tuple[int, int, int] | None:
         if self._claude_version is None:
             proc = scion_harness.run_cli(
@@ -675,14 +738,13 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
     def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
         name = plugin.name
         target = self.target(name)
+        # The reason is the whole message: reconcile reports it once.
         if plugin.skills_dir_conflict:
-            msg = f"plugin {name} not installed for claude: a skill named {name} is already installed in the skills dir"
-            self.ctx.warn(msg)
-            raise scion_harness.PluginInstallError("skills dir conflict")
+            raise scion_harness.PluginInstallError(
+                f"plugin {name} not installed for claude: a skill named {name} is already installed in the skills dir")
         if os.path.lexists(target) and name not in self.owned:
-            msg = f"plugin {name} not installed for claude: {target} exists and was not installed by Scion"
-            self.ctx.warn(msg)
-            raise scion_harness.PluginInstallError("skills dir entry not owned by Scion")
+            raise scion_harness.PluginInstallError(
+                f"plugin {name} not installed for claude: {target} exists and was not installed by Scion")
         if os.path.islink(target):
             raise scion_harness.PluginInstallError(f"{target} is a symlink")
 
@@ -690,15 +752,24 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         data_dir = self.data_dir(name)
         manifest = build_claude_manifest(self.ctx, plugin, data_dir)
 
-        os.makedirs(self.skills_dir, exist_ok=True)
         tmp = os.path.join(self.skills_dir, f".{name}.tmp")
         old = os.path.join(self.skills_dir, f".{name}.old")
         try:
+            # PLUGIN_DATA (spec 9.1): created before launch, private to the
+            # agent user, kept across updates and removals. Created first,
+            # so nothing can fail after the new dir is in place.
+            os.makedirs(data_dir, mode=0o700, exist_ok=True)
+            os.chmod(data_dir, 0o700)
+            os.makedirs(self.skills_dir, exist_ok=True)
             for leftover in (tmp, old):
                 _remove_path(leftover)
             shutil.copytree(plugin.staged_dir, tmp, symlinks=True)
+            for rel in (*CLAUDE_STRIPPED_PATHS, CLAUDE_PLUGIN_MANIFEST_DIR):
+                path = os.path.join(tmp, rel)
+                if os.path.lexists(path):
+                    _remove_path(path)
+                    self.ctx.warn(f"agent plugin {name}: ignored claude-specific {rel} in bundle")
             gen = os.path.join(tmp, CLAUDE_PLUGIN_MANIFEST_DIR)
-            _remove_path(gen)  # a bundle-shipped .claude-plugin/ is replaced
             os.makedirs(gen)
             scion_harness.atomic_write_json(os.path.join(gen, AGENT_PLUGIN_MANIFEST), manifest)
             # Atomic swap: old aside, tmp into place, old removed.
@@ -710,18 +781,18 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 if os.path.lexists(old) and not os.path.lexists(target):
                     os.rename(old, target)
                 raise
-            _remove_path(old)
         except OSError as exc:
             try:
                 _remove_path(tmp)
             except OSError:
                 pass
             raise scion_harness.PluginInstallError(f"cannot write {target}: {exc}") from None
-
-        # PLUGIN_DATA (spec 9.1): created before launch, private to the
-        # agent user, kept across updates and removals.
-        os.makedirs(data_dir, mode=0o700, exist_ok=True)
-        os.chmod(data_dir, 0o700)
+        # The new plugin is in place: a leftover old copy is only a warning
+        # (it is hidden, and the next install removes it).
+        try:
+            _remove_path(old)
+        except OSError as exc:
+            self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
         self.owned.add(name)
         return {"path": target}
 
@@ -739,19 +810,26 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 raise scion_harness.PluginInstallError(f"cannot remove {target}: {exc}") from None
         if self._has_generated_manifest(target):
             raise scion_harness.PluginInstallError(f"{target} is still present")
-        self.owned.discard(name)
+        # A bundle dir that lost only its generated manifest (removed by
+        # hand) stays Scion's for this run, so a reinstall at a new digest
+        # replaces it, as one at the same digest does.
+        root_manifest = os.path.join(target, AGENT_PLUGIN_MANIFEST)
+        if not (os.path.isdir(target) and not os.path.islink(target)
+                and os.path.isfile(root_manifest) and not os.path.islink(root_manifest)):
+            self.owned.discard(name)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
         """Claude's registration of a skills-dir plugin is the directory
         itself: root plugin.json plus the generated manifest at the current
-        skills dir. A plugin now in conflict with a skill is reported
-        missing so install handles it."""
+        skills dir. The data dir must exist too (spec 9.1: created before
+        launch). A plugin now in conflict with a skill is reported missing
+        so install handles it."""
         if name in self.conflicts:
             return False
         path = native_ref.get("path")
         if isinstance(path, str) and path and os.path.normpath(path) != os.path.normpath(self.target(name)):
             return False
-        return self._has_generated_manifest(self.target(name))
+        return self._has_generated_manifest(self.target(name)) and os.path.isdir(self.data_dir(name))
 
 
 def provision(ctx: scion_harness.ProvisionContext) -> None:

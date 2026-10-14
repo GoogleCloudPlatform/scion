@@ -1002,8 +1002,10 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.stage({"p": {"conflict": True}})
         warnings: list[str] = []
         self.reconcile(warnings)
-        self.assertIn("plugin p not installed for claude: a skill named p is already installed in the skills dir",
-                      warnings)
+        self.assertEqual(warnings, [
+            "agent plugin p: install failed (plugin p not installed for claude: a skill named p is already "
+            "installed in the skills dir); will retry next start",
+        ])
         self.assertEqual(os.listdir(os.path.join(self.skills, "p")), ["SKILL.md"])
         self.assertNotIn("p", self.state())
         self.assertEqual(self.status()["installed"], [])
@@ -1019,7 +1021,8 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         self.stage({"p": {}})
         warnings: list[str] = []
         self.reconcile(warnings)
-        self.assertTrue(any("exists and was not installed by Scion" in w for w in warnings), warnings)
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("exists and was not installed by Scion", warnings[0])
         self.assertEqual(self.read("p", ".claude-plugin", "plugin.json"), '{"name": "p"}')
         self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "plugin.json")))
         self.assertNotIn("p", self.state())
@@ -1082,16 +1085,152 @@ class ClaudeAgentPluginsTest(unittest.TestCase):
         target = os.path.join(self.skills, "p")
         self.assertFalse(os.path.exists(os.path.join(target, ".claude-plugin")))
         self.assertEqual(self.read("p", "SKILL.md"), "template skill")
-        self.assertTrue(os.path.isfile(os.path.join(target, "plugin.json")), "stray bundle files stay (R6)")
+        # The bundle's own root plugin.json goes (so the Go skills-dir skips
+        # see a skill again); other stray bundle files stay (R6).
+        self.assertFalse(os.path.exists(os.path.join(target, "plugin.json")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")))
         self.assertNotIn("p", self.state())
-        self.assertTrue(any("now shares its directory" in w for w in warnings), warnings)
-        self.assertIn("plugin p not installed for claude: a skill named p is already installed in the skills dir",
-                      warnings)
+        self.assertEqual(warnings, [
+            "agent plugin p: a skill named p now shares its directory; removed the generated "
+            ".claude-plugin manifest, so claude loads it as that skill",
+            "agent plugin p: install failed (plugin p not installed for claude: a skill named p is already "
+            "installed in the skills dir); will retry next start",
+        ])
         self.assertEqual(self.status()["installed"], [])
         # Dropping the plugin later leaves the skill alone.
         self.stage({})
         self.reconcile()
         self.assertEqual(self.read("p", "SKILL.md"), "template skill")
+
+    def test_stale_ownership_keeps_foreign_root_manifest(self) -> None:
+        # A root plugin.json that is not the bundle's own (the template
+        # skill ships one) is left alone.
+        self.stage({"p": {}})
+        self.reconcile()
+        with open(os.path.join(self.skills, "p", "plugin.json"), "w") as f:
+            f.write('{"template": true}')
+        self.stage({"p": {"conflict": True}})
+        self.reconcile()
+        self.assertEqual(self.read("p", "plugin.json"), '{"template": true}')
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", ".claude-plugin")))
+
+    def test_claude_specific_paths_not_installed(self) -> None:
+        # Review round 1, finding 1: claude 2.1.296 loads these from a plugin
+        # root by default (.mcp.json even next to manifest mcpServers), which
+        # would bypass Go validation and grant hooks/agents/commands.
+        self.stage({"p": {"servers": {"s": {"type": "stdio", "command": "./bin/srv"}}}})
+        staged = os.path.join(self.inputs, "plugins", "p")
+        files = {
+            ".mcp.json": '{"mcpServers": {"evil": {"command": "/bin/true"}}}',
+            ".lsp.json": "{}",
+            "hooks/hooks.json": '{"hooks": {}}',
+            "commands/c.md": "c",
+            "agents/a.md": "a",
+            "monitors/monitors.json": "[]",
+            "output-styles/o.md": "o",
+            "workflows/w.md": "w",
+            "themes/t.json": "{}",
+            "settings.json": "{}",
+            "lib/keep.txt": "kept",
+            "skills/hello/hooks/notes.md": "nested names are not plugin-root paths",
+        }
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(staged, rel)), exist_ok=True)
+            with open(os.path.join(staged, rel), "w") as f:
+                f.write(text)
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        target = os.path.join(self.skills, "p")
+        for rel in provision.CLAUDE_STRIPPED_PATHS:
+            self.assertFalse(os.path.lexists(os.path.join(target, rel)), rel)
+        self.assertEqual(self.read("p", "lib", "keep.txt"), "kept")
+        self.assertTrue(os.path.isfile(os.path.join(target, "skills", "hello", "hooks", "notes.md")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "bin", "srv")))
+        self.assertTrue(os.path.isfile(os.path.join(target, "plugin.json")))
+        self.assertEqual(sorted(warnings), sorted(
+            f"agent plugin p: ignored claude-specific {rel} in bundle" for rel in provision.CLAUDE_STRIPPED_PATHS))
+        manifest = json.loads(self.read("p", ".claude-plugin", "plugin.json"))
+        self.assertEqual(sorted(manifest["mcpServers"]), ["s"])
+
+    def test_server_using_stripped_path_skipped(self) -> None:
+        ctx = self.ctx()
+        warnings = _Warnings()
+        ctx.warn = warnings  # type: ignore[method-assign]
+        servers = {
+            "hook-cmd": {"type": "stdio", "command": "./hooks/run"},
+            "agents-cwd": {"type": "stdio", "command": "x", "cwd": "./agents"},
+            "root-cwd": {"type": "stdio", "command": "x", "cwd": "${PLUGIN_ROOT}/commands/sub"},
+            "dot": {"type": "stdio", "command": "./.mcp.json"},
+            "ok": {"type": "stdio", "command": "./bin/hooks", "cwd": "./lib/agents"},
+        }
+        got = provision.translate_mcp_servers(ctx, _plugin(servers=servers), "/d")
+        self.assertEqual(sorted(got), ["ok"])
+        self.assertIn("agent plugin acme.tools: mcp server hook-cmd skipped for claude: "
+                      "it uses hooks, which is not installed for claude", warnings.messages)
+        self.assertEqual(len(warnings.messages), 4)
+
+    def test_old_copy_removal_failure_is_a_warning(self) -> None:
+        # Review round 1, finding 2: nothing after the swap fails the
+        # install, so the new dir is always recorded (owned).
+        self.stage({"p": {"digest": "d1"}})
+        self.reconcile()
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        real_remove = provision._remove_path
+
+        def remove(path: str) -> None:
+            if path.endswith(".p.old") and os.path.lexists(path):
+                raise OSError("busy")
+            real_remove(path)
+
+        warnings: list[str] = []
+        with mock.patch.object(provision.ClaudePluginInstaller, "uninstall", return_value=None), \
+                mock.patch.object(provision, "_remove_path", remove):
+            self.reconcile(warnings)
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("cannot remove the previous copy", warnings[0])
+        # The next install clears the leftover.
+        self.stage({"p": {"digest": "d3", "skill": "PLUM-9"}})
+        self.reconcile()
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
+
+    def test_data_dir_failure_leaves_nothing_in_place(self) -> None:
+        self.stage({"p": {}})
+        blocker = os.path.join(self.home, "blocker")
+        with open(blocker, "w") as f:
+            f.write("not a dir")
+        warnings: list[str] = []
+        with mock.patch.object(provision.ClaudePluginInstaller, "data_dir",
+                               lambda _self, n: os.path.join(blocker, n)):
+            self.reconcile(warnings)
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
+        self.assertNotIn("p", self.state())
+        self.assertEqual(len(warnings), 1, warnings)
+        self.assertIn("agent plugin p: install failed (cannot write", warnings[0])
+
+    def test_digest_change_after_manual_manifest_removal(self) -> None:
+        # Review round 1, finding 3: same outcome as without a digest change.
+        self.stage({"p": {"digest": "d1"}})
+        self.reconcile()
+        shutil.rmtree(os.path.join(self.skills, "p", ".claude-plugin"))
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json")))
+        self.assertEqual(self.state()["p"]["digest"], "d2")
+
+    def test_missing_data_dir_reinstalls(self) -> None:
+        # Review round 1, FYI 6: PLUGIN_DATA must exist before launch.
+        self.stage({"p": {}})
+        self.reconcile()
+        shutil.rmtree(os.path.join(self.root, "data", "p"))
+        self.cli.calls.clear()
+        self.reconcile()
+        self.assertEqual(self.cli.calls, [["claude", "--version"]])
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "data", "p")))
 
     def test_uninstall_only_owned_generated_dirs(self) -> None:
         self.stage({"a": {}, "b": {}})
