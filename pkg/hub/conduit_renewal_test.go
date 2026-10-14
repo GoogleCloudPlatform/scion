@@ -167,7 +167,7 @@ func (f *renewalFixture) renew(latest []byte, open grant.Claims, streamID uint32
 	})
 }
 
-func ptyHeader() grant.StreamHeader {
+func renewalPTYHeader() grant.StreamHeader {
 	return grant.StreamHeader{Kind: grant.StreamKindPTY, Params: map[string]string{grant.ParamSession: conduitPTYSession, grant.ParamCols: "80", grant.ParamRows: "24"}}
 }
 
@@ -225,8 +225,8 @@ func TestConduitRenewStream_RenewsFromAnyGrantInTheChain(t *testing.T) {
 // TCP streams cannot diverge by permission today.
 func TestConduitRenewStream_OriginDecidesActions(t *testing.T) {
 	f := newRenewalFixture(t)
-	tunnelPTY, tunnelPTYOpen := f.openGrant(t, grant.ViaTunnel, ptyHeader(), nil)
-	webPTY, webPTYOpen := f.openGrant(t, grant.ViaPTY, ptyHeader(), nil)
+	tunnelPTY, tunnelPTYOpen := f.openGrant(t, grant.ViaTunnel, renewalPTYHeader(), nil)
+	webPTY, webPTYOpen := f.openGrant(t, grant.ViaPTY, renewalPTYHeader(), nil)
 	tunnelTCP, tunnelTCPOpen := f.openGrant(t, grant.ViaTunnel, tcpHeader("3000"), nil)
 	proxyTCP, proxyTCPOpen := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
 	for _, g := range []struct {
@@ -251,7 +251,7 @@ func TestConduitRenewStream_OriginDecidesActions(t *testing.T) {
 	// named after the test, so two in one test would share one database.
 	t.Run("attach removed", func(t *testing.T) {
 		g := newRenewalFixture(t)
-		tunnelPTY, tunnelPTYOpen := g.openGrant(t, grant.ViaTunnel, ptyHeader(), nil)
+		tunnelPTY, tunnelPTYOpen := g.openGrant(t, grant.ViaTunnel, renewalPTYHeader(), nil)
 		proxyTCP, proxyTCPOpen := g.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
 		g.deleteBinding(t, g.attachBind)
 		_, err := g.renew(tunnelPTY, tunnelPTYOpen, 1)
@@ -464,10 +464,10 @@ func TestConduitRenewStream_Scope(t *testing.T) {
 	_, err = f.renew(r.Token, tcpOpen, 1)
 	require.NoError(t, err, "the renewal renews in turn")
 
-	ptyTok, ptyOpen := f.openGrant(t, grant.ViaPTY, ptyHeader(), withScope(portOnly, "open-scoped-pty"))
+	ptyTok, ptyOpen := f.openGrant(t, grant.ViaPTY, renewalPTYHeader(), withScope(portOnly, "open-scoped-pty"))
 	_, err = f.renew(ptyTok, ptyOpen, 1)
 	assert.ErrorIs(t, err, errConduitForbidden, "the user holds attach, the token's scope does not")
-	plainTok, plainOpen := f.openGrant(t, grant.ViaPTY, ptyHeader(), nil)
+	plainTok, plainOpen := f.openGrant(t, grant.ViaPTY, renewalPTYHeader(), nil)
 	_, err = f.renew(plainTok, plainOpen, 1)
 	assert.NoError(t, err, "the same user's unscoped PTY stream renews")
 	assert.Nil(t, plainOpen.Scope)
