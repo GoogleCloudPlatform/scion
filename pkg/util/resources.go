@@ -48,7 +48,7 @@ func ParseMemory(s string) (int64, error) {
 			if err != nil {
 				return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 			}
-			return int64(val * float64(bs.multiplier)), nil
+			return checkedMemoryBytes(s, val*float64(bs.multiplier))
 		}
 	}
 
@@ -72,7 +72,7 @@ func ParseMemory(s string) (int64, error) {
 				if err != nil {
 					return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 				}
-				return int64(val * float64(ds.multiplier)), nil
+				return checkedMemoryBytes(s, val*float64(ds.multiplier))
 			}
 		}
 	}
@@ -83,6 +83,14 @@ func ParseMemory(s string) (int64, error) {
 		return 0, fmt.Errorf("invalid memory value %q: %w", s, err)
 	}
 	return val, nil
+}
+
+func checkedMemoryBytes(input string, bytes float64) (int64, error) {
+	// The upper bound is exclusive: 1<<63 cannot be represented by int64.
+	if math.IsNaN(bytes) || bytes >= 1<<63 || bytes < -(1<<63) {
+		return 0, fmt.Errorf("memory value %q is outside the supported byte range", input)
+	}
+	return int64(bytes), nil
 }
 
 // FormatMemoryForDocker formats bytes as a Docker-compatible memory string.

@@ -23,6 +23,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -384,7 +385,7 @@ func (v *googleCredentialValidator) ValidateAccessToken(ctx context.Context, tok
 	}
 
 	// The authoritative issued-client is azp. It must be in allowedClientIDs.
-	if !containsString(allowedClientIDs, tokenInfo.AZP) {
+	if !slices.Contains(allowedClientIDs, tokenInfo.AZP) {
 		return nil, fmt.Errorf("%w: azp %q not in allowed set", ErrGoogleUntrustedAudience, tokenInfo.AZP)
 	}
 
@@ -766,7 +767,7 @@ func canonicalizeGoogleIssuer(issuer string) string {
 // client ID.
 func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
 	for _, aud := range audiences {
-		if containsString(allowed, string(aud)) {
+		if slices.Contains(allowed, string(aud)) {
 			return true
 		}
 	}
@@ -780,21 +781,11 @@ func isAllowedAudience(audiences jwt.Audience, allowed []string) bool {
 // no entry matches — callers must not treat that as a valid audience.
 func matchedAudience(aud jwt.Audience, allowed []string) string {
 	for _, a := range aud {
-		if containsString(allowed, string(a)) {
+		if slices.Contains(allowed, string(a)) {
 			return string(a)
 		}
 	}
 	return ""
-}
-
-// containsString checks if a string slice contains the target.
-func containsString(slice []string, target string) bool {
-	for _, s := range slice {
-		if s == target {
-			return true
-		}
-	}
-	return false
 }
 
 // isGoogleServiceAccount detects Google service account emails by their

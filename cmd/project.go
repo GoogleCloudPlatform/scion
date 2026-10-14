@@ -229,9 +229,9 @@ func promptHubRegistration(isGlobal bool) error {
 	if _, err := requireHub(gp); err != nil {
 		var notConfigured *hubsync.HubNotConfiguredError
 		if errors.As(err, &notConfigured) {
-			return errors.New("no hub is configured yet; this project links on first use. " +
+			return errors.New("no hub is selected yet; this project links on first use. " +
 				"Start the local hub with 'scion server start' (first run opens setup), " +
-				"or set a remote one with 'scion config set hub.endpoint <url>'")
+				"or add a remote one with 'scion hub add <name> <url>' and select it with 'scion use --hub <name>'")
 		}
 		var notRunning *hubsync.LocalServerNotRunningError
 		if errors.As(err, &notRunning) {

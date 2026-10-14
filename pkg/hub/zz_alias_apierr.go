@@ -44,6 +44,7 @@ const (
 	ErrCodeConflict                         = apierr.ErrCodeConflict
 	ErrCodeConversationNotResolved          = apierr.ErrCodeConversationNotResolved
 	ErrCodeDeleteInProgress                 = apierr.ErrCodeDeleteInProgress
+	ErrCodeStartOutcomeUnknown              = apierr.ErrCodeStartOutcomeUnknown
 	ErrCodeDeliveryFailed                   = apierr.ErrCodeDeliveryFailed
 	ErrCodeDiscoverFailed                   = apierr.ErrCodeDiscoverFailed
 	ErrCodeEmptyRoleSet                     = apierr.ErrCodeEmptyRoleSet

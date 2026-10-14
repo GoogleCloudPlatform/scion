@@ -147,11 +147,11 @@ Examples:
   scion artifact publish plan.md --review scion://artifact/5f1c2d3e-...`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		settings, client, err := requireArtifactHubClient()
+		settings, client, endpoint, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
-		return publishArtifactCmd(cmd, settings, client, args[0])
+		return publishArtifactCmd(cmd, settings, client, endpoint, args[0])
 	},
 }
 
@@ -179,7 +179,7 @@ func checkArtifactPublishScope(settings *config.Settings) error {
 	return nil
 }
 
-func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hubclient.Client, file string) error {
+func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hubclient.Client, endpoint, file string) error {
 	if err := checkArtifactPublishScope(settings); err != nil {
 		return err
 	}
@@ -201,14 +201,14 @@ func publishArtifactCmd(cmd *cobra.Command, settings *config.Settings, client hu
 			return errors.New("--title and --key do not apply with --review or --version-of, which add a version to the artifact they name")
 		}
 		if artifactPublishReview != "" {
-			return publishReview(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishReview, opts)
+			return publishReview(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, artifactPublishReview, opts)
 		}
-		return publishVersionOf(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, artifactPublishOf, opts)
+		return publishVersionOf(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, artifactPublishOf, opts)
 	}
 	if info.Mode().IsRegular() && opts.Key == "" && opts.Note == "" && opts.Entry == "" {
-		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts.Title, opts.Scope)
+		return publishArtifact(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts.Title, opts.Scope)
 	}
-	return publishBundle(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), GetHubEndpoint(settings), file, opts)
+	return publishBundle(ctx, client.Artifacts(), cmd.OutOrStdout(), cmd.ErrOrStderr(), endpoint, file, opts)
 }
 
 var artifactGetCmd = &cobra.Command{
@@ -246,7 +246,7 @@ Examples:
   scion artifact get scion://artifact/5f1c2d3e-... --kind publish`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
@@ -273,7 +273,7 @@ Example:
   scion artifact versions scion://artifact/5f1c2d3e-...`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}
@@ -299,28 +299,30 @@ func init() {
 	rootCmd.AddCommand(artifactCmd)
 }
 
-// requireArtifactHubClient loads settings and a hub client, failing with the
-// not-configured error when no hub endpoint is configured.
-func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
+// requireArtifactHubClient loads settings and a hub client, and returns the
+// endpoint of the hub the client talks to (the target hub of a hub profile,
+// else the selected hub), failing with the not-configured error when no
+// hub is selected.
+func requireArtifactHubClient() (*config.Settings, hubclient.Client, string, error) {
 	if hubProfileSelected() {
 		return requireArtifactProfileClient()
 	}
 	resolvedPath, _, err := config.ResolveProjectPath(projectPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to resolve project path: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to resolve project path: %w", err)
 	}
 	settings, err := config.LoadSettings(resolvedPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
+		return nil, nil, "", fmt.Errorf("failed to load settings: %w", err)
 	}
-	if !hubConfigured(settings) {
-		return nil, nil, errHubNotConfigured
+	if !hubConfigured() {
+		return nil, nil, "", errHubNotConfigured
 	}
 	client, err := getHubClient(settings)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return settings, client, nil
+	return settings, client, invocationHubEndpoint(), nil
 }
 
 // publishArtifact publishes the file at filePath and prints the reference
@@ -634,14 +636,14 @@ func copyVerified(dst io.Writer, src io.Reader, wantDigest string, size int64) e
 // profile: the client acts as the --as identity on the target hub, no local
 // settings are read, and --project names a project on the target (resolved
 // there by name or id) for publish.
-func requireArtifactProfileClient() (*config.Settings, hubclient.Client, error) {
+func requireArtifactProfileClient() (*config.Settings, hubclient.Client, string, error) {
 	s, err := openHubProfileSession(true)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	client, err := s.Client()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	settings := &config.Settings{Hub: &config.HubClientConfig{Endpoint: s.Endpoint()}}
 	if projectPath != "" {
@@ -649,9 +651,9 @@ func requireArtifactProfileClient() (*config.Settings, hubclient.Client, error) 
 		defer cancel()
 		project, err := resolveProjectNameOrID(ctx, client, projectPath)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, "", err
 		}
 		settings.Hub.ProjectID = project.ID
 	}
-	return settings, client, nil
+	return settings, client, s.Endpoint(), nil
 }

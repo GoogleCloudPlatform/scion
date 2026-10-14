@@ -757,14 +757,6 @@ func (s *Server) createProjectWithOwner(ctx context.Context, project *store.Proj
 	})
 }
 
-// createProjectOwnerRoleBinding creates a project-owner role binding for the
-// user on the project, with its audit record, in one transaction.
-func (s *Server) createProjectOwnerRoleBinding(ctx context.Context, projectID, userID string) error {
-	return s.store.WithTx(ctx, func(tx store.Store) error {
-		return s.createProjectOwnerRoleBindingTx(ctx, tx, projectID, userID)
-	})
-}
-
 // createProjectOwnerRoleBindingTx writes the project-owner role binding for
 // userID on projectID and its project_member_add audit record on tx. A
 // binding that already exists is left as is and writes no record.
@@ -1004,9 +996,10 @@ func (s *Server) createProjectMembersGroup(ctx context.Context, project *store.P
 	// the idempotent re-create of an existing project and clone, so granting
 	// here would re-make a removed or demoted creator an owner on the next
 	// read. The creator-owner binding is created only on genuine first
-	// creation, by createProjectOwnerRoleBinding in the create, register and
-	// clone handlers; legacy projects with no owner binding at all are
-	// backfilled at startup by backfillProjectOwnerRoleBindings.
+	// creation, by createProjectWithOwner (createProjectOwnerRoleBindingTx)
+	// in the create, register and clone handlers; legacy projects with no
+	// owner binding at all are backfilled at startup by
+	// backfillProjectOwnerRoleBindings.
 
 	// ── Legacy policy bridge (pre-CO1) ──────────────────────────────────
 	// CO1 cutover: legacy project policies are no longer needed.
@@ -2228,6 +2221,13 @@ func (s *Server) handleProjectRoutes(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.handleProjectMemberByID(w, r, projectID, memberPath)
 		}
+		return
+	}
+
+	// Project visitor grants (ptone/scion#4603):
+	// …/visitors and …/visitors/{visitorId}.
+	if rest, ok := strings.CutPrefix(subPath, "visitors"); ok && (rest == "" || strings.HasPrefix(rest, "/")) {
+		s.handleProjectVisitors(w, r, projectID, rest)
 		return
 	}
 

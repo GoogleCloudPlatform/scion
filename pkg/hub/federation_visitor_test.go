@@ -61,7 +61,9 @@ func visitorSetExperiment(t *testing.T, srv *Server, on bool) {
 }
 
 // visitorFixture is a test server whose federation authenticator trusts a
-// user-type issuer and a hub-type issuer, both signing with key/kid.
+// user-type issuer (with allow_visitor_grants on, so its linked active
+// accounts act as visitors) and a hub-type issuer, both signing with
+// key/kid.
 type visitorFixture struct {
 	srv  *Server
 	st   store.Store
@@ -77,7 +79,8 @@ func newVisitorFixture(t *testing.T) *visitorFixture {
 	cfg := config.FederationConfig{
 		Enabled: true,
 		TrustedIssuers: []config.TrustedIssuerConfig{
-			{IssuerURL: visitorTestUserIssuer, IssuerType: string(IssuerTypeUser), JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience},
+			{IssuerURL: visitorTestUserIssuer, IssuerType: string(IssuerTypeUser), JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience,
+				AllowVisitorGrants: true},
 			{IssuerURL: visitorTestHubIssuer, JWKSURL: jwksSrv.URL, ExpectedAudience: visitorTestAudience},
 		},
 	}
@@ -94,7 +97,8 @@ func (f *visitorFixture) userToken(t *testing.T, subject, email string) string {
 	claims := validFederationClaims(visitorTestUserIssuer, visitorTestAudience)
 	claims.Subject = subject
 	claims.Email = email
-	claims.EmailVerified = true
+	verified := true
+	claims.EmailVerified = &verified
 	claims.Name = "Visitor " + subject
 	claims.ProjectID, claims.AgentName, claims.RootUser, claims.Ancestry = "", "", "", nil
 	return signFederationToken(t, f.key, f.kid, claims)
@@ -182,10 +186,9 @@ func TestFederatedVisitor_OtherCasesKeepFederatedUserIdentity(t *testing.T) {
 	f.account(t, "unlinked@corp.com", store.UserStatusActive, "")
 
 	for name, tc := range map[string]struct{ subject, email string }{
-		"pending account":   {"sub-pending", "pending@corp.com"},
-		"suspended account": {"sub-suspended", "suspended@corp.com"},
-		"no link":           {"sub-unlinked", "unlinked@corp.com"},
-		"unknown subject":   {"sub-nobody", "nobody@corp.com"},
+		"pending account": {"sub-pending", "pending@corp.com"},
+		"no link":         {"sub-unlinked", "unlinked@corp.com"},
+		"unknown subject": {"sub-nobody", "nobody@corp.com"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			identity, credential, code := f.identityThroughMiddleware(t, f.userToken(t, tc.subject, tc.email))
@@ -196,6 +199,14 @@ func TestFederatedVisitor_OtherCasesKeepFederatedUserIdentity(t *testing.T) {
 			assert.Equal(t, CredentialKindFederation, credential.Kind)
 		})
 	}
+
+	// A suspended account is refused outright (the status policy), not
+	// downgraded to the verified identity.
+	t.Run("suspended account", func(t *testing.T) {
+		identity, _, code := f.identityThroughMiddleware(t, f.userToken(t, "sub-suspended", "suspended@corp.com"))
+		assert.Equal(t, http.StatusForbidden, code)
+		assert.Nil(t, identity, "the handler never runs")
+	})
 
 	t.Run("hub issuer agent token", func(t *testing.T) {
 		claims := validFederationClaims(visitorTestHubIssuer, visitorTestAudience)

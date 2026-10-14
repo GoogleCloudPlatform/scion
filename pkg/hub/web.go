@@ -203,6 +203,22 @@ type WebServerConfig struct {
 	// path does not create or authenticate a user account for this identity.
 	// Empty when no transport service account is configured.
 	PlatformAuthSA string
+	// ProxyDriverPrincipals is auth.proxy.driverPrincipals (ptone/scion#4240,
+	// phase WS2), the same list the hub validates in New: the exact emails
+	// of the browser drivers that may carry test identity web sessions
+	// through the proxy. In proxy mode a verified assertion for a driver
+	// principal never gets a session of its own (403
+	// driver_principal_has_no_session); it is accepted only to redeem a
+	// web-login code and as the transport of the test identity web session
+	// it redeemed. Empty: test identity web sessions are unavailable behind
+	// proxy auth.
+	ProxyDriverPrincipals []string
+	// ProxyDriverTokenAudience is auth.proxy.driverTokenAudience (WS2): the
+	// audience (the IAP OAuth client ID) a driver's Google ID token must
+	// carry before a valid test identity web session may take its place on
+	// an /api/v1/ request (fixtureSessionBearer). Empty: that never
+	// happens.
+	ProxyDriverTokenAudience string
 	// SSEMaxConnectionAge is the maximum lifetime of an SSE connection before
 	// the server proactively closes it so the client can reconnect cleanly.
 	// Defaults to defaultSSEMaxConnectionAge (3500s) when zero.
@@ -254,8 +270,16 @@ type WebServer struct {
 	// identity web sessions (SetTestIdentityWebSessions), or nil.
 	testIdentityHub *Server
 	// testIdentityRedeemLimiter rate-limits POST /auth/test-identity/redeem
-	// per source IP.
+	// per source IP, and in proxy mode also per verified proxy assertion
+	// email (a separate key, testIdentityRedeemEmailRateKey).
 	testIdentityRedeemLimiter *testLoginLimiter
+	// proxyDrivers is the normalized ProxyDriverPrincipals set (WS2).
+	proxyDrivers driverPrincipalSet
+	// driverTokenValidator verifies a driver's Google ID token for the
+	// fixture session bearer rule (fixtureSessionBearer). Built in
+	// NewWebServer when ProxyDriverTokenAudience is set; tests replace it
+	// with SetDriverTokenValidator.
+	driverTokenValidator GoogleCredentialValidator
 	// testIdentityKinds caches, per user ID, whether the user's row is a
 	// test identity row (kind test_fixture or a reserved-domain email),
 	// for classifyTestIdentitySession's fast path; see the soundness note
@@ -605,6 +629,10 @@ func NewWebServer(cfg WebServerConfig) *WebServer {
 
 		testLoginLimiter:          newTestLoginLimiter(),
 		testIdentityRedeemLimiter: newTestLoginLimiter(),
+		proxyDrivers:              newDriverPrincipalSet(cfg.ProxyDriverPrincipals),
+	}
+	if strings.TrimSpace(cfg.ProxyDriverTokenAudience) != "" {
+		ws.driverTokenValidator = NewGoogleCredentialValidator(nil)
 	}
 
 	// Initialize session store
@@ -887,11 +915,20 @@ func (ws *WebServer) MountHubAPI(hubHandler http.Handler, hubShutdown func(conte
 
 // sessionToBearerMiddleware bridges cookie-based web sessions to the
 // Bearer-token authentication expected by the Hub API. If the request
-// already carries an Authorization header it is passed through unchanged.
+// already carries an Authorization header it is passed through unchanged,
+// with one exception behind proxy auth: a valid test identity web session
+// takes the place of its driver's Google ID token (fixtureSessionBearer).
 func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// If the caller already supplied an Authorization header, pass through.
 		if r.Header.Get("Authorization") != "" {
+			// Proxy mode only, downgrade-only: see fixtureSessionBearer.
+			if tok := ws.fixtureSessionBearer(w, r); tok != "" {
+				r2 := r.Clone(r.Context())
+				r2.Header.Set("Authorization", "Bearer "+tok)
+				next.ServeHTTP(w, r2)
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -909,7 +946,7 @@ func (ws *WebServer) sessionToBearerMiddleware(next http.Handler) http.Handler {
 		// token (both the overflow-mint branch and the refresh branches
 		// below). Clear it and continue with no Authorization header so the
 		// request falls through the normal auth flow instead.
-		if email, _ := session.Values[sessKeyUserEmail].(string); isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) {
+		if email, _ := session.Values[sessKeyUserEmail].(string); ws.isTransportIdentity(email) {
 			for key := range session.Values {
 				delete(session.Values, key)
 			}
@@ -2519,7 +2556,9 @@ func (ws *WebServer) devAuthMiddleware(next http.Handler) http.Handler {
 //
 // When AuthMode != "proxy" or no ProxyAuthenticator is configured, this is a no-op.
 // If the user already has a valid session cookie, the proxy assertion is not
-// re-verified — the session acts as a short-lived cache.
+// re-verified — the session acts as a short-lived cache. The exception is a
+// test identity web session (WS2): it is honoured only while the request
+// carries a valid assertion for the driver that redeemed it.
 func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 	if ws.config.AuthMode != "proxy" || ws.config.ProxyAuthenticator == nil {
 		return next // no-op when not in proxy mode
@@ -2544,14 +2583,35 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 			session, _ = ws.sessionStore.New(r, webSessionName)
 		}
 		if uid, ok := session.Values[sessKeyUserID].(string); ok && uid != "" {
-			// Test identity web sessions need the driver binding of a later
-			// phase on proxy hubs. Until then every marked session is
-			// refused here, before any lookup.
+			// A marked session (scion_ti cookie or marker values) is
+			// decided by the classifier, driver binding included (WS2):
+			// honoured only while this request carries a valid proxy
+			// assertion for the driver that redeemed it, and otherwise
+			// cleared with 401. It never falls through to the
+			// fresh-identity path below, so a driver principal is never
+			// served as itself. An unmarked session for a test identity
+			// row is cleared by the ordinary checks below.
 			if _, present := ws.readTestIdentityMarker(r); present || sessionString(session, sessKeyTIMarker) != "" {
-				ws.logger().Warn("Proxy auth: clearing a test identity web session (not available behind proxy auth)", "user_id", uid)
+				res := ws.classifyTestIdentitySession(r, session, nil)
+				switch res.state {
+				case tiSessionValid:
+					ctx := context.WithValue(r.Context(), webUserContextKey{}, testIdentityWebSessionUser(res.row))
+					ctx = context.WithValue(ctx, dbUserContextKey{}, res.row)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				case tiSessionStoreError, tiSessionUnverifiable:
+					ws.serveInternalError(w, r)
+					return
+				case tiSessionInvalid, tiSessionUserMissing:
+					ws.logger().Warn("Proxy auth: clearing a test identity web session", "user_id", uid, "reason", res.reason)
+					ws.clearTestIdentitySession(w, r, session)
+					ws.serveTestIdentitySessionEnded(w, r)
+					return
+				}
+				// tiSessionNotFixture: an ordinary account with a stray
+				// marker cookie. Drop the marker; the ordinary checks
+				// below decide.
 				ws.expireTestIdentityMarker(w)
-				ws.clearStaleSession(w, r)
-				return
 			}
 			// Session exists — re-verify user status and role from the
 			// authoritative store using the immutable session user ID.
@@ -2589,7 +2649,7 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 					// See isReservedPlatformIdentity: every path that provisions a
 					// user or mints/re-mints a hub token checks this, including an
 					// existing session for the configured service account.
-					if isReservedPlatformIdentity(email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(email) || !u.IsHumanKind() {
+					if ws.isTransportIdentity(email) || isReservedTestIdentityEmail(email) || !u.IsHumanKind() {
 						ws.logger().Warn("Proxy auth: clearing stale session for a reserved identity", "user_id", u.ID)
 						ws.clearStaleSession(w, r)
 						return
@@ -2681,12 +2741,23 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 		// Verified proxy identity — check authorization and provision/lookup user
 		ctx := r.Context()
 
+		// A driver principal (auth.proxy.driverPrincipals, WS2) is a
+		// transport for test identity web sessions, never a user: it
+		// has no session of its own, so it is refused before
+		// authorization, find-or-create and any session or token.
+		if ws.proxyDrivers.contains(proxyUser.Email) {
+			ws.logger().Warn("Proxy auth: refusing a driver principal with no test identity web session",
+				"reason", driverPrincipalNoSessionReason, "path", logging.RequestPath(r))
+			writeDriverPrincipalRefusal(w)
+			return
+		}
+
 		// The hub does not create or authenticate user accounts for its
 		// configured transport service account; this path does its own
 		// find-or-create (it does not go through Server.provisionUser), so it
 		// carries the same check independently. Checked before authorization,
 		// before find-or-create, and before any session/token is issued.
-		if isReservedPlatformIdentity(proxyUser.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(proxyUser.Email) {
+		if ws.isTransportIdentity(proxyUser.Email) || isReservedTestIdentityEmail(proxyUser.Email) {
 			ws.logger().Warn("Proxy auth: rejecting reserved identity", "email", proxyUser.Email)
 			http.Error(w, "access denied", http.StatusForbidden)
 			return
@@ -3129,7 +3200,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// mints/re-mints a hub token checks this. A service account cannot
 	// complete interactive OAuth, so this is not reachable in practice; kept
 	// for consistency with the other find-or-create paths.
-	if isReservedPlatformIdentity(userInfo.Email, ws.config.PlatformAuthSA) || isReservedTestIdentityEmail(userInfo.Email) {
+	if ws.isTransportIdentity(userInfo.Email) || isReservedTestIdentityEmail(userInfo.Email) {
 		ws.logger().Warn("OAuth callback: rejecting reserved identity", "email", userInfo.Email)
 		http.Redirect(w, r, "/login?error=unauthorized_domain", http.StatusFound)
 		return

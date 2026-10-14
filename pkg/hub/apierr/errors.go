@@ -134,6 +134,13 @@ const (
 	// deleteBlocksStart).
 	ErrCodeDeleteInProgress = "delete_in_progress"
 
+	// ErrCodeStartOutcomeUnknown is returned (504) by a create or env
+	// submit whose synchronous dispatch to the runtime broker ended without
+	// an answer (the dispatch deadline, or no response to a sent request).
+	// The agent is kept, not rolled back: the broker may still be starting
+	// it. Details carry agentId and phase (ptone/scion#4817).
+	ErrCodeStartOutcomeUnknown = "start_outcome_unknown"
+
 	// Conversation resolution error codes (Tranche G read-switch)
 
 	// ErrCodeConversationNotResolved is returned when the read-switch is ON
