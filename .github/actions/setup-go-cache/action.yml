@@ -7,7 +7,7 @@
 # (often a tiny one) saved the cache every job then restored, and no job
 # ever saved a useful one. Here:
 # - every workload (a fixed string per job, e.g. build-test or
-#   hub-shard-3) has its own key, so it restores what its own builds made;
+#   hub-shards) has its own key, so it restores what its own builds made;
 # - the key ends in the UTC date, so the first main run of each day saves a
 #   fresh cache, and later runs that day hit it;
 # - restore-keys fall back to the same workload's newest cache (same go.sum
@@ -23,6 +23,10 @@
 #
 # Several jobs can share one workload (the pkg/hub shards): give them the
 # same workload name, and save from only one of them (see save-go-cache).
+#
+# No workload name may be another's name followed by "-" (for example
+# hub-shard and hub-shard-plan): the restore-keys' bare prefix would
+# restore the other workload's cache. The first step checks this.
 #
 #   - name: Setup Go
 #     id: go
@@ -64,6 +68,44 @@ runs:
       with:
         go-version-file: ${{ inputs.go-version-file }}
         cache: false
+
+    # The restore-keys end in a bare prefix (go-...-<workload>-), which
+    # also matches every workload whose name is this one plus "-..." (a
+    # hub-shard workload restored hub-shard-plan's 11 MB cache that way).
+    # So no workload name may be another's name followed by "-". This
+    # check fails the job when that happens among the workloads named in
+    # .github/workflows (literal names only; one built from an
+    # expression is checked as this job's resolved name).
+    - name: Check the Go cache workload name
+      shell: bash
+      env:
+        WORKLOAD: ${{ inputs.workload }}
+      run: |
+        set -euo pipefail
+        # grep exits 1 when no workflow names a literal workload, and 2
+        # when it cannot read them; either way there is nothing to check
+        # against, so fail loudly rather than pass a check that saw nothing.
+        rc=0
+        literal=$(grep -hE '^[[:space:]]+workload:[[:space:]]*[^[:space:]$]+[[:space:]]*$' "$GITHUB_WORKSPACE"/.github/workflows/*.yml) || rc=$?
+        if [ "$rc" -gt 1 ]; then
+          echo "::error title=setup-go-cache::could not read the workflows in $GITHUB_WORKSPACE/.github/workflows to check the Go cache workload names (grep exit $rc)"
+          exit 1
+        fi
+        if [ -z "$literal" ]; then
+          echo "::error title=setup-go-cache::found no literal 'workload:' in $GITHUB_WORKSPACE/.github/workflows/*.yml, so the Go cache workload names cannot be checked; the check's pattern no longer matches how workflows pass the workload"
+          exit 1
+        fi
+        names=$( { echo "$WORKLOAD"; printf '%s\n' "$literal" | sed -E 's/^[[:space:]]+workload:[[:space:]]*//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//'; } | sed '/^$/d' | sort -u)
+        bad=0
+        while IFS= read -r a; do
+          while IFS= read -r b; do
+            if [ "$a" != "$b" ] && [ "${b#"$a"-}" != "$b" ]; then
+              echo "::error title=setup-go-cache::Go cache workload '$b' starts with '$a-', so the '$a' workload's restore-keys would also restore '$b' caches; rename one of them."
+              bad=1
+            fi
+          done <<< "$names"
+        done <<< "$names"
+        exit "$bad"
 
     - name: Compute the Go cache key
       id: key

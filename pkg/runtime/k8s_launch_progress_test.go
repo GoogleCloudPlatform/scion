@@ -23,6 +23,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	corev1 "k8s.io/api/core/v1"
@@ -202,6 +203,16 @@ func TestPodLaunchStep(t *testing.T) {
 func TestWaitForPodReady_TerminalFailuresAreLaunchFailures(t *testing.T) {
 	const img = `Back-off pulling image "registry.example/secret-team/agent:7"`
 	scheduled := []corev1.PodCondition{condScheduled(corev1.ConditionTrue, "")}
+	initExit := func(msg string) corev1.PodStatus {
+		return corev1.PodStatus{Phase: corev1.PodPending, Conditions: scheduled,
+			InitContainerStatuses: []corev1.ContainerStatus{initState(corev1.ContainerState{
+				Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error", Message: msg}})}}
+	}
+	// A log tail longer than the 1 KiB bound: only its last 1024 bytes,
+	// which hold the error line, reach the error text.
+	const lastLine = "error: chown /workspace: operation not permitted"
+	longLog := "\n" + strings.Repeat("early provision log line\n", 200) + strings.Repeat("y", 1000) + "\n" + lastLine + "\n"
+	longTail := strings.Repeat("y", 1024-len(lastLine)-1) + "\n" + lastLine
 	initWaiting := func(reason string) corev1.PodStatus {
 		return corev1.PodStatus{Phase: corev1.PodPending, Conditions: scheduled,
 			InitContainerStatuses: []corev1.ContainerStatus{initState(corev1.ContainerState{
@@ -242,6 +253,12 @@ func TestWaitForPodReady_TerminalFailuresAreLaunchFailures(t *testing.T) {
 				Terminated: &corev1.ContainerStateTerminated{ExitCode: 3, Reason: "Error", Message: "chown failed"}})}},
 			api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error",
 			`init container "workspace-provision" failed in pod "p": exit code 3 (Error): chown failed`},
+		{"init exit long message keeps the bounded tail", initExit(longLog),
+			api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error",
+			`init container "workspace-provision" failed in pod "p": exit code 1 (Error): ...` + longTail},
+		{"init exit empty message", initExit(""),
+			api.LaunchCodeInitContainerFailed, api.LaunchStepInitContainers, "Error",
+			`init container "workspace-provision" failed in pod "p": exit code 1 (Error): `},
 		{"unschedulable condition", corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
 			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
 			Message: "0/3 nodes are available: node(s) didn't match selector"}}},
@@ -581,4 +598,32 @@ func TestWaitForPodReady_DisruptedPodIsTyped(t *testing.T) {
 			t.Errorf("err = %v (LaunchFailure %+v), want the plain terminal error", err, lf)
 		}
 	})
+}
+
+// TestBoundedTerminationMessage checks the bound on init container
+// termination messages: short messages are only trimmed, long ones keep
+// their last maxInitTerminationMessage bytes behind a "..." marker, cut at a
+// rune boundary.
+func TestBoundedTerminationMessage(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"empty", "", ""},
+		{"whitespace only", " \n\t", ""},
+		{"short trimmed", "  chown failed\n", "chown failed"},
+		{"exactly the bound", strings.Repeat("a", maxInitTerminationMessage), strings.Repeat("a", maxInitTerminationMessage)},
+		{"one over the bound", "b" + strings.Repeat("a", maxInitTerminationMessage), "..." + strings.Repeat("a", maxInitTerminationMessage)},
+		// "é" is 2 bytes: the cut lands inside the first one kept, so that
+		// partial rune is dropped.
+		{"rune boundary", strings.Repeat("é", maxInitTerminationMessage) + "a", "..." + strings.Repeat("é", maxInitTerminationMessage/2-1) + "a"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := boundedTerminationMessage(tc.in); got != tc.want {
+				t.Errorf("boundedTerminationMessage = %q (%d bytes), want %q (%d bytes)", got, len(got), tc.want, len(tc.want))
+			}
+			if !utf8.ValidString(boundedTerminationMessage(tc.in)) {
+				t.Errorf("result is not valid UTF-8")
+			}
+		})
+	}
 }

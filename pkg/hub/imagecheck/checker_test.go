@@ -68,6 +68,21 @@ func TestChecker_ValidRemote(t *testing.T) {
 	}
 }
 
+// parseImageRef rejects only the empty reference, and CheckRemoteOnly treats
+// that as a bare name, so its parse-error branch is not reached. A malformed
+// registry-qualified reference parses and maps to invalid through the
+// registry's 404.
+func TestCheckRemoteOnly_MalformedReference(t *testing.T) {
+	c := NewChecker(WithHTTPClient(newMockHTTPClient(http.StatusNotFound, nil)))
+
+	if res := c.CheckRemoteOnly(context.Background(), "registry.example.com/Team/Agent:dev"); res.Status != "invalid" {
+		t.Errorf("malformed qualified reference: status %q, want invalid", res.Status)
+	}
+	if res := c.CheckRemoteOnly(context.Background(), ""); res.Status != "unknown" {
+		t.Errorf("empty reference: status %q, want unknown", res.Status)
+	}
+}
+
 func TestChecker_Invalid404(t *testing.T) {
 	c := NewChecker(
 		WithLocalChecker(&mockLocalChecker{exists: false}),

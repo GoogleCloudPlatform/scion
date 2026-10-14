@@ -40,8 +40,7 @@ import { live } from 'lit/directives/live.js';
 
 import { apiFetch } from '../../client/api.js';
 import {
-  DEFAULT_LINK_HOURS,
-  LINK_LIFETIMES,
+  linkLifetimeChoices,
   PERMISSION_LABELS,
   SELECTABLE_PERMISSIONS,
   createLink,
@@ -132,7 +131,9 @@ export class ScionArtifactShareDialog extends LitElement {
   @state() private links: ShareLink[] = [];
   @state() private grants: ArtifactGrant[] = [];
   @state() private crossProjectSharing = false;
-  @state() private ttlHours = DEFAULT_LINK_HOURS;
+  /** The link lifetimes offered: the hub's, once GET /links answers. */
+  @state() private lifetimes = linkLifetimeChoices();
+  @state() private ttlHours = this.lifetimes.selected;
   @state() private creating = false;
   @state() private created: CreateLinkResponse | null = null;
   @state() private copied = false;
@@ -352,7 +353,8 @@ export class ScionArtifactShareDialog extends LitElement {
   private reset(): void {
     this.error = null;
     this.forgetCreated();
-    this.ttlHours = DEFAULT_LINK_HOURS;
+    this.lifetimes = linkLifetimeChoices();
+    this.ttlHours = this.lifetimes.selected;
     this.query = '';
     this.suggestions = [];
     this.subject = null;
@@ -380,7 +382,9 @@ export class ScionArtifactShareDialog extends LitElement {
     try {
       const [links, grants] = await Promise.all([listLinks(a.id), listGrants(a.id)]);
       if (gen !== this.loadGen) return;
-      this.links = links;
+      this.links = links.links;
+      this.lifetimes = linkLifetimeChoices(links.defaultTtlHours, links.maxTtlHours);
+      this.ttlHours = this.lifetimes.selected;
       this.grants = grants.grants;
       this.crossProjectSharing = grants.crossProjectSharing;
       this.resolveNames();
@@ -644,7 +648,7 @@ export class ScionArtifactShareDialog extends LitElement {
               this.ttlHours = Number((e.target as HTMLInputElement).value);
             }}
           >
-            ${LINK_LIFETIMES.map(
+            ${this.lifetimes.options.map(
               (l) => html`<sl-option value=${String(l.hours)}>${l.label}</sl-option>`
             )}
           </sl-select>

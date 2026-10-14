@@ -47,9 +47,8 @@ var skillDiscoverKind = resourceImportKind{
 // DiscoverSkillsRequest is the request body for
 // POST /api/v1/skills/discover-directory.
 //
-// ProjectID is optional; when set it is used to resolve GitHub credentials (a
-// GitHub App installation token, falling back to the project's GITHUB_TOKEN
-// secret) so private repositories can be scanned.
+// ProjectID is optional; when set it is used to resolve the project's GitHub
+// credential (see importCredential) so private repositories can be scanned.
 type DiscoverSkillsRequest struct {
 	SourceURL string `json:"sourceUrl"`
 	ProjectID string `json:"projectId,omitempty"`
@@ -238,8 +237,9 @@ func (s *Server) handleSkillsDiscoverDirectory(w http.ResponseWriter, r *http.Re
 // returns false when the caller is rejected.
 //
 // Discovery persists nothing, but it does *spend* a project's GitHub
-// credentials: fetchRemoteForImport mints a GitHub App installation token or
-// reads the project's GITHUB_TOKEN secret. Supplying a projectId therefore has
+// credentials: fetchRemoteForImport reads the project's GH_{OWNER}__{REPO},
+// GH_{OWNER} or GITHUB_TOKEN secret, or mints a GitHub App installation token
+// (see importCredential). Supplying a projectId therefore has
 // to be authorized exactly like any other use of that project's credentials,
 // which is why the user branch runs the same CheckAccess as
 // authorizeProjectImport rather than settling for "is logged in".

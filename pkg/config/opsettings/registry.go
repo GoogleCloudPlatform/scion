@@ -220,6 +220,15 @@ func init() {
 			New: func() any { return &GCPIAMSettings{} },
 		},
 		{
+			// hub_observability holds the switches for the hub's own
+			// metrics and trace export. The exporters are created once at
+			// startup, so both keys apply after a restart.
+			Name:            "hub_observability",
+			KoanfPaths:      []string{config.HubMetricsEnabledKey, config.HubTracingEnabledKey},
+			New:             func() any { return &HubObservabilitySettings{} },
+			RestartRequired: []string{config.HubMetricsEnabledKey, config.HubTracingEnabledKey},
+		},
+		{
 			Name: "agent_secrets",
 			KoanfPaths: []string{
 				"agent_secrets.user_scope_only",
@@ -540,6 +549,9 @@ func compileSchemas() {
 		// so the section schema and the settings file schema cannot drift
 		// apart (the $defs are attached to every section at compile time).
 		"auto_expose_ports": schemaObject(getSchemaProperty(root, "auto_expose_ports")),
+		// hub_observability is derived from settings-v1.schema.json
+		// (server.hub.observability) like the sections above.
+		"hub_observability": schemaObject(getSchemaProperty(root, "server", "hub", "observability")),
 		"quotas":            schemaObject(getSchemaProperty(root, "quotas")),
 		"agent_secrets":     schemaObject(getSchemaProperty(root, "agent_secrets")),
 		// gcp_iam schema is hand-written -- the keys have no definition in

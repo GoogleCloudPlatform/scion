@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -270,10 +271,15 @@ func (s *Server) applyRuntimeChange() {
 }
 
 // activeProfileName returns the profile the server resolves at startup:
-// the effective settings' active profile, or "default".
+// the effective settings' configured active profile, or "default". It reads
+// ConfiguredActiveProfile, not ActiveProfile, so the settings overlay's
+// single-stored-profile fallback never redirects the system-runtime GET or
+// PUT onto the only stored profile.
 func activeProfileName() string {
-	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil && effective.ActiveProfile != "" {
-		return effective.ActiveProfile
+	if effective, _, err := config.LoadEffectiveSettings(""); err == nil && effective != nil {
+		if active := effective.ConfiguredActiveProfile(); active != "" {
+			return active
+		}
 	}
 	return "default"
 }
@@ -435,7 +441,6 @@ type OnboardingStatus struct {
 	IdentitySet         bool   `json:"identitySet"`
 	RuntimeOK           bool   `json:"runtimeOK"`
 	HarnessesSeeded     bool   `json:"harnessesSeeded"`
-	ImagesPresent       bool   `json:"imagesPresent"`
 	HasWorkspace        bool   `json:"hasWorkspace"`
 	Complete            bool   `json:"complete"`
 	EmbeddedBrokerID    string `json:"embeddedBrokerID,omitempty"`
@@ -487,9 +492,6 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 		}
 	}
 
-	// ImagesPresent: best-effort check — skip for now (optional per spec)
-	status.ImagesPresent = false
-
 	// HasWorkspace: at least one project in the store
 	if s.store != nil {
 		result, err := s.store.ListProjects(ctx, store.ProjectFilter{}, store.ListOptions{Limit: 1})
@@ -498,7 +500,7 @@ func (s *Server) computeOnboardingStatus(ctx context.Context) OnboardingStatus {
 		}
 	}
 
-	// Complete: all required steps done (ImagesPresent is optional)
+	// Complete: all required steps done
 	status.Complete = status.Initialized && status.IdentitySet && status.RuntimeOK && status.HarnessesSeeded
 
 	status.EmbeddedBrokerID = s.GetEmbeddedBrokerID()
@@ -813,6 +815,72 @@ type imageBuildLogEvent struct {
 	Line string `json:"line"`
 }
 
+// imageBuildLogMaxLine caps how many bytes of a single build-log line are
+// published. Longer lines are truncated, not fatal: the rest of the line is
+// read and discarded so the build keeps running.
+const imageBuildLogMaxLine = 1 << 20
+
+// imageBuildLogTruncatedFmt is appended (with imageBuildLogMaxLine) to a
+// build-log line that was cut at imageBuildLogMaxLine bytes.
+const imageBuildLogTruncatedFmt = " ... [line truncated at %d bytes]"
+
+// imageBuildLogReadBuf is the bufio.Reader size streamBuildLog reads with;
+// lines longer than this arrive from ReadLine in several fragments.
+const imageBuildLogReadBuf = 4096
+
+// streamBuildLog reads r line by line and calls emit for each line, without
+// the "\n" or "\r\n" terminator (a lone trailing "\r" on a final line with
+// no "\n" is kept). A line longer than imageBuildLogMaxLine is cut at that
+// length and marked as truncated. streamBuildLog reads r until EOF so that a
+// child process writing to r never blocks on a full pipe. On any other read
+// error it emits the pending partial line, makes a best-effort attempt to
+// discard what is left (a reader that keeps failing ends this at once; for a
+// pipe the realistic case is os.ErrClosed) and returns the error.
+func streamBuildLog(r io.Reader, emit func(string)) error {
+	br := bufio.NewReaderSize(r, imageBuildLogReadBuf)
+	var line []byte
+	truncated := false
+	flush := func() {
+		text := string(line)
+		if truncated {
+			text += fmt.Sprintf(imageBuildLogTruncatedFmt, imageBuildLogMaxLine)
+		}
+		emit(text)
+		line = line[:0]
+		truncated = false
+	}
+	for {
+		frag, isPrefix, err := br.ReadLine()
+		if err != nil {
+			if len(line) > 0 || truncated {
+				flush()
+			}
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			_, _ = io.Copy(io.Discard, br)
+			return err
+		}
+		if room := imageBuildLogMaxLine - len(line); len(frag) > room {
+			frag = frag[:room]
+			truncated = true
+		}
+		line = append(line, frag...)
+		if !isPrefix {
+			flush()
+		}
+	}
+}
+
+// imageBuildSubject returns the event subject for an image build's output.
+// Build output is delivered on the requesting user's own subject
+// (user.<userID>.images.<jobID>) rather than a shared system.* subject, so
+// only the session that started the build can subscribe to it: SSE
+// authorization admits user.<id>.* subjects only for that same user.
+func imageBuildSubject(userID, jobID string) string {
+	return "user." + userID + ".images." + jobID
+}
+
 func resolveBuildScript() string {
 	var path string
 	if root := os.Getenv("SCION_ROOT"); root != "" {
@@ -837,6 +905,14 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	if err := assertLoopback(r); err != nil {
 		writeError(w, http.StatusForbidden, ErrCodeForbidden, err.Error(), nil)
+		return
+	}
+
+	// Build output is scoped to the requesting user's subject, so a build
+	// needs a user identity to address it to.
+	requester := GetUserIdentityFromContext(r.Context())
+	if requester == nil || requester.ID() == "" {
+		writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized, "a user session is required to start an image build", nil)
 		return
 	}
 
@@ -884,50 +960,56 @@ func (s *Server) handleSystemImagesBuild(w http.ResponseWriter, r *http.Request)
 
 	buildStarted = true
 	jobID := api.NewUUID()
-	subject := "system.images." + jobID
+	subject := imageBuildSubject(requester.ID(), jobID)
 	requestedHarnesses := req.Harnesses
 
 	go func() {
 		defer s.imageBuildActive.Store(false)
-		cmd := exec.CommandContext(s.ctx, buildScript, "--target", "harnesses")
-		cmd.Dir = filepath.Dir(buildScript)
-
-		stdout, err := cmd.StdoutPipe()
-		if err != nil {
-			slog.Error("build: stdout pipe failed", "error", err)
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
-			return
-		}
-		cmd.Stderr = cmd.Stdout
-
-		if err := cmd.Start(); err != nil {
-			slog.Error("build: start failed", "error", err)
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
-			return
-		}
-
-		scanner := bufio.NewScanner(stdout)
-		for scanner.Scan() {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: scanner.Text()})
-		}
-		if err := scanner.Err(); err != nil {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
-		}
-
-		if err := cmd.Wait(); err != nil {
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
-		} else {
-			for _, h := range requestedHarnesses {
-				s.events.PublishRaw(subject, map[string]string{
-					"image":  "scion-" + h + ":latest",
-					"status": "done",
-				})
-			}
-			s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
-		}
+		s.runImageBuild(s.ctx, subject, buildScript, requestedHarnesses)
 	}()
 
 	writeJSON(w, http.StatusOK, imagePullResponse{JobID: jobID})
+}
+
+// runImageBuild runs the build script and publishes its output, line by line,
+// followed by per-image completion events, on subject. It blocks until the
+// script exits.
+func (s *Server) runImageBuild(ctx context.Context, subject, buildScript string, harnesses []string) {
+	cmd := exec.CommandContext(ctx, buildScript, "--target", "harnesses")
+	cmd.Dir = filepath.Dir(buildScript)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		slog.Error("build: stdout pipe failed", "error", err)
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+		return
+	}
+	cmd.Stderr = cmd.Stdout
+
+	if err := cmd.Start(); err != nil {
+		slog.Error("build: start failed", "error", err)
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error: " + err.Error()})
+		return
+	}
+
+	if err := streamBuildLog(stdout, func(line string) {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: line})
+	}); err != nil {
+		slog.Error("build: reading build log failed", "error", err)
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "error reading build log: " + err.Error()})
+	}
+
+	if err := cmd.Wait(); err != nil {
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build failed: " + err.Error()})
+	} else {
+		for _, h := range harnesses {
+			s.events.PublishRaw(subject, map[string]string{
+				"image":  "scion-" + h + ":latest",
+				"status": "done",
+			})
+		}
+		s.events.PublishRaw(subject, imageBuildLogEvent{Type: "log", Line: "build complete"})
+	}
 }
 
 // --- 5.2: Filesystem Endpoints ---

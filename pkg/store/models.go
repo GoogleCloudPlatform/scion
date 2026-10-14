@@ -168,6 +168,9 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -582,7 +585,11 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). The input is never mutated.
+// ResponseView/MarshalJSON above). ClearedFields is dropped for every
+// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// entries name env keys a viewer without attach access must not learn, and
+// leaving it out means a GET echoed back into a PATCH never carries it. The
+// input is never mutated.
 //
 // This redaction lives here, in the response-view copy, and deliberately
 // not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
@@ -601,6 +608,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		return nil
 	}
 	copied := *cfg
+	copied.ClearedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -1377,8 +1385,11 @@ const (
 	HarnessConfigStatusArchived = "archived"
 )
 
-// HarnessConfigImageStatus constants — reflect registry/reference validity only.
-// Local image availability is runtime-dependent and not persisted here.
+// HarnessConfigImageStatus constants. For a registry-qualified image the stored
+// status reflects registry validity only; finding the image in a local image
+// store is reported to the caller but not persisted. A bare image name can only
+// be verified locally, so its stored status may come from a broker or local
+// runtime find.
 const (
 	HarnessConfigImageStatusUnknown = "unknown"
 	HarnessConfigImageStatusValid   = "valid"

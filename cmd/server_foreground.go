@@ -55,6 +55,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubtracing"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
@@ -157,6 +158,13 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Server secrets are now in memory; remove them from the process env
+	// before anything below can start a child process. Two earlier
+	// spawns remain: on macOS the container runtime probe during logging
+	// setup, and the legacy settings migration's git ls-files during
+	// config load (pkg/config gitTracked), which runs with these names
+	// filtered out of its env.
+	scrubServerSecretEnv()
 	// Apply server.log_level (settings or SCION_SERVER_LOGLEVEL) at setting
 	// precedence. The level filter and the cloud, request and message
 	// handlers built by initServerLogging follow the shared level state, so
@@ -449,25 +457,32 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			hubSrv.ExpectEmbeddedBroker()
 		}
 
-		// Metrics and traces share one resolved identity.
-		telemetryID := newHubTelemetryIdentity(hubSrv, cfg.Hub.ResolveHubName())
+		// Metrics and traces share one resolved identity. initHubServerFn
+		// has applied the operational settings, so the hub name is the
+		// applied one (ptone/scion#4903).
+		telemetryID := newHubTelemetryIdentity(hubSrv)
+
+		// Decide the hub's own exporters once, from the observability
+		// switches and the export project (ptone/scion#4914). Each
+		// exporter logs one line saying whether it runs and why.
+		obs := hubObservabilityExport(cfg, hubSrv)
 
 		// Wire hub OTel tracing export to Cloud Trace.
-		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
-			tp, tpErr := hubtracing.NewTracerProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.tracingOptions()...)
+		if obs.Tracing.Enabled {
+			tp, tpErr := hubtracing.NewTracerProvider(ctx, obs.Tracing.Project.ID, telemetryID.tracingOptions()...)
 			if tpErr != nil {
-				log.Printf("WARNING: hub tracing export disabled: %v", tpErr)
+				obs.Tracing = obs.Tracing.Failed(tpErr)
 			} else {
 				exit.addFlush(tp.Shutdown)
-				log.Printf("Hub OTel tracing enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
+		log.Print(obs.Tracing.LogLine())
 
 		// Wire hub OTel metrics export to Cloud Monitoring.
-		if cfg.Hub.GCPProjectID != "" {
-			mp, mpErr := hubmetrics.NewMeterProvider(ctx, cfg.Hub.GCPProjectID, telemetryID.metricsOptions()...)
+		if obs.Metrics.Enabled {
+			mp, mpErr := hubmetrics.NewMeterProvider(ctx, obs.Metrics.Project.ID, telemetryID.metricsOptions()...)
 			if mpErr != nil {
-				log.Printf("WARNING: hub metrics export disabled: %v", mpErr)
+				obs.Metrics = obs.Metrics.Failed(mpErr)
 			} else {
 				exit.addFlush(mp.Shutdown)
 
@@ -497,10 +512,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 					hubSrv.SetGoogleValidatorCacheMetrics(otelExtBearer)
 					hubSrv.SetGEExchangeMetrics(otelExtBearer)
 				}
-
-				log.Printf("Hub OTel metrics export enabled (project: %s)", cfg.Hub.GCPProjectID)
 			}
 		}
+		log.Print(obs.Metrics.LogLine())
+		hubSrv.SetObservabilityExportStatus(obs)
 
 		// Wire command bus for cross-node dispatch (B2-4).
 		cmdBus, err := newCommandBus(ctx, cfg, hubSrv)
@@ -1807,7 +1822,7 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	devAuthCfg := apiclient.DevAuthConfig{
 		Enabled:   cfg.Auth.Enabled,
 		Token:     cfg.Auth.Token,
-		TokenFile: cfg.Auth.TokenFile,
+		TokenFile: devTokenFilePath(cfg.Auth.TokenFile, globalDir),
 	}
 
 	devAuthToken, err := apiclient.InitDevAuth(devAuthCfg, globalDir)
@@ -1860,12 +1875,18 @@ func devTokenStartupHint(cfg *config.GlobalConfig, globalDir string) string {
 }
 
 // devTokenFilePath returns the file the server keeps its dev token in: the
-// configured token file, or <globalDir>/dev-token by default.
+// configured token file, or <globalDir>/dev-token by default. A relative
+// configured path is resolved against globalDir, so it names the same file
+// however the server was started (foreground, background or --global) and
+// whatever the working directory is.
 func devTokenFilePath(configured, globalDir string) string {
-	if configured != "" {
-		return configured
+	if configured == "" {
+		return filepath.Join(globalDir, "dev-token")
 	}
-	return filepath.Join(globalDir, "dev-token")
+	if !filepath.IsAbs(configured) {
+		return filepath.Join(globalDir, configured)
+	}
+	return configured
 }
 
 // devTokenExportHint returns the shell command that exports the dev token
@@ -2207,22 +2228,70 @@ func resolveHubNameFromEnv() string {
 }
 
 // resolveSessionSecret resolves the deployment-wide session secret from the
-// --session-secret flag, falling back to the SCION_SERVER_SESSION_SECRET env
-// var (then SESSION_SECRET for compatibility). The same value backs both the
-// web session cookie store and the hub JWT signing keys so that all replicas
-// behind the load balancer agree.
+// --session-secret flag, falling back to the value scrubServerSecretEnv read
+// at startup, then to the SCION_SERVER_SESSION_SECRET env var (then the
+// deprecated SESSION_SECRET). The same value backs both the web session cookie
+// store and the hub JWT signing keys so that all replicas behind the load
+// balancer agree.
 func resolveSessionSecret() string {
 	secret := webSessionSecret
 	if secret == "" {
-		secret = os.Getenv("SCION_SERVER_SESSION_SECRET")
+		secret = capturedSessionSecret
 	}
 	if secret == "" {
-		secret = os.Getenv("SESSION_SECRET")
+		secret = sessionSecretFromEnv()
 	}
 	if secret == "" && hostedMode {
 		slog.Warn("No session secret configured in hosted mode! Replicas will not be able to share sessions or agree on JWT signing keys, leading to login loops.")
 	}
 	return secret
+}
+
+// hubObservabilityExport decides at startup whether the hub's own metrics
+// and trace exporters run, and their export project (ptone/scion#4914).
+// See decideHubObservabilityExport for the inputs.
+func hubObservabilityExport(cfg *config.GlobalConfig, hubSrv *hub.Server) hubexport.Status {
+	return decideHubObservabilityExport(cfg, hubSrv.GetOperationalSettings(), hubObservabilityInputs{
+		getenv: os.Getenv,
+		// Relies on the earlier Policy Troubleshooter probe in
+		// initHubServer (ResolveGCPProjectID) for caching: the metadata
+		// client caches OnGCE and a resolved project ID.
+		metadata:   func() (string, error) { return hub.ResolveGCPProjectID("") },
+		tracingEnv: parseBoolEnv(hubexport.TracingEnv),
+	})
+}
+
+// hubObservabilityInputs are the process inputs of
+// decideHubObservabilityExport, passed in so the selection is testable.
+type hubObservabilityInputs struct {
+	getenv     func(string) string
+	metadata   func() (string, error)
+	tracingEnv bool
+}
+
+// decideHubObservabilityExport selects the inputs of the export decision.
+// The switches come from the Layer-1 snapshot, where a managed DB row wins
+// over the settings file and the environment; a hub without the
+// operational settings service (ops nil) reads them from the loaded
+// config. The export project is server.hub.gcp_project_id, else the
+// metadata-server project, resolved as for service-account minting
+// (ResolveGCPProjectID, which skips the lookup off GCP).
+func decideHubObservabilityExport(cfg *config.GlobalConfig, ops *hub.OperationalSettings, in hubObservabilityInputs) hubexport.Status {
+	metrics, tracing := cfg.Hub.Observability.MetricsEnabled, cfg.Hub.Observability.TracingEnabled
+	if ops != nil {
+		snap := ops.Snapshot()
+		metrics, tracing = snap.HubMetricsEnabled, snap.HubTracingEnabled
+	}
+	project := hubexport.ResolveProject(hubexport.ProjectInputs{
+		Configured: cfg.Hub.GCPProjectID,
+		EnvValue:   in.getenv(hubexport.ProjectIDEnv),
+		Metadata:   in.metadata,
+	})
+	return hubexport.Status{
+		Project: project,
+		Metrics: hubexport.DecideMetrics(metrics, project),
+		Tracing: hubexport.DecideTracing(tracing, in.tracingEnv, project),
+	}
 }
 
 // parseBoolEnv reports whether the named environment variable is set to a
@@ -3863,26 +3932,14 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		rhCfg.ColocatedStorage = hubSrv.GetStorage()
 	}
 
-	// In co-located mode, install a global settings overlay so that the
-	// broker's config.LoadEffectiveSettings() calls pick up DB-backed
-	// runtimes, profiles, and harness_configs. Without this, the broker
-	// always reads from the ephemeral settings.yaml file and never sees
-	// changes made through the admin UI (issue #985).
-	if hubSrv != nil && cfg.Database.Driver == "postgres" {
-		overlay := config.NewSettingsOverlay()
-		config.SetGlobalSettingsOverlay(overlay)
-		// Seed the overlay from the current operational settings snapshot
-		// so that DB values are available from the first agent dispatch,
-		// not only after the next LISTEN/NOTIFY propagation.
-		if ops := hubSrv.GetOperationalSettings(); ops != nil {
-			snap := ops.Snapshot()
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
-			log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
-				len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
-		} else {
-			log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
-		}
-	}
+	// In co-located mode on any DB-backed Hub, install the global settings
+	// overlay so the broker sees the Hub's stored runtimes, profiles,
+	// harness_configs and image_registry (see installColocatedSettingsOverlay).
+	// Ordering invariant: the broker's default runtime (rt, from
+	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
+	// exists, so it comes from the settings file and startup never sees an
+	// overlay-only active_profile error.
+	installColocatedSettingsOverlay(cfg, hubSrv)
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)

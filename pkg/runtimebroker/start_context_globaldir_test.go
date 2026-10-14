@@ -55,12 +55,26 @@ func newGlobalDirTestServer(t *testing.T, markerID, markerSlug string) (srv *Ser
 		t.Fatal(err)
 	}
 	markerPath = filepath.Join(globalDir, config.DotScion)
-	if err := config.WriteProjectMarker(markerPath, &config.ProjectMarker{
-		ProjectID: markerID, ProjectName: markerSlug, ProjectSlug: markerSlug,
-	}); err != nil {
+	writeGlobalDirTestMarker(t, markerPath, markerID, markerSlug)
+	return srv, home, globalDir, markerPath
+}
+
+// writeGlobalDirTestMarker writes a .scion marker recording id under slug.
+// WriteProjectMarker refuses an empty slug, so an empty slug writes the
+// slug-less global id record instead.
+func writeGlobalDirTestMarker(t *testing.T, markerPath, id, slug string) {
+	t.Helper()
+	var err error
+	if slug == "" {
+		err = writeGlobalDirIDRecord(markerPath, id)
+	} else {
+		err = config.WriteProjectMarker(markerPath, &config.ProjectMarker{
+			ProjectID: id, ProjectName: slug, ProjectSlug: slug,
+		})
+	}
+	if err != nil {
 		t.Fatal(err)
 	}
-	return srv, home, globalDir, markerPath
 }
 
 func readFileOrFatal(t *testing.T, path string) []byte {
