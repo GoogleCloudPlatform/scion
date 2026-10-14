@@ -438,7 +438,7 @@ func TestProfileReferences_PollTickTriggersCount(t *testing.T) {
 
 // R5: a repeated count failure is logged once; a success logs recovery.
 func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
-	srv, _, _, fault := newRefFaultServer(t, "fail")
+	srv, _, fs, fault := newRefFaultServer(t, "fail")
 	overlay := config.NewSettingsOverlay()
 	overlay.Update(nil, storedGkeNFSProfiles(), nil, "")
 	srv.EnableProfileReferences(context.Background(), overlay, "b", t.TempDir())
@@ -449,6 +449,13 @@ func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
 		srv.runProfileReferenceCount(context.Background())
 	})
 	assert.Equal(t, 1, strings.Count(logs, "could not be counted"), logs)
+	assert.NotContains(t, logs, "counted again")
+
+	fs.mu.Lock()
+	fs.mode = "pass"
+	fs.mu.Unlock()
+	logs = captureHubLogs(t, func() { srv.runProfileReferenceCount(context.Background()) })
+	assert.Contains(t, logs, "Built-in profile references counted again", logs)
 }
 
 // A panicking count is recovered and the next count runs again.

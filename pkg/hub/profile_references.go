@@ -212,6 +212,18 @@ func (s *Server) onColocatedPlacement(ctx context.Context, projectID, brokerID, 
 	s.triggerProfileReferences()
 }
 
+// addColocatedAgentReference records, at once, an agent reference to
+// profile for an agent placed on brokerID, when that is the co-located
+// broker, and triggers a count.
+func (s *Server) addColocatedAgentReference(brokerID, profile string) {
+	overlay, coID, _ := s.profileRefs.target()
+	if overlay == nil || brokerID == "" || brokerID != coID {
+		return
+	}
+	overlay.AddAgentReference(profile)
+	s.triggerProfileReferences()
+}
+
 // onProjectActiveProfileSaved records a saved project's activeProfile at
 // once when the co-located broker provides the project, and triggers a
 // count.

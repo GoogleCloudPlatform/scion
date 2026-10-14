@@ -152,7 +152,9 @@ func (s *Server) linkMoveTargetProvider(ctx context.Context, mv *reincarnationMo
 	}); err != nil {
 		return err
 	}
-	s.onColocatedPlacement(ctx, mv.ProjectID, dst.ID, mv.Profile)
+	// linkProjectProvider recorded the project's activeProfile; add the
+	// moved agent's own profile.
+	s.addColocatedAgentReference(dst.ID, mv.Profile)
 	return nil
 }
 
