@@ -2468,8 +2468,14 @@ type NotificationStore interface {
 
 	// UnmarkNotificationDispatched reverts a claimed notification back to
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
-	// proceed (no dispatcher, no broker) after an optimistic claim.
-	UnmarkNotificationDispatched(ctx context.Context, id string) error
+	// proceed (no dispatcher, no broker) after an optimistic claim. It reverts
+	// only a row with no recorded DispatchOutcome: once another caller (for
+	// example a primary dispatch racing a broker-connect drain) has recorded
+	// an outcome, the row stays dispatched, so an empty outcome keeps meaning
+	// pending or in flight and the notification is not delivered again.
+	// reverted reports whether the row was released; (false, nil) means it
+	// has an outcome or does not exist.
+	UnmarkNotificationDispatched(ctx context.Context, id string) (reverted bool, err error)
 
 	// RecordNotificationDispatchAttempt atomically increments a
 	// notification's DispatchAttempts by one. Callers record an attempt just
@@ -2482,9 +2488,15 @@ type NotificationStore interface {
 	// SetNotificationDispatchOutcome records a notification's terminal
 	// dispatch outcome (NotificationOutcomeDelivered or
 	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
-	// not pick it up again. Returns ErrInvalidInput for any other outcome
-	// and ErrNotFound if the notification doesn't exist.
-	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error
+	// not pick it up again. Concurrent writers keep the most informative
+	// outcome: a delivered write applies unless the outcome is already
+	// delivered (it replaces failed, since the message did reach the
+	// subscriber), and a failed write applies only while no outcome is
+	// recorded. applied reports whether this call recorded it; (false, nil)
+	// means the write was refused and the recorded outcome is kept.
+	// Returns ErrInvalidInput for any other outcome and ErrNotFound if the
+	// notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) (applied bool, err error)
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.
