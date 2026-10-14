@@ -49,14 +49,14 @@ func assertNoHubURLSecrets(t *testing.T, out string) {
 	}
 }
 
-// hubURLRedactionErr reads like a net/http error wrapped by a hub error.
-var hubURLRedactionErr = errors.New(`hub at https://alice:s3cret@hub.example.com is not responding: Get "https://tok3n@hub.example.com/api/v1/agents": connection refused`)
+// errHubURLRedaction reads like a net/http error wrapped by a hub error.
+var errHubURLRedaction = errors.New(`hub at https://alice:s3cret@hub.example.com is not responding: Get "https://tok3n@hub.example.com/api/v1/agents": connection refused`)
 
 func TestFormatCLIError_RedactsHubURLUserInfo(t *testing.T) {
 	f, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = f.Close() })
-	out := formatCLIError(f, hubURLRedactionErr)
+	out := formatCLIError(f, errHubURLRedaction)
 	assertNoHubURLSecrets(t, out)
 	assert.Contains(t, out, "hub at https://alice:xxxxx@hub.example.com is not responding")
 	assert.Contains(t, out, `Get "https://xxxxx@hub.example.com/api/v1/agents"`)
@@ -64,21 +64,21 @@ func TestFormatCLIError_RedactsHubURLUserInfo(t *testing.T) {
 
 func TestReportPlainError_RedactsHubURLUserInfo(t *testing.T) {
 	var buf bytes.Buffer
-	reportPlainError(&buf, hubURLRedactionErr)
+	reportPlainError(&buf, errHubURLRedaction)
 	assertNoHubURLSecrets(t, buf.String())
 	assert.Contains(t, buf.String(), "https://xxxxx@hub.example.com/api/v1/agents")
 }
 
 func TestReportSSHError_RedactsHubURLUserInfo(t *testing.T) {
 	var buf bytes.Buffer
-	reportSSHError(&buf, hubURLRedactionErr)
+	reportSSHError(&buf, errHubURLRedaction)
 	assertNoHubURLSecrets(t, buf.String())
 	assert.Contains(t, buf.String(), "https://xxxxx@hub.example.com/api/v1/agents")
 }
 
 // sshOneLine formats the errors scion ssh and ssh-config print themselves.
 func TestSSHOneLine_RedactsHubURLUserInfo(t *testing.T) {
-	out := sshOneLine(hubURLRedactionErr.Error())
+	out := sshOneLine(errHubURLRedaction.Error())
 	assertNoHubURLSecrets(t, out)
 	assert.Contains(t, out, "https://alice:xxxxx@hub.example.com")
 }
@@ -168,7 +168,7 @@ func TestDoctorReportAdd_RedactsURLUserInfo(t *testing.T) {
 		r.add(&r.HubChecks, scionruntime.CheckResult{
 			Name:        "hub-connectivity",
 			Status:      "fail",
-			Message:     "Cannot reach Hub: " + hubURLRedactionErr.Error(),
+			Message:     "Cannot reach Hub: " + errHubURLRedaction.Error(),
 			Remediation: "Check https://tok3n@hub.example.com",
 		})
 		require.Len(t, r.HubChecks, 1)
@@ -281,8 +281,9 @@ func TestErrorSinks_UserInfoForms(t *testing.T) {
 
 // An error that names the --hub value is shown without its user info.
 func TestErrorSinks_HubValueInError(t *testing.T) {
-	const password = "s3cr@tp4ss"
-	_, perr := url.Parse("http://user:" + password + "@hub.example.com:99999x")
+	// Built at run time from its parts: a URL that does not parse.
+	password := "s3cr@tp4ss"
+	_, perr := url.Parse("http://user:" + password + "@hub.example.com:" + "99999x")
 	require.Error(t, perr)
 	e := fmt.Errorf("invalid hub endpoint: %w", perr)
 	f, err := os.Create(filepath.Join(t.TempDir(), "stderr"))
@@ -317,4 +318,28 @@ func TestHubLinkJSONResult_RedactsEndpoint(t *testing.T) {
 func TestRedactEndpointIn_UserInfoForms(t *testing.T) {
 	got := redactEndpointIn("dial http://al'ice:pa55word@hub.example.com/x: refused", "http://other:x@127.0.0.1:99999x")
 	assert.Equal(t, "dial http://xxxxx@hub.example.com/x: refused", got)
+}
+
+// An endpoint that is not a valid URL is named without its user info, and
+// the error still wraps the parse error.
+func TestSSHEndpointURL_InvalidURLShownWithoutUserInfo(t *testing.T) {
+	_, err := sshEndpointURL("https://user:s3cret@hub.example.com:99999x")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "s3cret")
+	assert.Contains(t, err.Error(), "https://xxxxx@hub.example.com:99999x")
+	var ue *url.Error
+	assert.True(t, errors.As(err, &ue), "the parse error stays in the chain")
+}
+
+func TestRecordLinkEntry_InvalidURLWarningWithoutUserInfo(t *testing.T) {
+	recordLinkEntryNotSaved(t, "https://user:s3cret@hub.example.com:99999x")
+}
+
+func TestRegisterHubInList_InvalidURLWarningWithoutUserInfo(t *testing.T) {
+	setupContextTest(t)
+	var out, errOut bytes.Buffer
+	registerHubInList(&out, &errOut, "https://user:s3cret@hub.example.com:99999x")
+	assert.Empty(t, out.String())
+	assert.Contains(t, errOut.String(), "Warning: could not add https://xxxxx@hub.example.com:99999x to the hub list")
+	assertNoHubURLSecrets(t, errOut.String())
 }

@@ -93,7 +93,12 @@ func sshEndpointURL(endpoint string) (*url.URL, error) {
 	}
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return nil, fmt.Errorf("invalid hub endpoint %q: %w", endpoint, err)
+		// The parse error quotes the URL; show it without user info.
+		var ue *url.Error
+		if errors.As(err, &ue) {
+			ue.URL = config.RedactURL(ue.URL)
+		}
+		return nil, fmt.Errorf("invalid hub endpoint %q: %w", config.RedactURL(endpoint), err)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return nil, fmt.Errorf("invalid hub endpoint %q: scheme must be http or https", config.RedactURL(endpoint))

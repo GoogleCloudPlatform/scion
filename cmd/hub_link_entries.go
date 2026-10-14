@@ -43,7 +43,7 @@ func recordLinkEntry(out, stderr io.Writer, endpoint, hubProjectID, slug, name, 
 		return
 	}
 	if err := config.ValidateHubURL(endpoint); err != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: could not record the link in the hub list: %v; link again with a plain http(s) hub URL (no user info, query or fragment)\n", err)
+		_, _ = fmt.Fprintf(stderr, "Warning: could not record the link in the hub list: %s; link again with a plain http(s) hub URL (no user info, query or fragment)\n", config.RedactURLsIn(err.Error()))
 		return
 	}
 	localPath := config.LinkPathForProject(projectDir)

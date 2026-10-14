@@ -211,7 +211,7 @@ func registerHubInList(out, stderr io.Writer, hubURL string) {
 		return
 	}
 	if err := config.ValidateHubURL(hubURL); err != nil {
-		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %v\n", config.RedactURL(hubURL), err)
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add %s to the hub list: %s\n", config.RedactURL(hubURL), config.RedactURLsIn(err.Error()))
 		return
 	}
 	var name string
