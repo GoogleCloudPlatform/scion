@@ -1064,10 +1064,10 @@ type createRollback struct {
 //     a managed one);
 //  3. compensates the committed create (compensateAgentCreate): one
 //     transaction that deletes the agent row unless a delete holds it
-//     (createRowHeldCheck), deactivates its delegation
-//     edge with cause create_compensation and writes an
-//     agent_create_dispatch_failed audit record naming rb.CreateAuditID and
-//     rb.Stage; and
+//     (createRowHeldCheck), deactivates its delegation edges and its
+//     service-account assignments with cause create_compensation, runs the
+//     hard-delete hooks and writes an agent_create_dispatch_failed audit
+//     record naming rb.CreateAuditID and rb.Stage; and
 //  4. releases its quota reservations, unless the row was left to a delete
 //     that holds it or to a concurrent writer (the conditional row delete
 //     gave up with store.ErrVersionConflict).
@@ -1078,7 +1078,7 @@ type createRollback struct {
 // that response by up to ~45s in the worst case (5s revoke + 30s runtime
 // delete + 5s compensation + 5s release), plus about 20s for the fallback
 // below (up to three row-delete attempts with backoff, then marking the row
-// failed or deactivating its edges).
+// failed or deactivating its edges and service-account assignments).
 // That can exceed a client's own timeout (the CLI's is 30s), in which case
 // the client sees a timeout rather than the create error — a deliberate
 // trade for not leaking the agent's row, runtime resources and reservations.
@@ -1090,8 +1090,9 @@ type createRollback struct {
 // quotas held (markCreateCleanupRefused). When the
 // compensation transaction fails, the failure is logged at ERROR with a
 // correlation ID and the compensation's op ID, and a fallback runs: a
-// standalone best-effort deactivation of the agent's edges (same cause and
-// op ID), then a delete of the agent row on its own. The correlation ID is
+// delete of the agent row on its own, then, once the row is gone, a
+// standalone best-effort deactivation of the agent's delegation edges and
+// service-account assignments (same cause and op ID). The correlation ID is
 // returned so the caller can report it (writeCreateFailure). The return
 // value is "" when the compensation committed.
 func (s *Server) cleanupFailedCreate(ctx context.Context, rb createRollback) (compensationFailureCorrelationID string) {
