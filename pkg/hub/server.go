@@ -226,10 +226,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -1608,6 +1604,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -4696,8 +4695,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -5767,8 +5767,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records

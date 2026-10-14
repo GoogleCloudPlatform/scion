@@ -79,6 +79,12 @@ func newBearerMatrixFixture(t *testing.T) *bearerMatrixFixture {
 	ids.userSkillInjection = seedUserSkillInjection(t, ctx, s, adminID)
 	// The chat routes likewise address the super-admin's own chat records.
 	ids.chat = seedChatRecords(t, ctx, s, srv.webChatStore, adminID, ids.project, ids.chatTopic, ids.agent, ids.user)
+	// The fixture agent takes messages from any user holding agent.message
+	// on it, so the message action's admitting token reaches delivery.
+	agent, err := s.GetAgent(ctx, ids.agent)
+	require.NoError(t, err)
+	agent.MessageMode = store.MessageModeProject
+	require.NoError(t, s.UpdateAgent(ctx, agent))
 
 	return &bearerMatrixFixture{srv: srv, store: s, ids: ids, adminID: adminID, otherProject: other, tokens: map[string]string{}}
 }
@@ -262,7 +268,12 @@ func bearerMatrixBodyOverrides(f idFixtures) map[overrideKey]map[string]interfac
 		// The delegation ceiling applies to the role an agent is granted:
 		// a token carrying only agent:create covers no usable role, so the
 		// probe asks for agentRole "none", which every creator may grant.
-		{"agent.lifecycle.create", "/api/v1/agents"}: {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		{"agent.lifecycle.create", "/api/v1/agents"}:                      {"name": "bdm-created", "projectId": f.project, "agentRole": "none"},
+		{"agent.lifecycle.create", "/api/v1/projects/{projectId}/agents"}: {"name": "bdm-created-project", "agentRole": "none"},
+		// handleSetMessageMode validates the mode before the authorization
+		// check; the fixture agent is already in project mode.
+		{"agent.setmessagemode", "/api/v1/agents/{id}/set_message_mode"}:                      {"mode": "project"},
+		{"agent.setmessagemode", "/api/v1/projects/{projectId}/agents/{id}/set_message_mode"}: {"mode": "project"},
 		// Inbox writes name the fixture project and agent.
 		{"inbox.conversation.create", "/api/v1/conversations"}:                              {"displayName": f.inbox.createConversations + "-a", "projectId": f.project},
 		{"inbox.conversation.create", "/api/v1/conversations/"}:                             {"displayName": f.inbox.createConversations + "-b", "projectId": f.project},

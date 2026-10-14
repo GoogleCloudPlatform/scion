@@ -286,9 +286,10 @@ type CreateAgentRequest struct {
 	GCPIdentity *GCPIdentityAssignment `json:"gcp_identity,omitempty"`
 	// AcceptAsyncLaunch is the client's non-blocking-launch opt-in.
 	// Persisted as store.Agent.LaunchAsyncOptIn because env finalize and
-	// workspace finalize launch in later requests. It takes effect only when
-	// hub.asyncAgentLaunch is on (see dispatchLaunching). Scheduled creates
-	// set the opt-in server-side rather than from client input.
+	// workspace finalize launch in later requests. It takes effect only while
+	// the hub.async_agent_launch experiment is on (see asyncLaunchEligible),
+	// checked at each send. Scheduled creates set the opt-in server-side
+	// rather than from client input.
 	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 

@@ -124,6 +124,11 @@ _Avoid_: home mount, config dir
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
 _Avoid_: server, master, coordinator
 
+**Hub nickname**:
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). Lowercase letters, digits and `-`, at most 63 characters; one nickname per Hub URL. The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings.
+_Avoid_: hub profile, hub alias, hub name (for the nickname), hub connection (that is the Runtime Broker's registration with a Hub)
+_See also_: Hub list, Current context, Hub
+
 **Runtime Broker**:
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. Always write in full; "broker" alone is forbidden because it collides with Message Broker. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
 _Avoid_: broker, node, runner, worker
@@ -194,6 +199,8 @@ The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kep
 
 **Current context**:
 The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+_Avoid_: current project (alone, when the Hub is meant too), default hub, active profile, kube-style context
+_See also_: Hub nickname, Hub list, Link entry
 
 **Link entry**:
 The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.

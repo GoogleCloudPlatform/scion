@@ -299,6 +299,16 @@ func Conflict(w http.ResponseWriter, message string) {
 	writeError(w, http.StatusConflict, ErrCodeConflict, message, nil)
 }
 
+// RetainedFilesRefused writes a 409 Conflict response with the stable
+// api.BrokerErrCodeRetainedFilesRefused code, for a purge of retained files
+// that removed nothing (ptone/scion#4744). reason, which names no host path,
+// is also in the details under api.BrokerErrDetailReason.
+func RetainedFilesRefused(w http.ResponseWriter, reason string) {
+	writeError(w, http.StatusConflict, api.BrokerErrCodeRetainedFilesRefused,
+		"Retained files not removed: "+reason,
+		map[string]interface{}{api.BrokerErrDetailReason: reason})
+}
+
 // StaleDispatch writes a 409 Conflict response with the stable
 // ErrCodeStaleDispatch code.
 func StaleDispatch(w http.ResponseWriter, message string) {
