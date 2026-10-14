@@ -44,8 +44,9 @@ import (
 //     RunConfig.FallbackEnv (templateEnvFallback), which every runtime
 //     applies as the last step of its own env assembly
 //     (runtime.FallbackEnvEntries): a key is set only when no other source
-//     emitted it, and never for the harness-config's auth-candidate keys
-//     (RunConfig.SuppressedFallbackKeys). Values are literal: no expansion
+//     emitted it, and never for an env key the harness-config's auth
+//     metadata lists for any auth type (templateFallbackSuppressedKeys,
+//     RunConfig.SuppressedFallbackKeys). Values are literal: no expansion
 //     against the broker host environment and no host passthrough for empty
 //     values, so a template can never copy broker-host secrets into a
 //     container. Template env is never in the request env or agent config,
