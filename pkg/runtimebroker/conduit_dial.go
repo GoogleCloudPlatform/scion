@@ -41,11 +41,13 @@ import (
 // The broker's conduit session (GET /api/v1/conduit, principal "broker").
 //
 // It is dialed alongside the control channel and never replaces it: the
-// control channel keeps carrying every broker RPC, sync operation, PTY and
-// the broker's presence. The conduit session carries no work yet, so its
-// Hello advertises no stream kinds and no RPCs. The two connections have
-// independent lifecycles: each reconnects on its own backoff, and losing
-// one never closes the other.
+// control channel keeps carrying durable operations, PTY and the broker's
+// presence, and remains the fallback for everything else. The conduit
+// session serves the hub's transient broker RPCs (logs, exec, images,
+// project cleanup) through the same handler tree as the control channel,
+// and its Hello lists them in capabilities.rpc; it advertises no stream
+// kinds. The two connections have independent lifecycles: each
+// reconnects on its own backoff, and losing one never closes the other.
 //
 // Fallback. Any refusal before the WebSocket upgrade (a non-101 answer,
 // or a dial or TLS failure) means the hub does not serve this broker a
@@ -94,6 +96,11 @@ type ConduitDialConfig struct {
 	// ExecScope is Hello.capabilities.exec_scope: the runtime target of a
 	// flat Runtime Broker, "" otherwise (the hub's value for the broker).
 	ExecScope string
+	// RPCHandler, when set, serves the hub's broker RPCs on the session,
+	// and Hello.capabilities.rpc lists every broker RPC
+	// (conduit.BrokerRPCs). Without it the session serves none and lists
+	// none. It takes precedence over Session.RPCHandler.
+	RPCHandler conduit.RPCHandler
 
 	// Test seams. Clock drives backoff and session timers (nil: real);
 	// Rand is the jitter source of both backoffs (nil: math/rand); WS
@@ -175,6 +182,9 @@ func conduitEndpointURL(hubEndpoint string) (string, error) {
 func (d *ConduitDialer) Run(ctx context.Context) error {
 	cfg := d.cfg.Session
 	cfg.Clock = d.cfg.Clock
+	if d.cfg.RPCHandler != nil {
+		cfg.RPCHandler = d.cfg.RPCHandler
+	}
 	r := &conduit.Reconnector{
 		Dialer: &conduitWSDialer{url: d.url, header: d.header, ws: d.cfg.WS},
 		Config: cfg,
@@ -195,14 +205,20 @@ func (d *ConduitDialer) Run(ctx context.Context) error {
 	return r.Run(ctx)
 }
 
-// hello is the broker's Hello: no stream kinds or RPCs (the session serves
-// none yet), the process incarnation and the exec scope.
+// hello is the broker's Hello: no stream kinds, the broker RPCs when the
+// session serves them (RPCHandler set), the process incarnation and the
+// exec scope.
 func (d *ConduitDialer) hello() *conduitv1.Hello {
+	var rpcs []string
+	if d.cfg.RPCHandler != nil {
+		rpcs = conduit.BrokerRPCs()
+	}
 	return &conduitv1.Hello{
 		PrincipalKind: conduitv1.PrincipalKind_PRINCIPAL_KIND_BROKER,
 		PrincipalId:   d.cfg.BrokerID,
 		ClientVersion: d.cfg.Version,
 		Capabilities: &conduitv1.Capabilities{
+			Rpc:                 rpcs,
 			EndpointIncarnation: d.cfg.Incarnation,
 			ExecScope:           d.cfg.ExecScope,
 		},
@@ -371,7 +387,10 @@ func (hc *HubConnection) startConduit(ctx context.Context, server *Server) {
 		TransportMode:   hc.TransportMode,
 		Version:         server.version,
 		ExecScope:       execScope,
-		Log:             logging.Subsystem("broker.conduit").With("name", hc.Name),
+		// The session serves the hub's broker RPCs through the same
+		// handler tree as the control channel.
+		RPCHandler: newConduitRPCHandler(server.Handler(), hc.Name, 0, logging.Subsystem("broker.conduit.rpc").With("name", hc.Name)),
+		Log:        logging.Subsystem("broker.conduit").With("name", hc.Name),
 	})
 	if err != nil {
 		slog.Warn("Conduit dialer not started; using the control channel only", "name", hc.Name, "error", err)
