@@ -16,8 +16,8 @@
 
 /**
  * Display rows for a flat Runtime Broker's runtime target and the
- * presentation its instance reports (Flat Runtime Brokers phase 4 design
- * §2.1, §3.4).
+ * presentation its instance reports (.design/flat-runtime-brokers/contract-appendix-p3.md
+ * FC4-a; ptone/scion#3282, ptone/scion#3283).
  *
  * The rows name each FC4-a published field explicitly and read nothing
  * else. The payload is JSON from the Hub and TypeScript types are not
@@ -36,7 +36,7 @@ import type {
 
 /**
  * The caption under the reported defaults: what they are, and what they are
- * not (#3283: no implication of verified Kubernetes permissions).
+ * not (ptone/scion#3283: no implication of verified Kubernetes permissions).
  */
 export const PRESENTATION_CAPTION =
   'Defaults for new agents; not the configuration of existing agents and not a check of cluster permissions.';

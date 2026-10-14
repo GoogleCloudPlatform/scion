@@ -96,7 +96,7 @@ func requireInt64(t *testing.T, want int64, got *int64, what string) {
 }
 
 // RuntimeBrokerPresentationConformance checks SetRuntimeBrokerPresentation
-// (Flat Runtime Brokers phase 4 design §2.1) on the backend the factory
+// (FC4-a presentation transport, ptone/scion#3282) on the backend the factory
 // selects: SQLite by default, Postgres under -tags integration with
 // SCION_TEST_POSTGRES_URL set (enttest.NewClient), so both backends give
 // the same outcomes for the same conditional update.

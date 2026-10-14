@@ -1069,8 +1069,9 @@ type RuntimeBroker struct {
 	Health *api.BrokerHealthReport `json:"health,omitempty"`
 
 	// RuntimeTargetPresentation is the publishable configuration a flat
-	// Runtime Broker instance last reported (FC4-a; Flat Runtime Brokers
-	// phase 4 design §2.1). It is display data only: never used for
+	// Runtime Broker instance last reported
+	// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a;
+	// ptone/scion#3282). It is display data only: never used for
 	// placement, admission or dispatch. Nil means none was reported (a
 	// legacy row, or an older broker binary). It and the five fields below
 	// are written only by SetRuntimeBrokerPresentation and removed only by

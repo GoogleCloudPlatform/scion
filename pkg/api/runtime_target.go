@@ -118,7 +118,7 @@ const RuntimeTargetPresentationSchemaVersion = 1
 
 // RuntimeTargetPresentation is the publishable form of a flat Runtime
 // Broker instance entry, sent by the instance on every heartbeat and shown
-// read-only by the Hub (Flat Runtime Brokers phase 4 design §2.1). It is
+// read-only by the Hub (ptone/scion#3282). It is
 // built only from config.PresentInstance (config.FlatInstancePresentation.API),
 // and apart from SchemaVersion its field set equals
 // config.FlatInstancePresentation's, which is the "published" column of the

@@ -15,8 +15,8 @@
  */
 
 /**
- * The read-only "Runtime target" card on the broker detail page (Flat
- * Runtime Brokers phase 4 design §3.4): the stored target, then the
+ * The read-only "Runtime target" card on the broker detail page
+ * (ptone/scion#3282, ptone/scion#3283): the stored target, then the
  * defaults the instance reported, with safe_to_evict as unset/true/false
  * and no field FC4-a withholds anywhere in the DOM.
  */

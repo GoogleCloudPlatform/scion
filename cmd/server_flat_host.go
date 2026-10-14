@@ -743,7 +743,7 @@ func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Serve
 }
 
 // flatColocatedPresenter publishes a co-located flat instance's FC4-a
-// presentation (Flat Runtime Brokers phase 4 design §2.1). A co-located
+// presentation (contract-appendix-p3.md FC4-a, ptone/scion#3282). A co-located
 // connection sends no HTTP heartbeat, so the internal heartbeat loop
 // publishes it through the Hub's one writer,
 // hub.Server.ApplyRuntimeTargetPresentation (write rules 2-4 and the

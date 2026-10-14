@@ -38,7 +38,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// Flat Runtime Brokers phase 4 (design §2.1, §2.7): the Hub stores a flat
+// FC4-a presentation transport (ptone/scion#3282): the Hub stores a flat
 // instance's presentation from its heartbeat only from the broker's own
 // credentials, only on a flat row bound to the reported target, with a
 // Hub-computed hash, and only when the epoch/seq fence advances. An omitted
