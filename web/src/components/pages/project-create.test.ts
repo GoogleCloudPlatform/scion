@@ -414,9 +414,7 @@ describe('scion-page-project-create — Start from (Blank / template)', () => {
       const startFrom = q(el, '#startFrom');
       expect(name).not.toBeNull();
       expect(startFrom).not.toBeNull();
-      return Boolean(
-        name!.compareDocumentPosition(startFrom!) & Node.DOCUMENT_POSITION_FOLLOWING
-      );
+      return Boolean(name!.compareDocumentPosition(startFrom!) & Node.DOCUMENT_POSITION_FOLLOWING);
     };
 
     expect(nameFirst()).toBe(true);

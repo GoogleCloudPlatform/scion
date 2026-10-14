@@ -1845,7 +1845,6 @@ export class ScionPageProjectCreate extends LitElement {
           </div>
 
           ${this.renderStartFrom(template)}
-
           ${template
             ? html`
                 ${this.renderTemplateSummary(template)}
