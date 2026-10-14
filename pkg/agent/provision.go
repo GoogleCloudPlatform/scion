@@ -2053,8 +2053,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
 				}
 				skillsDest := filepath.Join(agentHome, skillsDir)
-				record, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
 				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return "", "", nil, skillErr
+					}
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
