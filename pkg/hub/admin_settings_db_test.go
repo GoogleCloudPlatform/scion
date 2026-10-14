@@ -2044,6 +2044,32 @@ func TestGetServerConfigDB_SupersededServerEnvEqualToDefault(t *testing.T) {
 	}
 }
 
+// TestDetectKeySource_UnmappedSectionKey checks detectKeySource for a key of
+// a section without a JSON field mapping (agent_defaults, whose keys are
+// their koanf paths): the server environment wins over the seed layer,
+// which wins over the yaml fallback, as for a mapped key (ptone/scion#4983).
+func TestDetectKeySource_UnmappedSectionKey(t *testing.T) {
+	seed := map[string]interface{}{"default_template": "seed-template"}
+	server := map[string]interface{}{"default_template": "server-template"}
+	none := map[string]interface{}{}
+	for _, tc := range []struct {
+		name, section, key string
+		seed, server       map[string]interface{}
+		want               string
+	}{
+		{"server env", "agent_defaults", "default_template", seed, server, "server_env"},
+		{"seed env", "agent_defaults", "default_template", seed, none, "seed_env"},
+		{"neither", "agent_defaults", "default_template", none, none, "yaml"},
+		{"other key", "agent_defaults", "default_harness_config", seed, server, "yaml"},
+		{"mapped key", "access", "admin_emails", map[string]interface{}{"server.hub.admin_emails": "a@example.com"}, none, "seed_env"},
+	} {
+		got := detectKeySource(newEnvKoanf(t, tc.seed), newEnvKoanf(t, tc.server), tc.section, tc.key)
+		if got != tc.want {
+			t.Errorf("%s: detectKeySource(%s, %s) = %q, want %q", tc.name, tc.section, tc.key, got, tc.want)
+		}
+	}
+}
+
 // supersededSourcesWithAboveSeed builds the bootstrap merges from HOME and
 // the environment as startup does, with the unseeded and above-seed merges
 // set, saves managed agent_defaults, access and endpoints rows that differ

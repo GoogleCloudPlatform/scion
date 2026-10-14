@@ -839,7 +839,14 @@ func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string)
 	// Map the section-level key (e.g. "admin_emails") to koanf paths and check
 	// which layer provides the value.
 	for _, kp := range sec.KoanfPaths {
-		if opsettings.SectionKeyFromKoanfPath(kp) != key {
+		sectionKey := opsettings.SectionKeyFromKoanfPath(kp)
+		if sectionKey == "" {
+			// Sections without a JSON field mapping (agent_defaults) use
+			// the koanf path as the key, as computeSupersededKeys does
+			// (ptone/scion#4983).
+			sectionKey = kp
+		}
+		if sectionKey != key {
 			continue
 		}
 		if serverEnvK != nil && serverEnvK.Exists(kp) {
