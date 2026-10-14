@@ -184,7 +184,12 @@ Claude has no plugin install command for local bundles, so Scion writes the plug
 
   An MCP server whose command points into a removed path is skipped.
 - **Name conflicts with skills.** If a template, platform or Skill Bank skill has the same name as a plugin, the plugin is not installed for claude (`plugin <name> not installed for claude: a skill named <name> is already installed in the skills dir`). A directory in `~/.claude/skills/` that Scion did not install is never replaced or removed (`… exists and was not installed by Scion`).
-- **Scion removes only what it wrote.** Scion records every file it installs, with its checksum. On removal or update it deletes only recorded files whose content is unchanged. If a template skill or a user adds content to the plugin directory later, Scion removes only its own files, hands the directory back, and warns.
+- **Scion removes only what it wrote.** Scion records every file it installs, with its checksum, in `~/.scion/agent-plugins/state-claude.json`. On removal or update it deletes only recorded files whose content is unchanged.
+- **Presence check.** At each start, Scion checks that the generated `.claude-plugin/plugin.json` and the bundle's root `plugin.json` are still in place. If either is missing, the plugin is installed again.
+- **When Scion gives a directory up.** Only signs that something else now lives in the plugin directory make Scion hand it back: a skill with the same name (see above), a root `SKILL.md`, or a `.claude-plugin/` that is a symlink or whose `plugin.json` is not the one Scion generated. Scion then removes only its own files, drops the plugin from its state, and warns (`… removed only the files Scion installed`).
+- **Runtime output is kept.** Other files that appear in the plugin directory, such as `__pycache__/` or logs that an MCP server writes, are treated as runtime output and never deleted:
+  - On an update they are carried into the new copy. If one sits at a path the new version also uses, the update is blocked and the old version stays installed (`plugin <name> not updated for claude: … move them away to update`).
+  - On removal they stay behind in a directory that no longer has a plugin manifest, which Claude does not load. Delete `~/.claude/skills/<name>/` by hand if you want it gone.
 - The `claude` harness-config's `provisioner.timeout` stays at 30s: the install is a file write with no extra CLI call.
 
 ## Where plugins end up
@@ -199,6 +204,7 @@ Inside the agent container:
 | `~/.scion/agent-plugins/status-<harness>.json` | The result of the last start: `installed`, `stale` (an older version kept after a failed upgrade, or a removal deferred to the next start), `skipped` (each with a reason), `removed`, `cli_version` and `updated_at`. |
 | `~/.scion/agent-plugins/.agents/plugins/marketplace.json` | codex only: the `scion-agent-plugins` local marketplace. |
 | `~/.scion/agent-plugins/data/<name>/` | claude only: the plugin's `${PLUGIN_DATA}` directory. |
+| `~/.scion/agent-plugins/pending-claude.json` | claude only: an intent record written just before a plugin directory is swapped in. If provisioning stops before the state file is saved, the next start uses it to adopt the new copy or keep the old one. |
 
 The native install, per harness:
 
