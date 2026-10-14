@@ -965,9 +965,9 @@ async function scriptClickInFrame(page: Page, link: string): Promise<string> {
 
 /**
  * Diagnostic legs (no oracle row, status observed): the same v1 link click
- * (a) as the member WITH the History/Preview round-trip and (b) as the
- * owner on a fresh /v/1 load WITHOUT it. Nothing here is asserted; every
- * wait is bounded and any error only ends the leg.
+ * (a) on R2-11's path (v2, View v1, round-trip) as the member and (b) as
+ * the owner on a fresh /v/1 load without the round-trip. Nothing here is
+ * asserted; every wait is bounded and any error only ends the leg.
  */
 async function runDiagnosticLegs(): Promise<void> {
   if (!DIAG_LEGS_ON) {
@@ -987,22 +987,31 @@ async function runDiagnosticLegs(): Promise<void> {
       const started = Date.now();
       try {
         // R2-11's exact path, as the member: current page, v2 through the
-        // Version menu, History, View v1, Preview, the History/Preview
-        // round-trip, then the click. Only the role differs.
+        // Version menu and its settle (label, v2 heading, the same reads),
+        // History, View v1, Preview, the v1 heading, the label, the History
+        // rows read, Preview, then the click. Only the role differs; the
+        // waits are bounded and never throw.
         const page = await openArtifact('member', artifactPage(bundleId()));
         await page.locator(SELECTORS.versionMenu).click({ timeout: 15_000 });
         await versionMenuItem(page, 2).click({ timeout: 15_000 });
         await page.waitForURL(new RegExp(`/artifacts/${bundleId()}/v/2$`), { timeout: 15_000 });
+        await page
+          .locator(SELECTORS.versionMenu)
+          .filter({ hasText: 'Version v2' })
+          .waitFor({ state: 'visible', timeout: 15_000 });
+        r.ui.v2HeadingSeen = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v2');
+        r.ui.v2FrameDiag = await frameDiag(page, '#ver', 2);
+        await textOf(page.locator(SELECTORS.versionMenu));
+        await htmlFrameAttributes(page);
+        await frameHeading(page);
         await tab(page, 'history').click({ timeout: 15_000 });
         await historyViewButton(page, 1).click({ timeout: 15_000 });
         await page.waitForURL(new RegExp(`/artifacts/${bundleId()}/v/1$`), { timeout: 15_000 });
         await tab(page, 'preview').click({ timeout: 15_000 });
         r.ui.v1HeadingSeen = await textIs(htmlFrame(page).locator('#ver'), 'R2 bundle v1');
-        await tab(page, 'history').click({ timeout: 15_000 });
-        await page
-          .locator(RENDER_SELECTORS.historyVersionRow)
-          .first()
-          .waitFor({ state: 'visible', timeout: 15_000 });
+        r.ui.v1FrameDiag = await frameDiag(page, '#ver', 1);
+        await textOf(page.locator(SELECTORS.versionMenu));
+        await historyRows(page);
         await tab(page, 'preview').click({ timeout: 15_000 });
         await clickInFrameLink(page, r, 'member v1 via R2-11 path', '#to-page2', 'page2.html', 1, {
           graded: false,
