@@ -565,3 +565,135 @@ func TestGCPHandler_LiftedFieldOnePerKey(t *testing.T) {
 		})
 	}
 }
+
+// traceValuer is a LogValuer for a trace ID. As a struct, it does not
+// format as its trace ID, so only its resolved value carries the ID.
+type traceValuer struct{ id string }
+
+func (v traceValuer) LogValue() slog.Value { return slog.StringValue(v.id) }
+
+// emptyTraceCase is one entry logged with a trace_id that normalizes to
+// empty (or a valid one after one), and the entry wanted: its exact
+// top-level keys, and the trace ID of both the trace field and the trace
+// label, "" meaning neither is present.
+type emptyTraceCase struct {
+	name  string
+	log   func(l *slog.Logger)
+	keys  []string
+	trace string
+}
+
+// runEmptyTraceCases logs each case and checks the line's exact top-level
+// keys and that the trace field and the trace label agree with tc.trace.
+func runEmptyTraceCases(t *testing.T, cases []emptyTraceCase) {
+	t.Helper()
+	t.Setenv(EnvGCPProjectID, "test-proj")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			tc.log(slog.New(NewGCPHandler(&buf, nil, "test-component", "")))
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(tc.keys...)...)
+			data := decodeLine(t, buf.Bytes())
+			field, hasField := data[GCPKeyTrace]
+			labels, _ := data[GCPKeyLabels].(map[string]any)
+			label, hasLabel := labels[gcpTraceIDLabelKey]
+			if tc.trace == "" {
+				if hasField || hasLabel {
+					t.Errorf("trace field = %v (present %v), label = %v (present %v), want neither", field, hasField, label, hasLabel)
+				}
+				return
+			}
+			if want := "projects/test-proj/traces/" + tc.trace; field != want {
+				t.Errorf("trace field = %v, want %s", field, want)
+			}
+			if label != tc.trace {
+				t.Errorf("trace label = %v, want %s", label, tc.trace)
+			}
+		})
+	}
+}
+
+// TestGCPHandler_EmptyTraceIDWithNeverOverrides checks that a trace_id
+// from a later With that normalizes to empty does not override an earlier
+// one, for the trace field or the label (ptone/scion#5062).
+func TestGCPHandler_EmptyTraceIDWithNeverOverrides(t *testing.T) {
+	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const idB = "0af7651916cd43dd8448eb211c80319c"
+	runEmptyTraceCases(t, []emptyTraceCase{
+		{"empty", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).With(AttrTraceID, "").Info("m")
+		}, []string{GCPKeyTrace}, idA},
+		{"invalid", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).With(AttrTraceID, "not-a-trace").Info("m")
+		}, []string{GCPKeyTrace}, idA},
+		{"group_value", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).With(slog.Group(AttrTraceID, "x", 1)).Info("m")
+		}, []string{GCPKeyTrace}, idA},
+		{"empty_in_group", func(l *slog.Logger) {
+			l.WithGroup("g").With(AttrTraceID, idA).With(AttrTraceID, "").Info("m", "a", 1)
+		}, []string{GCPKeyTrace, "g"}, idA},
+		{"empty_LogValuer", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).With(AttrTraceID, traceValuer{""}).Info("m")
+		}, []string{GCPKeyTrace}, idA},
+		{"valid_LogValuer_overrides", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).With(AttrTraceID, traceValuer{idB}).Info("m")
+		}, []string{GCPKeyTrace}, idB},
+		{"empty_only", func(l *slog.Logger) {
+			l.With(AttrTraceID, "").Info("m")
+		}, nil, ""},
+	})
+}
+
+// TestGCPHandler_EmptyTraceIDRecordNeverOverrides checks that a record
+// trace_id that normalizes to empty does not override one from With, for
+// the trace field or the label (ptone/scion#5062).
+func TestGCPHandler_EmptyTraceIDRecordNeverOverrides(t *testing.T) {
+	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"
+	runEmptyTraceCases(t, []emptyTraceCase{
+		{"empty", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", AttrTraceID, "")
+		}, []string{GCPKeyTrace}, idA},
+		{"invalid", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", AttrTraceID, "not-a-trace")
+		}, []string{GCPKeyTrace}, idA},
+		{"group_value", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", slog.Group(AttrTraceID, "x", 1))
+		}, []string{GCPKeyTrace}, idA},
+		{"empty_in_group", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).WithGroup("g").Info("m", AttrTraceID, "", "a", 1)
+		}, []string{GCPKeyTrace, "g"}, idA},
+		{"empty_LogValuer", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", AttrTraceID, traceValuer{""})
+		}, []string{GCPKeyTrace}, idA},
+		{"empty_only", func(l *slog.Logger) {
+			l.Info("m", AttrTraceID, "")
+		}, nil, ""},
+	})
+}
+
+// TestGCPHandler_TraceLabelMatchesField checks that the trace label is
+// taken from the trace_id written as the trace field, whichever of With
+// and the record it comes from, including a LogValuer's resolved value
+// (ptone/scion#5062).
+func TestGCPHandler_TraceLabelMatchesField(t *testing.T) {
+	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"
+	const idB = "0af7651916cd43dd8448eb211c80319c"
+	runEmptyTraceCases(t, []emptyTraceCase{
+		{"record_over_empty_With", func(l *slog.Logger) {
+			l.With(AttrTraceID, "").Info("m", AttrTraceID, idB)
+		}, []string{GCPKeyTrace}, idB},
+		{"record_LogValuer", func(l *slog.Logger) {
+			l.With(AttrTraceID, idA).Info("m", AttrTraceID, traceValuer{idB})
+		}, []string{GCPKeyTrace}, idB},
+		{"With_LogValuer", func(l *slog.Logger) {
+			l.With(AttrTraceID, traceValuer{idB}).Info("m")
+		}, []string{GCPKeyTrace}, idB},
+		{"With_LogValuer_in_group", func(l *slog.Logger) {
+			l.WithGroup("g").With(AttrTraceID, traceValuer{idB}).Info("m")
+		}, []string{GCPKeyTrace}, idB},
+		{"empty_record_and_With", func(l *slog.Logger) {
+			l.With(AttrTraceID, " ").Info("m", AttrTraceID, "")
+		}, nil, ""},
+	})
+}

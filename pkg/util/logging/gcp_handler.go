@@ -21,6 +21,7 @@ import (
 	"os"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 
 	gcplog "cloud.google.com/go/logging"
@@ -169,6 +170,35 @@ func (h *GCPHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
+	// stack_trace, @type and trace_id (see liftedKey) from With and from the
+	// record are written top-level once each, the record's value winning
+	// over With and a later With over an earlier one (see lastPerKey). A
+	// record trace_id that normalizes to empty is dropped first, as one
+	// from With is (see WithAttrs), so it never overrides. The record's
+	// other attrs go top-level when no group is open, else in the open
+	// groups.
+	ungrouped := len(h.groups) == 0
+	special := h.lifted[:len(h.lifted):len(h.lifted)] // append copies
+	var plain, inner []slog.Attr
+	r.Attrs(func(a slog.Attr) bool {
+		switch {
+		case liftedKey(a.Key):
+			if a.Key == AttrTraceID {
+				a.Value = a.Value.Resolve()
+				if emptyTraceID(a) {
+					return true
+				}
+			}
+			special = append(special, a)
+		case ungrouped:
+			plain = append(plain, plainLevelAttr(a))
+		default:
+			inner = append(inner, a)
+		}
+		return true
+	})
+	special = lastPerKey(special)
+
 	// Build labels dynamically, promoting agent_id/project_id
 	labels := map[string]string{
 		"component": h.component,
@@ -184,7 +214,7 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 		promoteAttrToLabels(labels, a)
 		return true
 	})
-	if traceID := extractTraceIDFromAttrs(h.preAttrs, r); traceID != "" {
+	if traceID := extractTraceIDFromAttrs(special); traceID != "" {
 		labels[gcpTraceIDLabelKey] = traceID
 	}
 	top := []slog.Attr{slog.Any(GCPKeyLabels, labels)}
@@ -237,31 +267,13 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 		}
 	}
 
-	// stack_trace, @type and trace_id (see liftedKey) from With and from the
-	// record are written top-level once each, the record's value winning
-	// over With and a later With over an earlier one (see lastPerKey). The
-	// record's other attrs go top-level when no group is open, else in the
-	// open groups. In a group, the special fields go first: if every attr in
-	// a group is dropped (zero Attr, ReplaceAttr deletion), the JSON handler
-	// truncates the group without restoring its separator, so nothing may
-	// follow it.
+	// In a group, the special fields go first: if every attr in a group is
+	// dropped (zero Attr, ReplaceAttr deletion), the JSON handler truncates
+	// the group without restoring its separator, so nothing may follow it.
 	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
-	ungrouped := len(h.groups) == 0
-	special := h.lifted[:len(h.lifted):len(h.lifted)] // append copies
-	var inner []slog.Attr
-	r.Attrs(func(a slog.Attr) bool {
-		switch {
-		case liftedKey(a.Key):
-			special = append(special, a)
-		case ungrouped:
-			out.AddAttrs(plainLevelAttr(a))
-		default:
-			inner = append(inner, a)
-		}
-		return true
-	})
+	out.AddAttrs(plain...)
 	out.AddAttrs(top...)
-	out.AddAttrs(lastPerKey(special)...)
+	out.AddAttrs(special...)
 	out.AddAttrs(errAttrs...)
 	if !ungrouped {
 		out.AddAttrs(nestInGroups(h.groups, inner)...)
@@ -297,7 +309,9 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 	nh.preAttrs = newPreAttrs
 	// stack_trace, @type and trace_id are kept apart, with or without a
 	// group, and written top-level by Handle (see liftedKey). They are
-	// resolved and pruned now as at the top level, where they render.
+	// resolved and pruned now as at the top level, where they render. A
+	// trace_id that normalizes to empty is dropped too, so it never
+	// overrides an earlier one (see emptyTraceID).
 	var lifted, rest []slog.Attr
 	for _, a := range attrs {
 		if liftedKey(a.Key) {
@@ -306,7 +320,7 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 			rest = append(rest, a)
 		}
 	}
-	lifted = h.pruneEmpty(nil, lifted)
+	lifted = slices.DeleteFunc(h.pruneEmpty(nil, lifted), emptyTraceID)
 	if len(lifted) > 0 {
 		nh.lifted = make([]slog.Attr, len(h.lifted), len(h.lifted)+len(lifted))
 		copy(nh.lifted, h.lifted)
@@ -437,18 +451,27 @@ func nestInGroups(groups []gcpGroup, attrs []slog.Attr) []slog.Attr {
 	return attrs
 }
 
-func extractTraceIDFromAttrs(preAttrs []slog.Attr, r slog.Record) string {
+// extractTraceIDFromAttrs returns the normalized ID of the last trace_id in
+// attrs that does not normalize to empty, or "" if there is none. Handle
+// passes the attrs it writes top-level, so the trace label always matches
+// the trace field.
+func extractTraceIDFromAttrs(attrs []slog.Attr) string {
 	var traceID string
-	for _, a := range preAttrs {
-		if a.Key == AttrTraceID {
-			traceID = NormalizeTraceID(a.Value.String())
+	for _, a := range attrs {
+		if a.Key != AttrTraceID {
+			continue
+		}
+		if id := NormalizeTraceID(a.Value.Resolve().String()); id != "" {
+			traceID = id
 		}
 	}
-	r.Attrs(func(a slog.Attr) bool {
-		if a.Key == AttrTraceID {
-			traceID = NormalizeTraceID(a.Value.String())
-		}
-		return true
-	})
 	return traceID
+}
+
+// emptyTraceID reports whether a is a trace_id whose value normalizes to
+// empty: no valid trace ID, so no trace field or label. Such a trace_id,
+// from With or from the record, is dropped and never overrides an earlier
+// one. a's value must be resolved.
+func emptyTraceID(a slog.Attr) bool {
+	return a.Key == AttrTraceID && NormalizeTraceID(a.Value.String()) == ""
 }
