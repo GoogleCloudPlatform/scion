@@ -11,6 +11,7 @@
   },
   "include": [
     "./agent-store-count/*.ts",
+    "./artifacts-access/*.ts",
     "./chat/*.ts",
     "./chat-file-preview/*.ts",
     "./chat-mobile/*.ts",

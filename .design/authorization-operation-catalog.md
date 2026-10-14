@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 205
+**Operations:** 219
 
 ## Table of Contents
 
@@ -45,7 +45,20 @@
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
-- [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+- [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
+- [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+- [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
+- [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+- [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+- [artifact.link.revoke](#artifactlinkrevoke) — Revoke one share link of an artifact
+- [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+- [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+- [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
+- [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+- [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+- [artifact.version.read](#artifactversionread) — List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
 - [project.env.read](#projectenvread) — Read a project's environment variables (list or one key)
 - [project.env.write](#projectenvwrite) — Set or delete a project environment variable
 - [project.secret.read](#projectsecretread) — Read a project's secret metadata (list or one key)
@@ -115,6 +128,7 @@
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
+- [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
@@ -1264,6 +1278,7 @@
 | ID | Kind | Description | Fail-Closed |
 |----|------|-------------|-------------|
 | target-exists | business | Project must exist and not be already deleted | Yes |
+| agents-runtime-deleted | business | Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization | Yes |
 
 ### Audit
 
@@ -1281,11 +1296,13 @@
 - **Retry:** no retry — cascading deletes are best-effort; DB cascade is authoritative
 - **Auth Before Emit:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`
+**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`, `conflict`
 
 ### Tests
 
 - `pkg/hub:TestRS3_ProjectDeleteOwnerPositiveControl`
+- `pkg/hub:TestProjectDelete_LiveAgentRefused`
+- `pkg/hub:TestProjectDelete_GuardRunsAfterAuthorization`
 - `pkg/hub:TestRS3_ProjectDeleteGovernanceMatrix`
 - `pkg/hub:TestRS3_ProjectDeleteAtomicAudit`
 
@@ -1743,7 +1760,7 @@
 
 **Domain:** artifact
 
-**Description:** Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+**Description:** Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 
 ### Entry Points
 
@@ -1768,6 +1785,504 @@
 ### Tests
 
 - `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## artifact.update
+
+**Domain:** artifact
+
+**Description:** Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (expiry_set, expiry_cleared, moved)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** oldExpiresAt, fromScope, droppedGrantId
+- **After Fields:** newExpiresAt, toScope
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestPatchExpiry`
+- `pkg/artifacts:TestPatchRehome`
+
+---
+
+## artifact.grant.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestGrantsAdminGate`
+
+---
+
+## artifact.grant.put
+
+**Domain:** artifact
+
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/hub:TestArtifactCanGrantReviewOnRoutes`
+- `pkg/hub:TestArtifactHostMayGrantReview_ScopedToken`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestReviewGrantAllowed`
+- `pkg/artifacts:TestReviewGrantDenied`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed) (scope: artifact grant creation and change) — waives: `audit_obligation`
+
+---
+
+## artifact.grant.delete
+
+**Domain:** artifact
+
+**Description:** Remove one grant from an artifact; the home project's grant cannot be removed
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/grants/{grantId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (grant_removed)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantId, subjectKind, subjectRef, permission
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `home_grant`
+
+### Tests
+
+- `pkg/hub:TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestOwnerPathsRecordEvents`
+
+---
+
+## artifact.link.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.link.create
+
+**Domain:** artifact
+
+**Description:** Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkManagePermissions`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked) (scope: artifact share link creation) — waives: `audit_obligation`
+
+---
+
+## artifact.link.revoke
+
+**Domain:** artifact
+
+**Description:** Revoke one share link of an artifact
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/links/{linkId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (link_revoked)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** linkId
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.delete
+
+**Domain:** artifact
+
+**Description:** Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (deleted)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantsRemoved, linksRevoked
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactDeleteOfOrphanOnRoutes`
+- `pkg/artifacts:TestDeleteArtifactAllowed`
+- `pkg/artifacts:TestDeleteArtifactRefused`
+- `pkg/artifacts:TestStoreChangeAndEventCommitTogether`
+
+---
+
+## artifact.version.create
+
+**Domain:** artifact
+
+**Description:** Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.upload
+
+**Domain:** artifact
+
+**Description:** Upload one manifest file of a pending version; only the principal that started the version may upload to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/artifacts/{id}/versions/{seq}/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.finalize
+
+**Domain:** artifact
+
+**Description:** Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/finalize` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/hub:TestArtifactsReviewOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.view
+
+**Domain:** artifact
+
+**Description:** Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/view` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsHTMLViewOnRoutes`
+- `pkg/artifacts:TestViewMintAuthorization`
+
+---
+
+## artifact.version.read
+
+**Domain:** artifact
+
+**Description:** List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/versions` |
+| http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestListVersionsDiscarded`
 
 ---
 
@@ -4297,6 +4812,56 @@
 ### Exemptions
 
 - **authentication_only:** Token revocation is authenticated-only (user manages own tokens) (scope: self-token management only) — waives: `base_permission`
+
+---
+
+## federation.token.mint
+
+**Domain:** federation
+
+**Description:** Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/auth/federation-token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `federation_token.mint`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- A user obtains a credential for themselves only, for an audience the hub admin allows, with a lifetime capped at one hour; it carries no project or agent claims
+
+### Audit
+
+- **Event Type:** `federation_token_issued`
+- **Context Fields:** actor_id, credential_kind
+- **After Fields:** audience, jti, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestFederationToken_RefusedCallers`
+- `pkg/hub:TestFederationToken_UserAccessTokenNeedsMintScope`
+- `pkg/hub:TestFederationToken_AudienceAllowList`
+- `pkg/hub:TestFederationToken_AuditWritten`
+- `pkg/hub:TestFederationToken_AuditFailureIssuesNothing`
+- `pkg/hub:TestFederationToken_RefusedCredentialKinds`
 
 ---
 

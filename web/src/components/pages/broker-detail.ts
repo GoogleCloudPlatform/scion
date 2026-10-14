@@ -940,7 +940,7 @@ export class ScionPageBrokerDetail extends LitElement {
           <h2>Capabilities</h2>
         </div>
         <div class="capabilities-row">
-          <span class="capability-tag ${capabilities.webPTY ? 'enabled' : ''}">WebPTY</span>
+          <span class="capability-tag ${capabilities.webPty ? 'enabled' : ''}">WebPTY</span>
           <span class="capability-tag ${capabilities.sync ? 'enabled' : ''}">Sync</span>
           <span class="capability-tag ${capabilities.attach ? 'enabled' : ''}">Attach</span>
         </div>

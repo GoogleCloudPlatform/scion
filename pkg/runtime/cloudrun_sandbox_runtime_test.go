@@ -1039,6 +1039,7 @@ func (h *mockHarness) Provision(ctx context.Context, name, dir, home, ws string)
 func (h *mockHarness) GetInterruptKey() string                                         { return "C-c" }
 func (h *mockHarness) GetInterruptSequence() []string                                  { return nil }
 func (h *mockHarness) DeliverySpec() api.DeliverySpec                                  { return api.DeliverySpec{} }
+func (h *mockHarness) ReadySpec() api.ReadySpec                                        { return api.ReadySpec{} }
 func (h *mockHarness) GetHarnessEmbedsFS() (embed.FS, string)                          { return embed.FS{}, "" }
 func (h *mockHarness) InjectAgentInstructions(agentHome string, content []byte) error  { return nil }
 func (h *mockHarness) InjectSystemPrompt(agentHome string, content []byte) error       { return nil }
@@ -1146,7 +1147,7 @@ func TestPrepareScionLayout_CreatesDirectories(t *testing.T) {
 		},
 	}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1180,7 +1181,7 @@ func TestPrepareScionLayout_CreatesInWorkspaceSharedDirs(t *testing.T) {
 		},
 	}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1235,7 +1236,7 @@ func TestPrepareScionLayout_ChownsDirectories(t *testing.T) {
 	}
 
 	cfg := RunConfig{HomeDir: homeDir}
-	paths, err := prepareScionLayout(rootDir, "chown-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "chown-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1273,7 +1274,7 @@ func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
 	}
 
 	rootDir := t.TempDir()
-	paths, err := prepareScionLayout(rootDir, "nonroot-agent", RunConfig{})
+	paths, err := prepareScionLayout(context.Background(), rootDir, "nonroot-agent", RunConfig{})
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1289,7 +1290,7 @@ func TestPrepareScionLayout_SkipsChownNonRoot(t *testing.T) {
 
 func TestPrepareScionLayout_PathStructure(t *testing.T) {
 	rootDir := t.TempDir()
-	paths, err := prepareScionLayout(rootDir, "my-agent", RunConfig{})
+	paths, err := prepareScionLayout(context.Background(), rootDir, "my-agent", RunConfig{})
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1315,7 +1316,7 @@ func TestPrepareScionLayout_RelocatesHomeDir(t *testing.T) {
 	}
 
 	cfg := RunConfig{HomeDir: homeDir}
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
@@ -1359,14 +1360,14 @@ func TestPrepareScionLayout_SecondLaunchPreservesHomeContent(t *testing.T) {
 
 	cfg := RunConfig{HomeDir: homeDir}
 
-	paths1, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths1, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("first prepareScionLayout() error = %v", err)
 	}
 
 	// Second launch of the same agent: cfg is unchanged, but homeDir (and
 	// so cfg.HomeDir) is now the symlink the first launch created.
-	paths2, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths2, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("second prepareScionLayout() error = %v", err)
 	}
@@ -1412,7 +1413,7 @@ func TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir(t *te
 		t.Fatal(err)
 	}
 
-	paths1, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: seedHomeDir})
+	paths1, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: seedHomeDir})
 	if err != nil {
 		t.Fatalf("first prepareScionLayout() error = %v", err)
 	}
@@ -1434,7 +1435,7 @@ func TestPrepareScionLayout_SkipsRelocationWhenHomeDirResolvesUnderRootDir(t *te
 		t.Fatal("fixture check: homeDirThroughAncestor must not itself be a symlink")
 	}
 
-	paths2, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: homeDirThroughAncestor})
+	paths2, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: homeDirThroughAncestor})
 	if err != nil {
 		t.Fatalf("second prepareScionLayout() error = %v", err)
 	}
@@ -1482,7 +1483,7 @@ func TestPrepareScionLayout_LeavesPreExistingHomeSymlinkUntouched(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if _, err := prepareScionLayout(rootDir, "test-agent", RunConfig{HomeDir: homeDir}); err != nil {
+	if _, err := prepareScionLayout(context.Background(), rootDir, "test-agent", RunConfig{HomeDir: homeDir}); err != nil {
 		t.Fatalf("prepareScionLayout() error = %v", err)
 	}
 
@@ -1515,7 +1516,7 @@ func TestPrepareScionLayout_RejectsUnsafeWorkspaceSource(t *testing.T) {
 	rootDir := t.TempDir()
 	cfg := RunConfig{Workspace: "/"}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err == nil {
 		t.Fatal("expected prepareScionLayout to fail for a workspace source of '/'")
 	}
@@ -1555,7 +1556,7 @@ func TestPrepareScionLayout_CopiesLegitimateScionHomeWorkspace(t *testing.T) {
 	rootDir := t.TempDir()
 	cfg := RunConfig{Workspace: workspace}
 
-	paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err != nil {
 		t.Fatalf("expected %q to be accepted by workspace source validation, got error: %v", workspace, err)
 	}
@@ -1577,7 +1578,7 @@ func TestPrepareScionLayout_RejectsUnsafeHomeDir(t *testing.T) {
 	rootDir := t.TempDir()
 	cfg := RunConfig{HomeDir: "/"}
 
-	_, err := prepareScionLayout(rootDir, "test-agent", cfg)
+	_, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 	if err == nil {
 		t.Fatal("expected prepareScionLayout to fail for a home directory of '/'")
 	}
@@ -1618,7 +1619,7 @@ func TestPrepareScionLayout_AcceptsRealAgentHomes(t *testing.T) {
 
 			rootDir := t.TempDir()
 			cfg := RunConfig{HomeDir: homeDir}
-			paths, err := prepareScionLayout(rootDir, "test-agent", cfg)
+			paths, err := prepareScionLayout(context.Background(), rootDir, "test-agent", cfg)
 			if err != nil {
 				t.Fatalf("expected %q to be accepted, got error: %v", homeDir, err)
 			}

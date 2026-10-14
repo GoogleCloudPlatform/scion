@@ -353,7 +353,7 @@ func TestPrintWorkstationQuickstart_RegistersLocalHub(t *testing.T) {
 	t.Setenv("SCION_CLI_MODE", string(ModeHuman))
 
 	out := captureStdout(t, func() {
-		printWorkstationQuickstart(false, dir, "0.0.0.0", 9090, true, false, true, true)
+		printWorkstationQuickstart(false, dir, nil, "0.0.0.0", 9090, true, false, true, true)
 	})
 
 	assert.Contains(t, out, "Registered hub 'local' (http://127.0.0.1:9090); rename with 'scion hub rename'.")

@@ -175,9 +175,10 @@ var RelationshipPolicies = []RelationshipPolicy{
 		},
 	},
 	{
-		// launcher/agent/agent (ptone/scion#3409): an agent reads the status
-		// of an agent it directly launched, in the same project. The rule
-		// produces a candidate only on the single-agent GET routes.
+		// launcher/agent/agent (ptone/scion#3409, ptone/scion#4568): an agent
+		// reads the status of an agent it launched, directly or through its
+		// descendants, in the same project. The rule produces a candidate
+		// only on the single-agent GET routes.
 		Relationship:   "launcher",
 		PrincipalKinds: []string{"agent"},
 		ResourceType:   ResourceAgent,
