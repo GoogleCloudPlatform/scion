@@ -217,6 +217,11 @@ func (s *Server) recoverLaunch(path string, jr *journalRecord) {
 // its name-addressed leftovers inside a registry slot.
 func (s *Server) recoveryCleanup(ctx context.Context, jr *journalRecord, rec *launchRecord) {
 	mgr := s.recoveryManager(jr)
+	if mgr == nil && jr.RuntimeIdentity == "" {
+		s.agentLifecycleLog.Warn("Launch recovery: the launch's runtime identity was not recorded; its resources are left for `scion delete`",
+			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName)
+		return
+	}
 	if mgr == nil {
 		s.agentLifecycleLog.Warn("Launch recovery: the launch's runtime is no longer configured; its resources are left for `scion delete`",
 			"agent_id", jr.AgentID, "launch_id", jr.LaunchID, "runtime", jr.RuntimeName, "runtime_identity", jr.RuntimeIdentity)

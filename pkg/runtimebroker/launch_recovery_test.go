@@ -518,6 +518,30 @@ func TestRecoverLaunches_ResolvesRuntimeByIdentity(t *testing.T) {
 			t.Fatalf("the other cluster of the same type was cleaned up (cleanup %d, deleted %+v)", mgrA.CleanupCallCount(), mgrA.Deleted())
 		}
 	})
+	// The profile fallback (the identity is in neither the default nor the
+	// auxiliary map) keeps the manager its profile resolves to only if that
+	// manager's identity is the journalled one: here the profile resolves
+	// to the default runtime ("mock"), a different identity, so nothing is
+	// cleaned up anywhere.
+	t.Run("profile resolves to another runtime", func(t *testing.T) {
+		srv, rtb, mgrA, mgrB := setup(t)
+		def := newRecFakeManager(api.AgentInfo{Name: "agent-LK", ContainerID: "c-run", RunID: "run-LK"})
+		installRecoveryManager(srv, "mock", def)
+		rtC := &runtime.KubernetesRuntime{DefaultNamespace: "ns-c"}
+		jr := launchingRecord("LK")
+		jr.RuntimeName, jr.RuntimeIdentity, jr.Profile = "kubernetes", auxiliaryRuntimeIdentity(rtC), "cluster-c"
+		writeDeadRecord(t, srv, jr)
+		runRecovery(t, srv)
+		if len(terminalReports(rtb)) != 1 {
+			t.Fatal("the launch was not reported")
+		}
+		if n := def.CleanupCallCount() + mgrA.CleanupCallCount() + mgrB.CleanupCallCount(); n != 0 {
+			t.Fatalf("recovery cleaned up on a runtime whose identity is not the launch's (%d cleanup calls)", n)
+		}
+		if d := len(def.Deleted()) + len(mgrA.Deleted()) + len(mgrB.Deleted()); d != 0 {
+			t.Fatalf("recovery deleted on a runtime whose identity is not the launch's (%d deletes)", d)
+		}
+	})
 	t.Run("identity unknown", func(t *testing.T) {
 		srv, rtb, mgrA, mgrB := setup(t)
 		jr := launchingRecord("LK")
