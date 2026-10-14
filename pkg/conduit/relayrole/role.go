@@ -97,6 +97,9 @@ type Role struct {
 
 	// Streams schedules the re-checks of the user streams this relay holds.
 	Streams *StreamScheduler
+
+	// tunnels are the tunnels this relay opened for its user sessions.
+	tunnels tunnelTable
 }
 
 // heldSession is one relay-held session's hub admission.
@@ -272,24 +275,44 @@ func (f *rpcForwarder) HandleRPC(ctx context.Context, req *conduitv1.RpcRequest)
 	if err != nil {
 		return fail(http.StatusBadRequest, "invalid_request", "malformed request")
 	}
-	var out relay.HubRPCResponse
-	err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{AdmissionToken: f.ro.token(f.sessionID), RPC: b}, &out)
-	var refusal *relay.HubRefusal
-	switch {
-	case err == nil:
-		resp := &conduitv1.RpcResponse{}
-		if err := proto.Unmarshal(out.RPC, resp); err != nil {
-			return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+	// A tunnel the hub authorized is opened here (openTunnel). When its
+	// target turns out stale, the request goes back to the hub with that
+	// target excluded, and the hub re-checks and mints for the session it
+	// resolves next.
+	var exclude []string
+	for attempt := 0; ; attempt++ {
+		var out relay.HubRPCResponse
+		err = f.ro.cfg.Hub.Call(ctx, relay.HubSessionPath(f.sessionID, "rpc"), relay.HubRPCRequest{AdmissionToken: f.ro.token(f.sessionID), RPC: b, ExcludeTargets: exclude}, &out)
+		var refusal *relay.HubRefusal
+		switch {
+		case err == nil:
+			resp := &conduitv1.RpcResponse{}
+			if err := proto.Unmarshal(out.RPC, resp); err != nil {
+				return fail(http.StatusBadGateway, "unavailable", "malformed hub answer")
+			}
+			if out.Tunnel == nil {
+				return resp
+			}
+			opened, err := f.ro.openTunnel(ctx, f.sessionID, resp, out.Tunnel)
+			if errors.Is(err, errTunnelStale) {
+				if attempt >= MaxTunnelReResolves {
+					opened = tunnelUnavailable(out.Tunnel)
+				} else {
+					exclude = append(exclude, out.Tunnel.TargetSessionID)
+					continue
+				}
+			}
+			opened.RequestId = req.GetRequestId()
+			return opened
+		case errors.As(err, &refusal):
+			if code := closeCodeOf(refusal); code != 0 {
+				// The hub no longer authorizes the session.
+				go f.ro.closeSession(f.sessionID, code, relay.ReasonUnauthenticated)
+			}
+			return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(refusal.Status), Body: refusal.Body}
+		default:
+			return fail(http.StatusServiceUnavailable, "unavailable", "the hub is temporarily unavailable")
 		}
-		return resp
-	case errors.As(err, &refusal):
-		if code := closeCodeOf(refusal); code != 0 {
-			// The hub no longer authorizes the session.
-			go f.ro.closeSession(f.sessionID, code, relay.ReasonUnauthenticated)
-		}
-		return &conduitv1.RpcResponse{RequestId: req.GetRequestId(), Status: int32(refusal.Status), Body: refusal.Body}
-	default:
-		return fail(http.StatusServiceUnavailable, "unavailable", "the hub is temporarily unavailable")
 	}
 }
 

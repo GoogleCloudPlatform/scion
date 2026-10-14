@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
@@ -297,11 +298,61 @@ func ForwardCredentialHeaders(h http.Header) map[string][]string {
 type HubRPCRequest struct {
 	AdmissionToken string `json:"admission_token"`
 	RPC            []byte `json:"rpc"`
+	// ExcludeTargets names target sessions an earlier attempt of the same
+	// tunnel request found stale (the owner no longer held or admitted
+	// them). The hub resolves the tunnel's target without them, re-checks
+	// and mints a new grant for the session it picks.
+	ExcludeTargets []string `json:"exclude_targets,omitempty"`
 }
 
 // HubRPCResponse is the RPC's answer (the encoded RpcResponse).
 type HubRPCResponse struct {
 	RPC []byte `json:"rpc"`
+	// Tunnel is set only when the hub accepted a tunnel request (POST
+	// /v1/tunnels). The relay then opens the tunnel itself: the target
+	// stream, the user stream, and the splice between them. RPC is the
+	// answer to send once both legs are open, with the user stream's id
+	// set under TunnelResponseStreamIDKey in its JSON body.
+	Tunnel *HubTunnelOpen `json:"tunnel,omitempty"`
+}
+
+// TunnelResponseStreamIDKey is the key of the user-side stream id in the
+// JSON body of an accepted tunnel request's answer.
+const TunnelResponseStreamIDKey = "streamId"
+
+// HubTunnelOpen is the hub's instruction to open an authorized tunnel: the
+// target session it resolved, the owner relay holding it, and the open
+// grant it minted for exactly that session. The grant is passed to the
+// target unchanged.
+type HubTunnelOpen struct {
+	TargetSessionID string `json:"target_session_id"`
+	OwnerInstanceID string `json:"owner_instance_id"`
+	OwnerGeneration int64  `json:"owner_generation"`
+	OwnerEndpoint   string `json:"owner_endpoint"`
+	// The Want the owner re-checks admission for (the stream kind is the
+	// capability).
+	WantProjectID   string `json:"want_project_id,omitempty"`
+	WantExecScope   string `json:"want_exec_scope,omitempty"`
+	WantIncarnation string `json:"want_incarnation"`
+
+	Kind   string            `json:"kind"`
+	Params map[string]string `json:"params,omitempty"`
+	Grant  []byte            `json:"grant"`
+	// OpenJTI is the open grant's jti.
+	OpenJTI string `json:"open_jti,omitempty"`
+	// Unavailable is the encoded RpcResponse to answer with when the
+	// tunnel cannot be opened (no target stream, or no user stream).
+	Unavailable []byte `json:"unavailable"`
+}
+
+// Owner returns the relay holding the target session.
+func (o *HubTunnelOpen) Owner() Owner {
+	return Owner{InstanceID: o.OwnerInstanceID, Generation: o.OwnerGeneration, Endpoint: o.OwnerEndpoint}
+}
+
+// Want returns the Want the owner re-checks admission for.
+func (o *HubTunnelOpen) Want() registry.Want {
+	return registry.Want{ProjectID: o.WantProjectID, ExecScope: o.WantExecScope, Incarnation: o.WantIncarnation}
 }
 
 // HubRefreshRequest carries an in-band AuthRefresh credential of a

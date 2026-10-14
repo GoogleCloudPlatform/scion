@@ -290,7 +290,8 @@ func TestRelayAdmit_BindsRelayAndHost(t *testing.T) {
 
 // TestRelayRPC_ReachesHandlerWithAdmittedPrincipal: a forwarded RPC runs in
 // the unchanged in-process handler as the principal Admit admitted; POST
-// /v1/tunnels gets the typed refusal.
+// /v1/tunnels runs the hub's tunnel checks instead (a request without a
+// body is refused 400 with no instruction to open anything).
 func TestRelayRPC_ReachesHandlerWithAdmittedPrincipal(t *testing.T) {
 	f, cf := newUserRelayOps(t)
 	captured := captureRelayRPCs(t)
@@ -303,9 +304,9 @@ func TestRelayRPC_ReachesHandlerWithAdmittedPrincipal(t *testing.T) {
 
 	resp, err = rpcCall(t, f.hub, "s1", adm.AdmissionToken, conduitTunnelsPath)
 	require.NoError(t, err)
-	assert.Equal(t, int32(http.StatusServiceUnavailable), resp.GetStatus())
-	assert.Contains(t, string(resp.GetBody()), ptyReasonConduitNotServing)
-	assert.Contains(t, string(resp.GetBody()), conduitRelayTunnelsMessage)
+	assert.Equal(t, int32(http.StatusBadRequest), resp.GetStatus())
+	assert.Contains(t, string(resp.GetBody()), ErrCodeInvalidRequest)
+	assert.Equal(t, []string{cf.owner.ID()}, captured.ids, "tunnel requests do not reach the in-process handler")
 }
 
 // TestRelayRPC_TokenOnly: a forwarded RPC without a token, or with a

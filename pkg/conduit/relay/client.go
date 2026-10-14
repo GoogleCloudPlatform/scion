@@ -473,3 +473,6 @@ func (s *RemoteSession) Close() error { return nil }
 
 // Record returns the registry record the handle was resolved from.
 func (s *RemoteSession) Record() registry.SessionRecord { return s.rec }
+
+// Endpoint returns the internal endpoint of the relay holding the session.
+func (s *RemoteSession) Endpoint() string { return s.endpoint }

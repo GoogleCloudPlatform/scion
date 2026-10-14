@@ -372,45 +372,9 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	}()
 
 	s := ts.s
-	agent, err := s.store.GetAgent(ctx, req.Agent)
-	switch {
-	case errors.Is(err, store.ErrNotFound):
-		return nil, tunnelRefusal(tunnelAgentNotFound, "agent not found")
-	case err != nil:
-		return nil, fmt.Errorf("agent lookup: %w", err)
-	case !agent.DeletedAt.IsZero():
-		return nil, tunnelRefusal(tunnelAgentNotFound, "agent not found")
-	}
-	log = log.With("agent_id", agent.ID, "kind", kind)
-
-	port, err := s.authorizeConduitTunnel(ctx, ts.identity, agent, kind, params)
-	if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
-		// The user stopped being active after userActive: the same
-		// refusal userActive gives.
-		log.Info("Conduit tunnel refused", "cause", te.cause)
-		return nil, err
-	}
-	if errors.Is(err, errConduitUserStatusUnavailable) {
-		return nil, err
-	}
-	if errors.Is(err, errConduitAuthzUnavailable) {
-		log.Warn("Conduit tunnel request: authorization could not be evaluated", "error", err)
-		return nil, tunnelRefusal(tunnelStreamAuthzUnavailable, "authorization is temporarily unavailable")
-	}
+	agent, port, log, err := ts.checkTunnelTarget(ctx, log, req.Agent, kind, params)
 	if err != nil {
-		log.Info("Conduit tunnel refused", "cause", "forbidden", "error", err)
-		return nil, tunnelRefusal(tunnelForbidden, "not permitted")
-	}
-	switch state.Phase(agent.Phase) {
-	case state.PhaseStopped, state.PhaseHalted, state.PhaseStopping, state.PhaseSuspended:
-		return nil, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
-	}
-	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)
-	if err != nil {
-		return nil, fmt.Errorf("broker lookup: %w", err)
-	}
-	if offline {
-		return nil, tunnelRefusal(tunnelBrokerUnavailable, "runtime broker not connected")
+		return nil, err
 	}
 	rt := s.conduit.Load()
 	if rt == nil || rt.router == nil {
@@ -452,6 +416,7 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 		StreamID:  user.ID(),
 		Close:     t.closeBoth,
 		Renew:     renew,
+		Bridge:    conduitBridgeOf(target),
 	}
 	t.untrack = s.trackConduitUserStream(tracked)
 	t.tracked.Store(tracked)
@@ -472,6 +437,57 @@ func (ts *conduitTunnelSession) open(ctx context.Context, ls conduit.LocalSessio
 	go t.run(ts)
 	log.Info("Conduit tunnel opened", "stream_id", user.ID())
 	return resp, nil
+}
+
+// checkTunnelTarget runs a tunnel request's checks on its target agent, in
+// the order design §3.8 rule 7 fixes for every tunnel path: the agent
+// exists (404), the user may open the kind on it (403, or 503 when that
+// cannot be evaluated), it is running (409 agent_not_running), and its
+// runtime broker is connected (503). It returns the agent, the TCP port
+// the kind names (0 for other kinds) and log with the agent added.
+func (ts *conduitTunnelSession) checkTunnelTarget(ctx context.Context, log *slog.Logger, agentID, kind string, params map[string]string) (*store.Agent, int, *slog.Logger, error) {
+	s := ts.s
+	agent, err := s.store.GetAgent(ctx, agentID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotFound, "agent not found")
+	case err != nil:
+		return nil, 0, log, fmt.Errorf("agent lookup: %w", err)
+	case !agent.DeletedAt.IsZero():
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotFound, "agent not found")
+	}
+	log = log.With("agent_id", agent.ID, "kind", kind)
+
+	port, err := s.authorizeConduitTunnel(ctx, ts.identity, agent, kind, params)
+	if te := (*conduitTunnelError)(nil); errors.As(err, &te) {
+		// The user stopped being active after userActive: the same
+		// refusal userActive gives.
+		log.Info("Conduit tunnel refused", "cause", te.cause)
+		return nil, 0, log, err
+	}
+	if errors.Is(err, errConduitUserStatusUnavailable) {
+		return nil, 0, log, err
+	}
+	if errors.Is(err, errConduitAuthzUnavailable) {
+		log.Warn("Conduit tunnel request: authorization could not be evaluated", "error", err)
+		return nil, 0, log, tunnelRefusal(tunnelStreamAuthzUnavailable, "authorization is temporarily unavailable")
+	}
+	if err != nil {
+		log.Info("Conduit tunnel refused", "cause", "forbidden", "error", err)
+		return nil, 0, log, tunnelRefusal(tunnelForbidden, "not permitted")
+	}
+	switch state.Phase(agent.Phase) {
+	case state.PhaseStopped, state.PhaseHalted, state.PhaseStopping, state.PhaseSuspended:
+		return nil, 0, log, tunnelRefusal(tunnelAgentNotRunning, "agent is not running")
+	}
+	offline, err := s.conduitTunnelBrokerOffline(ctx, agent)
+	if err != nil {
+		return nil, 0, log, fmt.Errorf("broker lookup: %w", err)
+	}
+	if offline {
+		return nil, 0, log, tunnelRefusal(tunnelBrokerUnavailable, "runtime broker not connected")
+	}
+	return agent, port, log, nil
 }
 
 // userActive applies the user-status rule shared with the per-stream
@@ -642,7 +658,7 @@ func (ts *conduitTunnelSession) openTarget(ctx context.Context, rtr *router.Rout
 			// Authorization passed; the signing key set failed.
 			return fmt.Errorf("%w: %w", errConduitTunnelGrantKeys, err)
 		}
-		st, err = res.Session.OpenStream(ctx, &conduitv1.StreamOpen{
+		st, _, err = ts.s.openConduitTargetStream(ctx, res, &conduitv1.StreamOpen{
 			Kind:   conduit.StreamKind(kind).Proto(),
 			Params: params,
 			Grant:  tok,
