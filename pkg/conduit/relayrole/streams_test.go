@@ -148,6 +148,49 @@ func (f *fakeTargetSession) RefreshAuth(cred []byte, streamID uint32) error {
 	return nil
 }
 
+// remoteTargetSession is a target session this relay does not hold (not a
+// conduit.LocalSession).
+type remoteTargetSession struct{ conduit.Session }
+
+// recordingStreamRenewer records the credentials passed to Renew.
+type recordingStreamRenewer struct {
+	mu  sync.Mutex
+	got [][]byte
+}
+
+func (r *recordingStreamRenewer) Renew(credential []byte) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.got = append(r.got, append([]byte(nil), credential...))
+	return nil
+}
+
+// TestStreamRenewalCrossesTheHop: a renewal for a target on another relay
+// goes to the bridged stream's own renewer (AuthRefresh over the hop), with
+// the hub's grant bytes unchanged.
+func TestStreamRenewalCrossesTheHop(t *testing.T) {
+	hub := newFakeHub(t)
+	clk := clock.NewFake(t0)
+	ro := newStreamRole(t, hub, clk, nil)
+	grant := []byte("eyJ0eXAiOiJjb25kdWl0LXJlbmV3YWwrand0In0.payload.sig")
+	hub.setAnswer(renewAnswer(string(grant), t0.Add(20*time.Minute)))
+	bridged := &recordingStreamRenewer{}
+	rec := &streamRecorder{}
+	target := relay.TargetStream{SessionID: "agent-s2", StreamID: 7}
+	defer ro.Streams.Track(TrackedStream{
+		UserSessionID: "user-s2", Target: target,
+		OpenJTI: "jti-2", LatestGrant: []byte("open-grant"),
+		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
+		Renewer: RenewerFor(remoteTargetSession{}, target, bridged), Close: rec.close,
+	})()
+	clk.Advance(8 * time.Minute)
+	bridged.mu.Lock()
+	defer bridged.mu.Unlock()
+	if len(bridged.got) != 1 || !bytes.Equal(bridged.got[0], grant) {
+		t.Fatalf("bridged stream renewals %q; want one, the grant unchanged", bridged.got)
+	}
+}
+
 // TestStreamRenewalSentAsAuthRefreshUnchanged (design §3.9 Delivery): a
 // renewal reaches a target this relay holds as AuthRefresh carrying the
 // hub's grant bytes unchanged and the target-side stream id.
@@ -163,7 +206,7 @@ func TestStreamRenewalSentAsAuthRefreshUnchanged(t *testing.T) {
 		UserSessionID: "user-s1", Target: relay.TargetStream{SessionID: "agent-s1", StreamID: 42},
 		OpenJTI: "jti-1", LatestGrant: []byte("open-grant"),
 		AuthzUntil: t0.Add(10 * time.Minute), Interval: 10 * time.Minute,
-		Renewer: RenewerFor(target, relay.TargetStream{SessionID: "agent-s1", StreamID: 42}), Close: rec.close,
+		Renewer: RenewerFor(target, relay.TargetStream{SessionID: "agent-s1", StreamID: 42}, nil), Close: rec.close,
 	})()
 	clk.Advance(8 * time.Minute)
 	target.mu.Lock()

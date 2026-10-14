@@ -16,7 +16,6 @@ package relayrole
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"time"
 
@@ -45,11 +44,6 @@ type Renewer interface {
 	Renew(grant []byte) error
 }
 
-// ErrRenewalNotForwarded is returned by a Renewer that cannot deliver a
-// renewal to a target on another relay yet. The stream then fails closed:
-// its target ends it at its own deadline.
-var ErrRenewalNotForwarded = errors.New("conduit relay: renewal forwarding across relays is not available")
-
 // LocalRenewer delivers renewals on a target session this relay holds.
 func LocalRenewer(target conduit.LocalSession, targetStreamID uint32) Renewer {
 	return localRenewer{ls: target, id: targetStreamID}
@@ -62,22 +56,20 @@ type localRenewer struct {
 
 func (l localRenewer) Renew(grant []byte) error { return l.ls.RefreshAuth(grant, l.id) }
 
-// HopRenewer delivers renewals to a target on another relay, across the
-// relay-to-relay bridge. Forwarding over the bridge is not available yet,
-// so every renewal fails closed (ErrRenewalNotForwarded).
-func HopRenewer() Renewer { return hopRenewer{} }
+// HopRenewer delivers renewals to a target on another relay through the
+// bridged stream toward it: the stream's Renew sends AuthRefresh{stream id,
+// grant} over the relay-to-relay hop, and the owner relay forwards it to
+// the target stream, the grant unchanged.
+func HopRenewer(st conduit.StreamRenewer) Renewer { return st }
 
-type hopRenewer struct{}
-
-func (hopRenewer) Renew([]byte) error { return ErrRenewalNotForwarded }
-
-// RenewerFor returns the renewer of a stream opened on sess: local when this
-// relay holds the target's session, the hop renewer otherwise.
-func RenewerFor(sess conduit.Session, target relay.TargetStream) Renewer {
+// RenewerFor returns the renewer of the stream st opened on sess: local when
+// this relay holds the target's session, the bridged stream's own renewer
+// otherwise.
+func RenewerFor(sess conduit.Session, target relay.TargetStream, st conduit.StreamRenewer) Renewer {
 	if ls, ok := sess.(conduit.LocalSession); ok {
 		return LocalRenewer(ls, target.StreamID)
 	}
-	return HopRenewer()
+	return HopRenewer(st)
 }
 
 // TrackedStream is one relay-held user stream.
