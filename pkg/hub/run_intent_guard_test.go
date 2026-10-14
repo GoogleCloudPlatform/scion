@@ -97,6 +97,12 @@ var lifecycleDispatchCallers = map[string]lifecycleDispatchRule{
 	// claimed it: the row is gone, or the delete engine records the stopped
 	// intent itself (ptone/scion#3055).
 	"HTTPAgentDispatcher.compensateLandedRun": {kind: intentUnchanged},
+	// The retained-files purge sends a delete for a soft-deleted agent
+	// whose container is already gone, then purges the record. The soft
+	// delete recorded the stopped intent (deletionEngine.dispatch), and a
+	// running intent is refused on a soft-deleted row, so the intent is
+	// already stopped (ptone/scion#4744).
+	"Server.settleRetainedFiles": {kind: intentUnchanged},
 }
 
 // funcDeclKey names a function declaration as Recv.Name, or Name for a
