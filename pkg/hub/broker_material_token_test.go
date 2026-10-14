@@ -493,7 +493,8 @@ func TestBrokerImageOps_OnlySessionCredentialsReachAutoProvide(t *testing.T) {
 // gate of broker material: a test identity with an admin role is refused
 // broker env and secret reads and writes on every credential kind, also on
 // a broker it registered, and the refusal is recorded as the
-// authorizeBrokerMaterial role gate. A human super-admin is admitted.
+// authorizeBrokerMaterial role gate. Human super-admins, including one who
+// did not register the broker, are admitted.
 func TestBrokerMaterial_TestAdminIdentitiesRefused(t *testing.T) {
 	srv, s, buf := tsaServer(t)
 	ctx := context.Background()
@@ -538,6 +539,20 @@ func TestBrokerMaterial_TestAdminIdentitiesRefused(t *testing.T) {
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s read on %s: %s", who, b.Name, rec.Body.String())
 			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/runtime-brokers/"+b.ID+"/env/BMT_TA_VAR", map[string]interface{}{"value": "v"})
 			assert.Equal(t, http.StatusForbidden, rec.Code, "%s write on %s: %s", who, b.Name, rec.Body.String())
+			// The broker secret routes and the generic env and secret
+			// routes with scope=runtime_broker refuse the same way.
+			q := "?scope=runtime_broker&scopeId=" + b.ID
+			for _, path := range []string{
+				"/api/v1/runtime-brokers/" + b.ID + "/secrets",
+				"/api/v1/runtime-brokers/" + b.ID + "/secrets/BMT_TA_SECRET",
+				"/api/v1/env" + q,
+				"/api/v1/secrets" + q,
+			} {
+				rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodGet, path, nil)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "%s read %s: %s", who, path, rec.Body.String())
+			}
+			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/runtime-brokers/"+b.ID+"/secrets/BMT_TA_SECRET", map[string]interface{}{"value": "dg=="})
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s secret write on %s: %s", who, b.Name, rec.Body.String())
 		}
 	}
 
@@ -549,12 +564,18 @@ func TestBrokerMaterial_TestAdminIdentitiesRefused(t *testing.T) {
 	}
 	assert.True(t, denied, "the refusal is recorded as the authorizeBrokerMaterial role gate")
 
-	// A human super-admin is admitted for reads and writes.
-	human := tsaIdentity(t, s, issuer.ID)
-	for _, isWrite := range []bool{false, true} {
-		ok, code := decide(human, CredentialKindInteractive, shared, isWrite)
-		assert.True(t, ok, "human super-admin, write=%v: %d", isWrite, code)
+	// Human super-admins are admitted for reads and writes: the one who
+	// registered the broker, and one who did not (broker.update from the
+	// super-admin role, not the owner relationship).
+	other := taUser(t, s, "bmt-ta-human", store.SystemRoleSuperAdmin)
+	require.NotEqual(t, shared.CreatedBy, other.ID)
+	for _, u := range []*store.User{issuer, other} {
+		human := tsaIdentity(t, s, u.ID)
+		for _, isWrite := range []bool{false, true} {
+			ok, code := decide(human, CredentialKindInteractive, shared, isWrite)
+			assert.True(t, ok, "human super-admin %s, write=%v: %d", u.ID, isWrite, code)
+		}
+		rec := doRequestAsUser(t, srv, u, http.MethodGet, "/api/v1/runtime-brokers/"+shared.ID+"/env", nil)
+		assert.Equal(t, http.StatusOK, rec.Code, "human super-admin %s session read: %s", u.ID, rec.Body.String())
 	}
-	rec := doRequestAsUser(t, srv, issuer, http.MethodGet, "/api/v1/runtime-brokers/"+shared.ID+"/env", nil)
-	assert.Equal(t, http.StatusOK, rec.Code, "human super-admin session read: %s", rec.Body.String())
 }
