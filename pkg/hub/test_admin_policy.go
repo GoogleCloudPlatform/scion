@@ -374,6 +374,7 @@ var testAdminRoleGatePolicy = map[string]testAdminRoleGate{
 	"gcp_iam_settings.go:gcpIAMHubAdmin":                          {Policy: testAdminPolicyDeny, EnforcedIn: "requireGCPIAMHubAdmin", Reason: "GCP permission check settings are runtime configuration"},
 	"handlers_env_secrets.go:authorizeHubEnvVarList":              {Policy: testAdminPolicyDeny, Reason: "hub environment variables (hub.env_vars.read)"},
 	"handlers_env_secrets.go:resolveEnvSecretAccess":              {Policy: testAdminPolicyDeny, Reason: "hub-scope environment variables and secrets"},
+	"handlers_env_secrets.go:authorizeBrokerMaterial":             {Policy: testAdminPolicyDeny, Reason: "runtime broker environment variables and secrets, matching the material root scopes"},
 	"web.go:authorizeSSESubjects":                                 {Policy: testAdminPolicyAllow, Reason: "event subscriptions (read)"},
 	"passthrough_gate.go:authorizePassthroughIdentity":            {Policy: testAdminPolicyDeny, Reason: "exposes the co-located broker's host GCP identity to agents"},
 	"handlers_auth.go:handleAuthAdminStatus":                      {Policy: testAdminPolicyAllow, Reason: "display of the caller's own admin status"},

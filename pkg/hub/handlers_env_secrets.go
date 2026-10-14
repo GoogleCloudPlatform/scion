@@ -2640,6 +2640,7 @@ func (s *Server) removeProjectProvider(w http.ResponseWriter, r *http.Request, p
 // variables and secrets. It writes the response and returns false when the
 // caller is refused.
 //   - The broker itself reads and writes its own material.
+//   - A test identity with an admin role is refused (test-admin policy).
 //   - A write needs an interactive session or dev credential (GOV_PENDING)
 //     and broker.update on the broker.
 //   - A read needs broker.read on the broker and, beyond it, either the
@@ -2661,6 +2662,13 @@ func (s *Server) authorizeBrokerMaterial(w http.ResponseWriter, r *http.Request,
 	}
 	user, ok := identity.(UserIdentity)
 	if !ok {
+		Forbidden(w)
+		return false
+	}
+	// Broker material is not available to test identities with admin
+	// roles (test-admin policy), matching the material their agents may
+	// receive (testAdminRootScopes).
+	if s.testAdminPolicyRefuses(ctx, "handlers_env_secrets.go:authorizeBrokerMaterial") {
 		Forbidden(w)
 		return false
 	}

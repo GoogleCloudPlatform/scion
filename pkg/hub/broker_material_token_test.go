@@ -488,3 +488,73 @@ func TestBrokerImageOps_OnlySessionCredentialsReachAutoProvide(t *testing.T) {
 		assert.Equal(t, want, srv.canRunBrokerImageOps(reqCtx, broker), "credential kind %q", kind)
 	}
 }
+
+// TestBrokerMaterial_TestAdminIdentitiesRefused pins the test-admin policy
+// gate of broker material: a test identity with an admin role is refused
+// broker env and secret reads and writes on every credential kind, also on
+// a broker it registered, and the refusal is recorded as the
+// authorizeBrokerMaterial role gate. A human super-admin is admitted.
+func TestBrokerMaterial_TestAdminIdentitiesRefused(t *testing.T) {
+	srv, s, buf := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "bmt-ta-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "bmt-ta-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+
+	mkBroker := func(name, owner string) *store.RuntimeBroker {
+		b := &store.RuntimeBroker{
+			ID: tid(name), Name: name, Slug: name, Status: store.BrokerStatusOnline,
+			CreatedBy: owner, Created: time.Now(), Updated: time.Now(),
+		}
+		require.NoError(t, s.CreateRuntimeBroker(ctx, b))
+		return b
+	}
+	shared := mkBroker("bmt-ta-broker", issuer.ID)
+
+	decide := func(id UserIdentity, kind CredentialKind, b *store.RuntimeBroker, isWrite bool) (bool, int) {
+		reqCtx := contextWithCredentialContext(contextWithIdentityAndUser(id), CredentialContext{Kind: kind})
+		r := httptest.NewRequest(http.MethodGet, "/api/v1/runtime-brokers/"+b.ID+"/env", nil).WithContext(reqCtx)
+		w := httptest.NewRecorder()
+		return srv.authorizeBrokerMaterial(w, r, b, isWrite), w.Code
+	}
+	credentialKinds := []CredentialKind{CredentialKindInteractive, CredentialKindDev, CredentialKindUAT, CredentialKindFederation, ""}
+
+	for who, k := range kinds {
+		id := tsaIdentity(t, s, k.Identity.ID)
+		own := mkBroker("bmt-ta-own-"+who, k.Identity.ID)
+		for _, b := range []*store.RuntimeBroker{shared, own} {
+			for _, kind := range credentialKinds {
+				for _, isWrite := range []bool{false, true} {
+					ok, code := decide(id, kind, b, isWrite)
+					assert.False(t, ok, "%s on %s, credential %q, write=%v", who, b.Name, kind, isWrite)
+					assert.Equal(t, http.StatusForbidden, code, "%s on %s, credential %q, write=%v", who, b.Name, kind, isWrite)
+				}
+			}
+			// Over HTTP with the identity's own token.
+			rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodGet, "/api/v1/runtime-brokers/"+b.ID+"/env", nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s read on %s: %s", who, b.Name, rec.Body.String())
+			rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/runtime-brokers/"+b.ID+"/env/BMT_TA_VAR", map[string]interface{}{"value": "v"})
+			assert.Equal(t, http.StatusForbidden, rec.Code, "%s write on %s: %s", who, b.Name, rec.Body.String())
+		}
+	}
+
+	denied := false
+	for _, d := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
+		if d["class"] == "role_gate" && d["subject"] == "handlers_env_secrets.go:authorizeBrokerMaterial" {
+			denied = true
+		}
+	}
+	assert.True(t, denied, "the refusal is recorded as the authorizeBrokerMaterial role gate")
+
+	// A human super-admin is admitted for reads and writes.
+	human := tsaIdentity(t, s, issuer.ID)
+	for _, isWrite := range []bool{false, true} {
+		ok, code := decide(human, CredentialKindInteractive, shared, isWrite)
+		assert.True(t, ok, "human super-admin, write=%v: %d", isWrite, code)
+	}
+	rec := doRequestAsUser(t, srv, issuer, http.MethodGet, "/api/v1/runtime-brokers/"+shared.ID+"/env", nil)
+	assert.Equal(t, http.StatusOK, rec.Code, "human super-admin session read: %s", rec.Body.String())
+}
