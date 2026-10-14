@@ -745,14 +745,16 @@ func TestMoveBrokerQuota_FailedSourceReleaseFailsTheMove(t *testing.T) {
 }
 
 // racingRowStore makes the next CreateUsageReservation lose to a row it
-// first writes itself on winnerScope, as a racing writer would.
+// first writes itself on winnerScope, as a racing writer would. It is
+// transparent until its fault switch is armed.
 type racingRowStore struct {
 	store.Store
+	fault       *storeFaultSwitch
 	winnerScope string
 }
 
 func (r *racingRowStore) CreateUsageReservation(ctx context.Context, res *store.UsageReservation) (*store.UsageReservation, error) {
-	if r.winnerScope == "" {
+	if !r.fault.Active() || r.winnerScope == "" {
 		return r.Store.CreateUsageReservation(ctx, res)
 	}
 	winner := *res
@@ -765,11 +767,12 @@ func (r *racingRowStore) CreateUsageReservation(ctx context.Context, res *store.
 }
 
 func TestRecordBrokerReservationUnchecked_RacingWinnerClassified(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, rs, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *racingRowStore {
+		return &racingRowStore{Store: inner, fault: f}
+	})
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
 	require.NoError(t, err)
-	rs := &racingRowStore{Store: s}
-	srv.store = rs
+	fault.Arm()
 
 	rs.winnerScope = "broker-a"
 	created, err := srv.recordBrokerReservationUnchecked(context.Background(), def.ID, "broker-a", "agent-same")
@@ -899,9 +902,11 @@ func TestSweep_ReleasedConflictStalePinStillRefused(t *testing.T) {
 
 // reReserveAfterReadStore runs reReserve once, right after the sweep's batch
 // read of the agents holding rows (so the sweep acts on a stale
-// observation), as a start that re-reserved in that window would.
+// observation), as a start that re-reserved in that window would. It is
+// transparent until its fault switch is armed.
 type reReserveAfterReadStore struct {
 	store.Store
+	fault     *storeFaultSwitch
 	agentID   string
 	reReserve func()
 	done      bool
@@ -909,7 +914,7 @@ type reReserveAfterReadStore struct {
 
 func (r *reReserveAfterReadStore) GetAgentsByIDs(ctx context.Context, ids []string) (map[string]*store.Agent, error) {
 	out, err := r.Store.GetAgentsByIDs(ctx, ids)
-	if !r.done {
+	if r.fault.Active() && !r.done {
 		for _, id := range ids {
 			if id == r.agentID {
 				r.done = true
@@ -925,7 +930,9 @@ func (r *reReserveAfterReadStore) GetAgentsByIDs(ctx context.Context, ids []stri
 // re-reserved between the sweep's read and its release holds a new row, and
 // that slot is not freed.
 func TestSweep_StaleObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
-	srv, s := testServer(t)
+	srv, s, rr, fault := testServerWithStoreFault(t, func(inner store.Store, f *storeFaultSwitch) *reReserveAfterReadStore {
+		return &reReserveAfterReadStore{Store: inner, fault: f}
+	})
 	brokerA, _ := newQuotaTestBrokerAndProject(t, s, "rerez-a")
 	brokerB, projectB := newQuotaTestBrokerAndProject(t, s, "rerez-b")
 	def, err := s.GetLimitDefinitionByName(context.Background(), store.LimitMaxAgentsPerBroker)
@@ -934,11 +941,13 @@ func TestSweep_StaleObservationDoesNotReleaseAReReservedSlot(t *testing.T) {
 	seedBrokerRow(t, s, def.ID, brokerA.ID, agent.ID, time.Now().Add(-2*reconcileMinReservationAge))
 
 	var fresh *store.UsageReservation
-	srv.store = &reReserveAfterReadStore{Store: s, agentID: agent.ID, reReserve: func() {
+	rr.agentID = agent.ID
+	rr.reReserve = func() {
 		// The old row goes and a start reserves on the agent's own broker.
 		require.NoError(t, s.ReleaseReservation(context.Background(), def.ID, agent.ID))
 		fresh = seedBrokerRow(t, s, def.ID, brokerB.ID, agent.ID, time.Time{})
-	}}
+	}
+	fault.Arm()
 
 	srv.ReconcileStaleBrokerQuotaReservations(context.Background())
 
