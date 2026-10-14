@@ -301,10 +301,10 @@ func (r *startClaimRun) renewLoop() {
 // except a handoff, success and a lost claim included, it then frees the
 // agent's slot on the broker the claim's start targeted if the agent holds
 // no capacity and no start-kind claim (releaseSlotIfIdle, which never frees
-// a reservation on another broker): an exit observed while the claim was held skipped
-// its release (for example a synchronous create whose container exited
-// during the dispatch keeps its terminal phase). That is a no-op for a
-// running agent and while a start-kind claim is still held.
+// a reservation on another broker): an exit observed while the claim was
+// held skipped its release (for example a synchronous create whose
+// container exited during the dispatch keeps its terminal phase). That is a
+// no-op for a running agent and while a start-kind claim is still held.
 func (r *startClaimRun) finish(outcome startOutcome) bool {
 	close(r.stop)
 	<-r.done

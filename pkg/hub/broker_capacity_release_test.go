@@ -797,7 +797,9 @@ func TestSweep_StaleDeletedObservationDoesNotReleaseAReReservedSlot(t *testing.T
 // reservation on the broker that start targeted, which is also the agent
 // row's broker (k8s merge condition 2, R6-B1). A start refused because the
 // agent's reservation is on another broker releases its claim, and the
-// reservation on the other broker is kept; the sweep decides it.
+// reservation on the other broker is kept; the sweep decides it. The same
+// scenario as TestReserve_FailedRetryDoesNotReleaseExisting, driven once,
+// that also pins the claim release and that nothing is dispatched.
 func TestStartRefusedScopeConflict_StoppedAgent_KeepsOtherBrokerRow(t *testing.T) {
 	srv, s := testServer(t)
 	disp := &quotaLifecycleDispatcher{}
@@ -822,6 +824,9 @@ func TestStartRefusedScopeConflict_StoppedAgent_KeepsOtherBrokerRow(t *testing.T
 
 // An empty broker skips the idle release: there is no start target to scope
 // it to. The same idle agent's slot is freed on its own broker (control).
+// The empty case documents the guard; the reservation's scope check would
+// also skip it. TestReleaseSlotIfIdle_ClaimBrokerMustBeTheRowBroker pins the
+// row-broker clause.
 func TestReleaseSlotIfIdle_EmptyBrokerSkips(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -904,4 +909,23 @@ func TestReleaseSlotIfIdle_WriteNamesTheReservationRead(t *testing.T) {
 	after := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
 	require.NotNil(t, after, "the row that replaced the one read is kept")
 	assert.Equal(t, otherBroker, after.ScopeID)
+}
+
+// The claim's broker must also be the agent row's broker: a reservation on
+// the claim's broker X is kept while the agent row is on broker Y, even
+// though the reservation's scope matches X (design r7 §4.4, R6-B1, owner
+// rule: reservation scope == claim broker == row broker).
+func TestReleaseSlotIfIdle_ClaimBrokerMustBeTheRowBroker(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	brokerX, _ := newQuotaTestBrokerAndProject(t, s, "rowclaim-x")
+	brokerY, projectY := newQuotaTestBrokerAndProject(t, s, "rowclaim-y")
+	a := newQuotaTestAgent(t, s, brokerY, projectY, "rowclaim", state.PhaseStopped)
+	held := seedSlot(t, s, brokerX.ID, a.ID)
+
+	srv.releaseSlotIfIdleOn(ctx, a.ID, brokerX.ID)
+	after := activeReservation(t, s, brokerLimitDefID(t, s), a.ID)
+	require.NotNil(t, after, "the row is on another broker than the claim's: kept")
+	assert.Equal(t, held.ID, after.ID)
+	assert.EqualValues(t, 1, brokerReservationCount(t, s, brokerX.ID))
 }

@@ -273,8 +273,9 @@ func (s *Server) readAgentForIdleRelease(ctx context.Context, agentID string) *s
 // reservation's broker scope, and only that reservation: its ID is part of
 // the condition (store.ReleaseReservationIfAgent evaluates it with the rest
 // on the locked rows), with the run ID read here, no start-kind claim and
-// the agent holding no capacity (NotCounted). One read of the reservation
-// and one conditional write.
+// the agent holding no capacity (NotCounted). With the caller's agent read,
+// it costs a limit-definition read, a reservation read and one conditional
+// write.
 func (s *Server) releaseIdleSlotOn(ctx context.Context, row *store.Agent, broker string) {
 	if broker == "" || row.RuntimeBrokerID != broker {
 		return
@@ -298,12 +299,20 @@ func (s *Server) releaseIdleSlotOn(ctx context.Context, row *store.Agent, broker
 	if res.ScopeType != store.QuotaScopeBroker || res.ScopeID != broker {
 		return
 	}
-	if released, _ := s.releaseBrokerQuotaIf(ctx, row, store.AgentReleaseCond{
+	released, err := s.store.ReleaseReservationIfAgent(ctx, def.ID, row.ID, store.AgentReleaseCond{
 		ExpectedRunID:    row.RunID,
 		NoStartKindClaim: true,
 		NotCounted:       true,
 		ReservationID:    res.ID,
-	}); released {
+	})
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: release after the claim cleared failed",
+				"agent_id", row.ID, "reservation_id", res.ID, "error", err)
+		}
+		return
+	}
+	if released {
 		s.agentLifecycleLog.Info("quota: released the slot of an agent left idle when its claim cleared",
 			"agent_id", row.ID, "runtime_broker_id", broker)
 	}
