@@ -164,6 +164,27 @@ var layer1RoundTripNoCompanion = map[string]bool{
 	"server.hub.hub_name":                     true, // a sent value equal to the effective name is an echo
 }
 
+// layer1RoundTripPairs lists sample keys that are stored and cleared together
+// with a partner key, because one without the other is invalid: a save that
+// leaves telemetry.cloud.tls with only cert_file or only key_file is refused
+// (telemetryTLSSaveErrors). The partner shares the parent object.
+var layer1RoundTripPairs = map[string]string{
+	"telemetry.cloud.tls.cert_file": "telemetry.cloud.tls.key_file",
+	"telemetry.cloud.tls.key_file":  "telemetry.cloud.tls.cert_file",
+}
+
+// pairMembers returns the JSON object holding the last element of pathA
+// with valueA and the last element of pathB with valueB.
+func pairMembers(t *testing.T, pathA, pathB []string, valueA, valueB string) string {
+	t.Helper()
+	b, err := json.Marshal(map[string]json.RawMessage{
+		pathA[len(pathA)-1]: json.RawMessage(valueA),
+		pathB[len(pathB)-1]: json.RawMessage(valueB),
+	})
+	require.NoError(t, err)
+	return string(b)
+}
+
 // mapSections are the opsettings sections whose document is one map.
 var mapSections = map[string]bool{"runtimes": true, "profiles": true, "harness_configs": true}
 
@@ -329,7 +350,14 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				srv, fake, ops := newTestDBServerWithStore(t, st)
 
 				seed := sample
-				if f.docPath != nil {
+				partner, paired := layer1RoundTripPairs[koanf]
+				var pf layer1Field
+				switch {
+				case paired:
+					pf = layer1FieldFor(t, sec.Name, partner)
+					seed = nestJSON(t, f.docPath[:len(f.docPath)-1],
+						pairMembers(t, f.docPath, pf.docPath, sample, layer1RoundTripSamples[partner]))
+				case f.docPath != nil:
 					seed = nestJSON(t, f.docPath, sample)
 				}
 				fake.seedWithOrigin(sec.Name, json.RawMessage(seed), "managed")
@@ -347,8 +375,13 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				require.True(t, ok, "omitting %s must keep it; row %s after %s", koanf, row.Value, body)
 				assert.Equal(t, want, got, "omitting %s must keep its value", koanf)
 
-				// Explicit null: cleared.
+				// Explicit null: cleared. A paired key is cleared with its
+				// partner, the only clear that leaves a valid value.
 				body = nestJSON(t, f.bodyPath, `null`)
+				if paired {
+					body = nestJSON(t, f.bodyPath[:len(f.bodyPath)-1],
+						pairMembers(t, f.bodyPath, pf.bodyPath, `null`, `null`))
+				}
 				rr = putLayer1(t, srv, ops, sec.Name, body)
 				require.Equal(t, http.StatusOK, rr.Code, "clear body %s: %s", body, rr.Body.String())
 				row = storedRow(fake, sec.Name)
@@ -360,6 +393,10 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 				}
 				_, ok = valueAtPath(doc, f.docPath)
 				assert.False(t, ok, "an explicit null must clear %s; row %s", koanf, row.Value)
+				if paired {
+					_, ok = valueAtPath(doc, pf.docPath)
+					assert.False(t, ok, "an explicit null must clear %s with %s; row %s", partner, koanf, row.Value)
+				}
 				if audit != nil {
 					recs := audit.records()
 					require.Len(t, recs, 1, "only the clear changes the stored public URL")
@@ -374,6 +411,9 @@ func TestPutServerConfigDB_Layer1RoundTrip(t *testing.T) {
 	}
 	for k := range layer1RoundTripExempt {
 		assert.True(t, covered[k], "layer1RoundTripExempt has %s, which is not a registry key", k)
+	}
+	for k, partner := range layer1RoundTripPairs {
+		assert.True(t, covered[k] && covered[partner], "layer1RoundTripPairs has %s / %s, which is not a registry key pair", k, partner)
 	}
 }
 

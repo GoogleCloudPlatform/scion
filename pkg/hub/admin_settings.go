@@ -725,6 +725,20 @@ func (s *Server) handlePutServerConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// telemetry.cloud.tls unit rule, same as the DB-mode handler: checked
+	// only when the save sends tls (telemetryTLSTouched). A save replaces
+	// telemetry whole, so the file never keeps a tls the request left out.
+	if req.Telemetry != nil && telemetryTLSTouched(rawBody) {
+		var tls *config.V1TelemetryTLSConfig
+		if req.Telemetry.Cloud != nil {
+			tls = req.Telemetry.Cloud.TLS
+		}
+		if err := config.ValidateV1TelemetryTLS(tls); err != nil {
+			writeError(w, http.StatusBadRequest, ErrCodeValidationError, err.Error(), nil)
+			return
+		}
+	}
+
 	// Validate the effective hub default GCP identity (the merged result, so
 	// a PUT that changes only one of the pair is checked against the other's
 	// stored value). Same checks as the DB-mode handler.
