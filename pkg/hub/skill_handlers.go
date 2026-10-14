@@ -598,6 +598,13 @@ func (s *Server) createSkill(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		req.ScopeID = userIdent.ID()
+		// A user-scope skill is a new record in the caller's user scope: a
+		// user access token needs skill:create on a hub boundary.
+		decision := s.authzService.CheckAccess(ctx, userIdent, skillUserScopeResource(userIdent), ActionCreate)
+		if !decision.Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden, "You do not have permission to create skills in your user scope", nil)
+			return
+		}
 	}
 
 	slug := api.Slugify(req.Name)
@@ -1826,6 +1833,16 @@ func skillScopeResource(scope, scopeID string) Resource {
 	if scope == store.SkillScopeUser {
 		r.ScopeUserID = scopeID
 	}
+	return r
+}
+
+// skillUserScopeResource builds the "skill" Resource for a new skill in
+// the caller's own user scope. Like templateUserScopeResource, it takes the
+// authenticated UserIdentity, so the owner and scope user always name the
+// caller and never a request field.
+func skillUserScopeResource(userIdent UserIdentity) Resource {
+	r := skillScopeResource(store.SkillScopeUser, userIdent.ID())
+	r.OwnerID = userIdent.ID()
 	return r
 }
 
