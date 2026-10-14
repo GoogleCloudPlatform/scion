@@ -49,14 +49,26 @@ var levelToSeverity = map[slog.Level]string{
 }
 
 // GCPHandler is a slog.Handler that formats logs for Google Cloud Logging.
+//
+// Groups opened with WithGroup are tracked here instead of on the wrapped
+// JSON handler, so the Cloud Logging special fields (labels, source location
+// and serviceContext) stay at the top level of each entry while user
+// attributes nest inside their groups.
 type GCPHandler struct {
-	handler   slog.Handler
+	handler   slog.Handler // ungrouped; carries attrs added before the first group
 	component string
 	hubName   string
 	hostname  string
 	projectID string
 	version   string
 	preAttrs  []slog.Attr // tracked for label promotion
+	groups    []gcpGroup  // open groups, outermost first
+}
+
+// gcpGroup is a group opened with WithGroup and the attrs added inside it.
+type gcpGroup struct {
+	name  string
+	attrs []slog.Attr
 }
 
 // NewGCPHandler creates a new GCPHandler.
@@ -133,13 +145,13 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	if traceID := extractTraceIDFromAttrs(h.preAttrs, r); traceID != "" {
 		labels[gcpTraceIDLabelKey] = traceID
 	}
-	r.AddAttrs(slog.Any(GCPKeyLabels, labels))
+	top := []slog.Attr{slog.Any(GCPKeyLabels, labels)}
 
 	// Add source location if requested or by default
 	if r.PC != 0 {
 		fs := runtime.CallersFrames([]uintptr{r.PC})
 		f, _ := fs.Next()
-		r.AddAttrs(slog.Any(GCPKeySourceLocation, map[string]string{
+		top = append(top, slog.Any(GCPKeySourceLocation, map[string]string{
 			"file":     f.File,
 			"line":     strconv.Itoa(f.Line),
 			"function": f.Function,
@@ -147,12 +159,13 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 	}
 
 	// Add serviceContext for GCP Error Reporting (all levels)
-	r.AddAttrs(slog.Group("serviceContext",
+	top = append(top, slog.Group("serviceContext",
 		slog.String("service", h.component),
 		slog.String("version", h.version),
 	))
 
 	// ERROR+ only: stack trace and @type for GCP Error Reporting
+	var errAttrs []slog.Attr
 	if r.Level >= slog.LevelError {
 		hasST := false
 		hasType := false
@@ -174,46 +187,110 @@ func (h *GCPHandler) Handle(ctx context.Context, r slog.Record) error {
 			return !hasST || !hasType
 		})
 
-		var attrs []slog.Attr
 		if !hasST {
-			attrs = append(attrs, slog.String("stack_trace", string(debug.Stack())))
+			errAttrs = append(errAttrs, slog.String("stack_trace", string(debug.Stack())))
 		}
 		if !hasType {
-			attrs = append(attrs, slog.String("@type", errorReportingType))
-		}
-		if len(attrs) > 0 {
-			r.AddAttrs(attrs...)
+			errAttrs = append(errAttrs, slog.String("@type", errorReportingType))
 		}
 	}
 
-	return h.handler.Handle(ctx, r)
+	if len(h.groups) == 0 {
+		r.AddAttrs(top...)
+		r.AddAttrs(errAttrs...)
+		return h.handler.Handle(ctx, r)
+	}
+
+	// Grouped: nest the record attrs (and stack_trace/@type, as before) in
+	// the open groups ourselves, and keep the special fields top-level.
+	inner := make([]slog.Attr, 0, r.NumAttrs()+len(errAttrs))
+	r.Attrs(func(a slog.Attr) bool {
+		inner = append(inner, a)
+		return true
+	})
+	inner = append(inner, errAttrs...)
+	out := slog.NewRecord(r.Time, r.Level, r.Message, r.PC)
+	out.AddAttrs(nestInGroups(h.groups, inner)...)
+	out.AddAttrs(top...)
+	return h.handler.Handle(ctx, out)
 }
 
 func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if len(attrs) == 0 {
+		return h
+	}
 	newPreAttrs := make([]slog.Attr, len(h.preAttrs)+len(attrs))
 	copy(newPreAttrs, h.preAttrs)
 	copy(newPreAttrs[len(h.preAttrs):], attrs)
-	return &GCPHandler{
-		handler:   h.handler.WithAttrs(attrs),
-		component: h.component,
-		hubName:   h.hubName,
-		hostname:  h.hostname,
-		projectID: h.projectID,
-		version:   h.version,
-		preAttrs:  newPreAttrs,
+	nh := h.clone()
+	nh.preAttrs = newPreAttrs
+	if len(h.groups) == 0 {
+		nh.handler = h.handler.WithAttrs(attrs)
+		return nh
 	}
+	// Inside a group: keep the attrs with the innermost group. Resolve
+	// LogValuers now, as the JSON handler does for WithAttrs.
+	last := len(nh.groups) - 1
+	g := nh.groups[last]
+	groupAttrs := make([]slog.Attr, len(g.attrs), len(g.attrs)+len(attrs))
+	copy(groupAttrs, g.attrs)
+	for _, a := range attrs {
+		a.Value = a.Value.Resolve()
+		groupAttrs = append(groupAttrs, a)
+	}
+	nh.groups[last] = gcpGroup{name: g.name, attrs: groupAttrs}
+	return nh
 }
 
 func (h *GCPHandler) WithGroup(name string) slog.Handler {
-	return &GCPHandler{
-		handler:   h.handler.WithGroup(name),
-		component: h.component,
-		hubName:   h.hubName,
-		hostname:  h.hostname,
-		projectID: h.projectID,
-		version:   h.version,
-		preAttrs:  h.preAttrs,
+	if name == "" {
+		return h
 	}
+	nh := h.clone()
+	nh.groups = append(nh.groups, gcpGroup{name: name})
+	return nh
+}
+
+// clone returns a copy of h whose groups slice can be changed without
+// affecting h.
+func (h *GCPHandler) clone() *GCPHandler {
+	nh := *h
+	nh.groups = make([]gcpGroup, len(h.groups), len(h.groups)+1)
+	copy(nh.groups, h.groups)
+	return &nh
+}
+
+// nestInGroups wraps attrs in groups, innermost last, prepending each
+// group's own attrs. Like slog's JSON handler, a group with nothing to
+// show is omitted.
+func nestInGroups(groups []gcpGroup, attrs []slog.Attr) []slog.Attr {
+	for i := len(groups) - 1; i >= 0; i-- {
+		members := make([]slog.Attr, 0, len(groups[i].attrs)+len(attrs))
+		members = append(members, groups[i].attrs...)
+		members = append(members, attrs...)
+		v := slog.GroupValue(members...)
+		if !hasVisibleAttr(v.Group()) {
+			attrs = nil
+			continue
+		}
+		attrs = []slog.Attr{{Key: groups[i].name, Value: v}}
+	}
+	return attrs
+}
+
+// hasVisibleAttr reports whether any attr would be written: not the zero
+// Attr and not an empty group.
+func hasVisibleAttr(attrs []slog.Attr) bool {
+	for _, a := range attrs {
+		if a.Equal(slog.Attr{}) {
+			continue
+		}
+		if v := a.Value.Resolve(); v.Kind() == slog.KindGroup && !hasVisibleAttr(v.Group()) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func extractTraceIDFromAttrs(preAttrs []slog.Attr, r slog.Record) string {
