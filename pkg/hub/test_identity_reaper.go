@@ -37,7 +37,10 @@ import (
 //     never waits behind identities whose purge cannot complete. An expired identity is not
 //     admitted to any project (testFixtureRejection in
 //     userAdmittedToProjectAs), so its running agents are held and stopped
-//     within one drain interval of the expiry.
+//     within one drain interval of the expiry. An expired admin-kind
+//     identity's groups are also detached from every parent group
+//     (detachTestAdminGroups), so a child-group edge never outlives it by
+//     more than one tick.
 //  2. The next batch of identities past expires_at + testIdentityReaperGrace
 //     (testIdentityReaperCursor: a keyset cursor that moves past every
 //     identity tried and wraps at the end) is purged
@@ -215,6 +218,20 @@ func (s *Server) holdExpiredTestIdentities(ctx context.Context, now time.Time) (
 	})
 	if err != nil {
 		return 0, fmt.Errorf("enqueue expired test identity checks: %w", err)
+	}
+	// An expired admin-kind identity's groups stop being child groups now,
+	// not at its purge (admin tier A3; detachTestAdminGroups).
+	for i := range users {
+		if !store.IsTestAdminKind(users[i].Kind) {
+			continue
+		}
+		if n, err := s.detachTestAdminGroups(ctx, users[i].ID); err != nil {
+			slog.Error("test identity reaper: detaching an expired admin-kind identity's groups failed; retrying on a later tick",
+				"test_identity_id", users[i].ID, "error", err)
+		} else if n > 0 {
+			slog.Info("test identity reaper: child-group edges of an expired admin-kind identity removed",
+				"test_identity_id", users[i].ID, "edges", n)
+		}
 	}
 	s.drainMembershipLossChecks(ctx)
 	return len(users), nil

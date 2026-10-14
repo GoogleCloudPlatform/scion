@@ -196,3 +196,72 @@ func enqueueGrantPurgeLossTx(ctx context.Context, tx store.Store, g store.Issuan
 	}
 	return nil
 }
+
+// testAdminGroupEdgeRemoveMutation is the audit type of one child-group
+// edge removed at an admin-kind identity's expiry.
+const testAdminGroupEdgeRemoveMutation = "test_admin_group_edge_remove"
+
+// detachTestAdminGroups removes, at an admin-kind identity's expiry, every
+// child-group edge that makes a group stamped with it (as its provenance
+// root) a child of another group (review O1). A child-group edge has no
+// expiry of its own: the store admits such an edge under shaping only for
+// a group the identity created, and its bound would otherwise be the
+// purge, a grace period later. Members a person added to that group stop
+// inheriting the parent's authority here. Each removal writes a mutation
+// audit row and queues a membership-loss check for the group's users. It
+// returns the number of edges removed.
+func (s *Server) detachTestAdminGroups(ctx context.Context, rootID string) (int, error) {
+	set, err := s.store.ListFixtureRootedResources(ctx, rootID, fixturePurgeListLimit)
+	if err != nil {
+		return 0, fmt.Errorf("list stamped groups: %w", err)
+	}
+	actor := AuditActor{PrincipalKind: membershipLossSystemActorKind, PrincipalID: membershipLossSystemActorID}
+	removed := 0
+	for i := range set.Groups {
+		g := &set.Groups[i]
+		if g.Fixture.RootID != rootID {
+			continue
+		}
+		parents, err := s.store.GetDirectParentGroupIDs(ctx, g.ID)
+		if err != nil {
+			return removed, fmt.Errorf("parents of group %s: %w", g.ID, err)
+		}
+		if len(parents) == 0 {
+			continue
+		}
+		users, err := transitiveGroupMemberUsers(ctx, s.store, g.ID)
+		if err != nil {
+			return removed, fmt.Errorf("members of group %s: %w", g.ID, err)
+		}
+		for _, parentID := range parents {
+			record := &store.MutationAuditRecord{
+				MutationType:  testAdminGroupEdgeRemoveMutation,
+				TargetType:    "group",
+				TargetID:      g.ID,
+				BeforeSummary: marshalDeletionAuditJSON(map[string]string{"parent_group_id": parentID, "child_group_id": g.ID, "fixture_root_id": rootID}),
+				Timestamp:     time.Now(),
+			}
+			actor.ApplyActor(record)
+			applyHubActorFallback(record)
+			err := s.store.WithTx(ctx, func(tx store.Store) error {
+				if err := tx.RemoveChildGroupEdge(ctx, parentID, g.ID); err != nil {
+					return err
+				}
+				for _, uid := range users {
+					if err := enqueueMembershipLossTx(ctx, tx, uid, "", store.MembershipLossTriggerGroupChange, actor); err != nil {
+						return err
+					}
+				}
+				return tx.CreateMutationAudit(ctx, record)
+			})
+			if errors.Is(err, store.ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return removed, fmt.Errorf("remove edge %s -> %s: %w", parentID, g.ID, err)
+			}
+			removed++
+		}
+	}
+	return removed, nil
+}

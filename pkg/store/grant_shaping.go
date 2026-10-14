@@ -144,4 +144,8 @@ type IssuanceStampedGrant struct {
 	GroupID          string            `json:"groupId,omitempty"`
 	Name             string            `json:"name,omitempty"`
 	ExpiresAt        *time.Time        `json:"expiresAt,omitempty"`
+	// BoundOutsideIssuance is set on a role definition that a role binding
+	// without this issuance's stamp names (for example a person's): the
+	// purge keeps such a role, and the residue report lists it.
+	BoundOutsideIssuance bool `json:"boundOutsideIssuance,omitempty"`
 }

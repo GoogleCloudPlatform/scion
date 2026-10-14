@@ -97,9 +97,16 @@ func (c *CompositeStore) ListIssuanceStampedGrants(ctx context.Context, issuance
 		return nil, false, mapError(err)
 	}
 	for _, rd := range rds[:trim(len(rds))] {
+		bound, err := c.client.RoleBinding.Query().
+			Where(rolebinding.RoleDefinitionIDEQ(rd.ID), rolebinding.Or(
+				rolebinding.IssuanceIDIsNil(), rolebinding.IssuanceIDNEQ(issuanceID))).
+			Exist(ctx)
+		if err != nil {
+			return nil, false, mapError(err)
+		}
 		out = append(out, store.IssuanceStampedGrant{
 			Kind: store.IssuanceGrantRoleDefinition, ID: rd.ID.String(),
-			Name: rd.Name, ScopeType: string(rd.ScopeType),
+			Name: rd.Name, ScopeType: string(rd.ScopeType), BoundOutsideIssuance: bound,
 		})
 	}
 

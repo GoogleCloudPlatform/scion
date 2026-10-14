@@ -24,6 +24,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -34,18 +35,30 @@ import (
 
 // Grant shaping census (ptone/scion#4240, admin tier A3).
 //
-// TestGrantShapingBuilderCensus scans every non-test, non-generated Go file
-// of the module for writes to a grant table: an ent create, update or
-// upsert builder on RoleBinding, GroupMembership, RoleDefinition,
-// InviteCode or BrokerJoinToken, a child-group edge write (AddChildGroupIDs,
-// AddParentGroupIDs and their entity forms), and raw SQL that inserts into
-// or updates one of those tables or group_child_groups. Every function
-// holding one must call grantShapingFor, where the store applies the
-// shaping and the fail-closed refusal together, or be listed in
+// TestGrantShapingBuilderCensus parses every non-test, non-generated Go file
+// of the module (go/ast, not text) and finds every function that writes a
+// grant table:
+//
+//   - an ent builder call <x>.<Table>.<Create|CreateBulk|MapCreateBulk|
+//     Update|UpdateOne|UpdateOneID>(...) on RoleBinding, GroupMembership,
+//     RoleDefinition, InviteCode or BrokerJoinToken, however the chain is
+//     line-broken;
+//   - an ent edge setter that attaches or re-points grant rows or
+//     child-group edges (AddChildGroup(s|IDs), AddParentGroup(s|IDs),
+//     AddMembership(s|IDs), AddRoleBinding(s|IDs)) on any builder;
+//   - a SQL string literal that inserts, replaces or updates one of those
+//     tables or group_child_groups (INSERT [OR x] INTO, REPLACE INTO,
+//     UPDATE [ONLY], schema-qualified or quoted), or a SQL write keyword in a
+//     function that also names such a table (a literal or the ent Table
+//     constant: a table name assembled at runtime).
+//
+// Each such function must call grantShapingFor or shapeJoinToken (an actual
+// call; a comment does not count), where the store applies the shaping and
+// the fail-closed refusal together, or be listed in
 // grantShapingCensusExempt with the reason it is not a grant an admin-kind
-// test identity can make. The sites are discovered, not counted: a new
-// write path fails until it is shaped or classified, and a stale exemption
-// fails too.
+// test identity can make. A stale exemption fails. The reflective offline
+// copy of migration beta (MethodByName("CreateBulk")) is outside any source
+// census; it copies every column and is not a request path.
 
 // grantShapingCensusExempt lists the functions ("<path from the module
 // root>:<func>") that write a grant table without grant shaping, each with
@@ -60,14 +73,116 @@ var grantShapingCensusExempt = map[string]string{
 	"pkg/ent/entc/migrate_alpha.go:copyGroupChildEdgesSQL":            "one-time legacy database migration (migration alpha), before any request is served",
 }
 
-// grantShapingTables are the entity names of the grant tables.
-var grantShapingTables = []string{"RoleBinding", "GroupMembership", "RoleDefinition", "InviteCode", "BrokerJoinToken"}
-
 var (
-	grantBuilderRE = regexp.MustCompile(`\.(` + strings.Join(grantShapingTables, "|") + `)\.(Create|CreateBulk|MapCreateBulk|Update|UpdateOne|UpdateOneID)\(`)
-	grantEdgeRE    = regexp.MustCompile(`\.(AddChildGroupIDs|AddChildGroups|AddParentGroupIDs|AddParentGroups)\(`)
-	grantSQLRE     = regexp.MustCompile(`(?i)(insert\s+(or\s+\w+\s+)?into|update)\s+"?(\w+\.)?(role_bindings|group_memberships|role_definitions|invite_codes|broker_join_tokens|group_child_groups)\b`)
+	grantTables     = map[string]bool{"RoleBinding": true, "GroupMembership": true, "RoleDefinition": true, "InviteCode": true, "BrokerJoinToken": true}
+	grantBuilderOps = map[string]bool{"Create": true, "CreateBulk": true, "MapCreateBulk": true, "Update": true, "UpdateOne": true, "UpdateOneID": true}
+	grantEdgeOps    = map[string]bool{
+		"AddChildGroupIDs": true, "AddChildGroups": true, "AddParentGroupIDs": true, "AddParentGroups": true,
+		"AddMembershipIDs": true, "AddMemberships": true, "AddRoleBindingIDs": true, "AddRoleBindings": true,
+	}
+	// grantTablePkgs are the ent packages whose Table constants name a grant
+	// table (group.ChildGroupsTable for the child-group edges).
+	grantTablePkgs = map[string]bool{"rolebinding": true, "groupmembership": true, "roledefinition": true, "invitecode": true, "brokerjointoken": true}
+
+	grantSQLTables  = `(role_bindings|group_memberships|role_definitions|invite_codes|broker_join_tokens|group_child_groups)`
+	grantSQLWriteRE = regexp.MustCompile(`(?i)\b(?:(?:insert|replace)\s+(?:or\s+\w+\s+)?into|update(?:\s+only)?)\s+"?(?:\w+"?\.)?"?` + grantSQLTables + `\b`)
+	// grantSQLKeywordRE is a SQL write keyword whose table is not a literal
+	// in the same string (assembled at runtime).
+	grantSQLKeywordRE = regexp.MustCompile(`(?i)\b(?:(?:insert|replace)\s+(?:or\s+\w+\s+)?into|update(?:\s+only)?)\s*(?:%[sv]|"?\s*$)`)
+	grantSQLTableRE   = regexp.MustCompile(`(?i)^"?(?:\w+"?\.)?"?` + grantSQLTables + `"?$`)
 )
+
+// callName returns the called function or method name of call.
+func callName(call *ast.CallExpr) string {
+	switch f := call.Fun.(type) {
+	case *ast.Ident:
+		return f.Name
+	case *ast.SelectorExpr:
+		return f.Sel.Name
+	}
+	return ""
+}
+
+// stringLit returns the value of a string literal.
+func stringLit(n ast.Node) (string, bool) {
+	lit, ok := n.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false
+	}
+	v, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+
+// grantSite is one function that writes a grant table.
+type grantSite struct {
+	key    string // path:func
+	shaped bool   // calls grantShapingFor or shapeJoinToken
+}
+
+// grantSitesInFile returns the grant-writing functions of one source file.
+func grantSitesInFile(rel string, src []byte) ([]grantSite, error) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, rel, src, parser.SkipObjectResolution)
+	if err != nil {
+		return nil, err
+	}
+	var out []grantSite
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		writes, shaped, keyword, namesTable := false, false, false, false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				name := callName(x)
+				if name == "grantShapingFor" || name == "shapeJoinToken" {
+					shaped = true
+				}
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+					if grantBuilderOps[sel.Sel.Name] {
+						if inner, ok := sel.X.(*ast.SelectorExpr); ok && grantTables[inner.Sel.Name] {
+							writes = true
+						}
+					}
+					if grantEdgeOps[sel.Sel.Name] {
+						writes = true
+					}
+				}
+			case *ast.SelectorExpr:
+				if pkg, ok := x.X.(*ast.Ident); ok {
+					if (grantTablePkgs[pkg.Name] && x.Sel.Name == "Table") || (pkg.Name == "group" && x.Sel.Name == "ChildGroupsTable") {
+						namesTable = true
+					}
+				}
+			case *ast.BasicLit:
+				if v, ok := stringLit(x); ok {
+					if grantSQLWriteRE.MatchString(v) {
+						writes = true
+					}
+					if grantSQLKeywordRE.MatchString(v) {
+						keyword = true
+					}
+					if grantSQLTableRE.MatchString(strings.TrimSpace(v)) {
+						namesTable = true
+					}
+				}
+			}
+			return true
+		})
+		if keyword && namesTable {
+			writes = true
+		}
+		if writes {
+			out = append(out, grantSite{key: rel + ":" + fn.Name.Name, shaped: shaped})
+		}
+	}
+	return out, nil
+}
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()
@@ -83,15 +198,10 @@ func moduleRoot(t *testing.T) string {
 	}
 }
 
-// grantWriteSite is one function that writes a grant table.
-type grantWriteSite struct {
-	key    string // path:func
-	shaped bool   // calls grantShapingFor
-}
-
-func scanGrantWriteSites(t *testing.T, root string) []grantWriteSite {
+// walkModuleGo calls visit for every non-test, non-generated Go file of the
+// module (the entc hooks under pkg/ent are hand-written and included).
+func walkModuleGo(t *testing.T, root string, visit func(rel string, src []byte)) {
 	t.Helper()
-	var sites []grantWriteSite
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -104,75 +214,42 @@ func scanGrantWriteSites(t *testing.T, root string) []grantWriteSite {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if !strings.HasSuffix(rel, ".go") || strings.HasSuffix(rel, "_test.go") {
 			return nil
 		}
 		if strings.HasPrefix(rel, "pkg/ent/") && !strings.HasPrefix(rel, "pkg/ent/entc/") {
-			return nil
+			return nil // generated
 		}
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		if !grantBuilderRE.Match(src) && !grantEdgeRE.Match(src) && !grantSQLRE.Match(src) {
-			return nil
-		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, path, src, parser.SkipObjectResolution)
-		if err != nil {
-			return err
-		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			body := string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
-			if !grantBuilderRE.MatchString(body) && !grantEdgeRE.MatchString(body) && !grantSQLRE.MatchString(body) {
-				continue
-			}
-			sites = append(sites, grantWriteSite{
-				key:    rel + ":" + fn.Name.Name,
-				shaped: strings.Contains(body, "grantShapingFor(") || strings.Contains(body, "shapeJoinToken("),
-			})
-		}
+		visit(rel, src)
 		return nil
 	})
 	require.NoError(t, err)
-	return sites
-}
-
-func grantCensusExempt(key string) (string, bool) {
-	if r, ok := grantShapingCensusExempt[key]; ok {
-		return r, true
-	}
-	for pat, r := range grantShapingCensusExempt {
-		if strings.HasSuffix(pat, "*") && strings.HasPrefix(key, strings.TrimSuffix(pat, "*")) {
-			return r, true
-		}
-	}
-	return "", false
 }
 
 func TestGrantShapingBuilderCensus(t *testing.T) {
 	root := moduleRoot(t)
-	sites := scanGrantWriteSites(t, root)
+	var sites []grantSite
+	walkModuleGo(t, root, func(rel string, src []byte) {
+		got, err := grantSitesInFile(rel, src)
+		require.NoError(t, err, rel)
+		sites = append(sites, got...)
+	})
 	require.NotEmpty(t, sites, "the scan finds the grant writes")
 
 	var unshaped []string
-	usedExempt := map[string]bool{}
+	used := map[string]bool{}
 	shaped := map[string]bool{}
 	for _, s := range sites {
 		if s.shaped {
 			shaped[s.key] = true
 			continue
 		}
-		if _, ok := grantCensusExempt(s.key); ok {
-			for pat := range grantShapingCensusExempt {
-				if pat == s.key || (strings.HasSuffix(pat, "*") && strings.HasPrefix(s.key, strings.TrimSuffix(pat, "*"))) {
-					usedExempt[pat] = true
-				}
-			}
+		if _, ok := grantShapingCensusExempt[s.key]; ok {
+			used[s.key] = true
 			continue
 		}
 		unshaped = append(unshaped, s.key)
@@ -180,12 +257,10 @@ func TestGrantShapingBuilderCensus(t *testing.T) {
 	sort.Strings(unshaped)
 	assert.Empty(t, unshaped, "grant table writes without grant shaping: call grantShapingFor in the function, or classify it in grantShapingCensusExempt")
 
-	// The known shaped sites are found (the scan works), including every
-	// write path named in grant_shaping.go.
 	for _, want := range []string{
 		"pkg/store/entadapter/role_store.go:createRoleBinding",
 		"pkg/store/entadapter/role_store.go:CreateRoleDefinition",
-		"pkg/store/entadapter/role_store.go:UpdateRoleDefinition",
+		"pkg/store/entadapter/role_store.go:updateRoleDefinition",
 		"pkg/store/entadapter/role_store.go:UpdateSystemRoleDefinitionPermissions",
 		"pkg/store/entadapter/group_store.go:AddGroupMember",
 		"pkg/store/entadapter/group_store.go:UpdateGroupMemberRole",
@@ -196,36 +271,52 @@ func TestGrantShapingBuilderCensus(t *testing.T) {
 	} {
 		assert.True(t, shaped[want], "shaped grant write %s found", want)
 	}
-	// No stale exemption: each names a site that still writes a grant
-	// table without shaping.
-	for pat := range grantShapingCensusExempt {
-		assert.True(t, usedExempt[pat], "stale grant shaping exemption %q", pat)
+	for key := range grantShapingCensusExempt {
+		assert.True(t, used[key], "stale grant shaping exemption %q", key)
 	}
 }
 
-// The census regexes catch each form of grant write (proof the scan is
-// not vacuous).
+// TestGrantShapingBuilderCensus_Detects plants each write form the census
+// must find (review R1) and checks that it is reported, and unshaped unless
+// the function really calls grantShapingFor.
 func TestGrantShapingBuilderCensus_Detects(t *testing.T) {
-	for _, src := range []string{
-		`c.client.RoleBinding.Create().SetPrincipalID(x)`,
-		`tx.GroupMembership.UpdateOneID(id).SetRole(r)`,
-		`c.client.RoleDefinition.CreateBulk(b...)`,
-		`client.InviteCode.Update().Where(p)`,
-		`client.BrokerJoinToken.Create()`,
-	} {
-		assert.True(t, grantBuilderRE.MatchString(src), src)
+	cases := map[string]struct {
+		body   string
+		shaped bool
+	}{
+		"membership edge setter":          {body: `c.User.UpdateOneID(u).AddMembershipIDs(m).Exec(ctx)`},
+		"membership edge entity setter":   {body: `c.Group.UpdateOneID(g).AddMemberships(m).Exec(ctx)`},
+		"role binding edge setter":        {body: `c.RoleDefinition.UpdateOneID(r).AddRoleBindingIDs(b).Exec(ctx)`},
+		"child group edge":                {body: `c.Group.UpdateOneID(g).AddChildGroupIDs(m).Exec(ctx)`},
+		"line-broken builder chain":       {body: "c.RoleBinding.\n\t\tCreate().\n\t\tSetPrincipalID(x).\n\t\tExec(ctx)"},
+		"bulk create":                     {body: `c.GroupMembership.CreateBulk(b...).Exec(ctx)`},
+		"update one":                      {body: `c.InviteCode.UpdateOneID(id).SetNote(x).Exec(ctx)`},
+		"comment does not shape":          {body: "// grantShapingFor(ctx, c) is called elsewhere\n\tc.BrokerJoinToken.Create().Exec(ctx)"},
+		"insert into":                     {body: "db.Exec(`INSERT INTO role_bindings (id) VALUES (?)`)"},
+		"insert or ignore, schema prefix": {body: "db.Exec(`INSERT OR IGNORE INTO main.group_memberships (id) VALUES (?)`)"},
+		"replace into":                    {body: "db.Exec(`REPLACE INTO invite_codes (id) VALUES (?)`)"},
+		"update only":                     {body: "db.Exec(`UPDATE ONLY role_definitions SET name = ?`)"},
+		"quoted table":                    {body: "db.Exec(`UPDATE \"broker_join_tokens\" SET created_by = ?`)"},
+		"table assembled at runtime":      {body: `db.Exec(fmt.Sprintf("INSERT INTO %s (id) VALUES (?)", rolebinding.Table))`},
+		"table name in a variable":        {body: "t := \"group_child_groups\"\n\tdb.Exec(\"UPDATE \" + t + \" SET x = 1\")"},
+		"really shaped":                   {body: "if _, err := grantShapingFor(ctx, c); err != nil {\n\t\treturn\n\t}\n\tc.RoleBinding.Create().Exec(ctx)", shaped: true},
 	}
-	assert.True(t, grantEdgeRE.MatchString(`s.client.Group.UpdateOneID(g).AddChildGroupIDs(m)`))
-	for _, src := range []string{
-		`INSERT INTO role_bindings (id) VALUES (?)`,
-		`update group_memberships set role = 'owner'`,
-		`INSERT INTO group_child_groups (group_id, parent_group_id)`,
-		`INSERT OR IGNORE INTO group_memberships (id, role)`,
-		`INSERT INTO main.group_memberships (id, group_id)`,
-	} {
-		assert.True(t, grantSQLRE.MatchString(src), src)
+	for name, tc := range cases {
+		src := "package x\n\nfunc planted() {\n\t" + tc.body + "\n}\n"
+		sites, err := grantSitesInFile("planted.go", []byte(src))
+		require.NoError(t, err, name)
+		require.Len(t, sites, 1, "%s: the planted write is found", name)
+		assert.Equal(t, tc.shaped, sites[0].shaped, name)
 	}
-	assert.False(t, grantSQLRE.MatchString(`DELETE FROM role_bindings WHERE id = ?`), "a delete confers nothing")
+	for name, body := range map[string]string{
+		"delete":            "db.Exec(`DELETE FROM role_bindings WHERE id = ?`)",
+		"read":              `c.RoleBinding.Query().All(ctx)`,
+		"other table write": "db.Exec(`INSERT INTO agents (id) VALUES (?)`)",
+	} {
+		sites, err := grantSitesInFile("planted.go", []byte("package x\n\nfunc planted() {\n\t"+body+"\n}\n"))
+		require.NoError(t, err, name)
+		assert.Empty(t, sites, "%s confers nothing", name)
+	}
 }
 
 // issuance_id is Immutable at the ORM layer: no update builder of a grant

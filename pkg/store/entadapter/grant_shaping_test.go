@@ -468,3 +468,58 @@ func TestListExpiredTestFixtureUsers_IncludeAdminKinds(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, e.admin.ID, got[0].ID)
 }
+
+// Review R2: a role the identity defined may change only while no role
+// binding without its issuance names it. A person's binding of the role
+// makes the shaped update refused (the change would outlive the identity
+// through that binding, and the purge keeps the role); with only stamped
+// bindings it is allowed. The stamped-grant listing marks such a role.
+func TestGrantShaping_StampedRoleBoundByPersonIsFrozen(t *testing.T) {
+	e := newGSEnv(t, store.UserKindTestSuperAdmin)
+	ctx := context.Background()
+	proj := newStampTestProject(t, e.cs, store.FixtureProvenance{})
+	role, err := e.cs.CreateRoleDefinition(e.shaped, &store.RoleDefinition{ID: uuid.NewString(), Name: "gs-fr-" + uuid.NewString()[:8],
+		ScopeType: store.RoleScopeProject, Permissions: []string{"project.read"}})
+	require.NoError(t, err)
+
+	// Only a stamped binding: the update is allowed.
+	other := &store.User{ID: uuid.NewString(), Email: "gs-fr-o-" + uuid.NewString()[:8] + "@example.com", DisplayName: "o"}
+	require.NoError(t, e.cs.CreateUser(ctx, other))
+	_, err = e.cs.CreateRoleBinding(e.shaped, &store.RoleBinding{RoleDefinitionID: role.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: other.ID, ScopeType: store.RoleScopeProject, ScopeID: proj.ID, CreatedBy: e.admin.ID})
+	require.NoError(t, err)
+	role.Permissions = []string{"project.read", "project.update"}
+	_, err = e.cs.UpdateRoleDefinition(e.shaped, role)
+	require.NoError(t, err, "only stamped bindings name the role")
+	grants, _, err := e.cs.ListIssuanceStampedGrants(ctx, e.shaping.IssuanceID, 0)
+	require.NoError(t, err)
+	for _, g := range grants {
+		if g.Kind == store.IssuanceGrantRoleDefinition {
+			assert.False(t, g.BoundOutsideIssuance)
+		}
+	}
+
+	// A person binds the role: the shaped update is refused and the role
+	// is unchanged.
+	_, err = e.cs.CreateRoleBinding(e.humanCtx, &store.RoleBinding{RoleDefinitionID: role.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: e.human.ID, ScopeType: store.RoleScopeProject, ScopeID: proj.ID, CreatedBy: e.human.ID})
+	require.NoError(t, err)
+	role.Permissions = []string{"project.read", "project.update", "project.manage"}
+	_, err = e.cs.UpdateRoleDefinition(e.shaped, role)
+	assert.ErrorIs(t, err, store.ErrTestAdminGrantRefused)
+	got, err := e.cs.GetRoleDefinition(ctx, role.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"project.read", "project.update"}, got.Permissions, "unchanged")
+	grants, _, err = e.cs.ListIssuanceStampedGrants(ctx, e.shaping.IssuanceID, 0)
+	require.NoError(t, err)
+	var marked bool
+	for _, g := range grants {
+		if g.Kind == store.IssuanceGrantRoleDefinition && g.ID == role.ID {
+			marked = g.BoundOutsideIssuance
+		}
+	}
+	assert.True(t, marked, "the listing marks the role a person's binding names")
+	// Control: the person (a human actor) may change it.
+	_, err = e.cs.UpdateRoleDefinition(e.humanCtx, role)
+	assert.NoError(t, err)
+}

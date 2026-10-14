@@ -46,8 +46,8 @@ import (
 // It is computed at the start of each purge of an admin-kind identity (in
 // the purge report), and served on GET
 // /api/v1/test-identities/admin/{id}/residue to a human super-admin. When
-// UnstampedChanges is not empty a test_admin_residue line is written to the
-// test admin audit sink.
+// a purge's report lists unstamped changes a test_admin_residue line is
+// written to the test admin audit sink (a read of the route writes none).
 
 // Test admin audit events of A3.
 const (
@@ -90,6 +90,10 @@ type TestAdminResidueReport struct {
 	StampedGrants    []store.IssuanceStampedGrant `json:"stampedGrants"`
 	StampedResources TestAdminResidueResources    `json:"stampedResources"`
 	UnstampedChanges []TestAdminResidueChange     `json:"unstampedChanges"`
+	// KeptRoles lists the custom roles stamped with the issuance that a
+	// role binding without the stamp names: the purge keeps them (their
+	// content is the identity's; the binding is not).
+	KeptRoles []store.IssuanceStampedGrant `json:"keptRoles"`
 	// Truncated is true when a list hit its bound.
 	Truncated bool `json:"truncated,omitempty"`
 	// Limit states what the report can see.
@@ -110,6 +114,7 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 		StampedGrants:    []store.IssuanceStampedGrant{},
 		StampedResources: TestAdminResidueResources{Agents: []string{}, Schedules: []string{}, Groups: []string{}, Projects: []string{}},
 		UnstampedChanges: []TestAdminResidueChange{},
+		KeptRoles:        []store.IssuanceStampedGrant{},
 		Limit:            testAdminResidueLimitText,
 	}
 	stamped := map[string]bool{identityID: true}
@@ -122,6 +127,9 @@ func (s *Server) testAdminResidue(ctx context.Context, identityID, issuanceID st
 	for _, g := range grants {
 		rep.StampedGrants = append(rep.StampedGrants, g)
 		stamped[g.ID] = true
+		if g.Kind == store.IssuanceGrantRoleDefinition && g.BoundOutsideIssuance {
+			rep.KeptRoles = append(rep.KeptRoles, g)
+		}
 	}
 
 	actors := []string{identityID}
@@ -298,6 +306,8 @@ func (s *Server) handleTestAdminResidue(w http.ResponseWriter, r *http.Request) 
 		writeErrorFromErr(w, err, "")
 		return
 	}
-	s.emitTestAdminResidueWarning(ctx, rep)
+	// A read writes no sink line: the WARN is the purge's (design §4.5);
+	// the read is in the request lines of the audit sink only when an
+	// admin kind makes it, which the route refuses.
 	writeJSON(w, http.StatusOK, rep)
 }

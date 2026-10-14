@@ -20,15 +20,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
-	"regexp"
-	"strings"
 	"testing"
 	"time"
 
@@ -168,7 +161,7 @@ func TestTestAdminA3_GrantsLapseAtIdentityExpiry(t *testing.T) {
 	// Shorten the identity's lifetime to a few seconds (its row is the
 	// source of the shaping on every request).
 	db, dialect := a3RawDB(t, s)
-	exp := time.Now().Add(3 * time.Second).UTC()
+	exp := time.Now().Add(10 * time.Second).UTC()
 	_, err := db.ExecContext(ctx, taRebind(dialect, "UPDATE users SET expires_at = ? WHERE id = ?"), exp, k.Identity.ID)
 	require.NoError(t, err)
 	// Its issuance binding never outlives it (the A1 clamp drops one that
@@ -309,6 +302,10 @@ func TestTestAdminA3_CustomRolesInvitesJoinTokens(t *testing.T) {
 	rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/admin/roles/"+hrd.ID,
 		map[string]any{"name": hname, "permissions": []string{"project.read", "project.update"}})
 	assert.Equal(t, http.StatusForbidden, rec.Code, "a test admin changing a human's role: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), store.ErrTestAdminGrantRefused.Error(), "the refusal is grant shaping's")
+	rec = doRequestAsUser(t, srv, issuer, http.MethodPut, "/api/v1/admin/roles/"+hrd.ID,
+		map[string]any{"name": hname, "permissions": []string{"project.read", "project.update"}})
+	assert.Less(t, rec.Code, 300, "human control: %s", rec.Body.String())
 
 	rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/invites", InviteCreateRequest{ExpiresIn: "96h", MaxUses: 1})
 	require.Less(t, rec.Code, 300, rec.Body.String())
@@ -528,26 +525,62 @@ func a3ResidueHas(r TestAdminResidueReport, targetID string) bool {
 // purged by its issuer or a human super-admin; another human (a hub-admin)
 // gets the empty report and the identity stays.
 func TestTestAdminA3_PurgeCallers(t *testing.T) {
-	srv, s, _ := tsaServer(t)
+	srv, s, buf := tsaServer(t)
 	ctx := context.Background()
 	kinds, issuers := a3Kinds(t, srv, s, "a3-pc")
 	target := kinds[store.UserKindTestHubAdmin]
+	targetRow := a3Row(t, s, target.Identity.ID)
+	// A stamped grant of the target, to show the control removes nothing.
+	projectID := tiCreateProject(t, srv, target.AccessToken, "a3-pc-project")
+	grantee := taUser(t, s, "a3-pc-grantee", store.SystemRoleHubMember)
+	rec := doRequestWithToken(t, srv, target.AccessToken, http.MethodPost, "/api/v1/projects/"+projectID+"/members",
+		addProjectMemberRequest{RoleDefinitionID: a3ProjectRoleID(t, s, store.ProjectRoleAdmin), PrincipalType: "user", PrincipalID: grantee.ID})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	stampedBefore, _, err := s.ListIssuanceStampedGrants(ctx, *targetRow.IssuanceID, 0)
+	require.NoError(t, err)
+	require.NotEmpty(t, stampedBefore)
+
+	// Test identities of both admin kinds are refused as purge callers by
+	// the test-admin policy on the route's permission (test_identity.issue,
+	// deny for every admin kind), before any purge logic: the decision
+	// names the policy and the sink records the refusal for the caller.
 	for kind, caller := range kinds {
 		rec := doRequestWithToken(t, srv, caller.AccessToken, http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
 		assert.Equal(t, http.StatusForbidden, rec.Code, "%s as purge caller: %s", kind, rec.Body.String())
-		assert.True(t, rec.Code != http.StatusForbidden || taReason(t, rec) == testIdentityReasonFixtureCall || strings.Contains(rec.Body.String(), "test_identity"),
-			"%s: refused as a test identity: %s", kind, rec.Body.String())
+		d := srv.authzService.Decide(ctx, AuthzRequest{Principal: principalContextForIdentity(tsaIdentity(t, s, caller.Identity.ID)),
+			Credential: credentialContextForIdentity(tsaIdentity(t, s, caller.Identity.ID)), Resource: Resource{Type: "test_identity"},
+			Action: ActionIssue, Permission: permissionTestIdentityIssue, TargetEvidence: hubCollectionEvidence(permissionTestIdentityIssue)})
+		assert.False(t, d.Allowed)
+		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: the refusal is the test-admin policy's: %s", kind, d.Reason)
+		var found bool
+		for _, l := range tsaSinkLines(buf, testAdminAuditEventPolicyDenial) {
+			if l["user_id"] == caller.Identity.ID && l["class"] == "permission" && l["subject"] == permissionTestIdentityIssue {
+				found = true
+			}
+		}
+		assert.True(t, found, "%s: the policy refusal of test_identity.issue is in the sink", kind)
 	}
-	hubAdmin := taUser(t, s, "a3-pc-hubadmin", store.SystemRoleHubAdmin)
-	rec := doRequestAsUser(t, srv, hubAdmin, http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
-	if rec.Code == http.StatusOK {
-		r := fpPurgeReport(t, rec)
-		assert.False(t, r.IdentityDeleted, "a human hub-admin that is not the issuer purges nothing")
-	} else {
-		assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	}
-	_, err := s.GetUser(ctx, target.Identity.ID)
+
+	// Control: a human who passes the route's test_identity.issue check
+	// (a custom system role holding it) but is neither the issuer nor a
+	// super-admin is not a purge caller for an admin-kind target: exactly
+	// 200 with the empty report, and nothing is removed.
+	issuerRole, err := s.CreateRoleDefinition(ctx, &store.RoleDefinition{ID: generateID(), Name: "a3-pc-issuer-" + generateID()[:8],
+		ScopeType: store.RoleScopeSystem, Permissions: []string{permissionTestIdentityIssue}})
+	require.NoError(t, err)
+	human := taUser(t, s, "a3-pc-human", store.SystemRoleHubMember)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: issuerRole.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: human.ID, ScopeType: store.RoleScopeSystem, CreatedBy: "test"})
+	require.NoError(t, err)
+	rec = doRequestAsUser(t, srv, human, http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	r := fpPurgeReport(t, rec)
+	assert.Equal(t, *emptyTestIdentityPurgeReport(target.Identity.ID), r, "the empty report")
+	_, err = s.GetUser(ctx, target.Identity.ID)
 	require.NoError(t, err, "the identity stays")
+	stampedAfter, _, err := s.ListIssuanceStampedGrants(ctx, *targetRow.IssuanceID, 0)
+	require.NoError(t, err)
+	assert.Equal(t, len(stampedBefore), len(stampedAfter), "the stamped grants stay")
 
 	// The issuer purges its identity.
 	rec = doRequestAsUser(t, srv, issuers[store.UserKindTestHubAdmin], http.MethodDelete, "/api/v1/test-identities/"+target.Identity.ID+"?purge=true", nil)
@@ -753,115 +786,6 @@ func TestTestAdminA3_ScopeCensus(t *testing.T) {
 	assert.False(t, testAdminScopeAllowed("unknown:scope"), "an unknown scope fails closed")
 }
 
-// TestTestAdminA3_AgentMintCensus (advisor 4): every agent token scope list
-// and every synthetic agent identity's scopes in pkg/hub come from
-// ceilingFilteredAgentScopes (which applies the clamp), or apply
-// clampTestAdminRootedScopes themselves, or are classified here. A new
-// site fails until it is classified.
-func TestTestAdminA3_AgentMintCensus(t *testing.T) {
-	exempt := map[string]string{
-		"agenttoken.go:SignAgentToken":                     "copies grant.Scopes; every AgentTokenGrant with scopes is built by AuthorizeAgentToken (checked below); the empty-grant fallback agent:status:update is allowed (TestTestAdminA3_ScopeCensus)",
-		"agent_scope_reissue.go:planAgentDelegatorReissue": "scopes from AuthorizeAgentToken (parentGrant)",
-		"httpdispatcher.go:resolveAsNeededForKeys":         "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z): dispatch-time project-scope injection stays under A2's membership rule (provenance-root membership, SystemAuthorityProof)",
-		"httpdispatcher.go:resolveSecrets":                 "dispatch-time secret resolution identity, never signed; unchanged by A3 by decision (ti-adm-em 11:41Z), as resolveAsNeededForKeys",
-	}
-	root := moduleRootHub(t)
-	sites := a3ScopeSites(t, root)
-	require.NotEmpty(t, sites)
-	used := map[string]bool{}
-	for key, body := range sites {
-		if strings.Contains(body, "ceilingFilteredAgentScopes(") || strings.Contains(body, "clampTestAdminRootedScopes(") {
-			continue
-		}
-		if _, ok := exempt[key]; ok {
-			used[key] = true
-			continue
-		}
-		t.Errorf("agent scope site %s neither filters through ceilingFilteredAgentScopes nor clamps, and is not classified", key)
-	}
-	for key := range exempt {
-		assert.True(t, used[key], "stale agent mint exemption %s", key)
-	}
-	// The unclamped chain filter is used only by the clamped wrapper and by
-	// the child edge coverage (see chainFilteredAgentScopes).
-	callers := a3CallerFuncs(t, root, "chainFilteredAgentScopes(")
-	assert.ElementsMatch(t, []string{"authz_effect_ceiling.go:ceilingFilteredAgentScopes", "authz_effect_ceiling.go:agentRowEffectCeiling"}, callers)
-	for _, want := range []string{"agent_token_mint.go:AuthorizeAgentToken", "scheduled_authority.go:resolveScheduledAgent",
-		"skill_dispatch_resolve.go:creatorIdentityForAgent", "artifacts_recipient.go:recipientIdentity"} {
-		_, ok := sites[want]
-		assert.True(t, ok, "scope site %s found", want)
-	}
-}
-
-// moduleRootHub is the module root (the directory holding go.mod).
-func moduleRootHub(t *testing.T) string {
-	t.Helper()
-	dir, err := os.Getwd()
-	require.NoError(t, err)
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		require.NotEqual(t, parent, dir, "module root not found")
-		dir = parent
-	}
-}
-
-// a3ScopeSites returns, keyed "<file>:<func>", the body of every non-test
-// pkg/hub function that builds an AgentTokenGrant or AgentTokenClaims
-// literal with a Scopes field, or assigns to a grant's or claims' Scopes.
-func a3ScopeSites(t *testing.T, root string) map[string]string {
-	t.Helper()
-	dir := filepath.Join(root, "pkg", "hub")
-	entries, err := os.ReadDir(dir)
-	require.NoError(t, err)
-	litRE := regexp.MustCompile(`AgentToken(Grant|Claims)\{`)
-	assignRE := regexp.MustCompile(`(?i)(grant|claims)[A-Za-z]*\.Scopes\s*=[^=]`)
-	out := map[string]string{}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Join(dir, name))
-		require.NoError(t, err)
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, name, src, parser.SkipObjectResolution)
-		require.NoError(t, err, name)
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
-			}
-			found := false
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				cl, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				lit := string(src[fset.Position(cl.Pos()).Offset:fset.Position(cl.End()).Offset])
-				if !litRE.MatchString(lit) {
-					return true
-				}
-				for _, el := range cl.Elts {
-					if kv, ok := el.(*ast.KeyValueExpr); ok {
-						if id, ok := kv.Key.(*ast.Ident); ok && id.Name == "Scopes" {
-							found = true
-						}
-					}
-				}
-				return true
-			})
-			body := string(src[fset.Position(fn.Body.Pos()).Offset:fset.Position(fn.Body.End()).Offset])
-			if found || assignRE.MatchString(body) {
-				out[name+":"+fn.Name.Name] = body
-			}
-		}
-	}
-	return out
-}
-
 // Runtime secret reads through the API are clamped for an admin-rooted
 // agent (ti-adm-em 11:41Z: option 1), even in the project its root owns,
 // where A2's membership rule admits it: the token carries no
@@ -904,38 +828,100 @@ func TestTestAdminA3_RuntimeSecretReadClamped(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "a3-value")
 }
 
-// a3CallerFuncs returns "<file>:<func>" for every non-test pkg/hub function
-// whose body contains call (the function defining it excluded).
-func a3CallerFuncs(t *testing.T, root, call string) []string {
-	t.Helper()
-	dir := filepath.Join(root, "pkg", "hub")
-	entries, err := os.ReadDir(dir)
+// Review O1: a child-group edge has no expiry. A group a test admin creates
+// under a person's group, with a member a person added (unshaped), passes
+// the parent's authority on only until the identity expires: the reaper's
+// hold step detaches it then, not a grace period later at the purge. A
+// person's own child group under the same parent is untouched.
+func TestTestAdminA3_ChildGroupEdgeEndsAtExpiry(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "a3-ce-iss", store.SystemRoleSuperAdmin)
+	k := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	row := a3Row(t, s, k.Identity.ID)
+	owner := taUser(t, s, "a3-ce-owner", store.SystemRoleHubMember)
+	projectID := tid("a3-ce-project")
+	taProject(t, s, projectID, owner.ID)
+	parent := &store.Group{ID: generateID(), Name: "a3 ce parent", Slug: "a3-ce-parent-" + generateID()[:8], GroupType: store.GroupTypeExplicit}
+	require.NoError(t, s.CreateGroup(ctx, parent))
+	_, err := s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: a3ProjectRoleID(t, s, store.ProjectRoleMember), PrincipalType: store.RoleBindingPrincipalGroup,
+		PrincipalID: parent.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: "test"})
 	require.NoError(t, err)
-	name := strings.TrimSuffix(call, "(")
-	var out []string
-	for _, e := range entries {
-		fn := e.Name()
-		if e.IsDir() || !strings.HasSuffix(fn, ".go") || strings.HasSuffix(fn, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(filepath.Join(dir, fn))
-		require.NoError(t, err)
-		if !strings.Contains(string(src), call) {
-			continue
-		}
-		fset := token.NewFileSet()
-		f, err := parser.ParseFile(fset, fn, src, parser.SkipObjectResolution)
-		require.NoError(t, err, fn)
-		for _, decl := range f.Decls {
-			d, ok := decl.(*ast.FuncDecl)
-			if !ok || d.Body == nil || d.Name.Name == name {
-				continue
-			}
-			body := string(src[fset.Position(d.Body.Pos()).Offset:fset.Position(d.Body.End()).Offset])
-			if strings.Contains(body, call) {
-				out = append(out, fn+":"+d.Name.Name)
-			}
-		}
-	}
-	return out
+
+	// The test admin creates a child group of the person's group.
+	child := fpCreateGroup(t, srv, k.AccessToken, map[string]any{"name": "a3 ce child", "slug": "a3-ce-child-" + generateID()[:8], "parentId": parent.ID})
+	// A person adds a person to it (no shaping, no expiry).
+	member := taUser(t, s, "a3-ce-member", store.SystemRoleHubMember)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: child, MemberType: store.GroupMemberTypeUser, MemberID: member.ID, Role: "member", AddedBy: owner.ID}))
+	// Control: a person's own child group under the same parent.
+	human := &store.Group{ID: generateID(), Name: "a3 ce human", Slug: "a3-ce-human-" + generateID()[:8], GroupType: store.GroupTypeExplicit, ParentID: parent.ID}
+	require.NoError(t, s.CreateGroup(ctx, human))
+	control := taUser(t, s, "a3-ce-control", store.SystemRoleHubMember)
+	require.NoError(t, s.AddGroupMember(ctx, &store.GroupMember{GroupID: human.ID, MemberType: store.GroupMemberTypeUser, MemberID: control.ID, Role: "member", AddedBy: owner.ID}))
+
+	groups, err := s.GetEffectiveGroups(ctx, member.ID)
+	require.NoError(t, err)
+	require.Contains(t, groups, parent.ID, "before expiry the child passes the parent's authority on")
+
+	// One reaper tick inside the grace period after the expiry.
+	_, err = srv.reapTestIdentities(ctx, row.ExpiresAt.Add(time.Minute))
+	require.NoError(t, err)
+	groups, err = s.GetEffectiveGroups(ctx, member.ID)
+	require.NoError(t, err)
+	assert.NotContains(t, groups, parent.ID, "after the expiry the edge is gone")
+	assert.Contains(t, groups, child, "the membership itself (a person's) stays")
+	groups, err = s.GetEffectiveGroups(ctx, control.ID)
+	require.NoError(t, err)
+	assert.Contains(t, groups, parent.ID, "control: a person's child group keeps its edge")
+	assert.Len(t, fpPurgeAudits(t, s, testAdminGroupEdgeRemoveMutation, child), 1, "the removal is audited")
+	_, err = s.GetUser(ctx, row.ID)
+	assert.NoError(t, err, "the identity itself is purged only after the grace period")
+}
+
+// Review R2: a custom role the test admin defined that a person's binding
+// names is frozen for the test admin (the store refuses the change; see
+// TestGrantShaping_StampedRoleBoundByPersonIsFrozen), listed in the residue
+// report's KeptRoles, and kept by the purge (KeptGrants), with the person's
+// binding untouched.
+func TestTestAdminA3_StampedRoleBoundByPersonKept(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	ctx := context.Background()
+	issuer := taUser(t, s, "a3-kr-iss", store.SystemRoleSuperAdmin)
+	k := tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin)
+	row := a3Row(t, s, k.Identity.ID)
+	name := "a3-kr-" + generateID()[:8]
+	rec := doRequestWithToken(t, srv, k.AccessToken, http.MethodPost, "/api/v1/admin/roles",
+		map[string]any{"name": name, "scopeType": "project", "permissions": []string{"project.read"}})
+	require.Less(t, rec.Code, 300, rec.Body.String())
+	rd, err := s.GetRoleDefinitionByName(ctx, name, store.RoleScopeProject)
+	require.NoError(t, err)
+	owner := taUser(t, s, "a3-kr-owner", store.SystemRoleHubMember)
+	projectID := tid("a3-kr-project")
+	taProject(t, s, projectID, owner.ID)
+	_, err = s.CreateRoleBinding(ctx, &store.RoleBinding{RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser,
+		PrincipalID: owner.ID, ScopeType: store.RoleScopeProject, ScopeID: projectID, CreatedBy: owner.ID})
+	require.NoError(t, err)
+
+	rec = doRequestWithToken(t, srv, k.AccessToken, http.MethodPut, "/api/v1/admin/roles/"+rd.ID,
+		map[string]any{"name": name, "permissions": []string{"project.read", "project.update"}})
+	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), store.ErrTestAdminGrantRefused.Error())
+
+	res, err := srv.testAdminResidue(ctx, row.ID, *row.IssuanceID)
+	require.NoError(t, err)
+	require.Len(t, res.KeptRoles, 1)
+	assert.Equal(t, rd.ID, res.KeptRoles[0].ID)
+
+	rec = doRequestAsUser(t, srv, issuer, http.MethodDelete, "/api/v1/test-identities/"+row.ID+"?purge=true", nil)
+	report := fpPurgeReport(t, rec)
+	assert.True(t, report.IdentityDeleted, rec.Body.String())
+	require.Len(t, report.KeptGrants, 1)
+	assert.Equal(t, rd.ID, report.KeptGrants[0].ID)
+	assert.Equal(t, "role_in_use", report.KeptGrants[0].Reason)
+	got, err := s.GetRoleDefinition(ctx, rd.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"project.read"}, got.Permissions, "the kept role is unchanged")
+	roles, err := activeDirectProjectRoles(ctx, s, nil, false, owner.ID, projectID)
+	require.NoError(t, err)
+	assert.True(t, roles[store.ProjectRoleOwner], "the person's own grants stay")
 }

@@ -16,6 +16,7 @@ package entadapter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -248,27 +249,51 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 	if err != nil {
 		return nil, err
 	}
+	// The grant shaping check and the update run in one transaction (the
+	// caller's, inside store.WithTx).
+	var out *store.RoleDefinition
+	err = withEntTx(ctx, r.client, func(c *ent.Client) error {
+		var uerr error
+		out, uerr = updateRoleDefinition(ctx, c, uid, rd)
+		return uerr
+	})
+	return out, err
+}
 
-	// Fetch existing to check system flag.
-	existing, err := r.client.RoleDefinition.Get(ctx, uid)
+// updateRoleDefinition is UpdateRoleDefinition on client c. Under shaping
+// (an admin-kind test identity, admin tier A3) only a role stamped with the
+// same issuance may change, and only while no role binding without that
+// stamp names it: a change to any other role, or to a role a person's
+// binding names, could not be bounded by the identity's expiry.
+func updateRoleDefinition(ctx context.Context, c *ent.Client, uid uuid.UUID, rd *store.RoleDefinition) (*store.RoleDefinition, error) {
+	existing, err := c.RoleDefinition.Get(ctx, uid)
 	if err != nil {
 		return nil, mapError(err)
 	}
 	if existing.System {
 		return nil, fmt.Errorf("%w: system roles cannot be modified", store.ErrInvalidInput)
 	}
-	// An admin-kind test identity changes only the roles it defined: a
-	// change to any other role (bound, perhaps, to people) could not be
-	// bounded by the identity's expiry.
-	shaping, err := grantShapingFor(ctx, r.client)
+	shaping, err := grantShapingFor(ctx, c)
 	if err != nil {
 		return nil, err
 	}
-	if shaping != nil && !shapedByIssuance(shaping, existing.IssuanceID) {
-		return nil, store.ErrTestAdminGrantRefused
+	if shaping != nil {
+		if !shapedByIssuance(shaping, existing.IssuanceID) {
+			return nil, store.ErrTestAdminGrantRefused
+		}
+		boundOutside, err := c.RoleBinding.Query().
+			Where(rolebinding.RoleDefinitionIDEQ(uid), rolebinding.Or(
+				rolebinding.IssuanceIDIsNil(), rolebinding.IssuanceIDNEQ(shaping.IssuanceID))).
+			Exist(ctx)
+		if err != nil {
+			return nil, mapError(err)
+		}
+		if boundOutside {
+			return nil, store.ErrTestAdminGrantRefused
+		}
 	}
 
-	builder := r.client.RoleDefinition.UpdateOneID(uid).
+	builder := c.RoleDefinition.UpdateOneID(uid).
 		SetName(rd.Name).
 		SetDescription(rd.Description).
 		SetPermissions(rd.Permissions)
@@ -279,6 +304,23 @@ func (r *RoleStore) UpdateRoleDefinition(ctx context.Context, rd *store.RoleDefi
 		return nil, mapError(err)
 	}
 	return entRoleDefinitionToStore(updated), nil
+}
+
+// withEntTx runs fn in a transaction on client, or on client itself when
+// client is already transactional (inside store.WithTx).
+func withEntTx(ctx context.Context, client *ent.Client, fn func(*ent.Client) error) error {
+	tx, err := client.Tx(ctx)
+	if err != nil {
+		if errors.Is(err, ent.ErrTxStarted) {
+			return fn(client)
+		}
+		return err
+	}
+	if err := fn(tx.Client()); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateSystemRoleDefinitionPermissions updates the permissions list of a

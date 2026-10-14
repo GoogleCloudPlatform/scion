@@ -64,7 +64,7 @@ func (RoleDefinition) Fields() []ent.Field {
 		// issuance_id is the issuance ID of the admin-kind test identity
 		// whose request created this row (ptone/scion#4240, admin tier A3),
 		// set only by the store's grant shaping (entadapter
-		// applyGrantShaping), at create. NULL for every other row. The
+		// grantShapingFor and issuanceStamp), at create. NULL for every other row. The
 		// purge of that identity removes the rows carrying it.
 		field.String("issuance_id").
 			Optional().
