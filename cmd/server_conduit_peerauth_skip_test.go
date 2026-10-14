@@ -250,15 +250,17 @@ func TestStartConduit_FailureLogNamesTheKey(t *testing.T) {
 
 // TestStartConduit_NonSettingFailureRecordsNoKey: a relay start that fails
 // for a reason other than one setting (here the internal listener cannot
-// open) records the failure with no key.
+// open) records the failure with no key. The listen address fails to parse
+// (port out of range), so the failure is local: no name lookup is made.
 func TestStartConduit_NonSettingFailureRecordsNoKey(t *testing.T) {
 	t.Cleanup(resetServerFlags)
 	resetForSkipTest(t)
 	t.Setenv("SCION_SERVER_SESSION_SECRET", "conduit-test-signing-secret-0123456789")
+	logs := captureConduitLog(t)
 	recorded := recordStartFailures(t)
 	cfg := &config.GlobalConfig{}
 	cfg.Hub.Conduit.PeerAuth = config.ConduitPeerAuthHMAC
-	cfg.Hub.Conduit.InternalListen = "256.0.0.1:1" // cannot open
+	cfg.Hub.Conduit.InternalListen = "127.0.0.1:99999" // port out of range: a local parse error
 	srv := conduitHubServer(t, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
@@ -266,4 +268,7 @@ func TestStartConduit_NonSettingFailureRecordsNoKey(t *testing.T) {
 	require.NoError(t, startConduit(ctx, cancel, cfg, srv, skipTestHubEndpoint, &wg, make(chan error, 1)))
 	assert.Nil(t, srv.ConduitRelayFatal(), "no relay is running")
 	assert.Equal(t, []string{""}, *recorded, "a failure not caused by one setting records no key")
+	out := logs.String()
+	assert.Contains(t, out, "invalid port", "the listener failed on the local port parse")
+	assert.NotContains(t, out, "lookup", "no name lookup was made")
 }
