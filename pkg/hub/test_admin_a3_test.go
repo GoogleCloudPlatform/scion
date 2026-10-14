@@ -564,11 +564,13 @@ func TestTestAdminA3_PurgeCallers(t *testing.T) {
 		var body struct {
 			Error struct {
 				Code    string            `json:"code"`
+				Message string            `json:"message"`
 				Details map[string]string `json:"details"`
 			} `json:"error"`
 		}
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
 		assert.Equal(t, ErrCodeForbidden, body.Error.Code, kind)
+		assert.Equal(t, "Insufficient permissions", body.Error.Message, "%s: the guard's message (it exposes no reason or denied_by)", kind)
 		assert.Equal(t, map[string]string{"resource_type": "test_identity", "denied_action": "issue"}, body.Error.Details, "%s: refused on the route's permission", kind)
 		// The HTTP request itself wrote the policy refusal: a new sink line
 		// for this caller's issuance with the route ID (only a request
