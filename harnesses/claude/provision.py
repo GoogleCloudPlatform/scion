@@ -742,18 +742,23 @@ def _walk_entries(root: str) -> tuple[list[str], list[str]]:
 class ClaudePluginInstaller(scion_harness.PluginInstaller):
     """Installs Agent Plugins as Claude skills-dir plugins (design 2.5).
 
-    Invariant: Scion removes only what Scion wrote. install records, in the
+    Invariant: Scion deletes only what Scion wrote. install records, in the
     plugin's native_ref, every file it wrote under ~/.claude/skills/<name>/
-    with its sha256 (the generated .claude-plugin/plugin.json included) and
-    every directory. Removal, update and stale handling delete only recorded
-    files whose content still matches, then prune recorded directories that
-    are empty. Anything else (template content Go merged in, a file a user
-    added or edited) stays, and the dir is handed back: the plugin's record
-    is dropped with a warning, so Scion never touches the dir again.
+    with its sha256 (the generated .claude-plugin/plugin.json and the root
+    plugin.json included) and every directory. Removal and hand-back delete
+    only recorded files whose content still matches, then prune recorded
+    directories that end up empty. An update moves everything else (runtime
+    output such as __pycache__ or a server's log, a file a user added or
+    edited) into the new copy; it is never deleted.
 
-    Ownership: a dir is Scion's only while the plugin is recorded in
-    ~/.scion/agent-plugins/state-claude.json and holds nothing but what was
-    recorded. Registration (is_present) is the generated manifest's sha.
+    Ownership: a dir is Scion's while the plugin is recorded in
+    ~/.scion/agent-plugins/state-claude.json. Only a co-tenant marker makes
+    Scion give it up (hand-back: Scion's files removed, record dropped,
+    warned): Go's skills_dir_conflict, a root SKILL.md (any type; Scion
+    never installs one), or a .claude-plugin/plugin.json that is not the
+    generated one Scion wrote. Other unrecorded content is runtime output.
+    Registration (is_present) is the generated manifest's and the root
+    plugin.json's recorded sha.
     """
 
     harness = "claude"
@@ -782,6 +787,9 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         self.refs: dict[str, dict[str, Any]] = {
             n: rec["native_ref"] for n, rec in recorded.items()
             if isinstance(rec, dict) and isinstance(rec.get("native_ref"), dict)
+        }
+        self.digests: dict[str, Any] = {
+            n: rec.get("digest") for n, rec in recorded.items() if isinstance(rec, dict)
         }
 
     # --- state and paths -------------------------------------------------
@@ -823,10 +831,12 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
     def _settle_pending(self, recorded: dict[str, Any]) -> bool:
         """Finish or discard the intent records of interrupted installs.
-        A target that holds exactly what the intent recorded (all hashes
-        match, nothing else) is adopted into the state; one that still
-        matches the existing record is left to it; anything else is handed
-        back using the intent's file list. Returns whether recorded changed."""
+        The swap is proven only when the target carries the intent's
+        generated manifest (bytes unique to Scion) at the recorded sha; the
+        intent is then adopted into the state (markers are handled by the
+        stale pass that follows). Without that proof the intent is
+        discarded and the dir and any existing record are left untouched.
+        Returns whether recorded changed."""
         pending = self._load_pending()
         if not pending:
             return False
@@ -835,33 +845,20 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             entry = pending[name]
             ref = entry.get("native_ref") if isinstance(entry.get("native_ref"), dict) else {}
             rec = recorded.get(name) if isinstance(recorded.get(name), dict) else None
+            gen_sha = self._recorded_files(ref).get(GENERATED_MANIFEST_REL)
             target = self.target(name)
-            if not scion_harness.valid_agent_plugin_name(name) or not self._recorded_files(ref):
+            if not scion_harness.valid_agent_plugin_name(name) or not gen_sha:
                 continue
             if rec is not None and rec.get("native_ref") == ref:
                 continue  # the state save happened: confirmed
-            if not self._is_real_dir(target):
-                continue  # the swap never happened
-            if not self._foreign(target, ref, hash_files=True):
-                recorded[name] = {
-                    "digest": entry.get("digest"),
-                    "version": entry.get("version"),
-                    "native_ref": ref,
-                }
-                self.owned.add(name)
-                self.refs[name] = ref
-                changed = True
-                self.ctx.info(f"agent plugin {name}: recorded an install interrupted before its state was saved")
-                continue
-            old_ref = rec.get("native_ref") if rec is not None and isinstance(rec.get("native_ref"), dict) else None
-            if old_ref is not None and not self._foreign(target, old_ref, hash_files=True):
-                continue  # still the recorded install: the swap never happened
-            self._hand_back(name, ref, f"{target} does not match an interrupted install")
-            if rec is not None:
-                recorded.pop(name, None)
-                self.owned.discard(name)
-                self.refs.pop(name, None)
-                changed = True
+            if not self._is_real_dir(target) or _sha256_rel(target, GENERATED_MANIFEST_REL) != gen_sha:
+                continue  # no proof the swap happened: leave everything as it is
+            recorded[name] = {"digest": entry.get("digest"), "version": entry.get("version"), "native_ref": ref}
+            self.owned.add(name)
+            self.refs[name] = ref
+            self.digests[name] = entry.get("digest")
+            changed = True
+            self.ctx.info(f"agent plugin {name}: recorded an install interrupted before its state was saved")
         self._save_pending({})
         return changed
 
@@ -903,26 +900,42 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
     # --- the ownership invariant ----------------------------------------
 
-    def _foreign(self, target: str, ref: dict[str, Any], hash_files: bool) -> list[str]:
-        """Entries in target Scion did not write: unrecorded paths, a
-        recorded file that is now a dir or symlink, and (with hash_files, or
-        always for the generated manifest) a recorded file whose content
-        changed. Missing recorded files are not foreign."""
+    def _markers(self, target: str, ref: dict[str, Any]) -> list[str]:
+        """Co-tenant markers in an owned dir: a root SKILL.md of any type
+        (Scion never installs one), or a .claude-plugin that is a symlink or
+        whose plugin.json is not the generated one Scion wrote."""
+        out: list[str] = []
+        if os.path.lexists(os.path.join(target, ROOT_SKILL_FILE)):
+            out.append(ROOT_SKILL_FILE)
+        gen_dir = os.path.join(target, CLAUDE_PLUGIN_MANIFEST_DIR)
+        gen_sha = self._recorded_files(ref).get(GENERATED_MANIFEST_REL)
+        if os.path.islink(gen_dir):
+            out.append(CLAUDE_PLUGIN_MANIFEST_DIR)
+        elif os.path.lexists(os.path.join(target, GENERATED_MANIFEST_REL)) and \
+                _sha256_rel(target, GENERATED_MANIFEST_REL) != gen_sha:
+            out.append(GENERATED_MANIFEST_REL)
+        return out
+
+    def _runtime_entries(self, target: str, ref: dict[str, Any]) -> list[str]:
+        """What an update must carry into the new copy: unrecorded entries
+        (a whole unrecorded dir counts once) and recorded files whose
+        content changed or that are no longer regular files."""
         files = self._recorded_files(ref)
         dirs = self._recorded_dirs(ref)
         found_files, found_dirs = _walk_entries(target)
-        out = [f for f in found_files if f not in files]
-        out += [d for d in found_dirs if d not in dirs]
-        for rel, sha in files.items():
-            path = os.path.join(target, rel)
-            if not os.path.lexists(path):
+        unrec_dirs = [d for d in found_dirs if d not in dirs]
+        tops = [d for d in unrec_dirs if not any(d.startswith(u + os.sep) for u in unrec_dirs)]
+
+        def under_top(rel: str) -> bool:
+            return any(rel.startswith(t + os.sep) for t in tops)
+
+        out = list(tops)
+        for rel in found_files:
+            if under_top(rel):
                 continue
-            if rel == GENERATED_MANIFEST_REL or hash_files:
-                if _sha256_rel(target, rel) != sha:
-                    out.append(rel)
-            elif os.path.islink(path) or not os.path.isfile(path):
+            if rel not in files or _sha256_rel(target, rel) != files[rel]:
                 out.append(rel)
-        return sorted(set(out))
+        return sorted(out)
 
     def _remove_ours(self, target: str, ref: dict[str, Any]) -> None:
         """Delete the recorded files whose content still matches, then the
@@ -973,29 +986,15 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         left = " (the rest was left in place)" if os.path.lexists(target) else ""
         self.ctx.warn(f"agent plugin {name}: {why}; removed only the files Scion installed{left}")
 
-    def _needs_work(self, name: str, rec: dict[str, Any], ref: dict[str, Any]) -> bool:
-        """Whether reconcile will remove, update or reinstall this plugin."""
-        if name not in self.desired or rec.get("digest") != self.desired[name]:
-            return True
-        return not self.is_present(name, ref)
-
     def release_stale(self) -> None:
         """Runs before reconcile_agent_plugins on every start (it acts even
         when reconcile later skips for an old CLI: it only ever protects
-        skill content, and the claude route makes no CLI call). For each
-        plugin Scion recorded:
-
-        * Go flags skills_dir_conflict (a template, platform or bank skill
-          has its name, design 2.5 stale ownership), or
-        * the dir holds entries Scion did not write, or its generated
-          manifest was replaced (a template .claude-plugin merged in), or
-        * reconcile is about to remove, update or reinstall it and a
-          recorded file was edited:
-
-        hand the dir back (remove only Scion's files), drop the record and
-        warn. Reconcile then never touches the dir. Also sweeps leftover
-        .<n>.tmp/.<n>.old dirs of owned plugins.
-        """
+        co-tenant content, and the claude route makes no CLI call). Sweeps
+        leftover .<n>.tmp/.<n>.old dirs of owned plugins, settles intent
+        records, then hands back every owned dir that Go flags as a
+        skills_dir_conflict or that holds a co-tenant marker (see _markers):
+        Scion's files are removed, the record is dropped, and a warning is
+        given. Runtime output never triggers a hand-back."""
         recorded = self._recorded_plugins()
         self._sweep_leftovers(recorded)
         if not self.index_ok:
@@ -1012,11 +1011,10 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             elif not self._is_real_dir(target):
                 continue  # gone: reconcile reinstalls or forgets it
             else:
-                foreign = self._foreign(target, ref, hash_files=self._needs_work(name, rec, ref))
-                if not foreign:
+                markers = self._markers(target, ref)
+                if not markers:
                     continue
-                shown = ", ".join(foreign[:3]) + (", …" if len(foreign) > 3 else "")
-                why = f"{target} now also holds content Scion did not install ({shown})"
+                why = f"{target} now also holds content Scion did not install ({', '.join(markers)})"
             try:
                 self._hand_back(name, ref, why)
             except OSError as exc:
@@ -1067,6 +1065,56 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
         ref = rec.get("native_ref") if isinstance(rec, dict) else None
         return ref if isinstance(ref, dict) else {}
 
+    def _set_intent(self, name: str, entry: dict[str, Any] | None) -> None:
+        pending = self._load_pending()
+        if entry is None:
+            pending.pop(name, None)
+        else:
+            pending[name] = entry
+        self._save_pending(pending)
+
+    @staticmethod
+    def _move_entry(src_root: str, dst_root: str, rel: str) -> None:
+        """Rename src_root/rel to dst_root/rel without following a symlink
+        in src_root below the root (fd-relative source), creating the
+        destination's parent dirs inside dst_root (Scion's own dir)."""
+        src_fd = _open_dir(src_root)
+        if src_fd is None:
+            raise OSError(f"{src_root} is not a real directory")
+        try:
+            parent = _open_parent(src_fd, rel)
+            if parent is None:
+                raise OSError(f"{rel}: a parent in {src_root} is not a real directory")
+            spfd, sname = parent
+            try:
+                dst_parent = os.path.join(dst_root, os.path.dirname(rel))
+                os.makedirs(dst_parent, exist_ok=True)
+                dpfd = _open_dir(dst_parent)
+                if dpfd is None:
+                    raise OSError(f"{dst_parent} is not a real directory")
+                try:
+                    os.rename(sname, os.path.basename(rel), src_dir_fd=spfd, dst_dir_fd=dpfd)
+                finally:
+                    os.close(dpfd)
+            finally:
+                os.close(spfd)
+        finally:
+            os.close(src_fd)
+
+    @staticmethod
+    def _collides(root: str, rel: str) -> bool:
+        """Whether rel cannot be placed in root: it exists there, or an
+        ancestor exists as something other than a real dir."""
+        if os.path.lexists(os.path.join(root, rel)):
+            return True
+        parts = rel.split(os.sep)[:-1]
+        cur = root
+        for part in parts:
+            cur = os.path.join(cur, part)
+            if os.path.lexists(cur) and not (os.path.isdir(cur) and not os.path.islink(cur)):
+                return True
+        return False
+
     def install(self, plugin: scion_harness.AgentPlugin, bundle_dir: str) -> dict[str, Any]:
         name = plugin.name
         target = self.target(name)
@@ -1079,18 +1127,26 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
                 f"plugin {name} not installed for claude: {target} exists and was not installed by Scion")
         if os.path.islink(target):
             raise scion_harness.PluginInstallError(f"{target} is a symlink")
-        if os.path.lexists(target):
-            # Replacing an owned dir: only when it holds nothing but what
-            # Scion wrote (release_stale has normally handed back any other
-            # dir already; this is the last guard before the swap).
-            ref = self._current_ref(name)
-            foreign = self._foreign(target, ref, hash_files=True)
-            if foreign:
-                self._hand_back(name, ref, f"{target} now also holds content Scion did not install")
+        replacing = os.path.lexists(target)
+        old_ref = self._current_ref(name) if replacing else {}
+        old_intent = None
+        if replacing:
+            markers = self._markers(target, old_ref)
+            if markers:
+                # The last guard before an update (release_stale normally
+                # handed such a dir back already).
+                self._hand_back(name, old_ref,
+                                f"{target} now also holds content Scion did not install ({', '.join(markers)})")
                 self.owned.discard(name)
                 self.refs.pop(name, None)
                 raise scion_harness.PluginInstallError(
                     f"plugin {name} not installed for claude: {target} holds content Scion did not install")
+            # reconcile may already have dropped the old record (the update
+            # path). Until this install is in place, an intent record keeps
+            # the old install owned: a failure or crash leaves an intent the
+            # next start adopts (the old generated manifest is the proof).
+            old_intent = {"digest": self.digests.get(name), "version": "", "native_ref": old_ref}
+            self._set_intent(name, old_intent)
 
         _warn_invalid_mcp(self.ctx, plugin)
         data_dir = self.data_dir(name)
@@ -1098,17 +1154,30 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
 
         tmp = os.path.join(self.skills_dir, f".{name}.tmp")
         old = os.path.join(self.skills_dir, f".{name}.old")
-        wrote_intent = False
+        carried: list[str] = []
+        swapped = False
+
+        def restore() -> None:
+            """Undo a failed install: the original dir back in place, every
+            carried entry back into it, then Scion's tmp dir removed."""
+            if swapped:
+                return
+            if os.path.lexists(old) and not os.path.lexists(target):
+                os.rename(old, target)
+            for rel in reversed(carried):
+                self._move_entry(tmp, target, rel)
+            carried.clear()
+            _remove_path(tmp)
+
         try:
             # PLUGIN_DATA (spec 9.1): created before launch, private to the
-            # agent user, kept across updates and removals. Created first,
-            # so nothing can fail after the new dir is in place.
+            # agent user, kept across updates and removals.
             if os.path.islink(data_dir):
                 raise OSError(f"{data_dir} is a symlink")
             os.makedirs(data_dir, mode=0o700, exist_ok=True)
             os.chmod(data_dir, 0o700)  # not a symlink (checked above)
             os.makedirs(self.skills_dir, exist_ok=True)
-            for leftover in (tmp, old):
+            for leftover in (tmp, old):  # names only Scion uses
                 _remove_path(leftover)
             shutil.copytree(plugin.staged_dir, tmp, symlinks=True)
             for rel in (*CLAUDE_STRIPPED_PATHS, CLAUDE_PLUGIN_MANIFEST_DIR):
@@ -1130,61 +1199,78 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             files, dirs = _walk_entries(tmp)
             recorded: dict[str, str] = {}
             for rel in files:
-                path = os.path.join(tmp, rel)
                 sha = _sha256_rel(tmp, rel)
                 if sha is None:
-                    _remove_path(path)
+                    _remove_path(os.path.join(tmp, rel))
                     continue
                 recorded[rel] = sha
             ref = {"path": target, "files": recorded, "dirs": dirs}
-            # Intent record: if the process dies after the swap but before
-            # reconcile saves the state, the next start adopts the install
-            # (see _settle_pending) instead of finding an unowned plugin.
-            pending = self._load_pending()
-            pending[name] = {"digest": plugin.digest, "version": plugin.version, "native_ref": ref}
-            self._save_pending(pending)
-            wrote_intent = True
-            # Atomic swap: old aside (verified Scion's above), tmp into place.
-            if os.path.lexists(target):
+            if replacing:
+                # Carry runtime output and edits into the new copy; never
+                # delete them. A path the new version also uses blocks the
+                # update (the old version stays installed and owned).
+                runtime = self._runtime_entries(target, old_ref)
+                blocked = [rel for rel in runtime if self._collides(tmp, rel)]
+                if blocked:
+                    shown = ", ".join(blocked[:3]) + (", …" if len(blocked) > 3 else "")
+                    _remove_path(tmp)
+                    raise scion_harness.PluginInstallError(
+                        f"plugin {name} not updated for claude: {target} holds files Scion did not write "
+                        f"at paths the new version uses ({shown}); move them away to update")
+                for rel in runtime:
+                    self._move_entry(target, tmp, rel)
+                    carried.append(rel)
+            # Intent record for the new copy: if the process dies after the
+            # swap but before reconcile saves the state, the next start
+            # adopts it (see _settle_pending).
+            self._set_intent(name, {"digest": plugin.digest, "version": plugin.version, "native_ref": ref})
+            # Atomic swap: old aside, tmp into place.
+            if replacing:
                 os.rename(target, old)
+            os.rename(tmp, target)
+            swapped = True
+        except (OSError, scion_harness.PluginInstallError) as exc:
             try:
-                os.rename(tmp, target)
-            except OSError:
-                if os.path.lexists(old) and not os.path.lexists(target):
-                    os.rename(old, target)
-                raise
-        except OSError as exc:
+                restore()
+            except OSError as rexc:
+                self.ctx.warn(f"agent plugin {name}: could not fully undo the failed install: {rexc}")
             try:
-                _remove_path(tmp)
+                self._set_intent(name, old_intent)  # keep the old install owned, or forget
             except OSError:
                 pass
-            if wrote_intent:
-                try:
-                    pending = self._load_pending()
-                    pending.pop(name, None)
-                    self._save_pending(pending)
-                except OSError:
-                    pass
+            if isinstance(exc, scion_harness.PluginInstallError):
+                raise
             raise scion_harness.PluginInstallError(f"cannot write {target}: {exc}") from None
-        # The new plugin is in place: a leftover old copy is only a warning
-        # (it is hidden, and the next start sweeps it).
-        try:
-            _remove_path(old)
-        except OSError as exc:
-            self.ctx.warn(f"agent plugin {name}: cannot remove the previous copy {old}: {exc}")
+        if replacing:
+            # The old copy now holds only Scion's recorded files (everything
+            # else was carried): remove those; anything left is reported and
+            # the next start sweeps it.
+            try:
+                self._remove_ours(old, old_ref)
+            except OSError:
+                pass
+            if os.path.lexists(old):
+                self.ctx.warn(f"agent plugin {name}: could not fully remove the previous copy {old}")
         self.owned.add(name)
         self.refs[name] = ref
+        self.digests[name] = plugin.digest
         return ref
 
     def uninstall(self, name: str, native_ref: dict[str, Any]) -> None:
-        """Remove only what Scion wrote (recorded files whose content still
-        matches, then empty recorded dirs). If anything else remains, the
-        dir is handed back with a warning; either way the record goes.
-        data/<name> is kept (spec 9.1 makes deletion optional). Success is
-        judged by the result: Scion's generated manifest must be gone."""
+        """Remove the plugin: delete only recorded files whose content still
+        matches, then recorded dirs that end up empty. Anything else
+        (runtime output, a user's files) stays in the dir, which no longer
+        has a manifest, so Claude does not load it. data/<name> is kept
+        (spec 9.1 makes deletion optional). Success is judged by the result:
+        Scion's generated manifest must be gone.
+
+        A plugin that is still desired is being updated (reconcile removes
+        the previous version first): nothing is removed here; install
+        replaces it in place and carries its runtime output over."""
+        if name in self.desired and name in self.owned:
+            return
         target = self.target(name)
         if self._is_real_dir(target):
-            foreign = self._foreign(target, native_ref, hash_files=True)
             try:
                 self._remove_ours(target, native_ref)
             except OSError as exc:
@@ -1193,28 +1279,30 @@ class ClaudePluginInstaller(scion_harness.PluginInstaller):
             if gen_sha and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha:
                 raise scion_harness.PluginInstallError(f"{target} is still present")
             if os.path.lexists(target):
-                shown = ", ".join(foreign[:3]) + (", …" if len(foreign) > 3 else "")
-                self.ctx.warn(
-                    f"agent plugin {name}: removed; {target} also holds content Scion did not install "
-                    f"({shown or 'unknown'}), which was left in place")
+                self.ctx.info(f"agent plugin {name}: removed; files Scion did not write remain in {target}")
         self.owned.discard(name)
         self.refs.pop(name, None)
 
     def is_present(self, name: str, native_ref: dict[str, Any]) -> bool:
-        """Claude registers a skills-dir plugin by its generated manifest:
-        it must be the one Scion wrote (recorded sha), at the current skills
-        dir, with the data dir in place (spec 9.1: created before launch).
-        A plugin now in conflict with a skill is reported missing."""
+        """Claude registers a skills-dir plugin by its generated manifest,
+        and the Go skills-dir skips (design 2.7) rely on the root
+        plugin.json: both must be the ones Scion wrote (recorded sha), at the
+        current skills dir, with the data dir in place (spec 9.1: created
+        before launch). A plugin now in conflict with a skill is reported
+        missing."""
         if name in self.conflicts:
             return False
         path = native_ref.get("path")
         if isinstance(path, str) and path and os.path.normpath(path) != os.path.normpath(self.target(name)):
             return False
-        gen_sha = self._recorded_files(native_ref).get(GENERATED_MANIFEST_REL)
+        files = self._recorded_files(native_ref)
+        gen_sha = files.get(GENERATED_MANIFEST_REL)
+        root_sha = files.get(AGENT_PLUGIN_MANIFEST)
         target = self.target(name)
         return (
-            bool(gen_sha) and self._is_real_dir(target)
+            bool(gen_sha) and bool(root_sha) and self._is_real_dir(target)
             and _sha256_rel(target, GENERATED_MANIFEST_REL) == gen_sha
+            and _sha256_rel(target, AGENT_PLUGIN_MANIFEST) == root_sha
             and self._is_real_dir(self.data_dir(name))
         )
 

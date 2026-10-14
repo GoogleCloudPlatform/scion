@@ -1155,21 +1155,20 @@ class ClaudeAgentPluginsTest(_ClaudePluginsBase):
         self.stage({"p": {"digest": "d1"}})
         self.reconcile()
         self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
-        real_remove = provision._remove_path
+        real_remove_ours = provision.ClaudePluginInstaller._remove_ours
 
-        def remove(path: str) -> None:
-            if path.endswith(".p.old") and os.path.lexists(path):
-                raise OSError("busy")
-            real_remove(path)
+        def remove_ours(inst, target, ref):
+            if target.endswith(".p.old"):
+                return  # simulate a removal that leaves the old copy behind
+            real_remove_ours(inst, target, ref)
 
         warnings: list[str] = []
-        with mock.patch.object(provision.ClaudePluginInstaller, "uninstall", return_value=None), \
-                mock.patch.object(provision, "_remove_path", remove):
+        with mock.patch.object(provision.ClaudePluginInstaller, "_remove_ours", remove_ours):
             self.reconcile(warnings)
         self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
         self.assertEqual(self.state()["p"]["digest"], "d2")
         self.assertEqual(len(warnings), 1, warnings)
-        self.assertIn("cannot remove the previous copy", warnings[0])
+        self.assertIn("could not fully remove the previous copy", warnings[0])
         # The next install clears the leftover.
         self.stage({"p": {"digest": "d3", "skill": "PLUM-9"}})
         self.reconcile()
@@ -1271,6 +1270,17 @@ class ClaudeAgentPluginsTest(_ClaudePluginsBase):
         self.assertFalse(inst.is_present("p", ref))
         self.assertFalse(inst.is_present("p", {"path": ref["path"]}), "no recorded sha: not present")
 
+    def test_is_present_requires_root_plugin_json(self) -> None:
+        # Review round 7, finding 3 (design 2.5: both files exist).
+        self.stage({"p": {}})
+        self.reconcile()
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        ref = self.state()["p"]["native_ref"]
+        os.unlink(os.path.join(self.skills, "p", "plugin.json"))
+        self.assertFalse(inst.is_present("p", ref))
+        self.reconcile([])  # reinstalled
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", "plugin.json")))
+
     def test_invalid_servers_rewarned_and_placeholder_skipped(self) -> None:
         self.stage({"p": {
             "servers": {"ok": {"type": "sse", "url": "https://a/s"},
@@ -1335,11 +1345,13 @@ class ClaudeAgentPluginsTest(_ClaudePluginsBase):
 
 
 class ClaudeOwnershipTest(_ClaudePluginsBase):
-    """Review round 5: "Scion removes only what Scion wrote". Every
-    ownership path (restart, update, drop, conflict, sweep) against content
-    Scion did not write in an installed plugin dir. Go's util.CopyDir merge
-    of a same-named template skill dir is simulated by writing its files
-    into ~/.claude/skills/p/ (overwriting same-named files)."""
+    """Review rounds 5-7: "Scion deletes only what Scion wrote", and only a
+    co-tenant marker (Go conflict, root SKILL.md, a foreign
+    .claude-plugin/plugin.json) makes Scion give a dir up. Every ownership
+    path (restart, update, drop, conflict) against content Scion did not
+    write in an installed plugin dir. Go's util.CopyDir merge of a
+    same-named template skill dir is simulated by writing its files into
+    ~/.claude/skills/p/ (overwriting same-named files)."""
 
     GEN = ".claude-plugin/plugin.json"
 
@@ -1363,6 +1375,9 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
                                        "skills/native/SKILL.md": "native"},
             "hand-added": {"notes.txt": "mine"},
             "hand-edited": {"skills/hello/SKILL.md": "edited by hand"},
+            # Review round 7: output the plugin's own MCP server writes.
+            "runtime-pycache": {"bin/__pycache__/srv.cpython-313.pyc": "bytecode"},
+            "runtime-log": {"server.log": "log line"},
             "symlinked-skill": {},
             # Read through the symlink: the outside copy, identical content.
             "symlinked-dir": {"skills/hello/SKILL.md": "PLUM-7"},
@@ -1408,8 +1423,14 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
                 continue
             self.assertFalse(os.path.lexists(os.path.join(self.skills, "p", rel)), f"{kind}: {rel}")
 
-    KINDS = ("template-skill", "template-dir-no-skill-md", "template-claude-plugin",
-             "hand-added", "hand-edited", "symlinked-skill", "symlinked-dir")
+    # Expected outcome per kind: a co-tenant marker is handed back on every
+    # path; runtime output keeps the plugin owned and is carried on update;
+    # content at a path the new version also uses blocks the update (the
+    # old version stays installed and owned).
+    MARKER = ("template-skill", "template-claude-plugin", "symlinked-skill")
+    RUNTIME = ("runtime-pycache", "runtime-log", "hand-added", "template-dir-no-skill-md")
+    COLLIDING = ("hand-edited", "symlinked-dir")
+    KINDS = MARKER + RUNTIME + COLLIDING
 
     def fresh(self) -> None:
         for d in (os.path.join(self.home, ".claude"), os.path.join(self.home, ".scion", "agent-plugins")):
@@ -1430,6 +1451,16 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         else:
             raise AssertionError(path)
 
+    def assert_owned_installed(self, digest: str, skill: str) -> None:
+        self.assertEqual(self.state()["p"]["digest"], digest)
+        target = os.path.join(self.skills, "p")
+        ref = self.state()["p"]["native_ref"]
+        for rel in (self.GEN, "plugin.json", "bin/srv"):
+            with open(os.path.join(target, rel), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), ref["files"][rel], rel)
+        if "skills" in ref["dirs"] and not os.path.islink(os.path.join(target, "skills")):
+            self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), skill)
+
     def test_foreign_content_is_never_removed(self) -> None:
         for kind in self.KINDS:
             for path in ("restart", "update", "drop", "conflict"):
@@ -1440,21 +1471,42 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
                     warnings: list[str] = []
                     self.run_path(path, warnings)
                     self.assert_kept(kind, files)
-                    if kind == "hand-edited" and path == "restart":
-                        # Nothing to do on a steady-state start: the edit is
-                        # left alone and the plugin stays installed.
-                        self.assertIn("p", self.state())
+                    handed_back = kind in self.MARKER or path == "conflict"
+                    if handed_back:
+                        # Scion's files went, the record is gone, and Scion
+                        # never touches the dir again.
+                        self.assertNotIn("p", self.state(), warnings)
+                        self.assert_scion_files_gone(kind, files)
+                        self.assertTrue(any("removed only the files Scion installed" in w for w in warnings),
+                                        warnings)
+                    elif path == "restart":
                         self.assertEqual(warnings, [])
-                        continue
-                    # Handed back: the record is gone, so Scion never
-                    # touches the dir again, and only Scion's files went.
-                    self.assertNotIn("p", self.state(), warnings)
-                    self.assert_scion_files_gone(kind, files)
-                    self.assertTrue(any("removed only the files Scion installed" in w
-                                        or "which was left in place" in w for w in warnings), warnings)
-                    # And a later start leaves everything as it is.
-                    self.reconcile([])
+                        self.assert_owned_installed("d1", "PLUM-7" if kind != "hand-edited" else "edited by hand")
+                    elif path == "update" and kind in self.RUNTIME:
+                        self.assertEqual(warnings, [])
+                        self.assert_owned_installed("d2", "PLUM-8")
+                    elif path == "update":  # COLLIDING
+                        self.assertEqual(len(warnings), 1, warnings)
+                        self.assertIn("not updated for claude", warnings[0])
+                        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", self.GEN)),
+                                        "the old version stays installed")
+                    else:  # drop
+                        self.assertNotIn("p", self.state())
+                        self.assert_scion_files_gone(kind, files)
+                        self.assertEqual(warnings, [])
+                    # A later start leaves the foreign content as it is (and
+                    # adopts the old install back after a blocked update).
+                    later: list[str] = []
+                    self.reconcile(later)
                     self.assert_kept(kind, files)
+                    if path == "update" and kind in self.COLLIDING:
+                        # The blocked update keeps the old install in place
+                        # and owned: the intent record holds it at d1 until
+                        # the colliding files are moved away.
+                        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", self.GEN)))
+                        with open(self.pending_path()) as f:
+                            self.assertEqual(json.load(f)["plugins"]["p"]["digest"], "d1")
+                        self.assertTrue(any("not updated for claude" in w for w in later), later)
 
     def test_handed_back_dir_is_not_owned_any_more(self) -> None:
         self.install_p()
@@ -1548,7 +1600,7 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         self.assertEqual(warnings, [])
         self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
 
-    def test_failed_install_after_clean_uninstall_leaves_nothing(self) -> None:
+    def test_failed_update_keeps_old_version(self) -> None:
         self.install_p()
         self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
         real_copytree = shutil.copytree
@@ -1561,8 +1613,8 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         warnings: list[str] = []
         with mock.patch.object(provision.shutil, "copytree", copytree):
             self.reconcile(warnings)
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
         self.assertTrue(any("disk full" in w for w in warnings), warnings)
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-7", "old version stays")
         warnings.clear()
         self.reconcile(warnings)
         self.assertEqual(warnings, [])
@@ -1571,6 +1623,7 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
     def test_uninstall_failure_judged_by_result(self) -> None:
         self.install_p()
         ref = self.state()["p"]["native_ref"]
+        self.stage({})  # not desired: a real removal
         inst = provision.ClaudePluginInstaller(self.ctx())
         with mock.patch.object(os, "unlink", lambda *a, **k: None):
             with self.assertRaisesRegex(scion_harness.PluginInstallError, "still present"):
@@ -1579,10 +1632,20 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         self.assertFalse(os.path.exists(os.path.join(self.skills, "p")))
         inst.uninstall("never-installed", {})
 
-    def test_install_guard_hands_back_unverified_owned_dir(self) -> None:
-        # The last guard before the swap: an owned dir with foreign content
-        # that release_stale did not see (simulated by skipping it).
+    def test_uninstall_of_desired_plugin_defers_to_install(self) -> None:
+        # reconcile's update path calls uninstall before install: nothing is
+        # removed there, install replaces the dir and carries runtime output.
         self.install_p()
+        ref = self.state()["p"]["native_ref"]
+        inst = provision.ClaudePluginInstaller(self.ctx())
+        inst.uninstall("p", ref)
+        self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", self.GEN)))
+
+    def test_install_guard_hands_back_unverified_owned_dir(self) -> None:
+        # The last guard before an update: an owned dir with a co-tenant
+        # marker that release_stale did not see (simulated by skipping it).
+        self.install_p()
+        self.put("SKILL.md", "template skill")
         self.put("notes.txt", "mine")
         os.unlink(os.path.join(self.skills, "p", ".claude-plugin", "plugin.json"))
         ctx = self.ctx([])
@@ -1590,8 +1653,61 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         [p] = scion_harness.read_agent_plugins(ctx)
         with self.assertRaisesRegex(scion_harness.PluginInstallError, "holds content Scion did not install"):
             inst.install(p, p.staged_dir)
+        self.assertEqual(self.read("p", "SKILL.md"), "template skill")
         self.assertEqual(self.read("p", "notes.txt"), "mine")
         self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "bin", "srv")))
+
+    def test_runtime_output_kept_owned_and_carried(self) -> None:
+        # Review round 7, finding 1, end to end: a server-written
+        # lib/__pycache__ and a root log keep the plugin installed across a
+        # restart, are carried into the new version on update, and stay
+        # (in a manifest-less dir Claude does not load) when it is dropped.
+        self.install_p()
+        self.put("bin/__pycache__/srv.cpython-313.pyc", "bytecode")
+        self.put("server.log", "log")
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertIn("p", self.state())
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertEqual(self.read("p", "bin", "__pycache__", "srv.cpython-313.pyc"), "bytecode")
+        self.assertEqual(self.read("p", "server.log"), "log")
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
+        self.stage({})
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertNotIn("p", self.state())
+        self.assertEqual(sorted(os.listdir(os.path.join(self.skills, "p"))), ["bin", "server.log"])
+        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", ".claude-plugin")))
+
+    def test_failed_update_restores_carried_runtime_output(self) -> None:
+        self.install_p()
+        self.put("server.log", "log")
+        self.stage({"p": {"digest": "d2", "skill": "PLUM-8"}})
+        real_rename = os.rename
+        target = os.path.join(self.skills, "p")
+
+        def rename(src, dst, *a, **k):
+            if dst == target and str(src).endswith(".p.tmp"):
+                raise OSError("disk full")
+            return real_rename(src, dst, *a, **k)
+
+        warnings: list[str] = []
+        with mock.patch.object(os, "rename", rename):
+            self.reconcile(warnings)
+        self.assertTrue(any("disk full" in w for w in warnings), warnings)
+        self.assertEqual(self.read("p", "server.log"), "log")
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-7")
+        self.assertEqual([e for e in os.listdir(self.skills) if e.startswith(".")], [])
+        # The next start adopts the old install back and updates it.
+        warnings.clear()
+        self.reconcile(warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-8")
+        self.assertEqual(self.read("p", "server.log"), "log")
 
     def test_recorded_paths_are_validated(self) -> None:
         for rel, ok in (("a", True), ("a/b", True), (".claude-plugin/plugin.json", True),
@@ -1688,16 +1804,37 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         self.assertFalse(os.path.exists(self.pending_path()))
         self.assertTrue(os.path.isfile(os.path.join(self.skills, "p", "bin", "srv")))
 
-    def test_intent_with_edited_target_is_handed_back(self) -> None:
+    def test_intent_adopted_with_runtime_output(self) -> None:
         self.direct_install("d1")
-        self.put("notes.txt", "mine")
+        self.put("server.log", "log")
         warnings: list[str] = []
         self.reconcile(warnings)
-        self.assertEqual(self.read("p", "notes.txt"), "mine")
-        self.assertFalse(os.path.exists(os.path.join(self.skills, "p", "bin", "srv")))
-        self.assertNotIn("p", self.state())
-        self.assertTrue(any("does not match an interrupted install" in w for w in warnings), warnings)
+        self.assertEqual(warnings, [])
+        self.assertEqual(self.state()["p"]["digest"], "d1")
+        self.assertEqual(self.read("p", "server.log"), "log")
         self.assertFalse(os.path.exists(self.pending_path()))
+
+    def test_intent_without_proof_leaves_the_dir_alone(self) -> None:
+        # Review round 7, finding 2: the intent was written but the swap
+        # never happened, and a same-named template dir with a byte-identical
+        # skills/hello/SKILL.md appeared. Without Scion's generated manifest
+        # at the recorded sha the intent is discarded: nothing is deleted.
+        self.direct_install("d1")
+        target = os.path.join(self.skills, "p")
+        with open(self.pending_path()) as f:
+            pending = json.load(f)
+        shutil.rmtree(target)
+        os.makedirs(os.path.join(target, "skills", "hello"))
+        with open(os.path.join(target, "skills", "hello", "SKILL.md"), "w") as f:
+            f.write("PLUM-7")  # identical bytes to Scion's
+        with open(self.pending_path(), "w") as f:
+            json.dump(pending, f)
+        warnings: list[str] = []
+        self.reconcile(warnings)
+        self.assertEqual(self.read("p", "skills", "hello", "SKILL.md"), "PLUM-7")
+        self.assertNotIn("p", self.state())
+        self.assertFalse(os.path.exists(self.pending_path()))
+        self.assertTrue(any("exists and was not installed by Scion" in w for w in warnings), warnings)
 
     def test_failed_install_clears_its_intent(self) -> None:
         self.stage({"p": {}})
