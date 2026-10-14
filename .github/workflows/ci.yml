@@ -428,6 +428,30 @@ jobs:
           esac
           exit "$rc"
 
+      - name: Check Extras Go Images
+        run: |
+          # Invoked directly rather than via `make check-extras-go-images`, for
+          # the same reason as Check Authorization Guards above: make would
+          # collapse the script's exit 1 (violations) and exit 4 (nothing was
+          # analysed).
+          set +e
+          ./hack/check-extras-go-images.sh --self-test
+          rc=$?
+          if [ "$rc" -ne 0 ]; then
+            set -e
+            echo "::error title=Extras Go images NOT checked::check-extras-go-images --self-test failed (exit $rc) — the check itself is broken or could not run, so nothing was analysed."
+            exit "$rc"
+          fi
+          ./hack/check-extras-go-images.sh
+          rc=$?
+          set -e
+          case "$rc" in
+            0) ;;
+            1) echo "::error title=Extras Go images::An extras/ Dockerfile's golang base image is older than its module's go directive, so the image build needs a toolchain download. Bump the image to at least the module's go version; details are in the step log above." ;;
+            *) echo "::error title=Extras Go images NOT checked::check-extras-go-images.sh could not run (exit $rc) — NOTHING WAS ANALYSED. This is an environment failure, not a statement about the codebase." ;;
+          esac
+          exit "$rc"
+
       # Run Tests with a diagnostic hang watchdog (ptone/scion#3183). It is
       # diagnostic only: no retries, and on a normal pass or fail the step
       # exits with make test-fast-ci's own exit code. If the tests are still
