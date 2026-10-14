@@ -90,6 +90,7 @@ func (r *GCPSkillResolver) Resolve(ctx context.Context, refs []api.SkillReferenc
 		if err != nil {
 			result.Errors = append(result.Errors, ResolveError{
 				URI: ref.URI, Code: SkillErrCodeResolveFailed, Message: err.Error(),
+				Status: upstreamStatus(err),
 			})
 			continue
 		}
@@ -231,14 +232,14 @@ func (r *GCPSkillResolver) fetchSkillMetadata(ctx context.Context, resourceURL, 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("skill not found in GCP registry")
+		return nil, &upstreamStatusError{status: resp.StatusCode, msg: "skill not found in GCP registry"}
 	}
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("GCP API access denied — check service account permissions")
+		return nil, &upstreamStatusError{status: resp.StatusCode, msg: "GCP API access denied — check service account permissions"}
 	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("GCP API error (%d): %s", resp.StatusCode, string(body))
+		return nil, &upstreamStatusError{status: resp.StatusCode, msg: fmt.Sprintf("GCP API error (%d): %s", resp.StatusCode, string(body))}
 	}
 
 	const maxMetadataSize = 1 * 1024 * 1024 // 1MB

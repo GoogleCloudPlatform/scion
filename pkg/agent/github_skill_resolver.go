@@ -538,6 +538,7 @@ func (r *GitHubSkillResolver) resolveRef(ctx context.Context, ghRef *GitHubSkill
 	}
 	return refOutcome{rerr: &ResolveError{
 		URI: ref.URI, Code: code, Message: err.Error(), RetryAfter: retryAfter,
+		Status: upstreamStatus(err),
 	}}
 }
 
@@ -929,8 +930,9 @@ func (r *GitHubSkillResolver) resolveCommitSHA(ctx context.Context, ghRef *GitHu
 
 	if resp.StatusCode == http.StatusNotFound {
 		return "", &githubResolveError{
-			code: SkillErrCodeNotFound,
-			msg:  fmt.Sprintf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo),
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
+			msg:    fmt.Sprintf("ref %q not found in repo %s/%s", ghRef.Ref, ghRef.Owner, ghRef.Repo),
 		}
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -968,7 +970,8 @@ func (r *GitHubSkillResolver) listContents(ctx context.Context, ghRef *GitHubSki
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, &githubResolveError{
-			code: SkillErrCodeNotFound,
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
 			msg: fmt.Sprintf("skill %q not found in repo %s/%s at ref %s (expected directory at %s)",
 				ghRef.SkillName, ghRef.Owner, ghRef.Repo, commitSHA[:12], ghRef.SkillPath),
 		}
@@ -1002,8 +1005,9 @@ func (r *GitHubSkillResolver) downloadRawFile(ctx context.Context, ghRef *GitHub
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, &githubResolveError{
-			code: SkillErrCodeNotFound,
-			msg:  fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
+			code:   SkillErrCodeNotFound,
+			status: http.StatusNotFound,
+			msg:    fmt.Sprintf("file %s not found in repo %s/%s at %s", filePath, ghRef.Owner, ghRef.Repo, commitSHA[:12]),
 			// The listing at this commit named the file, so a 404 here is an
 			// upstream inconsistency (for example raw content lagging a
 			// push), not a missing ref; it is not remembered.
@@ -1071,9 +1075,14 @@ type githubResolveError struct {
 	// directory listing at the same commit named. cacheableFailure does not
 	// remember these.
 	fileMissingAfterListing bool
+	// status is the HTTP status of the GitHub response that failed the
+	// resolution, when one is known, else 0.
+	status int
 }
 
 func (e *githubResolveError) Error() string { return e.msg }
+
+func (e *githubResolveError) upstreamHTTPStatus() int { return e.status }
 
 func (e *githubResolveError) Unwrap() error { return e.err }
 
@@ -1402,15 +1411,20 @@ func (r *GitHubSkillResolver) apiError(resp *http.Response, action string) error
 		return &githubResolveError{
 			code:       SkillErrCodeRateLimited,
 			retryAfter: resp.Header.Get("Retry-After"),
+			status:     resp.StatusCode,
 			msg: fmt.Sprintf("GitHub API rate limited while %s (retry-after=%s, resets at %s); set GITHUB_TOKEN for higher limits",
 				action, resp.Header.Get("Retry-After"), resp.Header.Get("X-RateLimit-Reset")),
 		}
 	}
 	if resp.StatusCode >= http.StatusInternalServerError {
 		return &githubResolveError{
-			code: SkillErrCodeUpstreamUnavailable,
-			msg:  fmt.Sprintf("GitHub API error (%d) while %s, retries exhausted: %s", resp.StatusCode, action, string(body)),
+			code:   SkillErrCodeUpstreamUnavailable,
+			msg:    fmt.Sprintf("GitHub API error (%d) while %s, retries exhausted: %s", resp.StatusCode, action, string(body)),
+			status: resp.StatusCode,
 		}
 	}
-	return fmt.Errorf("GitHub API error (%d) while %s: %s", resp.StatusCode, action, string(body))
+	return &upstreamStatusError{
+		status: resp.StatusCode,
+		msg:    fmt.Sprintf("GitHub API error (%d) while %s: %s", resp.StatusCode, action, string(body)),
+	}
 }

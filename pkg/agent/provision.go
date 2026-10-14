@@ -2032,7 +2032,7 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				errorURIs[re.URI] = true
 				ref := requestedURIs[re.URI]
 				if ref == nil || !ref.Optional {
-					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
+					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter, Status: re.Status}
 				}
 				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
 					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
