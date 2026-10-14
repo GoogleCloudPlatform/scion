@@ -733,6 +733,88 @@ describe('composer — conversation switch', () => {
     });
   }
 
+  it('a topic send that fails after a switch restores nothing into the DM', async () => {
+    const { chatDraftStorageKey } = await import('../../../client/chat-drafts.js');
+    localStorage.clear();
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(sent).toHaveLength(1);
+    expect(sent[0].attachmentIds).toEqual(['att-1']);
+
+    await switchToDM(el);
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.pendingArtifacts).toEqual([]);
+    expect(el.text).toBe('');
+    // The text is kept as the topic's draft, under the usual draft rules.
+    expect(localStorage.getItem(chatDraftStorageKey('topic-a'))).toBe('for the topic');
+    expect(localStorage.getItem(chatDraftStorageKey('dm:user:u1:user:u2'))).toBeNull();
+    localStorage.clear();
+  });
+
+  it('a topic send that fails without a switch restores files and artifacts', async () => {
+    const el = await mountTopic();
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    el.text = 'for the topic';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(el.pendingFiles).toEqual([]);
+
+    sent[0].onError('boom');
+    await el.updateComplete;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.pendingArtifacts).toHaveLength(1);
+    expect(el.text).toBe('for the topic');
+  });
+
+  it("keeps the indicator on while a DM upload runs after topic A's settles", async () => {
+    const el = await mountTopic();
+    const settleA = deferUpload();
+    const uploadA = el.uploadFiles([new File(['a'], 'a.txt')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+
+    await switchToDM(el);
+    const settleB = deferUpload();
+    const uploadB = el.uploadFiles([new File(['b'], 'b.txt')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(2));
+    expect(el.uploading).toBe(true);
+
+    settleA(() => new Response(JSON.stringify({ attachments: [STORED] }), { status: 201 }));
+    await uploadA;
+    expect(el.uploading).toBe(true);
+    expect(el.pendingFiles).toEqual([]);
+
+    const bodyB = JSON.stringify({ attachments: [{ ...STORED, id: 'att-b' }] });
+    settleB(() => new Response(bodyB, { status: 201 }));
+    await uploadB;
+    expect(el.uploading).toBe(false);
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-b']);
+  });
+
   it('still applies an upload that settles without a switch', async () => {
     const el = await mountTopic();
     const settle = deferUpload();

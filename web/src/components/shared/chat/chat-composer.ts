@@ -49,6 +49,7 @@ import type { ScheduleConfirmDetail } from './chat-schedule-dialog.js';
 import './chat-schedule-dialog.js';
 import { TOUCH_PRIMARY_QUERY } from '../../../utils/input-modality.js';
 import { chatDraftStorageKey } from '../../../client/chat-drafts.js';
+import { saveDraftForConversation } from './chat-wake.js';
 import { ARTIFACTS_FLAG, MAX_MESSAGE_ARTIFACTS } from '../../../client/artifacts.js';
 import { isFeatureEnabled } from '../../../utils/feature-flags.js';
 import type { ArtifactPickerSelectDetail, PendingArtifact } from './artifact-picker.js';
@@ -139,6 +140,8 @@ export interface ChatScheduleDetail {
 
 /** Composer draft state saved before an optimistic clear. */
 interface ComposerSnapshot {
+  /** The conversation the state was taken in. */
+  conversationKey: string;
   text: string;
   runeCount: number;
   acceptedMentions: Set<string>;
@@ -2200,6 +2203,7 @@ export class ScionChatComposer extends LitElement {
    */
   private snapshotComposer(): ComposerSnapshot {
     return {
+      conversationKey: this.conversationKey,
       text: this.text,
       runeCount: this.runeCount,
       acceptedMentions: new Set(this.acceptedMentions),
@@ -2210,8 +2214,18 @@ export class ScionChatComposer extends LitElement {
     };
   }
 
-  /** Restore a snapshot after a failed send or schedule. */
+  /**
+   * Restore a snapshot after a failed send or schedule. A failure that
+   * lands after a conversation switch must not put the old conversation's
+   * state into the one now open: its text becomes that conversation's draft
+   * (unless it already has one), and its uploads and artifacts, which belong
+   * to it, are not restored.
+   */
   private restoreComposer(saved: ComposerSnapshot): void {
+    if (saved.conversationKey !== this.conversationKey) {
+      saveDraftForConversation(saved.conversationKey, saved.text);
+      return;
+    }
     this.text = saved.text;
     this.runeCount = saved.runeCount;
     this.acceptedMentions = saved.acceptedMentions;
