@@ -658,7 +658,7 @@ type AgentInfo struct {
 	ID            string `json:"id,omitempty"`          // Hub UUID (database primary key, globally unique)
 	Slug          string `json:"slug,omitempty"`        // URL-safe slug identifier (unique per project)
 	ContainerID   string `json:"containerId,omitempty"` // Runtime container ID (ephemeral, runtime-assigned)
-	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). In agent-info.json: the run that owns the agent's files (ptone/scion#2675); List never fills RunID from agent-info.json, so on the wire it is always the label
+	RunID         string `json:"runId,omitempty"`       // Per-run identity from the LabelRunID label; empty for pre-run-ID entries (ptone/scion#2550). The run that owns the agent's files (ptone/scion#2675) is recorded in the host-owned per-agent host state file, not here (ptone/scion#4771); List never fills RunID from agent-info.json, so on the wire it is always the label
 	Name          string `json:"name"`                  // Human-friendly display name
 	Template      string `json:"template"`
 	TemplateHash  string `json:"templateHash,omitempty"`  // Content hash of a template loaded from a content-addressed cache dir; when set, Template is a display name only and is never looked up by name
@@ -966,8 +966,8 @@ type runIDContextKey struct{}
 
 // ContextWithRunID returns a new context carrying the run ID of the start
 // that is provisioning the agent (ptone/scion#2550), so provisioning can
-// record it in agent-info.json as the run that owns the agent's files
-// (ptone/scion#2675). An empty runID returns ctx unchanged.
+// record it in the host state file as the run that owns the agent's files
+// (ptone/scion#2675, ptone/scion#4771). An empty runID returns ctx unchanged.
 func ContextWithRunID(ctx context.Context, runID string) context.Context {
 	if runID == "" {
 		return ctx

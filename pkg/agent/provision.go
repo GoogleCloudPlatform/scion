@@ -917,9 +917,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// it is started, and its first start records its run in place of this.
 	// If a runtime entry for the name still exists in this project (or the
 	// runtime cannot be listed), the files stay that entry's run's.
+	// The owner is recorded in the host-owned HostStateFile in agentDir
+	// (recordRunOwnerInAgentDir); a failure, including a record that would
+	// not land in agentDir, is logged and the provision carries on.
 	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
-			slog.Warn("Provision: failed to record the provision owner in agent-info.json",
+		if err := recordRunOwnerInAgentDir(RunOwnerTargetFor(opts), agentDir, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+			slog.Warn("Provision: failed to record the provision owner in the host state file",
 				"agent", opts.Name, "error", err)
 		}
 	}
@@ -2358,15 +2361,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
-	// Record the run that owns these files (ptone/scion#2675): a delete
-	// naming a different run then leaves them alone. A provision with no run
-	// (provision-only, reprovision) keeps whatever run already owned them,
-	// since the files still belong to that run's runtime entry.
-	info.RunID = api.RunIDFromContext(ctx)
-	if info.RunID == "" {
-		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
-	}
-
 	// Persist the broker-provisioned worktree's repo root now, if the ctx
 	// signal validates against workspaceSource: run.go's Start does not
 	// always run after this call returns — the hub's provision-only flow
@@ -2413,6 +2407,46 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
+	}
+	// Record the run that owns these files (ptone/scion#2675) in the
+	// host-owned HostStateFile in agentDir, never in agent-info.json
+	// (ptone/scion#4771): a delete naming a different run then leaves them
+	// alone. A provision with no run (provision-only, reprovision) leaves
+	// the record as it is, since the files still belong to that run's
+	// runtime entry (and copies a legacy agent-info.json runId into it,
+	// below). A failure (including a record that would not land in
+	// agentDir) is logged and the provision carries on, as for the
+	// agent-info.json write below.
+	ownerTarget := RunOwnerTarget{
+		ProjectPath:     projectPath,
+		AgentName:       agentName,
+		HubProjectID:    api.HubProjectIDFromContext(ctx),
+		SharedWorkspace: sharedWorkspace,
+	}
+	// Transitional (ptone/scion#4771): the agent-info.json rewrite below
+	// would drop a runId an older broker left there, so a provision
+	// without a run (reincarnate, provision-only) first copies it into the
+	// host state file (migrateLegacyRunOwner, which never replaces a run
+	// already recorded), keeping the owner base carried over. When the
+	// copy does not succeed, the rewrite keeps the value as it was read.
+	if runID := api.RunIDFromContext(ctx); runID != "" {
+		if err := recordRunOwnerInAgentDir(ownerTarget, agentDir, runID); err != nil {
+			slog.Warn("Provision: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
+				"agent", agentName, "run_id", runID, "error", err)
+		}
+	} else {
+		recorded, legacy, err := migrateLegacyRunOwner(ownerTarget, func(legacy string) (bool, error) {
+			return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, legacy)
+		})
+		if err != nil {
+			slog.Warn("Provision: failed to copy the legacy run ID into the host state file; keeping it in agent-info.json",
+				"agent", agentName, "error", err)
+		}
+		if legacy != "" && !recorded {
+			// Not copied: keep it as it was read, as updateSavedAgentInfo
+			// does, for the legacy fallback read.
+			info.RunID = legacy
+		}
 	}
 
 	// Now attach Info to the config object for return and for writing agent-info.json
@@ -2789,45 +2823,9 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 }
 
 // ProvisionOwnerPrefix prefixes the owner a provision-only create records
-// in agent-info.json runId in place of a run (see Provision). It never
+// (RecordRunOwner) in place of a run (see Provision). It never
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
-
-// readAgentInfoRunID returns the runId recorded in the agent-info.json at
-// path, or "" if the file is missing, unreadable or carries none.
-func readAgentInfoRunID(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var info struct {
-		RunID string `json:"runId"`
-	}
-	if json.Unmarshal(data, &info) != nil {
-		return ""
-	}
-	return info.RunID
-}
-
-// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
-// the run that owns the agent's files (ptone/scion#2675). It is "" for an
-// agent provisioned before run IDs were recorded, one provisioned but never
-// started, or one whose agent-info.json is missing or unreadable.
-func GetSavedRunID(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.RunID
-	}
-	return ""
-}
-
-// SetSavedRunID records runID in the agent's agent-info.json as the run that
-// owns the agent's files (ptone/scion#2675). It is a no-op when
-// agent-info.json does not exist yet.
-func SetSavedRunID(agentName string, projectPath string, runID string) error {
-	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.RunID = runID
-	})
-}
 
 func GetSavedProfile(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -2875,6 +2873,32 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		return nil
 	}
 
+	// Transitional (ptone/scion#4771): a runId an older broker left here
+	// is copied into the host state file before this update drops it, and
+	// it is dropped only once the host state file records a run. This
+	// caller holds no hub project ID or shared-workspace flag, so the copy
+	// is made only where the record's dir is the agent's own state dir
+	// (config.ResolveAgentDir, holding a regular scion-agent.json, which a
+	// shared-workspace agent's in-project dir never does). Otherwise, or
+	// when the copy fails, the value is left in place for the legacy
+	// fallback read; it is never written here.
+	ownerTarget := RunOwnerTarget{ProjectPath: projectPath, AgentName: agentName}
+	ownerRecorded, legacyRun, migrateErr := migrateLegacyRunOwner(ownerTarget, func(runID string) (bool, error) {
+		agentDir := config.ResolveAgentDir(projectDir, agentName)
+		if fi, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil || !fi.Mode().IsRegular() {
+			return false, fmt.Errorf("%w: %s holds no scion-agent.json", errRunOwnerDirMismatch, agentDir)
+		}
+		return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, runID)
+	})
+	if migrateErr != nil {
+		// Expected on every update of such an agent until it next starts
+		// (for example a hub-managed marker project, which this caller
+		// cannot resolve without the hub project ID), so not a warning.
+		slog.Debug("Did not copy the legacy agent-info.json run ID into the host state file; keeping it in agent-info.json",
+			"agent", agentName, "error", migrateErr)
+	}
+	keepLegacyRun := legacyRun != "" && !ownerRecorded
+
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
 	// process cannot lose this update or have its own lost (#4681).
@@ -2897,6 +2921,12 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		}
 
 		update(&info)
+		// The files-owner run lives in HostStateFile (ptone/scion#4771);
+		// a runId left by an older broker is dropped once HostStateFile
+		// records a run (see above), and otherwise left as it was read.
+		if !keepLegacyRun || info.RunID != legacyRun {
+			info.RunID = ""
+		}
 
 		newData, err := marshalAgentInfoKeepUnknown(data, &info)
 		if err != nil {
