@@ -517,6 +517,14 @@ func (k *conduitGrantKeys) revoke(ctx context.Context, kid string) error {
 	return fmt.Errorf("conduit grant key revoke: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
 }
 
+// invalidate drops the cached ring, so the next use reloads it from the
+// store.
+func (k *conduitGrantKeys) invalidate() {
+	k.mu.Lock()
+	k.ring = nil
+	k.mu.Unlock()
+}
+
 // recheckKeys returns the verify-only key set for re-check verification:
 // the ring's keys and its retained public halves (grant.KeyRing.RecheckKeys).
 // It is never published and never verifies a stream grant at admission.
@@ -591,7 +599,11 @@ func (s *Server) RevokeConduitGrantKey(ctx context.Context, kid string) error {
 	if !s.experimentEnabled(conduitExperiment) {
 		return errConduitDisabled
 	}
-	return s.conduitGrantKeySet().revoke(ctx, kid)
+	if err := s.conduitGrantKeySet().revoke(ctx, kid); err != nil {
+		return err
+	}
+	s.publishConduitGrantKeysChanged(kid)
+	return nil
 }
 
 // conduitGrantKeyActivation returns the configured publish-before-sign
@@ -621,7 +633,12 @@ func (s *Server) RotateConduitGrantKey(ctx context.Context) (ConduitGrantKeyRota
 	if !s.experimentEnabled(conduitExperiment) {
 		return ConduitGrantKeyRotation{}, errConduitDisabled
 	}
-	return s.conduitGrantKeySet().rotate(ctx, s.conduitGrantKeyActivation(), conduitGrantKeyDefaultOverlap)
+	rot, err := s.conduitGrantKeySet().rotate(ctx, s.conduitGrantKeyActivation(), conduitGrantKeyDefaultOverlap)
+	if err != nil {
+		return ConduitGrantKeyRotation{}, err
+	}
+	s.publishConduitGrantKeysChanged(rot.KeyID)
+	return rot, nil
 }
 
 // conduitGrantKeysResponse is the body of GET /api/v1/conduit/grant-keys.

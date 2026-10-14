@@ -1656,8 +1656,12 @@ type Server struct {
 	conduitRefreshMetrics atomic.Pointer[OTelConduitAgentRefreshMetrics]
 	// conduitAuthzBindMu guards conduitAuthzUnbind, which releases the
 	// re-check's binding to the current event publisher.
-	conduitAuthzBindMu     sync.Mutex
-	conduitAuthzUnbind     func()
+	conduitAuthzBindMu sync.Mutex
+	conduitAuthzUnbind func()
+	// conduitGrantKeysBindMu guards conduitGrantKeysUnbind, which releases
+	// the grant key change subscription (conduit_grant_notify.go).
+	conduitGrantKeysBindMu sync.Mutex
+	conduitGrantKeysUnbind func()
 	listCursorSealer       *listCursorSealer       // AEAD sealer for authorizedList's opaque pagination cursors (ptone/scion#2124)
 	uatService             *UserAccessTokenService // User access token service
 	inviteService          *InviteService          // Invite code service
@@ -4425,6 +4429,7 @@ func (s *Server) SetEventPublisher(ep EventPublisher) {
 	// A running conduit stream re-check follows the new publisher.
 	s.bindConduitAuthzEvents()
 	s.bindConduitBrokerRevokeEvents()
+	s.bindConduitGrantKeyEvents()
 }
 
 // SetCommandBus sets the inter-node dispatch signal bus. Nil is safe (treated
