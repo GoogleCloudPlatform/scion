@@ -35,6 +35,7 @@ func TestLaunchVocabularyValues(t *testing.T) {
 		{LaunchStepWorkspaceSync, "workspace_sync"},
 		{LaunchStepStartupGate, "startup_gate"},
 		{LaunchStepLaunching, "launching"},
+		{LaunchStepSandboxLayout, "sandbox_layout"},
 
 		{LaunchCodeLaunchTimeout, "launch_timeout"},
 		{LaunchCodeBrokerLost, "broker_lost"},

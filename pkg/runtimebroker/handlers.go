@@ -3124,7 +3124,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 	mgr, resolvedRuntimeType, err := s.resolveManagerForOptsStrict(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
-		writeSavedProfileUnresolved(w, err)
+		writeProfileUnresolved(w, err)
 		return
 	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
@@ -3159,7 +3159,7 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 
 	// Apply updated InlineConfig to scion-agent.json before starting.
 	if startReq.InlineConfig != nil && opts.ProjectPath != "" {
-		s.applyInlineConfigUpdate(id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
+		s.applyInlineConfigUpdate(ctx, id, opts.ProjectPath, startReq.InlineConfig, startReq.SharedWorkspace)
 	}
 
 	// The hub is the source of truth for resume intent: when it sets
@@ -3267,7 +3267,7 @@ func restartAgentConfig(namesProject bool, harnessConfig, harnessConfigID, harne
 // sharedWorkspace branches the path: shared-workspace agents store
 // scion-agent.json externally (~/.scion.project-configs/<slug>__<uuid>/.scion/
 // agents/<name>/) so siblings cannot read it via /workspace.
-func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
+func (s *Server) applyInlineConfigUpdate(ctx context.Context, agentName, projectPath string, inlineConfig *api.ScionConfig, sharedWorkspace bool) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
 		s.agentLifecycleLog.Warn("applyInlineConfigUpdate: failed to resolve project dir", "agent", agentName, "error", err)
@@ -3304,6 +3304,18 @@ func (s *Server) applyInlineConfigUpdate(agentName, projectPath string, inlineCo
 	// so collapse references that name the same skill and destination.
 	merged := config.MergeScionConfig(&existing, inlineConfig)
 	merged.Skills = dedupeSkillReferences(merged.Skills)
+	merged.Volumes = dedupeVolumesByTarget(merged.Volumes)
+
+	// The merge above keeps the previous value of any field the inline
+	// config leaves empty, so a field cleared on the Hub would never reach
+	// the agent. Remove the paths the Hub lists as cleared, after the merge
+	// and before anything reads the config at start (ptone/scion#3906).
+	// MergeScionConfig itself stays non-zero-wins: provisioning and
+	// template layering depend on it. The list is never written to disk.
+	if inlineConfig != nil {
+		s.applyClearedFields(ctx, merged, projectPath, projectDir, agentName, inlineConfig.ClearedFields)
+	}
+	merged.ClearedFields = nil
 
 	// Write back
 	updated, err := json.MarshalIndent(merged, "", "  ")
@@ -4180,7 +4192,7 @@ func (s *Server) restartAgent(w http.ResponseWriter, r *http.Request, id, projec
 	// buildStartContext already logged any fallback at Warn; Debug here.
 	mgr, resolvedRuntimeType, err := s.resolveExistingAgentManager(runtimeOpts, existingAgentProfileResolution(runtimeOpts.Profile, provisioned), slog.LevelDebug, pin)
 	if err != nil {
-		writeSavedProfileUnresolved(w, err)
+		writeProfileUnresolved(w, err)
 		return
 	}
 	recheckHubDefaultPassthrough(opts.Env, sc.EnvClassifications, resolvedRuntimeType)
@@ -6322,8 +6334,11 @@ const (
 	// fresh start.
 	profileLenient profileResolution = iota
 	// profileStrict is for an existing agent's saved profile
-	// (agent-info.json): errSavedProfileUnresolved, unless the agent's
-	// recorded runtime (AgentInfo.Runtime) is the default runtime.
+	// (agent-info.json). A profile that does not resolve returns
+	// errSavedProfileUnresolved, with one fallback: if the agent's recorded
+	// runtime (AgentInfo.Runtime) is the default runtime, the default is
+	// used. The fallback never applies to a profile missing from the hub's
+	// stored profiles.
 	profileStrict
 	// profileStrictProvisioned is for the profile recorded in an agent's
 	// broker-side image provenance: errSavedProfileUnresolved, with no
@@ -6353,6 +6368,22 @@ func existingAgentProfileResolution(profile string, provisioned bool) profileRes
 // than running the agent on the broker's default runtime (ptone/scion#2709).
 var errSavedProfileUnresolved = errors.New("saved runtime profile cannot be resolved")
 
+// errDefaultProfileUnresolved marks a dispatch that needs the broker's
+// default profile (active_profile) when the Hub's stored profiles, applied
+// through the settings overlay, do not define it and do not hold exactly
+// one profile to use instead (config.ActiveProfileError). Handlers return
+// it as a retryable 503, like errSavedProfileUnresolved; it is never a
+// startup error, so a broker whose agents all carry their own profile still
+// runs.
+var errDefaultProfileUnresolved = errors.New("default runtime profile cannot be resolved")
+
+// errProfileUnresolved marks a dispatch that names a profile (not an
+// existing agent's saved one, e.g. a create) which the Hub's stored
+// profiles, applied through the settings overlay, do not define. Handlers
+// return it as a retryable 503; the dispatch never falls back to the
+// broker's default runtime.
+var errProfileUnresolved = errors.New("requested runtime profile cannot be resolved")
+
 // loadRuntimeSettings loads the settings resolveManagerForOptsStrict reads:
 // s.loadSettings when a test sets it, config.LoadEffectiveSettings otherwise.
 func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettings, []string, error) {
@@ -6369,9 +6400,18 @@ func (s *Server) loadRuntimeSettings(projectDir string) (*config.VersionedSettin
 // errSavedProfileUnresolved instead of the broker's default manager. Under
 // profileStrict only, when the agent's recorded runtime (AgentInfo.Runtime)
 // is the default runtime, the default is used instead
-// (savedProfileUnresolved) and logged at fallbackLevel. With
-// profileLenient the error is always nil and those cases fall back to the
-// default, as for a fresh start.
+// (savedProfileUnresolved) and logged at fallbackLevel, except for a
+// profile missing from the hub's stored profiles
+// (*config.StoredProfileNotFoundError), which always returns
+// errSavedProfileUnresolved. With
+// profileLenient those cases fall back to the default, as for a fresh start.
+// In every mode, a dispatch with no profile whose default profile cannot be
+// resolved against the Hub's stored profiles (*config.ActiveProfileError:
+// active_profile is not one of them and they do not hold exactly one)
+// returns errDefaultProfileUnresolved together with the default manager.
+// With profileLenient, a named profile the stored profiles lack
+// (*config.StoredProfileNotFoundError) likewise returns errProfileUnresolved
+// with the default manager.
 //
 // The returned error is sent to the client, so it names only the agent,
 // the profile and a fixed cause; it does not include file paths or
@@ -6442,6 +6482,32 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 	// default is also Kubernetes).
 	rtConfig, runtimeType, err := vs.ResolveRuntime(opts.Profile)
 	if err != nil {
+		// The dispatch needs the default profile (opts.Profile is empty)
+		// and the Hub's stored profiles neither define active_profile nor
+		// hold exactly one profile to use instead: fail
+		// this dispatch with an error naming both, rather than running it
+		// on the broker's default runtime. The default manager is still
+		// returned for resolveManagerForOpts, which ignores the error, so
+		// agents already running (and the heartbeat and reconcile paths)
+		// are unaffected (ptone/scion#3906). The same holds for the
+		// requested-profile case below.
+		var ape *config.ActiveProfileError
+		if opts.Profile == "" && errors.As(err, &ape) {
+			s.agentLifecycleLog.Warn("default profile cannot be resolved for this dispatch",
+				"agent", opts.Name, "projectDir", projectDir, "error", err)
+			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errDefaultProfileUnresolved, opts.Name, err)
+		}
+		// The same for a profile named on a dispatch that is not an
+		// existing agent's saved one (a create): it is not one of the
+		// Hub's stored profiles, so the dispatch fails rather than running
+		// on the default runtime. Saved and provisioned profiles keep the
+		// strict handling below.
+		var spe *config.StoredProfileNotFoundError
+		if !strict && opts.Profile != "" && errors.As(err, &spe) {
+			s.agentLifecycleLog.Warn("requested profile is not one of the hub's stored profiles",
+				"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
+			return defMgr, defRT.Name(), fmt.Errorf("%w: agent %q: %v", errProfileUnresolved, opts.Name, err)
+		}
 		if strict {
 			// ResolveRuntime's errors name only the profile and runtime
 			// ("profile %q not found", "runtime %q not found for profile %q").
@@ -6557,11 +6623,22 @@ func (s *Server) resolveManagerForOptsStrict(opts api.StartOptions, mode profile
 // Under profileStrictProvisioned the profile is the one recorded in the
 // agent's image provenance; agent-info.json is not consulted, and the 503
 // names the provisioned profile and how to recover.
+//
+// A saved profile missing from the hub's stored profiles
+// (*config.StoredProfileNotFoundError) never takes the fallback either: the
+// stored profiles are authoritative, so the request gets the 503 naming the
+// available profiles rather than running on the default runtime
+// (ptone/scion#3907). Brokers without stored profiles keep the fallback.
 func (s *Server) savedProfileUnresolved(opts api.StartOptions, projectDir string, mode profileResolution, level slog.Level, cause, clientErr error) (agent.Manager, string, error) {
 	defMgr, defRT := s.defaultPair()
 	if mode == profileStrictProvisioned {
 		s.logSavedProfileUnresolved(opts, projectDir, cause)
 		return nil, "", fmt.Errorf("%w; it is the profile the agent was provisioned with, which no longer resolves on this broker: restore the profile in settings, or re-provision the agent (scion reincarnate, or delete and re-create it)", clientErr)
+	}
+	var spe *config.StoredProfileNotFoundError
+	if errors.As(cause, &spe) {
+		s.logSavedProfileUnresolved(opts, projectDir, cause)
+		return nil, "", clientErr
 	}
 	if recorded := agent.GetSavedRuntime(opts.Name, opts.ProjectPath); recorded != "" &&
 		recorded == defRT.Name() &&
@@ -6582,12 +6659,21 @@ func (s *Server) logSavedProfileUnresolved(opts api.StartOptions, projectDir str
 		"agent", opts.Name, "profile", opts.Profile, "projectDir", projectDir, "error", err)
 }
 
-// writeSavedProfileUnresolved writes errSavedProfileUnresolved as a
-// retryable 503 (runtime_unavailable, Retry-After: 30): the agent's runtime
-// is not available on this broker until its profile resolves again.
-func writeSavedProfileUnresolved(w http.ResponseWriter, err error) {
+// writeProfileUnresolved writes errSavedProfileUnresolved,
+// errDefaultProfileUnresolved or errProfileUnresolved as a retryable 503
+// (runtime_unavailable, Retry-After: 30): the runtime the dispatch needs is
+// not available on this broker until its profile resolves. The suffix says
+// what to fix for each case.
+func writeProfileUnresolved(w http.ResponseWriter, err error) {
+	suffix := "; the agent's runtime is not available on this broker, retry once its profile is configured"
+	switch {
+	case errors.Is(err, errDefaultProfileUnresolved):
+		suffix = "; retry once active_profile names one of the hub's stored profiles"
+	case errors.Is(err, errProfileUnresolved):
+		suffix = "; retry once the profile is one of the hub's stored profiles, or choose one of them"
+	}
 	w.Header().Set("Retry-After", recordedRuntimeRetryAfterSeconds)
-	RuntimeUnavailable(w, err.Error()+"; the agent's runtime is not available on this broker, retry once its profile is configured")
+	RuntimeUnavailable(w, err.Error()+suffix)
 }
 
 // recheckHubDefaultPassthrough re-runs the hub-default passthrough gate's

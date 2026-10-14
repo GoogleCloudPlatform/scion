@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 220
+**Operations:** 219
 
 ## Table of Contents
 
@@ -128,6 +128,7 @@
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
+- [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
@@ -176,12 +177,10 @@
 - [hub.githubapp.read](#hubgithubappread) — Read GitHub App configuration and installations
 - [hub.githubapp.update](#hubgithubappupdate) — Create, update and delete GitHub App installations, discover installations and sync permissions
 - [hub.githubapp.config.update](#hubgithubappconfigupdate) — Update the GitHub App configuration, which sets the hub's app credentials; an interactive session only
-- [quota.read](#quotaread) — Read limit definitions, entitlements, and usage. The route guard checks quota.read on the hub-scoped quota target
-- [quota.create](#quotacreate) — Create limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:create
-- [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update
-- [quota.brokersettings.update](#quotabrokersettingsupdate) — Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
-- [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
-- [quota.usage.self.read](#quotausageselfread) — Read the caller's own quota usage: each limit's effective value and active count for the caller only
+- [quota.read](#quotaread) — Read limit definitions, entitlements, and usage
+- [quota.create](#quotacreate) — Create limit definitions and entitlement bindings
+- [quota.update](#quotaupdate) — Update limit definitions and entitlement bindings
+- [quota.delete](#quotadelete) — Delete limit definitions and entitlement bindings
 - [hub.policies.removed](#hubpoliciesremoved) — Removed policy API; every method and sub-path answers 410 Gone and points callers to role bindings
 - [skill.read](#skillread) — Read skill definitions or list/discover skills
 - [skill.create](#skillcreate) — Create a new skill definition. A user-scope skill refuses a federated caller (requireProfileWriter)
@@ -1279,6 +1278,7 @@
 | ID | Kind | Description | Fail-Closed |
 |----|------|-------------|-------------|
 | target-exists | business | Project must exist and not be already deleted | Yes |
+| agents-runtime-deleted | business | Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization | Yes |
 
 ### Audit
 
@@ -1296,11 +1296,13 @@
 - **Retry:** no retry — cascading deletes are best-effort; DB cascade is authoritative
 - **Auth Before Emit:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`
+**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`, `conflict`
 
 ### Tests
 
 - `pkg/hub:TestRS3_ProjectDeleteOwnerPositiveControl`
+- `pkg/hub:TestProjectDelete_LiveAgentRefused`
+- `pkg/hub:TestProjectDelete_GuardRunsAfterAuthorization`
 - `pkg/hub:TestRS3_ProjectDeleteGovernanceMatrix`
 - `pkg/hub:TestRS3_ProjectDeleteAtomicAudit`
 
@@ -4813,6 +4815,56 @@
 
 ---
 
+## federation.token.mint
+
+**Domain:** federation
+
+**Description:** Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/auth/federation-token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `federation_token.mint`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- A user obtains a credential for themselves only, for an audience the hub admin allows, with a lifetime capped at one hour; it carries no project or agent claims
+
+### Audit
+
+- **Event Type:** `federation_token_issued`
+- **Context Fields:** actor_id, credential_kind
+- **After Fields:** audience, jti, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestFederationToken_RefusedCallers`
+- `pkg/hub:TestFederationToken_UserAccessTokenNeedsMintScope`
+- `pkg/hub:TestFederationToken_AudienceAllowList`
+- `pkg/hub:TestFederationToken_AuditWritten`
+- `pkg/hub:TestFederationToken_AuditFailureIssuesNothing`
+- `pkg/hub:TestFederationToken_RefusedCredentialKinds`
+
+---
+
 ## user.admin.suspend
 
 **Domain:** user.admin
@@ -6519,7 +6571,7 @@
 
 **Domain:** quota
 
-**Description:** Read limit definitions, entitlements, and usage. The route guard checks quota.read on the hub-scoped quota target
+**Description:** Read limit definitions, entitlements, and usage
 
 ### Entry Points
 
@@ -6527,16 +6579,13 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/limits` |
 | http_route | GET | `/api/v1/admin/limits/{id}` |
-| http_route | GET | `/api/v1/admin/limits/{id}/entitlements` |
 | http_route | GET | `/api/v1/admin/entitlements/{id}` |
 | http_route | GET | `/api/v1/admin/usage` |
 | http_route | GET | `/api/v1/admin/usage/{limit}` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.read`
 
@@ -6548,7 +6597,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -6556,7 +6605,7 @@
 
 **Domain:** quota
 
-**Description:** Create limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:create
+**Description:** Create limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -6567,9 +6616,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.create`
 
@@ -6581,7 +6628,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -6589,7 +6636,7 @@
 
 **Domain:** quota
 
-**Description:** Update limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:update
+**Description:** Update limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -6597,44 +6644,11 @@
 |------|--------|---------|
 | http_route | PUT | `/api/v1/admin/limits/{id}` |
 | http_route | PUT | `/api/v1/admin/entitlements/{id}` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `quota.update`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
-
----
-
-## quota.brokersettings.update
-
-**Domain:** quota
-
-**Description:** Replace a runtime broker's settings document. Requires broker.read on the broker and quota.update on the hub-scoped quota target for every write, including one that changes no key, and each changed key's declared permission (maxAgents declares quota.update)
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
 | http_route | PUT | `/api/v1/runtime-brokers/{id}/settings` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.update`
 
@@ -6646,8 +6660,7 @@
 
 ### Tests
 
-- `pkg/hub:TestBrokerSettingsPut_RequiresQuotaUpdateEvenWithoutChanges`
-- `pkg/hub:TestBrokerSettingsPut_EachChangedKeyIsAuthorized`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 
@@ -6655,7 +6668,7 @@
 
 **Domain:** quota
 
-**Description:** Delete limit definitions and entitlement bindings. The route guard checks quota.read, so a token needs quota:read and quota:delete
+**Description:** Delete limit definitions and entitlement bindings
 
 ### Entry Points
 
@@ -6666,9 +6679,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `quota.delete`
 
@@ -6687,41 +6698,7 @@
 
 ### Tests
 
-- `pkg/hub:TestQuotaAdminToken_ResolvesHubTarget`
-
----
-
-## quota.usage.self.read
-
-**Domain:** quota
-
-**Description:** Read the caller's own quota usage: each limit's effective value and active count for the caller only
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/usage/me` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestUsageMe_ReturnsOnlyTheHolder`)
-
-**Resource Resolver:** none
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestUsageMe_ReturnsOnlyTheHolder`
-
-### Exemptions
-
-- **authentication_only:** Returns only the caller's own usage; carries no other user's records (scope: caller's own quota usage only) — waives: `base_permission`
+- `pkg/hub/authzop:TestCatalogValidation`
 
 ---
 

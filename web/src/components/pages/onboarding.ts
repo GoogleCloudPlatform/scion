@@ -44,7 +44,6 @@ interface OnboardingStatus {
   identitySet: boolean;
   runtimeOK: boolean;
   harnessesSeeded: boolean;
-  imagesPresent: boolean;
   hasWorkspace: boolean;
   complete: boolean;
   embeddedBrokerID?: string;

@@ -99,7 +99,7 @@ Agents use `sciontool` as their init process, which includes an embedded OTLP fo
 
 #### Via Settings File (Recommended)
 
-The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Templates and individual agents can further override these via their `scion-agent.yaml`.
+The preferred approach is to configure telemetry in `settings.yaml`. Settings at the global level apply to all agents; project-level settings apply to a specific project. Individual agents can further override these via their `scion-agent.yaml`; a template's `telemetry` block is ignored with a warning.
 
 ```yaml
 # In ~/.scion/settings.yaml (global) or .scion/settings.yaml (project)
@@ -261,7 +261,7 @@ To debug an agent, set `SCION_LOG_LEVEL` for it explicitly. The value uses the s
   scion hub env clear --project SCION_LOG_LEVEL
   ```
 
-- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of a template or an inline `--config` file. A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
+- **In agent configuration**: add `SCION_LOG_LEVEL` to the `env` of an inline `--config` file (a template cannot set `SCION_*` keys). A value set this way overrides the Hub scopes; `--agent-log-level` overrides it in turn.
 
 ## Telemetry Collection
 
