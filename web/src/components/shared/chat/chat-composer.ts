@@ -1952,7 +1952,13 @@ export class ScionChatComposer extends LitElement {
     this.uploading = true;
     try {
       const formData = new FormData();
-      formData.append('project_id', this.projectId);
+      // A DM belongs to no project, and the hub accepts only project-less
+      // uploads there. The composer can still hold a projectId in a DM (an
+      // agent DM carries the agent's project, a DM opened from a project
+      // scope carries that project), so the field is left out for a DM.
+      if (this.conversationMode !== 'dm') {
+        formData.append('project_id', this.projectId);
+      }
       for (const file of files) {
         formData.append('files', file);
       }

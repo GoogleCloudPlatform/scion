@@ -522,3 +522,68 @@ describe('isComposing', () => {
     expect(el.isComposing).toBe(true);
   });
 });
+
+/**
+ * A DM belongs to no project: the hub accepts only a project-less upload
+ * there and refuses a project-scoped one at send ("attachment … is not
+ * available in this conversation", ptone/scion#5084). The composer can hold a
+ * projectId in a DM (an agent DM carries the agent's project, a DM opened in a
+ * project scope carries that project), so the upload must leave it out.
+ */
+describe('composer — upload project scope', () => {
+  /** The FormData of the single upload request made so far. */
+  function uploadForm(): FormData {
+    const call = apiFetch.mock.calls.find((c: any[]) => c[0] === '/api/v1/chat/attachments') as
+      | any[]
+      | undefined;
+    expect(call).toBeTruthy();
+    return (call![1] as RequestInit).body as FormData;
+  }
+
+  for (const [label, projectId] of [
+    ['an agent DM (agent project)', 'proj-agent'],
+    ['a DM opened in a project scope', 'proj-scope'],
+    ['a DM with no project', ''],
+  ] as const) {
+    it(`sends no project_id in ${label}`, async () => {
+      const el = document.createElement('scion-chat-composer') as any;
+      el.conversationMode = 'dm';
+      el.projectId = projectId;
+      respondWith(201, { attachments: [STORED], failures: [] });
+
+      await selectFiles(el, ['compose.yaml']);
+
+      const form = uploadForm();
+      expect(form.has('project_id')).toBe(false);
+      expect(form.getAll('files')).toHaveLength(1);
+      expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    });
+  }
+
+  it('sends the project_id in a group or topic conversation', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.projectId = 'proj-1';
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().get('project_id')).toBe('proj-1');
+  });
+
+  it('switching a mounted composer from a topic to a DM drops the project_id', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    el.conversationMode = 'dm';
+    el.conversationKey = 'dm:user:u1:user:u2';
+    await el.updateComplete;
+    respondWith(201, { attachments: [STORED], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().has('project_id')).toBe(false);
+  });
+});
