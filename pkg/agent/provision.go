@@ -26,7 +26,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -2907,6 +2909,17 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	})
 }
 
+// ErrAgentInfoNotDurable marks a writeAgentInfoFile failure after the
+// rename: the new content is in place, but syncing the parent directory
+// failed, so the change may not survive a crash. Repeating the write is
+// safe.
+var ErrAgentInfoNotDurable = errors.New("agent file replaced but the change may not be durable")
+
+// writeAgentInfoFile replaces path with data through a temp file in the
+// same directory, syncing the contents before the rename and the parent
+// directory after it. An error wrapping ErrAgentInfoNotDurable means the
+// content was replaced but may not survive a crash; any other error means
+// path was left untouched.
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -2924,10 +2937,60 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Flush the contents before the rename, so a crash cannot leave a
+	// truncated file under the final name (#4821).
+	if err := agentInfoFileSync(tmp); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	// Sync the parent directory so the rename itself survives a crash.
+	dir := filepath.Dir(path)
+	if err := syncAgentInfoDir(dir); err != nil {
+		return fmt.Errorf("%w: sync directory %s: %w", ErrAgentInfoNotDurable, dir, err)
+	}
+	return nil
+}
+
+// Test seams for writeAgentInfoFile's disk syncs.
+var (
+	// agentInfoFileSync flushes the temp file's contents to disk.
+	agentInfoFileSync = func(f *os.File) error { return f.Sync() }
+	// agentInfoDirSync flushes the parent directory, opened by
+	// syncAgentInfoDir, after the rename.
+	agentInfoDirSync = func(d *os.File) error { return d.Sync() }
+	// agentInfoDirOpen opens the parent directory for that sync.
+	agentInfoDirOpen = openAgentInfoDir
+)
+
+// syncAgentInfoDir fsyncs dir, as pkg/config's syncDir does. Windows cannot
+// fsync a directory, so it is a no-op there. A directory that cannot be
+// opened, or whose filesystem reports directory fsync as unsupported
+// (EINVAL, ENOTSUP, errors.ErrUnsupported), is skipped: the new content is
+// already in place.
+func syncAgentInfoDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
+	d, err := agentInfoDirOpen(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := agentInfoDirSync(d); err != nil && !isDirSyncUnsupported(err) {
+		return err
+	}
+	return nil
+}
+
+// isDirSyncUnsupported reports whether err is a filesystem saying it does
+// not support fsync on a directory.
+func isDirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, errors.ErrUnsupported)
 }
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the
@@ -3073,6 +3136,10 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //     worktreeMayHoldWork; only worktrees that belong to the project
 //     repository are inspected, and anything else that may hold data, or
 //     cannot be checked, is kept.
+//   - A dir kept for its workspace records when and why in a marker file;
+//     once the soft-delete retention window has passed, it is removed
+//     without inspecting the workspace (ptone/scion#4742, see
+//     kept_agent_dir.go).
 //   - Any other dir with no home state is stale: it is removed, and
 //     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
@@ -3117,10 +3184,22 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
+		// The dir is live again: a marker from an earlier keep no longer
+		// applies (ptone/scion#4742).
+		clearKeptAgentDirMarker(agentName, agentDir)
 		slog.Info("GetAgent: agent directory had no config file; wrote a minimal scion-agent.json from agent-info.json and kept the home",
 			"agent", agentName, "agent_dir", agentDir, "home", populatedHome,
 			"template", info.Template, "harness_config", info.HarnessConfig)
 		return nil
+	}
+
+	// A directory kept earlier (see recordKeptAgentDir) whose soft-delete
+	// retention window has passed is removed without inspecting its
+	// workspace, and the caller re-provisions it (ptone/scion#4742).
+	if hasKeptAgentDirMarker(agentDir) {
+		if retention := keptAgentDirRetention(); retention > 0 && purgeExpiredKeptAgentDir(agentName, agentDir, agentHome, retention) {
+			return nil
+		}
 	}
 
 	// No home state, but the in-dir workspace may still hold work
@@ -3145,11 +3224,13 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceCheckFailed)
 			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceMayHoldWork)
 			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if prunePath == "" && inspected {
@@ -3703,8 +3784,13 @@ func worktreeGitEnv() []string {
 // which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
+	// Links are skipped, so their targets are left unchanged; RemoveAll
+	// removes the link itself.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		_ = os.Chmod(path, 0755)
@@ -3822,6 +3908,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
+
+	// Remove other agents' kept directories in the same agents root whose
+	// soft-delete retention window has passed (ptone/scion#4742).
+	sweepExpiredKeptAgentDirs(filepath.Dir(agentDir), agentName, func(name string) string {
+		return config.GetAgentHomePath(projectDir, name)
+	})
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfig: a populated home is kept (adopted from

@@ -573,7 +573,7 @@ func TestReincarnatePatch_PatchedFieldPinnedOthersFollowTemplate(t *testing.T) {
 		Scope:       store.TemplateScopeGlobal,
 		Status:      store.TemplateStatusActive,
 		ContentHash: "hash-v1",
-		Config:      &store.TemplateConfig{Image: "template-image:v1", Model: "template-model-v1"},
+		AgentConfig: &api.ScionConfig{Model: "template-model-v1"},
 	}
 	require.NoError(t, s.CreateTemplate(ctx, template))
 	agent := newReincarnateTestAgent(t, s, project, broker, func(a *store.Agent) {
@@ -584,7 +584,7 @@ func TestReincarnatePatch_PatchedFieldPinnedOthersFollowTemplate(t *testing.T) {
 	require.Equal(t, http.StatusAccepted, rec.Code, rec.Body.String())
 	waitForReincarnationSettled(t, s, agent.ID)
 
-	template.Config = &store.TemplateConfig{Image: "template-image:v2", Model: "template-model-v2"}
+	template.AgentConfig = &api.ScionConfig{Model: "template-model-v2"}
 	template.ContentHash = "hash-v2"
 	require.NoError(t, setTemplateContentForTest(ctx, s, template))
 

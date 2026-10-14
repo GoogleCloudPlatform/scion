@@ -114,8 +114,12 @@ func Resolve(_ context.Context, opts ResolveOptions) (*ResolvedHarness, error) {
 		}, nil
 	}
 
+	// The plain Generic harness still carries the entry's ready spec (which
+	// EffectiveConfig fills from the built-in bundle when the entry has no
+	// block), so a built-in harness type keeps its readiness here too.
+	ready := entry.ResolvedReady()
 	return &ResolvedHarness{
-		Harness:        &Generic{},
+		Harness:        &Generic{ready: &ready},
 		ConfigName:     opts.Name,
 		ConfigDir:      hcDir,
 		Config:         entry,
@@ -168,6 +172,15 @@ func EffectiveConfig(name string, hcDir *config.HarnessConfigDir, settings *conf
 	if entry.Harness == "" {
 		entry.Harness = name
 	}
+
+	// A harness-config written before the ready block existed has none.
+	// Take the built-in bundle's block for the same harness, so the config
+	// keeps the readiness it had when readiness was keyed on the harness
+	// name. An explicit block, from the dir or an overlay, always wins; a
+	// harness with no built-in bundle keeps the delay default.
+	if entry.Ready == nil {
+		entry.Ready = embeddedReadyConfig(entry.Harness)
+	}
 	return entry
 }
 
@@ -209,6 +222,14 @@ func mergeHarnessConfigEntries(base, overlay config.HarnessConfigEntry) config.H
 	}
 	if len(overlay.Secrets) > 0 {
 		base.Secrets = overlay.Secrets
+	}
+	// Ready and delivery are replaced as whole blocks, never merged field
+	// by field: a half-merged readiness or delivery rule is confusing.
+	if overlay.Ready != nil {
+		base.Ready = overlay.Ready
+	}
+	if overlay.Delivery != nil {
+		base.Delivery = overlay.Delivery
 	}
 	return base
 }

@@ -29,6 +29,8 @@ type RoleDefinition struct {
 	Permissions []string `json:"permissions,omitempty"`
 	// System holds the value of the "system" field.
 	System bool `json:"system,omitempty"`
+	// ConfersMembership holds the value of the "confers_membership" field.
+	ConfersMembership bool `json:"confers_membership,omitempty"`
 	// Created holds the value of the "created" field.
 	Created time.Time `json:"created,omitempty"`
 	// Updated holds the value of the "updated" field.
@@ -64,7 +66,7 @@ func (*RoleDefinition) scanValues(columns []string) ([]any, error) {
 		switch columns[i] {
 		case roledefinition.FieldPermissions:
 			values[i] = new([]byte)
-		case roledefinition.FieldSystem:
+		case roledefinition.FieldSystem, roledefinition.FieldConfersMembership:
 			values[i] = new(sql.NullBool)
 		case roledefinition.FieldName, roledefinition.FieldDescription, roledefinition.FieldScopeType:
 			values[i] = new(sql.NullString)
@@ -124,6 +126,12 @@ func (_m *RoleDefinition) assignValues(columns []string, values []any) error {
 				return fmt.Errorf("unexpected type %T for field system", values[i])
 			} else if value.Valid {
 				_m.System = value.Bool
+			}
+		case roledefinition.FieldConfersMembership:
+			if value, ok := values[i].(*sql.NullBool); !ok {
+				return fmt.Errorf("unexpected type %T for field confers_membership", values[i])
+			} else if value.Valid {
+				_m.ConfersMembership = value.Bool
 			}
 		case roledefinition.FieldCreated:
 			if value, ok := values[i].(*sql.NullTime); !ok {
@@ -192,6 +200,9 @@ func (_m *RoleDefinition) String() string {
 	builder.WriteString(", ")
 	builder.WriteString("system=")
 	builder.WriteString(fmt.Sprintf("%v", _m.System))
+	builder.WriteString(", ")
+	builder.WriteString("confers_membership=")
+	builder.WriteString(fmt.Sprintf("%v", _m.ConfersMembership))
 	builder.WriteString(", ")
 	builder.WriteString("created=")
 	builder.WriteString(_m.Created.Format(time.ANSIC))

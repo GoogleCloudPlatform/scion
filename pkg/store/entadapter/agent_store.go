@@ -132,6 +132,7 @@ func entAgentToStore(a *ent.Agent) *store.Agent {
 		LaunchSeq:           a.LaunchSeq,
 		LaunchStep:          a.LaunchStep,
 		LaunchError:         a.LaunchError,
+		LaunchCause:         a.LaunchCause,
 		RunID:               a.RunID,
 		PreviousRunIDs:      append([]string(nil), a.PreviousRunIds...),
 		WorkspacePlacement:  a.WorkspacePlacement,
@@ -412,6 +413,27 @@ func (s *AgentStore) GetAgent(ctx context.Context, id string) (*store.Agent, err
 		return nil, mapError(err)
 	}
 	return entAgentToStore(a), nil
+}
+
+// GetAgentRunState implements store.AgentStore.GetAgentRunState: one
+// primary-key read of run_id and deleted_at.
+func (s *AgentStore) GetAgentRunState(ctx context.Context, id string) (store.AgentRunState, error) {
+	uid, err := parseGetID(id)
+	if err != nil {
+		return store.AgentRunState{}, err
+	}
+	row, err := s.client.Agent.Query().
+		Where(agent.IDEQ(uid)).
+		Select(agent.FieldRunID, agent.FieldDeletedAt).
+		Only(ctx)
+	if err != nil {
+		return store.AgentRunState{}, mapError(err)
+	}
+	rs := store.AgentRunState{RunID: row.RunID}
+	if row.DeletedAt != nil {
+		rs.DeletedAt = *row.DeletedAt
+	}
+	return rs, nil
 }
 
 // GetAgentBySlug retrieves an agent by its slug within a project.
@@ -850,7 +872,7 @@ func buildAgentUpdate(ac *ent.AgentClient, uid uuid.UUID, a *store.Agent, expect
 	// launch_* column from the caller's struct; this is the one exception,
 	// and it is unconditional (not gated on the row's launch_state).
 	if a.Phase == "running" {
-		update.SetLaunchError("")
+		update.SetLaunchError("").SetLaunchCause("")
 	}
 
 	return update, nil
@@ -1602,7 +1624,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// method has already locked (not on the caller's struct, which may be
 	// stale). No CASE SQL: both are plain Go conditionals on current.
 	if su.Phase == "running" {
-		upd.SetLaunchError("")
+		upd.SetLaunchError("").SetLaunchCause("")
 		if current.LaunchState == store.LaunchStateActive {
 			upd.SetLaunchState(store.LaunchStateEnded)
 			upd.SetLaunchEndReason(store.LaunchEndReasonRunningObserved)

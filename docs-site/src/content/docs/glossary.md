@@ -177,7 +177,7 @@ _See also_: AccessConstraint, Group, RoleBinding, User Access Token (UAT)
 A named authority tier (one of `none`, `readonly`, `baseline`, or `full`) assigned to an agent that governs the API scopes granted in its Hub-issued JWT. At creation, the requested or default role is capped by the project maximum and, for sub-agents, the parent agent's role. Live delegation checks separately verify the caller's authority.
 
 ### Group
-A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients) and from a **Project**.
+A named collection of Hub users, agents and nested groups used by the Hub permissions system to assign access. This is the primary meaning of "group" in Scion. Distinct from a **Message Group** (a set of message recipients), from a **Thread Group** (a set of a project's chat threads) and from a **Project**.
 
 ### User Access Token (UAT)
 A scoped, revocable bearer token (prefixed with `scion_pat_`) linked to a user account and used for non-interactive Hub authentication (e.g., CLI, CI/CD pipelines, desktop app integration). Every UAT has a boundary, either a single project or (for a hub-bound token, minted through the API) the hub, and carries a specific list of action permissions (scopes). The token boundary is not an **Access Boundary**. Formerly known as a *Personal Access Token (PAT)*.
@@ -245,7 +245,10 @@ The default message mode. Any user with the `agent:message` permission in the pr
 A project-level setting (`crossProjectInbound`) that controls whether the project accepts agent messages originating from other projects. One of three values: `none` (default — reject all), `members` (accept only when the sender's originating human is a member of this project), or `any` (accept from any project on the Hub). One of three independent controls required for cross-project messaging.
 
 ### Message Group
-A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users).
+A set of recipients addressed by a single send, correlated by a shared `group_id`, as opposed to a direct message to one recipient or a broadcast to all agents in a project. Distinct from **Group** (Hub users) and from a **Thread Group**.
+
+### Thread Group
+A named set of a project's group conversations (threads), owned by the project and shared by every project member, user or agent. A thread is in at most one thread group; adding it to another moves it. Membership is shared, while each user keeps their own sidebar order. Managed with [`scion conversation group`](/scion/reference/cli/#scion-conversation-group), behind the `hub.chat_thread_groups` [experiment](/scion/reference/experiments/). Distinct from **Group** (Hub users) and from a **Message Group** (the recipients of one send).
 
 ### Notification
 An event delivered when an agent reaches a tracked trigger activity (e.g. `completed`, `waiting_for_input`, `limits_exceeded`). Recipients register a **Subscription** — scoped to a single agent or to a whole project, naming which trigger activities fire it and whether an agent or a user receives it. Backs `scion notifications` and the `--notify` flag on `scion start`.

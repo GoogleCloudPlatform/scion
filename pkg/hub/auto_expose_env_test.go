@@ -70,8 +70,9 @@ func createAutoExposeAgent(t *testing.T, in autoExposeCreate) *store.Agent {
 }
 
 // TestCreateAgent_AutoExposePrecedence pins the hub half of the auto-expose
-// precedence (user-explicit > project annotation > template env > hub
-// default) on the persisted maps. Each case runs with and without unrelated
+// precedence (user-explicit > project annotation > hub default) on the
+// persisted maps. A template's SCION_AUTO_EXPOSE_PORTS is a reserved key the
+// hub never copies (ptone/scion#4222, ptone/scion#4524). Each case runs with and without unrelated
 // request env, since a request without config takes a different branch in
 // buildAppliedConfig.
 func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
@@ -85,12 +86,12 @@ func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
 		wantExplicit string
 	}{
 		{
-			name:    "AC1 template false beats hub default true",
+			name:    "AC1 template value is not copied; hub default stays unpersisted",
 			in:      autoExposeCreate{hubDefault: ptrBool(true), templateEnv: map[string]string{aeKey: "false"}},
-			wantEnv: "false",
+			wantEnv: "",
 		},
 		{
-			name:    "AC2 project true beats template false",
+			name:    "AC2 project true, template value ignored",
 			in:      autoExposeCreate{projectAnno: "true", templateEnv: map[string]string{aeKey: "false"}},
 			wantEnv: "true",
 		},
@@ -167,9 +168,9 @@ func TestCreateAgent_AutoExposePrecedence(t *testing.T) {
 }
 
 // TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv pins buildAppliedConfig's
-// separate Env map: the template-env fill and the project tier write
-// AppliedConfig.Env, and none of it may leak into InlineConfig.Env, which
-// holds the requester's explicit keys only.
+// separate Env map: the project tier writes AppliedConfig.Env, and none of
+// it may leak into InlineConfig.Env, which holds the requester's explicit
+// keys only. The template's env reaches neither (ptone/scion#4222).
 func TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv(t *testing.T) {
 	ag := createAutoExposeAgent(t, autoExposeCreate{
 		projectAnno: "true",
@@ -179,7 +180,7 @@ func TestCreateAgent_AppliedEnvDoesNotAliasInlineEnv(t *testing.T) {
 
 	assert.Equal(t, map[string]string{"OTHER": "x"}, inlineEnv(ag), "InlineConfig.Env")
 	assert.Equal(t, map[string]string{"OTHER": "x"}, createInputsEnv(ag), "CreateInputs.InlineConfig.Env")
-	assert.Equal(t, map[string]string{"OTHER": "x", "TPL": "t", aeKey: "true"}, ag.AppliedConfig.Env, "AppliedConfig.Env")
+	assert.Equal(t, map[string]string{"OTHER": "x", aeKey: "true"}, ag.AppliedConfig.Env, "AppliedConfig.Env")
 }
 
 func TestResolveAutoExposeEnv(t *testing.T) {
@@ -281,7 +282,7 @@ func TestApplyStartExtras_HubAgentDefaults(t *testing.T) {
 	_, ok := payload["hubAgentDefaults"]
 	assert.False(t, ok, "no hubAgentDefaults key without a value")
 
-	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, ptrBool(false), nil)})
+	applyStartExtras(payload, StartExtras{HubAgentDefaults: startHubAgentDefaults(opsettings.AgentDefaultsSettings{}, ptrBool(false), nil, nil)})
 	blob, err := json.Marshal(payload)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"hubAgentDefaults":{"autoExposePorts":false}}`, string(blob))

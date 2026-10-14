@@ -200,8 +200,20 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	}
 	r.groupMessage = conversationMessage(r.groupConversation)
 	r.directMessage = conversationMessage(r.directConversation)
+
+	threadGroup := func(name string) string {
+		g := &store.ThreadGroup{ProjectID: projectID, Name: name, CreatedBy: userID, CreatedByKind: store.ThreadGroupCreatorUser}
+		require.NoError(t, s.CreateThreadGroup(ctx, g))
+		return g.ID
+	}
+	r.threadGroup = threadGroup("inbox-thread-group-" + r.template[:8])
+	r.threadGroupDel = threadGroup("inbox-thread-group-del-" + r.template[:8])
 	return r
 }
+
+// liveInventoryFederationAudience is the peer hub audience the live
+// inventory server allows for POST /api/v1/auth/federation-token.
+const liveInventoryFederationAudience = "https://peer-hub.example.com"
 
 // seedLiveInventoryFixtures creates one real store row per resource family
 // (plus a second, disposable instance for families with a destructive
@@ -504,13 +516,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit and hub.agent_delegation on too, so their
-	// experiment-gated routes are live: the registry above with both also
-	// defaulting on (no operational
-	// settings, which the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
+	// federation.project_visitors on too, so their experiment-gated routes
+	// are live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -521,13 +533,20 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(conduitExperiment))
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
+	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
+	// provider is off: install a test key manager and allow the audience
+	// that bodyOverrides sends, so the route reaches its caller checks.
+	installTestOIDCKeyManager(t, srv)
+	srv.config.OIDCConfig.UserTokenAudiences = []string{liveInventoryFederationAudience}
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
 	f.userSkillInjection = seedUserSkillInjection(t, ctx, s, DevUserID)
 	f.delegation = seedLiveInventoryDelegation(t, ctx, s, f.agent, f.project)
 
-	// Hub test identities: turn the feature on (--enable-test-identities)
+	// Hub test identities: turn the feature on (--test-mode=member)
 	// and seed one live identity. Its issuer is the bearer matrix's
 	// super-admin (newBearerMatrixFixture), so that user's hub token may
 	// re-issue for it; the dev user reaches it as an admin session.
@@ -605,6 +624,9 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}"}:                      {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages"}:             {"id": f.inbox.directConversation},
 		{"inbox.conversation.direct.read", "/api/v1/conversations/{id}/messages/{messageId}"}: {"id": f.inbox.directConversation, "messageId": f.inbox.directMessage},
+
+		// Thread group delete uses its disposable twin.
+		{"inbox.threadgroup.delete", "/api/v1/thread-groups/{id}"}: {"id": f.inbox.threadGroupDel},
 	}
 }
 
@@ -621,6 +643,14 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/artifacts/{id}":                             {"id": f.artifact},
 		"/api/v1/artifacts/{id}/files/{path}":                {"id": f.artifact, "path": "live.md"},
 		"/api/v1/artifacts/{id}/versions/{seq}/files/{path}": {"id": f.artifact, "seq": "1", "path": "live.md"},
+		"/api/v1/artifacts/{id}/grants":                      {"id": f.artifact},
+		"/api/v1/artifacts/{id}/grants/{grantId}":            {"id": f.artifact},
+		"/api/v1/artifacts/{id}/links":                       {"id": f.artifact},
+		"/api/v1/artifacts/{id}/links/{linkId}":              {"id": f.artifact},
+		"/api/v1/artifacts/{id}/versions":                    {"id": f.artifact},
+		"/api/v1/artifacts/{id}/versions/{seq}":              {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/finalize":     {"id": f.artifact, "seq": "1"},
+		"/api/v1/artifacts/{id}/versions/{seq}/view":         {"id": f.artifact, "seq": "1"},
 
 		// --- test identity family ---
 		"/api/v1/test-identities/{id}/token":          {"id": f.testIdentity},
@@ -828,6 +858,11 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/conversations/{id}/participants":  {"id": f.inbox.groupConversation},
 		"/api/v1/conversations/{id}/leave":         {"id": f.inbox.leaveConversation},
 
+		// --- chat thread group family ---
+		"/api/v1/thread-groups/{id}":                          {"id": f.inbox.threadGroup},
+		"/api/v1/thread-groups/{id}/threads":                  {"id": f.inbox.threadGroup},
+		"/api/v1/thread-groups/{id}/threads/{conversationId}": {"id": f.inbox.threadGroup, "conversationId": f.inbox.groupConversation},
+
 		// --- hub pre-start hooks family ---
 		"/api/v1/pre-start-hooks/{id}":          {"id": f.hubPreStartHook},
 		"/api/v1/pre-start-hooks/{id}/activate": {"id": f.hubPreStartHook},
@@ -846,6 +881,8 @@ func queryOverrides(f idFixtures) map[string]string {
 		"/api/v1/artifacts": "name=live-inventory.txt&scope=" + f.project,
 		// handleConversationResolve 400s without a reference.
 		"/api/v1/conversations/resolve": "reference=conv:" + f.inbox.groupConversation,
+		// handleListThreadGroups 400s without a project for a user.
+		"/api/v1/thread-groups": "projectId=" + f.project,
 	}
 }
 
@@ -863,6 +900,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
+		// User access credential for a peer hub: an allowed audience, so
+		// an admitted caller gets 200 instead of a body 400
+		// (seedLiveInventoryFixtures allows it).
+		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -955,6 +996,8 @@ type inboxRecords struct {
 	directConversation  string
 	directMessage       string
 	createConversations string // display name prefix for conversations a test creates
+	threadGroup         string // a chat thread group in the project (ptone/scion#4424)
+	threadGroupDel      string // a disposable chat thread group for the delete probes
 }
 
 // seedLiveInventoryArtifact publishes a one-file artifact directly through

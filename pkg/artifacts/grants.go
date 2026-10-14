@@ -357,7 +357,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	ctx := r.Context()
 	subject, ok := s.reviewGrantSubject(r, a)
 	if !ok {
-		writeAdminForbidden(w)
+		s.writeAdminForbidden(w, r)
 		return
 	}
 	readable, err := s.reviewSubjectCanRead(ctx, b, a, subject)
@@ -367,7 +367,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		return
 	}
 	if !readable {
-		writeAdminForbidden(w)
+		s.writeAdminForbidden(w, r)
 		return
 	}
 	kind, ref, _, _ := s.host.Principal(ctx)
@@ -380,7 +380,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 	case errors.Is(err, ErrReviewGrantRefused), errors.Is(err, ErrReviewReplacesAccess):
 		// Both refusals give the uniform 403, whichever store check runs
 		// first.
-		writeAdminForbidden(w)
+		s.writeAdminForbidden(w, r)
 		return
 	case errors.Is(err, ErrTooManyGrants):
 		writeError(w, http.StatusConflict, "too_many_grants",
@@ -536,7 +536,7 @@ func (s *Service) handlePatchArtifact(w http.ResponseWriter, r *http.Request, id
 			writeError(w, http.StatusBadRequest, "bad_request", "scopeRef must be a project id")
 			return
 		}
-		if !s.host.Permits(ctx, scope, PermissionCreate) || !s.host.Authorize(ctx, scope, PermissionCreate) {
+		if !canCreateIn(ctx, s.host, scope) {
 			writeError(w, http.StatusForbidden, "forbidden", "not allowed to publish into that project")
 			return
 		}

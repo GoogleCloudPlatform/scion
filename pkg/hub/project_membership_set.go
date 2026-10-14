@@ -804,8 +804,9 @@ func sameRoleDefSet(bindings []*store.RoleBinding, ids []string) bool {
 
 // resolveDesiredRoleDefs de-duplicates ids and resolves each to a project-
 // scoped role definition, applying the structural validation rule: an
-// unknown ID or a non-project-scoped role is invalid_role_set, and more than
-// one built-in membership role is invalid_role_set.
+// unknown ID, a non-project-scoped role or a role that does not confer
+// membership is invalid_role_set, and more than one built-in membership role
+// is invalid_role_set.
 func (svc *ProjectMembershipService) resolveDesiredRoleDefs(ctx context.Context, ids []string) ([]*store.RoleDefinition, *MembershipDecision) {
 	seen := make(map[string]bool, len(ids))
 	var defs []*store.RoleDefinition
@@ -827,6 +828,15 @@ func (svc *ProjectMembershipService) resolveDesiredRoleDefs(ctx context.Context,
 			return nil, &MembershipDecision{
 				Allowed: false, DenialCode: ErrCodeInvalidRoleSet,
 				Reason: "role is not project-scoped: " + rd.Name, HTTPStatus: 400,
+				Details: map[string]interface{}{"roleDefinitionId": id, "roleName": rd.Name},
+			}
+		}
+		// A role that does not confer membership (project-visitor) is
+		// granted only through the visitor path, never as a member role.
+		if !rd.ConfersProjectMembership() {
+			return nil, &MembershipDecision{
+				Allowed: false, DenialCode: ErrCodeInvalidRoleSet,
+				Reason: "role is not a member role: " + rd.Name, HTTPStatus: 400,
 				Details: map[string]interface{}{"roleDefinitionId": id, "roleName": rd.Name},
 			}
 		}

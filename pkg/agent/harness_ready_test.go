@@ -94,7 +94,7 @@ func TestReadinessProbeArgvIsOneExec(t *testing.T) {
 	if len(argv) != 3 || argv[0] != "sh" || argv[1] != "-c" {
 		t.Fatalf("argv = %q", argv)
 	}
-	for _, want := range []string{"has-session -t scion", "#{session_created}", state.HarnessInitRunFile, state.HarnessReadyFile, "head -c 256", "stat -c %Y " + state.HarnessReadyFile} {
+	for _, want := range []string{"has-session -t scion", "#{session_created}", state.HarnessInitRunFile, state.HarnessReadyFile, "head -c 256", "stat -c %Y " + state.HarnessReadyFile, `echo "initspec=`, "sed -n 2p"} {
 		if !strings.Contains(argv[2], want) {
 			t.Errorf("probe script missing %q", want)
 		}

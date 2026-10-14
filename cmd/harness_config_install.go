@@ -42,8 +42,8 @@ Source can be:
 The installed name is, in order of precedence: --name; the "name" field in
 the source's config.yaml; its "harness" field; the source directory name.
 
-Without --global the config is installed into the current project (locally,
-or in the project's scope on the Hub when Hub mode is enabled); with
+Without --global the config is installed into the current project's scope
+on the Hub; with
 --global it is installed globally. If a harness-config with the same name
 already exists in the target scope, install fails unless --force is given.
 
@@ -99,7 +99,7 @@ func runHarnessConfigInstall(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid harness-config name %q; name cannot contain path components or separators", name)
 	}
 
-	hubCtx, err := CheckHubAvailabilityWithOptions(gp, true)
+	hubCtx, err := requireHub(gp)
 	if err != nil {
 		return err
 	}
