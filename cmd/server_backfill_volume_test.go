@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build volume_test && !no_sqlite
+//go:build !no_sqlite
 
 package cmd
 
@@ -133,9 +133,13 @@ func seedVolumeMessages(t *testing.T, ctx context.Context, s store.Store, projec
 // across the full spectrum of ThreadID shapes. It validates dry-run fidelity,
 // execute correctness, and idempotency in three sequential phases.
 //
-// Run explicitly:
+// It needs only the in-memory SQLite test store, so it carries no extra
+// build tag and runs wherever ./cmd is tested with SQLite (the blocking
+// SQLite Tests (non-hub) job, make test-cmd-sqlite). It once needed
+// -tags volume_test, which no CI job set, so it never ran (ptone/scion#5022).
+// Run it alone:
 //
-//	go test ./cmd/... -run TestBackfillVolume -tags volume_test -v -count=1 -timeout 300s
+//	go test ./cmd -run '^TestBackfillVolume$' -v -count=1
 func TestBackfillVolume(t *testing.T) {
 	const totalMessages = 50_000
 
