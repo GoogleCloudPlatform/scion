@@ -26,6 +26,7 @@ type AgentLaunch struct {
 	Kind      string `json:"kind"` // create | start | restart
 	Step      string `json:"step,omitempty"`
 	Error     string `json:"error,omitempty"`
+	Cause     string `json:"cause,omitempty"` // runtime cause code behind a runtime_error, e.g. runtime_forbidden (ptone/scion#4666)
 	EndReason string `json:"endReason,omitempty"`
 
 	// Present only while State == "active" (omitted otherwise).
@@ -52,6 +53,7 @@ func ComputeAgentLaunch(a *Agent, now time.Time) *AgentLaunch {
 		Kind:      a.LaunchKind,
 		Step:      a.LaunchStep,
 		Error:     a.LaunchError,
+		Cause:     a.LaunchCause,
 		EndReason: a.LaunchEndReason,
 	}
 	if a.LaunchState == LaunchStateActive && !a.LaunchDeadline.IsZero() {

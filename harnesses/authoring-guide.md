@@ -287,10 +287,15 @@ delivery:
 - `delay`: the signal is the creation of the tmux session. Use it when the
   tool has no early hook. `timeout` is not allowed with `delay`.
 
-The `ready` block is validated at load, but the runtime does not read it
-yet: readiness still follows the built-in rule. Set the block to match that
-rule. `hook` applies to claude, gemini-cli, copilot and grok-build, and
-`delay` 8s to every other harness.
+The broker passes the resolved `ready` block (project, template and hub
+harness-config overrides included) to the container, and both readiness
+readers use it: `sciontool init`, which ends the agent's initializing state,
+and the broker's wait before it pastes a held message. A session-start from
+`/clear` or `/compact` never counts as the hook signal. The built-in bundles
+use `hook` for claude, gemini-cli, copilot and grok-build, and `delay` 8s for
+every other harness; change a value only with evidence that the tool reads
+its input by then. A harness-config with no `ready` block gets the block of
+the built-in bundle for its `harness` type, or `delay` 8s if there is none.
 
 **`delivery`.** A message is loaded into a tmux buffer and pasted with
 bracketed paste. Then each key in `submit_keys` is sent with its own

@@ -46,18 +46,19 @@ const (
 )
 
 // ---------------------------------------------------------------------------
-// WP0-conformant capabilities serialization (R1)
+// WP0-conformant capabilities serialization
 // ---------------------------------------------------------------------------
 
-// wpCapabilities is the WP0 wire shape for capabilities. The B6
-// BoundaryCapabilities struct uses boolean fields; the WP0 contract
-// (type-shapes.ts §8) specifies an actions array. This wrapper lives
-// in B7 (serialization layer), not B6.
+// wpCapabilities is the WP0 wire shape for capabilities. The
+// BoundaryCapabilities struct of the capabilities service uses boolean
+// fields; the WP0 contract (type-shapes.ts §8) specifies an actions
+// array. This wrapper lives in the handler serialization layer, not in
+// the capabilities service.
 type wpCapabilities struct {
 	Actions []string `json:"actions"`
 }
 
-// toWPCapabilities maps B6 boolean BoundaryCapabilities to the WP0
+// toWPCapabilities maps the boolean BoundaryCapabilities to the WP0
 // actions array format. Action names match type-shapes.ts §8
 // AccessBoundaryCapabilityAction.
 func toWPCapabilities(bc *BoundaryCapabilities) *wpCapabilities {
@@ -88,7 +89,7 @@ func toWPCapabilities(bc *BoundaryCapabilities) *wpCapabilities {
 }
 
 // ---------------------------------------------------------------------------
-// Strict JSON decoding (R2)
+// Strict JSON decoding
 // ---------------------------------------------------------------------------
 
 // readJSONStrict decodes JSON from the request body into v, rejecting unknown
@@ -107,7 +108,7 @@ func readJSONStrict(r *http.Request, v interface{}) error {
 }
 
 // ---------------------------------------------------------------------------
-// Permission display name cache (N3)
+// Permission display name cache
 // ---------------------------------------------------------------------------
 
 var (
@@ -130,7 +131,7 @@ func getPermissionDisplayNameLookup() map[string]string {
 }
 
 // ---------------------------------------------------------------------------
-// Request types — preview-bound mutations (B7)
+// Request types — preview-bound mutations
 // ---------------------------------------------------------------------------
 
 // accessConstraintCreateRequest is the payload for POST
@@ -211,7 +212,7 @@ type previewCreateRequest struct {
 
 	// For update and delete:
 	ConstraintID string `json:"constraintId,omitempty"`
-	// BaseRevision is an opaque string on the wire (N4, WP0 contract).
+	// BaseRevision is an opaque string on the wire (WP0 contract).
 	// Parsed to int64 internally.
 	BaseRevision string `json:"baseRevision,omitempty"`
 }
@@ -226,17 +227,17 @@ type previewDraftRequest struct {
 }
 
 // ---------------------------------------------------------------------------
-// API response types (B7 response shape)
+// API response types
 // ---------------------------------------------------------------------------
 
-// principalRef is the WP0 wire shape for createdBy/updatedBy (R4.3).
+// principalRef is the WP0 wire shape for createdBy/updatedBy.
 type principalRef struct {
 	Type        string `json:"type"`
 	ID          string `json:"id"`
 	DisplayName string `json:"displayName"`
 }
 
-// appliesWhenResponse is the WP0 wire shape for time conditions (R4.6).
+// appliesWhenResponse is the WP0 wire shape for time conditions.
 type appliesWhenResponse struct {
 	NotBefore *time.Time `json:"notBefore"`
 	ExpiresAt *time.Time `json:"expiresAt"`
@@ -314,7 +315,7 @@ type resolvedPermission struct {
 	DisplayName string `json:"displayName,omitempty"`
 }
 
-// wpResolutionHealth is the WP0 ResolutionHealth wire shape (R4.2).
+// wpResolutionHealth is the WP0 ResolutionHealth wire shape.
 // Maps from the old {healthy, degraded, reason} to {state, unresolvedReferences}.
 type wpResolutionHealth struct {
 	State                string                `json:"state"`
@@ -334,7 +335,7 @@ type provenanceLinks struct {
 }
 
 // accessBoundaryListResponse is the list envelope.
-// Includes collection-level _capabilities (R4.7).
+// Includes collection-level _capabilities.
 type accessBoundaryListResponse struct {
 	Items         []accessBoundarySummary `json:"items"`
 	NextPageToken string                  `json:"nextPageToken,omitempty"`
@@ -553,7 +554,7 @@ func (s *Server) listAccessConstraints(w http.ResponseWriter, r *http.Request) {
 		items = append(items, summary)
 	}
 
-	// Collection-level _capabilities (R4.7): gates "New boundary" control.
+	// Collection-level _capabilities: gates "New boundary" control.
 	// Default to empty actions array so _capabilities is always present (WP0 contract).
 	collectionCaps := &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
@@ -625,7 +626,7 @@ func (s *Server) getAffectedPrincipals(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	// Keyset pagination based on principal ID (R5).
+	// Keyset pagination based on principal ID.
 	pageSize := parseIntOr(r.URL.Query().Get("pageSize"), 50)
 	if pageSize > 200 {
 		pageSize = 200
@@ -939,7 +940,7 @@ func (s *Server) createPreview(w http.ResponseWriter, r *http.Request, user User
 		ID:   user.ID(),
 	}
 
-	// Parse BaseRevision from opaque string to int64 (N4).
+	// Parse BaseRevision from opaque string to int64.
 	var baseRevision int64
 	if req.BaseRevision != "" {
 		var parseErr error
@@ -1048,7 +1049,7 @@ func (s *Server) createAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N1: purpose is required by the WP0 contract.
+	// Purpose is required by the WP0 contract.
 	req.Purpose = strings.TrimSpace(req.Purpose)
 	if req.Purpose == "" {
 		BadRequest(w, "purpose is required")
@@ -1213,7 +1214,7 @@ func (s *Server) updateAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N1: purpose is required by the WP0 contract.
+	// Purpose is required by the WP0 contract.
 	req.Purpose = strings.TrimSpace(req.Purpose)
 	if req.Purpose == "" {
 		BadRequest(w, "purpose is required")
@@ -1318,7 +1319,7 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// R3: Accept preview token ONLY from request body (JSON) or
+	// Accept preview token ONLY from request body (JSON) or
 	// X-Preview-Token header. Never from query parameters — tokens are
 	// HMAC credentials and must not appear in URLs.
 	var previewToken string
@@ -1342,7 +1343,7 @@ func (s *Server) deleteAccessConstraint(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	// N2: This pre-fetch checks the Disabled flag before calling
+	// This pre-fetch checks the Disabled flag before calling
 	// CommitBoundaryChange. The governance service will re-fetch internally,
 	// but we need the early check to return the correct error code for
 	// recovery-disabled constraints without consuming the preview token.
@@ -1586,7 +1587,7 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 	// Build scope display (WP0 ConstraintScopeDisplay shape).
 	scopeDisp := buildScopeDisplay(sc, scopeDisplayName)
 
-	// R4.3: createdBy/updatedBy as PrincipalRef objects.
+	// createdBy/updatedBy as PrincipalRef objects.
 	createdByRef := s.resolvePrincipalRef(ctx, sc.CreatedBy)
 	updatedByRef := s.resolvePrincipalRef(ctx, sc.UpdatedBy)
 
@@ -1599,10 +1600,10 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 		Scope:                  resolvedScopeFromStore(sc),
 		ScopeDisplay:           scopeDisp,
 		MaxPermissionCount:     len(sc.MaximumPermissions),
-		AffectedPrincipalCnt:   0, // R4.5: populated from cached count; TODO: compute from preview cache.
+		AffectedPrincipalCnt:   0, // Populated from cached count; TODO: compute from preview cache.
 		AffectedPrincipalExact: false,
 		Status:                 status,
-		Risk:                   []string{}, // R4.4: empty array; risk assessment not yet implemented.
+		Risk:                   []string{}, // Empty array; risk assessment not yet implemented.
 		Health:                 health,
 		AppliesWhen: appliesWhenResponse{
 			NotBefore: sc.NotBefore,
@@ -1615,7 +1616,7 @@ func (s *Server) buildBoundarySummary(ctx context.Context, sc *store.AccessConst
 		UpdatedAt: sc.UpdatedAt,
 	}
 
-	// Compute capabilities if actor is available (R1: WP0 actions array).
+	// Compute capabilities if actor is available (WP0 actions array).
 	// Default to empty actions array so _capabilities is always present (WP0 contract).
 	summary.Capabilities = &wpCapabilities{Actions: []string{}}
 	if actor != nil && s.capabilitiesService != nil {
@@ -1738,7 +1739,7 @@ func buildScopeDisplay(sc *store.AccessConstraint, displayName string) scopeDisp
 	return d
 }
 
-// resolvePrincipalRef resolves a bare user ID to a PrincipalRef (R4.3).
+// resolvePrincipalRef resolves a bare user ID to a PrincipalRef.
 // Falls back to showing the ID as display name if unresolvable.
 func (s *Server) resolvePrincipalRef(_ context.Context, userID string) *principalRef {
 	if userID == "" {
@@ -1754,7 +1755,7 @@ func (s *Server) resolvePrincipalRef(_ context.Context, userID string) *principa
 	}
 }
 
-// N3: Uses cached lookup map instead of rebuilding per call.
+// Uses cached lookup map instead of rebuilding per call.
 func resolvePermissionDisplayNames(ids []string) []resolvedPermission {
 	lookup := getPermissionDisplayNameLookup()
 	result := make([]resolvedPermission, len(ids))
@@ -1781,7 +1782,7 @@ func computeConstraintStatus(sc *store.AccessConstraint, hc *AccessConstraint) s
 	return "active"
 }
 
-// computeWPHealth converts the internal health to the WP0 ResolutionHealth shape (R4.2).
+// computeWPHealth converts the internal health to the WP0 ResolutionHealth shape.
 func computeWPHealth(hc *AccessConstraint) wpResolutionHealth {
 	if hc == nil || hc.Degraded {
 		return wpResolutionHealth{
@@ -2017,26 +2018,26 @@ func parseIntOr(s string, defaultVal int) int {
 	return v
 }
 
-// hasUnknownFields was removed (R2): replaced by readJSONStrict which uses
-// json.NewDecoder.DisallowUnknownFields() as the primary decode path for
-// all mutation and preview endpoints.
+// readJSONStrict, which uses json.NewDecoder.DisallowUnknownFields(), is
+// the primary decode path for all mutation and preview endpoints.
 
 // ---------------------------------------------------------------------------
-// Server field extensions (B7 service wiring)
+// Server field extensions (boundary service wiring)
 // ---------------------------------------------------------------------------
 
-// previewService provides access to the B3 preview engine.
+// previewService provides access to the preview engine.
 // Set via initBoundaryServices().
-// Field declared here to document B7's dependency; the actual field lives
+// Field declared here to document the handlers' dependency; the actual field lives
 // on Server.
 
-// governanceService provides access to the B5 governance service.
+// governanceService provides access to the governance service.
 // Set via initBoundaryServices().
 
-// capabilitiesService provides access to the B6 capabilities service.
+// capabilitiesService provides access to the capabilities service.
 // Set via initBoundaryServices().
 
-// initBoundaryServices initializes the B3-B6 services on the Server.
+// initBoundaryServices initializes the preview, governance and
+// capabilities services on the Server.
 // Called during server startup after authzService is available.
 func (s *Server) initBoundaryServices() {
 	if s.authzService == nil {

@@ -39,7 +39,7 @@ const (
 // look like a --hub or --project flag in the next.
 func resetContextTargets() {
 	hubEndpoint, projectPath = "", ""
-	hubSource, projectSource, contextProjectID, contextProjectSlug, hubFlagName = "", "", "", "", ""
+	hubSource, projectSource, contextProjectSlug, hubFlagName = "", "", "", ""
 	contextWarned = false
 }
 
@@ -222,11 +222,6 @@ func TestResolveInvocationTarget(t *testing.T) {
 			cmd:   []string{"list"},
 		},
 		{
-			name:  "--no-hub ignores the context",
-			setup: func(t *testing.T) { noHub = true },
-			cmd:   []string{"list"},
-		},
-		{
 			name: "server subtree ignores the context",
 			cmd:  []string{"server", "start"},
 		},
@@ -261,6 +256,11 @@ func TestResolveInvocationTarget(t *testing.T) {
 		{
 			name: "ssh-config gets the hub and the project",
 			cmd:  []string{"ssh-config"},
+			want: filled,
+		},
+		{
+			name: "vscode gets the hub and the project",
+			cmd:  []string{"vscode"},
 			want: filled,
 		},
 		{
@@ -378,8 +378,7 @@ func TestPersistentPreRun_ContextProjectSatisfiesProjectRequirement(t *testing.T
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	assert.Equal(t, ctxTestProjectID, projectPath)
 	assert.Equal(t, ctxTestHub, hubEndpoint)
-	assert.True(t, isContextProject(projectPath))
-	assert.False(t, isContextProject("some-other-ref"))
+	assert.Equal(t, targetSourceContext, projectSource)
 }
 
 // TestPersistentPreRun_AgentContainerIgnoresContext covers the acceptance
