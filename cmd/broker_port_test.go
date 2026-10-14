@@ -569,11 +569,16 @@ func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
 	var cancels atomic.Int32
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	// The handler's lifetime is separate from the server context the
+	// shutdown cancels, as in runServerStart, so it still reads the
+	// subscription's copy of the SIGTERM after the shutdown ran.
+	lifetime, stop := context.WithCancel(context.Background())
+	t.Cleanup(stop)
 	q := newTestShutdown(func() {
 		cancels.Add(1)
 		cancel()
 	})
-	done := installServerShutdownSignals(ctx, f.notify, q)
+	done := installServerShutdownSignals(lifetime, f.notify, q)
 
 	handleBrokerSIGTERM(globalDir, owned)
 
@@ -584,14 +589,19 @@ func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
 	assert.Equal(t, int32(1), cancels.Load(), "the direct call runs the shutdown")
 
 	f.deliver(syscall.SIGTERM) // the server's own subscription sees the same signal
+	require.Eventually(t, func() bool { return len(f.ch) == 0 }, 5*time.Second, time.Millisecond, "the subscription's SIGTERM was not read")
+	require.Never(t, func() bool {
+		select {
+		case <-q.forced():
+			return true
+		default:
+			return false
+		}
+	}, 200*time.Millisecond, 5*time.Millisecond, "the one SIGTERM seen by both handlers forced the shutdown (ptone/scion#5054 R6)")
+	stop()
 	<-done
 	assert.Equal(t, int32(1), cancels.Load(), "the shutdown runs once")
 	assert.Equal(t, 1, strings.Count(logs.String(), "Received signal terminated, shutting down..."), "logged once")
-	select {
-	case <-q.forced():
-		t.Fatal("the one SIGTERM seen by both handlers forced the shutdown (ptone/scion#5054 R6)")
-	default:
-	}
 }
 
 // R6 (ptone/scion#5054), the interleaving where the server was subscribed
