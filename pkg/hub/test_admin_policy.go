@@ -309,7 +309,7 @@ func testAdminGrantRefuses(permissionID, scopeType string) bool {
 	if !testAdminPermissionDenied(permissionID) {
 		return false
 	}
-	return !(scopeType == store.RoleScopeProject && testAdminGrantableAtProjectScope[permissionID])
+	return scopeType != store.RoleScopeProject || !testAdminGrantableAtProjectScope[permissionID]
 }
 
 // testAdminMustDenyPermissions is the initial deny set of the admin tier
