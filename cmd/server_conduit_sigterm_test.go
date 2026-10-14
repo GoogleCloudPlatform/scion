@@ -99,14 +99,26 @@ func TestRegisterConduitShutdownDrain_BoundedWait(t *testing.T) {
 	}
 }
 
-// TestConduitDrainStepBound: min(grace, S/4) with shutdown_grace set (S =
-// max(G-2s, G/2)); 12s unset (the relay's 10s write bound plus a send
-// margin).
+// TestConduitDrainStepBound (code review C-1): the drain step does not end
+// before the relay's own registry-write bound (min(10s, G-2.5s), 10s unset)
+// plus a 2s send slack, clamped to the teardown span S.
 func TestConduitDrainStepBound(t *testing.T) {
-	assert.Equal(t, 12*time.Second, conduitDrainStepBound(serverShutdownBudget{}))
-	assert.Equal(t, 2*time.Second, conduitDrainStepBound(serverShutdownBudget{grace: 10 * time.Second, set: true}))
-	assert.Equal(t, 4500*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: 20 * time.Second, set: true}))
-	assert.Equal(t, 125*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: time.Second, set: true}))
+	for _, tc := range []struct {
+		grace time.Duration
+		want  time.Duration
+	}{
+		{0, 12 * time.Second},                 // unset: 10s + 2s
+		{10 * time.Second, 8 * time.Second},   // 7.5s + 2s, clamped to S = 8s
+		{12 * time.Second, 10 * time.Second},  // 9.5s + 2s, clamped to S = 10s
+		{14 * time.Second, 12 * time.Second},  // 10s + 2s = S
+		{30 * time.Second, 12 * time.Second},  // 10s + 2s
+		{6 * time.Second, 4 * time.Second},    // 3.5s + 2s, clamped to S = 4s
+		{4 * time.Second, 2 * time.Second},    // 1.5s + 2s, clamped to S = 2s
+		{time.Second, 500 * time.Millisecond}, // no write time, clamped to S = 0.5s
+	} {
+		b := serverShutdownBudget{grace: tc.grace, set: tc.grace > 0}
+		assert.Equal(t, tc.want, conduitDrainStepBound(b), "grace %s", tc.grace)
+	}
 }
 
 // TestHubServerPathSubscribesToSignalsOnce (conduit review F2,

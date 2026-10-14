@@ -30,6 +30,7 @@ import (
 
 	"cloud.google.com/go/compute/metadata"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -207,25 +208,35 @@ var (
 	}
 )
 
-// conduitDrainStepFallback bounds the pre-cancel conduit drain step when
-// shutdown_grace is unset: the relay's own bound on its draining registry
-// writes (10s) before it sends the GoAways, plus 2s to send them.
-const conduitDrainStepFallback = 12 * time.Second
+// relayDrainWriteTimeout and relayDrainSendMargin mirror the relay's
+// bounds on a SIGTERM drain (pkg/conduit/relay: deleteTimeout and
+// drainSendMargin): before it sends any GoAway, the relay waits for its two
+// draining registry writes for at most deleteTimeout, and, with a capped
+// drain, at most the drain cap less drainSendMargin.
+const (
+	relayDrainWriteTimeout = 10 * time.Second
+	relayDrainSendMargin   = 500 * time.Millisecond
+)
+
+// conduitDrainSendSlack is the time the drain step allows, after the
+// relay's registry-write bound, for the GoAways to be sent.
+const conduitDrainSendSlack = 2 * time.Second
 
 // conduitDrainStepBound is how long the pre-cancel conduit drain step may
-// hold the shutdown before cancel: with the budget set, min(grace, S/4),
-// so a stalled GoAway send cannot eat the later phases; unset,
-// conduitDrainStepFallback. The drain itself goes on in the background
-// and the teardown's relay shutdown waits for it. Trade-off: with the
-// budget set, a registry slower than the bound (the relay waits up to
-// min(10s, grace-2.5s) for its draining writes before sending GoAway) lets
-// cancel run before the GoAways go out; they still go out from the
-// background drain.
+// hold the shutdown before cancel: the relay's own bound on its draining
+// registry writes plus conduitDrainSendSlack, so cancel (which closes the
+// listeners) never runs before the GoAways unless the relay itself is past
+// its bounds. Unset: 10s + 2s. With shutdown_grace set: min(10s, cap -
+// 0.5s) + 2s, clamped to [2s, S], where cap = shutdown_grace - 2s. A slow
+// registry therefore uses part of the later phases' time (the phase
+// deadlines are measured from the signal); the process still exits within
+// the grace (exit wait at S, watchdog at G - 250ms).
 func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
 	if !b.set {
-		return conduitDrainStepFallback
+		return relayDrainWriteTimeout + conduitDrainSendSlack
 	}
-	return min(b.grace, b.span()/4)
+	writes := max(min(relayDrainWriteTimeout, relay.ShutdownDrainCap(b.grace)-relayDrainSendMargin), 0)
+	return min(writes+conduitDrainSendSlack, b.span())
 }
 
 // registerConduitShutdownDrain makes the relay drain a pre-cancel step of
