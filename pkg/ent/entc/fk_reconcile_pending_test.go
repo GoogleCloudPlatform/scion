@@ -214,6 +214,19 @@ func TestPendingSQLiteFKRepairs_OrphanDigest(t *testing.T) {
 	require.Len(t, other, 1)
 	require.Equal(t, first[0].Rows, other[0].Rows)
 	require.NotEqual(t, first[0].Orphans, other[0].Orphans, "different rows, same count")
+
+	// A new orphan that reuses the rowid of a deleted one (the highest
+	// rowid, as after a CASCADE repair) still gets a different digest.
+	var rowid int64
+	require.NoError(t, db.QueryRow(`SELECT rowid FROM child WHERE id = 'b'`).Scan(&rowid))
+	mustExec(t, db, `DELETE FROM child WHERE id = 'b'`, `INSERT INTO child VALUES ('c', 'gone2')`)
+	var reused int64
+	require.NoError(t, db.QueryRow(`SELECT rowid FROM child WHERE id = 'c'`).Scan(&reused))
+	require.Equal(t, rowid, reused, "fixture: the rowid is reused")
+	third, err := PendingSQLiteFKRepairs(ctx, db)
+	require.NoError(t, err)
+	require.Len(t, third, 1)
+	require.NotEqual(t, other[0].Orphans, third[0].Orphans, "same rowid and count, different key")
 }
 
 // The hook runs inside AutoMigrate, after anything the caller did before

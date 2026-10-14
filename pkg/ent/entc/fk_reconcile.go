@@ -109,25 +109,52 @@ type FKRepairGroup struct {
 	Action string
 	// Rows is the number of orphaned rows.
 	Rows int
-	// Orphans is a digest of which rows are orphaned (their sorted rowids,
-	// and the count of rows without one), so two sets of orphans with the
-	// same count can be told apart.
+	// Orphans is a digest of which rows are orphaned: their sorted rowids,
+	// the count of rows without one, and their key column values. Two sets
+	// of orphans with the same count can be told apart, including a row
+	// that reuses the rowid of an earlier, deleted orphan.
 	Orphans string
 }
 
-// digest returns a stable hex digest of the violating rows.
-func (r *fkViolatingRows) digest() string {
+// orphanDigest returns a stable hex digest of the violating rows of fk:
+// their rowids and the values of their key columns (one SELECT).
+func orphanDigest(ctx context.Context, q sqlQuerier, fk fkInfo, r *fkViolatingRows) (string, error) {
 	ids := make([]int64, 0, len(r.rowids))
 	for id := range r.rowids {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	cols := make([]string, len(fk.from))
+	for i, c := range fk.from {
+		cols[i] = "quote(" + quoteIdent(c) + ")"
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s WHERE %s",
+		strings.Join(cols, " || ',' || "), quoteIdent(fk.table), orphanPredicate(fk)))
+	if err != nil {
+		return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var keys []string
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+		}
+		keys = append(keys, k)
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+	}
+	sort.Strings(keys)
 	h := sha256.New()
 	for _, id := range ids {
 		fmt.Fprintf(h, "%d\n", id)
 	}
 	fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
-	return hex.EncodeToString(h.Sum(nil))
+	for _, k := range keys {
+		fmt.Fprintf(h, "key=%s\n", k)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // diagnostic renders the unrepaired orphans with suggested repair SQL. It
@@ -493,6 +520,10 @@ func PendingSQLiteFKRepairs(ctx context.Context, db *sql.DB) ([]FKRepairGroup, e
 		if stmt == "" {
 			continue
 		}
+		digest, err := orphanDigest(ctx, conn, info, initial[k])
+		if err != nil {
+			return nil, fmt.Errorf("foreign key pre-check: %w", err)
+		}
 		out = append(out, FKRepairGroup{
 			Table:        info.table,
 			ForeignKeyID: info.id,
@@ -500,7 +531,7 @@ func PendingSQLiteFKRepairs(ctx context.Context, db *sql.DB) ([]FKRepairGroup, e
 			Parent:       info.parent,
 			Action:       info.onDelete,
 			Rows:         initial[k].count(),
-			Orphans:      initial[k].digest(),
+			Orphans:      digest,
 		})
 	}
 	return out, nil
