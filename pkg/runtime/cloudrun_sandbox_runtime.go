@@ -875,7 +875,9 @@ type scionPaths struct {
 // Motivation (§3.2a): --rootfs / is READ-ONLY (EROFS; no writable overlay,
 // confirmed by diag-sbx6). --write only makes MOUNTED filesystems writable.
 // Per-agent bind mounts under /scion make writable paths visible to the host.
-func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error) {
+//
+// ctx bounds the ownership walk (fsutil.ChownTree).
+func prepareScionLayout(ctx context.Context, rootDir, slug string, cfg RunConfig) (scionPaths, error) {
 	p := scionPaths{
 		root:      rootDir,
 		agentHome: filepath.Join(rootDir, "agents", slug, "home"),
@@ -989,7 +991,7 @@ func prepareScionLayout(rootDir, slug string, cfg RunConfig) (scionPaths, error)
 	// whatever p.agentHome/p.workspace actually resolved to.
 	if os.Getuid() == 0 && sandboxUID > 0 {
 		for _, d := range []string{p.agentHome, p.workspace} {
-			if chownErr := fsutil.ChownTree(context.Background(), d, sandboxUID, sandboxGID); chownErr != nil {
+			if chownErr := fsutil.ChownTree(ctx, d, sandboxUID, sandboxGID); chownErr != nil {
 				runtimeLog().Warn("failed to chown directory to sandbox user",
 					"dir", d, "uid", sandboxUID, "gid", sandboxGID, "error", chownErr)
 			}
@@ -1649,15 +1651,20 @@ func (r *CloudRunSandboxRuntime) restoreOrRemove(slug string, myNonce sandboxNon
 // the name lock, passed the held check and wrote its Starting entry, so
 // the sandbox named slug is this start's.
 //
-// The async hooks are not consulted: until ptone/scion#4758 adds the
-// hooks-active skip (with the handle report), this deviates from the
-// RunConfig.OnResourceCreated contract (the runtime skips its own start
-// cleanup when it is set). That is safe only while the sandbox runtime
-// keeps its async launch opt-out, so the opt-out lift (ptone/scion#4759)
-// must not land before ptone/scion#4758.
+// With the async hooks active (hooksActive, launchHooks.active) it
+// deletes nothing and returns cause at once: Run has reported the
+// sandbox's handle, and the entry and the sandbox are left to the
+// launch's cleanup (DeleteResource), as RunConfig.OnResourceCreated
+// requires. This covers every failStart path, dead on arrival and an
+// unreadable state file included.
 //
 // The caller holds the name lock.
-func (r *CloudRunSandboxRuntime) failStart(slug, runID string, myNonce sandboxNonce, cause error) error {
+func (r *CloudRunSandboxRuntime) failStart(slug, runID string, hooksActive bool, myNonce sandboxNonce, cause error) error {
+	if hooksActive {
+		runtimeLog().Info("cloudrun-sandbox: failed async start: leaving the sandbox and its state entry to the launch cleanup",
+			"sandbox", slug, "run_id", runID, "error", cause)
+		return cause
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), sandboxStartCleanupTimeout)
 	defer cancel()
 	cur, nonce, err := r.state.diskEntry(slug)
@@ -1686,9 +1693,13 @@ func (r *CloudRunSandboxRuntime) failStart(slug, runID string, myNonce sandboxNo
 // sandbox is gone afterwards (deleted, already gone, or the delete-hang
 // workaround's timeout, which kills it). A failed delete keeps the entry
 // and returns an error, so that a later delete can find it. Unlike Delete
-// on the workaround path, a failure is never treated as success.
+// on the workaround path, a failure is never treated as success; a
+// timedOut result counts as gone, as on Delete's workaround path
+// (CR-0a), because the workaround kills the hung sandbox.
 //
-// The caller holds the name lock; this never takes it.
+// The caller holds the name lock (failStart and DeleteResource both call
+// this under it); this never takes it, and a caller that took the lock
+// here again would deadlock on itself.
 func (r *CloudRunSandboxRuntime) deleteForCleanup(ctx context.Context, name string, obs sandboxObserved) error {
 	r.cancelWatcher(name)
 	result, err := r.classifiedDelete(ctx, name)
@@ -1703,6 +1714,63 @@ func (r *CloudRunSandboxRuntime) deleteForCleanup(ctx context.Context, name stri
 	return fmt.Errorf("cloudrun-sandbox: delete --force %s: %s: %w", name, result, err)
 }
 
+// DeleteResource deletes the sandbox an async launch reported
+// (ptone/scion#4758): h.Kind is api.ResourceKindSandbox, h.Name the
+// sandbox name and h.UID the launch's run ID. It satisfies
+// agent.UIDPreconditionDeleter; the broker's CleanupLaunch calls it on a
+// fresh context after the launch has ended.
+//
+// It takes the name lock, so it is serialized with Run, Stop and Delete of
+// the same name, and reads the entry from the state file, never from this
+// instance's cache, which may predate another instance's writes. It
+// deletes only when the entry's run label equals h.UID, whatever the
+// entry's state (Starting, running or stopped). No entry, an unlabelled
+// entry, or another run's entry is not this launch's sandbox: nothing is
+// deleted and nil is returned. Run writes the Starting entry before it
+// reports the handle and before `sandbox run`, and removes it only after a
+// create that provably did not happen, so "no entry" never hides a
+// sandbox this launch may have created.
+//
+// The delete is the classified forced delete (deleteForCleanup): deleted,
+// already gone, or the delete-hang workaround's timeout (timedOut, which
+// kills the hung sandbox; Delete's workaround path treats it as success
+// too, CR-0a) remove the entry by compare-and-set against the nonce read
+// here, so a newer run's entry is never removed. A failed delete returns
+// an error and keeps the entry, so that scion delete or a later pre-clean
+// can retry. An empty h.UID is refused (errNoUID).
+func (r *CloudRunSandboxRuntime) DeleteResource(ctx context.Context, h api.ResourceHandle) error {
+	if h.Kind != api.ResourceKindSandbox {
+		return fmt.Errorf("cloudrun-sandbox: unsupported resource kind %q", h.Kind)
+	}
+	if h.UID == "" {
+		return errNoUID(h)
+	}
+	unlock, err := lockSandboxNameCtx(ctx, h.Name)
+	if err != nil {
+		return fmt.Errorf("cloudrun-sandbox: wait for sandbox name %s: %w", h.Name, err)
+	}
+	defer unlock()
+	entry, nonce, err := r.state.diskEntry(h.Name)
+	if err != nil {
+		logUnreadableSandboxState(r.state.path, err)
+		return fmt.Errorf("cloudrun-sandbox: %w", err)
+	}
+	if entry == nil {
+		return nil
+	}
+	switch run := entry.Labels[api.LabelRunID]; {
+	case run == "":
+		runtimeLog().Info("Launch cleanup skipped an unlabelled sandbox; not this launch's",
+			"sandbox", h.Name, "run_id", h.UID)
+		return nil
+	case run != h.UID:
+		runtimeLog().Info("Launch cleanup skipped a sandbox recreated by another launch",
+			"sandbox", h.Name, "run_id", h.UID, "sandbox_run_id", run)
+		return nil
+	}
+	return r.deleteForCleanup(ctx, h.Name, sandboxObserved{entry: entry, nonce: nonce})
+}
+
 // promoteStartingEntry records the started sandbox once its probe passed:
 // a compare-and-set put of entry (the full entry, no longer Starting)
 // against myNonce, this start's Starting entry. If another writer removed
@@ -1712,20 +1780,20 @@ func (r *CloudRunSandboxRuntime) deleteForCleanup(ctx context.Context, name stri
 // the sandbox is then live but untracked (logged at WARN). A state read or
 // write failure goes to failStart. It returns the new nonce, for the exit
 // watcher.
-func (r *CloudRunSandboxRuntime) promoteStartingEntry(slug, runID string, myNonce sandboxNonce, entry *sandboxStateEntry) (sandboxNonce, error) {
+func (r *CloudRunSandboxRuntime) promoteStartingEntry(slug, runID string, hooksActive bool, myNonce sandboxNonce, entry *sandboxStateEntry) (sandboxNonce, error) {
 	nonce, err := r.state.casPut(slug, myNonce, entry)
 	if err == nil {
 		return nonce, nil
 	}
 	if !errors.Is(err, errStateChanged) {
-		return nonceAbsent, r.failStart(slug, runID, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err))
+		return nonceAbsent, r.failStart(slug, runID, hooksActive, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err))
 	}
 	if sandboxRecordRunHook != nil {
 		sandboxRecordRunHook(slug, "reread")
 	}
 	cur, _, readErr := r.state.diskEntry(slug)
 	if readErr != nil {
-		return nonceAbsent, r.failStart(slug, runID, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, readErr))
+		return nonceAbsent, r.failStart(slug, runID, hooksActive, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, readErr))
 	}
 	if cur != nil {
 		if other := sandboxHeldByOtherRun(cur, runID); other != "" {
@@ -1752,7 +1820,7 @@ func (r *CloudRunSandboxRuntime) promoteStartingEntry(slug, runID string, myNonc
 			"sandbox", slug, "run_id", runID, "error", err)
 		return nonceAbsent, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err)
 	default:
-		return nonceAbsent, r.failStart(slug, runID, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err))
+		return nonceAbsent, r.failStart(slug, runID, hooksActive, myNonce, fmt.Errorf("cloudrun-sandbox: record sandbox %s: %w", slug, err))
 	}
 }
 
@@ -1847,9 +1915,16 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		}
 	}
 
+	// Async-launch gate before the host layout (ptone/scion#4758); a
+	// no-op on the synchronous path. Nothing has been written yet.
+	hooks := cfg.launchHooks()
+	if err := hooks.checkpoint(ctx, CheckpointStepSandboxLayout); err != nil {
+		return "", err
+	}
+
 	// Prepare the /scion directory layout (§3.2a: rootfs is read-only;
 	// only mounted paths are writable).
-	paths, err := prepareScionLayout(r.rootDir, slug, cfg)
+	paths, err := prepareScionLayout(ctx, r.rootDir, slug, cfg)
 	if err != nil {
 		return "", fmt.Errorf("cloudrun-sandbox: prepare layout: %w", err)
 	}
@@ -1966,6 +2041,13 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 
 	WriteRuntimeDebugFile(cfg, r.bin, args)
 
+	// Async-launch gate immediately before the Starting entry and `sandbox
+	// run` (ptone/scion#4758); a no-op on the synchronous path. An abort
+	// here writes no entry and launches nothing.
+	if err := hooks.checkpoint(ctx, CheckpointStepLaunching); err != nil {
+		return "", err
+	}
+
 	// Record the start before anything is launched (ptone/scion#4757): the
 	// full entry, marked Starting, so that a start interrupted between
 	// `sandbox run` and the probe (a cancelled synchronous request, a
@@ -2000,6 +2082,15 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		return "", err
 	}
 
+	// Report the sandbox's handle before `sandbox run` creates it
+	// (ptone/scion#4758): its identity, the run ID, is known now, and the
+	// Starting entry just written keeps a not-yet-created sandbox from
+	// counting as gone to DeleteResource. The entry is removed only by
+	// this start after a create that provably did not happen
+	// (restoreOrRemove), or by a successful delete. From here on, with the
+	// hooks active, this start deletes nothing (failStart).
+	hooks.created(api.ResourceHandle{Kind: api.ResourceKindSandbox, Name: slug, UID: runID})
+
 	out, started, err := runSandboxLaunch(ctx, r.bin, args...)
 	if sandboxLaunchReturnedHook != nil {
 		sandboxLaunchReturnedHook(slug)
@@ -2028,7 +2119,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		runErr := fmt.Errorf("cloudrun-sandbox: run failed: %w (output: %s)", err, safeOut)
 		if outcome == sandboxLaunchMayExist {
 			// Killed (by ctx) or its Wait failed: the sandbox may exist.
-			return "", r.failStart(slug, runID, myNonce, runErr)
+			return "", r.failStart(slug, runID, hooks.active(), myNonce, runErr)
 		}
 		// Never started, or exited on its own: nothing was created by this
 		// start. Undo its entry; never delete by name (the name may be held
@@ -2068,7 +2159,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 		// diagnostics; the sandbox may be live, so it is deleted
 		// (failStart), as long as the entry is still this start's.
 		if ctx.Err() != nil {
-			return "", r.failStart(slug, runID, myNonce, ctx.Err())
+			return "", r.failStart(slug, runID, hooks.active(), myNonce, ctx.Err())
 		}
 
 		// Read entrypoint diagnostics from the host filesystem.
@@ -2094,7 +2185,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 			errMsg += diagInfo
 		}
 		// Clean up — the sandbox may be in a broken state.
-		return "", r.failStart(slug, runID, myNonce, errors.New(errMsg))
+		return "", r.failStart(slug, runID, hooks.active(), myNonce, errors.New(errMsg))
 	}
 
 	// Record the started sandbox: the full entry, no longer Starting,
@@ -2105,7 +2196,7 @@ func (r *CloudRunSandboxRuntime) Run(ctx context.Context, cfg RunConfig) (string
 	running.Starting = false
 	running.StartingAt = nil
 	running.StartingUntil = nil
-	nonce, err := r.promoteStartingEntry(slug, runID, myNonce, &running)
+	nonce, err := r.promoteStartingEntry(slug, runID, hooks.active(), myNonce, &running)
 	if err != nil {
 		return "", err
 	}
