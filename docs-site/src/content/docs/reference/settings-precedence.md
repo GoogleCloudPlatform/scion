@@ -1113,16 +1113,16 @@ settings-level (and harness-config-file-level) default; neither existed before t
 **Backward compatibility:** an agent created *before* this change has no `explicitImage` /
 `explicitImagePullPolicy` recorded on its `agent-info.json` (the fields didn't exist yet, and a
 missing field decodes to empty). If that agent's image *or* `kubernetes.imagePullPolicy` came from
-an inline `--config` at create time, its next plain restart no longer re-applies that inline
-value — it falls through to the template tier (if the agent's template sets one), then Hub
-settings, then the file default, where before this change the persisted (then-unconditional) value
-kept it regardless of any of those. This is an accepted, narrow trade-off: the code cannot tell "a
+an inline `--config` at create time, a plain *local* restart (local restarts have since been
+removed) no longer re-applied that inline value — it fell through to the template tier, then Hub
+settings, then the file default. This was an accepted, narrow trade-off: the code cannot tell "a
 pre-upgrade agent with no recorded inline value" apart from "an agent that never had an inline
-override" from the file alone. A later `scion start --image` is not applied to an existing agent
-(the CLI warns that the flag is ignored), so re-create the agent to make an inline value durable
-across restarts.
+override" from the file alone. A restart through the Hub is unaffected: the Hub resends the
+agent's recorded explicit image and inline config on every dispatch, so the value is re-applied.
+A later `scion start --image` is not applied to an existing agent (the CLI warns that the flag is
+ignored), so re-create the agent to change a create-time image.
 
-Separately: if an agent's **template** can no longer be resolved at all on a local restart
+Separately: if an agent's **template** can no longer be resolved at all on a restart
 (renamed or deleted since the agent was created), the restart falls back to the image/pull-policy
 recorded at its last provision, with a warning, rather than falling through to Hub settings or the
 file default — matching the behavior before this change. Since ptone/scion#1799 that recorded
