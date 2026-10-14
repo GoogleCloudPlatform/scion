@@ -353,11 +353,14 @@ export class ScionChatComposer extends LitElement {
       // Reset text so stale content from the old conversation is not carried over.
       this.text = '';
       this.runeCount = 0;
-      // Uploads belong to the conversation they were made in: a topic upload
-      // carries the topic's project, which a DM refuses at send. Drafts keep
-      // only text, so pending uploads are dropped rather than carried over.
+      // Uploads and picked artifacts belong to the conversation they were
+      // made in: a topic upload carries the topic's project, which a DM
+      // refuses at send. Drafts keep only text, so they are dropped rather
+      // than carried over.
       this.pendingFiles = [];
       this.uploadFailures = [];
+      this.pendingArtifacts = [];
+      this.uploading = false;
       this.resetMentionTracking();
       this.restoreDraft();
     }
@@ -1954,6 +1957,12 @@ export class ScionChatComposer extends LitElement {
       return;
     }
 
+    // The composer is reused across conversations. An upload that settles
+    // after a switch belongs to the conversation it was made in, so its
+    // result is dropped rather than attached to the one now open.
+    const uploadKey = this.conversationKey;
+    const switchedAway = (): boolean => this.conversationKey !== uploadKey;
+
     this.uploading = true;
     try {
       const formData = new FormData();
@@ -1961,7 +1970,7 @@ export class ScionChatComposer extends LitElement {
       // uploads there. The composer can still hold a projectId in a DM (an
       // agent DM carries the agent's project, a DM opened from a project
       // scope carries that project), so the field is left out for a DM.
-      if (this.conversationMode !== 'dm') {
+      if (!this.isDirectMessage()) {
         formData.append('project_id', this.projectId);
       }
       for (const file of files) {
@@ -1983,6 +1992,7 @@ export class ScionChatComposer extends LitElement {
         error?: { message?: string };
         message?: string;
       };
+      if (switchedAway()) return;
 
       // The server reports per file: some may be stored while others are
       // refused. Anything it did take is attached, and the refusals are named
@@ -2003,6 +2013,7 @@ export class ScionChatComposer extends LitElement {
         );
       }
     } catch (err) {
+      if (switchedAway()) return;
       this.dispatchEvent(
         new CustomEvent('composer-error', {
           detail: { message: err instanceof Error ? err.message : 'Upload failed' },
@@ -2011,8 +2022,18 @@ export class ScionChatComposer extends LitElement {
         })
       );
     } finally {
-      this.uploading = false;
+      // After a switch the indicator belongs to the new conversation, which
+      // the switch already reset; an upload started there may be running.
+      if (!switchedAway()) this.uploading = false;
     }
+  }
+
+  /**
+   * Whether the open conversation is a DM: the parent says so, or the key
+   * is a DM key. Either is enough, so a DM is never treated as a topic.
+   */
+  private isDirectMessage(): boolean {
+    return this.conversationMode === 'dm' || this.conversationKey.startsWith('dm:');
   }
 
   /** Handle paste events — extract images from clipboard and upload. */

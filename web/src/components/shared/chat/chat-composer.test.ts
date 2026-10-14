@@ -571,19 +571,178 @@ describe('composer — upload project scope', () => {
     expect(uploadForm().get('project_id')).toBe('proj-1');
   });
 
-  it('switching a mounted composer from a topic to a DM drops the project_id', async () => {
+  it('treats a dm: conversation key as a DM even without conversationMode', async () => {
     const el = document.createElement('scion-chat-composer') as any;
-    el.conversationMode = 'thread';
-    el.projectId = 'proj-1';
-    document.body.appendChild(el);
-    await el.updateComplete;
-
-    el.conversationMode = 'dm';
+    el.conversationMode = '';
     el.conversationKey = 'dm:user:u1:user:u2';
-    await el.updateComplete;
+    el.projectId = 'proj-scope';
     respondWith(201, { attachments: [STORED], failures: [] });
+
     await selectFiles(el, ['compose.yaml']);
 
     expect(uploadForm().has('project_id')).toBe(false);
+  });
+
+  it('a topic key with thread mode still sends the project_id', async () => {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    el.projectId = 'proj-1';
+    respondWith(201, { attachments: [STORED], failures: [] });
+
+    await selectFiles(el, ['compose.yaml']);
+
+    expect(uploadForm().get('project_id')).toBe('proj-1');
+  });
+});
+
+/**
+ * The composer is reused across conversations. What was pending in one
+ * conversation must not be sent in the next: a topic upload carries the
+ * topic's project, which a DM refuses at send.
+ */
+describe('composer — conversation switch', () => {
+  /** Mount a composer open on topic A. */
+  async function mountTopic(): Promise<any> {
+    const el = document.createElement('scion-chat-composer') as any;
+    el.conversationMode = 'thread';
+    el.conversationKey = 'topic-a';
+    el.projectId = 'proj-1';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    return el;
+  }
+
+  /** Switch the mounted composer to DM B. */
+  async function switchToDM(el: any): Promise<void> {
+    el.conversationMode = 'dm';
+    el.conversationKey = 'dm:user:u1:user:u2';
+    await el.updateComplete;
+  }
+
+  function uploadCalls(): any[][] {
+    return apiFetch.mock.calls.filter((c: any[]) => c[0] === '/api/v1/chat/attachments');
+  }
+
+  it('drops topic uploads on a switch; the next DM upload has no project_id', async () => {
+    const el = await mountTopic();
+    respondWith(201, {
+      attachments: [STORED],
+      failures: [{ name: 'bad.exe', error: 'not accepted' }],
+    });
+    await selectFiles(el, ['compose.yaml', 'bad.exe']);
+    expect((uploadCalls()[0][1].body as FormData).get('project_id')).toBe('proj-1');
+    expect(el.pendingFiles).toHaveLength(1);
+    expect(el.uploadFailures).toHaveLength(1);
+
+    await switchToDM(el);
+    expect(el.pendingFiles).toEqual([]);
+    expect(el.uploadFailures).toEqual([]);
+
+    respondWith(201, { attachments: [{ ...STORED, id: 'att-2' }], failures: [] });
+    await selectFiles(el, ['compose.yaml']);
+    expect((uploadCalls()[1][1].body as FormData).has('project_id')).toBe(false);
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-2']);
+  });
+
+  it('does not send an artifact picked in topic A in DM B', async () => {
+    const el = await mountTopic();
+    el.handleArtifactsPicked(
+      new CustomEvent('artifact-picker-select', {
+        detail: {
+          artifacts: [{ id: 'art-a', ref: 'scion://artifact/art-a', title: 'Notes', version: 1 }],
+        },
+      })
+    );
+    await el.updateComplete;
+    expect(el.pendingArtifacts).toHaveLength(1);
+
+    await switchToDM(el);
+    expect(el.pendingArtifacts).toEqual([]);
+
+    el.text = 'hello';
+    const sent: any[] = [];
+    el.addEventListener('chat-send', (e: CustomEvent) => sent.push(e.detail));
+    el.handleSend();
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).not.toHaveProperty('artifactRefs');
+    expect(sent[0].attachmentIds).toEqual([]);
+  });
+
+  /** Make the next apiFetch call wait until the returned settle function runs. */
+  function deferUpload(): (settle: () => Response | Error) => void {
+    let resolve!: (r: Response) => void;
+    let reject!: (e: Error) => void;
+    apiFetch.mockImplementationOnce(
+      () =>
+        new Promise<Response>((res, rej) => {
+          resolve = res;
+          reject = rej;
+        })
+    );
+    return (settle) => {
+      const out = settle();
+      if (out instanceof Error) reject(out);
+      else resolve(out);
+    };
+  }
+
+  function storedWithFailure(): Response {
+    const body = { attachments: [STORED], failures: [{ name: 'bad.exe', error: 'not accepted' }] };
+    return new Response(JSON.stringify(body), { status: 201 });
+  }
+
+  function requestError(): Response {
+    return new Response(JSON.stringify({ message: 'Attachments not available' }), { status: 503 });
+  }
+
+  function networkError(): Error {
+    return new Error('network down');
+  }
+
+  const LATE_OUTCOMES: Array<[string, () => Response | Error]> = [
+    ['stored files and per-file failures', storedWithFailure],
+    ['a whole-request error', requestError],
+    ['a network error', networkError],
+  ];
+
+  for (const [label, outcome] of LATE_OUTCOMES) {
+    it(`drops ${label} from an upload that settles after a switch`, async () => {
+      const el = await mountTopic();
+      const errors: string[] = [];
+      el.addEventListener('composer-error', (e: CustomEvent<{ message: string }>) =>
+        errors.push(e.detail.message)
+      );
+      const settle = deferUpload();
+
+      const upload = el.uploadFiles([new File(['content'], 'compose.yaml')]);
+      await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+      expect(el.uploading).toBe(true);
+
+      await switchToDM(el);
+      expect(el.uploading).toBe(false);
+
+      settle(outcome);
+      await upload;
+      await el.updateComplete;
+
+      expect(el.pendingFiles).toEqual([]);
+      expect(el.uploadFailures).toEqual([]);
+      expect(errors).toEqual([]);
+      expect(el.uploading).toBe(false);
+    });
+  }
+
+  it('still applies an upload that settles without a switch', async () => {
+    const el = await mountTopic();
+    const settle = deferUpload();
+    const upload = el.uploadFiles([new File(['content'], 'compose.yaml')]);
+    await vi.waitFor(() => expect(uploadCalls()).toHaveLength(1));
+
+    settle(() => new Response(JSON.stringify({ attachments: [STORED] }), { status: 201 }));
+    await upload;
+
+    expect(el.pendingFiles.map((f: { id: string }) => f.id)).toEqual(['att-1']);
+    expect(el.uploading).toBe(false);
   });
 });
