@@ -2035,7 +2035,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 			for uri, ref := range requestedURIs {
 				if !resolvedURIs[uri] && !errorURIs[uri] {
 					if ref.Optional {
-						util.Debugf("provision: optional skill %q missing from resolver response, skipping", uri)
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", uri, "reason", "missing from resolver response")
 					} else {
 						return "", "", nil, fmt.Errorf(
 							"required skill %q missing from resolver response — S1 fail-closed", uri)

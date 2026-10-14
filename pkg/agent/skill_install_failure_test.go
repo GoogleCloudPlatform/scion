@@ -332,3 +332,24 @@ func TestProvisionAgent_OptionalSkillResolveFailure_WarnsAndSucceeds(t *testing.
 		t.Errorf("resolve skip: expected a Warn naming %s and reason %q, got %d records", installFailMissingURI, reason, len(*records))
 	}
 }
+
+// TestProvisionAgent_OptionalSkillMissingFromResponse_Warns checks that an
+// optional skill the resolver neither resolved nor reported an error for is
+// skipped with a Warn naming the skill, not silently.
+func TestProvisionAgent_OptionalSkillMissingFromResponse_Warns(t *testing.T) {
+	content := []byte("# Good Skill")
+	srv := newInstallFailServer(t, content)
+	projectScionDir := writeInstallFailTemplate(t, true)
+
+	resolver := &mockResolver{resolved: installFailSkills(srv.URL, content, false)[:1]}
+	ctx := ContextWithSkillResolver(context.Background(), resolver)
+	records := captureSlog(t)
+
+	_, _, _, err := ProvisionAgent(ctx, "missing-skill-agent", "install-fail-tpl", "", "", projectScionDir, "", "", "", "")
+	if err != nil {
+		t.Fatalf("ProvisionAgent must succeed when an optional skill is missing from the response, got: %v", err)
+	}
+	if !hasSkipWarning(*records, "optional skill missing from resolver response; skipped", installFailMissingURI, "missing from resolver response") {
+		t.Errorf("missing skip: expected a Warn naming %s, got %d records", installFailMissingURI, len(*records))
+	}
+}
