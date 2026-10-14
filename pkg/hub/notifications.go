@@ -400,8 +400,14 @@ func (nd *NotificationDispatcher) storeAndDispatchForAgent(ctx context.Context, 
 			nd.createInboxMessage(ctx, sub, notif, agent)
 		}
 
-		// Channel registry is a fallback for deployments without a broker.
-		nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		// With a broker configured, user delivery goes through the broker
+		// only (plugin spokes plus deliverToUser), matching the outbound
+		// path (deliveryUserBroker); the registry is not a second path
+		// (ptone/scion#2752). The channel registry is the fallback for
+		// deployments without a broker.
+		if nd.brokerProxy == nil {
+			nd.dispatchToChannels(ctx, sub, notif, agent.ID, agent.Slug)
+		}
 	default:
 		nd.log.Warn("Unknown subscriber type", "type", sub.SubscriberType)
 	}
@@ -470,31 +476,40 @@ func (nd *NotificationDispatcher) dispatchToAgent(ctx context.Context, sub *stor
 	retryCtx, retryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer retryCancel()
 
+	nd.recordAttempt(ctx, notif.ID)
 	if err := dispatchWithBrokerRetry(retryCtx, nd.messageLog, dispatcher, subscriber, notif.Message, false, structuredMsg); err != nil {
-		nd.log.Error("Failed to dispatch notification to agent",
-			"subscriberID", sub.SubscriberID, "error", err)
-	} else {
-		nd.log.Info("Notification dispatched to agent",
-			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "brokerID", subscriber.RuntimeBrokerID)
-		// Log to dedicated message audit log
-		if nd.messageLog != nil {
-			logAttrs := []any{
-				"agent_id", subscriber.ID,
-				"agent_name", subscriber.Name,
-				"project_id", subscriber.ProjectID,
-				"notification_id", notif.ID,
-				// The record was written before dispatch; this outcome
-				// line carries no record fields or content.
-				logging.AttrLogKind, logging.LogKindEvent,
-			}
-			nd.messageLog.Debug("notification message dispatched", logAttrs...)
-		}
+		nd.log.Error("Failed to dispatch notification to agent; notification NOT dispatched",
+			"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "error", err)
+		// Do NOT mark as dispatched: the notification was not delivered.
+		// The periodic dispatch sweep picks it up after its grace period
+		// and retries it (see RetryDispatch for what bounds the retries).
+		return
 	}
 
-	// Mark dispatched regardless of success (best-effort)
+	nd.log.Info("Notification dispatched to agent",
+		"subscriberID", sub.SubscriberID, "notificationID", notif.ID, "brokerID", subscriber.RuntimeBrokerID)
+	// Log to dedicated message audit log
+	if nd.messageLog != nil {
+		logAttrs := []any{
+			"agent_id", subscriber.ID,
+			"agent_name", subscriber.Name,
+			"project_id", subscriber.ProjectID,
+			"notification_id", notif.ID,
+			// The record was written before dispatch; this outcome
+			// line carries no record fields or content.
+			logging.AttrLogKind, logging.LogKindEvent,
+		}
+		nd.messageLog.Debug("notification message dispatched", logAttrs...)
+	}
+
+	// setOutcome also sets dispatched=true; MarkNotificationDispatched is kept
+	// because it is what broadcasts the dispatched event to other replicas. It
+	// must run before setOutcome: it broadcasts only when its CAS on
+	// dispatched=false wins, and setOutcome would already have set the flag.
 	if err := nd.store.MarkNotificationDispatched(ctx, notif.ID); err != nil {
 		nd.log.Error("Failed to mark notification dispatched", "notificationID", notif.ID, "error", err)
 	}
+	nd.setOutcome(ctx, notif.ID, store.NotificationOutcomeDelivered)
 }
 
 // notificationMessageType returns the structured message type for a notification status.

@@ -314,7 +314,7 @@ func TestUATCeiling_LegacyRowThroughValidateToken(t *testing.T) {
 	// already ran Migrate once, before this row existed, and recorded
 	// completion.
 	require.NoError(t, s.DeleteHubSetting(ctx, "migration_uat_ceiling_backfill_v1"))
-	require.NoError(t, migrateTestStore(ctx, s))
+	require.NoError(t, s.Migrate(ctx))
 
 	stored, err = s.GetUserAccessToken(ctx, tokenID)
 	require.NoError(t, err)

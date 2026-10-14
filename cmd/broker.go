@@ -482,9 +482,9 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 	if endpoint == "" {
-		return fmt.Errorf("hub endpoint not configured; configure via SCION_HUB_ENDPOINT, hub.endpoint in settings.yaml, or --hub flag")
+		return errHubNotConfigured
 	}
 
 	// Step 1: Check if local broker server is running
@@ -534,7 +534,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 
 	// The global directory is a local pseudo-project: never offer to link
 	// it, which would create a hub project named "global" (ptone/scion#3534).
-	if !projectLinked && !settings.IsHubEnabled() && !isGlobal {
+	if !projectLinked && !hubConfigured() && !isGlobal {
 		// Project not linked - offer to link first
 		if hubsync.ShowLinkBeforeRegisterPrompt(projectName, autoConfirm) {
 			// Run the link flow
@@ -650,7 +650,7 @@ func runBrokerRegister(cmd *cobra.Command, args []string) error {
 	// --global register (or one resolved to the global directory) skips this
 	// step instead of offering, and creating, a hub project named "global"
 	// (ptone/scion#3534).
-	if shouldOfferProjectProvider(projectID, settings.IsHubEnabled(), isGlobal) {
+	if shouldOfferProjectProvider(projectID, hubConfigured(), isGlobal) {
 		if hubsync.ShowProjectProviderPrompt(projectName, autoConfirm) {
 			gitRemote := util.GetGitRemote()
 			req := &hubclient.RegisterProjectRequest{
@@ -2054,7 +2054,7 @@ func runBrokerHubs(cmd *cobra.Command, args []string) error {
 
 // runRemoteBrokerStatus fetches and displays status for a remote broker from the Hub
 func runRemoteBrokerStatus(brokerID string) error {
-	settings, client, err := loadHubClient()
+	_, client, err := loadHubClient()
 	if err != nil {
 		return err
 	}
@@ -2078,7 +2078,7 @@ func runRemoteBrokerStatus(brokerID string) error {
 		BrokerName:    broker.Name,
 		BrokerStatus:  broker.Status,
 		LastHeartbeat: broker.LastHeartbeat,
-		HubEndpoint:   GetHubEndpoint(settings),
+		HubEndpoint:   invocationHubEndpoint(),
 		HubConnected:  true, // We just connected successfully
 	}
 

@@ -73,13 +73,16 @@ func TestDiagnosticsLogsStreamCatalogMatchesRoute(t *testing.T) {
 }
 
 // TestAgentPortAccessCatalogMatchesRoute pins agent.portaccess's declared
-// entry points against the live port_forward_handlers.go routes: the bare
-// list route, plus proxyAgentPort reachable via every listed method on
-// ".../proxy" and one representative ".../proxy/{subpath}".
+// entry points against the live port_forward_handlers.go routes:
+// proxyAgentPort reachable via every listed method on ".../proxy" and one
+// representative ".../proxy/{subpath}". The bare list route is
+// agent.port.list (agent.read).
 func TestAgentPortAccessCatalogMatchesRoute(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
-		"agent.portaccess": {
+		"agent.port.list": {
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports", Method: "GET"},
+		},
+		"agent.portaccess": {
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "GET"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "POST"},
 			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/ports/{port}/proxy", Method: "PUT"},
@@ -140,13 +143,12 @@ func TestCheckDrift_NoOpOnEmptyInput(t *testing.T) {
 // already compares Method (drift.go), but nothing pinned that comparison.
 func TestCheckDrift_MethodMismatch(t *testing.T) {
 	discovered := map[OperationID][]DiscoveredEntryPoint{
-		// agent.update declares PATCH (handlers_agents_core.go). Supply a
+		// agent.hold.lift declares one entry point, POST. Supply a
 		// discovered entry point with the same kind and pattern but PUT,
-		// as if the live route had moved off PATCH — the same shape as the
-		// pre-#2227 catalog bug (agent.update wrongly declared PUT while
-		// the live route was PATCH).
-		"agent.update": {
-			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}", Method: "PUT"},
+		// as if the live route had moved off POST — the same shape as a
+		// catalog entry that declares the wrong method for its route.
+		"agent.hold.lift": {
+			{Kind: EntryPointHTTPRoute, Pattern: "/api/v1/agents/{id}/hold/lift", Method: "PUT"},
 		},
 	}
 	findings := CheckDrift(discovered)

@@ -148,7 +148,7 @@ func readSavedRunID(t *testing.T, home string) string {
 // A restart of an existing agent whose home the agent runtime cannot
 // write repairs the home's ownership through the runtime once, then clears
 // the stale provisioner wrapper and bundle, restages them, and records the
-// run ID (ptone/scion#4330).
+// run ID (ptone/scion#4330) in the host state file, outside the home.
 func TestStart_RestartRepairsForeignOwnedAgentHome(t *testing.T) {
 	e, home := startThenForeignOwnHome(t, "own-restart")
 	runs := 0
@@ -174,8 +174,11 @@ func TestStart_RestartRepairsForeignOwnedAgentHome(t *testing.T) {
 	if strings.Contains(string(data), staleWrapperMarker) {
 		t.Error("the stale provisioner wrapper was not removed before restaging")
 	}
-	if got := readSavedRunID(t, home); got != "run-after-repair" {
+	if got := hostStateRun(t, e.scion, "own-restart"); got != "run-after-repair" {
 		t.Errorf("recorded run ID = %q, want run-after-repair", got)
+	}
+	if got := readSavedRunID(t, home); got != "" {
+		t.Errorf("agent-info.json runId = %q, want none: the run is recorded in the host state file (ptone/scion#4771)", got)
 	}
 }
 

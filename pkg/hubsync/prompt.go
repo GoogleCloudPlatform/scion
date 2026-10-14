@@ -161,19 +161,6 @@ func ShowLinkPrompt(projectName string, autoConfirm bool) bool {
 	return ConfirmAction("Link project with Hub?", true, autoConfirm)
 }
 
-// ShowInitLinkPrompt displays the post-init link prompt.
-// Returns true if the user confirms, false otherwise.
-func ShowInitLinkPrompt(autoConfirm bool) bool {
-	return ConfirmAction("Project initialized. Link to Hub?", true, autoConfirm)
-}
-
-// ShowInitProvidePrompt displays a confirmation to add this broker as a provider.
-// Returns true if the user confirms, false otherwise.
-func ShowInitProvidePrompt(brokerName, projectName string, autoConfirm bool) bool {
-	_, _ = fmt.Fprintf(promptOut, "This host (%s) is registered as a broker.\n", brokerName)
-	return ConfirmAction(fmt.Sprintf("Add as provider for '%s'?", projectName), true, autoConfirm)
-}
-
 // ProjectChoice represents the user's choice when matching projects exist.
 type ProjectChoice int
 
@@ -586,16 +573,21 @@ type ProjectProviders interface {
 }
 
 // ShowProjectDeletePrompt displays the project deletion confirmation.
-// Returns true if the user confirms, false otherwise.
-func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, autoConfirm bool) bool {
+// agentCount is the project's agent count, soft-deleted agents included.
+// force reports whether the delete is forced: without it the Hub refuses
+// while agents that are not deleted remain, with it their records are
+// removed and their runtime deletes are best-effort. Returns true if the
+// user confirms, false otherwise.
+func ShowProjectDeletePrompt(projectName string, agentCount int, providers ProjectProviders, force, autoConfirm bool) bool {
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintf(promptOut, "This will permanently delete project '%s' from the Hub.\n", projectName)
 	_, _ = fmt.Fprintln(promptOut)
 	_, _ = fmt.Fprintln(promptOut, "The following will be removed:")
-	if agentCount > 0 {
-		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (will be stopped and deleted)\n", agentCount)
-	} else {
+	switch {
+	case agentCount == 0:
 		_, _ = fmt.Fprintln(promptOut, "  - 0 agents")
+	case force:
+		_, _ = fmt.Fprintf(promptOut, "  - %d agent(s) (--force: records removed, runtime deletes are best-effort)\n", agentCount)
 	}
 	if providers != nil && providers.ProviderCount() > 0 {
 		_, _ = fmt.Fprintf(promptOut, "  - %d broker provider association(s):\n", providers.ProviderCount())
@@ -604,6 +596,13 @@ func ShowProjectDeletePrompt(projectName string, agentCount int, providers Proje
 		}
 	}
 	_, _ = fmt.Fprintln(promptOut)
+	if agentCount > 0 && !force {
+		// Not a removal: without --force the Hub refuses the delete while
+		// any agent is not deleted. agentCount also counts soft-deleted
+		// agents, which do not block, so the warning is conditional.
+		_, _ = fmt.Fprintf(promptOut, "Warning: the project has %d agent record(s). The Hub refuses this delete if any of these agents is not deleted yet; delete them first, or use --force.\n", agentCount)
+		_, _ = fmt.Fprintln(promptOut)
+	}
 	_, _ = fmt.Fprintln(promptOut, "This action cannot be undone.")
 	_, _ = fmt.Fprintln(promptOut)
 	// Default NO for safety - destructive operation

@@ -62,7 +62,8 @@ Scripts that parse the output of 'scion project list' should use
 before it listed projects across hubs, JSON included.
 
 --local flags orphaned project directories (where the workspace no longer
-exists). Use 'scion project prune' to clean them up.`,
+exists, or the recorded workspace is itself a scion .scion directory). Use
+'scion project prune' to clean them up.`,
 	RunE: runProjectList,
 }
 
@@ -413,7 +414,8 @@ func projectListFilterLabel(filter, name string) string {
 var projectListRefreshTimeout = 30 * time.Second
 
 // listAllHubProjects lists every project on the hub that the caller can
-// see, following the pages.
+// see, following the pages. The hub's global project is left out (see
+// isHubGlobalProject).
 func listAllHubProjects(ctx context.Context, client hubclient.Client) ([]config.KnownProject, error) {
 	var all []config.KnownProject
 	opts := &hubclient.ListProjectsOptions{}
@@ -423,7 +425,7 @@ func listAllHubProjects(ctx context.Context, client hubclient.Client) ([]config.
 		if err != nil {
 			return nil, err
 		}
-		for _, p := range resp.Projects {
+		for _, p := range withoutHubGlobalProjects(resp.Projects) {
 			all = append(all, config.KnownProject{ID: p.ID, Slug: p.Slug, Name: p.Name})
 		}
 		next := resp.Page.NextCursor
@@ -463,7 +465,7 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 		endpoint := c.Hubs[name].Endpoint
 		// A hub gets only a credential bound to it unless it was given with
 		// --hub or is the effective hub (hubGetsFullChain).
-		fanOut := !hubGetsFullChain(settings, endpoint, onlyHub != "")
+		fanOut := !hubGetsFullChain(endpoint, onlyHub != "")
 		if !hubUsable(settings, endpoint, fanOut) {
 			results[i].skipped = true
 			continue
@@ -491,8 +493,10 @@ func refreshKnownProjects(ctx context.Context, stderr io.Writer, c *config.CLICo
 	for i, name := range names {
 		r := results[i]
 		switch {
-		case r.skipped || apiclient.IsUnauthorizedError(r.err):
+		case r.skipped:
 			skipped = append(skipped, name+": not logged in")
+		case apiclient.IsUnauthorizedError(r.err):
+			skipped = append(skipped, name+": login refused")
 		case r.err != nil:
 			skipped = append(skipped, fmt.Sprintf("%s: unreachable: %v", name, hubclient.HintProxyError(r.err)))
 		default:

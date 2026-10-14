@@ -1,0 +1,28 @@
+schema_version: "1"
+server:
+  shared_dir_storage:
+    nfs:
+      mount_root: /mnt/scion-nfs
+      shares:
+        - id: share-1
+runtimes:
+  cluster:
+    type: kubernetes
+    namespace: agents
+    kubernetes_service_account_mappings:
+      shared@proj.iam.gserviceaccount.com: ksa-shared
+profiles:
+  a:
+    runtime: cluster
+    kubernetes_service_account_mappings:
+      agent@proj.iam.gserviceaccount.com: ksa-a
+    shared_dir_storage_backends:
+      data: nfs
+      logs: local
+  b:
+    runtime: cluster
+    kubernetes_service_account_mappings:
+      agent@proj.iam.gserviceaccount.com: ksa-b
+    shared_dir_storage_backends:
+      data: local
+      logs: local

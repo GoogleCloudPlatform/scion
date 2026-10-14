@@ -44,6 +44,7 @@ var hubOnlyCommands = map[string]bool{
 	"tunnel":     true,
 	"ssh":        true,
 	"ssh-config": true,
+	"vscode":     true,
 	"expose":     true,
 	"unexpose":   true,
 }
@@ -80,12 +81,6 @@ func commandRequiresProject(cmd *cobra.Command) bool {
 	case "init":
 		// Both top-level init and project init don't require existing project
 		return false
-	case "shadow", "unshadow":
-		// hub shadow/unshadow create/remove the project marker — they must
-		// run in a directory with no existing project.
-		if parentName == "hub" {
-			return false
-		}
 	case "migrate-names", "migrate":
 		// hub secret migrate-names (GCP SM name migration) and hub secret
 		// migrate (DB -> GCP SM value migration) operate directly against
@@ -174,27 +169,19 @@ func subcommandGlobalFlagSet(cmd *cobra.Command) bool {
 // isHubDispatchInvocation reports whether agent work for this invocation is
 // sent to a hub instead of run locally. It matches how hub dispatch is
 // decided (hubsync.EnsureHubReady) and how the endpoint is resolved
-// (GetHubEndpoint: --hub, then settings, then environment):
+// (invocationHub: --hub, the environment, a link entry or the current hub):
 //
 //   - inside a hub-connected container (config.IsHubContext);
 //   - a hub project reference (slug, name or git URL) for --project, which
 //     goes to the hub or fails with a hub-mode error;
-//   - hub enabled in settings with an endpoint from any source.
-//
-// --no-hub turns off the last two.
+//   - a hub endpoint from any source (local-only mode was removed, so a
+//     configured endpoint is what makes the CLI use a hub).
 func isHubDispatchInvocation(projectPath string) bool {
 	if config.IsHubContext() {
 		return true
 	}
-	if noHub {
-		return false
-	}
 	if projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
 		return true
 	}
-	settings, err := config.LoadSettings(projectPath)
-	if err != nil || settings == nil {
-		return false
-	}
-	return settings.IsHubEnabled() && GetHubEndpoint(settings) != ""
+	return hubConfigured()
 }

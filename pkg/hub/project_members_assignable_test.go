@@ -154,11 +154,11 @@ func TestAssignableRoles_SystemRolesNeverListedAndOrdered(t *testing.T) {
 	require.NoError(t, err)
 	projectRoles := 0
 	for _, rd := range all {
-		if rd.ScopeType == store.RoleScopeProject {
+		if rd.ScopeType == store.RoleScopeProject && rd.ConfersProjectMembership() {
 			projectRoles++
 		}
 	}
-	require.Len(t, body.Items, projectRoles, "every project-scoped role is listed")
+	require.Len(t, body.Items, projectRoles, "every project-scoped role that confers membership is listed")
 	for _, it := range body.Items {
 		rd, err := f.store.GetRoleDefinition(ctx, it.ID)
 		require.NoError(t, err)

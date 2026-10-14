@@ -41,7 +41,7 @@ import (
 // and returns one access token for it. POST /api/v1/test-identities/{id}/token
 // re-issues a token for a live identity, GET /api/v1/test-identities lists
 // identities, and DELETE /api/v1/test-identities/{id} deletes one. The
-// feature is off unless the hub starts with --enable-test-identities; while
+// feature is off unless the hub starts with --test-mode=member or above; while
 // it is off the routes return 404 and the auth middleware refuses every
 // test-fixture row (testFixtureRejection).
 //
@@ -766,7 +766,12 @@ func (s *Server) handleCreateTestIdentity(w http.ResponseWriter, r *http.Request
 // test_identity.issue route guard, sees and re-issues every test identity
 // rather than only its own: an unscoped platform admin session. It widens
 // the result scope only; it grants no access on its own.
-func testIdentityCallerSeesAll(caller UserIdentity) bool {
+func (s *Server) testIdentityCallerSeesAll(ctx context.Context, caller UserIdentity) bool {
+	// Test identities with admin roles never see every test identity
+	// (test-admin policy; the routes are deny for them as well).
+	if s.testAdminPolicyRefusesUser(ctx, caller.ID(), "handlers_test_identities.go:testIdentityCallerSeesAll") {
+		return false
+	}
 	return IsUnscopedLocalPlatformAdmin(caller)
 }
 
@@ -777,7 +782,7 @@ func testIdentityCallerSeesAll(caller UserIdentity) bool {
 // manages the identities it issued (including those issued through its
 // delegations: the grantor's own session), and an unscoped platform admin
 // session manages all.
-func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
+func (s *Server) canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
 	if st := workloadDelegationCaller(ctx); st != nil {
 		return u.IssuerDelegationID != nil && *u.IssuerDelegationID == st.delegation.ID &&
 			u.IssuedBy != nil && *u.IssuedBy == st.delegation.GrantorID
@@ -786,7 +791,7 @@ func canManageTestIdentity(ctx context.Context, caller UserIdentity, u *store.Us
 		// A workload credential without its state: fail closed.
 		return false
 	}
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(ctx, caller) {
 		return true
 	}
 	return u.IssuedBy != nil && *u.IssuedBy == caller.ID()
@@ -833,14 +838,14 @@ func (s *Server) handleIssueTestIdentityToken(w http.ResponseWriter, r *http.Req
 	u, err := s.store.GetUser(ctx, id)
 	// An admin-kind identity gets exactly one token, at issuance: no
 	// re-issue (409), for its issuer or an unscoped platform admin.
-	if err == nil && u.IsTestAdmin() && canManageTestIdentity(ctx, caller, u) {
+	if err == nil && u.IsTestAdmin() && s.canManageTestIdentity(ctx, caller, u) {
 		writeError(w, http.StatusConflict, ErrCodeConflict, "an admin-kind test identity's token is never re-issued",
 			map[string]interface{}{"reason": testAdminReasonAdminKindTokens})
 		return
 	}
 	// One answer for a missing user, a non-fixture user, and a fixture the
 	// caller did not issue, so the route is no user-existence oracle.
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !canManageTestIdentity(ctx, caller, u))) {
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!u.IsTestFixture() || !s.canManageTestIdentity(ctx, caller, u))) {
 		NotFound(w, "test identity")
 		return
 	}
@@ -929,7 +934,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 		return
 	}
 	issuedBy := caller.ID()
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(r.Context(), caller) {
 		issuedBy = ""
 	}
 	// A workload delegation request lists only its own delegation's
@@ -991,7 +996,7 @@ func (s *Server) handleListTestIdentities(w http.ResponseWriter, r *http.Request
 // besides test_identity.issue (checked by testIdentityCaller), holds
 // user.delete on u.
 func (s *Server) canDeleteTestIdentity(ctx context.Context, caller UserIdentity, u *store.User) bool {
-	if canManageTestIdentity(ctx, caller, u) {
+	if s.canManageTestIdentity(ctx, caller, u) {
 		return true
 	}
 	// A workload delegation deletes only its own delegation's identities;
@@ -1187,7 +1192,7 @@ func (s *Server) handlePurgeTestIdentity(w http.ResponseWriter, r *http.Request,
 		// the same empty report; the grantor's session or an admin session
 		// purges them.
 		if !ok || GetCredentialContextFromContext(ctx).Kind == CredentialKindWorkloadDelegation ||
-			(!testIdentityCallerSeesAll(caller) && issuer != caller.ID()) {
+			(!s.testIdentityCallerSeesAll(ctx, caller) && issuer != caller.ID()) {
 			writeJSON(w, http.StatusOK, emptyTestIdentityPurgeReport(id))
 			return
 		}

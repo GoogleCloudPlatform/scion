@@ -17,10 +17,12 @@ The routes are described in the [API reference](/scion/reference/api/) under `/a
 
 Browser sessions for test identities are available only on a test hub that has both of these:
 
-- **Test identities enabled at the member level**: the hub starts with `--enable-test-identities`.
+- **Test identities enabled at the member level**: the hub starts with `--test-mode=member:<hub-id>` or above (`admin:<hub-id>`, `super-admin:<hub-id>`), which itself requires `server.hub.class: test` and the marker below (see "Test mode (operators)" in the [API reference](/scion/reference/api/)).
 - **The test infrastructure marker** in its database, written with `scion server test-infra mark --hub-id <hub-id>` before the hub starts. Marking generates a hub-local key that only these sessions use. Unmarking or marking again replaces the key, which ends every test identity browser session.
 
-There is no separate switch for web sessions. When either requirement is missing, minting a code answers `404` with `details.reason: test_identity_web_sessions_unavailable`, and the member tier keeps working without web sessions. Hubs behind proxy auth (for example IAP) do not offer these sessions yet.
+There is no separate switch for web sessions. When either requirement is missing, minting a code answers `404` with `details.reason: test_identity_web_sessions_unavailable`, and the member tier keeps working without web sessions. Hubs behind proxy auth (for example IAP) also need at least one driver principal; see [IAP-fronted hubs](#iap-fronted-hubs).
+
+`GET /api/v1/test-infra/status` reports `testIdentityWebSessions` (whether these sessions are available) and `testIdentityWebSessionsUnavailableReason` (why not, while test identities are on; empty otherwise). The admin health summary has the same two values.
 
 ## Minting a code
 
@@ -67,6 +69,80 @@ While the session lasts, every page shows a "Test identity &lt;email&gt; · expi
 - Keep the code out of URLs, logs, screenshots and command lines: pass the code file, not the code.
 - Do not write the context's `storageState` to a shared path.
 - Use `waitUntil: 'domcontentloaded'`, not `networkidle`: the web app keeps server-sent event connections open.
+
+## IAP-fronted hubs
+
+Behind an authenticating proxy such as IAP, the browser reaches the hub as a **driver principal**, for example a test-UI service account, and IAP adds its verified assertion to every request. The hub treats a driver principal as a transport for test identity sessions, never as a user.
+
+### Hub configuration
+
+Two startup settings, under `server.auth.proxy` in `settings.yaml`, configure this. Neither can be written through the settings API, and the server-config view does not show them.
+
+| Setting | Meaning |
+| :--- | :--- |
+| `driver_principals` | The exact emails of the driver principals. No wildcards or patterns. A hub whose `server.auth.mode` is not `proxy` refuses to start when this list is not empty. |
+| `driver_token_audience` | The IAP OAuth client ID: the audience of the driver's Google ID token (see [The driver's bearer token](#the-drivers-bearer-token)). |
+
+```yaml
+server:
+  auth:
+    mode: proxy
+    proxy:
+      provider: iap
+      iap:
+        audience: /projects/123456789/global/backendServices/987654321
+      driver_principals:
+        - test-ui-driver@my-test-project.iam.gserviceaccount.com
+      driver_token_audience: 123456789-abc.apps.googleusercontent.com
+```
+
+A proxy hub with test identities on and **no** driver principals still starts. Web sessions are then unavailable: redeem answers `403`, any test identity session is ended with `401`, and the member tier for API clients keeps working. The hub logs `test-identity web sessions unavailable: proxy auth mode with no driverPrincipals` at startup, and the status endpoints report the reason `proxy_auth_without_driver_principals`.
+
+### Driver principals have no hub account
+
+A driver principal is treated like the hub's transport service account everywhere: it cannot sign in through any login flow, an admin cannot create or invite a user for it, and a session or hub token it held before it was listed stops working. A verified assertion for a driver principal never signs in or creates a user, so a run whose session has ended fails loudly instead of acting as the service account:
+
+- page navigations, and `/api/v1/` requests that carry only the assertion, get `403` with `details.reason: driver_principal_has_no_session`;
+- `/api/v1/` requests that carry the driver's ID token in `Authorization` (as the Playwright hook sends them) get `401`, or a plain `403` where the hub trusts Google tokens. They never act as the driver.
+
+### Redeeming behind IAP
+
+Redeem the code from Node (Playwright's `context.request`) with the driver's ID token in `Proxy-Authorization`, which IAP consumes. The hub checks IAP's assertion itself and requires a driver principal. It records the driver in the new session. A redeem without a valid assertion, or from a principal that is not a driver, is refused (`401` or `403`) before the code is read, so the code stays usable. Each refusal is audited with the reason, the first 8 hex digits of the code's hash (never the code), the client IP and the assertion email. Redeem is rate-limited per client IP and per assertion email. Behind the proxy the connection comes from the proxy itself: the hub reads the client IP from `X-Forwarded-For` only when the connecting peer is one of its trusted proxies, and otherwise records and limits the connecting address. There is no setting for the hub's trusted proxies yet, so behind IAP `client_ip` and the per-IP limit are the proxy's address: the per-IP limit is coarse there, and the per-email limit is the effective one.
+
+On hubs without proxy auth nothing changes: redeem needs no assertion and ignores one.
+
+### The session is bound to its driver
+
+Behind the proxy, the hub honours a test identity session only on a request that carries a valid assertion for the driver that redeemed it. This applies to page routes, `/auth/me`, `/api/v1/` requests, the event stream (when it opens and on each 30-second heartbeat) and logout. With another principal's assertion, or none, the session is cleared, so a copied cookie is useless to anyone else behind the same IAP, and to a browser without IAP. The request itself gets `401`; on `/api/v1/` it goes on without the session and gets only what its assertion or bearer alone gets, never the test identity. A session made on a hub without proxy auth is never honoured behind the proxy, and the reverse.
+
+An open event stream also ends when the assertion it was opened with expires. The browser then reconnects with a fresh one.
+
+### The driver's bearer token
+
+Pages cannot send `Proxy-Authorization`, so page requests carry the driver's Google ID token in `Authorization`. On `/api/v1/` such a header normally wins over the session cookie. The hub replaces it with the test identity's own short-lived token only when all of these hold:
+
+- the hub is in proxy auth mode and `driver_token_audience` is set;
+- the request carries a valid test identity session, bound to its driver as above;
+- the bearer is not a hub-issued token (not a hub user token, personal access token, agent token or development token);
+- the bearer verifies as a Google-signed ID token whose only audience is `driver_token_audience`;
+- its email equals both the current assertion's email and the session's driver.
+
+Otherwise the request is handled as it is today: a hub-issued bearer acts as itself, and any other bearer goes to the external-token path or gets `401`. The replacement can only narrow access: the request acts with exactly the test identity's permissions, never the driver's or more.
+
+### Playwright
+
+The harness's `installIapDriver(context, { baseURL, token })` (`web/e2e/harness/iap-driver.ts`) adds the driver's ID token to the context's requests to the hub origin (`baseURL`, required) only, never to another origin. It calls your `token` callback for a fresh token shortly before the cached one expires, and never logs or saves the token.
+
+```typescript
+import { redeemTestIdentity } from './harness/auth.js';
+import { installIapDriver } from './harness/iap-driver.js';
+
+const context = await browser.newContext({ baseURL: hubURL });
+await redeemTestIdentity(context, { codeFile, proxyAuthorization: `Bearer ${await driverToken()}` });
+await installIapDriver(context, { baseURL: hubURL, token: driverToken });
+const page = await context.newPage();
+await page.goto('/', { waitUntil: 'domcontentloaded' });
+```
 
 ## Session lifetime and teardown
 

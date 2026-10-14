@@ -668,10 +668,12 @@ func newProjectEdgeFixture(t *testing.T, s store.Store, prefix string) *projectE
 	return f
 }
 
+// request is forced: the fixture has a live agent (ptone/scion#4811).
 func (f *projectEdgeFixture) request() ProjectDeleteRequest {
 	return ProjectDeleteRequest{
 		ProjectID: f.projectID,
 		Actor:     NewAuthenticatedUser(f.ownerID, f.ownerID+"@test.com", "Owner", "member", "web"),
+		Force:     true,
 	}
 }
 

@@ -129,7 +129,7 @@ func runHubBrokersJoinTokenCreate(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
-	endpoint := GetHubEndpoint(settings)
+	endpoint := invocationHubEndpoint()
 
 	client, err := getHubClient(settings)
 	if err != nil {

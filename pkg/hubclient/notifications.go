@@ -57,6 +57,12 @@ type Notification struct {
 	Dispatched     bool      `json:"dispatched"`
 	Acknowledged   bool      `json:"acknowledged"`
 	CreatedAt      time.Time `json:"createdAt"`
+	// DispatchAttempts counts delivery attempts to a subscriber agent (0 for
+	// rows stored before attempts were recorded).
+	DispatchAttempts int `json:"dispatchAttempts"`
+	// DispatchOutcome is "delivered", "failed", or empty when no outcome is
+	// recorded.
+	DispatchOutcome string `json:"dispatchOutcome"`
 }
 
 // List returns notifications for the current user.

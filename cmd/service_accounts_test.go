@@ -105,6 +105,7 @@ func saCLIHub(t *testing.T, body string) *url.Values {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	return seen
 }
@@ -227,6 +228,7 @@ func TestSAScopedList_AssignableWithGlobalIsRefusedLocally(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	globalMode = true
 	saGlobalListAssignable = true
@@ -296,6 +298,7 @@ func TestSAScopedShow_GlobalUsesTheFlatRoute(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, srv.URL)
 
 	globalMode = true
 	saOutputJSON = false
@@ -327,6 +330,7 @@ func TestResolveSAScope_HubScopeNeedsNoLinkedProject(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 	projectPath = projectDir
+	useHubForTest(t, "http://127.0.0.1:1")
 
 	globalMode = true
 	sc, err := resolveSAScope()

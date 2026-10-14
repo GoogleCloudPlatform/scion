@@ -186,7 +186,7 @@ func recordHubProjectIdentity(projectPath, slug, projectID string, inUse func() 
 
 // otherProjectAgentsInUse reports whether an agent of projectID other than
 // agentID is known to this broker in any phase other than stopped or error.
-// The starting agent is matched by agentKey, as in newProjectAgentsInUse,
+// The starting agent is matched by agentKey, as in newProjectAgentsInUseReason,
 // because AgentInfo.ID can be empty or a pod name. A listing failure counts
 // as in use.
 //
@@ -263,9 +263,18 @@ func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[str
 	return ids, nil
 }
 
-// newProjectAgentsInUse reports whether an agent of projectID whose key
-// (agentKey) is not in known is known to this broker in any phase
-// other than stopped or error. An agent without a key counts as new (fail
+// Reasons newProjectAgentsInUseReason gives for a project in use.
+const (
+	projectInUseHere           = "a new agent of the project is in use on this Runtime Broker instance"
+	projectInUseSibling        = "another Runtime Broker instance of this host has live agents in the project"
+	projectInUseSiblingUnknown = "cannot tell: another Runtime Broker instance's records cannot be read"
+	projectInUseListingFailed  = "cannot tell: the project's agents could not be listed"
+)
+
+// newProjectAgentsInUseReason reports whether an agent of projectID whose
+// key (agentKey) is not in known is known to this broker in any phase other
+// than stopped or error, and why (one of the reasons above, or "" when the
+// project is not in use). An agent without a key counts as new (fail
 // closed). It is otherProjectAgentsInUse with a set of excluded agents. A
 // listing failure counts as in use. Without a manager no agents are known,
 // so it reports false.
@@ -276,17 +285,23 @@ func (s *Server) projectAgentIDs(ctx context.Context, projectID string) (map[str
 // otherProjectAgentsInUse. A project delete is refused while another
 // instance has agents in the project, so any such agent seen later is a new
 // one.
-func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, known map[string]bool) (bool, error) {
-	if s.ownership != nil && s.locks().projectInUseByOthers(s, projectID) {
-		return true, nil
+func (s *Server) newProjectAgentsInUseReason(ctx context.Context, projectID string, known map[string]bool) (bool, string, error) {
+	if s.ownership != nil {
+		used, unreadable := s.locks().projectUseByOthers(s, projectID)
+		switch {
+		case used:
+			return true, projectInUseSibling, nil
+		case unreadable:
+			return true, projectInUseSiblingUnknown, nil
+		}
 	}
 	if s.manager == nil {
 		// A broker without a manager runs no agents, so none can be in use.
-		return false, nil
+		return false, "", nil
 	}
 	agents, err := s.manager.List(ctx, map[string]string{"scion.agent": "true", "scion.project_id": projectID})
 	if err != nil {
-		return true, err
+		return true, projectInUseListingFailed, err
 	}
 	for _, a := range agents {
 		if label, ok := a.Labels["scion.project_id"]; ok && label != projectID {
@@ -298,10 +313,10 @@ func (s *Server) newProjectAgentsInUse(ctx context.Context, projectID string, kn
 		switch state.Phase(a.Phase) {
 		case state.PhaseStopped, state.PhaseError:
 		default:
-			return true, nil
+			return true, projectInUseHere, nil
 		}
 	}
-	return false, nil
+	return false, "", nil
 }
 
 // alignHubManagedProjectIdentity applies recordHubProjectIdentity for an

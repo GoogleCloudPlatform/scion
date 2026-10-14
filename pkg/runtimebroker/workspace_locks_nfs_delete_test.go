@@ -15,9 +15,13 @@
 package runtimebroker
 
 import (
+	"encoding/json"
+	"errors"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -165,4 +169,62 @@ func TestWorkspaceLocks_NFSRetryWithoutSiblingAgentRemovesTree(t *testing.T) {
 	a.srv.nfsCleanupWG.Wait()
 	require.Equal(t, []int{1, 2}, *attempts)
 	assertGone(t, tree)
+}
+
+// nfsKeepReason runs a project delete on instance A whose first NFS
+// cleanup attempt fails; atRetry runs just before the retry's check. It
+// returns the reason A logged for keeping the tree.
+func nfsKeepReason(t *testing.T, atRetry func(a, b *partitionInstance, d *sharedDaemon) error) string {
+	t.Helper()
+	a, b, d, tree, restore := nfsDeleteSiblings(t)
+	logs := &syncBuffer{}
+	a.srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+	var hookErr error
+	attempts := setBrokerAttemptHook(t, func(attempt int) {
+		if attempt == 2 {
+			restore()
+			hookErr = atRetry(a, b, d)
+		}
+	})
+
+	w := serveFlat(a.srv, http.MethodDelete, "/api/v1/projects/shared-proj?project_id="+scopeProjA, "")
+	require.Equal(t, http.StatusNoContent, w.Code, w.Body.String())
+	a.srv.nfsCleanupWG.Wait()
+	require.NoError(t, hookErr)
+	require.Equal(t, []int{1, 2}, *attempts)
+	assertPresent(t, filepath.Join(tree, "workspace", "README.md"))
+	for _, line := range strings.Split(logs.String(), "\n") {
+		var rec map[string]any
+		if json.Unmarshal([]byte(line), &rec) == nil && rec["msg"] == "NFS workspace tree kept: the project is in use" {
+			reason, _ := rec["reason"].(string)
+			return reason
+		}
+	}
+	t.Fatalf("no NFS keep log line in: %s", logs.String())
+	return ""
+}
+
+// TestWorkspaceLocks_NFSKeepLogNamesTheSiblingInstance: when another
+// instance of the host started an agent of the project before the retry,
+// the keep log says so rather than blaming this instance.
+func TestWorkspaceLocks_NFSKeepLogNamesTheSiblingInstance(t *testing.T) {
+	reason := nfsKeepReason(t, func(_, b *partitionInstance, d *sharedDaemon) error {
+		d.add(api.AgentInfo{ID: "cid-b1", ContainerID: "cid-b1", Name: "worker", ProjectID: scopeProjA, Phase: "running",
+			Labels: map[string]string{"scion.agent": "true", "scion.name": "worker", "scion.project_id": scopeProjA, "agent_id": "agent-b1",
+				api.LabelRunID: "run-cid-b1", api.LabelRuntimeBrokerID: b.identity.RuntimeBrokerID}})
+		return b.srv.ownership.BeginRun(scopeProjA, "agent-b1", "worker", "run-cid-b1")
+	})
+	require.Equal(t, projectInUseSibling, reason)
+}
+
+// TestWorkspaceLocks_NFSKeepLogNamesAnUnreadableSibling: when another
+// instance's records cannot be read at the retry, the tree is kept and the
+// keep log says that it cannot tell.
+func TestWorkspaceLocks_NFSKeepLogNamesAnUnreadableSibling(t *testing.T) {
+	reason := nfsKeepReason(t, func(a, _ *partitionInstance, _ *sharedDaemon) error {
+		a.srv.locks().registerWorkspaceUser(&Server{}, &workspaceUser{instance: "unreadable-sibling",
+			projectInUse: func(string) (bool, error) { return false, errors.New("ownership records cannot be read") }})
+		return nil
+	})
+	require.Equal(t, projectInUseSiblingUnknown, reason)
 }

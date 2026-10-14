@@ -26,7 +26,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -83,6 +85,14 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	var repoRoot string
 	var externalAgentDir string
 	var worktreeDir string // worktree-per-agent: agent's worktree path
+	// ownWorktreePaths lists the paths where this agent's own worktree may
+	// be registered. Only these entries are removed from git's worktree
+	// list; other worktrees' entries are never touched (ptone/scion#5060).
+	var ownWorktreePaths []string
+	// sharedBaseWorktree is the agent's path under the worktree-per-agent
+	// shared base. It is added to ownWorktreePaths only once the sharer
+	// check below has shown that no other agent still uses it.
+	var sharedBaseWorktree string
 	var globalWorkspaceDir string
 	// resolvedProjectDir is config.GetResolvedProjectDir's return value,
 	// captured here (rather than only inside the block below) so the
@@ -123,6 +133,7 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		if _, statErr := os.Stat(filepath.Join(sharedBase, ".git")); statErr == nil {
 			repoRoot = sharedBase
 			wtPath := filepath.Join(sharedBase, "worktrees", agentName)
+			sharedBaseWorktree = wtPath
 			if _, statErr := os.Stat(wtPath); statErr == nil {
 				worktreeDir = wtPath
 			}
@@ -175,6 +186,9 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 	// but not structurally excluded. Acceptable for single-node local mode
 	// which has no advisory locker.
 	refcountHandled := false
+	// sharersRemain is set when other agents still share this agent's
+	// worktree; its entry then belongs to them and is left alone.
+	sharersRemain := false
 	if repoRoot != "" {
 		// Do NOT silently swallow registry errors and fall through to the legacy
 		// path — that path could delete the shared worktree out from under live
@@ -249,9 +263,17 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 				}
 			} else {
 				util.Debugf("delete: %d sharers remain for branch %s, detaching agent %s", len(remaining), branch, agentName)
+				sharersRemain = true
+			}
+			if len(remaining) == 0 && wtPath != "" {
+				ownWorktreePaths = append(ownWorktreePaths, wtPath)
 			}
 			refcountHandled = true
 		}
+	}
+
+	if sharedBaseWorktree != "" && !sharersRemain {
+		ownWorktreePaths = append(ownWorktreePaths, sharedBaseWorktree)
 	}
 
 	// Worktree-per-agent: remove the agent's worktree from the shared base.
@@ -280,11 +302,14 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 
 	for _, dir := range agentsDirs {
 		agentDir := filepath.Join(dir, agentName)
+		agentWorkspace := filepath.Join(agentDir, "workspace")
+		if !sharersRemain {
+			ownWorktreePaths = append(ownWorktreePaths, agentWorkspace)
+		}
 		if _, err := os.Stat(agentDir); err != nil {
 			continue
 		}
 
-		agentWorkspace := filepath.Join(agentDir, "workspace")
 		// Check if it's a worktree before trying to remove it.
 		// Skip when the refcount path already handled removal/detach —
 		// the shared worktree must not be removed while other sharers remain.
@@ -315,14 +340,20 @@ func DeleteAgentFiles(agentName string, projectPath string, removeBranch bool) (
 		}
 	}
 
-	// Prune stale worktree records from the repo. This handles cases where the
-	// workspace directory was removed (e.g. by os.RemoveAll above, or a previous
-	// incomplete cleanup) but the git worktree record was not properly unregistered.
+	// Remove stale records of this agent's own worktree. This handles cases
+	// where the workspace directory was removed (e.g. by the fallback removal
+	// above, or a previous incomplete cleanup) but its git worktree record
+	// was not unregistered. Only this agent's paths are targeted, and an
+	// entry whose directory still exists is left alone. There is no
+	// repository-wide prune: it would also drop the entries of other
+	// worktrees whose directories are missing or unreadable from this
+	// process (ptone/scion#5060).
 	if repoRoot != "" {
-		util.Debugf("delete: pruning stale worktrees in %s", repoRoot)
-		pruneStart := time.Now()
-		_ = util.PruneWorktreesIn(repoRoot)
-		util.Debugf("delete: prune completed in %v", time.Since(pruneStart))
+		for _, p := range ownWorktreePaths {
+			if err := util.RemoveWorktreeEntryIn(repoRoot, p); err != nil {
+				slog.Warn("delete: could not remove the worktree entry", "agent_id", agentName, "path", p, "error", err)
+			}
+		}
 
 		// If the branch wasn't already deleted via RemoveWorktree (e.g. because
 		// the workspace .git file didn't exist), try to delete it by name.
@@ -579,9 +610,13 @@ func (m *AgentManager) finishProvision(opts api.StartOptions, agentDir, agentHom
 		cfg.AuthSelectedType = opts.HarnessAuth
 		// cfg carries the environment values ProvisionAgent merged in for
 		// its caller; the file keeps the agent's own (ptone/scion#4561).
+		// Likewise for the default limits (ptone/scion#623).
 		persisted := cfg
 		if env, ok := readPersistedAgentEnvironment(agentDir); ok {
 			persisted = withEnvironment(cfg, env)
+		}
+		if limits, ok := readPersistedAgentLimits(agentDir); ok {
+			persisted = withLimits(persisted, limits)
 		}
 		cfgData, marshalErr := json.MarshalIndent(persisted, "", "  ")
 		if marshalErr == nil {
@@ -795,7 +830,7 @@ func (m *AgentManager) Reprovision(ctx context.Context, opts api.StartOptions) (
 	// provisioned, and recorded only after provisioning succeeds.
 	var sdChange *pendingSharedDirBackendChange
 	if len(opts.SharedDirBackendChanges) > 0 || opts.AllowEmptySharedDir {
-		c, err := prepareSharedDirBackendChange(projectDir, agentDir, opts)
+		c, err := prepareSharedDirBackendChange(ctx, projectDir, agentDir, opts)
 		if err != nil {
 			return nil, err
 		}
@@ -911,9 +946,12 @@ func (m *AgentManager) Provision(ctx context.Context, opts api.StartOptions) (*a
 	// it is started, and its first start records its run in place of this.
 	// If a runtime entry for the name still exists in this project (or the
 	// runtime cannot be listed), the files stay that entry's run's.
+	// The owner is recorded in the host-owned HostStateFile in agentDir
+	// (recordRunOwnerInAgentDir); a failure, including a record that would
+	// not land in agentDir, is logged and the provision carries on.
 	if opts.FreshProvision && opts.RunID == "" && !m.hasRuntimeEntry(ctx, opts) {
-		if err := SetSavedRunID(opts.Name, opts.ProjectPath, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
-			slog.Warn("Provision: failed to record the provision owner in agent-info.json",
+		if err := recordRunOwnerInAgentDir(RunOwnerTargetFor(opts), agentDir, ProvisionOwnerPrefix+uuid.NewString()); err != nil {
+			slog.Warn("Provision: failed to record the provision owner in the host state file",
 				"agent", opts.Name, "error", err)
 		}
 	}
@@ -2025,14 +2063,16 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 				if ref == nil || !ref.Optional {
 					return "", "", nil, &SkillResolutionError{URI: re.URI, Code: re.Code, Message: re.Message, RetryAfter: re.RetryAfter}
 				}
-				util.Debugf("provision: optional skill %q skipped: %s", re.URI, re.Message)
+				slog.WarnContext(ctx, "optional skill could not be resolved; skipped",
+					"skill_uri", re.URI, "code", re.Code, "reason", re.Message)
 			}
 
 			// S1: verify every requested URI has an outcome
 			for uri, ref := range requestedURIs {
 				if !resolvedURIs[uri] && !errorURIs[uri] {
 					if ref.Optional {
-						util.Debugf("provision: optional skill %q missing from resolver response, skipping", uri)
+						slog.WarnContext(ctx, "optional skill missing from resolver response; skipped",
+							"skill_uri", uri, "reason", "missing from resolver response")
 					} else {
 						return "", "", nil, fmt.Errorf(
 							"required skill %q missing from resolver response — S1 fail-closed", uri)
@@ -2051,8 +2091,24 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 					return "", "", nil, fmt.Errorf("harness does not support skills (no skills directory configured)")
 				}
 				skillsDest := filepath.Join(agentHome, skillsDir)
-				record, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
+				// The requested ref is authoritative for Optional: a resolver
+				// that does not copy it must not make an optional skill's
+				// install failure fail the create (#5020).
+				for i := range result.Resolved {
+					result.Resolved[i].Optional = requestedURIs[result.Resolved[i].URI].Optional
+				}
+				// Skipped optional skills are logged as warnings by
+				// installResolvedSkills.
+				record, _, err := installResolvedSkills(ctx, result.Resolved, skillsDest, agentHome)
 				if err != nil {
+					// A required skill's install failure is already a
+					// *SkillResolutionError naming the skill; return it as
+					// is so the broker reports it as a skill resolution
+					// failure rather than a generic runtime error.
+					var skillErr *SkillResolutionError
+					if errors.As(err, &skillErr) {
+						return "", "", nil, skillErr
+					}
 					return "", "", nil, fmt.Errorf("skill installation failed: %w", err)
 				}
 				record.Resolver = resolverName(resolver)
@@ -2236,24 +2292,20 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		}
 	}
 
-	// Hub operational agent_defaults: below the template and below inline
-	// config (both of which have already populated finalScionCfg by the merge
-	// at step 2b), above this broker's own settings.yaml defaults (applied
-	// immediately below). Same only-if-zero shape as that block, so the two
-	// tiers compose without either needing to know about the other.
+	// Limits: the template and inline config (both merged into
+	// finalScionCfg at step 2b) are the agent's own and are persisted; the
+	// hub operational agent_defaults and then this broker's settings.yaml
+	// defaults fill only what they leave unset (applyDefaultLimits). Those
+	// defaults are applied to the returned config here and again by Start
+	// on every start, never persisted (ptone/scion#623), so a later change
+	// to either reaches the agent at its next start.
 	//
-	// The placement IS the design. Move this after the settings block and the
-	// hub tier loses to settings.yaml; stamp these values hub-side into
-	// InlineConfig instead and they arrive as top-of-chain and beat a
-	// template's explicit max_turns — the inversion this channel exists to
-	// avoid (design §3.2.1, rejected alternative A5).
-	//
-	// The hub sends nothing in file mode, so this never fires there and
-	// file-mode behaviour is unchanged: a co-located broker reads the same
-	// settings.yaml and applies these values itself at the BOTTOM tier below.
-	// The rank of hub agent_defaults is therefore mode-dependent — bottom of
-	// the broker chain in file mode, just above broker settings in Postgres
-	// mode. That is deliberate; see design §3.2.4 and alternative A7.
+	// The hub sends nothing in file mode, so the hub tier never fires there
+	// and a co-located broker applies the same settings.yaml values itself
+	// at the bottom tier. The rank of hub agent_defaults is therefore
+	// mode-dependent — bottom of the broker chain in file mode, just above
+	// broker settings in Postgres mode. That is deliberate; see design
+	// §3.2.4 and alternative A7.
 	//
 	// Note the asymmetry for Resources: hub agent_defaults.resources ranks
 	// above default_resources ONLY. Broker profile resources and harness
@@ -2262,31 +2314,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// explicitly does not want hub defaults silently overriding broker
 	// profile resources). Resources are resolved by
 	// resolveEnvironmentResources below and again by Start, never persisted.
-	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && hd.MaxTurns > 0 {
-			finalScionCfg.MaxTurns = hd.MaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && hd.MaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = hd.MaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && hd.MaxDuration != "" {
-			finalScionCfg.MaxDuration = hd.MaxDuration
-		}
-	}
-
-	// Apply default limits from settings (hub global defaults) if not already set
-	// by template or inline config. Priority: agent > template > settings defaults.
-	if settings != nil && finalScionCfg != nil {
-		if finalScionCfg.MaxTurns == 0 && settings.DefaultMaxTurns > 0 {
-			finalScionCfg.MaxTurns = settings.DefaultMaxTurns
-		}
-		if finalScionCfg.MaxModelCalls == 0 && settings.DefaultMaxModelCalls > 0 {
-			finalScionCfg.MaxModelCalls = settings.DefaultMaxModelCalls
-		}
-		if finalScionCfg.MaxDuration == "" && settings.DefaultMaxDuration != "" {
-			finalScionCfg.MaxDuration = settings.DefaultMaxDuration
-		}
-	}
+	ownLimits := limitsOf(finalScionCfg)
+	applyDefaultLimits(ctx, finalScionCfg, settings)
 
 	// Resources: settings default_resources < hub agent_defaults.resources
 	// < profile resources < the agent's own < profile harness_overrides, then
@@ -2361,15 +2390,6 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	if explicitPullPolicy != "" {
 		info.ExplicitImagePullPolicy = explicitPullPolicy
 	}
-	// Record the run that owns these files (ptone/scion#2675): a delete
-	// naming a different run then leaves them alone. A provision with no run
-	// (provision-only, reprovision) keeps whatever run already owned them,
-	// since the files still belong to that run's runtime entry.
-	info.RunID = api.RunIDFromContext(ctx)
-	if info.RunID == "" {
-		info.RunID = readAgentInfoRunID(filepath.Join(agentHome, "agent-info.json"))
-	}
-
 	// Persist the broker-provisioned worktree's repo root now, if the ctx
 	// signal validates against workspaceSource: run.go's Start does not
 	// always run after this call returns — the hub's provision-only flow
@@ -2391,7 +2411,8 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// Start from current settings on every start, so a later settings or
 	// profile change reaches the agent on its next start (ptone/scion#4561).
 	// The returned config keeps the merged values (see the reload below).
-	persistedCfg := withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume))
+	// Likewise it carries only the agent's own limits (ptone/scion#623).
+	persistedCfg := withLimits(withEnvironment(finalScionCfg, provisionedAgentEnvironment(inlineCfg, workspaceVolume)), ownLimits)
 	agentCfgData, err := json.MarshalIndent(persistedCfg, "", "  ")
 	if err != nil {
 		return "", "", nil, fmt.Errorf("failed to marshal agent config: %w", err)
@@ -2415,6 +2436,46 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 		TemplateHash:          templateHash,
 	}); err != nil {
 		return "", "", nil, fmt.Errorf("failed to write image provenance: %w", err)
+	}
+	// Record the run that owns these files (ptone/scion#2675) in the
+	// host-owned HostStateFile in agentDir, never in agent-info.json
+	// (ptone/scion#4771): a delete naming a different run then leaves them
+	// alone. A provision with no run (provision-only, reprovision) leaves
+	// the record as it is, since the files still belong to that run's
+	// runtime entry (and copies a legacy agent-info.json runId into it,
+	// below). A failure (including a record that would not land in
+	// agentDir) is logged and the provision carries on, as for the
+	// agent-info.json write below.
+	ownerTarget := RunOwnerTarget{
+		ProjectPath:     projectPath,
+		AgentName:       agentName,
+		HubProjectID:    api.HubProjectIDFromContext(ctx),
+		SharedWorkspace: sharedWorkspace,
+	}
+	// Transitional (ptone/scion#4771): the agent-info.json rewrite below
+	// would drop a runId an older broker left there, so a provision
+	// without a run (reincarnate, provision-only) first copies it into the
+	// host state file (migrateLegacyRunOwner, which never replaces a run
+	// already recorded), keeping the owner base carried over. When the
+	// copy does not succeed, the rewrite keeps the value as it was read.
+	if runID := api.RunIDFromContext(ctx); runID != "" {
+		if err := recordRunOwnerInAgentDir(ownerTarget, agentDir, runID); err != nil {
+			slog.Warn("Provision: failed to record the run in the host state file; a delete for this run may leave the agent's files behind",
+				"agent", agentName, "run_id", runID, "error", err)
+		}
+	} else {
+		recorded, legacy, err := migrateLegacyRunOwner(ownerTarget, func(legacy string) (bool, error) {
+			return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, legacy)
+		})
+		if err != nil {
+			slog.Warn("Provision: failed to copy the legacy run ID into the host state file; keeping it in agent-info.json",
+				"agent", agentName, "error", err)
+		}
+		if legacy != "" && !recorded {
+			// Not copied: keep it as it was read, as updateSavedAgentInfo
+			// does, for the legacy fallback read.
+			info.RunID = legacy
+		}
 	}
 
 	// Now attach Info to the config object for return and for writing agent-info.json
@@ -2513,11 +2574,13 @@ func ProvisionAgent(ctx context.Context, agentName string, templateName string, 
 	// returned config carries the effective ones merged above (for the
 	// create response and other callers), which Start re-derives from
 	// current settings on every start (ptone/scion#4561).
+	// The same holds for the default limits (ptone/scion#623).
 	effectiveEnv := environmentOf(finalScionCfg)
+	effectiveLimits := limitsOf(finalScionCfg)
 	reloadTpl := &config.Template{Path: agentDir}
 	if updatedCfg, err := reloadTpl.LoadConfig(); err == nil {
 		updatedCfg.Info = finalScionCfg.Info // Re-attach info
-		finalScionCfg = withEnvironment(updatedCfg, effectiveEnv)
+		finalScionCfg = withLimits(withEnvironment(updatedCfg, effectiveEnv), effectiveLimits)
 	} else {
 		fmt.Fprintf(os.Stderr, "Warning: failed to reload agent config after harness provisioning: %v\n", err)
 	}
@@ -2789,45 +2852,9 @@ func (m *AgentManager) hasRuntimeEntry(ctx context.Context, opts api.StartOption
 }
 
 // ProvisionOwnerPrefix prefixes the owner a provision-only create records
-// in agent-info.json runId in place of a run (see Provision). It never
+// (RecordRunOwner) in place of a run (see Provision). It never
 // equals a run ID the hub sends.
 const ProvisionOwnerPrefix = "provision-"
-
-// readAgentInfoRunID returns the runId recorded in the agent-info.json at
-// path, or "" if the file is missing, unreadable or carries none.
-func readAgentInfoRunID(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	var info struct {
-		RunID string `json:"runId"`
-	}
-	if json.Unmarshal(data, &info) != nil {
-		return ""
-	}
-	return info.RunID
-}
-
-// GetSavedRunID returns the run ID recorded in the agent's agent-info.json:
-// the run that owns the agent's files (ptone/scion#2675). It is "" for an
-// agent provisioned before run IDs were recorded, one provisioned but never
-// started, or one whose agent-info.json is missing or unreadable.
-func GetSavedRunID(agentName string, projectPath string) string {
-	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
-		return info.RunID
-	}
-	return ""
-}
-
-// SetSavedRunID records runID in the agent's agent-info.json as the run that
-// owns the agent's files (ptone/scion#2675). It is a no-op when
-// agent-info.json does not exist yet.
-func SetSavedRunID(agentName string, projectPath string, runID string) error {
-	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.RunID = runID
-	})
-}
 
 func GetSavedProfile(agentName string, projectPath string) string {
 	if info := getSavedAgentInfo(agentName, projectPath); info != nil {
@@ -2875,6 +2902,32 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		return nil
 	}
 
+	// Transitional (ptone/scion#4771): a runId an older broker left here
+	// is copied into the host state file before this update drops it, and
+	// it is dropped only once the host state file records a run. This
+	// caller holds no hub project ID or shared-workspace flag, so the copy
+	// is made only where the record's dir is the agent's own state dir
+	// (config.ResolveAgentDir, holding a regular scion-agent.json, which a
+	// shared-workspace agent's in-project dir never does). Otherwise, or
+	// when the copy fails, the value is left in place for the legacy
+	// fallback read; it is never written here.
+	ownerTarget := RunOwnerTarget{ProjectPath: projectPath, AgentName: agentName}
+	ownerRecorded, legacyRun, migrateErr := migrateLegacyRunOwner(ownerTarget, func(runID string) (bool, error) {
+		agentDir := config.ResolveAgentDir(projectDir, agentName)
+		if fi, err := os.Stat(filepath.Join(agentDir, "scion-agent.json")); err != nil || !fi.Mode().IsRegular() {
+			return false, fmt.Errorf("%w: %s holds no scion-agent.json", errRunOwnerDirMismatch, agentDir)
+		}
+		return recordLegacyRunOwnerInAgentDir(ownerTarget, agentDir, runID)
+	})
+	if migrateErr != nil {
+		// Expected on every update of such an agent until it next starts
+		// (for example a hub-managed marker project, which this caller
+		// cannot resolve without the hub project ID), so not a warning.
+		slog.Debug("Did not copy the legacy agent-info.json run ID into the host state file; keeping it in agent-info.json",
+			"agent", agentName, "error", migrateErr)
+	}
+	keepLegacyRun := legacyRun != "" && !ownerRecorded
+
 	// The read, update and write run under the agent-info lock, so a
 	// concurrent writer in the container (sciontool) or another host
 	// process cannot lose this update or have its own lost (#4681).
@@ -2897,6 +2950,12 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 		}
 
 		update(&info)
+		// The files-owner run lives in HostStateFile (ptone/scion#4771);
+		// a runId left by an older broker is dropped once HostStateFile
+		// records a run (see above), and otherwise left as it was read.
+		if !keepLegacyRun || info.RunID != legacyRun {
+			info.RunID = ""
+		}
 
 		newData, err := marshalAgentInfoKeepUnknown(data, &info)
 		if err != nil {
@@ -2907,6 +2966,17 @@ func updateSavedAgentInfo(agentName string, projectPath string, update func(*api
 	})
 }
 
+// ErrAgentInfoNotDurable marks a writeAgentInfoFile failure after the
+// rename: the new content is in place, but syncing the parent directory
+// failed, so the change may not survive a crash. Repeating the write is
+// safe.
+var ErrAgentInfoNotDurable = errors.New("agent file replaced but the change may not be durable")
+
+// writeAgentInfoFile replaces path with data through a temp file in the
+// same directory, syncing the contents before the rename and the parent
+// directory after it. An error wrapping ErrAgentInfoNotDurable means the
+// content was replaced but may not survive a crash; any other error means
+// path was left untouched.
 func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
@@ -2924,10 +2994,60 @@ func writeAgentInfoFile(path string, data []byte, mode os.FileMode) error {
 	if _, err := tmp.Write(data); err != nil {
 		return err
 	}
+	// Flush the contents before the rename, so a crash cannot leave a
+	// truncated file under the final name (#4821).
+	if err := agentInfoFileSync(tmp); err != nil {
+		return err
+	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	// Sync the parent directory so the rename itself survives a crash.
+	dir := filepath.Dir(path)
+	if err := syncAgentInfoDir(dir); err != nil {
+		return fmt.Errorf("%w: sync directory %s: %w", ErrAgentInfoNotDurable, dir, err)
+	}
+	return nil
+}
+
+// Test seams for writeAgentInfoFile's disk syncs.
+var (
+	// agentInfoFileSync flushes the temp file's contents to disk.
+	agentInfoFileSync = func(f *os.File) error { return f.Sync() }
+	// agentInfoDirSync flushes the parent directory, opened by
+	// syncAgentInfoDir, after the rename.
+	agentInfoDirSync = func(d *os.File) error { return d.Sync() }
+	// agentInfoDirOpen opens the parent directory for that sync.
+	agentInfoDirOpen = openAgentInfoDir
+)
+
+// syncAgentInfoDir fsyncs dir, as pkg/config's syncDir does. Windows cannot
+// fsync a directory, so it is a no-op there. A directory that cannot be
+// opened, or whose filesystem reports directory fsync as unsupported
+// (EINVAL, ENOTSUP, errors.ErrUnsupported), is skipped: the new content is
+// already in place.
+func syncAgentInfoDir(dir string) error {
+	if goruntime.GOOS == "windows" {
+		return nil
+	}
+	d, err := agentInfoDirOpen(dir)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = d.Close() }()
+	if err := agentInfoDirSync(d); err != nil && !isDirSyncUnsupported(err) {
+		return err
+	}
+	return nil
+}
+
+// isDirSyncUnsupported reports whether err is a filesystem saying it does
+// not support fsync on a directory.
+func isDirSyncUnsupported(err error) bool {
+	return errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) || errors.Is(err, errors.ErrUnsupported)
 }
 
 // provisionedWorktreeStateFile is the broker-owned file that persists the
@@ -3040,7 +3160,7 @@ func UpdateAgentConfig(agentName string, projectPath string, status string, runt
 // writer never sees or keeps only half of the soft-delete mark.
 func MarkAgentSoftDeleted(agentName string, projectPath string, deletedAt time.Time) error {
 	return updateSavedAgentInfo(agentName, projectPath, func(info *api.AgentInfo) {
-		info.Phase = "deleted"
+		info.Phase = softDeletedPhase
 		if !deletedAt.IsZero() {
 			info.DeletedAt = deletedAt
 		}
@@ -3073,6 +3193,10 @@ func UpdateAgentDeletedAt(agentName string, projectPath string, deletedAt time.T
 //     worktreeMayHoldWork; only worktrees that belong to the project
 //     repository are inspected, and anything else that may hold data, or
 //     cannot be checked, is kept.
+//   - A dir kept for its workspace records when and why in a marker file;
+//     once the soft-delete retention window has passed, it is removed
+//     without inspecting the workspace (ptone/scion#4742, see
+//     kept_agent_dir.go).
 //   - Any other dir with no home state is stale: it is removed, and
 //     worktrees are pruned, so the caller re-provisions it.
 func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace string) error {
@@ -3117,10 +3241,22 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err := os.WriteFile(filepath.Join(agentDir, "scion-agent.json"), data, 0644); err != nil {
 			return fmt.Errorf("failed to write agent config: %w", err)
 		}
+		// The dir is live again: a marker from an earlier keep no longer
+		// applies (ptone/scion#4742).
+		clearKeptAgentDirMarker(agentName, agentDir)
 		slog.Info("GetAgent: agent directory had no config file; wrote a minimal scion-agent.json from agent-info.json and kept the home",
 			"agent", agentName, "agent_dir", agentDir, "home", populatedHome,
 			"template", info.Template, "harness_config", info.HarnessConfig)
 		return nil
+	}
+
+	// A directory kept earlier (see recordKeptAgentDir) whose soft-delete
+	// retention window has passed is removed without inspecting its
+	// workspace, and the caller re-provisions it (ptone/scion#4742).
+	if hasKeptAgentDirMarker(agentDir) {
+		if retention := keptAgentDirRetention(); retention > 0 && purgeExpiredKeptAgentDir(agentName, agentDir, agentHome, retention) {
+			return nil
+		}
 	}
 
 	// No home state, but the in-dir workspace may still hold work
@@ -3145,11 +3281,13 @@ func handleAgentDirWithoutConfig(agentName, agentDir, agentHome, agentWorkspace 
 		if err != nil {
 			slog.Warn("GetAgent: agent workspace could not be checked for uncommitted work; keeping the agent directory",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace, "error", err)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceCheckFailed)
 			return fmt.Errorf("%w: agent %q state directory kept: could not check the agent's workspace for uncommitted work; check its ownership and permissions, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if hasWork {
 			slog.Warn("GetAgent: agent directory has no config file but its workspace may hold work; keeping it",
 				"agent", agentName, "agent_dir", agentDir, "workspace", inDirWorkspace)
+			recordKeptAgentDir(agentName, agentDir, keptReasonWorkspaceMayHoldWork)
 			return fmt.Errorf("%w: agent %q state directory kept: its workspace may hold work (files, uncommitted changes, a standalone clone, or commits on no branch); save it, or delete and re-create the agent to reset it", config.ErrAgentStateConflict, agentName)
 		}
 		if prunePath == "" && inspected {
@@ -3703,8 +3841,13 @@ func worktreeGitEnv() []string {
 // which is unrelated to the agent (ptone/scion#4511).
 func removeAgentDirAndPruneWorktrees(agentDir, agentWorkspace string, prune bool) {
 	// chmod to ensure we can remove root-owned files left by containers.
+	// Links are skipped, so their targets are left unchanged; RemoveAll
+	// removes the link itself.
 	_ = filepath.WalkDir(agentDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
 			return nil
 		}
 		_ = os.Chmod(path, 0755)
@@ -3822,6 +3965,12 @@ func GetAgent(ctx context.Context, agentName string, templateName string, agentI
 	if !sharedWorkspace {
 		agentWorkspace = filepath.Join(agentDir, "workspace")
 	}
+
+	// Remove other agents' kept directories in the same agents root whose
+	// soft-delete retention window has passed (ptone/scion#4742).
+	sweepExpiredKeptAgentDirs(filepath.Dir(agentDir), agentName, func(name string) string {
+		return config.GetAgentHomePath(projectDir, name)
+	})
 
 	// Handle an agent directory that exists but has no config file. See
 	// handleAgentDirWithoutConfig: a populated home is kept (adopted from

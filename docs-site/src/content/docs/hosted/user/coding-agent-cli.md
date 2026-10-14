@@ -48,8 +48,8 @@ token (see step 2), token scopes limit what the agent can do on the Hub, and the
 without `agent:delete` cannot delete agents through the Hub.
 
 :::caution[Token scopes do not limit local actions]
-Local actions, such as `scion clean` and any command run with `--no-hub` (for example
-`scion delete --no-hub`), act on the local machine with the file permissions of the user the
+Local actions, such as `scion clean` and `scion delete --cleanup-only --force` (which removes an
+agent's local files without checking the Hub), act on the local machine with the file permissions of the user the
 CLI runs as, and token scopes don't limit them. To keep the agent away from local projects and
 agents, run it as a dedicated OS user or with an isolated `HOME` (see step 2).
 :::
@@ -90,7 +90,8 @@ broker, withdrawing it from a project or unlinking a project. `--non-interactive
 for confirmation at all. Neither flag makes a destructive action safe. Token scopes limit what
 the agent can do on the Hub, and only when the CLI runs in an environment with no stored login.
 They do not limit local actions: `scion clean` removes the local `.scion` directory and
-`scion delete --no-hub` deletes local agents, limited only by what the CLI's OS user can reach.
+`scion delete --cleanup-only --force` removes an agent's local worktree, directory and branch,
+limited only by what the CLI's OS user can reach.
 :::
 
 Pick one of these setups:
@@ -99,13 +100,12 @@ Pick one of these setups:
   every confirmation answers No, the command stops, and stderr names `--yes`. The agent reports
   this and you decide whether to run the command yourself or let the agent re-run it with
   `--yes` for that one action. This does not cover commands that do not ask, such as
-  `scion delete`. Leave their scopes out of the token to stop them on the Hub; with `--no-hub`
-  they act locally, where token scopes don't apply.
+  `scion delete`. Leave their scopes out of the token to stop them on the Hub.
 - **`--non-interactive`, with a narrow token and an isolated environment.** Pass
   `--non-interactive` only when the token lacks the scopes for Hub actions you would not confirm
   yourself, for example no `agent:delete`, and the CLI runs with no stored login. Every Hub
   confirmation the token allows is then answered Yes. Local confirmations are answered Yes too:
-  local actions (`scion clean`, and commands with `--no-hub`) act on the local machine with the
+  local actions (`scion clean`, `scion delete --cleanup-only`) act on the local machine with the
   user's file permissions, and token scopes don't limit them. So use this setup only where the
   agent's OS user or `HOME` holds no local project or agents it must not remove, such as the
   dedicated OS user or isolated `HOME` from step 2. A prompt with no single answer, such as

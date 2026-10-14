@@ -346,10 +346,11 @@ func maskedTelemetryHeaderNames(t *config.V1TelemetryConfig) []string {
 // A masked value is restored only when cloudUnchanged is true: the caller
 // reports whether the telemetry.cloud object this save would store, apart
 // from headers, equals the one stored now (telemetryCloudUnchanged), each
-// computed with the write's own semantics (the DB-mode merge, or the
-// file-mode replace). A masked header with no stored value, or with a
-// stored value that is itself the placeholder, is an error too. The caller
-// answers 400 to an error.
+// computed with the write's own semantics (the DB-mode merge,
+// mergeSectionOnCurrent, or the file-mode merge, mergeSettingsSection;
+// both merge telemetry key by key). A masked header with no stored value,
+// or with a stored value that is itself the placeholder, is an error too.
+// The caller answers 400 to an error.
 func restoreMaskedTelemetryHeaders(incoming, stored *config.V1TelemetryConfig, cloudUnchanged bool) error {
 	names := maskedTelemetryHeaderNames(incoming)
 	if len(names) == 0 {
@@ -502,11 +503,32 @@ func restoreMaskedTelemetryHeadersInDoc(next, cur json.RawMessage) (json.RawMess
 }
 
 // telemetryCloudUnchangedFile reports, for a file-mode save, whether the
-// telemetry.cloud object the save would write (the request's telemetry
-// replaces the stored one whole) equals, apart from headers, the stored
-// one.
-func telemetryCloudUnchangedFile(req, stored *config.V1TelemetryConfig) bool {
-	next, err1 := json.Marshal(req)
+// telemetry.cloud object the save would write equals, apart from headers,
+// the stored one. raw is the settings.yaml document, stored its decoded
+// telemetry section, req the request's telemetry and rawSection the body's
+// telemetry object. The object written is the stored section merged with
+// the request (mergeSettingsSection, as the write does), so a member the
+// request omits keeps its stored value and does not count as a change. The
+// merge runs on a copy; raw is not modified.
+func telemetryCloudUnchangedFile(raw map[string]interface{}, req *config.V1TelemetryConfig, rawSection json.RawMessage, stored *config.V1TelemetryConfig) bool {
+	scratch := map[string]interface{}{}
+	if t, ok := raw["telemetry"]; ok && t != nil {
+		data, err := yamlv3.Marshal(t)
+		if err != nil {
+			return false
+		}
+		var c interface{}
+		if err := yamlv3.Unmarshal(data, &c); err != nil {
+			return false
+		}
+		scratch["telemetry"] = c
+	}
+	mergeSettingsSection(scratch, "telemetry", req, rawSection)
+	merged, err := telemetryConfigFromRaw(scratch)
+	if err != nil {
+		return false
+	}
+	next, err1 := json.Marshal(merged)
 	cur, err2 := json.Marshal(stored)
 	return err1 == nil && err2 == nil && telemetryCloudUnchanged(next, cur)
 }

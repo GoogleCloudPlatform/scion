@@ -258,3 +258,92 @@ func TestArtifactListVersionsPages(t *testing.T) {
 		t.Errorf("ListVersions = %+v, %v", vs, err)
 	}
 }
+
+// TestArtifactListScopeShared: Scope and Shared map to the hub's scope and
+// shared query parameters (ptone/scion#4579), and the list rows carry the
+// access the hub reports.
+func TestArtifactListScopeShared(t *testing.T) {
+	var query string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query = r.URL.Query().Encode()
+		_, _ = io.WriteString(w, `{"artifacts":[{"id":"id-1","access":"shared","sharedWithScope":true}]}`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	got, err := c.Artifacts().List(context.Background(), &ListArtifactsOptions{Scope: "proj-1", Shared: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if query != "mine=1&scope=proj-1&shared=1" {
+		t.Errorf("query = %q", query)
+	}
+	if len(got.Artifacts) != 1 || got.Artifacts[0].Access != "shared" || !got.Artifacts[0].SharedWithScope {
+		t.Errorf("rows = %+v", got.Artifacts)
+	}
+}
+
+// TestArtifactMintView: MintView posts to the version's view route once
+// and decodes the capability path and expiry (ptone/scion#4572).
+func TestArtifactMintView(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/artifacts/id-1/versions/3/view" {
+			t.Errorf("request %s %s", r.Method, r.URL.Path)
+		}
+		_, _ = io.WriteString(w, `{"url":"/api/v1/artifacts/view/cap/index.html","expiresAt":"2026-10-13T07:00:00Z","remoteImages":true}`)
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	v, err := c.Artifacts().MintView(context.Background(), "id-1", 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.URL != "/api/v1/artifacts/view/cap/index.html" || !v.RemoteImages || v.ExpiresAt.IsZero() || calls.Load() != 1 {
+		t.Errorf("view = %+v, calls %d", v, calls.Load())
+	}
+}
+
+// TestArtifactGrantCalls: ListGrants, PutGrant and DeleteGrant use the
+// grants routes with the hub's request and response shapes
+// (ptone/scion#4579).
+func TestArtifactGrantCalls(t *testing.T) {
+	var seen []string
+	var putBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.Method+" "+r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/artifacts/id-1/grants":
+			_, _ = io.WriteString(w, `{"grants":[{"id":"g1","subjectKind":"scope","subjectRef":"proj-1","permission":"read","home":true}],"crossProjectSharing":true}`)
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/artifacts/id-1/grants":
+			_ = json.NewDecoder(r.Body).Decode(&putBody)
+			w.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(w, `{"grant":{"id":"g2","subjectKind":"principal","subjectRef":"user:u1","permission":"write"}}`)
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/artifacts/id-1/grants/g 2":
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	c, _ := New(srv.URL)
+	ctx := context.Background()
+	list, err := c.Artifacts().ListGrants(ctx, "id-1")
+	if err != nil || len(list.Grants) != 1 || !list.Grants[0].Home || list.Grants[0].SubjectKind != "scope" || !list.CrossProjectSharing {
+		t.Fatalf("ListGrants = %+v, %v", list, err)
+	}
+	g, err := c.Artifacts().PutGrant(ctx, "id-1", &ArtifactGrantRequest{SubjectKind: "principal", SubjectRef: "user:u1", Permission: "write"})
+	if err != nil || g.ID != "g2" || g.Permission != "write" {
+		t.Fatalf("PutGrant = %+v, %v", g, err)
+	}
+	if putBody["subjectKind"] != "principal" || putBody["subjectRef"] != "user:u1" || putBody["permission"] != "write" {
+		t.Errorf("put body = %v", putBody)
+	}
+	if err := c.Artifacts().DeleteGrant(ctx, "id-1", "g 2"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"GET /api/v1/artifacts/id-1/grants", "POST /api/v1/artifacts/id-1/grants", "DELETE /api/v1/artifacts/id-1/grants/g 2"}
+	if strings.Join(seen, "|") != strings.Join(want, "|") {
+		t.Errorf("requests = %q", seen)
+	}
+}

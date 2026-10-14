@@ -406,7 +406,7 @@ func TestDeleteAgent_RunIDCancelsOnlyItsOwnInFlightStart(t *testing.T) {
 	}
 }
 
-func TestLaunchRegistry_CancelLocalForRun(t *testing.T) {
+func TestLaunchRegistry_CancelLocalFor_RunID(t *testing.T) {
 	key := launchKey{ProjectID: "p1", Slug: "a"}
 	for _, tc := range []struct {
 		name, recRun, deleteRun string
@@ -423,20 +423,20 @@ func TestLaunchRegistry_CancelLocalForRun(t *testing.T) {
 			rec := newLaunchRecord("L1", "a", "create", "", time.Time{}, func() { cancelled = true })
 			rec.RunID = tc.recRun
 			r.Begin(key, rec)
-			woke := r.CancelLocalForRun(key, tc.deleteRun)
+			woke := r.CancelLocalFor(key, "", tc.deleteRun)
 			if cancelled != tc.wantCancel {
 				t.Errorf("cancelled = %v, want %v", cancelled, tc.wantCancel)
 			}
 			if woke != tc.wantCancel {
-				t.Errorf("CancelLocalForRun returned %v, want %v", woke, tc.wantCancel)
+				t.Errorf("CancelLocalFor returned %v, want %v", woke, tc.wantCancel)
 			}
 		})
 	}
-	if newLaunchRegistry().CancelLocalForRun(key, "r1") {
-		t.Error("CancelLocalForRun returned true with no launch registered")
+	if newLaunchRegistry().CancelLocalFor(key, "", "r1") {
+		t.Error("CancelLocalFor returned true with no launch registered")
 	}
 	var nilReg *launchRegistry
-	if nilReg.CancelLocalForRun(key, "r1") {
+	if nilReg.CancelLocalFor(key, "", "r1") {
 		t.Error("nil registry returned true")
 	}
 }

@@ -86,7 +86,8 @@ type EffectiveMembershipResult struct {
 // active-time checks.
 //
 // Membership means holding any active project-scoped role binding, built-in
-// (owner/admin/member) or custom, either directly or via an effective group.
+// (owner/admin/member) or custom, of a role that confers membership (not
+// project-visitor), either directly or via an effective group.
 // This matches ProjectMembershipEvidence. A group-bound owner role is the one
 // exception: groups never confer owner, and such a binding is ignored. An
 // owner counts as a member; ownership does not permit piercing a target's
@@ -103,15 +104,22 @@ type EffectiveMembershipResult struct {
 // highest built-in tier held and is "" when membership comes only from
 // custom roles.
 func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID string) EffectiveMembershipResult {
+	return checkEffectiveMembership(ctx, s.store, s.authzService, userID, projectID)
+}
+
+// checkEffectiveMembership is CheckEffectiveMembership over an explicit store
+// and authorization service, so the dispatcher's test-admin secret clamp
+// uses the same membership rule as the runtime material precheck.
+func checkEffectiveMembership(ctx context.Context, st store.Store, authz *AuthzService, userID, projectID string) EffectiveMembershipResult {
 	now := time.Now()
 
 	// 1. Direct user bindings.
-	directBindings, err := s.store.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
+	directBindings, err := st.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalUser, userID)
 	if err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("list direct bindings for user %s: %w", userID, err)}
 	}
 	// Unclamped read: apply the test identity clamps (fail closed).
-	if directBindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, directBindings); err != nil {
+	if directBindings, err = clampBindingsForUser(ctx, st, authz, userID, directBindings); err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
 	}
 
@@ -120,7 +128,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if rd, ok := rdCache[rdID]; ok {
 			return rd, nil
 		}
-		rd, err := s.store.GetRoleDefinition(ctx, rdID)
+		rd, err := st.GetRoleDefinition(ctx, rdID)
 		if err != nil {
 			return nil, fmt.Errorf("get role definition %s: %w", rdID, err)
 		}
@@ -144,8 +152,13 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		if rdErr != nil {
 			return EffectiveMembershipResult{Err: rdErr}
 		}
-		// Any active project binding confers membership; Role tracks only
-		// the built-in tier.
+		// A role that does not confer membership (project-visitor) is
+		// ignored.
+		if !rd.ConfersProjectMembership() {
+			continue
+		}
+		// Any other active project binding confers membership; Role
+		// tracks only the built-in tier.
 		isMember = true
 		if store.IsBuiltInProjectMembershipRole(rd.Name) {
 			bestRole = higherProjectRole(bestRole, rd.Name)
@@ -153,7 +166,7 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 	}
 
 	// 2. Group-derived bindings.
-	groupIDs, err := s.store.GetEffectiveGroups(ctx, userID)
+	groupIDs, err := st.GetEffectiveGroups(ctx, userID)
 	if err != nil {
 		return EffectiveMembershipResult{Err: fmt.Errorf("get effective groups for user %s: %w", userID, err)}
 	}
@@ -162,11 +175,11 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 		for _, gid := range groupIDs {
 			principals = append(principals, store.PrincipalRef{Type: store.RoleBindingPrincipalGroup, ID: gid})
 		}
-		groupBindings, err := s.store.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
+		groupBindings, err := st.ListRoleBindingsForPrincipals(ctx, principals, nil, nil)
 		if err != nil {
 			return EffectiveMembershipResult{Err: fmt.Errorf("list group bindings: %w", err)}
 		}
-		if groupBindings, err = clampBindingsForUser(ctx, s.store, s.authzService, userID, groupBindings); err != nil {
+		if groupBindings, err = clampBindingsForUser(ctx, st, authz, userID, groupBindings); err != nil {
 			return EffectiveMembershipResult{Err: fmt.Errorf("test identity clamp for user %s: %w", userID, err)}
 		}
 		for _, rb := range groupBindings {
@@ -180,8 +193,12 @@ func (s *Server) CheckEffectiveMembership(ctx context.Context, userID, projectID
 			if rdErr != nil {
 				return EffectiveMembershipResult{Err: rdErr}
 			}
-			// Groups can only confer admin or member, never owner.
-			if rd.Name == store.ProjectRoleOwner {
+			// Groups can only confer admin or member, never owner, and a
+			// role that does not confer membership is ignored. That second
+			// check is defensive: the store binds such a role only to a user
+			// principal (CreateVisitorRoleBinding), so no group binding of
+			// one is written today.
+			if rd.Name == store.ProjectRoleOwner || !rd.ConfersProjectMembership() {
 				continue
 			}
 			isMember = true

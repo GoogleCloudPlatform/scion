@@ -234,6 +234,26 @@ func readyVersion(w http.ResponseWriter, r *http.Request, b backend, a *Artifact
 	return v, true
 }
 
+// scopeDeleted reports whether a's home project no longer exists, by the
+// rule the list marks rows with (markDeletedScopes): only a project scope
+// can be deleted, and a project the ScopeChecker does not answer for, or a
+// host without one, counts as existing. A failed check is logged and
+// reported as false: the field is advisory, and the GET it rides on must
+// not fail over it.
+func (s *Service) scopeDeleted(ctx context.Context, a *Artifact) bool {
+	checker, ok := s.host.(ScopeChecker)
+	if !ok || a.ScopeKind != ScopeKindProject {
+		return false
+	}
+	exists, err := checker.ScopesExist(ctx, []string{a.ScopeRef})
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: home project check failed", "artifact", a.ID, "error", err)
+		return false
+	}
+	e, known := exists[a.ScopeRef]
+	return known && !e
+}
+
 // handleGetArtifact serves the metadata of an artifact and its current
 // version.
 func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id string) {
@@ -241,7 +261,7 @@ func (s *Service) handleGetArtifact(w http.ResponseWriter, r *http.Request, id s
 	if !ok {
 		return
 	}
-	resp := ArtifactResponse{Artifact: artifactInfo(a)}
+	resp := ArtifactResponse{Artifact: artifactInfo(a), ScopeDeleted: s.scopeDeleted(r.Context(), a)}
 	if !s.capabilities(w, r, b, a, &resp) {
 		return
 	}

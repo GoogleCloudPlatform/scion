@@ -50,10 +50,6 @@ func (m *mockTemplateService) Create(ctx context.Context, req *hubclient.CreateT
 	return nil, nil
 }
 
-func (m *mockTemplateService) Update(ctx context.Context, templateID string, req *hubclient.UpdateTemplateRequest) (*hubclient.Template, error) {
-	return nil, nil
-}
-
 func (m *mockTemplateService) Delete(ctx context.Context, templateID string) error {
 	return nil
 }
@@ -70,7 +66,7 @@ func (m *mockTemplateService) RequestUploadURLs(ctx context.Context, templateID 
 	return nil, nil
 }
 
-func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash string) (*hubclient.Template, error) {
+func (m *mockTemplateService) Finalize(ctx context.Context, templateID string, manifest *hubclient.TemplateManifest, expectedContentHash, uploadID string) (*hubclient.Template, error) {
 	return nil, nil
 }
 
@@ -123,6 +119,7 @@ func (m *mockHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService 
 func (m *mockHubClient) Messages() hubclient.MessageService                               { return nil }
 func (m *mockHubClient) Messaging() hubclient.MessagingService                            { return nil }
 func (m *mockHubClient) Conversations() hubclient.ConversationService                     { return nil }
+func (m *mockHubClient) ThreadGroups() hubclient.ThreadGroupService                       { return nil }
 func (m *mockHubClient) AllowList() hubclient.AllowListService                            { return nil }
 func (m *mockHubClient) Invites() hubclient.InviteService                                 { return nil }
 func (m *mockHubClient) Skills() hubclient.SkillService                                   { return nil }
@@ -132,6 +129,9 @@ func (m *mockHubClient) ProjectInjectedSkills(projectID string) hubclient.Inject
 }
 func (m *mockHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { return nil }
 func (m *mockHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
+	return nil
+}
+func (m *mockHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
 	return nil
 }
 func (m *mockHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }

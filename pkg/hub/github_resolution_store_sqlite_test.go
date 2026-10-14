@@ -38,7 +38,7 @@ func TestGitHubResolutionStore_GetPut(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	err = client.Schema.Create(ctx)
+	err = entc.AutoMigrate(ctx, client)
 	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
@@ -87,7 +87,7 @@ func TestGitHubResolutionStore_Put_UpsertUpdatesExistingRow(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	err = client.Schema.Create(ctx)
+	err = entc.AutoMigrate(ctx, client)
 	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
@@ -149,7 +149,7 @@ func TestGitHubResolutionStore_Put_ConflictTargetInSQL(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	require.NoError(t, client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 	entry := GitHubCacheEntry{
@@ -189,7 +189,7 @@ func TestGitHubResolutionStore_Expiration(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	err = client.Schema.Create(ctx)
+	err = entc.AutoMigrate(ctx, client)
 	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
@@ -221,7 +221,7 @@ func TestGitHubResolutionStore_PurgeExpired(t *testing.T) {
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	err = client.Schema.Create(ctx)
+	err = entc.AutoMigrate(ctx, client)
 	require.NoError(t, err)
 
 	store := NewGitHubResolutionStore(client)
@@ -283,7 +283,7 @@ func TestGitHubResolutionStore_PurgeExpired_KeepsStaleServableBranchRow(t *testi
 	defer client.Close() //nolint:errcheck
 
 	ctx := context.Background()
-	require.NoError(t, client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 
@@ -348,7 +348,7 @@ func TestGitHubResolutionStore_StaleCutoff_AccountsForTTLJitter(t *testing.T) {
 	require.NoError(t, err)
 	defer client.Close() //nolint:errcheck
 	ctx := context.Background()
-	require.NoError(t, client.Schema.Create(ctx))
+	require.NoError(t, entc.AutoMigrate(ctx, client))
 
 	store := NewGitHubResolutionStore(client)
 	cutoff := time.Now().Add(agent.MaxJitteredTTL(agent.DefaultResolutionCacheTTL) - agent.MaxResolutionStaleAge)

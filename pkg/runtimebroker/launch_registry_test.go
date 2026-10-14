@@ -15,7 +15,6 @@
 package runtimebroker
 
 import (
-	"context"
 	"testing"
 	"time"
 )
@@ -70,7 +69,7 @@ func TestLaunchRegistry_BeginReplacesAndCancelsOld(t *testing.T) {
 	}
 }
 
-func TestLaunchRegistry_CancelLocal_WakesTheHeldRecord(t *testing.T) {
+func TestLaunchRegistry_CancelLocalFor_WakesTheHeldRecord(t *testing.T) {
 	r := newLaunchRegistry()
 	key := launchKey{ProjectID: "p1", Slug: "agent-1"}
 
@@ -80,13 +79,13 @@ func TestLaunchRegistry_CancelLocal_WakesTheHeldRecord(t *testing.T) {
 
 	// A key with no held record is a harmless no-op (design: "optimisation
 	// only").
-	r.CancelLocal(launchKey{ProjectID: "p1", Slug: "no-such-agent"})
+	r.CancelLocalFor(launchKey{ProjectID: "p1", Slug: "no-such-agent"}, "", "")
 
-	r.CancelLocal(key)
+	r.CancelLocalFor(key, "", "")
 	select {
 	case <-cancelled:
 	case <-time.After(time.Second):
-		t.Fatal("CancelLocal did not cancel the held record")
+		t.Fatal("CancelLocalFor did not cancel the held record")
 	}
 }
 
@@ -111,58 +110,6 @@ func TestLaunchRegistry_FinishOnlyRemovesIfStillCurrent(t *testing.T) {
 	r.mu.Unlock()
 	if current != newRec {
 		t.Fatalf("Finish(old) must not remove the newer current record")
-	}
-}
-
-func TestWaitSuperseded_NilIsNoOp(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	WaitSuperseded(ctx, nil) // must return immediately, not block for the ctx timeout
-}
-
-func TestWaitSuperseded_ReturnsOnCtxDoneIfNeverClosed(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
-	defer cancel()
-	never := make(chan struct{})
-	start := time.Now()
-	WaitSuperseded(ctx, never)
-	if time.Since(start) > time.Second {
-		t.Fatal("WaitSuperseded did not respect ctx as a backstop")
-	}
-}
-
-// TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish exercises the
-// exact Begin+WaitSuperseded sequence runLaunch uses (design §3.8.2 step
-// 5.2, F5): a new launch's marker write must wait for the superseded
-// record's own cleanup (Finish) to complete, not just for Begin to return.
-func TestLaunchRegistry_BeginThenWaitSupersededBlocksUntilFinish(t *testing.T) {
-	r := newLaunchRegistry()
-	key := launchKey{ProjectID: "p1", Slug: "agent-1"}
-
-	oldRec := newLaunchRecord("L1", "agent-id-1", "create", "", time.Now().Add(time.Minute), func() {})
-	r.Begin(key, oldRec)
-
-	newRec := newLaunchRecord("L2", "agent-id-1", "create", "", time.Now().Add(time.Minute), func() {})
-	supersededDone := r.Begin(key, newRec)
-
-	waited := make(chan struct{})
-	go func() {
-		WaitSuperseded(context.Background(), supersededDone)
-		close(waited)
-	}()
-
-	select {
-	case <-waited:
-		t.Fatal("WaitSuperseded returned before the superseded launch finished cleaning up")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	r.Finish(key, oldRec)
-
-	select {
-	case <-waited:
-	case <-time.After(time.Second):
-		t.Fatal("WaitSuperseded did not return after the superseded launch's Finish")
 	}
 }
 

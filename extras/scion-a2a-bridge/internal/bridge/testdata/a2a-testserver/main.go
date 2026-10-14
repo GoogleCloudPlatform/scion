@@ -281,6 +281,7 @@ func (m *mockProdHubClient) Schedules(string) hubclient.ScheduleService         
 func (m *mockProdHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService { return nil }
 func (m *mockProdHubClient) Messages() hubclient.MessageService                     { return nil }
 func (m *mockProdHubClient) Conversations() hubclient.ConversationService           { return nil }
+func (m *mockProdHubClient) ThreadGroups() hubclient.ThreadGroupService             { return nil }
 func (m *mockProdHubClient) AllowList() hubclient.AllowListService                  { return nil }
 func (m *mockProdHubClient) Invites() hubclient.InviteService                       { return nil }
 func (m *mockProdHubClient) Skills() hubclient.SkillService                         { return nil }
@@ -290,6 +291,9 @@ func (m *mockProdHubClient) ProjectInjectedSkills(projectID string) hubclient.In
 }
 func (m *mockProdHubClient) UserInjectedSkills() hubclient.InjectedSkillsService { return nil }
 func (m *mockProdHubClient) ProjectPreStartHooks(projectID string) hubclient.ProjectPreStartHookService {
+	return nil
+}
+func (m *mockProdHubClient) ProjectVisitors(projectID string) hubclient.ProjectVisitorService {
 	return nil
 }
 func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService { return nil }

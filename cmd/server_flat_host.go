@@ -96,8 +96,9 @@ func newFlatInstanceRuntime(_ context.Context, inst config.V1RuntimeBrokerInstan
 		if err != nil {
 			return nil, err // a configuration error: the file, its parse or its context
 		}
-		rt, err := runtime.NewKubernetesRuntimeFromClient(client, config.V1RuntimeConfig{
-			Type: "kubernetes", Context: t.Context, Namespace: t.Namespace})
+		// The instance's own GKE mode and default priority class apply;
+		// cross-namespace listing never does (one cluster and namespace).
+		rt, err := runtime.NewKubernetesRuntimeFromClient(client, t.KubernetesRuntimeConfig())
 		if err != nil {
 			// The connection check failed: the cluster cannot be identified.
 			return nil, fmt.Errorf("%w: Cannot identify Kubernetes execution scope: the API server is unreachable or the request failed; "+
@@ -697,19 +698,46 @@ func flatHostHealth(ctx context.Context, host *brokerhost.Host) interface{} {
 	return map[string]interface{}{"ready": host.Ready(), "instances": host.Status()}
 }
 
+// colocatedSettingsOverlayEnabled reports whether a co-located broker reads
+// the Hub's stored runtimes, profiles, harness_configs and image_registry
+// through the global settings overlay: true for every DB-backed Hub, SQLite
+// or Postgres (ptone/scion#3906). The driver list must track the store-open
+// driver switch in initStore (server_foreground.go): a driver added there
+// and not here would silently get no overlay.
+func colocatedSettingsOverlayEnabled(cfg *config.GlobalConfig, hubSrv *hub.Server) bool {
+	if hubSrv == nil || cfg == nil {
+		return false
+	}
+	switch cfg.Database.Driver {
+	case "sqlite", "postgres":
+		return true
+	}
+	return false
+}
+
 // installColocatedSettingsOverlay installs the global settings overlay for a
-// co-located Hub with a Postgres database, as startRuntimeBroker does for
-// the legacy broker. Flat instances never read profiles or runtimes from it.
-func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Server) {
-	if hubSrv == nil || cfg.Database.Driver != "postgres" {
-		return
+// co-located DB-backed Hub, so that the broker's config.LoadEffectiveSettings
+// calls pick up the stored runtimes, profiles, harness_configs and
+// image_registry instead of only the settings file. It seeds
+// the overlay from the current operational settings snapshot so stored
+// values apply from the first dispatch; later changes arrive through
+// hub.ApplySnapshot. Flat instances never read profiles or runtimes from it.
+// It reports whether the overlay was installed.
+func installColocatedSettingsOverlay(cfg *config.GlobalConfig, hubSrv *hub.Server) bool {
+	if !colocatedSettingsOverlayEnabled(cfg, hubSrv) {
+		return false
 	}
 	overlay := config.NewSettingsOverlay()
 	config.SetGlobalSettingsOverlay(overlay)
 	if ops := hubSrv.GetOperationalSettings(); ops != nil {
 		snap := ops.Snapshot()
 		overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
+		log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
+			len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
+	} else {
+		log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
 	}
+	return true
 }
 
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
