@@ -166,16 +166,18 @@ func TestPresentation_NeverFieldsAbsent(t *testing.T) {
 			}},
 		},
 	}
-	if !reflect.DeepEqual(got, want) {
-		gj, _ := json.MarshalIndent(got, "", "  ")
-		t.Fatalf("wire presentation:\n%s", gj)
-	}
 	raw, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(raw), "NEVER") {
 		t.Fatalf("a never-published value is in the wire presentation: %s", raw)
+	}
+	// Checked after the values, so a withheld value copied into a published
+	// field fails on the value check above first.
+	if !reflect.DeepEqual(got, want) {
+		gj, _ := json.MarshalIndent(got, "", "  ")
+		t.Fatalf("wire presentation:\n%s", gj)
 	}
 	var decoded interface{}
 	if err := json.Unmarshal(raw, &decoded); err != nil {
