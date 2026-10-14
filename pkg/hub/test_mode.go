@@ -21,7 +21,8 @@ package hub
 //	off          no test identities (the default)
 //	member       member and viewer test identities (POST /api/v1/test-identities)
 //	admin        member, plus the test hub-admin kind
-//	super-admin  admin, plus the test super-admin kind (refused until phase A2)
+//	super-admin  admin, plus the test super-admin kind (only with a complete
+//	             test-admin policy classification, test_admin_policy.go)
 //
 // Every level other than off requires, all together: a hub with a user
 // store, the hub id binding (the value after the colon equals the resolved
@@ -121,6 +122,10 @@ const (
 	TestModePreconditionNoSharedSecret      = "no_shared_signing_secret"
 	TestModePreconditionNoPreconfiguredKey  = "no_preconfigured_signing_key"
 	TestModePreconditionSigningKeysHubLocal = "signing_keys_hub_local"
+	// TestModePreconditionPolicyComplete is the super-admin level's G3:
+	// the test-admin policy classification of this binary is complete
+	// (TestAdminPolicyComplete).
+	TestModePreconditionPolicyComplete = "test_admin_policy_complete"
 )
 
 // TestModeMemberPreconditions returns the preconditions every level other
@@ -285,6 +290,11 @@ func (s *Server) testModePreconditions() []string {
 	return append([]string{}, s.testMode.preconditions...)
 }
 
+// testModeSecretsWarning is written in the startup line of every level
+// other than off (DEC-10): member-tier test identities are not clamped, so
+// their agents receive hub- and broker-scope material like any member's.
+const testModeSecretsWarning = "test-mode: hub and broker env secrets are injected into every member agent; keep only test-grade secrets on this hub"
+
 // testAdminAuditEventTestModeStart is the startup line of the member level.
 // The admin levels write the test_admin_gate_start line instead, which
 // carries the same test_mode and preconditions fields.
@@ -297,6 +307,7 @@ func (s *Server) emitTestModeStart() error {
 	if err := s.testAdminAudit.emit(testAdminAuditEventTestModeStart, map[string]any{
 		"level":         "WARN",
 		"msg":           "TEST MODE ENABLED: this hub can issue test identities. Test hubs only.",
+		"warning":       testModeSecretsWarning,
 		"test_mode":     string(s.TestModeLevel()),
 		"preconditions": s.testModePreconditions(),
 		"hub_id":        s.config.HubID,

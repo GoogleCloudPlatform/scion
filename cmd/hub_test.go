@@ -257,31 +257,35 @@ func hubStatusScope(isGlobal bool) hubEndpointScope {
 	return getHubEndpointScope(isGlobal, describeUseTarget(&config.CLIContext{}))
 }
 
-func TestGetHubEndpointScope_FromProject(t *testing.T) {
-	setupContextTest(t)
-	t.Setenv("SCION_HUB_ENDPOINT", "")
-	root := makeDirProject(t, "https://project-hub.example.com")
-
-	scope := hubStatusScope(false)
-	assert.Equal(t, "project_settings", scope.Source)
-	dotScion, err := filepath.EvalSymlinks(filepath.Join(root, ".scion"))
-	require.NoError(t, err)
-	assert.Equal(t, "project settings: "+displayProjectDir(dotScion), scope.Label)
-	assert.False(t, scope.Inherited)
-	assert.Equal(t, "https://project-hub.example.com", scope.Endpoint)
-}
-
-func TestGetHubEndpointScope_InheritedFromGlobal(t *testing.T) {
+// A directory project's own hub.endpoint, and the global settings'
+// hub.endpoint, are not hub sources: hub status reports no hub.
+func TestGetHubEndpointScope_SettingsAreNotASource(t *testing.T) {
 	setupContextTest(t)
 	t.Setenv("SCION_HUB_ENDPOINT", "")
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: https://global-hub.example.com\n")
-	makeDirProject(t, "")
+	makeDirProject(t, "https://project-hub.example.com")
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
 
 	scope := hubStatusScope(false)
-	assert.Equal(t, "global_settings", scope.Source)
-	assert.Equal(t, "global settings", scope.Label)
+	assert.Equal(t, "none", scope.Source)
+	assert.Empty(t, scope.Endpoint)
+	assert.False(t, scope.Inherited)
+}
+
+// In a directory project, the current hub is inherited (it does not come
+// from the project), as the global settings' endpoint used to be.
+func TestGetHubEndpointScope_InheritedFromContext(t *testing.T) {
+	setupContextTest(t)
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	saveTestContext(t, ctxTestHub, "")
+	makeDirProject(t, "")
+	require.NoError(t, resolveInvocationTarget(findCommand(t, "hub", "status"), ModeHuman))
+
+	scope := hubStatusScope(false)
+	assert.Equal(t, "context", scope.Source)
+	assert.Equal(t, "current context", scope.Label)
 	assert.True(t, scope.Inherited)
-	assert.Equal(t, "https://global-hub.example.com", scope.Endpoint)
+	assert.Equal(t, ctxTestHub, scope.Endpoint)
 }
 
 func TestGetHubEndpointScope_FromEnv(t *testing.T) {

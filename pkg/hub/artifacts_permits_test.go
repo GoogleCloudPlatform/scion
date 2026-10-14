@@ -161,8 +161,7 @@ func TestLegacyChainsWithholdOnlyArtifactScopes(t *testing.T) {
 	assert.Equal(t, map[string]bool{
 		"artifact.create": true, "artifact.read": true, "artifact.update": true, "artifact.delete": true,
 		"hub.federation.read": true, "hub.federation.update": true, "hub.teams_manifest.update": true,
-		"agent.log_append":                true,
-		"test_identity.issue_super_admin": true,
+		"agent.log_append": true,
 	}, legacyChainExcludedPermissions)
 
 	unrecorded := store.EffectCeiling{Kind: store.EffectCeilingUnrecorded}

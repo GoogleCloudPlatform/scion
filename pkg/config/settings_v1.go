@@ -1893,10 +1893,10 @@ type V1ServerHubConfig struct {
 	// wait for another hub node (e.g., "12m"; minimum 11m).
 	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
 	// StartUnconfirmedHold is the longest a start whose outcome is unknown
-	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	// blocks other starts of the agent (e.g., "17m"; minimum 16m).
 	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	// create-and-start (e.g., "16m"; 16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
@@ -2198,6 +2198,14 @@ type V1ProxyConfig struct {
 	JWT *V1JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"require_trusted_proxy_ip,omitempty" yaml:"require_trusted_proxy_ip,omitempty" koanf:"require_trusted_proxy_ip"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driver_principals,omitempty" yaml:"driver_principals,omitempty" koanf:"driver_principals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driver_token_audience,omitempty" yaml:"driver_token_audience,omitempty" koanf:"driver_token_audience"`
 }
 
 // V1IAPConfig holds Google IAP-specific settings.
@@ -4492,6 +4500,8 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Auth.Proxy = &ProxyAuthConfig{
 				Provider:              v1.Auth.Proxy.Provider,
 				RequireTrustedProxyIP: v1.Auth.Proxy.RequireTrustedProxyIP,
+				DriverPrincipals:      v1.Auth.Proxy.DriverPrincipals,
+				DriverTokenAudience:   v1.Auth.Proxy.DriverTokenAudience,
 			}
 			if v1.Auth.Proxy.IAP != nil {
 				gc.Auth.Proxy.IAP = &IAPAuthConfig{
@@ -4840,6 +4850,8 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		v1.Auth.Proxy = &V1ProxyConfig{
 			Provider:              gc.Auth.Proxy.Provider,
 			RequireTrustedProxyIP: gc.Auth.Proxy.RequireTrustedProxyIP,
+			DriverPrincipals:      gc.Auth.Proxy.DriverPrincipals,
+			DriverTokenAudience:   gc.Auth.Proxy.DriverTokenAudience,
 		}
 		if gc.Auth.Proxy.IAP != nil {
 			v1.Auth.Proxy.IAP = &V1IAPConfig{

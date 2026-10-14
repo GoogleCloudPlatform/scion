@@ -136,6 +136,14 @@ type AuthConfig struct {
 	// Now is the clock for the test-fixture expiry check. Nil means
 	// time.Now.
 	Now func() time.Time
+	// DriverPrincipals is the hub's auth.proxy.driverPrincipals set
+	// (ptone/scion#4240, phase WS2). A verified proxy assertion for a
+	// driver principal is refused at Step 3a with 403 before any user is
+	// provisioned (a Google identity for one is refused by
+	// GoogleIdentityResolver.Resolve, on the external-bearer path and the
+	// GE exchange alike): a driver principal is a transport for test
+	// identity web sessions, never a user.
+	DriverPrincipals driverPrincipalSet
 	// KindForPrincipal reads a user principal's stored kind
 	// (Server.kindForPrincipal). The JWT arm's row block uses it for the
 	// admin-kind checks (testAdminRejection). Nil reads the kind from the
@@ -468,6 +476,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					}
 					if proxyUser != nil {
+						// A driver principal is a transport, never a user
+						// (WS2): refused before provisioning, and never
+						// served as itself.
+						if cfg.DriverPrincipals.contains(proxyUser.Email) {
+							log.Warn("Proxy auth: refusing a driver principal on the API",
+								"reason", driverPrincipalNoSessionReason,
+								"path", logging.RequestPath(r))
+							writeDriverPrincipalRefusal(w)
+							return
+						}
 						// Verified proxy identity — provision the user
 						identity, err := cfg.ProxyUserProvisioner(ctx, proxyUser)
 						if err != nil {
@@ -604,7 +622,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// See isReservedPlatformIdentity: every credential-acceptance
 				// point checks this too, including a PAT issued under a
 				// reserved-identity user row.
-				if isReservedPlatformIdentity(scopedUser.Email(), cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(scopedUser.Email()) {
 					logCredentialRejected(log, ctx, "reserved_identity", true, scopedUser.CredentialID())
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
@@ -700,7 +718,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				// identity. Agent, federation, and broker credentials never
 				// reach this arm (see UnifiedAuthMiddleware's earlier steps),
 				// so this cannot deny an agent or broker token.
-				if isReservedPlatformIdentity(claims.Email, cfg.PlatformAuthSA) {
+				if cfg.isTransportIdentity(claims.Email) {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid access token", nil)
 					return
