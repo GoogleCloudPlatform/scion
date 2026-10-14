@@ -83,11 +83,16 @@ func (s Signer) GoString() string { return s.String() }
 // LogValue redacts the private key.
 func (s Signer) LogValue() slog.Value { return slog.GroupValue(slog.String("kid", s.KeyID)) }
 
-// RingKey is one private key in a KeyRing. Seed is the 32-byte Ed25519 seed
-// and is secret; it appears only in the persisted JSON form of the ring.
+// RingKey is one key in a KeyRing. Seed is the 32-byte Ed25519 seed and is
+// secret; it appears only in the persisted JSON form of the ring. Once a
+// later key has activated, the seed is dropped (see KeyRing.Settle) and only
+// PublicKey remains: the key still verifies until NotAfter but can no
+// longer sign.
 type RingKey struct {
-	KeyID     string    `json:"kid"`
-	Seed      []byte    `json:"seed"`
+	KeyID string `json:"kid"`
+	Seed  []byte `json:"seed,omitempty"`
+	// PublicKey is the raw 32-byte public key, set when Seed is dropped.
+	PublicKey []byte    `json:"public_key,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	// ActivateAt is when the hub may start signing with this key. A rotated
 	// key is published before it signs, so targets that refresh their key
@@ -107,9 +112,19 @@ func (k RingKey) GoString() string { return k.String() }
 // LogValue redacts the seed.
 func (k RingKey) LogValue() slog.Value { return slog.GroupValue(slog.String("kid", k.KeyID)) }
 
+// canSign reports whether k still holds its private seed.
+func (k RingKey) canSign() bool { return len(k.Seed) == ed25519.SeedSize }
+
+// publicBytes returns k's public key, from the seed when present.
+func (k RingKey) publicBytes() ed25519.PublicKey {
+	if k.canSign() {
+		return ed25519.NewKeyFromSeed(k.Seed).Public().(ed25519.PublicKey)
+	}
+	return append(ed25519.PublicKey(nil), k.PublicKey...)
+}
+
 func (k RingKey) publicKey() PublicKey {
-	priv := ed25519.NewKeyFromSeed(k.Seed)
-	return PublicKey{KeyID: k.KeyID, Key: priv.Public().(ed25519.PublicKey), NotAfter: k.NotAfter}
+	return PublicKey{KeyID: k.KeyID, Key: k.publicBytes(), NotAfter: k.NotAfter}
 }
 
 func (k RingKey) liveAt(now time.Time) bool {
@@ -132,8 +147,22 @@ func NewRingKey(now, activateAt time.Time) (RingKey, error) {
 
 // KeyRing is the hub's set of grant signing keys, keyed by kid. It is a
 // plain value: the hub persists it (as JSON) and serializes rotation.
+//
+// Retained holds the public halves of keys past their not_after. They are
+// kept only for re-check verification (RecheckKeys), are never published
+// (PublicKeys) and can never sign.
 type KeyRing struct {
-	Keys []RingKey `json:"keys"`
+	Keys     []RingKey     `json:"keys"`
+	Retained []RetainedKey `json:"retained,omitempty"`
+}
+
+// RetainedKey is the public half of a key past its not_after, kept until
+// RetainUntil for re-check verification only.
+type RetainedKey struct {
+	KeyID       string    `json:"kid"`
+	PublicKey   []byte    `json:"public_key"`
+	RetiredAt   time.Time `json:"retired_at"`
+	RetainUntil time.Time `json:"retain_until"`
 }
 
 // String redacts every seed.
@@ -142,15 +171,21 @@ func (r KeyRing) String() string {
 	for i, k := range r.Keys {
 		ids[i] = k.KeyID
 	}
-	return fmt.Sprintf("grant.KeyRing{kids:%v}", ids)
+	ret := make([]string, len(r.Retained))
+	for i, k := range r.Retained {
+		ret[i] = k.KeyID
+	}
+	return fmt.Sprintf("grant.KeyRing{kids:%v retained:%v}", ids, ret)
 }
 
 // GoString redacts every seed.
 func (r KeyRing) GoString() string { return r.String() }
 
-// Validate checks that kids are unique and non-empty and seeds are 32 bytes.
+// Validate checks that kids are unique and non-empty across Keys and
+// Retained, that every key has either a 32-byte seed or (without one) a
+// 32-byte public key, and that retained keys hold no seed.
 func (r *KeyRing) Validate() error {
-	seen := make(map[string]bool, len(r.Keys))
+	seen := make(map[string]bool, len(r.Keys)+len(r.Retained))
 	for _, k := range r.Keys {
 		if k.KeyID == "" {
 			return errors.New("grant: ring key with empty kid")
@@ -159,8 +194,23 @@ func (r *KeyRing) Validate() error {
 			return fmt.Errorf("grant: duplicate ring kid %q", k.KeyID)
 		}
 		seen[k.KeyID] = true
-		if len(k.Seed) != ed25519.SeedSize {
-			return fmt.Errorf("grant: ring key %q has invalid seed size", k.KeyID)
+		switch {
+		case len(k.Seed) == ed25519.SeedSize:
+		case len(k.Seed) == 0 && len(k.PublicKey) == ed25519.PublicKeySize:
+		default:
+			return fmt.Errorf("grant: ring key %q has neither a valid seed nor a valid public key", k.KeyID)
+		}
+	}
+	for _, k := range r.Retained {
+		if k.KeyID == "" {
+			return errors.New("grant: retained key with empty kid")
+		}
+		if seen[k.KeyID] {
+			return fmt.Errorf("grant: duplicate ring kid %q", k.KeyID)
+		}
+		seen[k.KeyID] = true
+		if len(k.PublicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("grant: retained key %q has invalid public key size", k.KeyID)
 		}
 	}
 	return nil
@@ -176,7 +226,7 @@ func (r *KeyRing) Signer(now time.Time) (*Signer, error) {
 	var best *RingKey
 	for i := range r.Keys {
 		k := &r.Keys[i]
-		if len(k.Seed) != ed25519.SeedSize || now.Before(k.ActivateAt) || !k.liveAt(now.Add(MaxValidity)) {
+		if !k.canSign() || now.Before(k.ActivateAt) || !k.liveAt(now.Add(MaxValidity)) {
 			continue
 		}
 		if best == nil || k.ActivateAt.After(best.ActivateAt) {
@@ -195,7 +245,7 @@ func (r *KeyRing) Signer(now time.Time) (*Signer, error) {
 func (r *KeyRing) PublicKeys(now time.Time) []PublicKey {
 	live := make([]RingKey, 0, len(r.Keys))
 	for _, k := range r.Keys {
-		if len(k.Seed) == ed25519.SeedSize && k.liveAt(now) {
+		if len(k.publicBytes()) == ed25519.PublicKeySize && k.liveAt(now) {
 			live = append(live, k)
 		}
 	}
@@ -239,7 +289,8 @@ func (r *KeyRing) Rotate(now time.Time, next RingKey, activateAfter, overlap tim
 }
 
 // Prune drops keys whose not_after has passed. Their grants are already
-// refused, so they no longer need publishing or storing.
+// refused, so they no longer need publishing or storing. The hub uses Settle
+// instead, which keeps their public halves for re-check verification.
 func (r *KeyRing) Prune(now time.Time) {
 	kept := r.Keys[:0]
 	for _, k := range r.Keys {
@@ -248,6 +299,127 @@ func (r *KeyRing) Prune(now time.Time) {
 		}
 	}
 	r.Keys = kept
+}
+
+// Settle brings the ring up to date at now and reports whether it changed:
+//
+//   - a key whose successor (a later key that has activated and can sign)
+//     exists drops its seed and keeps only its public half: it never signs
+//     again, but still verifies until its not_after;
+//   - a key past its not_after leaves Keys and joins Retained, public half
+//     only, until not_after + retain;
+//   - a retained key's RetainUntil only moves later (to RetiredAt + retain
+//     when that is later), never earlier;
+//   - a retained key past its RetainUntil is dropped.
+func (r *KeyRing) Settle(now time.Time, retain time.Duration) bool {
+	changed := false
+	for i := range r.Keys {
+		k := &r.Keys[i]
+		if k.canSign() && r.superseded(i, now) {
+			k.PublicKey = k.publicBytes()
+			k.Seed = nil
+			changed = true
+		}
+	}
+	kept := r.Keys[:0]
+	for _, k := range r.Keys {
+		if k.liveAt(now) {
+			kept = append(kept, k)
+			continue
+		}
+		r.Retained = append(r.Retained, RetainedKey{
+			KeyID: k.KeyID, PublicKey: k.publicBytes(),
+			RetiredAt: k.NotAfter, RetainUntil: k.NotAfter.Add(retain),
+		})
+		changed = true
+	}
+	r.Keys = kept
+	ret := r.Retained[:0]
+	for _, k := range r.Retained {
+		if want := k.RetiredAt.Add(retain); want.After(k.RetainUntil) {
+			k.RetainUntil = want
+			changed = true
+		}
+		if !now.Before(k.RetainUntil) {
+			changed = true
+			continue
+		}
+		ret = append(ret, k)
+	}
+	r.Retained = ret
+	return changed
+}
+
+// superseded reports whether a key activated after r.Keys[i] has itself
+// activated at now and can sign.
+func (r *KeyRing) superseded(i int, now time.Time) bool {
+	k := r.Keys[i]
+	for j, o := range r.Keys {
+		if j != i && o.canSign() && o.ActivateAt.After(k.ActivateAt) && !now.Before(o.ActivateAt) {
+			return true
+		}
+	}
+	return false
+}
+
+// Errors returned by Revoke.
+var (
+	ErrRevokeUnknown      = errors.New("grant: no such key in the ring")
+	ErrRevokeActiveSigner = errors.New("grant: the active signing key cannot be revoked; rotate first")
+)
+
+// Revoke removes kid from the ring at once, from Keys and from Retained:
+// it no longer verifies anything, in admission or in re-check. The key that
+// signs at now cannot be revoked (rotate first).
+func (r *KeyRing) Revoke(now time.Time, kid string) error {
+	if s, err := r.Signer(now); err == nil && s.KeyID == kid {
+		return ErrRevokeActiveSigner
+	}
+	found := false
+	keys := r.Keys[:0]
+	for _, k := range r.Keys {
+		if k.KeyID == kid {
+			found = true
+			continue
+		}
+		keys = append(keys, k)
+	}
+	r.Keys = keys
+	ret := r.Retained[:0]
+	for _, k := range r.Retained {
+		if k.KeyID == kid {
+			found = true
+			continue
+		}
+		ret = append(ret, k)
+	}
+	r.Retained = ret
+	if !found {
+		return ErrRevokeUnknown
+	}
+	return nil
+}
+
+// RecheckKeys returns the key set for re-check verification only: every
+// key in Keys and every retained key, each valid until its retention ends
+// (not_after + retain for a key in Keys, RetainUntil for a retained one).
+// It must never be published or used to verify a stream grant at
+// admission.
+func (r *KeyRing) RecheckKeys(now time.Time, retain time.Duration) KeySet {
+	s := make(staticKeySet, len(r.Keys)+len(r.Retained))
+	for _, k := range r.Keys {
+		pk := k.publicKey()
+		if !k.NotAfter.IsZero() {
+			pk.NotAfter = k.NotAfter.Add(retain)
+		}
+		s[k.KeyID] = pk
+	}
+	for _, k := range r.Retained {
+		if now.Before(k.RetainUntil) {
+			s[k.KeyID] = PublicKey{KeyID: k.KeyID, Key: append(ed25519.PublicKey(nil), k.PublicKey...), NotAfter: k.RetainUntil}
+		}
+	}
+	return s
 }
 
 // WireKey is the JSON form of a PublicKey, matching the contract's GrantKey

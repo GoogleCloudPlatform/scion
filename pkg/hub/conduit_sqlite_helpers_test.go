@@ -242,6 +242,9 @@ var testGrantEncryptionKey = secret.DeriveLocalEncryptionKey("test-shared-secret
 func assertNoKeyMaterial(t *testing.T, s string, ring *grant.KeyRing) {
 	t.Helper()
 	for _, k := range ring.Keys {
+		if len(k.Seed) == 0 {
+			continue // the seed was dropped; only the public half remains
+		}
 		for _, enc := range []string{base64.StdEncoding.EncodeToString(k.Seed), base64.RawURLEncoding.EncodeToString(k.Seed), fmt.Sprintf("%x", k.Seed)} {
 			assert.NotContains(t, s, enc)
 		}

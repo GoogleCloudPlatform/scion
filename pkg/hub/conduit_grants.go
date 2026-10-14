@@ -83,11 +83,17 @@ import (
 //
 // Retention. Rotation sets not_after on every outgoing key, so a grant signed
 // with an old kid verifies until its own exp or the key's not_after,
-// whichever comes first. Each rotation first prunes keys whose not_after has
-// passed. The ring therefore holds the newest key plus every key still
-// within its overlap window; there is no fixed count, since it depends on
-// how often rotation runs. A retired key that has not been pruned yet is
-// neither published nor used to sign.
+// whichever comes first. Every ring load and write settles the ring
+// (grant.KeyRing.Settle): once the rotated-in key activates, the outgoing
+// key's seed is dropped, so it can verify until not_after but never sign
+// again; a key past not_after moves to the ring's retained set, its public
+// half only, kept for re-check verification until not_after plus the
+// largest stream authorization interval plus 30s (conduitGrantKeyRetention;
+// retention only grows). Retained keys are never published and never
+// verify a stream grant at admission. Operators remove a possibly exposed
+// key at once with POST /api/v1/admin/conduit/grant-keys/revoke
+// (handleAdminConduitGrantKeyRevoke): rotate first, wait for the new key to
+// activate, then revoke the old kid.
 const (
 	conduitExperiment = "hub.conduit"
 
@@ -111,6 +117,10 @@ const (
 	// conduitGrantKeyDefaultOverlap keeps an old key for an hour after the
 	// switch.
 	conduitGrantKeyDefaultOverlap = time.Hour
+	// conduitGrantKeyDefaultRetention is the default retention of a retired
+	// key's public half for re-check verification: the default user stream
+	// authorization interval plus the targets' 30s allowance.
+	conduitGrantKeyDefaultRetention = defaultConduitUserStreamAuthzMax + 30*time.Second
 	// conduitGrantKeyRotateAttempts bounds the compare-and-swap retries of
 	// one rotation.
 	conduitGrantKeyRotateAttempts = 5
@@ -220,7 +230,10 @@ type memoryConduitGrantKeyStore struct {
 }
 
 func cloneKeyRing(r *grant.KeyRing) *grant.KeyRing {
-	return &grant.KeyRing{Keys: append([]grant.RingKey(nil), r.Keys...)}
+	return &grant.KeyRing{
+		Keys:     append([]grant.RingKey(nil), r.Keys...),
+		Retained: append([]grant.RetainedKey(nil), r.Retained...),
+	}
 }
 
 func (m *memoryConduitGrantKeyStore) Load(context.Context) (*grant.KeyRing, int, error) {
@@ -256,6 +269,11 @@ func (m *memoryConduitGrantKeyStore) CompareAndSwap(_ context.Context, ring *gra
 type conduitGrantKeys struct {
 	store conduitGrantKeyStore
 	now   func() time.Time
+	// retain is how long a retired key's public half is kept for re-check
+	// verification: the largest stream authorization interval plus the
+	// targets' 30s allowance (design §3.5, Re-check). Nil means
+	// conduitGrantKeyDefaultRetention.
+	retain func() time.Duration
 
 	mu       sync.Mutex
 	ring     *grant.KeyRing
@@ -271,14 +289,35 @@ func newConduitGrantKeys(st conduitGrantKeyStore, now func() time.Time) *conduit
 	return &conduitGrantKeys{store: st, now: now}
 }
 
+// retention returns how long retired keys' public halves are kept.
+func (k *conduitGrantKeys) retention() time.Duration {
+	if k.retain != nil {
+		return k.retain()
+	}
+	return conduitGrantKeyDefaultRetention
+}
+
 // currentLocked returns the cached ring, reloading it when stale and
-// creating it when absent. Callers must hold k.mu.
+// creating it when absent. A reloaded ring is settled (grant.KeyRing.Settle):
+// a key with an activated successor loses its seed, retired keys move to
+// the verify-only retained set, and retention only grows. A settled ring
+// that changed is written back with a compare-and-swap; losing that race
+// only means another writer got there first. Callers must hold k.mu.
 func (k *conduitGrantKeys) currentLocked(ctx context.Context) (*grant.KeyRing, error) {
 	now := k.now()
 	if k.ring != nil && now.Sub(k.loadedAt) < conduitGrantKeyRefresh {
 		return k.ring, nil
 	}
-	ring, _, err := k.store.Load(ctx)
+	ring, rev, err := k.store.Load(ctx)
+	if err == nil {
+		next := cloneKeyRing(ring)
+		if next.Settle(now, k.retention()) {
+			if _, cerr := k.store.CompareAndSwap(ctx, next, rev); cerr != nil {
+				slog.Warn("Conduit grant key ring: could not store the settled ring", "error", cerr)
+			}
+			ring = next
+		}
+	}
 	if errors.Is(err, store.ErrNotFound) {
 		ring, err = k.bootstrap(ctx, now)
 	}
@@ -403,7 +442,7 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 			return ConduitGrantKeyRotation{}, errConduitGrantKeyPending
 		}
 		next := cloneKeyRing(ring)
-		next.Prune(now)
+		next.Settle(now, k.retention())
 		if err := next.Rotate(now, key, activateAfter, overlap); err != nil {
 			return ConduitGrantKeyRotation{}, err
 		}
@@ -426,6 +465,68 @@ func (k *conduitGrantKeys) rotate(ctx context.Context, activateAfter, overlap ti
 		}
 	}
 	return ConduitGrantKeyRotation{}, fmt.Errorf("conduit grant key rotation: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
+}
+
+// errConduitGrantKeyRevokeActive refuses revoking the key that signs now
+// (the handler maps it to 409); errConduitGrantKeyUnknown is a kid the ring
+// does not hold (404).
+var (
+	errConduitGrantKeyRevokeActive = errors.New("the active signing key cannot be revoked; rotate first")
+	errConduitGrantKeyUnknown      = errors.New("no such grant key")
+)
+
+// revoke removes kid from the ring at once, from the published keys and
+// from the verify-only retained set, so it verifies nothing from then on,
+// in admission or in re-check. Like rotate it rereads the stored ring and
+// writes it back with a compare-and-swap, retrying a bounded number of
+// times.
+func (k *conduitGrantKeys) revoke(ctx context.Context, kid string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.ring = nil
+	if _, err := k.currentLocked(ctx); err != nil {
+		return err
+	}
+	now := k.now()
+	for range conduitGrantKeyRotateAttempts {
+		ring, rev, err := k.store.Load(ctx)
+		if err != nil {
+			return fmt.Errorf("load conduit grant key ring: %w", err)
+		}
+		next := cloneKeyRing(ring)
+		next.Settle(now, k.retention())
+		switch err := next.Revoke(now, kid); {
+		case errors.Is(err, grant.ErrRevokeActiveSigner):
+			return errConduitGrantKeyRevokeActive
+		case errors.Is(err, grant.ErrRevokeUnknown):
+			return errConduitGrantKeyUnknown
+		case err != nil:
+			return err
+		}
+		applied, err := k.store.CompareAndSwap(ctx, next, rev)
+		if err != nil {
+			return fmt.Errorf("store conduit grant key ring: %w", err)
+		}
+		if applied {
+			k.ring, k.loadedAt = next, now
+			slog.Warn("Conduit grant key revoked", "kid", kid)
+			return nil
+		}
+	}
+	return fmt.Errorf("conduit grant key revoke: ring changed concurrently %d times; retry", conduitGrantKeyRotateAttempts)
+}
+
+// recheckKeys returns the verify-only key set for re-check verification:
+// the ring's keys and its retained public halves (grant.KeyRing.RecheckKeys).
+// It is never published and never verifies a stream grant at admission.
+func (k *conduitGrantKeys) recheckKeys(ctx context.Context) (grant.KeySet, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	ring, err := k.currentLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return ring.RecheckKeys(k.now(), k.retention()), nil
 }
 
 // hasPendingConduitGrantKey reports whether ring holds a key that has not
@@ -458,6 +559,7 @@ func (s *Server) conduitGrantKeySet() *conduitGrantKeys {
 			st = &memoryConduitGrantKeyStore{}
 		}
 		s.conduitGrants = newConduitGrantKeys(st, nil)
+		s.conduitGrants.retain = s.conduitGrantKeyRetention
 	})
 	return s.conduitGrants
 }
@@ -468,6 +570,31 @@ func (s *Server) conduitGrantKeySet() *conduitGrantKeys {
 func (s *Server) requiresSharedSigningKeys() bool {
 	_, isGCPBackend := s.secretBackend.(*secret.GCPBackend)
 	return isGCPBackend || s.config.RequireStableSigningKey
+}
+
+// conduitGrantKeyRetention is how long a retired key's public half is kept
+// for re-check verification: the largest stream authorization interval in
+// effect (only user streams carry one) plus the targets' 30s allowance.
+// Raising the interval later extends retention on the next ring load; it
+// never shortens it.
+func (s *Server) conduitGrantKeyRetention() time.Duration {
+	d := s.config.ConduitUserStreamAuthzMax
+	if d <= 0 {
+		d = defaultConduitUserStreamAuthzMax
+	}
+	return d + 30*time.Second
+}
+
+// RevokeConduitGrantKey removes a grant key from the ring at once, for use
+// when the key may have been exposed: it stops verifying anything, and
+// streams whose latest grant it signed get no further renewal. The key that
+// signs now cannot be revoked; rotate first and wait for the new key to
+// activate. POST /api/v1/admin/conduit/grant-keys/{kid}/revoke calls it.
+func (s *Server) RevokeConduitGrantKey(ctx context.Context, kid string) error {
+	if !s.experimentEnabled(conduitExperiment) {
+		return errConduitDisabled
+	}
+	return s.conduitGrantKeySet().revoke(ctx, kid)
 }
 
 // conduitGrantKeyActivation returns the configured publish-before-sign
@@ -563,4 +690,53 @@ func (s *Server) handleAdminConduitGrantKeyRotate(w http.ResponseWriter, r *http
 	}
 	slog.Info("Conduit grant key rotation requested", "actor_id", actor, "kid", out.KeyID)
 	writeJSON(w, http.StatusOK, out)
+}
+
+// conduitGrantKeyRevokeRequest is the body of POST
+// /api/v1/admin/conduit/grant-keys/revoke.
+type conduitGrantKeyRevokeRequest struct {
+	KeyID string `json:"kid"`
+}
+
+// handleAdminConduitGrantKeyRevoke serves POST
+// /api/v1/admin/conduit/grant-keys/revoke {"kid": ...}. Route metadata
+// (RouteHubAdmin, permission hub.conduit_grant_keys.execute) authorizes the
+// caller before the handler runs. The key is removed at once: it no longer
+// verifies anything, and streams whose latest grant it signed get no
+// further renewal. Responses: 200 {"kid"}; 400 without a kid; 404 for a kid
+// the ring does not hold, or when hub.conduit is off; 409 for the key that
+// signs now (rotate first and wait for the new key to activate).
+func (s *Server) handleAdminConduitGrantKeyRevoke(w http.ResponseWriter, r *http.Request) {
+	if !s.experimentEnabled(conduitExperiment) {
+		NotFound(w, "route")
+		return
+	}
+	if r.Method != http.MethodPost {
+		MethodNotAllowed(w, http.MethodPost)
+		return
+	}
+	var req conduitGrantKeyRevokeRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.KeyID == "" {
+		writeError(w, http.StatusBadRequest, ErrCodeValidationError, "kid is required", nil)
+		return
+	}
+	err := s.RevokeConduitGrantKey(r.Context(), req.KeyID)
+	switch {
+	case errors.Is(err, errConduitGrantKeyUnknown):
+		writeError(w, http.StatusNotFound, ErrCodeNotFound, "no such grant key", nil)
+		return
+	case errors.Is(err, errConduitGrantKeyRevokeActive):
+		writeError(w, http.StatusConflict, ErrCodeConflict, "the active signing key cannot be revoked; rotate first", nil)
+		return
+	case err != nil:
+		slog.Error("conduit grant key revocation failed", "error", err)
+		writeError(w, http.StatusServiceUnavailable, ErrCodeInternalError, "grant key revocation failed", nil)
+		return
+	}
+	actor := ""
+	if id := GetIdentityFromContext(r.Context()); id != nil {
+		actor = id.ID()
+	}
+	slog.Warn("Conduit grant key revocation requested", "actor_id", actor, "kid", req.KeyID)
+	writeJSON(w, http.StatusOK, conduitGrantKeyRevokeRequest{KeyID: req.KeyID})
 }
