@@ -37,6 +37,16 @@
       "x-scope": "any",
       "x-since": "1"
     },
+    "local_experiments": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)+$"
+      },
+      "description": "Experiments enabled for solo/local (non-broker) provisioning. Only experiments consulted on the local provisioning path take effect (currently hub.agent_plugins); hub features are toggled on the hub.",
+      "x-scope": "any",
+      "x-since": "1"
+    },
     "default_harness_auth": {
       "type": "string",
       "enum": ["", "api-key", "oauth-token", "auth-file", "vertex-ai", "none"],
@@ -1020,7 +1030,8 @@
           },
           "additionalProperties": false
         },
-        "resume": { "$ref": "#/$defs/capabilityField" }
+        "resume": { "$ref": "#/$defs/capabilityField" },
+        "agent_plugins": { "$ref": "#/$defs/capabilityField" }
       },
       "additionalProperties": false
     },
