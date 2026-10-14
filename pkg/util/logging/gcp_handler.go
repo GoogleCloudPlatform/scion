@@ -348,6 +348,11 @@ func (h *GCPHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 // severity key. Only used for top-level attrs; grouped ones are left as is
 // there.
 func plainLevelAttr(a slog.Attr) slog.Attr {
+	// Other attrs are returned unresolved: slog resolves them once, at
+	// render, so a LogValuer runs once per record.
+	if a.Key != "" && a.Key != slog.LevelKey {
+		return a
+	}
 	v := a.Value.Resolve()
 	if a.Key == "" && v.Kind() == slog.KindGroup {
 		members := v.Group()
@@ -362,7 +367,7 @@ func plainLevelAttr(a slog.Attr) slog.Attr {
 			return slog.String(a.Key, level.String())
 		}
 	}
-	return a
+	return slog.Attr{Key: a.Key, Value: v}
 }
 
 // pruneEmpty returns attrs, with LogValuers resolved, minus those slog's

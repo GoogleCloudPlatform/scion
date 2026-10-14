@@ -471,8 +471,9 @@ func TestGCPHandler_ExplicitGroupTraceIDNotRenamed(t *testing.T) {
 
 // TestGCPHandler_GroupSiblingsIndependentLifted checks that handlers derived
 // from one grouped handler do not share the attrs written at the top level.
-// The parent's lifted slice has spare capacity after three With calls, so an
-// append that aliased it would let the second sibling overwrite the first.
+// With an aliasing append, the parent's lifted slice would have spare
+// capacity after three With calls (cap 4), so the second sibling would
+// overwrite the first. The real code allocates exact capacity.
 func TestGCPHandler_GroupSiblingsIndependentLifted(t *testing.T) {
 	t.Setenv(EnvGCPProjectID, "test-proj")
 	const idA = "4bf92f3577b34da6a3ce929d0e0e4736"

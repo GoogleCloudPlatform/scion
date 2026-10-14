@@ -210,3 +210,41 @@ func TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity(t *testing.T) {
 type levelValuer slog.Level
 
 func (v levelValuer) LogValue() slog.Value { return slog.AnyValue(slog.Level(v)) }
+
+// countingValuer is a slog.LogValuer that counts its LogValue calls.
+type countingValuer struct{ n *int }
+
+func (v countingValuer) LogValue() slog.Value {
+	*v.n++
+	return slog.StringValue("v")
+}
+
+// TestGCPHandler_LogValuerResolvedOnce verifies that a top-level LogValuer
+// attr, on the record or with With, is resolved once per entry, also under
+// the key "level" when it does not resolve to a slog.Level.
+func TestGCPHandler_LogValuerResolvedOnce(t *testing.T) {
+	tests := []struct {
+		name  string
+		logFn func(*slog.Logger, slog.LogValuer)
+		key   string
+	}{
+		{"record", func(l *slog.Logger, v slog.LogValuer) { l.Info("msg", "k", v) }, "k"},
+		{"record_level_key", func(l *slog.Logger, v slog.LogValuer) { l.Info("msg", "level", v) }, "level"},
+		{"With", func(l *slog.Logger, v slog.LogValuer) { l.With("k", v).Info("msg") }, "k"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			n := 0
+			tt.logFn(slog.New(NewGCPHandler(&buf, nil, "test-component", "")), countingValuer{&n})
+
+			assertKeys(t, buf.Bytes(), withBaseKeys(tt.key)...)
+			if got := decodeLine(t, buf.Bytes())[tt.key]; got != "v" {
+				t.Errorf("%s = %v, want v", tt.key, got)
+			}
+			if n != 1 {
+				t.Errorf("LogValue called %d times, want 1", n)
+			}
+		})
+	}
+}
