@@ -879,7 +879,13 @@ func (r *CloudRunRuntime) instanceOp(ctx context.Context, ref RunRef, verb strin
 		return fmt.Errorf("failed to create client: %w", err)
 	}
 	defer func() { _ = c.Close() }()
+	return r.instanceOpWith(ctx, c, ref, verb, strict, call)
+}
 
+// instanceOpWith is instanceOp on the open client c, which the caller
+// owns and closes; the caller has resolved the config. DeleteResource uses
+// it to share one client across its retries.
+func (r *CloudRunRuntime) instanceOpWith(ctx context.Context, c cloudrun.InstancesAPI, ref RunRef, verb string, strict bool, call instanceCall) error {
 	name := r.instanceResourceName(ref.ID)
 	if ref.RunID == "" {
 		op, err := call(c, name, "")

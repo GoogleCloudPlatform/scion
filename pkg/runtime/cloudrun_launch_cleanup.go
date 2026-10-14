@@ -191,7 +191,9 @@ func (r *CloudRunRuntime) parent() string {
 //     instance that is not reconciling retries after cloudRunRefusalBackoff;
 //   - anything else is an error.
 //
-// All of it runs within cloudRunCleanupBudget, which bounds the calls too.
+// All of it runs within cloudRunCleanupBudget, which bounds the calls too,
+// on one Instances client opened for the whole cleanup. When the budget
+// runs out the error wraps both the ctx error and the last API error.
 // A handle in another namespace, of another kind or with no UID is
 // refused before any call.
 func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHandle) error {
@@ -212,28 +214,29 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 	defer cancel()
 	name := r.instanceResourceName(h.Name)
 	ref := RunRef{ID: h.Name, RunID: h.UID}
+	c, err := r.client(budget)
+	if err != nil {
+		return fmt.Errorf("cloudrun: launch cleanup of instance %s: failed to create client: %w", h.Name, err)
+	}
+	defer func() { _ = c.Close() }()
+	// overBudget is the error once the budget has run out: it wraps the
+	// ctx error (cause) and the last API error (last).
+	overBudget := func(cause, last error) error {
+		return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w (last error: %w)", h.Name, cloudRunCleanupBudget, cause, last)
+	}
 	var seen bool // a read in this attempt found this run's instance
-	deleteCall := func(c cloudrun.InstancesAPI, n, etag string) (cloudrun.InstanceOperation, error) {
-		// instanceOp issues the call only after its read found the
+	deleteCall := func(dc cloudrun.InstancesAPI, n, etag string) (cloudrun.InstanceOperation, error) {
+		// instanceOpWith issues the call only after its read found the
 		// instance labelled with this run.
 		seen = true
-		return c.DeleteInstance(budget, &runpb.DeleteInstanceRequest{Name: n, Etag: etag}, defaultCallOpts...)
+		return dc.DeleteInstance(budget, &runpb.DeleteInstanceRequest{Name: n, Etag: etag}, defaultCallOpts...)
 	}
-
-	// waitClient serves the reconciling waits; opened at the first
-	// refusal and shared by every later one.
-	var waitClient cloudrun.InstancesAPI
-	defer func() {
-		if waitClient != nil {
-			_ = waitClient.Close()
-		}
-	}()
 
 	var repollUntil time.Time
 	refusals := 0
 	for {
 		seen = false
-		err := r.instanceOp(budget, ref, "delete", true, deleteCall)
+		err := r.instanceOpWith(budget, c, ref, "delete", true, deleteCall)
 		switch {
 		case err == nil:
 			clearCloudRunCreateInDoubt(name, h.UID)
@@ -251,7 +254,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 			return nil
 		}
 		if budget.Err() != nil {
-			return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
+			return overBudget(budget.Err(), err)
 		}
 		switch status.Code(err) {
 		case codes.NotFound:
@@ -270,19 +273,14 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 				return nil
 			}
 			if serr := cloudRunSleep(budget, cloudRunRepollInterval); serr != nil {
-				return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
+				return overBudget(serr, err)
 			}
 		case codes.FailedPrecondition, codes.Aborted:
 			// The read found the instance: the create is observed.
 			clearCloudRunCreateInDoubt(name, h.UID)
-			if waitClient == nil {
-				if c, cerr := r.client(budget); cerr == nil {
-					waitClient = c
-				}
-			}
-			reconciled, werr := waitCloudRunReconciled(budget, waitClient, name)
+			reconciled, werr := waitCloudRunReconciled(budget, c, name)
 			if werr != nil {
-				return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
+				return overBudget(werr, err)
 			}
 			if reconciled {
 				continue
@@ -292,7 +290,7 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 			runtimeLog().Info("Launch cleanup: Cloud Run refused the delete; retrying",
 				"instance", h.Name, "run_id", h.UID, "after", d, "error", err)
 			if serr := cloudRunSleep(budget, d); serr != nil {
-				return fmt.Errorf("cloudrun: launch cleanup of instance %s did not finish within %s: %w", h.Name, cloudRunCleanupBudget, err)
+				return overBudget(serr, err)
 			}
 		default:
 			return fmt.Errorf("cloudrun: launch cleanup of instance %s: %w", h.Name, err)
@@ -304,13 +302,9 @@ func (r *CloudRunRuntime) DeleteResource(ctx context.Context, h api.ResourceHand
 // reports Reconciling, reads it again every cloudRunReconcilePoll. It reports
 // whether it waited for a reconcile to clear (or saw the instance gone),
 // so the caller retries at once; false means the instance was not
-// reconciling (or could not be read, or c is nil because no client could
-// be opened) and the caller backs off. The error is ctx's, when ctx ends
-// first.
+// reconciling (or could not be read) and the caller backs off. The error
+// is ctx's, when ctx ends first.
 func waitCloudRunReconciled(ctx context.Context, c cloudrun.InstancesAPI, name string) (bool, error) {
-	if c == nil {
-		return false, nil
-	}
 	waited := false
 	for {
 		inst, err := c.GetInstance(ctx, &runpb.GetInstanceRequest{Name: name}, defaultCallOpts...)

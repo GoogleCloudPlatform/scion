@@ -23,6 +23,7 @@ import (
 
 	"cloud.google.com/go/run/apiv2/runpb"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtime/cloudrun"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -596,5 +597,67 @@ func TestCloudRunInstanceDeleteResource_InDoubtMarkExpires(t *testing.T) {
 	}
 	if len(fake.getReqs) != 1 {
 		t.Errorf("GetInstance called %d times, want 1 (no re-poll)", len(fake.getReqs))
+	}
+}
+
+// One Instances client serves the whole cleanup: two refusals, the
+// reconciling reads and the accepted delete all go through the client
+// opened once at the start, which is closed on return.
+func TestCloudRunInstanceDeleteResource_OneClientAcrossRetries(t *testing.T) {
+	fake, rt := ciSetup(t)
+	opens := 0
+	rt.newClient = func(context.Context) (cloudrun.InstancesAPI, error) {
+		opens++
+		return fake, nil
+	}
+	fake.getInstance = ciInstance(ciRunA)
+	refused := status.Error(codes.FailedPrecondition, "refused")
+	fake.deleteErrSeq = []error{refused, refused, nil}
+
+	if _, err := ciCleanup(rt); err != nil {
+		t.Fatalf("DeleteResource = %v, want nil after two refusals", err)
+	}
+	if len(fake.deleteReqs) != 3 {
+		t.Fatalf("DeleteInstance called %d times, want 3", len(fake.deleteReqs))
+	}
+	if opens != 1 || fake.closeCount != 1 {
+		t.Errorf("Instances clients opened %d and closed %d times, want 1 and 1", opens, fake.closeCount)
+	}
+}
+
+// When the budget runs out while waiting (the backoff after a refusal,
+// the in-doubt re-poll, or the reconciling wait), the error wraps both
+// context.DeadlineExceeded and the last API error.
+func TestCloudRunInstanceDeleteResource_BudgetErrorWrapsBoth(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		setup    func(t *testing.T, f *fakeInstancesClient, rt *CloudRunRuntime)
+		wantCode codes.Code
+	}{
+		{"backoff", func(_ *testing.T, f *fakeInstancesClient, _ *CloudRunRuntime) {
+			cloudRunRefusalBackoff = []time.Duration{time.Hour}
+			f.getInstance = ciInstance(ciRunA)
+			f.deleteErr = status.Error(codes.FailedPrecondition, "refused")
+		}, codes.FailedPrecondition},
+		{"repoll", func(t *testing.T, f *fakeInstancesClient, rt *CloudRunRuntime) {
+			ciCutOffCreate(t, f, rt)
+			cloudRunInDoubtRepoll = time.Hour
+			f.getErr = notFoundErr()
+		}, codes.NotFound},
+		{"reconcile", func(_ *testing.T, f *fakeInstancesClient, _ *CloudRunRuntime) {
+			f.getInstance = ciInstance(ciRunA)
+			f.reconcilingReads = 1 << 30
+		}, codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, rt := ciSetup(t)
+			tc.setup(t, fake, rt)
+			cloudRunCleanupBudget = 300 * time.Millisecond
+
+			elapsed, err := ciCleanup(rt)
+			if !errors.Is(err, context.DeadlineExceeded) || status.Code(err) != tc.wantCode {
+				t.Fatalf("DeleteResource = %v after %s, want it to wrap context.DeadlineExceeded and a gRPC %s", err, elapsed, tc.wantCode)
+			}
+		})
 	}
 }
