@@ -21,6 +21,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // nfsProvisionPinCases are the provisioning init container shapes of each
@@ -51,11 +52,11 @@ func nfsProvisionPinCases() map[string]RunConfig {
 // command, env, mounts and security context of the provisioning init
 // container, exactly as buildPod produces them.
 var nfsProvisionPinWant = map[string]string{
-	"shared-plain":    `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--depth","1","--uid","1000","--gid","1000"],"env":[{"name":"SCION_CLONE_URL","value":"https://github.com/example/repo.git"},{"name":"SCION_CLONE_BRANCH","value":"main"},{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"GITHUB_TOKEN","valueFrom":{"secretKeyRef":{"name":"scion-agent-pin-sp","key":"GITHUB_TOKEN"}}},{"name":"SCION_PROVISION_CHOWN_BEST_EFFORT","value":"1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
-	"non-git":         `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
-	"worktree":        `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--depth","1","--uid","1000","--gid","1000"],"env":[{"name":"SCION_CLONE_URL","value":"https://github.com/example/repo.git"},{"name":"SCION_CLONE_BRANCH","value":"main"},{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"GITHUB_TOKEN","valueFrom":{"secretKeyRef":{"name":"scion-agent-pin-wt","key":"GITHUB_TOKEN"}}},{"name":"SCION_WORKSPACE_MODE","value":"worktree-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"},{"name":"SCION_AGENT_BRANCH","value":"agent-one"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
-	"clone-per-agent": `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"SCION_WORKSPACE_MODE","value":"clone-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"},{"name":"SCION_AGENT_BRANCH","value":"scion/agent-1"},{"name":"SCION_PROVISION_CHOWN_BEST_EFFORT","value":"1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/agents/agent-1"}],"securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
-	"empty-per-agent": `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"SCION_WORKSPACE_MODE","value":"empty-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/agents/agent-1"}],"securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
+	"shared-plain":    `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--depth","1","--uid","1000","--gid","1000"],"env":[{"name":"SCION_CLONE_URL","value":"https://github.com/example/repo.git"},{"name":"SCION_CLONE_BRANCH","value":"main"},{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"GITHUB_TOKEN","valueFrom":{"secretKeyRef":{"name":"scion-agent-pin-sp","key":"GITHUB_TOKEN"}}},{"name":"SCION_PROVISION_CHOWN_BEST_EFFORT","value":"1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"terminationMessagePolicy":"FallbackToLogsOnError","securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
+	"non-git":         `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"terminationMessagePolicy":"FallbackToLogsOnError","securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
+	"worktree":        `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--depth","1","--uid","1000","--gid","1000"],"env":[{"name":"SCION_CLONE_URL","value":"https://github.com/example/repo.git"},{"name":"SCION_CLONE_BRANCH","value":"main"},{"name":"SCION_PROVISION_STATE_DIR","value":"/scion-provision"},{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"GITHUB_TOKEN","valueFrom":{"secretKeyRef":{"name":"scion-agent-pin-wt","key":"GITHUB_TOKEN"}}},{"name":"SCION_WORKSPACE_MODE","value":"worktree-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"},{"name":"SCION_AGENT_BRANCH","value":"agent-one"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/workspace"},{"name":"workspace","mountPath":"/scion-provision","subPath":"projects/proj-123/provision"}],"terminationMessagePolicy":"FallbackToLogsOnError","securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
+	"clone-per-agent": `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"SCION_WORKSPACE_MODE","value":"clone-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"},{"name":"SCION_AGENT_BRANCH","value":"scion/agent-1"},{"name":"SCION_PROVISION_CHOWN_BEST_EFFORT","value":"1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/agents/agent-1"}],"terminationMessagePolicy":"FallbackToLogsOnError","securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
+	"empty-per-agent": `[{"name":"workspace-provision","image":"test-image","command":["sciontool","provision","--uid","1000","--gid","1000"],"env":[{"name":"SCION_PROJECT_ID","value":"proj-123"},{"name":"SCION_WORKSPACE_MODE","value":"empty-per-agent"},{"name":"SCION_AGENT_SLUG","value":"agent-1"}],"resources":{},"volumeMounts":[{"name":"workspace","mountPath":"/workspace","subPath":"projects/proj-123/agents/agent-1"}],"terminationMessagePolicy":"FallbackToLogsOnError","securityContext":{"capabilities":{"add":["CHOWN","FOWNER","DAC_OVERRIDE"],"drop":["ALL"]},"runAsUser":0,"runAsGroup":0,"runAsNonRoot":false,"allowPrivilegeEscalation":false}}]`,
 }
 
 // TestBuildPod_NFSProvisionInitContainer_Pinned pins the provisioning init
@@ -73,6 +74,28 @@ func TestBuildPod_NFSProvisionInitContainer_Pinned(t *testing.T) {
 			got, err := json.Marshal(pod.Spec.InitContainers)
 			require.NoError(t, err)
 			assert.Equal(t, want, string(got))
+		})
+	}
+}
+
+// TestBuildPod_NFSProvisionInitContainer_TerminationMessagePolicy checks
+// that the provisioning init container of every NFS workspace mode falls
+// back to its log tail for the termination message, as the home init
+// containers do, so a failed provision reports why in the create error.
+func TestBuildPod_NFSProvisionInitContainer_TerminationMessagePolicy(t *testing.T) {
+	for name, cfg := range nfsProvisionPinCases() {
+		t.Run(name, func(t *testing.T) {
+			pod, err := newNFSTestK8sRuntime().buildPod("default", cfg)
+			require.NoError(t, err)
+			found := false
+			for _, c := range pod.Spec.InitContainers {
+				if c.Name != k8sWorkspaceProvisionContainer {
+					continue
+				}
+				found = true
+				assert.Equal(t, corev1.TerminationMessageFallbackToLogsOnError, c.TerminationMessagePolicy)
+			}
+			assert.True(t, found, "no %s init container", k8sWorkspaceProvisionContainer)
 		})
 	}
 }

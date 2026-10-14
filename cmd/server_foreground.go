@@ -449,8 +449,10 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 			hubSrv.ExpectEmbeddedBroker()
 		}
 
-		// Metrics and traces share one resolved identity.
-		telemetryID := newHubTelemetryIdentity(hubSrv, cfg.Hub.ResolveHubName())
+		// Metrics and traces share one resolved identity. initHubServerFn
+		// has applied the operational settings, so the hub name is the
+		// applied one (ptone/scion#4903).
+		telemetryID := newHubTelemetryIdentity(hubSrv)
 
 		// Wire hub OTel tracing export to Cloud Trace.
 		if parseBoolEnv("SCION_TRACING_ENABLED") && cfg.Hub.GCPProjectID != "" {
@@ -3863,26 +3865,14 @@ func startRuntimeBroker(ctx context.Context, cmd *cobra.Command, cfg *config.Glo
 		rhCfg.ColocatedStorage = hubSrv.GetStorage()
 	}
 
-	// In co-located mode, install a global settings overlay so that the
-	// broker's config.LoadEffectiveSettings() calls pick up DB-backed
-	// runtimes, profiles, and harness_configs. Without this, the broker
-	// always reads from the ephemeral settings.yaml file and never sees
-	// changes made through the admin UI (issue #985).
-	if hubSrv != nil && cfg.Database.Driver == "postgres" {
-		overlay := config.NewSettingsOverlay()
-		config.SetGlobalSettingsOverlay(overlay)
-		// Seed the overlay from the current operational settings snapshot
-		// so that DB values are available from the first agent dispatch,
-		// not only after the next LISTEN/NOTIFY propagation.
-		if ops := hubSrv.GetOperationalSettings(); ops != nil {
-			snap := ops.Snapshot()
-			overlay.Update(snap.Runtimes, snap.Profiles, snap.HarnessConfigs, snap.ImageRegistry)
-			log.Printf("Settings overlay installed for co-located broker (runtimes=%d, profiles=%d, harness_configs=%d)",
-				len(snap.Runtimes), len(snap.Profiles), len(snap.HarnessConfigs))
-		} else {
-			log.Printf("Settings overlay installed for co-located broker (operational settings not yet available)")
-		}
-	}
+	// In co-located mode on any DB-backed Hub, install the global settings
+	// overlay so the broker sees the Hub's stored runtimes, profiles,
+	// harness_configs and image_registry (see installColocatedSettingsOverlay).
+	// Ordering invariant: the broker's default runtime (rt, from
+	// resolveBrokerDefaultRuntime) is resolved above, before the overlay
+	// exists, so it comes from the settings file and startup never sees an
+	// overlay-only active_profile error.
+	installColocatedSettingsOverlay(cfg, hubSrv)
 
 	rhSrv := runtimebroker.New(rhCfg, mgr, rt)
 	rhSrv.SetRequestLogger(requestLogger)
