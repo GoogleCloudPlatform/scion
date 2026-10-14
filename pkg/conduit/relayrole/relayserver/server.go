@@ -191,6 +191,11 @@ func waitExperiment(ctx context.Context, cfg *Config) error {
 		case err == nil:
 			return ErrExperimentOff
 		}
+		// A read that failed because ctx is done is not retried or
+		// reported as a missed deadline: the caller gets ctx's error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		left := deadline.Sub(cfg.Clock.Now())
 		if left <= 0 {
 			return fmt.Errorf("conduit relay: hub.conduit could not be read before the startup deadline: %w", err)

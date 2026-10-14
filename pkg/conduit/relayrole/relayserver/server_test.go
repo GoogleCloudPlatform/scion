@@ -19,6 +19,7 @@ package relayserver
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"reflect"
 	"strings"
 	"sync"
@@ -477,4 +478,63 @@ func TestNoSessionSecretInput(t *testing.T) {
 	if !s.Relay.Admitting() {
 		t.Fatal("not admitting")
 	}
+}
+
+// cancellingExperiment fails every read with the context's error and, on
+// the first read, cancels the context and moves the clock past the startup
+// deadline: a read that ran until the relay was told to stop.
+type cancellingExperiment struct {
+	cancel  context.CancelFunc
+	clk     *clock.Fake
+	advance time.Duration
+	n       int
+}
+
+func (e *cancellingExperiment) ConduitEnabled(ctx context.Context) (bool, error) {
+	e.n++
+	if e.n == 1 {
+		e.cancel()
+		e.clk.Advance(e.advance)
+	}
+	return false, ctx.Err()
+}
+
+// TestWaitExperimentReturnsContextErrorWhenCancelled: a hub.conduit read
+// that fails once ctx is done returns ctx's error at once, unwrapped: no
+// retry, no wait and no startup-deadline error.
+func TestWaitExperimentReturnsContextErrorWhenCancelled(t *testing.T) {
+	t.Run("cancelled during the read, past the deadline", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		clk := clock.NewFake(time.Now())
+		exp := &cancellingExperiment{cancel: cancel, clk: clk, advance: 2 * time.Second}
+		cfg := &Config{Experiment: exp, Clock: clk, StartupDeadline: time.Second, StartupRetry: 100 * time.Millisecond, Logger: slog.New(slog.DiscardHandler)}
+		err := waitExperiment(ctx, cfg)
+		if err != context.Canceled {
+			t.Fatalf("waitExperiment = %v, want context.Canceled unwrapped", err)
+		}
+		if exp.n != 1 {
+			t.Fatalf("%d reads, want 1", exp.n)
+		}
+		if p := clk.Pending(); p != 0 {
+			t.Fatalf("%d timers armed, want none", p)
+		}
+	})
+	t.Run("already cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		clk := clock.NewFake(time.Now())
+		exp := newFakeExperiment(expAnswer{err: errUnreadable})
+		cfg := &Config{Experiment: exp, Clock: clk, StartupDeadline: time.Second, StartupRetry: 100 * time.Millisecond, Logger: slog.New(slog.DiscardHandler)}
+		err := waitExperiment(ctx, cfg)
+		if err != context.Canceled {
+			t.Fatalf("waitExperiment = %v, want context.Canceled unwrapped", err)
+		}
+		if n := exp.count(); n != 1 {
+			t.Fatalf("%d reads, want 1", n)
+		}
+		if p := clk.Pending(); p != 0 {
+			t.Fatalf("%d timers armed, want none", p)
+		}
+	})
 }

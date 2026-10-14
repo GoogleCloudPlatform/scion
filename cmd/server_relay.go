@@ -197,12 +197,23 @@ func runRelayRole(ctx context.Context, cfg *config.GlobalConfig) error {
 	}
 	runErr := srv.Wait(ctx)
 	grace, capped := conduitShutdownDrainSetting(cfg)
-	timeout := 30 * time.Second
-	if capped {
-		timeout = grace
-	}
-	sctx, cancel := context.WithTimeout(context.Background(), timeout)
+	sctx, cancel := context.WithTimeout(context.Background(), relayShutdownTimeout(grace, capped))
 	defer cancel()
 	_ = srv.Shutdown(sctx, capped, relay.ShutdownDrainCap(grace))
 	return runErr
+}
+
+// relayShutdownPad is how long Shutdown may run past a capped drain: the
+// drain cap ends the drain, and the pad leaves the HTTP servers time to
+// close after it.
+const relayShutdownPad = 10 * time.Second
+
+// relayShutdownTimeout is the deadline for the relay's Shutdown: 30 s by
+// default, or the configured grace plus relayShutdownPad when the drain is
+// capped, so Shutdown is not cut off before the drain cap ends the drain.
+func relayShutdownTimeout(grace time.Duration, capped bool) time.Duration {
+	if capped {
+		return grace + relayShutdownPad
+	}
+	return 30 * time.Second
 }

@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/pflag"
 	"github.com/stretchr/testify/assert"
@@ -264,4 +265,13 @@ func TestRelayRoleRefusesOtherComponents(t *testing.T) {
 		require.Error(t, err, name)
 		assert.Contains(t, err.Error(), "--"+name)
 	}
+}
+
+// A capped drain gets its grace plus the pad, so Shutdown is not cut off
+// before the drain cap ends the drain; an uncapped one keeps 30 s.
+func TestRelayShutdownTimeoutPadsPastTheDrainCap(t *testing.T) {
+	assert.Equal(t, 70*time.Second, relayShutdownTimeout(60*time.Second, true))
+	assert.Equal(t, relayShutdownPad, relayShutdownTimeout(0, true))
+	assert.Equal(t, 30*time.Second, relayShutdownTimeout(0, false))
+	assert.Equal(t, 30*time.Second, relayShutdownTimeout(60*time.Second, false))
 }

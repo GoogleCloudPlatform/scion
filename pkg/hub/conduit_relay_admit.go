@@ -234,17 +234,36 @@ func (s *Server) relayIAPPinned() bool {
 }
 
 // relayServesHost reports whether host (as the dialer sent it) is the host
-// of the relay's registered public endpoint. A relay without one serves no
-// dialers.
+// of the relay's registered public endpoint. The hostname is compared
+// case-insensitively and the port exactly, where no port and the default
+// port of the endpoint's scheme (443 for https, 80 for http) are the same.
+// Nothing else is normalised: no suffix, wildcard or partial match. A relay
+// without a parsable endpoint serves no dialers.
 func relayServesHost(publicEndpoint, host string) bool {
-	if publicEndpoint == "" {
+	if publicEndpoint == "" || host == "" {
 		return false
 	}
 	u, err := url.Parse(publicEndpoint)
-	if err != nil || u.Host == "" {
+	if err != nil || u.Hostname() == "" {
 		return false
 	}
-	return strings.EqualFold(u.Host, host) || (u.Port() == "" && strings.EqualFold(u.Hostname(), host))
+	h := &url.URL{Host: host}
+	if h.Hostname() == "" || !strings.EqualFold(u.Hostname(), h.Hostname()) {
+		return false
+	}
+	def := relayDefaultPorts[strings.ToLower(u.Scheme)]
+	return portOrDefault(u.Port(), def) == portOrDefault(h.Port(), def)
+}
+
+// relayDefaultPorts are the default ports of the relay endpoint schemes.
+var relayDefaultPorts = map[string]string{"https": "443", "http": "80"}
+
+// portOrDefault is port, or def when port is empty.
+func portOrDefault(port, def string) string {
+	if port == "" {
+		return def
+	}
+	return port
 }
 
 // relayRow returns the calling relay's registry row (false when it has
