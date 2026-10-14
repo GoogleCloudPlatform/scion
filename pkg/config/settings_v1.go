@@ -3620,11 +3620,42 @@ func resolveEffectiveProjectPath(projectPath string) string {
 // 4. External project config settings (for git projects with split storage)
 // 5. Environment variables (SCION_ prefix)
 func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
+	k, err := loadVersionedSettingsKoanf(projectPath, true)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal into VersionedSettings struct
+	settings := &VersionedSettings{
+		Runtimes:       make(map[string]V1RuntimeConfig),
+		HarnessConfigs: make(map[string]HarnessConfigEntry),
+		Profiles:       make(map[string]V1ProfileConfig),
+	}
+
+	if err := unmarshalVersionedSettings(k, settings); err != nil {
+		return nil, err
+	}
+	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
+		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
+		}
+	}
+
+	return settings, nil
+}
+
+// loadVersionedSettingsKoanf merges LoadVersionedSettings' layers into one
+// koanf instance. withDefaults false leaves out layer 1 (the embedded
+// defaults), so ProfileOrigins can tell settings that come from the files
+// and environment from the built-in defaults with the same layer list.
+func loadVersionedSettingsKoanf(projectPath string, withDefaults bool) (*koanf.Koanf, error) {
 	k := koanf.New(".")
 
 	// 1. Load embedded defaults (YAML)
-	if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
-		_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+	if withDefaults {
+		if defaultData, err := GetDefaultSettingsDataYAML(); err == nil {
+			_ = k.Load(rawbytes.Provider(defaultData), yaml.Parser())
+		}
 	}
 
 	// 2. Load global settings (~/.scion/settings.yaml or .json)
@@ -3714,23 +3745,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		}
 	}
 
-	// Unmarshal into VersionedSettings struct
-	settings := &VersionedSettings{
-		Runtimes:       make(map[string]V1RuntimeConfig),
-		HarnessConfigs: make(map[string]HarnessConfigEntry),
-		Profiles:       make(map[string]V1ProfileConfig),
-	}
-
-	if err := unmarshalVersionedSettings(k, settings); err != nil {
-		return nil, err
-	}
-	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		if err := ValidateV1TelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
-			return nil, err
-		}
-	}
-
-	return settings, nil
+	return k, nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
