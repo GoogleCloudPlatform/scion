@@ -15,10 +15,8 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -451,7 +449,7 @@ func runHubProfileList(cmd *cobra.Command, _ []string) error {
 		if profiles == nil {
 			profiles = []*hubprofile.Profile{}
 		}
-		return writeIndentedJSON(out, map[string]any{"profiles": profiles})
+		return writeJSONTo(out, map[string]any{"profiles": profiles})
 	}
 	if len(profiles) == 0 {
 		_, _ = fmt.Fprintln(out, "No hub profiles.")
@@ -486,7 +484,7 @@ func runHubProfileShow(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if hubProfileJSON {
-		return writeIndentedJSON(out, map[string]any{"profile": p, "runs": runs})
+		return writeJSONTo(out, map[string]any{"profile": p, "runs": runs})
 	}
 	_, _ = fmt.Fprintf(out, "Profile:            %s\n", p.Name)
 	_, _ = fmt.Fprintf(out, "Endpoint:           %s\n", p.Endpoint)
@@ -518,12 +516,6 @@ func runHubProfileRemove(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Removed hub profile %q.\n", args[0])
 	return nil
-}
-
-func writeIndentedJSON(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }
 
 // hubProfileRequested reports whether a profile is selected, before or
