@@ -24,6 +24,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/registry"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/relay/relaytest"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 )
 
 // TestRelayNotifyGrantKeysChanged: the hint goes to every local target
@@ -46,12 +47,12 @@ func TestRelayNotifyGrantKeysChanged(t *testing.T) {
 		Agent: relay.AgentIncarnationFacts{LaunchID: "L2", Generation: 1}})
 	plainHello := relaytest.AgentHello("agent-plain", "L2", "", "pty")
 	plainHello.Capabilities.Features = []string{"stream_renewal"} // the earlier name is not .v2
-	a.MustDial("plain", plainHello, counting(&plainHints))
+	plain, _ := a.MustDial("plain", plainHello, counting(&plainHints))
 
 	w.SetPrincipal("user", relay.Principal{Kind: registry.PrincipalUser, ID: "user-1"})
 	userHello := relaytest.UserHello("user-1")
 	userHello.Capabilities.Features = []string{conduit.FeatureStreamRenewal}
-	a.MustDial("user", userHello, counting(&userHints))
+	user, _ := a.MustDial("user", userHello, counting(&userHints))
 
 	if n := a.Relay.NotifyGrantKeysChanged(); n != 1 {
 		t.Fatalf("sent on %d sessions, want 1", n)
@@ -63,7 +64,13 @@ func TestRelayNotifyGrantKeysChanged(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	time.Sleep(50 * time.Millisecond)
+	// Barrier: the relay answers each RPC after anything it queued on that
+	// session before, so a hint sent to these sessions would arrive first.
+	for _, s := range []conduit.LocalSession{plain, user} {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_, _ = s.Call(ctx, &conduitv1.RpcRequest{Path: "/barrier"})
+		cancel()
+	}
 	if plainHints.Load() != 0 || userHints.Load() != 0 {
 		t.Fatalf("hints reached other sessions: plain %d, user %d", plainHints.Load(), userHints.Load())
 	}

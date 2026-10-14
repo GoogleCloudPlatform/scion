@@ -150,11 +150,16 @@ func TestConduitGrantKeyChangeEventNamesOnlyTheKey(t *testing.T) {
 	}
 
 	setConduitExperiment(t, n.a, false)
-	n.a.publishConduitGrantKeysChanged("cg-any")
+	n.a.publishConduitGrantKeysChanged("cg-while-off")
+	setConduitExperiment(t, n.a, true)
+	n.a.publishConduitGrantKeysChanged("cg-marker") // published after; must be the next event
 	select {
 	case evt := <-ch:
-		t.Fatalf("event published with hub.conduit off: %s", evt.Data)
-	case <-time.After(100 * time.Millisecond):
+		var got conduitGrantKeysChanged
+		require.NoError(t, json.Unmarshal(evt.Data, &got))
+		assert.Equal(t, "cg-marker", got.KeyID, "an event was published with hub.conduit off")
+	case <-time.After(5 * time.Second):
+		t.Fatal("no marker event")
 	}
 }
 
