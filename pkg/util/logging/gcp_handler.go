@@ -453,15 +453,15 @@ func nestInGroups(groups []gcpGroup, attrs []slog.Attr) []slog.Attr {
 
 // extractTraceIDFromAttrs returns the normalized ID of the last trace_id in
 // attrs that does not normalize to empty, or "" if there is none. Handle
-// passes the attrs it writes top-level, so the trace label always matches
-// the trace field.
+// passes the attrs it writes top-level, with their trace_id values
+// resolved, so the trace label always matches the trace field.
 func extractTraceIDFromAttrs(attrs []slog.Attr) string {
 	var traceID string
 	for _, a := range attrs {
 		if a.Key != AttrTraceID {
 			continue
 		}
-		if id := NormalizeTraceID(a.Value.Resolve().String()); id != "" {
+		if id := NormalizeTraceID(a.Value.String()); id != "" {
 			traceID = id
 		}
 	}
