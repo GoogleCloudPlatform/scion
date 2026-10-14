@@ -3184,16 +3184,17 @@ func syncHubSettings(ctx context.Context, s store.HubSettingStore, bootstrapKoan
 			continue
 		}
 
-		if existing.Origin == opsettings.OriginManaged {
-			slog.Debug("Skipping managed section", "section", sec.Name)
-			continue
-		}
-
-		// Origin is "seeded" — update only if content differs.
-		// Compare semantically (not byte-for-byte) because Postgres jsonb
+		// Write only when SyncedSection's document differs from the row, so
+		// the write set comes from the shared rule alone: a managed row's
+		// document is its own value and is never rewritten. Compare
+		// semantically (not byte-for-byte) because Postgres jsonb
 		// re-serializes values, changing whitespace and key ordering.
 		if jsonEqual(existing.Value, doc) {
-			slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+			if existing.Origin == opsettings.OriginManaged {
+				slog.Debug("Skipping managed section", "section", sec.Name)
+			} else {
+				slog.Debug("Seeded section unchanged; skipping write", "section", sec.Name)
+			}
 			continue
 		}
 
