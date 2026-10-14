@@ -60,19 +60,19 @@ func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
 	// The opener is an exported method of the artifact service, so the rest
 	// of the module is checked too: outside its own declaration, the only
 	// reference to it in non-test code is the call above.
-	refs := moduleReferences(t, "../..", "OpenBoundAttachment")
+	refs := moduleSymbolReferences(t, "../..", "OpenBoundAttachment")
 	if want := []string{"pkg/hub/attachments_artifacts.go:stageArtifactAttachment"}; strings.Join(refs, ",") != strings.Join(want, ",") {
 		t.Errorf("OpenBoundAttachment is referenced at %v; want only %v", refs, want)
 	}
 }
 
-// moduleReferences returns, sorted, "<file>:<function>" for every reference
+// moduleSymbolReferences returns, sorted, "<file>:<function>" for every reference
 // to name (an identifier or a selected name, called or not) in the non-test
 // Go files of the module rooted at root, skipping nested modules, hidden
 // directories, testdata, vendor and node_modules. A function's own
 // declaration name is not a reference; a reference outside any function is
 // reported with the function "<file scope>".
-func moduleReferences(t *testing.T, root, name string) []string {
+func moduleSymbolReferences(t *testing.T, root, name string) []string {
 	t.Helper()
 	absRoot, err := filepath.Abs(root)
 	if err != nil {

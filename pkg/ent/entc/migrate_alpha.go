@@ -698,11 +698,6 @@ func attachedTableColumns(ctx context.Context, db *sql.DB, table string) (map[st
 	return cols, rows.Err()
 }
 
-// quoteIdent double-quotes a SQLite identifier.
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
-
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {

@@ -1617,6 +1617,14 @@ authDone:
 	}
 	warnings = append(warnings, envWarnings...)
 
+	// Check the OTLP TLS settings in the final env, after every merge. Only
+	// a warning: in the container sciontool logs a failed telemetry start
+	// and runs the agent anyway (cmd/sciontool/commands/init.go), so a
+	// start that worked without telemetry must not fail here.
+	if err := config.ValidateTelemetryEnv(agentEnv); err != nil {
+		warnings = append(warnings, fmt.Sprintf("Warning: %v; with cloud telemetry export configured, the agent starts without telemetry", err))
+	}
+
 	// Determine the effective workspace path. If agentWorkspace is empty but we have
 	// a volume mounted to /workspace (e.g., shared worktree case), use that source path.
 	effectiveWorkspace := agentWorkspace
@@ -1947,7 +1955,7 @@ authDone:
 			if startGlobalSettings != nil {
 				return checkHomeStorageLoaded(startGlobalSettings)
 			}
-			return loadHomeStorageSettings()
+			return loadHomeStorageSettings(ctx)
 		},
 	})
 	if err != nil {
@@ -2284,6 +2292,17 @@ authDone:
 	task, err = deliverTaskFile(agentHome, task)
 	if err != nil {
 		return nil, err
+	}
+
+	// The container-script provisioner reads the manifest inside the
+	// container, where the workspace is mounted at containerWorkspace, not at
+	// the host path Provision staged it with above. Claude's provisioner, for
+	// one, pre-trusts agent_workspace; a host path there leaves the agent
+	// blocked on Claude Code's folder-trust dialog.
+	if _, isContainerScript := h.(*harness.ContainerScriptHarness); isContainerScript {
+		if err := writeAgentHome(ctx, func() error { return harness.SetManifestAgentWorkspace(agentHome, containerWorkspace) }); err != nil {
+			return nil, fmt.Errorf("stage harness manifest workspace: %w", err)
+		}
 	}
 
 	runCfg := runtime.RunConfig{

@@ -375,11 +375,13 @@ func TestChatProfileWrites_FederatedUserRefused(t *testing.T) {
 
 // TestChatProfileWrites_SessionAndTokenUnchanged pins that a session and a
 // user access credential keep their behaviour on the chat preference, presence
-// and project-less attachment writes.
+// and project-less attachment writes. The credential carries inbox:write on a
+// hub boundary, which these writes require of a token.
 func TestChatProfileWrites_SessionAndTokenUnchanged(t *testing.T) {
 	f := newProfileWriteFixture(t)
+	inboxWriter := mintHubConfigToken(t, f.srv, f.alice.ID, hubBoundary(), "inbox:read", "inbox:write")
 	want := []int{http.StatusOK, http.StatusOK, http.StatusCreated}
-	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"user access credential", f.token}} {
+	for _, caller := range []struct{ name, key string }{{"session", f.session}, {"user access credential", inboxWriter}} {
 		for i, pr := range chatProfileWrites(t) {
 			rec := f.asBearer(pr, caller.key)
 			assert.Equal(t, want[i], rec.Code, "%s %s %s: %s", caller.name, pr.method, pr.path, rec.Body.String())

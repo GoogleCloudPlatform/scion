@@ -206,23 +206,19 @@ next start.
 To give an existing agent the new setup:
 
 1. **Update the harness-config.**
-   - **Local mode:** run `scion harness-config upgrade <name>`. It changes only the local copy
-     in `~/.scion/harness-configs/<name>/`. It adds missing files and settings, but an existing
-     file that changed in the new defaults (for example `home/.claude/settings.json`) keeps your
-     version. To take the new defaults, run `scion harness-config upgrade <name> --force`. This
-     overwrites every file that ships in the embedded defaults, discarding your edits to those
-     files. Files you added yourself are kept.
-   - **Workstation and hosted:** agents use the Hub's copy, which `upgrade` does not change. The
+   - Agents use the Hub's copy. `scion harness-config upgrade <name>` changes only the local copy
+     in `~/.scion/harness-configs/<name>/` (add `--force` to take every new default file, discarding
+     your edits to them), not the Hub's copy. The
      Hub refreshes its copy of a built-in harness-config from the binary's defaults when it
      restarts. In Workstation mode, that restart also resets the bundled configs in
      `~/.scion/harness-configs/` to the defaults. Publish a harness-config you changed yourself
      with `scion harness-config sync <name>`.
 2. **Rebuild the agent's home.**
-   - **With a Hub:** run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
+   - Run [`scion reincarnate <agent>`](/scion/reference/cli/#scion-reincarnate).
      It keeps the agent's identity and workspace and copies the harness-config's home files, the
      skills from the template chain (including skill references it declares) and the platform
      skills in again. It overlays files: files that the new version no longer has stay in place.
-   - **Without a Hub, or in a worktree-per-agent project** (where reincarnate is not available):
+   - **In a worktree-per-agent project** (where reincarnate is not available):
      save the agent's work, then delete the agent with `scion delete` and start it again.
 
 ### Deleting
@@ -395,6 +391,16 @@ grok-build, and `delay` 8s for every other harness. A harness-config without the
 example one installed before the block existed) uses the block of the built-in bundle for its
 `harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
 `delay` 8s.
+
+A harness-config without a provisioner that declares a `ready` or `delivery` block, in
+`config.yaml` or in an override, is treated like a harness-config with `command` or
+`config_dir`: its `ready` block is used, its `instructions_file`, `system_prompt_file` and
+`system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
+the agent is provisioned, and the harness reports its `harness` type as its name instead of
+`generic`. A `ready` block taken from the built-in bundle does not have this effect. Message
+delivery and interrupts still use the built-in bundle for the `harness` type (the defaults for a
+type with no bundle), so a custom `delivery` block, `interrupt_key` and `interrupt_sequence` do
+not yet change how messages are submitted or interrupted.
 
 **Version skew.**
 

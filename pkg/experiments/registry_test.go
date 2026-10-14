@@ -456,3 +456,25 @@ func TestAttachmentArtifacts_RegisteredDefaultOff(t *testing.T) {
 		t.Errorf("attachment artifacts experiment metadata mismatch: %+v", entry)
 	}
 }
+
+// TestAsyncAgentLaunchExperimentRegistered pins hub.async_agent_launch: it
+// changes what the hub sends to brokers, so it is server-layer only (the
+// web form opts in unconditionally), and it ships off.
+func TestAsyncAgentLaunchExperimentRegistered(t *testing.T) {
+	e, ok := Default().Lookup(AsyncAgentLaunch)
+	if !ok {
+		t.Fatalf("%s is not registered", AsyncAgentLaunch)
+	}
+	if AsyncAgentLaunch != "hub.async_agent_launch" {
+		t.Fatalf("frozen name changed: %q", AsyncAgentLaunch)
+	}
+	if e.Default {
+		t.Fatal("async agent launch must default to off")
+	}
+	if !e.HasLayer(LayerServer) || e.HasLayer(LayerWeb) {
+		t.Fatalf("must be a server-layer (only) experiment, got %v", e.Layers)
+	}
+	if e.Issue != "ptone/scion#4991" || e.Stage != StageAlpha {
+		t.Fatalf("unexpected registration: %+v", e)
+	}
+}

@@ -104,3 +104,25 @@ const RecordedRuntimeQueryParam = "runtime"
 // the start of a newer agent recreated under the same name. A broker that
 // does not read it, or a request without it, matches by name.
 const AgentIDQueryParam = "agentId"
+
+// PurgeRetainedQueryParam is the query parameter ("true") on a hub-to-broker
+// delete that removes the retained files of a soft-deleted agent once the
+// soft-delete retention window has passed (ptone/scion#4744). The broker
+// treats the delete as a files delete (deleteFiles=true, never soft) and
+// removes the files only when no runtime entry holds the agent, no start,
+// restart or create of the agent is in flight on the broker, and its
+// agent-info.json carries the soft-delete mark; otherwise it answers 409
+// with BrokerErrCodeRetainedFilesRefused and removes nothing (it does not
+// cancel an in-flight start either). While the removal runs, the broker
+// refuses a start, restart or create of the agent with a retryable 409,
+// BrokerErrCodeRetainedPurgeInProgress. The delete must carry the agent's
+// projectId (the broker answers 400 otherwise), and cannot be combined with
+// localOnly.
+//
+// Caller contract (defence in depth beside the broker's own checks): a hub
+// restore does not clear the broker's soft-delete mark (only a later start
+// rewrites agent-info.json), so the mark alone does not prove the agent is
+// still deleted. The caller must send this only for an agent record that is
+// still soft-deleted, and past its retention window, when the delete is
+// dispatched.
+const PurgeRetainedQueryParam = "purgeRetained"

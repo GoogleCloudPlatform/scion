@@ -897,6 +897,10 @@ func (s *Server) handlePutServerConfigDB(w http.ResponseWriter, r *http.Request,
 	if rejectRemovedProfileTimezone(w, rawBody) {
 		return
 	}
+	// Likewise the retired server.hub.async_agent_launch (ptone/scion#4991).
+	if rejectRetiredAsyncAgentLaunch(w, rawBody) {
+		return
+	}
 	// A user access token writes configuration keys only.
 	if writeTokenRefusedSettingsKeys(w, r.Context(), tokenRefusedServerConfigKeys(rawBody)) {
 		return
@@ -1968,9 +1972,6 @@ func extractKoanfKeysFromRequest(req *ServerConfigUpdateRequest) []string {
 			}
 			if hub.CORS != nil {
 				keys = append(keys, "server.hub.cors")
-			}
-			if hub.AsyncAgentLaunch != nil {
-				keys = append(keys, "server.hub.async_agent_launch")
 			}
 			if hub.PerfTrace != nil {
 				keys = append(keys, "server.hub.perf_trace")
