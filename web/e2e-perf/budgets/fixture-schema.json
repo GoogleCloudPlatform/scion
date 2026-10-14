@@ -270,6 +270,7 @@
     "/api/v1/test-infra/status": {
       "status": 200,
       "fields": [
+        "testAdminWebSessions:boolean",
         "testHubAdmin:boolean",
         "testIdentities:boolean",
         "testIdentityWebSessions:boolean",
