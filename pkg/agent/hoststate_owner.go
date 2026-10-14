@@ -215,8 +215,8 @@ func HostStateRootFor(t RunOwnerTarget) (string, error) {
 
 	slug := api.Slugify(config.GetProjectName(configDir))
 	ext, extMissing := "", ""
-	switch {
-	case t.HubProjectID == "":
+	switch t.HubProjectID {
+	case "":
 		extMissing = "the request has no hub project ID"
 	default:
 		m := config.ProjectMarker{ProjectID: t.HubProjectID, ProjectSlug: slug}
