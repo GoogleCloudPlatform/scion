@@ -309,9 +309,11 @@ func (s *Server) commitHarnessConfigFiles(ctx context.Context, hc *store.Harness
 
 	// 5. One row write, in the blob layout.
 	prevState := *hc
+	// Only a recorded legacy path is removed after the migration: a row
+	// without one never owned a tree it could prove is its own.
 	migratedFrom := ""
 	if !isHarnessConfigBlobLayout(hc) && !opts.create {
-		migratedFrom = s.harnessConfigLegacyPath(hc)
+		migratedFrom = hc.StoragePath
 	}
 	hc.Files = next
 	hc.ContentHash = contentHash

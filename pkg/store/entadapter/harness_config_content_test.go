@@ -279,6 +279,24 @@ func TestUpdateHarnessConfigContent_LayoutAndPathInPredicate(t *testing.T) {
 		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &fresh, readPre(got)))
 	})
 
+	t.Run("layout only", func(t *testing.T) {
+		// Each column of the predicate is checked on its own: here the
+		// stored row changed only its layout (mutant "CAS without layout").
+		legacyRead := newLegacy("aba-layout-only")
+		moved := *legacyRead
+		moved.Layout = store.HarnessConfigLayoutBlobs
+		require.NoError(t, ts.UpdateHarnessConfigContent(ctx, &moved, readPre(legacyRead)))
+
+		stale := *legacyRead
+		stale.SourceURL = "stale writer"
+		assert.ErrorIs(t, ts.UpdateHarnessConfigContent(ctx, &stale, readPre(legacyRead)), store.ErrHarnessConfigConflict)
+
+		got, err := ts.GetHarnessConfig(ctx, legacyRead.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.HarnessConfigLayoutBlobs, got.Layout, "the legacy layout was not written back")
+		assert.Empty(t, got.SourceURL)
+	})
+
 	t.Run("storage path only", func(t *testing.T) {
 		legacyRead := newLegacy("aba-path")
 		moved := *legacyRead
