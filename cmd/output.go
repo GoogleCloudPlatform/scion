@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -48,7 +49,12 @@ func statusln(a ...interface{}) {
 
 // outputJSON pretty-prints a value as JSON to stdout.
 func outputJSON(v interface{}) error {
-	enc := json.NewEncoder(os.Stdout)
+	return writeJSONTo(os.Stdout, v)
+}
+
+// writeJSONTo writes v to out as indented JSON.
+func writeJSONTo(out io.Writer, v any) error {
+	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	return enc.Encode(v)
 }
