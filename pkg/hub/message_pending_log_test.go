@@ -105,8 +105,8 @@ func TestMessagePendingLog_AgentDM(t *testing.T) {
 	assert.Equal(t, "agent:"+sender.Slug, rec["sender"])
 	assert.Equal(t, "agent:"+target.Slug, rec["recipient"])
 	assert.Equal(t, pendingPathAgentDM, rec["creation_path"])
-	assert.Equal(t, []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time"},
-		sortedKeys(rec), "the line carries only identifiers and routing fields")
+	wantKeys := []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time"}
+	assert.Equal(t, wantKeys, sortedKeys(rec), "the line carries only identifiers and routing fields")
 	assert.NotContains(t, lines[0], body, "the message body must never be logged")
 }
 
