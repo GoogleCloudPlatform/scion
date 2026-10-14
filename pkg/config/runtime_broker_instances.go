@@ -620,16 +620,6 @@ func RuntimeBrokerInstancesToGlobal(in []V1RuntimeBrokerInstanceConfig) []Runtim
 	return v1InstancesToGlobal(in)
 }
 
-// copyBoolPtr returns a new pointer to *b, or nil, so a tri-state value is
-// never shared between two copies of a config.
-func copyBoolPtr(b *bool) *bool {
-	if b == nil {
-		return nil
-	}
-	v := *b
-	return &v
-}
-
 // copyStringMap returns a copy of m (nil for an empty map).
 func copyStringMap(m map[string]string) map[string]string {
 	if len(m) == 0 {
