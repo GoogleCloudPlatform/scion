@@ -16,10 +16,14 @@ package runtimebroker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path/filepath"
+	"slices"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
@@ -127,8 +131,20 @@ func (s *Server) ownRuntimeFor(ctx context.Context) *agentOwnRuntime {
 // the fingerprint of the profile runtime configuration it was resolved from;
 // when settings no longer match it (for example an edited namespace), the
 // profile is resolved again and the entry replaced. Concurrent requests for
-// one configuration share a single resolution; a failed resolution is not
-// stored and is retried on the next request.
+// one configuration share a single resolution; a failed runtime resolution
+// is not stored and is retried on the next request.
+//
+// A saved profile that does not resolve in the loaded settings (it is no
+// longer in the profile catalog, or names a missing runtime) is memoised too,
+// keyed by project directory and profile, with the fingerprint of the
+// catalog it failed in (profileCatalogFingerprint). While the catalog is
+// unchanged, later requests skip the resolution; a settings change that
+// touches the catalog (for example an admin save restoring the profile)
+// changes the fingerprint, so the next request resolves again. The fallback
+// is logged at warn level once per agent, profile and catalog, then at debug
+// level (logSavedProfileFallback). The agent's saved profile is never
+// rewritten: the configuration error stays visible and start keeps refusing
+// the missing profile.
 //
 // Per-request cost: every existing-agent request reads the agent's
 // agent-info.json and the project's settings (local file reads only). The
@@ -152,12 +168,15 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 	if err != nil || vs == nil {
 		return ctx
 	}
-	rtConfig, runtimeType, err := vs.ResolveRuntime(profile)
+	catalog := profileCatalogFingerprint(vs, profile)
+	rtConfig, runtimeType, err := s.resolveSavedProfile(vs, projectDir, profile, catalog)
 	if err != nil {
-		s.agentLifecycleLog.Warn("Agent's saved profile no longer resolves; searching all registered runtimes",
-			"agent_id", id, "project_id", projectID, "profile", profile, "error", err)
+		s.logSavedProfileFallback(id, projectID, projectDir, profile, catalog, err)
 		return ctx
 	}
+	// The profile resolves: a later failure, even in a catalog seen before,
+	// is logged at warn level again.
+	s.savedProfileWarned.Delete(savedProfileWarnedKey(projectDir, id, profile))
 	fingerprint, err := json.Marshal(rtConfig)
 	if err != nil {
 		return ctx
@@ -190,6 +209,89 @@ func (s *Server) ensureAgentOwnRuntime(ctx context.Context, id, projectID, proje
 		return ctx
 	}
 	return context.WithValue(ctx, agentOwnRuntimeKey{}, v.(*agentOwnRuntime))
+}
+
+// savedProfileFailure is a memoised failed resolution of a saved profile.
+type savedProfileFailure struct {
+	catalog string // profileCatalogFingerprint of the settings it failed in
+	err     error
+}
+
+// savedProfileKey keys the memo of failed saved-profile resolutions.
+func savedProfileKey(projectDir, profile string) string {
+	return projectDir + "\x00" + profile
+}
+
+// resolveSavedProfile resolves profile's runtime configuration in vs, whose
+// profileCatalogFingerprint is catalog, except when the same profile already
+// failed to resolve for projectDir in a catalog with that fingerprint; then
+// the memoised error is returned without resolving again. A failure is
+// stored, replacing any entry for the key, and a success removes the entry,
+// so the memo holds at most one entry per project directory and saved
+// profile that currently fails.
+func (s *Server) resolveSavedProfile(vs *config.VersionedSettings, projectDir, profile, catalog string) (config.V1RuntimeConfig, string, error) {
+	key := savedProfileKey(projectDir, profile)
+	if v, ok := s.savedProfileFailures.Load(key); ok && v.(*savedProfileFailure).catalog == catalog {
+		return config.V1RuntimeConfig{}, "", v.(*savedProfileFailure).err
+	}
+	resolve := s.resolveProfileRuntime
+	if resolve == nil {
+		resolve = (*config.VersionedSettings).ResolveRuntime
+	}
+	rtConfig, runtimeType, err := resolve(vs, profile)
+	if err != nil {
+		s.savedProfileFailures.Store(key, &savedProfileFailure{catalog: catalog, err: err})
+		return config.V1RuntimeConfig{}, "", err
+	}
+	s.savedProfileFailures.Delete(key)
+	return rtConfig, runtimeType, nil
+}
+
+// profileCatalogFingerprint identifies everything in vs that decides whether
+// profile resolves: the profile's runtime name and the sorted names of all
+// profiles and runtimes. Any change to the catalog changes it, so a
+// memoised failure is not reused after settings add, remove or rename a
+// profile or runtime.
+func profileCatalogFingerprint(vs *config.VersionedSettings, profile string) string {
+	h := sha256.New()
+	write := func(parts ...string) {
+		for _, p := range parts {
+			h.Write([]byte(p))
+			h.Write([]byte{0})
+		}
+	}
+	if p, ok := vs.Profiles[profile]; ok {
+		write("profile", profile, "runtime", p.Runtime)
+	} else {
+		write("profile", profile, "missing")
+	}
+	write("profiles")
+	write(slices.Sorted(maps.Keys(vs.Profiles))...)
+	write("runtimes")
+	write(slices.Sorted(maps.Keys(vs.Runtimes))...)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// savedProfileWarnedKey keys the record of logged saved-profile failures.
+func savedProfileWarnedKey(projectDir, id, profile string) string {
+	return projectDir + "\x00" + id + "\x00" + profile
+}
+
+// logSavedProfileFallback logs that agent id's saved profile does not
+// resolve and every registered runtime is searched instead: at warn level
+// the first time for the agent, profile and catalog in this process, at
+// debug level after that, since every existing-agent request (each message
+// delivery, status, logs, exec) repeats the same finding. One entry per
+// project directory, agent and profile holds the last catalog logged at
+// warn level, removed when the profile resolves again, so the map stays
+// bounded by the agents seen in this process times their saved profiles.
+func (s *Server) logSavedProfileFallback(id, projectID, projectDir, profile, catalog string, err error) {
+	log := s.agentLifecycleLog.Debug
+	if prev, seen := s.savedProfileWarned.Swap(savedProfileWarnedKey(projectDir, id, profile), catalog); !seen || prev != catalog {
+		log = s.agentLifecycleLog.Warn
+	}
+	log("Agent's saved profile no longer resolves; searching all registered runtimes",
+		"agent_id", id, "project_id", projectID, "profile", profile, "error", err)
 }
 
 // runtimeOfManager returns the runtime behind mgr, or nil.
