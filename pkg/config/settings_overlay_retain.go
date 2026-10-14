@@ -245,8 +245,13 @@ func (o *SettingsOverlay) addReference(profile string, agent bool) {
 
 	// A built-in named here becomes sticky at once, so a reference count
 	// whose store read predates this call cannot drop it before the
-	// caller's dispatch loads the settings.
+	// caller's dispatch loads the settings. An added reference is a known
+	// reference, so it also clears a conservative mark. A stored name is
+	// not retained (the stored entry wins), so it is not recorded.
 	if _, builtin := o.builtins().Profiles[profile]; !builtin {
+		return
+	}
+	if _, stored := o.profiles[profile]; stored {
 		return
 	}
 	o.retained.mu.Lock()
@@ -380,9 +385,12 @@ func (o *SettingsOverlay) retainRuntimes(vs *VersionedSettings) []string {
 			continue // only built-in runtimes are retained
 		}
 		_, sticky := o.retained.runtimes[key]
-		if runtimeTypeOf(key, rt) == "kubernetes" && !sticky {
+		_, stickyProfile := o.retained.profiles[name]
+		if runtimeTypeOf(key, rt) == "kubernetes" && !sticky && !stickyProfile {
 			// Known references win even in conservative mode: refs then
 			// hold only the references added since (AddProjectReference).
+			// A sticky profile was referenced once (conservative mode
+			// never makes a kubernetes-runtime profile sticky by itself).
 			if !o.refs.referenced(name) && name != vs.ActiveProfile {
 				continue
 			}
@@ -413,18 +421,24 @@ func (o *SettingsOverlay) RetainedState() ([]RetainedProfile, []RetainedRuntime)
 		return nil, nil
 	}
 	o.mu.RLock()
-	refs := o.refs
-	o.mu.RUnlock()
+	defer o.mu.RUnlock()
 	b := o.builtins()
 
 	o.retained.mu.Lock()
 	defer o.retained.mu.Unlock()
-	return o.retainedStateLocked(refs, b)
+	return o.retainedStateLocked(b)
 }
 
-func (o *SettingsOverlay) retainedStateLocked(refs ProfileReferences, b *builtinCatalog) ([]RetainedProfile, []RetainedRuntime) {
+// retainedStateLocked builds the retained state, leaving out names that
+// are now stored (a stored entry wins, so it is not retained). Called with
+// o.mu held (for reading or writing) and o.retained.mu held.
+func (o *SettingsOverlay) retainedStateLocked(b *builtinCatalog) ([]RetainedProfile, []RetainedRuntime) {
+	refs := o.refs
 	var profiles []RetainedProfile
 	for _, name := range sortedNames(o.retained.profiles) {
+		if _, stored := o.profiles[name]; stored {
+			continue
+		}
 		def := b.Profiles[name]
 		_, active := o.retained.activeProfiles[name]
 		p := RetainedProfile{
@@ -440,6 +454,9 @@ func (o *SettingsOverlay) retainedStateLocked(refs ProfileReferences, b *builtin
 	}
 	var runtimes []RetainedRuntime
 	for _, name := range sortedNames(o.retained.runtimes) {
+		if _, stored := o.runtimes[name]; stored {
+			continue
+		}
 		runtimes = append(runtimes, RetainedRuntime{
 			Name:     name,
 			Type:     runtimeTypeOf(name, b.Runtimes[name]),
@@ -460,17 +477,24 @@ func (o *SettingsOverlay) logRetention() {
 
 	o.retained.mu.Lock()
 	defer o.retained.mu.Unlock()
-	if len(o.retained.profiles) == 0 && len(o.retained.runtimes) == 0 {
+	profiles, runtimes := o.retainedStateLocked(b)
+	if len(profiles) == 0 && len(runtimes) == 0 {
 		return
 	}
+	var selfPerpetuating []string
+	for _, p := range profiles {
+		if _, ok := o.retained.selfPerpetuating[p.Name]; ok {
+			selfPerpetuating = append(selfPerpetuating, p.Name)
+		}
+	}
 	var key strings.Builder
-	for _, name := range sortedNames(o.retained.profiles) {
-		fmt.Fprintf(&key, "p:%s:%t\x00", name, o.retained.profiles[name])
+	for _, p := range profiles {
+		fmt.Fprintf(&key, "p:%s:%t\x00", p.Name, p.Conservative)
 	}
-	for _, name := range sortedNames(o.retained.runtimes) {
-		fmt.Fprintf(&key, "r:%s\x00", name)
+	for _, r := range runtimes {
+		fmt.Fprintf(&key, "r:%s\x00", r.Name)
 	}
-	for _, name := range sortedNames(o.retained.selfPerpetuating) {
+	for _, name := range selfPerpetuating {
 		fmt.Fprintf(&key, "s:%s\x00", name)
 	}
 	k := key.String()
@@ -482,7 +506,6 @@ func (o *SettingsOverlay) logRetention() {
 	}
 	o.retained.warnLogged[k] = struct{}{}
 
-	profiles, runtimes := o.retainedStateLocked(refs, b)
 	attrs := []any{}
 	conservative := false
 	for _, p := range profiles {
@@ -505,7 +528,7 @@ func (o *SettingsOverlay) logRetention() {
 	if refs.AgentInfoMissing > 0 {
 		attrs = append(attrs, slog.Int("agent_info_missing", refs.AgentInfoMissing))
 	}
-	for _, name := range sortedNames(o.retained.selfPerpetuating) {
+	for _, name := range selfPerpetuating {
 		attrs = append(attrs, slog.String("default."+name,
 			fmt.Sprintf("new agents without a profile save %q and keep it in use; set active_profile to a stored profile, or store %q", name, name)))
 	}

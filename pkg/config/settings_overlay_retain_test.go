@@ -557,3 +557,125 @@ func captureLogs(t *testing.T, fn func()) string {
 	fn()
 	return buf.String()
 }
+
+// inc1 R1: a stored name is never reported as retained, even after an
+// added reference, and a name stored after it was retained drops out of
+// the report.
+func TestRetain_StoredNameNotReported(t *testing.T) {
+	stored := map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local": {Runtime: "docker"}}
+	o := newRetainOverlay(overlaySpec{profiles: stored})
+	o.SetProfileReferences(ProfileReferences{})
+	o.AddProjectReference("local")
+	logs := captureLogs(t, func() { o.Apply(fileSettings("gke")) })
+	if strings.Contains(logs, "Retaining built-in") {
+		t.Fatalf("WARN for a stored name: %s", logs)
+	}
+	if ps, rs := o.RetainedState(); ps != nil || rs != nil {
+		t.Fatalf("RetainedState = %+v / %+v, want empty", ps, rs)
+	}
+
+	o2 := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
+	o2.SetProfileReferences(agentsOn(map[string]int{"local": 1}))
+	o2.Apply(fileSettings("gke"))
+	if ps, _ := o2.RetainedState(); len(ps) != 1 {
+		t.Fatalf("precondition: RetainedState = %+v", ps)
+	}
+	o2.Update(nil, map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local": {Runtime: "docker"}}, nil, "")
+	o2.Apply(fileSettings("gke"))
+	if ps, _ := o2.RetainedState(); ps != nil {
+		t.Fatalf("RetainedState after storing local = %+v, want empty", ps)
+	}
+}
+
+// inc1 R2: an added remote reference survives a stale count together with
+// its kubernetes runtime.
+func TestRetain_AddedRemoteKeepsKubernetesRuntime(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{
+		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		profiles: storedGkeNFS,
+	})
+	o.SetProfileReferences(ProfileReferences{})
+	o.AddProjectReference("remote")
+	o.SetProfileReferences(ProfileReferences{}) // stale count lands first
+	vs := fileSettings("gke")
+	o.Apply(vs)
+	mustResolveType(t, vs, "remote", "kubernetes")
+}
+
+// DR2-C2: after a conservative start, a count referencing remote adds it
+// and the kubernetes runtime.
+func TestRetain_ConservativeThenRemoteReferenced(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{
+		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		profiles: storedGkeNFS,
+	})
+	o.EnableConservativeRetention()
+	o.Apply(fileSettings("gke"))
+	o.SetProfileReferences(agentsOn(map[string]int{"remote": 1}))
+	vs := fileSettings("gke")
+	o.Apply(vs)
+	mustResolveType(t, vs, "remote", "kubernetes")
+	mustResolveType(t, vs, "local", "docker")
+}
+
+// SR4-O2 for an added reference in conservative mode.
+func TestRetain_ConservativeAddedRemote(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{
+		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		profiles: storedGkeNFS,
+	})
+	o.EnableConservativeRetention()
+	o.AddProjectReference("remote")
+	vs := fileSettings("gke")
+	o.Apply(vs)
+	mustResolveType(t, vs, "remote", "kubernetes")
+}
+
+// SR1, config side: agents without a profile count toward the configured
+// active_profile: with active local, local is retained and the WARN shows
+// them; with active gke nothing is retained.
+func TestRetain_AgentsWithoutProfile(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
+	o.SetProfileReferences(agentsOn(map[string]int{"": 1}))
+	vs := fileSettings("local")
+	logs := captureLogs(t, func() { o.Apply(vs) })
+	mustResolveType(t, vs, "", "docker")
+	if !strings.Contains(logs, "agents_without_profile=1") {
+		t.Fatalf("WARN lacks agents_without_profile=1: %s", logs)
+	}
+
+	o2 := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
+	o2.SetProfileReferences(agentsOn(map[string]int{"": 1}))
+	vs = fileSettings("gke")
+	o2.Apply(vs)
+	if vs.RetainedProfileNames() != nil {
+		t.Fatalf("RetainedProfileNames = %v, want nil", vs.RetainedProfileNames())
+	}
+}
+
+// The WARN carries what operators act on: per-profile counts and runtime
+// type, the remediation, and agent_info_missing when non-zero.
+func TestRetain_WarnContent(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{
+		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		profiles: storedGkeNFS,
+	})
+	o.SetProfileReferences(ProfileReferences{
+		Agents:           map[string]int{"local": 3},
+		Projects:         map[string]int{"local": 1},
+		AgentInfoMissing: 2,
+	})
+	logs := captureLogs(t, func() { o.Apply(fileSettings("gke")) })
+	for _, want := range []string{
+		"agents=3 projects=1 active_profile=false runtime=docker runtime_type=docker",
+		"runtime.docker=",
+		"needed_by=[local local-nfs]",
+		"agent_info_missing=2",
+		"remediation=",
+		"retired built-ins drop at the next restart",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("WARN lacks %q:\n%s", want, logs)
+		}
+	}
+}

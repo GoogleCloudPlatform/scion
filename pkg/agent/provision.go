@@ -2832,44 +2832,47 @@ const (
 // It is read-only and has no other side effects (no writes, no caches, no
 // logging), so the rebuild preflight can call it directly.
 func SavedProfileOnDisk(projectPath, agentName string, sharedWorkspace bool, hubProjectID string) (string, SavedProfileState) {
-	projectDir, err := config.GetResolvedProjectDir(projectPath)
-	if err != nil {
-		return "", SavedProfileMissing
-	}
-	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
-	if _, err := os.Stat(agentInfoPath); err != nil {
-		return "", SavedProfileMissing
-	}
-	if data, err := os.ReadFile(agentInfoPath); err == nil {
-		var info api.AgentInfo
-		if err := json.Unmarshal(data, &info); err == nil {
-			return info.Profile, SavedProfileFound
+	info, state := readSavedAgentInfo(agentName, projectPath)
+	switch state {
+	case SavedProfileFound:
+		return info.Profile, SavedProfileFound
+	case SavedProfileUnreadable:
+		if profile, ok, err := ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, false); err == nil && ok {
+			return profile, SavedProfileUnreadable
 		}
+		return "", SavedProfileUnreadable
+	default:
+		return "", SavedProfileMissing
 	}
-	if profile, ok, err := ProvisionedProfile(projectPath, agentName, sharedWorkspace, hubProjectID, false); err == nil && ok {
-		return profile, SavedProfileUnreadable
-	}
-	return "", SavedProfileUnreadable
 }
 
 func getSavedAgentInfo(agentName string, projectPath string) *api.AgentInfo {
+	info, _ := readSavedAgentInfo(agentName, projectPath)
+	return info
+}
+
+// readSavedAgentInfo reads agent agentName's agent-info.json in projectPath:
+// the one reader behind GetSaved* and SavedProfileOnDisk, so they always
+// look at the same file. info is non-nil only when state is
+// SavedProfileFound.
+func readSavedAgentInfo(agentName string, projectPath string) (*api.AgentInfo, SavedProfileState) {
 	projectDir, err := config.GetResolvedProjectDir(projectPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	agentInfoPath := filepath.Join(config.GetAgentHomePath(projectDir, agentName), "agent-info.json")
 	if _, err := os.Stat(agentInfoPath); err != nil {
-		return nil
+		return nil, SavedProfileMissing
 	}
 	data, err := os.ReadFile(agentInfoPath)
 	if err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
 	var info api.AgentInfo
 	if err := json.Unmarshal(data, &info); err != nil {
-		return nil
+		return nil, SavedProfileUnreadable
 	}
-	return &info
+	return &info, SavedProfileFound
 }
 
 // hasRuntimeEntry reports whether the runtime holds an entry for opts.Name
