@@ -75,13 +75,12 @@ func TestRunTemplateDelete_NotFound(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
-	noHub = true
 	autoConfirm = true
 
 	// Create empty templates dir so the path resolves
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".scion", "templates"), 0755))
 
-	err := runTemplateDelete(nil, []string{"nonexistent"})
+	err := runTemplateDelete(localTemplateCmd(t), []string{"nonexistent"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not found")
 }
@@ -93,7 +92,6 @@ func TestRunTemplateDelete_LocalOnly_AutoConfirm(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
-	noHub = true
 	autoConfirm = true
 
 	templateDir := createTestTemplate(t, tmpHome, "test-tpl")
@@ -102,7 +100,7 @@ func TestRunTemplateDelete_LocalOnly_AutoConfirm(t *testing.T) {
 	_, err := os.Stat(templateDir)
 	require.NoError(t, err)
 
-	err = runTemplateDelete(nil, []string{"test-tpl"})
+	err = runTemplateDelete(localTemplateCmd(t), []string{"test-tpl"})
 	require.NoError(t, err)
 
 	// Verify deleted
@@ -117,18 +115,17 @@ func TestRunTemplateDelete_ProtectedTemplate(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
-	noHub = true
 	autoConfirm = true
 
 	createTestTemplate(t, tmpHome, "default")
 
-	err := runTemplateDelete(nil, []string{"default"})
+	err := runTemplateDelete(localTemplateCmd(t), []string{"default"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cannot delete protected template")
 }
 
 // newMockHubServer creates a mock Hub server that handles the endpoints
-// required by CheckHubAvailabilityWithOptions and template operations.
+// required by requireHub and template operations.
 // projectID is the project ID to recognize. templates is the list of templates to return.
 // Returns the server and a pointer to a bool that tracks if delete was called.
 func newMockHubServer(t *testing.T, projectID string, templates []map[string]interface{}) (*httptest.Server, *bool) {
@@ -270,26 +267,6 @@ func TestRunTemplateDelete_Both_AutoConfirm(t *testing.T) {
 
 	// Hub delete should have been called
 	assert.True(t, *deleteCalled, "hub delete API should have been called")
-}
-
-func TestRunTemplateDelete_NoHub_Flag(t *testing.T) {
-	orig := saveTemplateTestState()
-	defer orig.restore()
-
-	tmpHome := t.TempDir()
-	_ = os.Setenv("HOME", tmpHome)
-	globalMode = true
-	noHub = true // --no-hub set
-	autoConfirm = true
-
-	templateDir := createTestTemplate(t, tmpHome, "local-tpl")
-
-	err := runTemplateDelete(nil, []string{"local-tpl"})
-	require.NoError(t, err)
-
-	// Verify deleted
-	_, err = os.Stat(templateDir)
-	assert.True(t, os.IsNotExist(err), "template directory should be deleted")
 }
 
 func TestRunTemplateSync_RequiresArgOrAll(t *testing.T) {
@@ -434,14 +411,14 @@ func TestRunTemplateStatus_NoHub(t *testing.T) {
 	tmpHome := t.TempDir()
 	_ = os.Setenv("HOME", tmpHome)
 	globalMode = true
-	noHub = true
 	autoConfirm = true
 
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpHome, ".scion", "templates"), 0755))
 
-	// Status requires Hub, so it should fail with no-hub
+	// Status requires a hub, so it fails with no hub configured
 	err := runTemplateStatus(nil, nil)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, errHubNotConfigured)
 }
 
 func TestWarnDeprecatedHubAccessScopes_JSON_WithScopes(t *testing.T) {
@@ -552,4 +529,157 @@ func TestWarnDeprecatedHubAccessScopes_EmptyScopes(t *testing.T) {
 
 	assert.Empty(t, output,
 		"should not warn when hubAccess.scopes is empty array")
+}
+
+// localTemplateCmd returns a command carrying the template commands'
+// --local and --hub flags, with --local set.
+func localTemplateCmd(t *testing.T) *cobra.Command {
+	t.Helper()
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("local", false, "")
+	cmd.Flags().Bool("hub", false, "")
+	cmd.Flags().Bool("global", false, "")
+	require.NoError(t, cmd.Flags().Set("local", "true"))
+	return cmd
+}
+
+// TestTemplateCommands_NoHubReturnsError checks that without --local the
+// template commands return the hub error instead of silently falling back
+// to the filesystem (D5).
+func TestTemplateCommands_NoHubReturnsError(t *testing.T) {
+	orig := saveTemplateTestState()
+	defer orig.restore()
+
+	hermeticCLIEnv(t)
+	tmpHome := os.Getenv("HOME")
+	globalMode = true
+	autoConfirm = true
+	templateDir := createTestTemplate(t, tmpHome, "local-tpl")
+
+	for name, run := range map[string]func() error{
+		"list":   func() error { return runTemplateList(nil, nil) },
+		"show":   func() error { return runTemplateShow(nil, []string{"local-tpl"}) },
+		"delete": func() error { return runTemplateDelete(nil, []string{"local-tpl"}) },
+		"clone":  func() error { return runTemplateClone(nil, []string{"local-tpl", "copy-tpl"}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, errHubNotConfigured)
+		})
+	}
+	_, err := os.Stat(templateDir)
+	assert.NoError(t, err, "the local template is untouched")
+}
+
+// TestRunTemplateList_LocalWithoutHub checks that 'templates list --local'
+// lists the filesystem templates in a temp HOME with no hub configured.
+func TestRunTemplateList_LocalWithoutHub(t *testing.T) {
+	orig := saveTemplateTestState()
+	defer orig.restore()
+
+	hermeticCLIEnv(t)
+	tmpHome := os.Getenv("HOME")
+	globalMode = true
+	createTestTemplate(t, tmpHome, "local-tpl")
+
+	var err error
+	stdout, _ := captureStdIO(t, func() { err = runTemplateList(localTemplateCmd(t), nil) })
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "local-tpl")
+	assert.NotContains(t, stdout, "Hub Templates")
+}
+
+// TestRunTemplateList_LocalMakesNoHubRequest checks that --local makes no
+// hub request even when a hub is configured.
+func TestRunTemplateList_LocalMakesNoHubRequest(t *testing.T) {
+	orig := saveTemplateTestState()
+	defer orig.restore()
+
+	hub := withFakeHub(t)
+	tmpHome := os.Getenv("HOME")
+	globalMode = true
+	createTestTemplate(t, tmpHome, "local-tpl")
+
+	var err error
+	stdout, _ := captureStdIO(t, func() { err = runTemplateList(localTemplateCmd(t), nil) })
+	require.NoError(t, err)
+	assert.Contains(t, stdout, "local-tpl")
+	assert.Empty(t, hub.Requests(), "--local must not call the hub")
+}
+
+// templateListHub is a hub-connected test hub whose template list answers
+// per scope: a scope in failScopes gets a 500, any other scope one template
+// named "<scope>-tpl". It serves nothing else, so callers must not target
+// the global project explicitly (that looks up the hub's Global project).
+func templateListHub(t *testing.T, failScopes ...string) {
+	t.Helper()
+	hermeticCLIEnv(t)
+	fail := map[string]bool{}
+	for _, s := range failScopes {
+		fail[s] = true
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.URL.Path == "/healthz":
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		case r.URL.Path == "/api/v1/templates" && r.Method == http.MethodGet:
+			scope := r.URL.Query().Get("scope")
+			if fail[scope] {
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{
+					"error": map[string]string{"code": "internal", "message": scope + " list failed"},
+				})
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"templates": []map[string]string{{"id": scope + "-id", "name": scope + "-tpl"}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("SCION_HUB_ENDPOINT", srv.URL)
+	t.Setenv("SCION_DEV_TOKEN", "scion_dev_tpl")
+	t.Setenv("SCION_PROJECT_ID", "tpl-project")
+}
+
+// TestRunTemplateList_HubListErrors: a failed global-scope list is returned
+// (no empty hub section next to the local templates); a failed project or
+// user list alone is a warning and the rest is still listed.
+func TestRunTemplateList_HubListErrors(t *testing.T) {
+	t.Run("global scope failure fails the command", func(t *testing.T) {
+		orig := saveTemplateTestState()
+		defer orig.restore()
+		templateListHub(t, "global")
+		// No explicit project: the hub-connected path takes the project ID
+		// from SCION_PROJECT_ID. (An explicit --global here would look up
+		// the hub's Global project, which this test hub does not serve.)
+		globalMode, projectPath = false, ""
+		t.Chdir(t.TempDir())
+
+		var err error
+		captureStdIO(t, func() { err = runTemplateList(nil, nil) })
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to list hub templates")
+	})
+	t.Run("project and user failures are warnings", func(t *testing.T) {
+		orig := saveTemplateTestState()
+		defer orig.restore()
+		templateListHub(t, "project", "user")
+		// No explicit project: the hub-connected path takes the project ID
+		// from SCION_PROJECT_ID. (An explicit --global here would look up
+		// the hub's Global project, which this test hub does not serve.)
+		globalMode, projectPath = false, ""
+		t.Chdir(t.TempDir())
+
+		var err error
+		stdout, stderr := captureStdIO(t, func() { err = runTemplateList(nil, nil) })
+		require.NoError(t, err)
+		assert.Contains(t, stdout, "global-tpl")
+		assert.Contains(t, stderr, "Warning: could not list project templates on the hub")
+		assert.Contains(t, stderr, "Warning: could not list user templates on the hub")
+	})
 }

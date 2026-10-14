@@ -390,7 +390,7 @@ func TestUseThenHubAvailability(t *testing.T) {
 	require.NoError(t, rootCmd.PersistentPreRunE(list, nil))
 	require.Equal(t, ctxTestProjectID, projectPath)
 
-	hubCtx, err := CheckHubAvailability(projectPath)
+	hubCtx, err := requireHub(projectPath)
 	require.NoError(t, err)
 	require.NotNil(t, hubCtx)
 	assert.Equal(t, ctxTestProjectID, hubCtx.ProjectID)
