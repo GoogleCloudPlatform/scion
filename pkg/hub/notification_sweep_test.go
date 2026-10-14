@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"testing"
 	"time"
 
@@ -976,4 +977,128 @@ func TestRetryDispatch_ExhaustedOutcomeSurvivesExpiredParentContext(t *testing.T
 	assert.Equal(t, store.NotificationOutcomeFailed, n.DispatchOutcome,
 		"the failed outcome must be recorded even after the caller's deadline")
 	assert.Equal(t, 1, n.DispatchAttempts)
+}
+
+// gatedFirstCallDispatcher records calls like recordingDispatcher. Its first
+// DispatchAgentMessage call signals entered, waits for release and then
+// fails with firstErr; later calls succeed. It lets a test hold a retry's
+// delivery attempt in flight while a second dispatch runs to completion.
+type gatedFirstCallDispatcher struct {
+	recordingDispatcher
+	firstErr error
+	entered  chan struct{}
+	release  chan struct{}
+	once     sync.Once
+}
+
+func newGatedFirstCallDispatcher(firstErr error) *gatedFirstCallDispatcher {
+	return &gatedFirstCallDispatcher{
+		firstErr: firstErr,
+		entered:  make(chan struct{}),
+		release:  make(chan struct{}),
+	}
+}
+
+func (d *gatedFirstCallDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, structuredMsg *messages.StructuredMessage) error {
+	first := false
+	d.once.Do(func() { first = true })
+	if err := d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, structuredMsg); err != nil {
+		return err
+	}
+	if !first {
+		return nil
+	}
+	close(d.entered)
+	select {
+	case <-d.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return d.firstErr
+}
+
+// runDrainVsPrimary reproduces the broker-connect drain racing a primary
+// dispatch (ptone/scion#5030) with a fixed interleaving: the drain's retry
+// claims the notification and starts its attempt, the primary dispatch
+// delivers and records delivered while that attempt is in flight, then the
+// drain's attempt fails. It returns the test env, the gated dispatcher
+// and the notification's ID.
+func runDrainVsPrimary(t *testing.T, age time.Duration) (*notificationTestEnv, *gatedFirstCallDispatcher, string) {
+	t.Helper()
+	// Long enough that the held attempt cannot time out on a slow runner.
+	setRetryAttemptTimeout(t, time.Minute)
+	env := setupNotificationTest(t)
+	gated := newGatedFirstCallDispatcher(errors.New("broker refused"))
+	env.nd = NewNotificationDispatcher(env.store, env.pub, func() AgentDispatcher { return gated }, slog.Default())
+	ctx := context.Background()
+
+	notifID := createUndispatchedNotification(t, env, env.sub, age)
+	// The drain reads with no grace period, so it sees the notification
+	// while the primary dispatch is still in flight.
+	pending, err := env.store.GetUndispatchedAgentNotifications(ctx, env.subscriber.RuntimeBrokerID)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.Equal(t, notifID, pending[0].ID)
+
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		env.nd.RetryDispatch(ctx, &pending[0])
+	}()
+	select {
+	case <-gated.entered:
+	case <-drainDone:
+		t.Fatal("the drain's retry ended before its delivery attempt")
+	}
+	require.True(t, notificationDispatched(t, env, notifID), "the drain's retry holds the claim")
+
+	// The primary dispatch delivers and records its outcome while the
+	// drain's attempt is still in flight.
+	env.nd.dispatchToAgent(ctx, env.sub, getNotification(t, env, notifID), env.watched.ID, env.watched.Slug)
+	require.Equal(t, store.NotificationOutcomeDelivered, getNotification(t, env, notifID).DispatchOutcome)
+
+	// The drain's attempt now fails.
+	close(gated.release)
+	<-drainDone
+	return env, gated, notifID
+}
+
+// assertDeliveredOnce checks that the notification stays delivered and
+// dispatched after the race and that no later pass delivers it again.
+func assertDeliveredOnce(t *testing.T, env *notificationTestEnv, gated *gatedFirstCallDispatcher, notifID string) {
+	t.Helper()
+	ctx := context.Background()
+
+	n := getNotification(t, env, notifID)
+	assert.True(t, n.Dispatched, "a delivered notification must stay dispatched")
+	assert.Equal(t, store.NotificationOutcomeDelivered, n.DispatchOutcome, "the delivered outcome must be kept")
+	assert.Equal(t, 2, n.DispatchAttempts, "both attempts are counted")
+	require.Len(t, gated.getCalls(), 2)
+
+	// Neither a later drain nor the sweep sees it, and a retry of the
+	// stale row claims nothing and delivers nothing.
+	drain, err := env.store.GetUndispatchedAgentNotifications(ctx, env.subscriber.RuntimeBrokerID)
+	require.NoError(t, err)
+	assert.Empty(t, drain, "a delivered notification must not be drained again")
+	sweep, err := env.store.GetUndispatchedAgentNotifications(ctx, "")
+	require.NoError(t, err)
+	assert.Empty(t, sweep, "a delivered notification must not be swept again")
+	env.nd.RetryDispatch(ctx, n)
+	assert.Len(t, gated.getCalls(), 2, "a delivered notification must not be delivered again")
+}
+
+// The drain's failed attempt does not revert a notification the primary
+// dispatch delivered meanwhile, so it is not redelivered and its outcome
+// and dispatched flag agree (ptone/scion#5030).
+func TestRetryDispatch_DrainFailureAfterPrimaryDelivered_KeepsDelivered(t *testing.T) {
+	env, gated, notifID := runDrainVsPrimary(t, 0)
+	assertDeliveredOnce(t, env, gated, notifID)
+}
+
+// A drain attempt that fails past notificationRetryMaxAge gives up with
+// the failed outcome; when the primary dispatch has already recorded
+// delivered, the first outcome is kept (ptone/scion#5030).
+func TestRetryDispatch_DrainGiveUpAfterPrimaryDelivered_KeepsDelivered(t *testing.T) {
+	env, gated, notifID := runDrainVsPrimary(t, notificationRetryMaxAge+time.Hour)
+	assertDeliveredOnce(t, env, gated, notifID)
 }

@@ -112,7 +112,9 @@ func assertLegacyNotificationsUpgraded(t *testing.T, cs *CompositeStore) {
 	require.NoError(t, err)
 	require.True(t, claimed, "an undispatched legacy row must still be retried")
 	require.NoError(t, cs.RecordNotificationDispatchAttempt(ctx, legacyNotifPending))
-	require.NoError(t, cs.SetNotificationDispatchOutcome(ctx, legacyNotifPending, store.NotificationOutcomeFailed))
+	applied, err := cs.SetNotificationDispatchOutcome(ctx, legacyNotifPending, store.NotificationOutcomeFailed)
+	require.NoError(t, err)
+	require.True(t, applied, "a legacy row with no outcome takes one")
 
 	pending, err = cs.GetNotification(ctx, legacyNotifPending)
 	require.NoError(t, err)
