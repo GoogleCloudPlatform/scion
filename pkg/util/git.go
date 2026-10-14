@@ -524,16 +524,18 @@ func PruneWorktreesIn(repoRoot string) error {
 }
 
 // RemoveWorktreeEntryIn removes git's record of the single worktree at path
-// from the repository at repoRoot, using "git worktree remove --force".
-// Unlike PruneWorktreesIn, it never touches the entries of other worktrees.
+// from the repository at repoRoot, using "git worktree remove" (without
+// --force). Unlike PruneWorktreesIn, it never touches the entries of other
+// worktrees.
 //
 // It only acts once the worktree directory is gone: when path still exists
-// it does nothing, so it can never delete a worktree's files. It also does
-// nothing when git has no entry for path (already removed or never
-// registered), and inside agent containers (see PruneWorktrees). path must
-// be absolute, so the existence check and git see the same location. Any
-// other failure is returned; callers must not fall back to a
-// repository-wide prune.
+// it does nothing. Without --force, git also refuses to delete a checkout
+// that has modified or untracked files, so a worktree's files are never
+// removed by this call. It does nothing when git has no entry for path
+// (already removed or never registered), and inside agent containers (see
+// PruneWorktrees). path must be absolute, so the existence check and git see
+// the same location. Any other failure (for example a locked entry) is
+// returned; callers must not fall back to a repository-wide prune.
 func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	if os.Getenv("SCION_HOST_UID") != "" {
 		return nil
@@ -549,7 +551,7 @@ func RemoveWorktreeEntryIn(repoRoot, path string) error {
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("worktree entry %s: %w", path, err)
 	}
-	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", "--force", path)
+	cmd := exec.Command("git", "-C", repoRoot, "worktree", "remove", path)
 	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	out, err := cmd.CombinedOutput()
 	if err != nil {

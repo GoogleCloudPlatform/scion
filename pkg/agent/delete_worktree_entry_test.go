@@ -15,6 +15,7 @@
 package agent
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -209,6 +210,67 @@ func TestDeleteAgentFiles_SharedWorktreeHidden_JoinerKeepsEntry(t *testing.T) {
 	restore()
 
 	if list := listWorktrees(t, base); !strings.Contains(list, "branch refs/heads/shared-branch") {
+		t.Errorf("the shared worktree entry was removed while agent-b still shares it; worktree list:\n%s", list)
+	}
+	if out, err := exec.Command("git", "-C", wtA, "status", "--short").CombinedOutput(); err != nil {
+		t.Errorf("git status in the shared worktree failed: %v\n%s", err, out)
+	}
+}
+
+// ProvisionAgent layout: the shared worktree lives at the creator's
+// agents/<name>/workspace and a second agent attached to it. Deleting the
+// creator while the other agent remains must leave the worktree's entry
+// alone, even when its directory is missing from this process's view.
+func TestDeleteAgentFiles_AgentWorkspaceSharedHidden_JoinerKeepsEntry(t *testing.T) {
+	scionDir, _ := reprovisionSetup(t)
+	resolvedScionDir, err := config.GetResolvedProjectDir(scionDir)
+	if err != nil {
+		t.Fatalf("GetResolvedProjectDir: %v", err)
+	}
+	branch := "shared-branch"
+	for _, name := range []string{"agent-a", "agent-b"} {
+		if _, _, _, err := ProvisionAgent(context.Background(), name, "default", "", "", scionDir, "", "created", branch, ""); err != nil {
+			t.Fatalf("provision %s: %v", name, err)
+		}
+	}
+	wtA := filepath.Join(resolvedScionDir, "agents", "agent-a", "workspace")
+	if _, err := os.Stat(filepath.Join(wtA, ".git")); err != nil {
+		t.Fatalf("setup: expected a worktree at %s: %v", wtA, err)
+	}
+	root, err := util.RepoRootDir(filepath.Dir(scionDir))
+	if err != nil {
+		t.Fatalf("RepoRootDir: %v", err)
+	}
+	if sharers, wtPath, err := provision.ListSharers(root, resolvedScionDir, branch); err != nil || len(sharers) != 2 || wtPath != wtA {
+		t.Fatalf("setup: sharers=%v worktreePath=%q err=%v; want 2 sharers at %q", sharers, wtPath, err, wtA)
+	}
+
+	// Hide the shared worktree outside agent-a's directory, which the
+	// delete removes.
+	hidden := filepath.Join(filepath.Dir(filepath.Dir(scionDir)), "hidden-workspace")
+	if err := os.Rename(wtA, hidden); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	restore := func() {
+		if !restored {
+			restored = true
+			if err := os.MkdirAll(filepath.Dir(wtA), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(hidden, wtA); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	t.Cleanup(restore)
+
+	if _, err := DeleteAgentFiles("agent-a", scionDir, true); err != nil {
+		t.Fatalf("DeleteAgentFiles(agent-a): %v", err)
+	}
+	restore()
+
+	if list := listWorktrees(t, root); !strings.Contains(list, "branch refs/heads/"+branch) {
 		t.Errorf("the shared worktree entry was removed while agent-b still shares it; worktree list:\n%s", list)
 	}
 	if out, err := exec.Command("git", "-C", wtA, "status", "--short").CombinedOutput(); err != nil {

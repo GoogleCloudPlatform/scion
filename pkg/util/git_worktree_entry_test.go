@@ -135,7 +135,7 @@ func TestRemoveWorktree_NoRepoRoot_DoesNotPrune(t *testing.T) {
 func TestRemoveWorktree_EntryRemovalFailure_DoesNotPrune(t *testing.T) {
 	repo, own, sibling, restore := hiddenSiblingRepo(t)
 
-	// A locked entry makes "git worktree remove --force" fail.
+	// A locked entry makes "git worktree remove" fail.
 	if out, err := exec.Command("git", "-C", repo, "worktree", "lock", own).CombinedOutput(); err != nil {
 		t.Fatalf("git worktree lock: %v\n%s", err, out)
 	}
