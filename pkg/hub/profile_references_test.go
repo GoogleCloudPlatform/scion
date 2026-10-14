@@ -106,7 +106,7 @@ func (d *resolveAtDispatchDispatcher) DispatchAgentCreateWithGather(ctx context.
 
 // The auto-link create path links the co-located broker and dispatches in
 // the same request: the project's activeProfile built-in must already
-// resolve at that dispatch (DR2-RQ2), not only after the next count.
+// resolve at that dispatch, not only after the next count.
 func TestProfileReferences_AutoLinkCreateRetainsFirstTime(t *testing.T) {
 	f := brokerLinkAuthzSetup(t)
 	ctx := context.Background()
@@ -153,7 +153,7 @@ func TestProfileReferences_LinkToOtherBrokerAddsNothing(t *testing.T) {
 }
 
 // A project activeProfile save adds the reference only when the co-located
-// broker provides the project (SR4-R1).
+// broker provides the project.
 func TestProfileReferences_ProjectSaveGatedOnProvider(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -181,7 +181,7 @@ func TestProfileReferences_ProjectSaveGatedOnProvider(t *testing.T) {
 // The count reads agent-info.json at the path dispatch sends and the broker
 // resolves, for linked, hub-native and global projects and a project with no
 // provider row; it counts the hub value for missing files and unplaced
-// agents, and skips agents on other brokers (SR2-R1, settings N1).
+// agents, and skips agents on other brokers; the global project keeps its slug.
 func TestProfileReferences_CountReadsAgentInfoWhereDispatchPoints(t *testing.T) {
 	srv, s := testServer(t)
 	ctx := context.Background()
@@ -241,7 +241,7 @@ func TestProfileReferences_CountReadsAgentInfoWhereDispatchPoints(t *testing.T) 
 		ProjectID: native.ID, RuntimeBrokerID: other.ID, AppliedConfig: &store.AgentAppliedConfig{Profile: "remote"}}))
 
 	// Counting table row 1: the file wins, even with an empty profile over a
-	// hub value. DR2-C3: a corrupt file with no provenance counts "", as
+	// hub value. A corrupt file with no provenance counts "", as
 	// start would, and is unreadable, not missing.
 	nativePath := config.BrokerProjectPath(globalDir, "", "pr-native")
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: tid("pr-count-emptyfile"), Slug: "emptyfile", Name: "emptyfile",
@@ -352,7 +352,7 @@ func startPropagation(t *testing.T, srv *Server, s store.Store, poll time.Durati
 	return ops
 }
 
-// DR2-RQ1: the worker runs under the propagation lifecycle; StopPropagation
+// The worker runs under the propagation lifecycle; StopPropagation
 // returns while a count is blocked and cancels it; triggers never block,
 // before the worker exists and after it stopped.
 func TestProfileReferences_WorkerStopsWithPropagation(t *testing.T) {
@@ -388,7 +388,7 @@ func TestProfileReferences_WorkerStopsWithPropagation(t *testing.T) {
 	srv.triggerProfileReferences()
 }
 
-// DR-R3: triggers during a blocked count coalesce into exactly one more
+// Triggers during a blocked count coalesce into exactly one more
 // count, and counts never overlap.
 func TestProfileReferences_TriggersCoalesce(t *testing.T) {
 	srv, _, fs, fault := newRefFaultServer(t, "block")
@@ -436,7 +436,7 @@ func TestProfileReferences_PollTickTriggersCount(t *testing.T) {
 	}, 10*time.Second, 20*time.Millisecond, "poll ticks must trigger counts")
 }
 
-// R5: a repeated count failure is logged once; a success logs recovery.
+// A repeated count failure is logged once; a success logs recovery.
 func TestProfileReferences_ErrorLoggedOncePerText(t *testing.T) {
 	srv, _, fs, fault := newRefFaultServer(t, "fail")
 	overlay := config.NewSettingsOverlay()
@@ -469,7 +469,7 @@ func TestProfileReferences_PanicRecovered(t *testing.T) {
 	assert.Equal(t, 2, calls)
 }
 
-// DR2-C2 (final ruling): a failed install count enables conservative
+// A failed install count enables conservative
 // retention: local resolves, remote and its runtime do not; the ERROR and
 // the conservative WARN are logged; a later successful zero-reference
 // count keeps local.
@@ -498,7 +498,7 @@ func TestProfileReferences_InstallFailureIsConservative(t *testing.T) {
 	assert.NoError(t, resolvesThrough(overlay, "local"), "a later count never removes a retained name")
 }
 
-// DR2-C5 / R10: a flat instance ID known to the hub is never the
+// A flat instance ID known to the hub is never the
 // co-located ID; with no legacy ID, nothing is enabled.
 func TestProfileReferences_FlatIDIsNotColocated(t *testing.T) {
 	srv, _ := testServer(t)
@@ -517,7 +517,7 @@ func TestProfileReferences_FlatIDIsNotColocated(t *testing.T) {
 	assert.Equal(t, "legacy-id", srv.LegacyColocatedBrokerID())
 }
 
-// R7: a reincarnate move onto the co-located broker records the project's
+// A reincarnate move onto the co-located broker records the project's
 // activeProfile and the moved agent's profile, on both branches (target
 // already serves the project, and the target is linked by the move).
 func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
@@ -549,7 +549,7 @@ func TestProfileReferences_MoveOntoColocatedBroker(t *testing.T) {
 	}
 }
 
-// R7 (structural): every pkg/hub provider link goes through
+// Every pkg/hub provider link goes through
 // linkProjectProvider, so none can skip the placement hook.
 func TestProfileReferences_EveryProviderLinkIsHooked(t *testing.T) {
 	entries, err := os.ReadDir(".")
@@ -566,7 +566,7 @@ func TestProfileReferences_EveryProviderLinkIsHooked(t *testing.T) {
 	}
 }
 
-// R8: the project settings PUT of an activeProfile on a project the
+// The project settings PUT of an activeProfile on a project the
 // co-located broker provides retains it at once.
 func TestProfileReferences_ProjectSettingsPutRetains(t *testing.T) {
 	f := bypassAgentsSetup(t)
@@ -584,7 +584,7 @@ func TestProfileReferences_ProjectSettingsPutRetains(t *testing.T) {
 	assert.NoError(t, resolvesThrough(overlay, "local"))
 }
 
-// R11(c): the DB-tier GET shows the retained built-ins read-only, while
+// The DB-tier GET shows the retained built-ins read-only, while
 // profiles and runtimes stay the stored sets, and no request field can
 // carry them.
 func TestProfileReferences_ServerConfigGetShowsRetained(t *testing.T) {

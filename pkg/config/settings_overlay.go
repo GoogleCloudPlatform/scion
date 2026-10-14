@@ -240,7 +240,7 @@ func joinAvailableProfiles(names, retained []string) string {
 // built-in profiles), and records the stored and retained names so that
 // ResolveRuntime can name them when a requested profile is missing. stored
 // and retained are sorted and disjoint. The order is (ptone/scion#5113,
-// ruling 4 in the settings owner's order):
+// ptone/scion#5113):
 //
 //  1. the file's active_profile, when it is a stored profile;
 //  2. otherwise, when exactly one profile is stored, that profile:

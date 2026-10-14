@@ -156,6 +156,9 @@ func (s *Server) runProfileReferenceCount(ctx context.Context) {
 	defer p.runMu.Unlock()
 	overlay, brokerID, globalDir := p.target()
 	if overlay == nil {
+		// No target yet: EnableProfileReferences runs its own count when it
+		// publishes one, and the poll tick triggers again, so dropping this
+		// trigger loses nothing.
 		return
 	}
 	defer func() {

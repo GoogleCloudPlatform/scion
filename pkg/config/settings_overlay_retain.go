@@ -430,13 +430,16 @@ func (o *SettingsOverlay) RetainedState() ([]RetainedProfile, []RetainedRuntime)
 }
 
 // retainedStateLocked builds the retained state, leaving out names that
-// are now stored (a stored entry wins, so it is not retained). Called with
+// are now stored (a stored entry wins, so it is not retained). Profiles are
+// reported only while stored profiles replace the catalog, and runtimes only
+// while stored runtimes do: without a stored set nothing is retained (the
+// file and built-in catalog applies), even if a name is sticky. Called with
 // o.mu held (for reading or writing) and o.retained.mu held.
 func (o *SettingsOverlay) retainedStateLocked(b *builtinCatalog) ([]RetainedProfile, []RetainedRuntime) {
 	refs := o.refs
 	var profiles []RetainedProfile
 	for _, name := range sortedNames(o.retained.profiles) {
-		if _, stored := o.profiles[name]; stored {
+		if _, stored := o.profiles[name]; stored || len(o.profiles) == 0 {
 			continue
 		}
 		def := b.Profiles[name]
@@ -454,7 +457,7 @@ func (o *SettingsOverlay) retainedStateLocked(b *builtinCatalog) ([]RetainedProf
 	}
 	var runtimes []RetainedRuntime
 	for _, name := range sortedNames(o.retained.runtimes) {
-		if _, stored := o.runtimes[name]; stored {
+		if _, stored := o.runtimes[name]; stored || len(o.runtimes) == 0 {
 			continue
 		}
 		runtimes = append(runtimes, RetainedRuntime{

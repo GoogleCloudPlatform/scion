@@ -234,7 +234,7 @@ func TestRetain_Runtimes(t *testing.T) {
 		}
 	})
 
-	t.Run("community hub: stored local on docker, stored runtimes gke only", func(t *testing.T) {
+	t.Run("stored local on docker, stored runtimes gke only", func(t *testing.T) {
 		o := newRetainOverlay(overlaySpec{
 			runtimes: gkeOnly,
 			profiles: map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local-nfs": {Runtime: "docker"}, "local": {Runtime: "docker"}},
@@ -317,7 +317,7 @@ func TestRetain_Runtimes(t *testing.T) {
 	})
 }
 
-// Ruling 4 in the Q1 order.
+// The default profile order: stored, single-stored fallback, retained.
 func TestRetain_ActiveProfileOrder(t *testing.T) {
 	t.Run("two stored, active a referenced-only-by-default built-in", func(t *testing.T) {
 		o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
@@ -372,7 +372,7 @@ func TestRetain_ActiveProfileOrder(t *testing.T) {
 	})
 }
 
-// S1: a retained name stays retained after its references go away, and a
+// Retention is sticky: a retained name stays retained after its references go away, and a
 // project-load active_profile retention is process-wide.
 func TestRetain_Sticky(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
@@ -386,7 +386,7 @@ func TestRetain_Sticky(t *testing.T) {
 	mustResolveType(t, vs, "local", "docker")
 }
 
-// DR3-R1: an added reference survives a concurrent count that replaces the
+// An added reference survives a concurrent count that replaces the
 // references without it.
 func TestRetain_AddedReferenceSurvivesStaleCount(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
@@ -399,7 +399,7 @@ func TestRetain_AddedReferenceSurvivesStaleCount(t *testing.T) {
 	mustResolveType(t, vs, "local", "docker")
 }
 
-// C2 (final ruling): conservative retention.
+// Conservative retention when references could not be counted.
 func TestRetain_Conservative(t *testing.T) {
 	spec := overlaySpec{
 		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
@@ -441,7 +441,7 @@ func TestRetain_Conservative(t *testing.T) {
 	}
 }
 
-// SR4-O2: in conservative mode the kubernetes block yields to the known
+// In conservative mode the kubernetes exclusion yields to the known
 // active_profile.
 func TestRetain_ConservativeKnownReferenceWins(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{
@@ -558,7 +558,7 @@ func captureLogs(t *testing.T, fn func()) string {
 	return buf.String()
 }
 
-// inc1 R1: a stored name is never reported as retained, even after an
+// A stored name is never reported as retained, even after an
 // added reference, and a name stored after it was retained drops out of
 // the report.
 func TestRetain_StoredNameNotReported(t *testing.T) {
@@ -587,7 +587,7 @@ func TestRetain_StoredNameNotReported(t *testing.T) {
 	}
 }
 
-// inc1 R2: an added remote reference survives a stale count together with
+// An added remote reference survives a stale count together with
 // its kubernetes runtime.
 func TestRetain_AddedRemoteKeepsKubernetesRuntime(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{
@@ -602,7 +602,7 @@ func TestRetain_AddedRemoteKeepsKubernetesRuntime(t *testing.T) {
 	mustResolveType(t, vs, "remote", "kubernetes")
 }
 
-// DR2-C2: after a conservative start, a count referencing remote adds it
+// After a conservative start, a count referencing remote adds it
 // and the kubernetes runtime.
 func TestRetain_ConservativeThenRemoteReferenced(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{
@@ -618,7 +618,7 @@ func TestRetain_ConservativeThenRemoteReferenced(t *testing.T) {
 	mustResolveType(t, vs, "local", "docker")
 }
 
-// SR4-O2 for an added reference in conservative mode.
+// In conservative mode an added reference to remote retains it and its runtime.
 func TestRetain_ConservativeAddedRemote(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{
 		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
@@ -677,5 +677,39 @@ func TestRetain_WarnContent(t *testing.T) {
 		if !strings.Contains(logs, want) {
 			t.Errorf("WARN lacks %q:\n%s", want, logs)
 		}
+	}
+}
+
+// With no stored set (an unmanaged hub) nothing is reported as retained,
+// even after an added reference made a built-in sticky; and a stored set
+// cleared later stops the report.
+func TestRetain_UnmanagedHubReportsNothing(t *testing.T) {
+	o := newRetainOverlay(overlaySpec{})
+	o.SetProfileReferences(ProfileReferences{})
+	o.AddProjectReference("local")
+	logs := captureLogs(t, func() { o.Apply(fileSettings("local")) })
+	if strings.Contains(logs, "Retaining built-in") {
+		t.Fatalf("WARN on an unmanaged hub: %s", logs)
+	}
+	if ps, rs := o.RetainedState(); ps != nil || rs != nil {
+		t.Fatalf("RetainedState = %+v / %+v, want empty", ps, rs)
+	}
+
+	o2 := newRetainOverlay(overlaySpec{
+		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
+		profiles: storedGkeNFS,
+	})
+	o2.SetProfileReferences(agentsOn(map[string]int{"local": 1}))
+	o2.Apply(fileSettings("gke"))
+	if ps, rs := o2.RetainedState(); len(ps) != 1 || len(rs) != 1 {
+		t.Fatalf("precondition: RetainedState = %+v / %+v", ps, rs)
+	}
+	o2.Update(map[string]V1RuntimeConfig{}, map[string]V1ProfileConfig{}, nil, "")
+	logs = captureLogs(t, func() { o2.Apply(fileSettings("gke")) })
+	if ps, rs := o2.RetainedState(); ps != nil || rs != nil {
+		t.Fatalf("RetainedState after clearing the stored sets = %+v / %+v, want empty", ps, rs)
+	}
+	if strings.Contains(logs, "Retaining built-in") {
+		t.Fatalf("WARN after clearing the stored sets: %s", logs)
 	}
 }
