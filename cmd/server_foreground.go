@@ -158,6 +158,21 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
+	if err := validateServerRole(serverRole); err != nil {
+		return err
+	}
+	if serverRole == serverRoleRelay {
+		// A separate conduit relay: no hub, Runtime Broker or web.
+		if err := validateRelayRoleFlags(cmd.Flags()); err != nil {
+			return err
+		}
+		applyServerLogLevelSetting(cfg.LogLevel)
+		ctx := cmd.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return runRelayRole(ctx, cfg)
+	}
 	// Server secrets are now in memory; remove them from the process env
 	// before anything below can start a child process. Two earlier
 	// spawns remain: on macOS the container runtime probe during logging
@@ -1483,6 +1498,12 @@ func validateServerPreflight(cfg *config.GlobalConfig) error {
 	if err := cfg.Hub.PortProxy.Validate(); err != nil {
 		return err
 	}
+	if err := cfg.Relay.Validate(); err != nil {
+		return err
+	}
+	if err := validateConduitPeerSecret(cfg.Hub.Conduit, false, sessionSecretValue()); err != nil {
+		return err
+	}
 	if _, err := hub.ParseAgentRunScope(cfg.Auth.AgentRunScope, cfg.Auth.AgentRunScopeLegacyUntil); err != nil {
 		return err
 	}
@@ -1682,6 +1703,12 @@ func initStore(ctx context.Context, cfg *config.GlobalConfig) (store.Store, *ent
 	// unless server.database.allow_shadowed_schema is set. Only hub startup
 	// enables this check.
 	s.EnableSchemaShadowGuard(cfg.Database.AllowShadowedSchema)
+
+	// On SQLite, snapshot the database when the migration (after
+	// PreMigrate) is about to apply declared ON DELETE actions to orphaned
+	// rows. A snapshot that is needed but fails stops startup before the
+	// reconcile changes any rows.
+	s.SetBeforeFKReconcile(snapshotBeforeFKReconcile)
 
 	// Migrate runs Ent's schema migration and seeds built-in maintenance
 	// operations (parity with the former raw-SQL store).
@@ -2258,6 +2285,24 @@ func resolveSessionSecret() string {
 	return secret
 }
 
+// sessionSecretValue is the configured session secret, or "": the
+// --session-secret flag, else the value scrubServerSecretEnv read at
+// startup, else SCION_SERVER_SESSION_SECRET, then SESSION_SECRET. It only
+// reads: no deprecation or hosted-mode warning (resolveSessionSecret adds
+// the hosted-mode one).
+func sessionSecretValue() string {
+	if webSessionSecret != "" {
+		return webSessionSecret
+	}
+	if capturedSessionSecret != "" {
+		return capturedSessionSecret
+	}
+	if s := os.Getenv(sessionSecretEnv); s != "" {
+		return s
+	}
+	return os.Getenv(legacySessionSecretEnv)
+}
+
 // hubObservabilityExport decides at startup whether the hub's own metrics
 // and trace exporters run, and their export project (ptone/scion#4914).
 // See decideHubObservabilityExport for the inputs.
@@ -2591,6 +2636,10 @@ func wireHubCoreMetrics(hubSrv *hub.Server, mp metric.MeterProvider) dbmetrics.R
 		hubSrv.SetConduitStreamAuthzMetrics(authzRec)
 	}
 
+	if err := hubSrv.RegisterConduitRelayReadinessGauge(mp); err != nil {
+		log.Printf("WARNING: hub conduit relay readiness gauge disabled: %v", err)
+	}
+
 	if refreshRec, err := hub.NewOTelConduitAgentRefreshMetrics(mp); err != nil {
 		log.Printf("WARNING: hub conduit agent refresh metrics disabled: %v", err)
 	} else {
@@ -2715,6 +2764,18 @@ func initHubServer(ctx context.Context, cfg *config.GlobalConfig, s store.Store,
 		default:
 			return nil, fmt.Errorf("unsupported auth.proxy.provider: %q", cfg.Auth.Proxy.Provider)
 		}
+	}
+
+	// Proxy driver principals (auth.proxy.driverPrincipals, test identities
+	// phase WS2): exact emails, proxy auth mode only. A non-empty list on a
+	// hub that is not in proxy mode refuses startup; hub.New re-checks it.
+	proxyDrivers, driversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if driversErr != nil {
+		return nil, driversErr
+	}
+	hubCfg.ProxyDriverPrincipals = proxyDrivers
+	if len(proxyDrivers) > 0 {
+		log.Printf("Proxy driver principals configured: %d (test identity web session drivers; they never get a hub account)", len(proxyDrivers))
 	}
 
 	// Construct transport token minter when auth.transport is configured
@@ -3422,6 +3483,13 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		webPlatformAuthSA = cfg.Auth.Transport.PlatformAuthSA
 	}
 
+	// The same proxy driver principals the hub gets (WS2), checked the same
+	// way, so the web server never runs with a list the hub would refuse.
+	webProxyDrivers, webDriversErr := config.ValidateProxyDriverConfig(cfg.Auth.Mode, cfg.Auth.Proxy.ProxyDriverPrincipals())
+	if webDriversErr != nil {
+		return nil, webDriversErr
+	}
+
 	webCfg := hub.WebServerConfig{
 		Port:                 webPort,
 		Host:                 webHost,
@@ -3438,6 +3506,9 @@ func initWebServer(ctx context.Context, cfg *config.GlobalConfig, hubSrv *hub.Se
 		PlatformAuthSA:       webPlatformAuthSA,
 		SlowRequestThreshold: cfg.SlowRequestThreshold,
 		PerfTrace:            cfg.Hub.PerfTrace,
+
+		ProxyDriverPrincipals:    webProxyDrivers,
+		ProxyDriverTokenAudience: cfg.Auth.Proxy.ProxyDriverTokenAudience(),
 	}
 	if enableDebugEndpoints {
 		slog.Warn("Diagnostic endpoints are enabled (--enable-debug-endpoints). Use for local development only.")

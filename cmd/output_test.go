@@ -39,21 +39,12 @@ func TestIsJSONOutput(t *testing.T) {
 }
 
 func TestOutputJSON(t *testing.T) {
-	// Capture stdout
-	oldStdout := os.Stdout
-	r, w, _ := os.Pipe()
-	os.Stdout = w
-
 	data := map[string]string{"key": "value"}
-	err := outputJSON(data)
+	var err error
+	output := captureStdout(t, func() {
+		err = outputJSON(data)
+	})
 	require.NoError(t, err)
-
-	_ = w.Close()
-	os.Stdout = oldStdout
-
-	var buf bytes.Buffer
-	_, _ = buf.ReadFrom(r)
-	output := buf.String()
 
 	// Verify it's valid JSON
 	var parsed map[string]string
@@ -69,26 +60,17 @@ func TestOutputActionResult(t *testing.T) {
 	t.Run("json mode outputs JSON", func(t *testing.T) {
 		outputFormat = "json"
 
-		// Capture stdout
-		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
-
 		result := ActionResult{
 			Status:  "success",
 			Command: "test",
 			Agent:   "test-agent",
 			Message: "test message",
 		}
-		err := outputActionResult(result)
+		var err error
+		output := captureStdout(t, func() {
+			err = outputActionResult(result)
+		})
 		require.NoError(t, err)
-
-		_ = w.Close()
-		os.Stdout = oldStdout
-
-		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(r)
-		output := buf.String()
 
 		var parsed ActionResult
 		err = json.Unmarshal([]byte(output), &parsed)
@@ -102,37 +84,24 @@ func TestOutputActionResult(t *testing.T) {
 	t.Run("plain mode outputs message to stdout and warnings to stderr", func(t *testing.T) {
 		outputFormat = "plain"
 
-		// Capture stdout
-		oldStdout := os.Stdout
-		stdoutR, stdoutW, _ := os.Pipe()
-		os.Stdout = stdoutW
-
-		// Capture stderr
-		oldStderr := os.Stderr
-		stderrR, stderrW, _ := os.Pipe()
-		os.Stderr = stderrW
-
 		result := ActionResult{
 			Status:   "success",
 			Command:  "test",
 			Message:  "test message",
 			Warnings: []string{"warning 1"},
 		}
-		err := outputActionResult(result)
+		var err error
+		var stdout string
+		stderr := captureStderr(t, func() {
+			stdout = captureStdout(t, func() {
+				err = outputActionResult(result)
+			})
+		})
 		require.NoError(t, err)
 
-		_ = stdoutW.Close()
-		_ = stderrW.Close()
-		os.Stdout = oldStdout
-		os.Stderr = oldStderr
-
-		var stdoutBuf, stderrBuf bytes.Buffer
-		_, _ = stdoutBuf.ReadFrom(stdoutR)
-		_, _ = stderrBuf.ReadFrom(stderrR)
-
-		assert.Contains(t, stdoutBuf.String(), "test message")
-		assert.NotContains(t, stdoutBuf.String(), "Warning:")
-		assert.Contains(t, stderrBuf.String(), "Warning: warning 1")
+		assert.Contains(t, stdout, "test message")
+		assert.NotContains(t, stdout, "Warning:")
+		assert.Contains(t, stderr, "Warning: warning 1")
 	})
 }
 

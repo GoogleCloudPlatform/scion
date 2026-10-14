@@ -185,6 +185,15 @@ export function canEditHubEnvVars(adminStatus: AdminStatus | null): boolean {
   return adminStatus?.isSuperAdmin === true;
 }
 
+/**
+ * Whether the user may run the bulk scope re-issue (reset-auth-all with
+ * reissue_scopes). The hub accepts it from super-admins only and stays the
+ * authority; this only decides whether the control is shown.
+ */
+export function canReissueAllScopes(adminStatus: AdminStatus | null): boolean {
+  return adminStatus?.isSuperAdmin === true;
+}
+
 // ---------------------------------------------------------------------------
 // Super-admin-only routes
 // ---------------------------------------------------------------------------

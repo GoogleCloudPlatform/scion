@@ -64,6 +64,7 @@
           "x-since": "1"
         },
         "hub": { "$ref": "#/$defs/serverHub" },
+        "relay": { "$ref": "#/$defs/serverRelay" },
         "broker": { "$ref": "#/$defs/serverBroker" },
         "database": { "$ref": "#/$defs/serverDatabase" },
         "auth": { "$ref": "#/$defs/serverAuth" },
@@ -141,7 +142,7 @@
         "endpoint": {
           "type": "string",
           "format": "uri",
-          "description": "Hub API endpoint URL to connect to as a client.",
+          "description": "Deprecated and ignored by the CLI, which takes its hub from the hub list ('scion hub add', 'scion use --hub'); accepted so existing settings files still load. A server still reads it as a legacy fallback for its own endpoint (see server.hub.public_url and server.broker.hub_endpoint).",
           "x-env-var": "SCION_HUB_ENDPOINT",
           "x-since": "1"
         },
@@ -159,7 +160,7 @@
         },
         "transport": {
           "type": "object",
-          "description": "Transport-layer auth for reaching a Hub behind a platform guard (IAP, Cloud Run invoker IAM). Kept when a legacy settings file is migrated.",
+          "description": "Deprecated and ignored by the CLI: transport auth is set on the hub's entry in the hub list. Accepted so existing settings files still load.",
           "x-since": "1",
           "properties": {
             "mode": {
@@ -1264,6 +1265,25 @@
         "disk": { "type": "string" }
       }
     },
+    "serverRelay": {
+      "type": "object",
+      "description": "Settings of a separate relay process (scion server --role relay). Settings shared with the hub's own relay stay under server.hub.conduit. Read at startup.",
+      "additionalProperties": false,
+      "properties": {
+        "hub_internal_url": {
+          "type": "string",
+          "description": "Base URL of the hub internal API the relay calls for admission, RPCs and re-checks; any hub replica serves it (e.g. 'http://hub-internal.scion.svc:9811').",
+          "x-env-var": "SCION_SERVER_RELAY_HUBINTERNALURL",
+          "x-since": "1"
+        },
+        "public_url": {
+          "type": "string",
+          "description": "The relay's own public URL, recorded as its relay_instances.public_endpoint.",
+          "x-env-var": "SCION_SERVER_RELAY_PUBLICURL",
+          "x-since": "1"
+        }
+      }
+    },
     "serverHub": {
       "type": "object",
       "description": "Hub API server settings (for running scion-server).",
@@ -1379,13 +1399,13 @@
         },
         "start_unconfirmed_hold": {
           "type": "string",
-          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '13m', minimum 12m40s.",
+          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '17m', minimum 16m.",
           "x-env-var": "SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD",
           "x-since": "1"
         },
         "start_create_unconfirmed_hold": {
           "type": "string",
-          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '5m', allowed 3m up to start_unconfirmed_hold.",
+          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '16m', allowed 16m up to start_unconfirmed_hold.",
           "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
           "x-since": "1"
         },
@@ -1500,6 +1520,20 @@
               "type": "string",
               "description": "Time the platform allows between SIGTERM and killing the hub process (Cloud Run: 10s). On SIGTERM the conduit relay sends GoAway to every session before the listeners close; when this key is set, the drain deadline is at most shutdown_grace minus 2s (1ms at or below 2s), and unset it stays 30s. Read at startup (e.g. '10s'; no default, greater than 0 when set).",
               "x-env-var": "SCION_SERVER_HUB_CONDUIT_SHUTDOWNGRACE",
+              "x-since": "1"
+            },
+            "relay_mode": {
+              "type": "string",
+              "enum": ["in_process", "external"],
+              "description": "Where conduit sessions are held: 'in_process' (default) runs a relay in every hub process; 'external' runs none, and separate relay processes (scion server --role relay) hold the sessions. External mode requires peer_secret and the hub.conduit experiment. Read at startup.",
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_RELAYMODE",
+              "x-since": "1"
+            },
+            "peer_secret": {
+              "type": "string",
+              "description": "Dedicated relay-peer secret, raw octets (no decoding; one trailing newline is removed), at least 32 octets with at least 16 distinct (generate with 'openssl rand -base64 32'): the HMAC key of every relay-peer call is derived from it wherever a separate relay runs. Required in external relay mode and on --role relay, and must differ from the session secret. Never stored in the database, returned by the server-config API or logged; prefer a file-mounted settings.yaml over the environment. Read at startup.",
+              "x-sensitive": true,
+              "x-env-var": "SCION_SERVER_HUB_CONDUIT_PEERSECRET",
               "x-since": "1"
             },
             "proxy_session_max_age": {
@@ -1927,7 +1961,13 @@
                 }
               }
             },
-            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." }
+            "require_trusted_proxy_ip": { "type": "boolean", "description": "Also require requests to come from a trusted proxy IP." },
+            "driver_principals": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Exact emails of the browser drivers (for example a test-UI service account) that may carry test identity web sessions through the proxy. No wildcards. A driver principal never gets a hub account. Startup config only; never writable through the API. A hub whose auth mode is not 'proxy' refuses to start with a non-empty list."
+            },
+            "driver_token_audience": { "type": "string", "description": "Audience (the IAP OAuth client ID) a driver's Google ID token must carry before a test identity web session may take its place on an API request. Startup config only; never writable through the API." }
           }
         },
         "transport": {
@@ -2594,7 +2634,11 @@
         "default_role": { "type": "string" },
         "allowed_emails": { "type": "array", "items": { "type": "string" } },
         "allowed_gcp_projects": { "type": "array", "items": { "type": "string" } },
-        "allowed_domains": { "type": "array", "items": { "type": "string" } }
+        "allowed_domains": { "type": "array", "items": { "type": "string" } },
+        "allow_visitor_grants": {
+          "type": "boolean",
+          "description": "Let project owners grant visitor access to users of this issuer (issuer_type user or hub). Default false."
+        }
       },
       "additionalProperties": false
     }

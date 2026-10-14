@@ -39,7 +39,8 @@ var messagesCmd = &cobra.Command{
 	Long: `View and manage messages sent to you by agents.
 
 Messages go through the hub (start the local one with 'scion server start',
-or set a remote one with 'scion config set hub.endpoint <url>').
+or add a remote one with 'scion hub add <name> <url>' and select it with
+'scion use --hub <name>').
 
 Commands:
   scion messages                            List your unread messages

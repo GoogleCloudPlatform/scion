@@ -26,12 +26,12 @@ import (
 const ContainerStatusStopQueued = "stop_queued"
 
 // BrokerQuotaCountedPhase reports whether phase counts toward the agent's
-// Runtime Broker's max_agents_per_broker cap. Only stopped, suspended and
-// error are excluded: a container in any other phase occupies, or is moving
-// toward occupying, broker capacity.
+// Runtime Broker's max_agents_per_broker cap. Only stopped, suspended, error
+// and halted (a run the platform ended) are excluded: a container in any
+// other phase occupies, or is moving toward occupying, broker capacity.
 func BrokerQuotaCountedPhase(phase string) bool {
 	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended, state.PhaseError:
+	case state.PhaseStopped, state.PhaseSuspended, state.PhaseError, state.PhaseHalted:
 		return false
 	default:
 		return true

@@ -91,11 +91,11 @@ Examples:
 // artifact view uses. Tests replace it to run the command against a test
 // hub.
 var artifactViewClient = func() (string, hubclient.ArtifactService, error) {
-	settings, client, err := requireArtifactHubClient()
+	_, client, endpoint, err := requireArtifactHubClient()
 	if err != nil {
 		return "", nil, err
 	}
-	return GetHubEndpoint(settings), client.Artifacts(), nil
+	return endpoint, client.Artifacts(), nil
 }
 
 func init() {

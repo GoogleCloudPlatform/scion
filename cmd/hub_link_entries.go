@@ -107,27 +107,26 @@ func contextLinkRecorder(out, stderr io.Writer) func(endpoint, hubProjectID, pro
 }
 
 // registerLocalHub adds the local workstation hub at endpoint to the hub
-// list as "local" when no entry has that endpoint. It makes the hub at
-// endpoint current only when no hub is current and the global settings
-// name no other hub (hub.endpoint unset, or the local endpoint itself).
-// While the CLI still reads hub.endpoint from the global settings, that
-// keeps a user whose global hub.endpoint names a remote hub on that hub
-// outside project directories, as before server start stopped writing
-// hub.endpoint (it only ever wrote it when unset). A new entry is
-// announced on out. A failure is a warning on stderr. Inside an agent the
-// hub list is not used.
+// list as "local" when no entry has that endpoint, and makes it current
+// when no hub is current. The hub list is read with the one-time import of
+// the global settings' hub configuration first (server commands skip the
+// resolver that runs it), so a user whose global hub.endpoint names a
+// remote hub keeps that hub current. A new entry is announced on out. A
+// failure is a warning on stderr. Inside an agent the hub list is not used.
 func registerLocalHub(out, stderr io.Writer, endpoint string) {
 	if contextDisabled(resolveMode()) {
 		return
 	}
-	globalEndpoint, _ := fileHubEndpoint("", true)
-	mayBecomeCurrent := globalEndpoint == "" || config.NormalizeEndpoint(globalEndpoint) == config.NormalizeEndpoint(endpoint)
+	if _, err := loadInvocationContext(stderr); err != nil {
+		_, _ = fmt.Fprintf(stderr, "Warning: could not add the local hub to the hub list: %v\n", err)
+		return
+	}
 	var name string
 	var created, changed bool
 	err := config.UpdateCLIContext(func(c *config.CLIContext) error {
 		name, created = c.EnsureHub(endpoint, localHubName)
 		changed = created
-		if c.CurrentHub == "" && mayBecomeCurrent {
+		if c.CurrentHub == "" {
 			c.CurrentHub = name
 			changed = true
 		}

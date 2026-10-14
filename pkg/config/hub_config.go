@@ -157,10 +157,10 @@ type HubServerConfig struct {
 	// (minimum 11m).
 	StartMaxDuration time.Duration `json:"startMaxDuration" yaml:"startMaxDuration" koanf:"startMaxDuration"`
 	// StartUnconfirmedHold bounds how long a start with an unknown outcome
-	// blocks other starts. Default 13m (minimum 12m40s).
+	// blocks other starts. Default 17m (minimum 16m).
 	StartUnconfirmedHold time.Duration `json:"startUnconfirmedHold" yaml:"startUnconfirmedHold" koanf:"startUnconfirmedHold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start. Default 5m (3m up to StartUnconfirmedHold).
+	// create-and-start. Default 16m (16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold time.Duration `json:"startCreateUnconfirmedHold" yaml:"startCreateUnconfirmedHold" koanf:"startCreateUnconfirmedHold"`
 
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage
@@ -742,6 +742,14 @@ type ProxyAuthConfig struct {
 	JWT *JWTAuthConfig `json:"jwt,omitempty" yaml:"jwt,omitempty" koanf:"jwt"`
 	// RequireTrustedProxyIP enables defense-in-depth IP allowlisting.
 	RequireTrustedProxyIP bool `json:"requireTrustedProxyIP,omitempty" yaml:"requireTrustedProxyIP,omitempty" koanf:"requireTrustedProxyIP"`
+	// DriverPrincipals lists the exact emails of the browser drivers that
+	// may carry test identity web sessions through the proxy
+	// (ProxyDriverPrincipalsKey). Startup config only; never API-writable.
+	DriverPrincipals []string `json:"driverPrincipals,omitempty" yaml:"driverPrincipals,omitempty" koanf:"driverPrincipals"`
+	// DriverTokenAudience is the audience (the IAP OAuth client ID) of a
+	// driver's Google ID token (ProxyDriverTokenAudienceKey). Startup config
+	// only; never API-writable.
+	DriverTokenAudience string `json:"driverTokenAudience,omitempty" yaml:"driverTokenAudience,omitempty" koanf:"driverTokenAudience"`
 }
 
 // IAPAuthConfig holds Google IAP-specific settings.
@@ -973,6 +981,10 @@ type GlobalConfig struct {
 
 	// Hub API server settings
 	Hub HubServerConfig `json:"hub" yaml:"hub" koanf:"hub"`
+
+	// Relay holds the settings of a separate relay process (scion server
+	// --role relay; server.relay).
+	Relay RelayServerConfig `json:"relay,omitzero" yaml:"relay,omitempty" koanf:"relay"`
 
 	// Runtime Broker API server settings
 	RuntimeBroker RuntimeBrokerConfig `json:"runtimeBroker" yaml:"runtimeBroker" koanf:"runtimeBroker"`
@@ -1775,6 +1787,8 @@ var camelCaseFields = map[string]string{
 	"devtokenfile":                  "devTokenFile",
 	"disablelegacystoragefallback":  "disableLegacyStorageFallback",
 	"displayname":                   "displayName",
+	"driverprincipals":              "driverPrincipals",
+	"drivertokenaudience":           "driverTokenAudience",
 	"gcpcredentials":                "gcpCredentials",
 	"gcpiamdenyunknownpolicy":       "gcpIamDenyUnknownPolicy",
 	"gcpiamcheckmode":               "gcpIamCheckMode",
@@ -1836,6 +1850,9 @@ var camelCaseFields = map[string]string{
 // Handles camelCase conversion for known fields like clientId, clientSecret.
 // Example: OAUTH_CLI_GOOGLE_CLIENTID -> oauth.cli.google.clientId
 func envKeyToConfigKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.GlobalConfig
+	}
 	// Split by underscore, convert each part
 	parts := strings.Split(strings.ToLower(envKey), "_")
 	for i, part := range parts {
@@ -1874,6 +1891,7 @@ var serverSubKeys = map[string]bool{
 	"mode": true, "env": true, "federation": true,
 	"shared_dir_storage": true, "home_storage": true, "maintenance": true,
 	"scheduler": true, "oidc_login": true, "oidc": true,
+	"relay": true,
 }
 
 // serverEnvToOpsettingsKey maps a SCION_SERVER_* env var key (after prefix
@@ -1882,6 +1900,9 @@ var serverSubKeys = map[string]bool{
 // so that SCION_SERVER_HUB_ADMINEMAILS → server.hub.admin_emails.
 // Non-server keys (e.g. telemetry, default_template) pass through unchanged.
 func serverEnvToOpsettingsKey(envKey string) string {
+	if a, ok := lookupServerEnvPathAlias(envKey); ok {
+		return a.Path
+	}
 	key := envKeyToOpsettingsKey(envKey)
 	firstSeg := key
 	if dot := strings.Index(key, "."); dot >= 0 {

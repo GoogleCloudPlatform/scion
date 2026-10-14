@@ -639,8 +639,9 @@ func TestUseMultiHub_EnvHubRestrictsCandidates(t *testing.T) {
 	assert.Zero(t, prod.calls())
 }
 
-// The hub in the settings joins the registered hubs when it has no entry.
-func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
+// A hub.endpoint in the settings is not a hub: only registered hubs are
+// searched, and the settings hub gets no entry.
+func TestUseMultiHub_SettingsHubIsNotSearched(t *testing.T) {
 	prod, staging := setupTwoHubs(t)
 	prod.setProjects()
 	staging.setProjects()
@@ -648,20 +649,23 @@ func TestUseMultiHub_SettingsHubJoinsRegisteredHubs(t *testing.T) {
 	storeTestLogin(t, other.URL())
 	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+other.URL()+"\n")
 
-	stdout, _, err := runScion(t, "use", "foo")
-	require.NoError(t, err)
-	assert.Positive(t, prod.lists.Load(), "the registered hubs are searched too")
-	assert.Positive(t, staging.lists.Load(), "the registered hubs are searched too")
-	// The settings hub gets an entry with a nickname derived from its URL
-	// (not "local": that is only for a hub reached with dev auth), and is
-	// now the current hub. The test server listens on 127.0.0.1, an IPv4
-	// address, whose nickname is the address with '-' for '.'.
+	_, _, err := runScion(t, "use", "foo")
+	require.EqualError(t, err, "project 'foo' not found on hubs: prod, staging")
+	assert.Zero(t, other.calls(), "the settings hub is not searched")
 	c := readTestContext(t)
-	name, h := c.HubByEndpoint(other.URL())
-	require.NotNil(t, h, "the settings hub got an entry")
-	assert.Equal(t, "127-0-0-1", name)
-	assert.Equal(t, name, c.CurrentHub)
-	assert.Equal(t, "Now using project 'foo' on hub '127-0-0-1' ("+other.URL()+").\n", stdout)
+	_, h := c.HubByEndpoint(other.URL())
+	assert.Nil(t, h, "the settings hub got no entry")
+	assert.Empty(t, c.CurrentHub)
+}
+
+// makeCurrentHub makes the registered hub name the current hub, as
+// 'scion use --hub <name>' would.
+func makeCurrentHub(t *testing.T, name string) {
+	t.Helper()
+	require.NoError(t, config.UpdateCLIContext(func(c *config.CLIContext) error {
+		c.CurrentHub = name
+		return nil
+	}))
 }
 
 // Each hub's lookup has its own timeout: a hub that never answers is
@@ -740,7 +744,7 @@ func TestUseMultiHub_LoneHubChosenOrEffectiveGetsFullChain(t *testing.T) {
 	})
 	t.Run("effective hub", func(t *testing.T) {
 		prod := setupOneHubNoLogin(t)
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"/\n")
+		makeCurrentHub(t, "prod")
 		_, _, err := runScion(t, "project", "list", "--refresh")
 		require.NoError(t, err)
 		assert.Positive(t, prod.lists.Load())
@@ -775,7 +779,7 @@ func TestUseMultiHub_KnownProjectCheckFollowsCredentialRule(t *testing.T) {
 	t.Run("effective", func(t *testing.T) {
 		prod, staging := setupTwoHubsNoLogins(t)
 		seed(t)
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 		stdout, _, err := runScion(t, "use", "foo")
 		require.NoError(t, err)
 		assert.Equal(t, "Now using project 'foo' on hub 'prod' ("+prod.URL()+").\n", stdout)
@@ -930,7 +934,8 @@ func TestUseLoginOffer_TransportOnlyTheHubsOwn(t *testing.T) {
 	}))
 	assert.Equal(t, []string{"Bearer staging-aud-token"}, login(), "a hub the lookup picked: exactly its entry's own transport")
 
-	writeHomeGlobalSettings(t, "hub:\n  endpoint: "+staging.URL()+"\n")
+	// The effective hub (here the current hub, as the resolver fills it).
+	hubEndpoint, hubSource = staging.URL(), targetSourceContext
 	assert.Equal(t, []string{envTransportHeader}, login(), "the effective hub: environment transport as for 'hub auth login'")
 }
 
@@ -953,7 +958,7 @@ func TestUseMultiHub_LoneCandidateNotEffectiveIsNotContacted(t *testing.T) {
 func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
 	t.Run("other hub without a login", func(t *testing.T) {
 		prod, staging := setupTwoHubsNoLogins(t) // both have "foo"
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 
 		stdout, stderr, err := runScion(t, "use", "foo", "--refresh")
 		require.NoError(t, err)
@@ -967,7 +972,7 @@ func TestUseMultiHub_SearchDecidesFullChainPerHub(t *testing.T) {
 		withEnvTransport(t)
 		storeTestLogin(t, staging.URL())
 		staging.setProjects()
-		writeHomeGlobalSettings(t, "hub:\n  endpoint: "+prod.URL()+"\n")
+		makeCurrentHub(t, "prod")
 
 		stdout, _, err := runScion(t, "use", "foo", "--refresh")
 		require.NoError(t, err)

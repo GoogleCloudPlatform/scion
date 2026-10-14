@@ -209,11 +209,18 @@ func envSubmitOutcomeUnknownError(agentName string, err error, get func(context.
 // isTransportOutcomeUnknown reports whether err is a request that may have
 // reached the Hub without an answer: a transport error or timeout (the
 // apiclient wraps the *url.Error), a context deadline, or a 2xx answer
-// with no body. Local failures (a cancelled prompt, unreadable input) are
+// with no body; or the Hub's 504 start_outcome_unknown, whose dispatch to
+// the broker got no answer. Local failures (a cancelled prompt, unreadable input) are
 // not: nothing was sent.
 func isTransportOutcomeUnknown(err error) bool {
 	var urlErr *url.Error
 	var netErr net.Error
+	var apiErr *apiclient.APIError
+	if errors.As(err, &apiErr) {
+		// The Hub's own answer that its dispatch to the broker ended with
+		// no answer: the agent was kept and may still be starting.
+		return apiErr.Code == apiclient.ErrCodeStartOutcomeUnknown
+	}
 	return errors.Is(err, context.DeadlineExceeded) || errors.As(err, &urlErr) ||
 		errors.As(err, &netErr) || errors.Is(err, apiclient.ErrNoContent)
 }

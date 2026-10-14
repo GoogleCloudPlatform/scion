@@ -57,7 +57,7 @@ Examples:
   scion artifact list --query report --all`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		_, client, err := requireArtifactHubClient()
+		_, client, _, err := requireArtifactHubClient()
 		if err != nil {
 			return err
 		}

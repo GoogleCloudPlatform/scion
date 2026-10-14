@@ -145,6 +145,27 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				}
 			}
 
+			// A failed start recorded in the host state file
+			// (ptone/scion#4815) shows as error, for the run this container
+			// belongs to only, and not once the runtime reports the
+			// container running or starting. Display-only and fail-quiet:
+			// HubProjectID is the container's project-id label (set at
+			// create; a local CLI start fills it from project settings), so
+			// this must never feed a delete, cleanup or ownership decision.
+			// Any refusal, error or invalid record means no overlay.
+			if rp := runtimePhases[agents[i].Name]; rp != string(state.PhaseRunning) && rp != string(state.PhaseStarting) &&
+				agents[i].RunID != "" && agents[i].Phase != "deleted" {
+				t := RunOwnerTarget{
+					ProjectPath:  agents[i].ProjectPath,
+					AgentName:    agents[i].Name,
+					HubProjectID: projectkeys.ProjectIDFromLabels(agents[i].Labels),
+				}
+				if startFailedForDisplay(t, agentDir) == agents[i].RunID {
+					agents[i].Phase = string(state.PhaseError)
+					agents[i].Activity = ""
+				}
+			}
+
 			// Use agent-info.json mtime as LastSeen for local agents
 			if fi, err := os.Stat(agentInfoJSON); err == nil {
 				agents[i].LastSeen = fi.ModTime()
@@ -208,7 +229,7 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 				// UI doesn't show a stale "cloning" or "starting" phase.
 				agents[i].Phase = string(state.PhaseError)
 				agents[i].Activity = ""
-			case state.PhaseError, state.PhaseStopped:
+			case state.PhaseError, state.PhaseStopped, state.PhaseHalted:
 				// Already terminal — preserve as-is
 			}
 		}
@@ -319,6 +340,28 @@ func (m *AgentManager) List(ctx context.Context, filter map[string]string) ([]ap
 					ProvisionedOnly: info.Phase == string(state.PhaseCreated) && info.DeletedAt.IsZero(),
 				}
 
+				// A failed start recorded in the host state file
+				// (ptone/scion#4815) shows as error. Display-only and
+				// fail-quiet: it must never feed a delete, cleanup or
+				// ownership decision. With no container there is no
+				// broker-held hub identity here, so the record is read
+				// only where the host state contract allows it without
+				// one: HubProjectID "" and SharedWorkspace false (the
+				// resolver then refuses a .scion marker or a symlinked or
+				// missing .scion), and only when the resolver places the
+				// file in this agent dir (a shared-workspace agent's
+				// external dir never matches). Nothing from the project
+				// tree feeds the identity. Any refusal, error or invalid
+				// record means no overlay.
+				if info.DeletedAt.IsZero() && info.Phase != "deleted" {
+					t := RunOwnerTarget{ProjectPath: gp, AgentName: e.Name()}
+					if startFailedForDisplay(t, agentDir) != "" {
+						agentEntry.Phase = string(state.PhaseError)
+						agentEntry.Activity = ""
+						agentEntry.ProvisionedOnly = false
+					}
+				}
+
 				// Use agent-info.json mtime as LastSeen for local agents
 				if fi, err := os.Stat(agentInfoJSON); err == nil {
 					agentEntry.LastSeen = fi.ModTime()
@@ -391,7 +434,7 @@ func lazyHubProjectID(projectDir string) func() string {
 
 func terminalRuntimePhase(agent api.AgentInfo) string {
 	switch state.Phase(agent.Phase) {
-	case state.PhaseStopped, state.PhaseError:
+	case state.PhaseStopped, state.PhaseError, state.PhaseHalted:
 		return agent.Phase
 	case state.PhaseCreated, state.PhaseProvisioning, state.PhaseCloning,
 		state.PhaseStarting, state.PhaseRunning, state.PhaseStopping:
