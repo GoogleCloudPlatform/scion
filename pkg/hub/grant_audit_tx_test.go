@@ -198,13 +198,35 @@ func TestGroupDeleteAuditFailureRollsBack(t *testing.T) {
 	})
 	ctx := context.Background()
 	group, userID, path := groupDeleteFixture(t, real, "gd-audit-fault")
+	parent := &store.Group{ID: tid("gd-audit-fault-parent"), Name: "gd audit fault parent", Slug: "gd-audit-fault-parent", GroupType: store.GroupTypeExplicit}
+	require.NoError(t, real.CreateGroup(ctx, parent))
+	require.NoError(t, real.AddGroupMember(ctx, &store.GroupMember{
+		GroupID: parent.ID, MemberType: store.GroupMemberTypeGroup, MemberID: group.ID, Role: store.GroupMemberRoleMember,
+	}))
+	rd := newDeliverRoleDefinition(t, real)
+	binding, err := real.CreateRoleBinding(ctx, &store.RoleBinding{
+		RoleDefinitionID: rd.ID,
+		PrincipalType:    store.RoleBindingPrincipalGroup,
+		PrincipalID:      group.ID,
+		ScopeType:        store.RoleScopeSystem,
+		CreatedBy:        "test",
+	})
+	require.NoError(t, err)
 
 	rec := doRequest(t, srv, http.MethodDelete, path, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
-	_, err := real.GetGroup(ctx, group.ID)
+	_, err = real.GetGroup(ctx, group.ID)
 	require.NoError(t, err, "group kept after the audit failure")
 	_, err = real.GetGroupMembership(ctx, group.ID, store.GroupMemberTypeUser, userID)
 	require.NoError(t, err, "membership kept after the audit failure")
+	children, err := real.ListGroups(ctx, store.GroupFilter{ParentID: parent.ID}, store.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, children.Items, 1, "parent edge kept after the audit failure")
+	assert.Equal(t, group.ID, children.Items[0].ID)
+	bindings, err := real.ListRoleBindingsForPrincipal(ctx, store.RoleBindingPrincipalGroup, group.ID)
+	require.NoError(t, err)
+	require.Len(t, bindings, 1, "role binding kept after the audit failure")
+	assert.Equal(t, binding.ID, bindings[0].ID)
 	assert.Empty(t, grantAudits(t, real, "group_delete", group.ID))
 }
 
