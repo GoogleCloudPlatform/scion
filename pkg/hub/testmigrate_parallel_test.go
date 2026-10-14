@@ -85,26 +85,43 @@ func TestMigrateSerializesConcurrentFreshStores(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseHolder := func() { releaseOnce.Do(func() { close(release) }) }
-	t.Cleanup(releaseHolder)
 	var heldOnce sync.Once
 	holder.SetBeforeFKReconcile(func(context.Context, *sql.DB, []entc.FKRepairGroup) error {
 		heldOnce.Do(func() { close(held) })
 		<-release
 		return nil
 	})
+
+	type result struct {
+		i   int
+		err error
+	}
+	// Every Migrate goroutine sends to a buffered channel and is counted in
+	// migrations. On every exit, a t.Fatalf included, this cleanup releases
+	// the holder and waits for all of them before the fresh stores close; it
+	// runs before the holder's own close, which newTestStore registered
+	// earlier.
+	var migrations sync.WaitGroup
+	stores := make([]*entadapter.CompositeStore, 0, fresh)
+	t.Cleanup(func() {
+		releaseHolder()
+		migrations.Wait()
+		for _, s := range stores {
+			_ = s.Close()
+		}
+	})
 	holderErr := make(chan error, 1)
-	go func() { holderErr <- holder.Migrate(ctx) }()
+	migrations.Add(1)
+	go func() {
+		defer migrations.Done()
+		holderErr <- holder.Migrate(ctx)
+	}()
 	select {
 	case <-held:
 	case err := <-holderErr:
 		t.Fatalf("holder Migrate returned before its BeforeFKReconcile hook ran: %v", err)
 	}
 
-	type result struct {
-		i   int
-		err error
-	}
-	stores := make([]*entadapter.CompositeStore, 0, fresh)
 	done := make(chan result, fresh)
 	started := 0
 	finishedEarly := false
@@ -114,9 +131,12 @@ func TestMigrateSerializesConcurrentFreshStores(t *testing.T) {
 			t.Fatalf("store%d: open: %v", i, err)
 		}
 		s := entadapter.NewCompositeStore(client)
-		t.Cleanup(func() { _ = s.Close() })
 		stores = append(stores, s)
-		go func() { done <- result{i, s.Migrate(ctx)} }()
+		migrations.Add(1)
+		go func() {
+			defer migrations.Done()
+			done <- result{i, s.Migrate(ctx)}
+		}()
 		started++
 
 		deadline := time.After(time.Minute)
@@ -139,7 +159,6 @@ func TestMigrateSerializesConcurrentFreshStores(t *testing.T) {
 				}
 			case <-deadline:
 				tick.Stop()
-				releaseHolder()
 				t.Fatalf("store%d: after a minute, %d of %d started Migrate calls are parked waiting for entc.AutoMigrate's lock (autoMigrateLockWaiters may no longer recognise the wait)",
 					i, autoMigrateLockWaiters(t.Name()), started)
 			}
@@ -200,8 +219,8 @@ func seedOrphanRoleBinding(t *testing.T, db *sql.DB) {
 // that are parked waiting for entc.AutoMigrate's process lock: blocked in a
 // select whose innermost non-runtime frame is entc.AutoMigrate. AutoMigrate
 // has no other select of its own, so a goroutine past the lock never
-// matches. Runtime frames are skipped because the default traceback level
-// hides them.
+// matches. The default traceback level already hides runtime frames; they
+// are skipped so the match also holds when the level shows them.
 func autoMigrateLockWaiters(testName string) int {
 	const autoMigrateFrame = "github.com/GoogleCloudPlatform/scion/pkg/ent/entc.AutoMigrate("
 	ownFrame := "github.com/GoogleCloudPlatform/scion/pkg/hub." + testName + "."
