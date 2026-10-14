@@ -429,13 +429,18 @@ func (s *Server) restoreAgentTx(ctx context.Context, a *store.Agent, actor Audit
 	// the restore's commit; a failure leaves the marker, which then reads
 	// as an abandoned delete, and is logged.
 	if lapsedClaim {
+		// The restore has committed: finish the clear even if the
+		// caller's request has ended meanwhile.
+		clearCtx := context.WithoutCancel(ctx)
 		lapsedBefore := time.Now()
 		none := store.DeletionStateNone
 		pred := store.DeletionPredicate{States: []string{store.DeletionStateDeleting}, DeletedAtNull: true, LeaseExpiredBefore: &lapsedBefore}
 		set := store.DeletionFields{State: &none, ClearLeaseAt: true, KeepUpdated: true}
-		if _, err := s.store.UpdateAgentDeletion(ctx, row.ID, pred, set); err != nil {
+		if _, err := s.store.UpdateAgentDeletion(clearCtx, row.ID, pred, set); err != nil {
 			s.agentLifecycleLog.Warn("restore: could not clear a lapsed purge claim", "agent_id", row.ID, "error", err)
-		} else if fresh, err := s.store.GetAgent(ctx, row.ID); err == nil {
+		} else if fresh, err := s.store.GetAgent(clearCtx, row.ID); err != nil {
+			s.agentLifecycleLog.Warn("restore: could not re-read the agent after clearing a lapsed purge claim", "agent_id", row.ID, "error", err)
+		} else {
 			row = *fresh
 		}
 	}
