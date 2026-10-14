@@ -450,7 +450,7 @@ func TestSkillFailure_ParserMessagesWithheld(t *testing.T) {
 					}
 				}
 			}
-			if !strings.Contains(outputs["log"], resolverMessageWithheld) {
+			if !strings.Contains(outputs["log"], agent.ResolverMessageWithheld) {
 				t.Errorf("log text does not withhold the resolver message: %s", outputs["log"])
 			}
 		})
