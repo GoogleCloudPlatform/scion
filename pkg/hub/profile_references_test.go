@@ -520,6 +520,7 @@ func TestProfileReferences_InstallFailureIsConservative(t *testing.T) {
 	fs.mode = "pass"
 	fs.mu.Unlock()
 	srv.runProfileReferenceCount(context.Background())
+	requireCounted(t, srv, overlay) // the later count succeeded and ended conservative mode
 	assert.NoError(t, resolvesThrough(overlay, "local"), "a later count never removes a retained name")
 }
 
