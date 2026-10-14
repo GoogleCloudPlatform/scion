@@ -647,7 +647,10 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // message stored without one, of its thread (a DM key names its peer agent's
 // project, or none for two users; a topic its project), must pass the
 // token's self-scope check, and a DM with an agent also needs agent:read on
-// that agent. Every lookup failure answers false.
+// that agent. A message of a project's (non-direct) conversation also needs
+// project:read on that project through the token (canReadProject), the
+// rule the AttachmentStore download route applies to a project's file.
+// Every lookup failure answers false.
 func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
 	s := h.server
 	if token == nil || msg == nil {
@@ -684,7 +687,18 @@ func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUse
 		slog.WarnContext(ctx, "artifacts: attachment token boundary check failed", "message", msg.ID, "error", err)
 		return false
 	}
-	return ok
+	if !ok {
+		return false
+	}
+	// A message of a project's conversation also needs project:read on that
+	// project through the token, as the AttachmentStore download route
+	// requires for a project's file. This applies before the native and
+	// addressee checks, so an addressee's token reads no more than the
+	// token reads of the project.
+	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
+		return s.canReadProject(ctx, token, *conv.ProjectID)
+	}
+	return true
 }
 
 // PermitsMessageRead implements artifacts.MessageScopeHost: whether the

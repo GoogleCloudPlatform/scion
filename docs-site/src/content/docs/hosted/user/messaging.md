@@ -74,7 +74,7 @@ With the `hub.attachment_artifacts` experiment on, a file uploaded in web chat i
 
 When the message goes to an agent, the file is also copied into the project's shared directory so the agent can open it, and there project access applies (until ptone/scion#4597 delivers files to the agent's own home instead).
 
-Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Anyone else gets the same "not found" answer as for an attachment that does not exist. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
+Until it is sent, only the uploader can read it, and an upload that is not sent within 24 hours is removed. Deleting a message makes its attachments unreadable at once, and their stored bytes are removed after the artifact garbage-collection grace period. Any user who cannot read it gets the same "not found" answer as for an attachment that does not exist. Attachments are read only through their message: they have no share links, grants or versions, and they are not listed among artifacts.
 
 Each file can be up to the artifact file size limit (`artifacts.max_file_bytes`, 32 MiB by default), with up to 10 files per message. The experiment uses the artifact service, with its settings section enabled; `hub.artifacts` can stay off. Attachments stored while the experiment is on stay readable after it is turned off.
 :::

@@ -79,8 +79,15 @@ func enableAttachmentArtifacts(t *testing.T, f *refFixture) artifacts.Store {
 	blobs, err := storage.NewLocal(storage.Config{Provider: storage.ProviderLocal, Bucket: "hub", LocalPath: t.TempDir()})
 	require.NoError(t, err)
 	f.srv.SetStorage(blobs)
-	require.True(t, f.srv.attachmentUploadsToArtifacts(), "uploads go to the artifact service")
+	require.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "uploads go to the artifact service")
 	return st
+}
+
+// sessionContext returns a context carrying user's session identity, as the
+// upload route sees it.
+func (f *refFixture) sessionContext(user *store.User) context.Context {
+	return contextWithIdentity(context.Background(),
+		NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, user.Role, string(ClientTypeWeb)))
 }
 
 // uploadAs posts one file to the upload route as user, with project_id
@@ -336,7 +343,7 @@ func TestAttachmentArtifacts_ExperimentOff(t *testing.T) {
 	f.sendWith(t, f.ua, dm, onID)
 
 	setAttachmentExperiments(t, f.srv, false, false)
-	require.False(t, f.srv.attachmentUploadsToArtifacts())
+	require.False(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)))
 
 	// Uploads go to the legacy store, exactly as before.
 	offID := f.uploadAs(t, f.ua, "", "off.txt", "stored while off")
@@ -523,6 +530,63 @@ func TestAttachmentArtifacts_ScopedTokenBoundary(t *testing.T) {
 	requireSameAnswer(t, missing, f.downloadAs(t, bobInA, threadFileB))
 	bobInB := selfToken(t, f.ub.ID, projectBoundary(f.projB.ID), "project:read", "inbox:read")
 	require.Equal(t, http.StatusOK, f.downloadAs(t, bobInB, threadFileB).status)
+}
+
+// A user access token reads an attachment of a project's message only with
+// project:read on that project through the token, as on the AttachmentStore
+// download route, even when its holder is an addressee of the message: the
+// addressee rule that admits bob's session does not widen his tokens.
+func TestAttachmentArtifacts_TokenProjectMessageNeedsProjectRead(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	convID, err := f.srv.conversationIDForKey(ctx, f.wcs, f.topicA)
+	require.NoError(t, err)
+	msgID := f.seedMessage(t, f.projA.ID, f.topicA, convID, "for bob too")
+	id := f.uploadAs(t, f.ua, "", "brief.txt", "addressed")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	// bob, of project B, is an addressee of the message.
+	require.NoError(t, f.st.AddAddressee(ctx, &store.MessageAddressee{ID: uuid.NewString(), MessageID: msgID,
+		PrincipalKind: "user", PrincipalID: f.ub.ID, Via: "explicit", DeliveryState: "delivered"}))
+	require.Equal(t, http.StatusOK, f.download(t, f.ub, id).status, "bob's session reads it as an addressee")
+
+	missing := f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+
+	// bob's hub-boundary tokens read nothing of project A, where he is not
+	// a member: neither with inbox:read alone nor with project:read too.
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "inbox:read alone")
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "project:read", "inbox:read"), id), "with project:read")
+
+	// alice, a member of project A, reads it with a token carrying both.
+	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read"), id)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, "addressed", got.body)
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), id), "member without project:read")
+}
+
+// With the experiment on, uploads go to the artifact service only for a
+// caller it can own as a user principal: a session or a user access token.
+// A federated user, which the artifact service does not serve, uploads to
+// the AttachmentStore as with the experiment off, instead of failing.
+func TestAttachmentArtifacts_FederatedUploadsUseAttachmentStore(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+
+	require.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "session")
+	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:write")
+	require.True(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
+
+	fed := NewFederatedUserIdentity("https://issuer.attachments.test", "att-fed", "att-fed@test.com", "Fed", "member", nil)
+	fedCtx := contextWithCredentialContext(contextWithIdentity(ctx, fed), CredentialContext{Kind: CredentialKindFederation})
+	require.False(t, f.srv.attachmentUploadsToArtifacts(fedCtx), "federated user")
+	require.False(t, f.srv.attachmentUploadsToArtifacts(ctx), "no identity")
+
+	// The artifact service would refuse the federated upload, which is why
+	// it is routed to the AttachmentStore.
+	_, _, _, ok := newArtifactHost(f.srv).Principal(fedCtx)
+	require.False(t, ok)
 }
 
 // While the artifacts settings section is disabled, stored attachments
