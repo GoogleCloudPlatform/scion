@@ -36,6 +36,7 @@ import {
   beforeAll,
   beforeEach,
   afterEach,
+  onTestFinished,
   type MockInstance,
 } from 'vitest';
 import { html, nothing, render, type TemplateResult } from 'lit';
@@ -1965,9 +1966,10 @@ describe('chat page — late route lookups', () => {
     vi.mocked(apiFetch).mockImplementation(async (path: string) => {
       if (path.startsWith('/api/v1/projects?slug=')) {
         await held;
-        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ projects: [{ id: 'p1', slug: 'alpha', name: 'A' }], totalCount: 1 }),
+          { status: 200 }
+        );
       }
       return new Response('{}', { status: 200 });
     });
@@ -2042,6 +2044,55 @@ describe('chat page — late route lookups', () => {
     expect(el.mobilePanel).toBe('center');
   });
 
+  it('a slug lookup asks the hub for that slug and records the project it names', async () => {
+    const release = holdSlugLookup();
+    const el = mountedPage();
+    window.history.replaceState({}, '', '/chat/alpha/topic-1');
+    el.parseV2Route();
+
+    release();
+    await vi.waitFor(() => expect(el._slugToProjectId.get('alpha')).toBe('p1'));
+    expect(el._projectIdToSlug.get('p1')).toBe('alpha');
+    expect(vi.mocked(apiFetch)).toHaveBeenCalledWith('/api/v1/projects?slug=alpha&limit=1');
+  });
+
+  it.each([
+    {
+      name: 'an empty projects list',
+      answer: () =>
+        Promise.resolve(
+          new Response(JSON.stringify({ projects: [], totalCount: 0 }), { status: 200 })
+        ),
+    },
+    {
+      name: 'a non-OK response',
+      answer: () => Promise.resolve(new Response('{}', { status: 500 })),
+    },
+    {
+      name: 'a failed request',
+      answer: (): Promise<Response> => Promise.reject(new TypeError('Failed to fetch')),
+    },
+  ])('a slug lookup answered by $name resolves nothing and asks again', async ({ answer }) => {
+    vi.mocked(apiFetch).mockClear();
+    vi.mocked(apiFetch).mockImplementation(answer);
+    onTestFinished(() => {
+      vi.mocked(apiFetch).mockImplementation(() =>
+        Promise.resolve(new Response('{}', { status: 200 }))
+      );
+    });
+    const el = createPage();
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    expect(el._slugToProjectId.size).toBe(0);
+    expect(el._projectIdToSlug.size).toBe(0);
+
+    expect(await el.resolveProjectBySlug('alpha')).toBe('');
+    const lookups = vi
+      .mocked(apiFetch)
+      .mock.calls.filter(([path]) => path === '/api/v1/projects?slug=alpha&limit=1');
+    expect(lookups).toHaveLength(2);
+  });
+
   it('a burst of rail reloads does not pull the user back to the thread the URL named before', async () => {
     const release = holdSlugLookup();
     const el = mountedPage();
@@ -2113,9 +2164,10 @@ describe('chat page — late space lookups', () => {
     vi.mocked(apiFetch).mockImplementation(async (path: string) => {
       if (path.startsWith('/api/v1/projects?slug=')) {
         await slugHeld;
-        return new Response(JSON.stringify({ items: [{ id: 'p1', slug: 'alpha', name: 'A' }] }), {
-          status: 200,
-        });
+        return new Response(
+          JSON.stringify({ projects: [{ id: 'p1', slug: 'alpha', name: 'A' }], totalCount: 1 }),
+          { status: 200 }
+        );
       }
       if (path === '/api/v1/chat/spaces/p1/threads') {
         await threadsHeld;

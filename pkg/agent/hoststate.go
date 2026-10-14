@@ -84,6 +84,11 @@ type HostState struct {
 	// RunID is the agent's run ID.
 	RunID string `json:"runId,omitempty"`
 
+	// StartFailedRunID is the run ID of the last start whose runtime
+	// launch failed, "" when the last start got past the launch
+	// (ptone/scion#4815). See setStartFailedRunID.
+	StartFailedRunID string `json:"startFailedRunId,omitempty"`
+
 	// unknown holds the top-level keys read from the file that HostState
 	// has no field for, with their raw values.
 	unknown map[string]json.RawMessage

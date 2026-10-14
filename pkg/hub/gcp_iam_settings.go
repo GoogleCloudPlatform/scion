@@ -395,9 +395,11 @@ func gcpIAMHubAdmin(ctx context.Context) bool {
 	return sessionCredentialAllowed(ctx)
 }
 
-// requireGCPIAMHubAdmin writes a 403 and returns false unless gcpIAMHubAdmin.
-func requireGCPIAMHubAdmin(w http.ResponseWriter, ctx context.Context) bool {
-	if gcpIAMHubAdmin(ctx) {
+// requireGCPIAMHubAdmin writes a 403 and returns false unless gcpIAMHubAdmin
+// and the test-admin policy admits the caller (test identities with admin
+// roles do not change these settings).
+func (s *Server) requireGCPIAMHubAdmin(w http.ResponseWriter, ctx context.Context) bool {
+	if gcpIAMHubAdmin(ctx) && !s.testAdminPolicyRefuses(ctx, "gcp_iam_settings.go:gcpIAMHubAdmin") {
 		return true
 	}
 	writeError(w, http.StatusForbidden, ErrCodeForbidden,

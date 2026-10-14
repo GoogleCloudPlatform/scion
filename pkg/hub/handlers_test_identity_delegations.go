@@ -343,7 +343,7 @@ func (s *Server) handleListTestIdentityDelegations(w http.ResponseWriter, r *htt
 		return
 	}
 	grantorID := caller.ID()
-	if testIdentityCallerSeesAll(caller) {
+	if s.testIdentityCallerSeesAll(ctx, caller) {
 		grantorID = ""
 	}
 	limit := testIdentityDelegationListDefaultLimit
@@ -387,7 +387,7 @@ func (s *Server) handleRevokeTestIdentityDelegation(w http.ResponseWriter, r *ht
 	}
 	id := r.PathValue("id")
 	d, err := s.store.GetTestIdentityDelegation(ctx, id)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && d.GrantorID != caller.ID() && !testIdentityCallerSeesAll(caller)) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && d.GrantorID != caller.ID() && !s.testIdentityCallerSeesAll(ctx, caller)) {
 		NotFound(w, "issuer delegation")
 		return
 	}

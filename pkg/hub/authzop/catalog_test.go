@@ -277,9 +277,10 @@ func TestRegisteredPermissionsConsumed(t *testing.T) {
 		"agent.lifecycle":              "Inline authorization in authorizeAgentLifecycle/handleAgentAction (start, stop, suspend, restart, restore) and authorizeAgentReincarnate (reincarnate), not route-enforced",
 
 		// Admin test identities: the super-admin kind's capability is
-		// checked by testAdminIssuer, whose issuance answers 404 until the
-		// admin tier's policy phase (A2) adds its operation.
-		"test_identity.issue_super_admin": "Reserved in the permission registry until admin tier phase A2 (ptone/scion#4240): test super-admin issuance is refused",
+		// checked by testAdminIssuer inside testidentity.admin.create (whose
+		// base permission is test_identity.issue_admin; the route guard also
+		// admits test_identity.issue_super_admin, RouteMetadata.AlsoPermits).
+		"test_identity.issue_super_admin": "Checked by testAdminIssuer within testidentity.admin.create for adminRole super-admin (ptone/scion#4240)",
 
 		// Global catalog permissions — handler-enforced, not a standalone route.
 		"skill.create_global": "Handler-enforced via globalWriteAction in skill_handlers.go; catalog operation deferred to Phase 2 (ptone/scion#1713)",
