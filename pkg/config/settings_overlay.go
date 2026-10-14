@@ -81,9 +81,11 @@ func NewSettingsOverlay() *SettingsOverlay {
 	return &SettingsOverlay{}
 }
 
-// Update sets the overlay's fields. Nil maps are treated as "no change" —
-// pass an empty (non-nil) map to clear a section. imageRegistry is always
-// applied (empty string clears it).
+// Update sets the overlay's fields. Nil maps are treated as "no change".
+// An empty (non-nil) map clears the section: a stored catalog with no
+// entries means the section is not managed in the hub, the same as unset,
+// so Apply keeps the settings file's map for it (ptone/scion#5007).
+// imageRegistry is always applied (empty string clears it).
 func (o *SettingsOverlay) Update(
 	runtimes map[string]V1RuntimeConfig,
 	profiles map[string]V1ProfileConfig,
@@ -94,20 +96,33 @@ func (o *SettingsOverlay) Update(
 	defer o.mu.Unlock()
 
 	if runtimes != nil {
-		o.runtimes = cloneRuntimes(runtimes)
+		o.runtimes = nonEmptyOrNil(cloneRuntimes(runtimes))
 	}
 	if profiles != nil {
-		o.profiles = cloneProfiles(profiles)
+		o.profiles = nonEmptyOrNil(cloneProfiles(profiles))
 	}
 	if harnessConfigs != nil {
-		o.harnessConfigs = cloneHarnessConfigs(harnessConfigs)
+		o.harnessConfigs = nonEmptyOrNil(cloneHarnessConfigs(harnessConfigs))
 	}
 	o.imageRegistry = imageRegistry
 	o.active = true
 }
 
+// nonEmptyOrNil returns m, or nil when m has no entries.
+func nonEmptyOrNil[V any](m map[string]V) map[string]V {
+	if len(m) == 0 {
+		return nil
+	}
+	return m
+}
+
 // Apply merges overlay values into a VersionedSettings. DB values
-// replace file values for each field that has been set in the overlay.
+// replace file values for each field that has been set in the overlay
+// with at least one entry; an empty stored map leaves the file's map in
+// place (see Update). Runtimes and profiles are handled independently, so
+// stored profiles resolve against the file's runtimes when no runtimes are
+// stored, and the active_profile resolution against stored profiles (and
+// its errors) applies only when stored profiles exist.
 // Called by LoadEffectiveSettings after loading from disk.
 func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 	if o == nil || vs == nil {
@@ -120,10 +135,10 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 		return
 	}
 
-	if o.runtimes != nil {
+	if len(o.runtimes) > 0 {
 		vs.Runtimes = cloneRuntimes(o.runtimes)
 	}
-	if o.profiles != nil {
+	if len(o.profiles) > 0 {
 		vs.Profiles = cloneProfiles(o.profiles)
 		if configured, chosen := resolveOverlaidActiveProfile(vs); chosen != "" {
 			o.logSingleProfileFallback(configured, chosen)
@@ -131,7 +146,7 @@ func (o *SettingsOverlay) Apply(vs *VersionedSettings) {
 			o.resetSingleProfileFallbackLog()
 		}
 	}
-	if o.harnessConfigs != nil {
+	if len(o.harnessConfigs) > 0 {
 		vs.HarnessConfigs = cloneHarnessConfigs(o.harnessConfigs)
 	}
 	if o.imageRegistry != "" && os.Getenv("SCION_IMAGE_REGISTRY") == "" {
@@ -277,7 +292,8 @@ func (o *SettingsOverlay) resetSingleProfileFallbackLog() {
 }
 
 // Profiles returns a deep copy of the overlay's profiles map. Returns nil if
-// the overlay has not been activated or no profiles have been set.
+// the overlay has not been activated or no profiles have been stored (an
+// empty stored map counts as none; see Update).
 func (o *SettingsOverlay) Profiles() map[string]V1ProfileConfig {
 	if o == nil {
 		return nil

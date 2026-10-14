@@ -109,19 +109,6 @@ func TestSettingsOverlay_ActiveProfile_UnsetNamesUnsetAndAvailable(t *testing.T)
 	}
 }
 
-// An empty overlaid profiles map lists no available profiles.
-func TestSettingsOverlay_ActiveProfile_EmptyOverlaidMap(t *testing.T) {
-	vs := overlayActiveProfileFixture("local")
-	o := NewSettingsOverlay()
-	o.Update(nil, map[string]V1ProfileConfig{}, nil, "")
-	o.Apply(vs)
-
-	_, _, err := vs.ResolveRuntime("")
-	if err == nil || !strings.Contains(err.Error(), "available profiles: none") {
-		t.Errorf("ResolveRuntime(\"\") error = %v, want one listing no available profiles", err)
-	}
-}
-
 // When the overlay does not replace profiles, active_profile handling is
 // unchanged (bare not-found error, no ActiveProfileError).
 func TestSettingsOverlay_ActiveProfile_UnchangedWithoutOverlaidProfiles(t *testing.T) {
@@ -302,15 +289,16 @@ func TestSettingsOverlay_ActiveProfile_FallbackLogDedup(t *testing.T) {
 	}
 }
 
-// With zero or several overlaid profiles, an active_profile that is not one
-// of them is refused with an error naming every stored profile, and nothing
-// is chosen in its place.
-func TestSettingsOverlay_ActiveProfile_ZeroOrSeveralStoredProfilesRefused(t *testing.T) {
+// With several overlaid profiles, an active_profile that is not one of
+// them is refused with an error naming every stored profile, and nothing is
+// chosen in its place. Zero stored profiles (an empty stored map) is not
+// refused: it leaves the file's profiles in place (see
+// settings_overlay_empty_catalog_test.go).
+func TestSettingsOverlay_ActiveProfile_SeveralStoredProfilesRefused(t *testing.T) {
 	for name, tc := range map[string]struct {
 		profiles map[string]V1ProfileConfig
 		want     string
 	}{
-		"zero": {profiles: map[string]V1ProfileConfig{}, want: "available profiles: none"},
 		"two": {
 			profiles: map[string]V1ProfileConfig{"cluster": {Runtime: "k8s"}, "batch": {Runtime: "k8s"}},
 			want:     "available profiles: batch, cluster",
