@@ -668,14 +668,22 @@ function twoFrameBoxes(el: Element): Promise<number[][]> {
   });
 }
 
+/** In the page: resolves at the next animation frame (paces a failed round). */
+function nextAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
 /**
  * Before the first click into a frame the page has just shown again (a tab
  * switch), waits until a person could click it: the frame element visible,
  * its box non-zero and the same across two consecutive animation frames, and
- * its document loaded at the frame's src, which names the expected version
- * and entry. Bounded by budgetMs (the action budget). There is no fixed sleep:
- * each round waits two animation frames. It never clicks; the result says
- * whether the conditions held, how long that took and the last check seen.
+ * its document loaded at the frame's src, which names this bundle, the
+ * expected version and the expected entry. One deadline (budgetMs, the action
+ * budget): every read is bounded by the time left, and held is true only if
+ * the conditions held before the deadline. There is no fixed sleep: each
+ * round waits two animation frames (one when the box read fails). It never
+ * clicks; the result says whether the conditions held, how long that took
+ * and the last check seen.
  */
 async function waitFrameReadyToClick(
   page: Page,
@@ -684,34 +692,48 @@ async function waitFrameReadyToClick(
   budgetMs = 15_000
 ): Promise<{ held: boolean; waitedMs: number; last: Record<string, boolean> }> {
   const started = Date.now();
+  const deadline = started + budgetMs;
+  // The bound for one read: at most 2 s and never past the deadline; 0 means
+  // out of time, and a read is then skipped (a 0 timeout means none).
+  const left = (): number => Math.max(0, Math.min(2_000, deadline - Date.now()));
   const frameEl = page.locator(RENDER_SELECTORS.htmlFrame);
   let last: Record<string, boolean> = {};
-  while (Date.now() - started < budgetMs) {
+  while (left() > 0) {
     const visible = await frameEl.isVisible().catch(() => false);
-    const boxRead = frameEl.evaluate(twoFrameBoxes, undefined, { timeout: 2_000 });
-    const boxes = await withTimeout(
-      boxRead.catch(() => null),
-      2_000,
-      null
-    );
+    let boxes: number[][] | null = null;
+    let t = left();
+    if (t > 0) {
+      const boxRead = frameEl.evaluate(twoFrameBoxes, undefined, { timeout: t });
+      const boxSafe = boxRead.catch(() => null);
+      boxes = await withTimeout(boxSafe, t, null);
+    }
+    t = left();
+    if (!boxes && t > 0) {
+      const paced = page.evaluate(nextAnimationFrame).catch(() => undefined);
+      await withTimeout(paced, t, undefined);
+    }
     const [b0, b1] = boxes ?? [[], []];
     const nonZero = (b1[2] ?? 0) > 0 && (b1[3] ?? 0) > 0;
     const stableBox = nonZero && b0.length === 4 && b0.every((v, k) => v === b1[k]);
-    const el = await frameEl.elementHandle({ timeout: 2_000 }).catch(() => null);
+    t = left();
+    const el = t > 0 ? await frameEl.elementHandle({ timeout: t }).catch(() => null) : null;
     const src = el ? await el.getAttribute('src').catch(() => null) : null;
     const frame = el ? await el.contentFrame().catch(() => null) : null;
     await el?.dispose().catch(() => undefined);
     const info = viewInfo(src, bundleId());
-    const expectedSrc = info.viewSeq === expectedSeq && info.entry === expectedEntry;
+    const expectedSrc =
+      info.viewIdMatches && info.viewSeq === expectedSeq && info.entry === expectedEntry;
     const atSrc = !!src && !!frame && frame.url() === new URL(src, page.url()).href;
     let readyState: string | null = null;
-    if (frame) {
+    t = left();
+    if (frame && t > 0) {
       const state = frame.evaluate(() => document.readyState).catch(() => null);
-      readyState = await withTimeout(state, 2_000, null);
+      readyState = await withTimeout(state, t, null);
     }
     const loaded = readyState === 'complete';
     last = { visible, stableBox, atExpectedSrc: expectedSrc && atSrc, loaded };
-    if (visible && stableBox && expectedSrc && atSrc && loaded) {
+    const inTime = Date.now() <= deadline;
+    if (inTime && visible && stableBox && expectedSrc && atSrc && loaded) {
       return { held: true, waitedMs: Date.now() - started, last };
     }
   }
