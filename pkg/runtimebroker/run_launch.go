@@ -389,7 +389,7 @@ func (s *Server) runLaunch(ctx context.Context, rec *launchRecord, lc launchCtx)
 		s.agentLifecycleLog.Error("runLaunch: agent start failed", append(append([]any{
 			"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID,
 			"launch_id", rec.ID, "error_code", code}, failureLogAttrs(sr.err, launchSkill)...),
-			runtimeFailureLogAttrs(sr.err)...)...)
+			runtimeCauseLogAttrs(sr.err, launchSkill)...)...)
 		if launchSkill != nil {
 			s.logSkillResolutionFailure(launchSkill,
 				"agent_id", rec.AgentID, "project_id", lc.req.ProjectID, "run_id", lc.opts.RunID, "launch_id", rec.ID)

@@ -188,13 +188,26 @@ const redactedLogValue = "REDACTED"
 // server-side log. Each URL runs from its "http://" or "https://" to the
 // next whitespace or the next "http://" or "https://", so two URLs joined
 // with no separator are redacted one by one, and a URL holding a raw quote
-// or angle bracket is redacted whole. In each URL the userinfo is dropped,
-// everything after the first "?" (the query and any fragment) becomes
-// "?REDACTED", a fragment with no query becomes "#REDACTED", and an
-// artifact path becomes logging.RedactedArtifactPath. Punctuation ending a
-// URL with no query or fragment (see urlTrailingPunct; "]" only when the
-// URL has no "[", as in an IPv6 host) is kept as text. The rest of s is
-// unchanged.
+// or angle bracket is redacted whole. In each URL:
+//   - Userinfo is dropped: everything after the scheme up to the last "@"
+//     in the URL, whatever comes before it (a raw "/", "?" or "#" in a
+//     password included). The one exception is an "@" that comes only
+//     after the first "?" or "#" of a URL whose host before that is a
+//     plausible host name (see plausibleAuthority): that "@" is in the
+//     query or fragment, which is replaced anyway. So an "@" in a path is
+//     taken as the end of userinfo too.
+//   - Everything after the first "?" up to the next whitespace (the query,
+//     any fragment and any closing punctuation) becomes "?REDACTED", and a
+//     fragment with no query becomes "#REDACTED". For example,
+//     Get "https://h/x?q=v": EOF  becomes  Get "https://h/x?REDACTED EOF
+//   - An artifact path becomes logging.RedactedArtifactPath.
+//   - A URL that does not parse after this becomes "(unparseable URL)"
+//     after its scheme. A single-label host (http://hub/...) is kept, but
+//     is not plausible enough to treat a later "@" as part of a query.
+//
+// Punctuation ending a URL with no query or fragment (see
+// urlTrailingPunct; "]" only when the URL has no "[", as in an IPv6 host)
+// is kept as text. The rest of s is unchanged.
 //
 // Only http and https are handled. URLs with other schemes (gs://, s3://,
 // ftp://, ssh://, or scp-style git@host:path) are out of scope and logged
@@ -227,6 +240,9 @@ func redactURLsInText(s string) string {
 func redactURLToken(token string, schemeLen int) string {
 	scheme := strings.ToLower(token[:schemeLen])
 	rest := token[schemeLen:]
+	if at := strings.LastIndexByte(rest, '@'); at >= 0 && !atInQueryOrFragment(rest, at) {
+		rest = rest[at+1:]
+	}
 	var suffix, trailing string
 	if i := strings.IndexAny(rest, "?#"); i >= 0 {
 		if rest[i] == '?' {
@@ -242,13 +258,74 @@ func redactURLToken(token string, schemeLen int) string {
 	if j := strings.IndexByte(rest, '/'); j >= 0 {
 		authority, path = rest[:j], rest[j:]
 	}
-	if k := strings.LastIndexByte(authority, '@'); k >= 0 {
-		authority = authority[k+1:]
+	u, err := url.Parse(scheme + authority + path)
+	if err != nil || u.User != nil {
+		return scheme + unparseableURL + suffix + trailing
 	}
-	if u, err := url.Parse(scheme + authority + path); err == nil && logging.IsCredentialURL(u) {
+	if logging.IsCredentialURL(u) {
 		path = logging.RedactedArtifactPath
 	}
 	return scheme + authority + path + suffix + trailing
+}
+
+// unparseableURL replaces a logged URL, after its scheme, that does not
+// parse once its userinfo, query and fragment are removed.
+const unparseableURL = "(unparseable URL)"
+
+// atInQueryOrFragment reports whether the "@" at rest[at] is in the query or
+// fragment of the URL rest (a URL after its scheme), not the end of
+// userinfo: it comes after the first "?" or "#", nothing before that holds
+// an "@", and the authority before that is a plausible host.
+func atInQueryOrFragment(rest string, at int) bool {
+	q := strings.IndexAny(rest, "?#")
+	if q < 0 || at < q || strings.Contains(rest[:q], "@") {
+		return false
+	}
+	authority := rest[:q]
+	if j := strings.IndexByte(authority, '/'); j >= 0 {
+		authority = authority[:j]
+	}
+	return plausibleAuthority(authority)
+}
+
+// plausibleAuthority reports whether a looks like host[:port]: a bracketed
+// IPv6 address, "localhost", or a dotted name of letters, digits, "-" and
+// ".", with an optional all-digit port.
+func plausibleAuthority(a string) bool {
+	host, port := a, ""
+	if strings.HasPrefix(a, "[") {
+		end := strings.IndexByte(a, ']')
+		if end < 0 {
+			return false
+		}
+		host, port = a[:end+1], a[end+1:]
+		if port != "" && !strings.HasPrefix(port, ":") {
+			return false
+		}
+		port = strings.TrimPrefix(port, ":")
+	} else if i := strings.LastIndexByte(a, ':'); i >= 0 {
+		host, port = a[:i], a[i+1:]
+	}
+	if i := strings.LastIndexByte(a, ':'); i >= 0 && i == len(a)-1 {
+		return false
+	}
+	for _, c := range port {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	if strings.HasPrefix(host, "[") {
+		return len(host) > 2
+	}
+	if host != "localhost" && !strings.Contains(host, ".") {
+		return false
+	}
+	for _, c := range host {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return host != ""
 }
 
 // trimURLTrailing splits rest, a URL after its scheme with no query or
@@ -309,6 +386,18 @@ func failureLogAttrs(err error, f *skillFailure) []any {
 		return []any{"error", err}
 	}
 	return []any{"error", f.publicText(), "correlation_id", f.ref}
+}
+
+// runtimeCauseLogAttrs returns runtimeFailureLogAttrs(err) for a general
+// failure record when there is no skill failure f, and nothing when there
+// is one: the runtime cause of a skill failure is the skill failure itself,
+// whose full text belongs only in the record logSkillResolutionFailure
+// writes.
+func runtimeCauseLogAttrs(err error, f *skillFailure) []any {
+	if f != nil {
+		return nil
+	}
+	return runtimeFailureLogAttrs(err)
 }
 
 // spanErrorText returns err's text for a trace span status: for a skill

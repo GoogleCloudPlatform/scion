@@ -28,6 +28,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 )
 
@@ -83,8 +84,12 @@ func assertResolverLogRecord(t *testing.T, logs, generalMsg, ref string) {
 		t.Errorf("logs carry the URL query value %q: %s", resolverTestQueryValue, logs)
 	}
 	if generalMsg != "" {
-		if general := logRecord(t, logs, generalMsg); general["correlation_id"] != ref {
+		general := logRecord(t, logs, generalMsg)
+		if general["correlation_id"] != ref {
 			t.Errorf("%q record correlation_id = %v, want %q", generalMsg, general["correlation_id"], ref)
+		}
+		if cause, ok := general["cause"]; ok {
+			t.Errorf("%q record carries a runtime cause %v; the full text belongs only in the skill failure record", generalMsg, cause)
 		}
 	}
 }
@@ -324,6 +329,34 @@ func TestSyncCreate_SkillResolverDeadline_LogsOnceRedacted(t *testing.T) {
 	}
 	if w.Code != http.StatusGatewayTimeout {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusGatewayTimeout)
+	}
+	assertResolverLogRecord(t, logs.String(), "Agent create failed", startErrTextRunID)
+}
+
+// TestSyncCreate_SkillFailureWithEarlierCase_LogsOnce covers an error that
+// holds a skill failure together with a case the create response checks
+// first (template not found): the response is that case's, and the skill
+// failure is still logged once, with the general record's correlation id.
+func TestSyncCreate_SkillFailureWithEarlierCase_LogsOnce(t *testing.T) {
+	mgr := newAsyncManager()
+	mgr.setStartErr(fmt.Errorf("%w: %w", config.ErrTemplateNotFound, resolverTestError()))
+	srv, _ := newAsyncTestServer(t, mgr)
+	logs := &syncBuffer{}
+	srv.agentLifecycleLog = slog.New(slog.NewJSONHandler(logs, nil))
+
+	w := postCreate(t, srv, map[string]any{
+		"name": "skill-earlier-case", "projectId": startErrTextProjectID, "runId": startErrTextRunID,
+		"config": map[string]any{"template": "claude"},
+	})
+	var resp ErrorResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode error body: %v (status %d, body %s)", err, w.Code, w.Body.String())
+	}
+	if w.Code != http.StatusNotFound || resp.Error.Code != ErrCodeNotFound {
+		t.Errorf("got status %d code %q, want %d %q", w.Code, resp.Error.Code, http.StatusNotFound, ErrCodeNotFound)
+	}
+	if strings.Contains(w.Body.String(), "ARBITRARY-UPSTREAM-BODY") {
+		t.Errorf("response body carries resolver text: %s", w.Body.String())
 	}
 	assertResolverLogRecord(t, logs.String(), "Agent create failed", startErrTextRunID)
 }

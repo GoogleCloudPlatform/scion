@@ -1599,7 +1599,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 			// "refused to run" apart from an actual provisioning error.
 			if errors.Is(err, agent.ErrReprovisionRefused) {
 				markAttemptFailed(http.StatusConflict, "reprovision refused")
-				span.SetStatus(codes.Error, err.Error())
+				span.SetStatus(codes.Error, spanErrorText(err))
 				Conflict(w, "Failed to provision agent: "+err.Error())
 				return
 			}
@@ -1613,8 +1613,9 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 				markAttemptFailed(http.StatusNotFound, "failed to provision agent")
 				// Names the resource without err's own text, which can carry
 				// broker paths (ptone/scion#3113); the full error is logged.
-				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found",
-					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID, "error", err)
+				s.agentLifecycleLog.Warn("Agent provision failed: template or harness-config not found", append([]any{
+					"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID},
+					failureLogAttrs(err, provisionSkill)...)...)
 				writeError(w, http.StatusNotFound, ErrCodeNotFound, notFoundMessage("provision agent", err, opts.TemplateName), nil)
 				return
 			}
@@ -1724,7 +1725,7 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		s.agentLifecycleLog.Error("Agent create failed", append(append([]any{
 			"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID,
 			"name", req.Name, "slug", req.Slug}, failureLogAttrs(err, createSkill)...),
-			runtimeFailureLogAttrs(err)...)...)
+			runtimeCauseLogAttrs(err, createSkill)...)...)
 		if createSkill != nil {
 			s.logSkillResolutionFailure(createSkill,
 				"agent_id", req.ID, "project_id", req.ProjectID, "run_id", opts.RunID)
