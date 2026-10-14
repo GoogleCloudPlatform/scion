@@ -448,9 +448,9 @@ func (q *QuotaStore) ReleaseReservation(ctx context.Context, limitDefinitionID, 
 
 // ReleaseReservationByID releases the reservation with reservationID while
 // it is still active, in one conditional write; store.ErrNotFound when no
-// active row has that ID.
+// active row has that ID, including a malformed ID.
 func (q *QuotaStore) ReleaseReservationByID(ctx context.Context, reservationID string) error {
-	uid, err := parseUUID(reservationID)
+	uid, err := parseGetID(reservationID)
 	if err != nil {
 		return err
 	}
