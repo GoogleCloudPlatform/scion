@@ -141,9 +141,12 @@ func openAt(t *testing.T, key testKey, s core.LocalSession, port int, now time.T
 	})
 }
 
-// withDeadline gives a grant an authorization deadline (and a jti).
+// withDeadline gives a grant an authorization deadline, a jti and the
+// proxy origin.
 func withDeadline(jti string, until time.Time, interval time.Duration) func(*grant.Claims) {
-	return func(c *grant.Claims) { c.JTI, c.AuthzUntil, c.AuthzInterval = jti, until, interval }
+	return func(c *grant.Claims) {
+		c.JTI, c.AuthzUntil, c.AuthzInterval, c.Via = jti, until, interval, grant.ViaProxy
+	}
 }
 
 // renewalFor mints a renewal minted at now for the stream st on s, opened
@@ -158,6 +161,7 @@ func renewalFor(t *testing.T, key testKey, s core.LocalSession, st core.Stream, 
 	}
 	c := grant.RenewalClaims{
 		Stream: grant.StreamHeader{Kind: string(kind), Params: open.GetParams()},
+		Via:    grant.ViaProxy, // withDeadline's origin
 		Issuer: "scion-hub", Subject: "user:u1", ProjectID: testProjectID,
 		Target: grant.Target{
 			Kind: grant.TargetKindAgent, ID: testAgentID, EndpointIncarnation: "launch-1",
@@ -340,9 +344,9 @@ func TestAgentRotatedKeyAcceptedAfterOneFetch(t *testing.T) {
 }
 
 // TestAgentEnforceModeRequiresDeadline: once the key fetch sets enforce,
-// a user stream's grant without authz_until is refused without consuming
-// its jti; with authz_until it is accepted, and a stream opened by an
-// agent principal needs none.
+// a user stream's grant without authz_until, or without a valid via, is
+// refused without consuming its jti; with both it is accepted, and a
+// stream opened by an agent principal needs neither.
 func TestAgentEnforceModeRequiresDeadline(t *testing.T) {
 	k1 := newTestKey(t, "k1")
 	h := newFakeHub(t, k1.public)
@@ -354,6 +358,9 @@ func TestAgentEnforceModeRequiresDeadline(t *testing.T) {
 	now := fakeStart
 
 	mustRefuse(t, s, openAt(t, k1, s, port, now, func(c *grant.Claims) { c.JTI = "open-1" }), "user grant without authz_until")
+	mustRefuse(t, s, openAt(t, k1, s, port, now, func(c *grant.Claims) {
+		c.JTI, c.AuthzUntil, c.AuthzInterval = "open-1", now.Add(time.Hour), time.Hour
+	}), "user grant with authz_until but no via")
 	// The refused grant did not consume its jti.
 	mustOpen(t, s, openAt(t, k1, s, port, now, withDeadline("open-1", now.Add(time.Hour), time.Hour)), "user grant with authz_until and the same jti")
 	mustOpen(t, s, openAt(t, k1, s, port, now, func(c *grant.Claims) { c.Subject = "agent:agent-2" }), "agent grant without authz_until")

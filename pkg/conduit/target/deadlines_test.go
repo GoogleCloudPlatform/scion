@@ -77,6 +77,7 @@ func newDeadlineFixture(t *testing.T) *deadlineFixture {
 	df.open.JTI = "open-jti-1"
 	df.open.AuthzUntil = t0.Add(testInterval)
 	df.open.AuthzInterval = testInterval
+	df.open.Via = grant.ViaProxy
 	df.stop = df.d.Track(testBinding, 3, &df.open, df.rec.close)
 	t.Cleanup(df.stop)
 	return df
@@ -89,7 +90,7 @@ func (df *deadlineFixture) renewal(t *testing.T, until time.Time, mut func(*gran
 	now := df.clk.Now()
 	c := grant.RenewalClaims{
 		Issuer: df.open.Issuer, Subject: df.open.Subject, ProjectID: df.open.ProjectID,
-		Target: df.open.Target, Stream: df.open.Stream, StreamID: 3, OpenJTI: df.open.JTI,
+		Target: df.open.Target, Stream: df.open.Stream, Via: df.open.Via, StreamID: 3, OpenJTI: df.open.JTI,
 		AuthzUntil: until, NotBefore: now, Expiry: now.Add(30 * time.Second),
 	}
 	if mut != nil {
@@ -191,7 +192,7 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	otherKey := otherSigner(t)
 	unknownKid, err := grant.MintRenewal(otherKey, grant.RenewalClaims{
 		Issuer: df.open.Issuer, Subject: df.open.Subject, ProjectID: df.open.ProjectID,
-		Target: df.open.Target, Stream: df.open.Stream, StreamID: 3, OpenJTI: df.open.JTI,
+		Target: df.open.Target, Stream: df.open.Stream, Via: df.open.Via, StreamID: 3, OpenJTI: df.open.JTI,
 		AuthzUntil: now.Add(testInterval), NotBefore: now, Expiry: now.Add(30 * time.Second),
 	})
 	if err != nil {
@@ -415,6 +416,27 @@ func TestDeadlinesRenewalStreamMustMatch(t *testing.T) {
 	}
 	got, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = jti }))
 	if err != nil || !got.Equal(until) {
+		t.Fatalf("matching renewal with the same jti: %v, %v", got, err)
+	}
+}
+
+// TestDeadlinesRenewalViaMustMatch: a renewal whose via differs from the
+// admitted open grant's is refused and changes nothing, and its jti stays
+// usable (design v2.21.29 §3.5).
+func TestDeadlinesRenewalViaMustMatch(t *testing.T) {
+	df := newDeadlineFixture(t)
+	ctx := context.Background()
+	before := df.deadline(t)
+	until := df.clk.Now().Add(testInterval + 10*time.Second)
+	const jti = "renewal-via"
+	jtis := df.cache.Len()
+	if _, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI, c.Via = jti, grant.ViaTunnel })); !errors.Is(err, grant.ErrVia) {
+		t.Fatalf("err = %v, want ErrVia", err)
+	}
+	if got := df.deadline(t); !got.Equal(before) || df.rec.count() != 0 || df.cache.Len() != jtis {
+		t.Fatal("a renewal with another via changed something")
+	}
+	if got, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = jti })); err != nil || !got.Equal(until) {
 		t.Fatalf("matching renewal with the same jti: %v, %v", got, err)
 	}
 }

@@ -36,6 +36,7 @@ func baseRenewal() RenewalClaims {
 		ProjectID:  "proj-1",
 		Target:     baseTarget(),
 		Stream:     baseClaims().Stream,
+		Via:        ViaProxy,
 		StreamID:   3,
 		OpenJTI:    testOpenJTI,
 		AuthzUntil: t0.Add(2 * time.Hour),
@@ -50,6 +51,7 @@ func baseRenewalExpect() RenewalExpectation {
 		ProjectID: "proj-1",
 		Subject:   "user:u1",
 		Stream:    baseClaims().Stream,
+		Via:       ViaProxy,
 		StreamID:  3,
 		OpenJTI:   testOpenJTI,
 		After:     t0.Add(time.Hour),
@@ -100,6 +102,7 @@ func TestVerifyRenewal_Refusals(t *testing.T) {
 		{name: "other stream id", claims: func(c *RenewalClaims) { c.StreamID = 5 }, want: ErrStreamBinding},
 		{name: "other open jti", claims: func(c *RenewalClaims) { c.OpenJTI = "open-jti-2" }, want: ErrStreamBinding},
 		{name: "other stream kind", claims: func(c *RenewalClaims) { c.Stream = StreamHeader{Kind: StreamKindPTY} }, want: ErrStream},
+		{name: "other via", claims: func(c *RenewalClaims) { c.Via = ViaTunnel }, want: ErrVia},
 		{name: "other stream params", claims: func(c *RenewalClaims) {
 			c.Stream = StreamHeader{Kind: StreamKindTCP, Params: map[string]string{ParamHost: "127.0.0.1", ParamPort: "9090"}}
 		}, want: ErrStream},
@@ -224,6 +227,8 @@ func TestMintRenewal_RejectsInvalidClaims(t *testing.T) {
 		"missing stream id":      func(c *RenewalClaims) { c.StreamID = 0 },
 		"missing open jti":       func(c *RenewalClaims) { c.OpenJTI = "" },
 		"missing stream":         func(c *RenewalClaims) { c.Stream = StreamHeader{} },
+		"missing via":            func(c *RenewalClaims) { c.Via = "" },
+		"unknown via":            func(c *RenewalClaims) { c.Via = "elsewhere" },
 		"missing authz_until":    func(c *RenewalClaims) { c.AuthzUntil = time.Time{} },
 		"authz_until before nbf": func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) },
 		"validity over 60s":      func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) },
@@ -346,12 +351,25 @@ func TestVerify_RequireDeadlineFor(t *testing.T) {
 			t.Fatalf("the same grant without the requirement: %v", err)
 		}
 	})
-	t.Run("user grant with authz_until accepted", func(t *testing.T) {
+	t.Run("user grant with authz_until and via accepted", func(t *testing.T) {
 		c := baseClaims()
 		c.Subject = SubjectUserPrefix + "u1"
-		c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+		c.AuthzUntil, c.AuthzInterval, c.Via = t0.Add(time.Hour), time.Hour, ViaProxy
 		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, newCache(), now); err != nil {
 			t.Fatal(err)
+		}
+	})
+	t.Run("user grant with authz_until but no via refused, jti kept", func(t *testing.T) {
+		cache := newCache()
+		c := baseClaims()
+		c.Subject, c.JTI = SubjectUserPrefix+"u1", "jti-novia"
+		c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, cache, now); !errors.Is(err, ErrVia) {
+			t.Fatalf("err = %v, want ErrVia", err)
+		}
+		c.Via = ViaTunnel
+		if _, err := Verify(context.Background(), f.mint(t, c), f.keys, required, cache, now); err != nil {
+			t.Fatalf("the same jti with a via: %v", err)
 		}
 	})
 	t.Run("other subject not affected", func(t *testing.T) {
@@ -388,5 +406,24 @@ func TestVerifyRenewal_StreamClaimRequired(t *testing.T) {
 	}
 	if _, err := VerifyRenewal(context.Background(), tok, f.keys, baseRenewalExpect(), cache, now); err != nil {
 		t.Fatalf("the same jti with the stream claim: %v", err)
+	}
+}
+
+// TestGrantViaClaim: via round-trips on a stream grant, is omitted when
+// empty, and an unknown value cannot be minted (design v2.21.29 §3.5).
+func TestGrantViaClaim(t *testing.T) {
+	f := newFixture(t)
+	c := baseClaims()
+	c.Via = ViaTunnel
+	got, err := Verify(context.Background(), f.mint(t, c), f.keys, baseExpect(), newCache(), t0.Add(time.Second))
+	if err != nil || got.Via != ViaTunnel {
+		t.Fatalf("via round trip: %+v, %v", got, err)
+	}
+	if pl := payloadOf(t, f.mint(t, baseClaims())); pl["via"] != nil {
+		t.Fatal("a grant without via carries the key")
+	}
+	c.Via = "elsewhere"
+	if _, err := Mint(f.signer, c); err == nil {
+		t.Fatal("an unknown via was minted")
 	}
 }

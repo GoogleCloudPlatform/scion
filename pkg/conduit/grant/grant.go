@@ -83,6 +83,24 @@ const (
 // stream a user opened ("user:<user id>").
 const SubjectUserPrefix = "user:"
 
+// Origins (the via claim): the request path that admitted a user stream
+// (design v2.21.29 §3.5, Origin claim via). The hub sets it from the endpoint
+// that served the request.
+const (
+	ViaTunnel = "tunnel" // POST /v1/tunnels
+	ViaProxy  = "proxy"  // the hub port proxy
+	ViaPTY    = "pty"    // hub PTY attach
+)
+
+// IsVia reports whether via is one of the origins.
+func IsVia(via string) bool {
+	switch via {
+	case ViaTunnel, ViaProxy, ViaPTY:
+		return true
+	}
+	return false
+}
+
 // Stream params. A tcp grant names exactly one agent-local target with
 // ParamHost and ParamPort. ParamAgentID is reserved: the hub sets it on every
 // grant for a broker target to the agent the stream was authorized for, and
@@ -136,6 +154,8 @@ var (
 	ErrSubject       = errors.New("grant: wrong subject")
 	ErrStreamBinding = errors.New("grant: renewal is for another stream")
 	ErrAuthzUntil    = errors.New("grant: authz_until missing or out of range")
+	// ErrVia refuses a missing, unknown or mismatched via claim.
+	ErrVia = errors.New("grant: via missing or does not match")
 )
 
 // StreamHeader is the authority-bearing part of a StreamOpen: its kind and
@@ -189,6 +209,10 @@ type Claims struct {
 	// a grant without a deadline encodes exactly as before.
 	AuthzUntil    time.Time
 	AuthzInterval time.Duration
+	// Via is the stream's origin (ViaTunnel, ViaProxy or ViaPTY), set on
+	// user-stream grants to stream_renewal.v2 targets; empty otherwise and
+	// then omitted from the token.
+	Via string
 }
 
 // wireClaims is the JSON form of Claims. Times are Unix seconds.
@@ -205,8 +229,9 @@ type wireClaims struct {
 	Expiry    int64        `json:"exp"`
 	// AuthzUntil (Unix seconds) and AuthzInterval (seconds) are omitted
 	// when zero, so a grant without a deadline encodes exactly as before.
-	AuthzUntil    int64 `json:"authz_until,omitempty"`
-	AuthzInterval int64 `json:"authz_interval,omitempty"`
+	AuthzUntil    int64  `json:"authz_until,omitempty"`
+	AuthzInterval int64  `json:"authz_interval,omitempty"`
+	Via           string `json:"via,omitempty"`
 }
 
 type header struct {
@@ -244,6 +269,8 @@ func (c *Claims) validate() error {
 		return fmt.Errorf("%w: authz_until must be after nbf", ErrInvalidClaims)
 	case c.AuthzInterval < 0 || c.AuthzInterval%time.Second != 0:
 		return fmt.Errorf("%w: authz_interval must be whole positive seconds", ErrInvalidClaims)
+	case c.Via != "" && !IsVia(c.Via):
+		return fmt.Errorf("%w: unknown via %q", ErrInvalidClaims, c.Via)
 	}
 	return nil
 }
@@ -293,6 +320,7 @@ func Mint(signer *Signer, c Claims) ([]byte, error) {
 		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream,
 		NotBefore: c.NotBefore.Unix(), Expiry: c.Expiry.Unix(),
 		AuthzUntil: unixOrZero(c.AuthzUntil), AuthzInterval: int64(c.AuthzInterval / time.Second),
+		Via: c.Via,
 	})
 }
 
@@ -343,8 +371,9 @@ type Expectation struct {
 	// capped at MaxClockSkew; zero means none.
 	ClockSkew time.Duration
 	// RequireDeadlineFor, when non-empty, is a subject prefix: a grant
-	// whose sub starts with it must carry authz_until, or it is refused
-	// with ErrAuthzUntil (before its jti is consumed).
+	// whose sub starts with it must carry authz_until and a valid via, or
+	// it is refused with ErrAuthzUntil or ErrVia (before its jti is
+	// consumed).
 	RequireDeadlineFor string
 }
 
@@ -380,6 +409,7 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream,
 		NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 		AuthzUntil: timeOrZero(w.AuthzUntil), AuthzInterval: time.Duration(w.AuthzInterval) * time.Second,
+		Via: w.Via,
 	}
 	if c.KeyID != kid {
 		return nil, fmt.Errorf("%w: payload kid does not match header", ErrMalformed)
@@ -408,8 +438,13 @@ func Verify(ctx context.Context, token []byte, keys KeySet, expect Expectation, 
 	if !c.Stream.Equal(expect.Header) {
 		return nil, ErrStream
 	}
-	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) && c.AuthzUntil.IsZero() {
-		return nil, ErrAuthzUntil
+	if expect.RequireDeadlineFor != "" && strings.HasPrefix(c.Subject, expect.RequireDeadlineFor) {
+		if c.AuthzUntil.IsZero() {
+			return nil, ErrAuthzUntil
+		}
+		if !IsVia(c.Via) {
+			return nil, ErrVia
+		}
 	}
 
 	// Final step: consume the jti. Exactly one concurrent caller wins.

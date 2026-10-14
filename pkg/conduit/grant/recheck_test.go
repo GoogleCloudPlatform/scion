@@ -27,6 +27,7 @@ func recheckOpenClaims() Claims {
 	c := baseClaims()
 	c.JTI = testOpenJTI
 	c.AuthzUntil, c.AuthzInterval = t0.Add(time.Hour), time.Hour
+	c.Via = ViaProxy
 	return c
 }
 
@@ -43,7 +44,7 @@ func TestVerifyRecheck_AcceptsChainGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open grant: %v", err)
 	}
-	if c.Renewal || c.OpenJTI != testOpenJTI || !c.Stream.Equal(baseClaims().Stream) || c.Subject != baseClaims().Subject {
+	if c.Renewal || c.OpenJTI != testOpenJTI || !c.Stream.Equal(baseClaims().Stream) || c.Subject != baseClaims().Subject || c.Via != ViaProxy {
 		t.Fatalf("open grant claims %+v", c)
 	}
 	ren := f.mintRenewal(t, baseRenewal())
@@ -51,7 +52,7 @@ func TestVerifyRecheck_AcceptsChainGrants(t *testing.T) {
 	if err != nil {
 		t.Fatalf("renewal: %v", err)
 	}
-	if !c.Renewal || c.StreamID != 3 || c.OpenJTI != testOpenJTI || !c.Stream.Equal(baseRenewal().Stream) {
+	if !c.Renewal || c.StreamID != 3 || c.OpenJTI != testOpenJTI || !c.Stream.Equal(baseRenewal().Stream) || c.Via != ViaProxy {
 		t.Fatalf("renewal claims %+v", c)
 	}
 }
@@ -82,6 +83,8 @@ func TestVerifyRecheck_Refusals(t *testing.T) {
 	now := t0.Add(time.Second)
 	noDeadline := baseClaims()
 	noDeadline.JTI = testOpenJTI
+	noVia := recheckOpenClaims()
+	noVia.Via = ""
 	tests := []struct {
 		name   string
 		token  []byte
@@ -96,6 +99,7 @@ func TestVerifyRecheck_Refusals(t *testing.T) {
 		{"other stream id (renewal)", f.mintRenewal(t, baseRenewal()), func(e *RecheckExpectation) { e.StreamID = 5 }, ErrStreamBinding},
 		{"wrong issuer", f.mint(t, recheckOpenClaims()), func(e *RecheckExpectation) { e.Issuer = "other-hub" }, ErrIssuer},
 		{"open grant without authz_until", f.mint(t, noDeadline), nil, ErrAuthzUntil},
+		{"open grant without via", f.mint(t, noVia), nil, ErrVia},
 		{"incomplete expectation", f.mint(t, recheckOpenClaims()), func(e *RecheckExpectation) { e.StreamID = 0 }, ErrExpectation},
 		{"not a grant", []byte("abc.def.ghi"), nil, ErrMalformed},
 	}
