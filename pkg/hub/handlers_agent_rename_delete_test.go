@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"testing"
@@ -120,6 +121,8 @@ func TestDeleteAgent_StopsScheduledEventTimerWithoutNotFoundWarning(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, store.ScheduledEventCancelled, after.Status,
 		"the stored event must be cancelled by the delete")
+	require.Equal(t, "target agent deleted", after.Error,
+		"the delete must record why the event was cancelled")
 	require.False(t, timerArmed(), "the delete must stop the event's in-memory timer")
 
 	logs.mu.Lock()
@@ -127,6 +130,88 @@ func TestDeleteAgent_StopsScheduledEventTimerWithoutNotFoundWarning(t *testing.T
 	for _, rec := range logs.recs {
 		if rec.level >= slog.LevelWarn && rec.attrs["event_id"] == evt.ID {
 			t.Errorf("unexpected %s log for the cancelled event: %q (error=%v)",
+				rec.level, rec.msg, rec.attrs["error"])
+		}
+	}
+}
+
+// fireAfterListStore claims one scheduled event as fired right after
+// ListScheduledEvents returns it as pending. It reproduces an event that
+// fires between the delete path's list and its cancel.
+type fireAfterListStore struct {
+	store.Store
+	eventID string
+}
+
+func (s *fireAfterListStore) ListScheduledEvents(ctx context.Context, filter store.ScheduledEventFilter, opts store.ListOptions) (*store.ListResult[store.ScheduledEvent], error) {
+	res, err := s.Store.ListScheduledEvents(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	claimer, ok := s.Store.(store.ScheduledEventClaimer)
+	if !ok {
+		return nil, errors.New("test store does not support ClaimScheduledEvent")
+	}
+	claimed, err := claimer.ClaimScheduledEvent(ctx, s.eventID, store.ScheduledEventFired)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, errors.New("test event was not pending when listed")
+	}
+	return res, nil
+}
+
+// TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel verifies that the
+// delete-time cancel only changes events that are still pending. An event
+// that fires after the delete path lists it but before the cancel keeps its
+// fired status and fire time, its timer is left alone, and the delete logs
+// no warning for it.
+func TestDeleteAgent_KeepsScheduledEventFiredBeforeCancel(t *testing.T) {
+	f := projectAgentAuthzSetup(t)
+	ctx := context.Background()
+
+	logs := &levelLogHandler{}
+	f.srv.agentLifecycleLog = slog.New(logs)
+	f.srv.scheduler = NewScheduler(f.store, slog.Default())
+
+	payload, err := json.Marshal(map[string]string{"agentId": f.target.ID})
+	require.NoError(t, err)
+	evt := store.ScheduledEvent{
+		ID:        tid("delete-fired-before-cancel-evt"),
+		ProjectID: f.project.ID,
+		EventType: "message",
+		FireAt:    time.Now().Add(time.Hour),
+		Payload:   string(payload),
+		Status:    store.ScheduledEventPending,
+	}
+	require.NoError(t, f.store.CreateScheduledEvent(ctx, &evt))
+	f.srv.scheduler.scheduleTimer(ctx, evt)
+	t.Cleanup(func() { f.srv.scheduler.StopEventTimer(evt.ID) })
+
+	f.srv.store = &fireAfterListStore{Store: f.store, eventID: evt.ID}
+
+	delRec := doRequestAsUser(t, f.srv, f.member, http.MethodDelete, f.targetPath(), nil)
+	require.Contains(t, []int{http.StatusOK, http.StatusNoContent}, delRec.Code,
+		"DELETE body: %s", delRec.Body.String())
+
+	after, err := f.store.GetScheduledEvent(ctx, evt.ID)
+	require.NoError(t, err)
+	require.Equal(t, store.ScheduledEventFired, after.Status,
+		"an event that fired before the cancel must keep its fired status")
+	require.NotNil(t, after.FiredAt, "the delete must not clear the fire time")
+	require.Empty(t, after.Error, "the delete must not record a cancel reason on a fired event")
+
+	f.srv.scheduler.mu.Lock()
+	_, armed := f.srv.scheduler.timers[evt.ID]
+	f.srv.scheduler.mu.Unlock()
+	require.True(t, armed, "the delete must not stop the timer of an event that is no longer pending")
+
+	logs.mu.Lock()
+	defer logs.mu.Unlock()
+	for _, rec := range logs.recs {
+		if rec.level >= slog.LevelWarn && rec.attrs["event_id"] == evt.ID {
+			t.Errorf("unexpected %s log for the fired event: %q (error=%v)",
 				rec.level, rec.msg, rec.attrs["error"])
 		}
 	}
