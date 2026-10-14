@@ -146,6 +146,7 @@ func TestParseGrantSubject(t *testing.T) {
 		"agent:a1":    {"principal", "agent:a1"},
 		"project:p1":  {"scope", "p1"},
 		" Project:p2": {"scope", "p2"},
+		"user : u3":   {"principal", "user:u3"},
 	} {
 		kind, ref, err := parseGrantSubject(in)
 		require.NoError(t, err, in)

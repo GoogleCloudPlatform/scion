@@ -189,6 +189,15 @@ _Avoid_: hub-native, hub-native project, hub workspace, hub-project, hosted proj
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
 _Avoid_: local project, imported project, registered project
 
+**Hub list**:
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
+
+**Current context**:
+The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+
+**Link entry**:
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
+
 **Shadowed project**:
 A local directory associated with a Hub project purely for CLI routing, with no workspace content, no provider registration, and no broker involvement — as opposed to a *Linked project*, whose workspace is a real pre-existing path on a broker machine. Created by the removed `scion hub shadow`; existing ones still resolve and print a cleanup notice. Use `scion use <project>` instead.
 _Avoid_: linked, mounted, cloned

@@ -157,7 +157,7 @@ scion list
 
 Commands run outside a project directory now target `my-repo` on the local hub. Run `scion use` to
 see what is selected, and `scion use --clear` to forget it. See
-[`scion use`](/scion/reference/cli/#scion-use).
+[`scion use`](/scion/reference/cli/#scion-project).
 
 ## Keeping the hub running
 

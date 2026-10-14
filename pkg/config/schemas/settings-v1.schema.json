@@ -1554,6 +1554,25 @@
               "x-since": "1"
             }
           }
+        },
+        "observability": {
+          "type": "object",
+          "description": "Switches for the hub's own metrics and trace export. Read at startup; restart required to change. The export project is the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) when set, else the project of the Google Cloud metadata server.",
+          "additionalProperties": false,
+          "properties": {
+            "metrics_enabled": {
+              "type": "boolean",
+              "description": "Hub metrics export. true: on; false: off. Unset: on when the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) is set. When true and no export project resolves, the hub logs a warning and starts without the metrics exporter.",
+              "x-env-var": "SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED",
+              "x-since": "1"
+            },
+            "tracing_enabled": {
+              "type": "boolean",
+              "description": "Hub trace export. true: on; false: off. Unset: on when SCION_TRACING_ENABLED and the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) are both set. When true and no export project resolves, the hub logs a warning and starts without the trace exporter.",
+              "x-env-var": "SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED",
+              "x-since": "1"
+            }
+          }
         }
       }
     },

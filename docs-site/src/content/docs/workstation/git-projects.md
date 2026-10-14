@@ -236,7 +236,7 @@ Or create a Pull Request directly from the branch on GitHub.
 
 If you link a local checkout to a **remote** Hub, the workspace strategy changes: even if the broker machine has the repository on disk, agents use clone-based provisioning, unless the project was created with worktree-per-agent mode (requires git 2.48+ on the broker). This means you need a `GITHUB_TOKEN` secret set on the project for private repositories, just like a project created from a URL.
 
-On the **local workstation** Hub, a newly linked repository keeps local worktrees of your checkout instead. A repository linked there before local worktrees existed keeps cloning until it is re-linked. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
+On the local workstation Hub, a git project that `scion hub link` (or the automatic link) creates gets workspace mode `worktree-per-agent`, so new agents get a git worktree of your checkout. A project that already existed on the Hub keeps its mode. This needs git 2.48 or later. If git is older, or the checkout's `origin` does not match the project's repository, agent creation fails with an error instead of falling back to a clone. Agents on a Kubernetes runtime do not use the checkout. A repository linked there before local worktrees existed keeps cloning until it is re-linked. See [Linked git projects](/scion/local/workspace/#linked-git-projects).
 
 ---
 

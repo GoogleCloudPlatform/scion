@@ -27,6 +27,9 @@ This command performs several actions simultaneously:
 1.  **Starts the Hub**: Binds a local API and Web server (defaulting to port 8080), and, on the first start, adds itself to your list of hubs as `local` (`Registered hub 'local' (http://127.0.0.1:8080); rename with 'scion hub rename'.`) and makes it the current hub, unless another hub is already current or your global settings name another hub in `hub.endpoint`.
 2.  **Starts a Broker**: Binds a local broker interface to execute containers.
 3.  **Links Them**: Automatically registers the local broker with the local hub.
+4.  **Adds the Hub to your hub list** (a background start with the web server on, the default; `--foreground` does not add it): Registers the local Hub as `local` (or `local-2` and so on if that name is taken) in `~/.scion/context.yaml`, and makes it the current Hub when no Hub is current and your global settings name no other Hub (see [Working with several Hubs](/scion/hosted/user/hosted-user/#working-with-several-hubs)). It no longer writes `hub.endpoint` to your global settings.
+
+**Listen addresses.** `--host` sets the listen address of the Hub API and web server only. The Runtime Broker stays on `127.0.0.1` unless `server.broker.host` is set to another address (`0.0.0.0` counts as unset), so exposing the dashboard on your network does not expose the Runtime Broker.
 
 `scion server start` returns only after the started components answer their `/healthz` endpoints (the web port, which also serves the Hub API, and the broker port when the broker starts; without an image registry the server starts without the broker, and start waits only for the web port), so a command run right after it, such as `scion hub link`, can reach the server. If they do not answer within about 30 seconds, the command exits non-zero and says which component did not answer. The server is left running in that case; check the log and `scion server status`. If the server process exits during startup, the command says so at once. `scion server restart` waits the same way.
 
@@ -84,11 +87,7 @@ On macOS, Scion prefers Podman, then Docker, and uses the Apple `container` runt
 
 If you are using other runtimes, you may need to ensure that the containers can route traffic back to the host machine's IP address on the port where the Hub is listening (e.g., `8080`).
 
-To configure the agents to find the Hub, you might need to adjust the `SCION_HUB_API_URL` setting passed to the agents in your template or via the CLI:
-
-```bash
-scion start my-agent --env SCION_HUB_API_URL=http://host.bridge.internal:8080
-```
+To set the address agents use to reach the Hub, set `server.broker.container_hub_endpoint` in `settings.yaml` (for example `http://host.containers.internal:8080`). See [Hub Endpoint Resolution](/scion/reference/server-config/#hub-endpoint-resolution).
 
 ## Next Steps
 

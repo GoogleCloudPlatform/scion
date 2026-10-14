@@ -191,6 +191,16 @@ func (r *CloudRunRuntime) Name() string { return "cloudrun" }
 // runtime is Cloud Run must not advertise the capability.
 func (r *CloudRunRuntime) SupportsEmptyPerAgentWorkspace() bool { return false }
 
+// SupportsAttach implements AttachCapableRuntime and reports false: the
+// agent terminal path cannot serve interactive attach for Cloud Run
+// instances, so the broker refuses attach up front (and reports it as
+// unsupported to the Hub) instead of failing after the stream opens. A
+// later terminal over conduit may add attach (ptone/scion#2782). The
+// cloudrun-sandbox runtime is separate and keeps attach support.
+func (r *CloudRunRuntime) SupportsAttach() bool { return false }
+
+var _ AttachCapableRuntime = (*CloudRunRuntime)(nil)
+
 // AsyncLaunchUnsupported implements AsyncLaunchUnsupportedRuntime. Run
 // calls neither RunConfig.Checkpoint nor RunConfig.OnResourceCreated, so an
 // async launch could not be stopped before the Cloud Run instance (or its
