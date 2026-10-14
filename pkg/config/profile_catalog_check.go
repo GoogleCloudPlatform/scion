@@ -211,7 +211,9 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 // then storedRuntimes and storedProfiles applied through a fresh overlay, as
 // the hub's overlay applies a stored set. A nil or empty map leaves that
 // section unmanaged, so the settings files and built-in defaults stay in
-// effect (ptone/scion#5007). The fresh overlay is never installed globally;
+// effect (ptone/scion#5007), so a caller passes the FULL stored state it
+// evaluates, runtimes included: a nil storedRuntimes means the runtimes are
+// not managed in the hub. The fresh overlay is never installed globally;
 // Apply may log its single-profile fallback.
 func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeConfig, storedProfiles map[string]V1ProfileConfig) (*VersionedSettings, error) {
 	vs, _, err := loadEffectiveSettings(projectPath, false)
