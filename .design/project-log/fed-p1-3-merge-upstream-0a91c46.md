@@ -38,3 +38,7 @@ Date: 2026-10-13. Branch: scion/mmr-fed-p1-3.
   280: upstream 276 plus the four `project.visitors.*` operations) and one `opPatternOverrides`
   row in `authzop_sqlite_helpers_test.go` (the `project.visitors.update` row, kept after
   upstream's realigned block) needed a hand resolution.
+- 2026-10-14: merged upstream main again at c33bfa6384e8. The operation catalog report count
+  (293: upstream 289 plus the four `project.visitors.*` operations) and one `opPatternOverrides`
+  row in `authzop_sqlite_helpers_test.go` (the `project.visitors.update` row, kept after
+  upstream's new user-scope rows) needed a hand resolution.

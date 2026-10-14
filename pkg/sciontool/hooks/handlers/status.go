@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 
 	state "github.com/GoogleCloudPlatform/scion/pkg/agent/state"
@@ -311,7 +312,7 @@ func (h *StatusHandler) setWaitingFromNotificationFor(owner string) error {
 			owners = notificationWaitOwners(info)
 			parent = parentWaitOf(info)
 		}
-		if owner != "" && !containsString(owners, owner) && len(owners) < maxNotificationWaitAgents {
+		if owner != "" && !slices.Contains(owners, owner) && len(owners) < maxNotificationWaitAgents {
 			owners = append(owners, owner)
 		}
 		if owner == "" && len(owners) > 0 && parent != parentWaitAgent {
@@ -502,15 +503,6 @@ func restoreParentWait(info map[string]interface{}) bool {
 	case parentWaitAgent:
 		delete(info, activitySourceKey)
 		return true
-	}
-	return false
-}
-
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
 	}
 	return false
 }

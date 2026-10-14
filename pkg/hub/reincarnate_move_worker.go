@@ -106,10 +106,12 @@ func withBroker(a *store.Agent, brokerID string) *store.Agent {
 }
 
 // moveBrokerQuota moves the agent's broker reservation from the source to
-// the target. Release comes first: Reserve short-circuits on any active
-// reservation for the agent, whatever its broker, so reserving first would
-// leave the slot counted against the source. When the target has no room,
-// the source reservation is re-asserted and the error returned.
+// the target. Release comes first: Reserve refuses a request while the agent
+// holds an active reservation on another broker (ReservationScopeConflictError),
+// so reserving first would always fail. If the source release itself fails,
+// the target reserve returns that conflict and the move fails with the slot
+// still on the source. When the target has no room, the source reservation
+// is re-asserted and the error returned.
 func (s *Server) moveBrokerQuota(ctx context.Context, a *store.Agent, mv *reincarnationMove) error {
 	src := withBroker(a, mv.SourceBrokerID)
 	s.releaseBrokerQuota(ctx, src)

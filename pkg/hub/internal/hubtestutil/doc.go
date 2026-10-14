@@ -13,9 +13,9 @@
 // limitations under the License.
 
 // Package hubtestutil holds generic test helpers for pkg/hub and its
-// subpackages: deterministic test IDs, in-memory SQLite, serialised schema
-// migration, the TestMain memory and leak guards, hermetic git runners and
-// small fault-injection and buffer types.
+// subpackages: deterministic test IDs, in-memory SQLite, the TestMain memory
+// and leak guards, hermetic git runners and small fault-injection and buffer
+// types.
 //
 // Only test code imports it. It must never import pkg/hub
 // (no_hub_import_test.go enforces this), so that future pkg/hub/<area>
