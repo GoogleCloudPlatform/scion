@@ -2549,9 +2549,10 @@ func TestHubCheckHint(t *testing.T) {
 	}
 }
 
-// setupGlobalHubProject points HOME at a temporary global project that is
-// hub-enabled with the given project ID and the server's endpoint, clears
-// the hub and credential environment, and changes into HOME.
+// setupGlobalHubProject points HOME at a temporary global project with the
+// given project ID, clears the hub and credential environment, and changes
+// into HOME. The settings name the endpoint too, which EnsureHubReady does
+// not read: callers pass it as EndpointOverride.
 func setupGlobalHubProject(t *testing.T, projectID, endpoint string) {
 	t.Helper()
 	for _, e := range []string{"SCION_HUB_ENDPOINT", "SCION_HUB_URL", "SCION_PROJECT_ID", "SCION_AUTH_TOKEN", "SCION_HUB_TOKEN", "SCION_DEV_TOKEN", "SCION_DEV_TOKEN_FILE"} {
@@ -2603,7 +2604,7 @@ func TestEnsureHubReady_ScopedTokenWithoutProjectRead(t *testing.T) {
 
 	// Auto-confirm on, as under --yes: the registration path would proceed
 	// without asking, so only the scoped-token check can stop it.
-	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true})
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, EndpointOverride: server.URL})
 	if !errors.Is(err, ErrScopedTokenProjectNotFound) {
 		t.Fatalf("error = %v, want ErrScopedTokenProjectNotFound", err)
 	}
@@ -2654,7 +2655,7 @@ func TestEnsureHubReady_NonInteractiveAmbiguousProject(t *testing.T) {
 	t.Setenv("SCION_DEV_TOKEN", "test-dev-token")
 
 	// --non-interactive implies --yes, so AutoConfirm is set as well.
-	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, NonInteractive: true})
+	_, err := EnsureHubReady("", EnsureHubReadyOptions{AutoConfirm: true, NonInteractive: true, EndpointOverride: server.URL})
 	if !errors.Is(err, ErrAmbiguousProject) {
 		t.Fatalf("error = %v, want ErrAmbiguousProject", err)
 	}
