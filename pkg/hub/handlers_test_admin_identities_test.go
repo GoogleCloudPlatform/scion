@@ -459,7 +459,7 @@ func TestTestAdmin_IssuedRowBindingAndAudit(t *testing.T) {
 		return err == nil && len(byActor) > 0
 	}, 5*time.Second, 20*time.Millisecond, "a mutation under the admin-kind identity is audited")
 	// The same labels straight from the context the row block builds.
-	direct := auditActorFromContext(contextWithTestAdminActor(ctx, u))
+	direct := auditActorFromContext(contextWithTestAdminActor(ctx, u, testAdminCredentialBearer))
 	byActor = append(byActor, &store.MutationAuditRecord{CredentialLabels: direct.CredentialLabels, CorrelationID: direct.CorrelationID})
 	for _, r := range byActor {
 		var labels map[string]string

@@ -258,6 +258,7 @@ func (s *Server) recordTestAdminPolicyDenial(ctx context.Context, userID, class,
 	if ta, ok := testAdminActorFromContext(ctx); ok {
 		fields["issuance_id"] = ta.IssuanceID
 		fields["kind"] = ta.Kind
+		fields["credential"] = ta.Credential
 	}
 	if route := routeFromContext(ctx); route != "" {
 		fields["route_id"] = route
@@ -327,7 +328,8 @@ func testAdminResponseDecision(status int, policyDenied bool) string {
 // the JWT row block marks an admitted admin-kind identity in the request
 // context (contextWithTestAdminActor). Before the handler runs it writes a
 // test_admin_request line (method, route template, user, kind,
-// issuance_id); if that write fails the request answers 503 and the
+// issuance_id, and credential: "web_session" for a request from the
+// identity's browser web session, "bearer" for its own access token); if that write fails the request answers 503 and the
 // handler does not run. When the handler returns it writes a
 // test_admin_response line with the status and the decision. Requests of
 // every other caller pass through untouched.
@@ -350,6 +352,7 @@ func (s *Server) testAdminRequestAuditMiddleware(next http.Handler) http.Handler
 			"user_id":     userID,
 			"kind":        ta.Kind,
 			"issuance_id": ta.IssuanceID,
+			"credential":  ta.Credential,
 			"method":      r.Method,
 			"route":       route,
 		}

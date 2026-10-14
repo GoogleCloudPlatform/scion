@@ -1828,6 +1828,9 @@ type V1PluginEntry struct {
 // settings layout.
 type V1TestIdentitiesConfig struct {
 	WorkloadIssuers []V1TestIdentityWorkloadIssuer `json:"workload_issuers,omitempty" yaml:"workload_issuers,omitempty" koanf:"workload_issuers"`
+	// AdminWebSessions is server.hub.test_identities.admin_web_sessions
+	// (see TestIdentitiesConfig.AdminWebSessions).
+	AdminWebSessions string `json:"admin_web_sessions,omitempty" yaml:"admin_web_sessions,omitempty" koanf:"admin_web_sessions"`
 }
 
 // V1TestIdentityWorkloadIssuer is one server.hub.test_identities.workload_issuers
@@ -4274,7 +4277,7 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 			gc.Hub.HubClass = v1.Hub.HubClass
 		}
 		if v1.Hub.TestIdentities != nil {
-			ti := &TestIdentitiesConfig{}
+			ti := &TestIdentitiesConfig{AdminWebSessions: v1.Hub.TestIdentities.AdminWebSessions}
 			for _, e := range v1.Hub.TestIdentities.WorkloadIssuers {
 				ti.WorkloadIssuers = append(ti.WorkloadIssuers, TestIdentityWorkloadIssuer(e))
 			}
@@ -4718,7 +4721,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 		},
 	}
 	if gc.Hub.TestIdentities != nil {
-		ti := &V1TestIdentitiesConfig{}
+		ti := &V1TestIdentitiesConfig{AdminWebSessions: gc.Hub.TestIdentities.AdminWebSessions}
 		for _, e := range gc.Hub.TestIdentities.WorkloadIssuers {
 			ti.WorkloadIssuers = append(ti.WorkloadIssuers, V1TestIdentityWorkloadIssuer(e))
 		}

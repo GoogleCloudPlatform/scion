@@ -74,8 +74,12 @@ import (
 // sign scion_ti, so a scion_sess cookie made with only the shared session
 // keys is not a valid test identity session; it is cleared.
 //
-// Only kind=test_fixture identities (member and viewer) are admitted. The
-// admin kinds get web sessions only behind their own gate (phase WS4).
+// kind=test_fixture identities (member and viewer) are admitted whenever
+// web sessions are available. The admin kinds (test_hub_admin,
+// test_super_admin) are admitted only behind their own startup setting,
+// server.hub.test_identities.admin_web_sessions, at an admin --test-mode
+// level (phase WS4, test_admin_web_sessions.go), and their sessions are
+// capped at the kind's maximum identity lifetime.
 
 // Test identity web session constants.
 const (
@@ -242,13 +246,6 @@ func (s *Server) logTestIdentityWebSessionState() {
 	slog.Warn("Test identity web sessions are unavailable on this hub; the member tier is unaffected", attrs...)
 }
 
-// testIdentityWebKindAdmitted reports whether u's kind may hold a web
-// session in this release: kind=test_fixture only (member and viewer). The
-// admin kinds are refused at mint, at redeem, and on every session check.
-func testIdentityWebKindAdmitted(u *store.User) bool {
-	return u != nil && u.IsTestFixture()
-}
-
 // workloadWebCodeAdmitted reports whether the request may mint a web-login
 // code for u as far as a workload delegation is concerned. A request that
 // is not a workload delegation request is not restricted here. A workload
@@ -311,7 +308,11 @@ type TestIdentityWebCodeResponse struct {
 // /api/v1/test-identities/{id}/web-login-code.
 func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	caller, ok := s.testIdentityCaller(w, r)
+	// test_identity.issue admits the member tier. The admin kinds'
+	// capabilities admit a code for an admin-kind identity, which also
+	// needs the issuer checks of that kind (testAdminWebCodeIssuer).
+	caller, allowed, ok := s.testIdentityCallerFor(w, r, permissionTestIdentityIssue,
+		permissionTestIdentityIssueAdmin, permissionTestIdentityIssueSuperAdmin)
 	if !ok {
 		return
 	}
@@ -333,13 +334,19 @@ func (s *Server) handleIssueTestIdentityWebCode(w http.ResponseWriter, r *http.R
 	// re-issue: the route is no user-existence oracle. A workload
 	// delegation (ptone/scion#4240, X3b) reaches only the member-tier
 	// identities it issued itself (canManageTestIdentity,
-	// workloadWebCodeAdmitted).
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!testIdentityWebKindAdmitted(u) || !s.canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u))) {
+	// workloadWebCodeAdmitted). An admin-kind identity is admitted only
+	// while its kind's web sessions are on (testIdentityWebKindAdmitted,
+	// WS4); a member-tier identity needs test_identity.issue.
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidInput) || (err == nil && (!s.testIdentityWebKindAdmitted(u) ||
+		!s.canManageTestIdentity(ctx, caller, u) || !workloadWebCodeAdmitted(ctx, u) || (u.IsTestFixture() && !allowed[permissionTestIdentityIssue]))) {
 		NotFound(w, "test identity")
 		return
 	}
 	if err != nil {
 		writeErrorFromErr(w, err, "")
+		return
+	}
+	if u.IsTestAdmin() && !s.testAdminWebCodeIssuer(w, r, caller, u, allowed) {
 		return
 	}
 	now := s.testIdentities.clock()
@@ -478,6 +485,12 @@ func (ws *WebServer) testIdentityNow() time.Time {
 	return ws.testIdentityHub.testIdentities.clock()
 }
 
+// testIdentityKindAdmitted is the web server's view of
+// Server.testIdentityWebKindAdmitted; without a hub nothing is admitted.
+func (ws *WebServer) testIdentityKindAdmitted(row *store.User) bool {
+	return ws.testIdentityHub != nil && ws.testIdentityHub.testIdentityWebKindAdmitted(row)
+}
+
 // testIdentityCodec returns the marker cookie codec, or nil.
 func (ws *WebServer) testIdentityCodec() *securecookie.SecureCookie {
 	if ws.testIdentityHub == nil {
@@ -593,9 +606,10 @@ type tiSessionResult struct {
 // verified proxy assertion (fixtureSessionValid). It is
 // row-authoritative: whenever the session names a user it reads that
 // user's row (or uses row, when the caller already read it), and the
-// session is a test identity session when the row is kind test_fixture or
-// in the reserved test identity domain, or when the request carries any
-// test identity hint (a scion_ti cookie, marker values, a reserved-domain
+// session is a test identity session when the row's immutable kind is not
+// human (testIdentityRowByKind: every test identity kind, current and
+// future, and any unrecognised kind), or when the request carries any test
+// identity hint (a scion_ti cookie, marker values, a reserved-domain
 // session email). Such a session is honoured only when fixtureSessionValid
 // passes. The session's own email is never what admits it.
 //
@@ -629,11 +643,11 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 				return tiSessionResult{state: tiSessionNotFixture}
 			}
 		}
-		// Fast path: a user already read as an ordinary account (neither
-		// kind test_fixture nor a reserved-domain email: the cached value
-		// is exactly the row test below, so a cached answer always equals
-		// the uncached one) is answered without a row read when there is
-		// no hint. The trigger set for a full read is exactly: a hint, a
+		// Fast path: a user already read as an ordinary account (a human
+		// kind: the cached value is exactly the row test below,
+		// testIdentityRowByKind, so a cached answer always equals the
+		// uncached one) is answered without a row read when there is no
+		// hint. The trigger set for a full read is exactly: a hint, a
 		// cached test identity row, or no cache entry (a miss always reads
 		// the row; it never yields NotFixture unread). The cache cannot
 		// go stale: kind is Immutable (pkg/ent/schema/user.go), user IDs
@@ -655,11 +669,11 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 			return tiSessionResult{state: tiSessionStoreError, reason: "store_error"}
 		}
 		row = u
-		ws.cacheTestIdentityKind(uid, row.IsTestFixture() || isReservedTestIdentityEmail(row.Email))
+		ws.cacheTestIdentityKind(uid, testIdentityRowByKind(row))
 	}
 	marker, _ := ws.readTestIdentityMarker(r)
 	sessMarker, _ := session.Values[sessKeyTIMarker].(string)
-	if !row.IsTestFixture() && !isReservedTestIdentityEmail(row.Email) &&
+	if !testIdentityRowByKind(row) &&
 		!isReservedTestIdentityEmail(sessionString(session, sessKeyUserEmail)) && sessMarker == "" {
 		// An ordinary account. A stray marker cookie (for example left
 		// from an earlier test identity session in the same browser) is
@@ -671,6 +685,15 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 		return tiSessionResult{state: tiSessionInvalid, reason: reason, row: row}
 	}
 	return tiSessionResult{state: tiSessionValid, row: row, marker: marker, assertionEmail: assertionEmail}
+}
+
+// testIdentityRowByKind reports whether row is a test identity row for
+// the classifier: its immutable kind is not human (store.User.IsHumanKind
+// is false). That covers every test identity kind, current and future, and
+// fails closed on an unrecognised kind. A reserved-domain email on the row
+// also counts, as a second signal; it never makes a row ordinary.
+func testIdentityRowByKind(row *store.User) bool {
+	return row != nil && (!row.IsHumanKind() || isReservedTestIdentityEmail(row.Email))
 }
 
 // tiKind is a cached user kind for the classifier's fast path.
@@ -702,8 +725,7 @@ func (ws *WebServer) testIdentityKindCached(uid string) tiKind {
 }
 
 // cacheTestIdentityKind records, after a successful row read, whether
-// uid's row is a test identity row (kind test_fixture or a reserved-domain
-// email).
+// uid's row is a test identity row (testIdentityRowByKind).
 func (ws *WebServer) cacheTestIdentityKind(uid string, fixture bool) {
 	c := &ws.testIdentityKinds
 	c.mu.Lock()
@@ -732,9 +754,12 @@ func (res tiSessionResult) isTestIdentitySession() bool {
 //   - the driver binding holds (testIdentityDriverBinding): in proxy mode
 //     r carries a valid assertion for exactly the session's driver;
 //     outside proxy mode the session names no driver;
-//   - row is an admitted kind (test_fixture), active, and passes
+//   - row is an admitted kind (test_fixture, or an admin kind while its
+//     web sessions are on: testIdentityWebKindAdmitted), active, and passes
 //     testFixtureRejection (feature on, not expired);
-//   - now is before the session's identity expiry;
+//   - the session's expiry is within the row's limits (never past the
+//     identity's expiry; for an admin kind never past its creation plus
+//     the kind's maximum lifetime), and now is before it;
 //   - the session generation equals the row's.
 func (ws *WebServer) fixtureSessionValid(r *http.Request, session *sessions.Session, marker *tiMarkerValue, row *store.User, now time.Time) (assertionEmail, reason string) {
 	if ok, cause := ws.testIdentityWebGate(); !ok {
@@ -756,12 +781,15 @@ func (ws *WebServer) fixtureSessionValid(r *http.Request, session *sessions.Sess
 		return "", "marker_mismatch"
 	case marker.Expiry <= 0 || sessExpiry != marker.Expiry:
 		return "", "expiry_mismatch"
-	case !testIdentityWebKindAdmitted(row):
+	case !ws.testIdentityKindAdmitted(row):
 		return "", "kind_not_admitted"
 	case row.Status != store.UserStatusActive:
 		return "", "identity_not_active"
 	}
 	if reason := testFixtureRejection(row, ws.testIdentitiesEnabled(), now); reason != "" {
+		return "", reason
+	}
+	if reason := testIdentityWebSessionExpiryReason(row, time.UnixMilli(marker.Expiry)); reason != "" {
 		return "", reason
 	}
 	if !now.Before(time.UnixMilli(marker.Expiry)) {
@@ -1104,13 +1132,15 @@ func (ws *WebServer) handleTestIdentityRedeem(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, ErrCodeInternalError, "internal error", nil)
 		return
 	}
-	if err != nil || !testIdentityWebKindAdmitted(row) || row.Status != store.UserStatusActive ||
+	if err != nil || !ws.testIdentityKindAdmitted(row) || row.Status != store.UserStatusActive ||
 		testFixtureRejection(row, ws.testIdentitiesEnabled(), now) != "" {
 		ws.auditTestIdentityRedeemRefusal(r, clientIP, "identity_not_admitted", prefix, code.UserID, assertionEmail)
 		writeRedeemInvalid(w)
 		return
 	}
-	expiry := *row.ExpiresAt
+	// The identity's expiry; for an admin kind also capped at the kind's
+	// maximum identity lifetime (WS4).
+	expiry := testAdminWebSessionExpiry(row, now)
 	remaining := expiry.Sub(now)
 	maxAge := int((remaining + time.Second - 1) / time.Second)
 	if maxAge < 1 {
