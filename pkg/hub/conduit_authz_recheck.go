@@ -373,6 +373,10 @@ type conduitUserStreamAuthz struct {
 	ViaTunnel bool
 	// Port is the agent-local port of a tcp stream.
 	Port int
+	// DeferTCPTarget leaves the tcp port check to the caller. Only the
+	// tunnel open sets it, so that a stopped agent is reported before the
+	// port it no longer exposes. Re-checks never set it.
+	DeferTCPTarget bool
 	// ConfirmDeny, if set, is asked before an action deny is reported;
 	// false makes the decision unavailable instead.
 	ConfirmDeny func() bool
@@ -419,7 +423,7 @@ func (s *Server) authorizeConduitUserStream(ctx context.Context, req conduitUser
 			return conduitAuthzDenied, "permission no longer held", err
 		}
 	}
-	if req.Kind == grant.StreamKindTCP {
+	if req.Kind == grant.StreamKindTCP && !req.DeferTCPTarget {
 		if err := s.authorizeConduitTCPTarget(req.Agent, req.Port); err != nil {
 			return conduitAuthzDenied, "port no longer an authorized target", err
 		}
