@@ -728,6 +728,79 @@ async function expectFrameText(
   }
 }
 
+/** The entry and seq of the page's view frame(s), for click diagnostics. */
+function viewFrameStates(
+  page: Page
+): Array<{ urlSeq: number | 'nan' | null; entry: string | null }> {
+  return page
+    .frames()
+    .filter((f) => f.url().includes(VIEW_PREFIX))
+    .map((f) => {
+      const info = viewInfo(f.url(), bundleId());
+      return { urlSeq: info.viewSeq, entry: info.entry };
+    });
+}
+
+/** Polls until a view frame shows entry, up to ms; true if it did. */
+async function frameReaches(page: Page, entry: string, ms: number): Promise<boolean> {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    if (viewFrameStates(page).some((f) => f.entry === entry)) return true;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return false;
+}
+
+/**
+ * Clicks an in-frame link and records diagnostics around it: the frame
+ * element's visibility and box, the link's box, and the view frames before
+ * the click, about 1 s after it, and when the wait ends. If the first click
+ * does not reach the target within the usual 5 s, ONE retry is made and its
+ * outcome recorded. The row still fails when the first click does not
+ * navigate (soft check). Every wait is bounded.
+ */
+async function clickInFrameLink(
+  page: Page,
+  r: RowRecord,
+  leg: string,
+  link: string,
+  targetEntry: string
+): Promise<void> {
+  const rec: Record<string, unknown> = { leg, link, targetEntry };
+  ((r.ui.clickDiag ??= []) as Array<Record<string, unknown>>).push(rec);
+  const frameEl = page.locator(RENDER_SELECTORS.htmlFrame).first();
+  rec.before = {
+    frameVisible: await frameEl.isVisible().catch(() => null),
+    frameBox: await frameEl.boundingBox({ timeout: 2_000 }).catch(() => null),
+    linkBox: await htmlFrame(page)
+      .locator(link)
+      .boundingBox({ timeout: 2_000 })
+      .catch(() => null),
+    viewFrames: viewFrameStates(page),
+  };
+  const firstClick = await htmlFrame(page)
+    .locator(link)
+    .click({ timeout: 5_000 })
+    .then(() => 'clicked')
+    .catch((err: unknown) => redactViews(firstLine(err)));
+  rec.firstClick = firstClick;
+  await page.waitForTimeout(1_000);
+  rec.after1s = viewFrameStates(page);
+  const firstNavigated = await frameReaches(page, targetEntry, 4_000);
+  rec.firstNavigated = firstNavigated;
+  rec.afterWait = viewFrameStates(page);
+  if (!firstNavigated) {
+    rec.retryClick = await htmlFrame(page)
+      .locator(link)
+      .click({ timeout: 5_000 })
+      .then(() => 'clicked')
+      .catch((err: unknown) => redactViews(firstLine(err)));
+    rec.retryNavigated = await frameReaches(page, targetEntry, 5_000);
+    rec.afterRetry = viewFrameStates(page);
+  }
+  expect.soft(firstNavigated, `${leg}: the first in-frame link click navigates`).toBe(true);
+}
+
 /** The current heading of the bundle frame. */
 async function frameHeading(page: Page): Promise<string> {
   return textOf(htmlFrame(page).locator('#ver'));
@@ -2103,7 +2176,7 @@ async function runMain(browser: Browser): Promise<void> {
       const v1Label = await textOf(page.locator(SELECTORS.versionMenu));
       const historyAtV1 = await historyRows(page);
       await tab(page, 'preview').click();
-      await htmlFrame(page).locator('#to-page2').click();
+      await clickInFrameLink(page, r, 'v1 to-page2', '#to-page2', 'page2.html');
       await expectFrameText(page, r, 'v1 page2', '#page2', 'R2 page two v1', 1);
       const v1Frame = await bundleFrame(page);
       const v1View = viewInfo(v1Frame.url(), bundleId());
