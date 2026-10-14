@@ -261,3 +261,23 @@ func TestValidateSettings_LeafErrorNamesProperty(t *testing.T) {
 		t.Errorf("no leaf error names unknown_field at server/maintenance: %v", errs)
 	}
 }
+
+// TestInstancePath pins the JSON-pointer rendering of leaf error paths:
+// no leading slash, "/" between tokens, and "~" and "/" inside a token
+// escaped as "~0" and "~1" (RFC 6901).
+func TestInstancePath(t *testing.T) {
+	cases := []struct {
+		in   []string
+		want string
+	}{
+		{nil, ""},
+		{[]string{"hub", "endpoint"}, "hub/endpoint"},
+		{[]string{"runtimes", "a/b", "c~d"}, "runtimes/a~1b/c~0d"},
+		{[]string{"~/"}, "~0~1"},
+	}
+	for _, tc := range cases {
+		if got := instancePath(tc.in); got != tc.want {
+			t.Errorf("instancePath(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

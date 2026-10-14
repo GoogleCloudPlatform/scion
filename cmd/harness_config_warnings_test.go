@@ -16,8 +16,12 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -101,4 +105,53 @@ func TestHarnessConfigUpgrade_UnknownTopLevelKeyWarns(t *testing.T) {
 	})
 	require.NoError(t, runErr)
 	assert.Contains(t, stderr.String(), "warning: claude: "+futureKeyWarning)
+}
+
+func TestHarnessConfigSync_UnknownTopLevelKeyWarns(t *testing.T) {
+	t.Setenv("SCION_AGENT_ID", "")
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	orig := saveTemplateTestState()
+	defer orig.restore()
+	tmpHome := t.TempDir()
+	require.NoError(t, os.Setenv("HOME", tmpHome))
+	globalMode = false
+	autoConfirm = true
+	noHub = false
+
+	const projectID = "proj-4975"
+	rec := &hcScopeRecorder{}
+	scopeHub := harnessConfigScopeHubHandler(t, rec)
+	hub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/healthz":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"status": "ok"})
+		case strings.HasPrefix(r.URL.Path, "/api/v1/projects/") && r.Method == http.MethodGet:
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"id": projectID, "name": "test-project"})
+		default:
+			scopeHub(w, r)
+		}
+	}))
+	defer hub.Close()
+	projectPath = setupHubProject(t, tmpHome, hub.URL, projectID)
+
+	hcDir := filepath.Join(projectPath, "harness-configs", "future-hc")
+	createTestHarnessConfig(t, hcDir)
+	f, err := os.OpenFile(filepath.Join(hcDir, "config.yaml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = f.WriteString("future_block:\n  enabled: true\n")
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+
+	var stderr bytes.Buffer
+	harnessConfigSyncCmd.SetErr(&stderr)
+	t.Cleanup(func() { harnessConfigSyncCmd.SetErr(nil) })
+	var runErr error
+	_ = captureStdout(t, func() {
+		runErr = harnessConfigSyncCmd.RunE(harnessConfigSyncCmd, []string{"future-hc"})
+	})
+	require.NoError(t, runErr)
+	assert.Contains(t, stderr.String(), "warning: future-hc: "+futureKeyWarning)
+	require.Len(t, rec.createReqs, 1, "sync must still upload the config")
 }
