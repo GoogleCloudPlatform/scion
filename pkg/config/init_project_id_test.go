@@ -38,7 +38,7 @@ func initWithProjectID(t *testing.T, gitForm bool, projectID string, seed func(r
 	}
 	t.Chdir(root)
 	orig := isGitRepoFunc
-	isGitRepoFunc = func() (bool, error) { return gitForm, nil }
+	isGitRepoFunc = func(string) (bool, error) { return gitForm, nil }
 	t.Cleanup(func() { isGitRepoFunc = orig })
 
 	if seed != nil {

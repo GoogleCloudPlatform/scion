@@ -17,6 +17,7 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -29,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
 	"github.com/knadh/koanf/parsers/yaml"
 	"github.com/knadh/koanf/providers/confmap"
 	"github.com/knadh/koanf/providers/env"
@@ -167,12 +169,6 @@ type HubServerConfig struct {
 
 	// --- Async agent create (design §3.7) ---
 
-	// AsyncAgentLaunch is the kill switch for non-blocking agent create. Off
-	// by default; even when on, a launch is only non-blocking for a request
-	// that also opts in (AcceptAsyncLaunch). Old clients that never opt in
-	// stay synchronous permanently, regardless of this flag.
-	AsyncAgentLaunch bool `json:"asyncAgentLaunch" yaml:"asyncAgentLaunch" koanf:"asyncAgentLaunch"`
-
 	// PerfTrace turns on per-request performance tracing (phase timings,
 	// authorization store-call and decision-audit counts, DB pool waits).
 	// Off by default; observe only; read at startup.
@@ -204,6 +200,10 @@ type HubServerConfig struct {
 	// PortProxy holds the agent port proxy settings (validated by
 	// HubPortProxyConfig.Validate at startup).
 	PortProxy HubPortProxyConfig `json:"portProxy" yaml:"portProxy" koanf:"portProxy"`
+
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability HubObservabilityConfig `json:"observability" yaml:"observability" koanf:"observability"`
 }
 
 // DefaultHubID generates a deterministic hub instance ID from the machine hostname.
@@ -314,7 +314,7 @@ func ResolveHubIDFromEnv() string {
 		return v
 	}
 	resolvedHubIDOnce.Do(func() {
-		if kService := os.Getenv("K_SERVICE"); kService != "" {
+		if kService := cloudrunenv.ServiceName(); kService != "" {
 			slog.Warn("hub_id not explicitly configured on Cloud Run; deriving from K_SERVICE — set server.hub.hub_id in settings.yaml for stability",
 				"k_service", kService)
 			h := sha256.Sum256([]byte(kService))
@@ -353,7 +353,7 @@ func ResolveHubIDFromEnvReadOnly() (id string, ok bool) {
 	if v := os.Getenv("SCION_SERVER_HUB_HUBID"); v != "" {
 		return v, true
 	}
-	if kService := os.Getenv("K_SERVICE"); kService != "" {
+	if kService := cloudrunenv.ServiceName(); kService != "" {
 		h := sha256.Sum256([]byte(kService))
 		return hex.EncodeToString(h[:6]), true
 	}
@@ -584,6 +584,8 @@ type RuntimeTargetConfig struct {
 	// See V1RuntimeTargetConfig.
 	KubernetesBlockServiceAccount    string            `json:"kubernetesBlockServiceAccount,omitempty" yaml:"kubernetesBlockServiceAccount,omitempty" koanf:"kubernetesBlockServiceAccount"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetesServiceAccountMappings,omitempty" yaml:"kubernetesServiceAccountMappings,omitempty" koanf:"kubernetesServiceAccountMappings"`
+	SharedDirStorageClass            string            `json:"sharedDirStorageClass,omitempty" yaml:"sharedDirStorageClass,omitempty" koanf:"sharedDirStorageClass"`
+	SharedDirSize                    string            `json:"sharedDirSize,omitempty" yaml:"sharedDirSize,omitempty" koanf:"sharedDirSize"`
 }
 
 // DatabaseConfig holds database connection settings.
@@ -845,6 +847,97 @@ type OIDCProviderConfig struct {
 	Enabled bool `json:"enabled" yaml:"enabled" koanf:"enabled"`
 	// TokenLifetime is the validity duration of issued identity tokens. Default: 15m.
 	TokenLifetime time.Duration `json:"token_lifetime,omitempty" yaml:"token_lifetime,omitempty" koanf:"token_lifetime"`
+	// UserTokenAudiences lists the peer hub issuer URLs for which this hub
+	// issues user access credentials to its own users (POST
+	// /api/v1/auth/federation-token). Empty, the default, means none are
+	// issued. Read at startup; a change needs a restart.
+	UserTokenAudiences []string `json:"user_token_audiences,omitempty" yaml:"user_token_audiences,omitempty" koanf:"user_token_audiences"`
+	// UserTokenLifetime is the validity of those credentials. Zero means
+	// DefaultUserTokenLifetime; otherwise it must be a whole number of
+	// seconds and may not exceed MaxUserTokenLifetime.
+	UserTokenLifetime time.Duration `json:"user_token_lifetime,omitempty" yaml:"user_token_lifetime,omitempty" koanf:"user_token_lifetime"`
+}
+
+const (
+	// DefaultUserTokenLifetime is the validity of an issued user access
+	// credential for a peer hub when UserTokenLifetime is zero.
+	DefaultUserTokenLifetime = 15 * time.Minute
+	// MaxUserTokenLifetime is the longest UserTokenLifetime accepted.
+	MaxUserTokenLifetime = time.Hour
+)
+
+// EffectiveUserTokenLifetime returns UserTokenLifetime, or
+// DefaultUserTokenLifetime when it is zero.
+func (c OIDCProviderConfig) EffectiveUserTokenLifetime() time.Duration {
+	if c.UserTokenLifetime == 0 {
+		return DefaultUserTokenLifetime
+	}
+	return c.UserTokenLifetime
+}
+
+// NormalizeUserTokenAudience returns aud without surrounding whitespace or
+// trailing slashes, the form in which audiences are compared.
+func NormalizeUserTokenAudience(aud string) string {
+	return strings.TrimRight(strings.TrimSpace(aud), "/")
+}
+
+// ValidateUserTokens checks UserTokenAudiences and UserTokenLifetime: the
+// lifetime must be a whole number of seconds between zero and
+// MaxUserTokenLifetime (credential times are whole seconds), and each audience
+// must be a distinct http(s) URL with a host and no user info, query or
+// fragment.
+func (c OIDCProviderConfig) ValidateUserTokens() error {
+	var errs []error
+	if c.UserTokenLifetime < 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must not be negative", c.UserTokenLifetime))
+	} else if c.UserTokenLifetime > MaxUserTokenLifetime {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s exceeds the maximum of %s", c.UserTokenLifetime, MaxUserTokenLifetime))
+	} else if c.UserTokenLifetime%time.Second != 0 {
+		errs = append(errs, fmt.Errorf("user_token_lifetime %s must be a whole number of seconds", c.UserTokenLifetime))
+	}
+	seen := make(map[string]bool)
+	for i, aud := range c.UserTokenAudiences {
+		norm := NormalizeUserTokenAudience(aud)
+		if norm == "" {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: must not be empty", i))
+			continue
+		}
+		u, err := url.Parse(norm)
+		switch {
+		case err != nil:
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: invalid URL %q: %v", i, aud, err))
+			continue
+		case u.Scheme != "https" && u.Scheme != "http":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must use https or http scheme", i, aud))
+			continue
+		case u.Host == "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q has no host", i, aud))
+			continue
+		case u.User != nil || u.RawQuery != "" || u.Fragment != "":
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: %q must be an issuer URL without user info, query or fragment", i, aud))
+			continue
+		}
+		if seen[norm] {
+			errs = append(errs, fmt.Errorf("user_token_audiences[%d]: duplicate audience %q", i, aud))
+		}
+		seen[norm] = true
+	}
+	return errors.Join(errs...)
+}
+
+// AllowsUserTokenAudience reports whether aud, normalized, is one of
+// UserTokenAudiences. It is false for an empty aud or an empty list.
+func (c OIDCProviderConfig) AllowsUserTokenAudience(aud string) bool {
+	norm := NormalizeUserTokenAudience(aud)
+	if norm == "" {
+		return false
+	}
+	for _, allowed := range c.UserTokenAudiences {
+		if NormalizeUserTokenAudience(allowed) == norm {
+			return true
+		}
+	}
+	return false
 }
 
 // GlobalConfig holds the complete server configuration.
@@ -1530,6 +1623,8 @@ var snakeCaseFields = map[string]string{
 	"autoexposeports":            "auto_expose_ports",
 	"autosuspendstalled":         "auto_suspend_stalled",
 	"cafile":                     "ca_file",
+	"certfile":                   "cert_file",
+	"keyfile":                    "key_file",
 	"defaultharnessconfig":       "default_harness_config",
 	"defaultmaxduration":         "default_max_duration",
 	"defaultuserrole":            "default_user_role",
@@ -1553,6 +1648,8 @@ var snakeCaseFields = map[string]string{
 	"missingagentgrace":          "missing_agent_grace",
 	"membershipsweepreportonly":  "membership_sweep_report_only",
 	"monitoringdashboardurl":     "monitoring_dashboard_url",
+	"metricsenabled":             "metrics_enabled",
+	"tracingenabled":             "tracing_enabled",
 	"grantkeyactivation":         "grant_key_activation",
 	"tcpallowedports":            "tcp_allowed_ports",
 	"internallisten":             "internal_listen",
@@ -1635,7 +1732,6 @@ var camelCaseFields = map[string]string{
 	"allowshadowedschema":           "allowShadowedSchema",
 	"apibaseurl":                    "apiBaseUrl",
 	"appid":                         "appId",
-	"asyncagentlaunch":              "asyncAgentLaunch",
 	"perftrace":                     "perfTrace",
 	"membershipsweepreportonly":     "membershipSweepReportOnly",
 	"authorizeddomains":             "authorizedDomains",
@@ -1671,6 +1767,8 @@ var camelCaseFields = map[string]string{
 	"launchtimeout":                 "launchTimeout",
 	"localpath":                     "localPath",
 	"monitoringdashboardurl":        "monitoringDashboardUrl",
+	"metricsenabled":                "metricsEnabled",
+	"tracingenabled":                "tracingEnabled",
 	"loglevel":                      "logLevel",
 	"maintenancemessage":            "maintenanceMessage",
 	"missingagentgrace":             "missingAgentGrace",
@@ -1891,6 +1989,22 @@ func LoadBootstrapKoanf() *koanf.Koanf {
 // come from the global settings.yaml, as they do in file mode. An empty
 // configPath, or one that resolves to the global directory, changes nothing.
 func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, true)
+}
+
+// LoadUnseededBootstrapKoanfWithConfigPath is LoadBootstrapKoanfWithConfigPath
+// without the SCION_SEED_* layer: coded defaults, settings.yaml (and the
+// --config location) and SCION_SERVER_*. These are the layers the hub's
+// endpoint resolution at startup reads; it ignores seed values, so the admin
+// view takes the public URL it shows when none is saved from this merge
+// (ptone/scion#4826).
+func LoadUnseededBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
+	return loadBootstrapKoanf(configPath, false)
+}
+
+// loadBootstrapKoanf builds the bootstrap merge, with the SCION_SEED_*
+// layer when withSeed is true.
+func loadBootstrapKoanf(configPath string, withSeed bool) *koanf.Koanf {
 	k := koanf.New(".")
 
 	// 1. Coded defaults in the opsettings keyspace (server.* snake_case).
@@ -1925,8 +2039,10 @@ func LoadBootstrapKoanfWithConfigPath(configPath string) *koanf.Koanf {
 	}
 
 	// 2. SCION_SEED_* environment variables (snake_case via envKeyToOpsettingsKey).
-	seedK := LoadSeedEnvKoanf()
-	_ = k.Merge(seedK)
+	if withSeed {
+		seedK := LoadSeedEnvKoanf()
+		_ = k.Merge(seedK)
+	}
 
 	// 3. settings.yaml (+ legacy server.yaml).
 	globalDir, err := GetGlobalDir()

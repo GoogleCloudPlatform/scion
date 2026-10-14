@@ -44,9 +44,10 @@ var (
 	// projectSource is targetSourceContext when resolveInvocationTarget set
 	// projectPath from the current context, and "" otherwise.
 	projectSource string
-	// contextProjectID is the hub project UUID resolveInvocationTarget
-	// injected as projectPath, or "".
-	contextProjectID string
+	// contextProjectSlug is the slug of the hub project
+	// resolveInvocationTarget injected as projectPath, as recorded in the
+	// context, or "". It is for messages only.
+	contextProjectSlug string
 	// hubFlagName is the hub nickname given with --hub, which
 	// resolveInvocationTarget replaced by its endpoint in hubEndpoint, or "".
 	hubFlagName string
@@ -54,12 +55,6 @@ var (
 	// about an unreadable context.yaml in this invocation.
 	contextWarned bool
 )
-
-// isContextProject reports whether path is the project that
-// resolveInvocationTarget took from the current context.
-func isContextProject(path string) bool {
-	return projectSource == targetSourceContext && path != "" && path == contextProjectID
-}
 
 // contextDisabled reports whether the current context must be ignored:
 // in agent mode, inside an agent container (SCION_HOST_UID), and in a
@@ -133,18 +128,23 @@ func mergedHubEndpoint(projectDir string) string {
 // contextSkippedSubtrees are top-level commands for which the current
 // context is never applied. The server and the runtime broker take their
 // hub endpoint from the global settings (it is the endpoint the server
-// advertises to its agents), so 'scion use' must never retarget them.
+// advertises to its agents), so 'scion use' must never retarget them. A
+// --hub nickname is still resolved for them, as for every command: it is
+// an explicit choice, not the context.
 var contextSkippedSubtrees = map[string]bool{
 	"server":         true,
 	"runtime-broker": true,
 }
 
-// contextIgnoredCommands are commands, by command path, that resolve their
-// hub exactly as without a current context: they would save the resolved
-// endpoint into settings, and the context's hub never reaches a settings
-// file. 'hub shadow' pins its endpoint in the shadow's settings.
-var contextIgnoredCommands = map[string]bool{
-	"scion hub shadow": true,
+// contextProjectCommands are hub-only commands (see hubOnlyCommands), by
+// command path, that take the context's project like the project-scoped
+// commands do, although they need no local project. expose and unexpose
+// act as the calling agent and stay out.
+var contextProjectCommands = map[string]bool{
+	"scion tunnel":     true,
+	"scion ssh":        true,
+	"scion ssh-config": true,
+	"scion vscode":     true,
 }
 
 // importGlobalHubSettings turns on the one-time import of the global
@@ -229,28 +229,27 @@ func hubWithoutEndpointError(name string) error {
 //     effective hub, when no --project, no --global and no filesystem
 //     project apply and the command needs a project. A UUID is used rather
 //     than the slug because it can never be mistaken for a local directory.
+//     tunnel, ssh and ssh-config need no project but take this one too
+//     (contextProjectCommands).
 //
 // It records hubSource and projectSource. A context file that cannot be
 // read is a warning, and the invocation proceeds without it, unless --hub
 // is a nickname, which then cannot be resolved.
+//
+// For the server and runtime-broker subtrees (contextSkippedSubtrees) only
+// a --hub nickname is resolved; nothing else is filled, and without a
+// nickname context.yaml is not read.
 func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 	hubSource = ""
 	projectSource = ""
-	contextProjectID = ""
+	contextProjectSlug = ""
 	contextWarned = false
 	hubFlagName = ""
-	if contextDisabled(mode) || contextSkippedSubtrees[topLevelName(cmd)] {
+	if contextDisabled(mode) {
 		return nil
 	}
-	// --no-hub turns the hub off, and a context project is a hub project.
-	// Remove this check together with the --no-hub flag.
-	if noHub {
-		return nil
-	}
-	// The commands that ignore the context read it only to resolve an
-	// explicit --hub nickname.
-	ignored := contextIgnoredCommands[cmd.CommandPath()]
-	if ignored && !isHubNickname(hubEndpoint) {
+	nicknameOnly := contextSkippedSubtrees[topLevelName(cmd)]
+	if nicknameOnly && !isHubNickname(hubEndpoint) {
 		return nil
 	}
 	ctx, err := loadInvocationContext(cmd.ErrOrStderr())
@@ -262,18 +261,17 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 		contextWarned = true
 		return nil
 	}
-	// An explicit nickname is an explicit --hub, also for the commands
-	// that otherwise ignore the context.
 	if err := resolveHubNickname(ctx); err != nil {
 		return err
 	}
-	if ignored {
+	if nicknameOnly {
 		return nil
 	}
 	// config subcommands act on local settings files, never on a hub
 	// project, so they never get an injected project (they still see the
 	// context hub). commandRequiresProject alone does not exempt them.
-	projectScoped := projectPath == "" && !globalMode && commandRequiresProject(cmd) && !commandInSubtree(cmd, "config")
+	wantsProject := commandRequiresProject(cmd) || contextProjectCommands[cmd.CommandPath()]
+	projectScoped := projectPath == "" && !globalMode && wantsProject && !commandInSubtree(cmd, "config")
 	if projectScoped && hubFlagEndpoint() != "" {
 		warnHubFlagMismatch(cmd.ErrOrStderr(), ctx)
 	}
@@ -317,7 +315,7 @@ func resolveInvocationTarget(cmd *cobra.Command, mode CLIMode) error {
 		if p := ctx.ProjectFor(effectiveHub); p != nil && !inFilesystemProject() {
 			projectPath = p.ID
 			projectSource = targetSourceContext
-			contextProjectID = p.ID
+			contextProjectSlug = p.Slug
 		}
 	}
 	return nil
@@ -381,18 +379,4 @@ func warnHubFlagMismatch(stderr io.Writer, c *config.CLIContext) {
 	}
 	_, _ = fmt.Fprintf(stderr, "Warning: this directory is linked to hub %s, but --hub selects %s; the directory's project may not exist there.\n",
 		describeHub(dirName, config.NormalizeEndpoint(dirHub)), describeHub(flagName, config.NormalizeEndpoint(hubEndpoint)))
-}
-
-// persistHubFlagEndpoint saves the --hub flag value as hub.endpoint in the
-// settings of resolvedPath (global settings when isGlobal). It does nothing
-// without the flag, including when the hub came from the current context.
-func persistHubFlagEndpoint(resolvedPath string, isGlobal bool) error {
-	ep := hubFlagEndpoint()
-	if ep == "" {
-		return nil
-	}
-	if err := config.UpdateSetting(resolvedPath, "hub.endpoint", ep, isGlobal); err != nil {
-		return fmt.Errorf("failed to save endpoint: %w", err)
-	}
-	return nil
 }

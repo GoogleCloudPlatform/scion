@@ -20,19 +20,23 @@ package hub
 // test identities that hold hub-admin (and, from phase A2, super-admin)
 // authority. Its inputs are deploy-time only:
 //
-//	G1  --enable-test-identities is on and the hub has a user store
-//	G2  --enable-test-admin-identities=<id> with id == the resolved hub id
-//	G3  --enable-test-super-admin-identities=<id> (REFUSED in this binary:
-//	    the super-admin kind needs the test-admin policy registry, phase A2)
+//	G1  test identities are on (implied by the level) and the hub has a
+//	    user store
+//	G2  --test-mode=admin:<id> with id == the resolved hub id
+//	G3  --test-mode=super-admin (REFUSED in this binary: the super-admin
+//	    kind needs the test-admin policy registry, phase A2)
 //	G4  server.hub.class is exactly "test" (never writable through the API)
 //	G5  explicit --production is refused (--hosted is allowed)
 //	G6  the database carries a test_infra_marker row for this hub id
 //	G7  every signing-key class resolves from a hub-local source
 //	G8  no federation is configured
-//	G9  Helm refuses both flags (deploy/helm/scion-hub $unsafeToPass)
+//	G9  Helm renders no admin level (deploy/helm/scion-hub $unsafeToPass
+//	    refuses --test-mode in hub.args; the chart only renders member)
 //	G10 not a workstation hub
 //
-// cmd's validateTestAdminIdentities checks G1-G8 and G10 and fails startup
+// G1, G2, G4, G5 and G6 apply to the member level too (test_mode.go).
+//
+// cmd's resolveTestMode checks G1-G8 and G10 and fails startup
 // with a named error; New re-checks the configuration and verifies G7
 // against the actual key sources, then captures the result into the
 // immutable testAdminGate value. Nothing changes the gate afterwards: it has
@@ -51,9 +55,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
-// TestAdminGateError is a named refusal of the test admin tier. Condition is
-// the gate condition (G1..G10, or "broker" for the broker check) and Name a
-// stable snake_case identifier.
+// TestAdminGateError is a named refusal of a --test-mode level (the member
+// preconditions and the test admin tier gate). Condition is the gate
+// condition (G1..G10, "broker" for the broker check, "test_mode" for the
+// setting itself) and Name a stable snake_case identifier.
 type TestAdminGateError struct {
 	Condition string
 	Name      string
@@ -61,7 +66,7 @@ type TestAdminGateError struct {
 }
 
 func (e *TestAdminGateError) Error() string {
-	return fmt.Sprintf("test admin tier refused (%s %s): %s", e.Condition, e.Name, e.Detail)
+	return fmt.Sprintf("test mode refused (%s %s): %s", e.Condition, e.Name, e.Detail)
 }
 
 func testAdminGateErr(condition, name, detail string) *TestAdminGateError {
@@ -72,19 +77,19 @@ func testAdminGateErr(condition, name, detail string) *TestAdminGateError {
 // match with errors.Is.
 var (
 	ErrTestAdminRequiresHub = testAdminGateErr("G1", "requires_hub",
-		"--enable-test-admin-identities and --enable-test-super-admin-identities need a hub (--enable-hub)")
+		"--test-mode needs a hub (--enable-hub)")
 	ErrTestAdminRequiresTestIdentities = testAdminGateErr("G1", "requires_test_identities",
-		"--enable-test-admin-identities requires --enable-test-identities")
+		"the test admin tier requires test identities to be on (--test-mode=admin turns on both)")
 	ErrTestAdminRequiresUserStore = testAdminGateErr("G1", "requires_user_store",
-		"--enable-test-admin-identities requires a hub with a user store")
+		"--test-mode requires a hub with a user store")
 	ErrTestAdminHubIDMismatch = testAdminGateErr("G2", "hub_id_mismatch",
-		"the --enable-test-admin-identities value must equal this hub's resolved hub id")
+		"the hub id in --test-mode=<level>:<hub id> must equal this hub's resolved hub id")
 	ErrTestSuperAdminRequiresPolicyRegistry = testAdminGateErr("G3", "super_admin_requires_policy_registry",
-		"--enable-test-super-admin-identities is refused: the test super-admin kind needs the test-admin policy registry, which this binary does not include (admin tier phase A2)")
+		"--test-mode=super-admin is refused: the test super-admin kind needs the test-admin policy registry, which this binary does not include (admin tier phase A2)")
 	ErrTestAdminHubClassNotTest = testAdminGateErr("G4", "hub_class_not_test",
 		`server.hub.class must be exactly "test"`)
 	ErrTestAdminProductionFlag = testAdminGateErr("G5", "production_flag",
-		"--production is refused with the test admin tier; use --hosted")
+		"--production is refused with --test-mode; use --hosted")
 	ErrTestAdminMarkerAbsent = testAdminGateErr("G6", "marker_absent",
 		"the database has no test infrastructure marker; run `scion server test-infra mark` on the hub host")
 	ErrTestAdminMarkerHubMismatch = testAdminGateErr("G6", "marker_hub_mismatch",
@@ -121,11 +126,10 @@ const ErrCodeTestAdminRemoteBrokerRefused = "test_admin_tier_remote_broker_refus
 
 // TestAdminGateConfig is the validated gate input (ServerConfig.TestAdminGate).
 type TestAdminGateConfig struct {
-	// HubAdmin is true when --enable-test-admin-identities passed validation.
+	// HubAdmin is true when --test-mode=admin passed validation.
 	HubAdmin bool
-	// SuperAdmin is true when --enable-test-super-admin-identities was
-	// accepted. This binary always refuses it (G3); New refuses a config
-	// that sets it.
+	// SuperAdmin is true when --test-mode=super-admin was accepted. This
+	// binary always refuses it (G3); New refuses a config that sets it.
 	SuperAdmin bool
 	// HubID is the validated flag value; it equals ServerConfig.HubID.
 	HubID string
@@ -390,6 +394,8 @@ func (s *Server) emitTestAdminGateStart() error {
 		"marker_created_at":   markerAt,
 		"signing_key_sources": sources,
 		"federation":          "off",
+		"test_mode":           string(s.TestModeLevel()),
+		"preconditions":       s.testModePreconditions(),
 	}); err != nil {
 		return fmt.Errorf("test admin tier: startup banner could not be written: %w", err)
 	}

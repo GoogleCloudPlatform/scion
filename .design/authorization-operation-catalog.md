@@ -2,7 +2,7 @@
 
 *Generated from Go-native OperationSpec definitions. Do not edit manually.*
 
-**Operations:** 211
+**Operations:** 219
 
 ## Table of Contents
 
@@ -45,7 +45,20 @@
 - [schedule.event.delete](#scheduleeventdelete) — Cancel a scheduled event or delete a recurring schedule
 - [artifact.read](#artifactread) — Read an artifact's metadata or file bytes (owner, home-project readers via the scope grant, or principal grants); unreadable artifacts answer 404
 - [artifact.list](#artifactlist) — List the artifacts the caller owns, holds a grant on, or that are shared to a project it is a member of (?mine=1); each row passes the artifact.read check, so an artifact the caller cannot read is omitted, never denied
-- [artifact.create](#artifactcreate) — Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+- [artifact.create](#artifactcreate) — Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
+- [artifact.update](#artifactupdate) — Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+- [artifact.grant.list](#artifactgrantlist) — List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+- [artifact.grant.put](#artifactgrantput) — Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+- [artifact.grant.delete](#artifactgrantdelete) — Remove one grant from an artifact; the home project's grant cannot be removed
+- [artifact.link.list](#artifactlinklist) — List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+- [artifact.link.create](#artifactlinkcreate) — Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+- [artifact.link.revoke](#artifactlinkrevoke) — Revoke one share link of an artifact
+- [artifact.delete](#artifactdelete) — Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+- [artifact.version.create](#artifactversioncreate) — Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+- [artifact.version.upload](#artifactversionupload) — Upload one manifest file of a pending version; only the principal that started the version may upload to it
+- [artifact.version.finalize](#artifactversionfinalize) — Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+- [artifact.version.view](#artifactversionview) — Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+- [artifact.version.read](#artifactversionread) — List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
 - [project.env.read](#projectenvread) — Read a project's environment variables (list or one key)
 - [project.env.write](#projectenvwrite) — Set or delete a project environment variable
 - [project.secret.read](#projectsecretread) — Read a project's secret metadata (list or one key)
@@ -86,6 +99,11 @@
 - [inbox.conversation.participant.add](#inboxconversationparticipantadd) — Add a participant to a group conversation. Every caller needs project:read on the conversation's project; an added agent must be in that project and an added user must be a member of it; a token also needs inbox:write for it. A caller who is not a participant or cannot read the group gets the unknown-conversation answer, and an agent of another project the unknown-agent answer
 - [inbox.conversation.leave](#inboxconversationleave) — Leave a conversation the caller takes part in. A token needs inbox:write for the conversation
 - [inbox.conversation.resolve](#inboxconversationresolve) — Resolve a conversation reference. A group reference needs project:read on its project and an agent reference needs agent:read on the agent, for every user caller; a token also needs inbox:read for the result
+- [project.threadgroup.list](#projectthreadgrouplist) — List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+- [project.threadgroup.read](#projectthreadgroupread) — Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+- [inbox.threadgroup.create](#inboxthreadgroupcreate) — Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+- [inbox.threadgroup.update](#inboxthreadgroupupdate) — Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+- [inbox.threadgroup.delete](#inboxthreadgroupdelete) — Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
 - [agent.message.target.resolve](#agentmessagetargetresolve) — Resolve a messaging target in another project through the agent message authorization. Only a target the caller may message is answered; any other target gets the unknown-target answer
 - [inbox.notification.read](#inboxnotificationread) — List the caller's notifications. A token lists only rows inside its boundary; with agentId, rows addressed to the agent subscriber need agent:read on that agent, for every user caller
 - [inbox.notification.ack](#inboxnotificationack) — Acknowledge the caller's notifications. Ack-all by a project token touches only rows of its boundary project
@@ -110,6 +128,7 @@
 - [credential.token.read](#credentialtokenread) — List or read the caller's own user access tokens
 - [credential.token.create](#credentialtokencreate) — Create a user access token (UAT)
 - [credential.token.revoke](#credentialtokenrevoke) — Revoke or delete a user access token
+- [federation.token.mint](#federationtokenmint) — Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
 - [user.admin.suspend](#useradminsuspend) — Suspend or reactivate a user account (dispatched from PATCH /api/v1/users/{id} when status field is present)
 - [user.admin.invite](#useradmininvite) — Invite a user to the platform
 - [user.admin.provision](#useradminprovision) — Pre-register a user (status invited) through POST /api/v1/users; invitation-equivalent, shares the invite creation core; no role, no grants
@@ -118,26 +137,15 @@
 - [group.read](#groupread) — Read group details or list groups
 - [group.create](#groupcreate) — Create a new group
 - [group.update](#groupupdate) — Update group metadata
-- [user.read](#userread) — Read a user profile
-- [user.list](#userlist) — List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
+- [user.read](#userread) — Read user profile or list users
 - [user.update](#userupdate) — Update user profile or settings (PATCH may also dispatch user.admin.suspend/promote per field)
-- [role.read](#roleread) — Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
+- [role.read](#roleread) — Read role definitions and permission registry
 - [role.binding.read](#rolebindingread) — Read role binding assignments
-- [access.constraint.read](#accessconstraintread) — Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
-- [hub.audit.constraint](#hubauditconstraint) — Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
+- [access.constraint.read](#accessconstraintread) — Read access constraint definitions
 - [user.session.logout](#usersessionlogout) — Sign-in flow logout step; the hub holds no server-side session state for it to change
 - [user.session.revoke](#usersessionrevoke) — Revoke every cookie session of a user (platform admin only)
 - [user.terminalworkspace](#userterminalworkspace) — Read or replace the caller's own terminal workspace
 - [user.skillinjection.update](#userskillinjectionupdate) — Add, replace or remove the skills injected into the caller's own agents. A user access token needs user_skill_injection:update on a hub boundary
-- [hub.audit.effectiveaccess](#hubauditeffectiveaccess) — Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
-- [hub.audit.explain](#hubauditexplain) — Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
-- [user.self.explain](#userselfexplain) — Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-- [user.self.profile](#userselfprofile) — Read the caller's own profile and preferences. Any token reads its holder's own profile
-- [user.self.scopes](#userselfscopes) — List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
-- [user.self.adminstatus](#userselfadminstatus) — Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
-- [user.self.groups](#userselfgroups) — List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
-- [user.invite.redeem](#userinviteredeem) — Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
-- [user.chatlink.verify](#userchatlinkverify) — Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
 - [hub.authreset](#hubauthreset) — Reset all agent authentication credentials (emergency action)
 - [hub.authreset.reissue](#hubauthresetreissue) — Re-issue an agent's role scopes from its delegator's current authority (dispatched from POST .../agents/{id}/reset-auth when reissue_scopes is set; hub super-admin only)
 - [hub.authreset.reissueall](#hubauthresetreissueall) — Re-issue every agent's role scopes from its delegator's current authority (dispatched from POST /api/v1/admin/agents/reset-auth-all when reissue_scopes is set; dry run by default; hub super-admin only)
@@ -204,7 +212,7 @@
 - [testidentity.create](#testidentitycreate) — Issue a short-lived synthetic member or viewer test identity and one access token for it (no refresh token, no cookie)
 - [testidentity.list](#testidentitylist) — List test identities: the caller's own, or every identity for an unscoped platform admin session
 - [testidentity.token.issue](#testidentitytokenissue) — Re-issue one access token for a live test identity, for its issuer or an unscoped platform admin session
-- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available
+- [testidentity.webcode.issue](#testidentitywebcodeissue) — Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
 - [testidentity.delete](#testidentitydelete) — Delete a test identity (its role bindings, group memberships and user-scope data go with it), for its issuer, an unscoped platform admin session, or a holder of test_identity.issue and user.delete; refused with 409 while it owns agents or is a project's last owner. With ?purge=true it also removes the agents, schedules, groups and projects stamped as created under the identity (the identity ID is the only input), keeps stamped projects that have another owner or other resources, and reports unstamped agents as unproven
 - [testidentity.admin.create](#testidentityadmincreate) — Issue a short-lived test identity holding an expiring hub-admin role and one access token for it (no refresh token, no cookie), on a hub started with the test admin gate
 - [testidentity.admin.revokeall](#testidentityadminrevokeall) — Revoke every admin-kind test identity: delete each (or, when the user delete refuses it, suspend it and remove its role bindings), for a human super-admin session
@@ -1270,6 +1278,7 @@
 | ID | Kind | Description | Fail-Closed |
 |----|------|-------------|-------------|
 | target-exists | business | Project must exist and not be already deleted | Yes |
+| agents-runtime-deleted | business | Unless force=true, refused with 409 conflict while the project has an agent that is not soft-deleted (runtime deletion not confirmed); checked under the agent row lock, after authorization | Yes |
 
 ### Audit
 
@@ -1287,11 +1296,13 @@
 - **Retry:** no retry — cascading deletes are best-effort; DB cascade is authoritative
 - **Auth Before Emit:** Yes
 
-**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`
+**Denial Codes:** `forbidden`, `user_suspended`, `credential_insufficient`, `not_found`, `conflict`
 
 ### Tests
 
 - `pkg/hub:TestRS3_ProjectDeleteOwnerPositiveControl`
+- `pkg/hub:TestProjectDelete_LiveAgentRefused`
+- `pkg/hub:TestProjectDelete_GuardRunsAfterAuthorization`
 - `pkg/hub:TestRS3_ProjectDeleteGovernanceMatrix`
 - `pkg/hub:TestRS3_ProjectDeleteAtomicAudit`
 
@@ -1749,7 +1760,7 @@
 
 **Domain:** artifact
 
-**Description:** Publish a single file as a new artifact homed in a project (the caller's own, or ?scope=)
+**Description:** Create an artifact homed in a project (the caller's own, or ?scope=): a single file published at once (?name=), or a manifest that starts a pending first version (JSON body), whose files are then uploaded and finalized through the artifact.version.upload and artifact.version.finalize routes
 
 ### Entry Points
 
@@ -1774,6 +1785,504 @@
 ### Tests
 
 - `pkg/hub:TestArtifactsTwoAgentsSameProject`
+
+---
+
+## artifact.update
+
+**Domain:** artifact
+
+**Description:** Set or clear an artifact's expiry, or move it to another home project (PATCH); a move also requires artifact.create in the target project and cross-project sharing on; it removes the old home project's grant, so that project's members lose read unless another grant covers them, and gives the target project a read grant unless it already holds a scope grant (an admin one is refused with 409 home_admin_grant)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (expiry_set, expiry_cleared, moved)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** oldExpiresAt, fromScope, droppedGrantId
+- **After Fields:** newExpiresAt, toScope
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestPatchExpiry`
+- `pkg/artifacts:TestPatchRehome`
+
+---
+
+## artifact.grant.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's principal and scope grants, home grant first, with whether cross-project sharing is on
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/artifacts:TestGrantsAdminGate`
+
+---
+
+## artifact.grant.put
+
+**Domain:** artifact
+
+**Description:** Give a user, agent or project read, write or admin on an artifact, or a user review, or change an existing grant's permission (POST); a caller that may not manage the artifact may still give a user the review level on an artifact owned by an agent when it is that agent's delegating user or an admin of the artifact's home project (project.manage there; MayGrantReview), to a user who can already read it through the home project or a grant to one of the user's projects, never replacing a read, write or admin grant; every other request from such a caller is refused with the same 403, and an accepted one can still answer 409 too_many_grants, or 404 when the artifact went away meanwhile
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/grants` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A manager (the owner or an admin grantee) grants at most admin, the level it holds, and admin is never given to the home project's grant; the review path gives only the review level, which allows review versions and no read of its own, decided by the host's review-grant authority (MayGrantReview) rather than by grants the caller holds
+
+**Denial Codes:** `not_found`, `forbidden`, `cross_project_sharing_disabled`
+
+### Tests
+
+- `pkg/hub:TestArtifactsGrantsOnRoutes`
+- `pkg/hub:TestArtifactCanGrantReviewOnRoutes`
+- `pkg/hub:TestArtifactHostMayGrantReview_ScopedToken`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestReviewGrantAllowed`
+- `pkg/artifacts:TestReviewGrantDenied`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a grant is created or its permission changed (tracked in ptone/scion#4882); removal is recorded (grant_removed) (scope: artifact grant creation and change) — waives: `audit_obligation`
+
+---
+
+## artifact.grant.delete
+
+**Domain:** artifact
+
+**Description:** Remove one grant from an artifact; the home project's grant cannot be removed
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/grants/{grantId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) remove its grants; the home project's grant is refused (409 home_grant)
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (grant_removed)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantId, subjectKind, subjectRef, permission
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`, `home_grant`
+
+### Tests
+
+- `pkg/hub:TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`
+- `pkg/artifacts:TestGrantsAdminGate`
+- `pkg/artifacts:TestOwnerPathsRecordEvents`
+
+---
+
+## artifact.link.list
+
+**Domain:** artifact
+
+**Description:** List an artifact's unexpired share links (ids, creator, expiry; never the tokens)
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.link.create
+
+**Domain:** artifact
+
+**Description:** Create a share link: an unguessable token, shown once, that lets anyone holding it read the artifact's current version without signing in until it expires (at most the hub's maximum lifetime, never past the artifact's own expiry) or is revoked
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/links` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `grant-authority`
+
+### Delegation
+
+- **Kind:** `non_amplification`
+- A link gives read of the current version only, which the creating manager (the owner or an admin grantee) already holds; it gives no write, review or admin
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkManagePermissions`
+
+### Exemptions
+
+- **route_guarded:** The artifact service records no artifact_event today when a share link is created (tracked in ptone/scion#4882); revocation is recorded (link_revoked) (scope: artifact share link creation) — waives: `audit_obligation`
+
+---
+
+## artifact.link.revoke
+
+**Domain:** artifact
+
+**Description:** Revoke one share link of an artifact
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}/links/{linkId}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `revoke-authority`
+
+### Governance
+
+- **Kind:** domain_specific
+- Only the artifact's managers (its owner or an admin grantee, a user whose credential permits artifact.manage in the home project) revoke its share links
+- **Callback:** `pkg/artifacts.(*Service).adminAuthorityWith`
+
+### Audit
+
+- **Event Type:** `artifact_event (link_revoked)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** linkId
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactsShareLinkOnRoutes`
+- `pkg/artifacts:TestLinkListAndRevoke`
+
+---
+
+## artifact.delete
+
+**Domain:** artifact
+
+**Description:** Delete an artifact with its grants and share links (its files are removed after the hub's grace period); allowed for its managers (the owner or an admin grantee) and, as custodian, for an admin of its home project (project.manage there), each a user whose credential permits artifact.manage in the home project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/artifacts/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.manage`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `artifact_event (deleted)`
+- **Context Fields:** artifact_id, actor_kind, actor_ref, authority
+- **Before Fields:** grantsRemoved, linksRevoked
+- **Atomic:** Yes
+
+**Denial Codes:** `not_found`, `forbidden`
+
+### Tests
+
+- `pkg/hub:TestArtifactDeleteOfOrphanOnRoutes`
+- `pkg/artifacts:TestDeleteArtifactAllowed`
+- `pkg/artifacts:TestDeleteArtifactRefused`
+- `pkg/artifacts:TestStoreChangeAndEventCommitTogether`
+
+---
+
+## artifact.version.create
+
+**Domain:** artifact
+
+**Description:** Start a pending version of an artifact from a manifest; a review grantee may start review versions only
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.upload
+
+**Domain:** artifact
+
+**Description:** Upload one manifest file of a pending version; only the principal that started the version may upload to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PUT | `/api/v1/artifacts/{id}/versions/{seq}/files/{path}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.finalize
+
+**Domain:** artifact
+
+**Description:** Finalize a pending version once every file has arrived, making it ready (and current unless a later one is); only the principal that started it may finalize it, and a review is checked against its base
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/finalize` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.create`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `not_found`, `forbidden`, `review_only`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/hub:TestArtifactsReviewOnRoutes`
+- `pkg/artifacts:TestTwoStepWriteAuthorization`
+
+---
+
+## artifact.version.view
+
+**Domain:** artifact
+
+**Description:** Get a view URL for a ready version whose entry is HTML: a capability, valid for a limited time, that serves only that version's files under /api/v1/artifacts/view/ in the sandboxed viewer (see the view exemption); the caller needs only the read check
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/artifacts/{id}/versions/{seq}/view` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsHTMLViewOnRoutes`
+- `pkg/artifacts:TestViewMintAuthorization`
+
+---
+
+## artifact.version.read
+
+**Domain:** artifact
+
+**Description:** List an artifact's versions (ready ones, and discarded ones by number and reason) or read one ready version's metadata and file list
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/artifacts/{id}/versions` |
+| http_route | GET | `/api/v1/artifacts/{id}/versions/{seq}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `artifact_record`; boundaries `project`, `hub`; pinned by `TestArtifactsManageAndVersionRoutesUserAccessTokensAreBounded`)
+
+**Base Permission:** `artifact.read`
+
+**Resource Resolver:** artifact-home-project
+
+**Effects:** `read-one`, `list-scoped`
+
+**Denial Codes:** `not_found`
+
+### Tests
+
+- `pkg/hub:TestArtifactsTwoStepBundleOnRoutes`
+- `pkg/artifacts:TestListVersionsDiscarded`
 
 ---
 
@@ -3191,6 +3700,180 @@
 
 ---
 
+## project.threadgroup.list
+
+**Domain:** project
+
+**Description:** List a project's chat thread groups. Needs project:read on the project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_query`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** project-from-query
+
+**Effects:** `list-scoped`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_OtherProjectAgentForbidden`
+
+---
+
+## project.threadgroup.read
+
+**Domain:** project
+
+**Description:** Read a chat thread group. Needs project:read on the group's project; an agent must belong to it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | GET | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `project.read`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `read-one`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_NonMemberUserForbidden`
+
+---
+
+## inbox.threadgroup.create
+
+**Domain:** inbox
+
+**Description:** Create a chat thread group in a project. Needs project:read on the project (an agent must belong to it); a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/thread-groups` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `project_body`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** project-from-body
+
+**Effects:** `create-resource`
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+
+---
+
+## inbox.threadgroup.update
+
+**Domain:** inbox
+
+**Description:** Rename a chat thread group, or add or remove one of its threads. Needs project:read on the group's project (an agent must belong to it); a token also needs inbox:write for it. An added thread must be a live group conversation of the same project
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | PATCH | `/api/v1/thread-groups/{id}` |
+| http_route | POST | `/api/v1/thread-groups/{id}/threads` |
+| http_route | DELETE | `/api/v1/thread-groups/{id}/threads/{conversationId}` |
+
+**Principals:** `user`, `agent`
+
+**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `update-resource`
+
+**Denial Codes:** `forbidden`, `not_found`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+- `pkg/hub:TestThreadGroups_AddThreadValidation`
+
+---
+
+## inbox.threadgroup.delete
+
+**Domain:** inbox
+
+**Description:** Delete a chat thread group; its threads become ungrouped. Users only (an agent gets 403). Needs project:read on the group's project; a token also needs inbox:write for it
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | DELETE | `/api/v1/thread-groups/{id}` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `thread_group_record`; boundaries `project`, `hub`)
+
+**Base Permission:** `inbox.write`
+
+**Resource Resolver:** threadgroup-project
+
+**Effects:** `delete-resource`
+
+### Audit
+
+- **Event Type:** `inbox.threadgroup.delete`
+- **Context Fields:** actor_id, project_id
+- **Before Fields:** thread_group_id
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub:TestThreadGroups_SameProjectAgentAllButDelete`
+- `pkg/hub:TestThreadGroups_TokenWithoutInboxWriteReadsOnly`
+
+---
+
 ## agent.message.target.resolve
 
 **Domain:** agent.message
@@ -4132,6 +4815,56 @@
 
 ---
 
+## federation.token.mint
+
+**Domain:** federation
+
+**Description:** Obtain a short-lived user access credential for the caller, signed with the hub's OIDC key, for one peer hub audience listed in server.oidc.user_token_audiences. Only a local human user with status active; a user access token needs federation_token:mint on a hub boundary. 404 while federation.project_visitors is off
+
+### Entry Points
+
+| Kind | Method | Pattern |
+|------|--------|---------|
+| http_route | POST | `/api/v1/auth/federation-token` |
+
+**Principals:** `user`
+
+**Credentials:** `session_jwt`, `scoped_uat`
+
+**Bearer:** `admit` (target `self_record`; boundaries `hub`)
+
+**Base Permission:** `federation_token.mint`
+
+**Resource Resolver:** self-principal
+
+**Effects:** `mint-credential`
+
+### Governance
+
+- **Kind:** issuer_credential
+- A user obtains a credential for themselves only, for an audience the hub admin allows, with a lifetime capped at one hour; it carries no project or agent claims
+
+### Audit
+
+- **Event Type:** `federation_token_issued`
+- **Context Fields:** actor_id, credential_kind
+- **After Fields:** audience, jti, expires_at
+- **Atomic:** Yes
+
+**Denial Codes:** `forbidden`
+
+### Tests
+
+- `pkg/hub/authzop:TestCatalogValidation`
+- `pkg/hub:TestFederationToken_RefusedCallers`
+- `pkg/hub:TestFederationToken_UserAccessTokenNeedsMintScope`
+- `pkg/hub:TestFederationToken_AudienceAllowList`
+- `pkg/hub:TestFederationToken_AuditWritten`
+- `pkg/hub:TestFederationToken_AuditFailureIssuesNothing`
+- `pkg/hub:TestFederationToken_RefusedCredentialKinds`
+
+---
+
 ## user.admin.suspend
 
 **Domain:** user.admin
@@ -4442,12 +5175,13 @@
 
 **Domain:** user
 
-**Description:** Read a user profile
+**Description:** Read user profile or list users
 
 ### Entry Points
 
 | Kind | Method | Pattern |
 |------|--------|---------|
+| http_route | GET | `/api/v1/users` |
 | http_route | GET | `/api/v1/users/{id}` |
 
 **Principals:** `user`
@@ -4465,38 +5199,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-
----
-
-## user.list
-
-**Domain:** user
-
-**Description:** List users. A session sees the users it may read. A token needs user:list at the hub collection on a hub boundary, and then sees only the users it may read, each checked as a hub-level user record, so it also needs user:read
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/users` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
-
-**Base Permission:** `user.list`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `list-scoped`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestUserListToken_RequiresUserListAndHubBoundary`
 
 ---
 
@@ -4534,7 +5236,7 @@
 
 **Domain:** role
 
-**Description:** Read role definitions and the permission registry. A token needs role:read on a hub boundary; the write methods on the same routes stay refused to every token
+**Description:** Read role definitions and permission registry
 
 ### Entry Points
 
@@ -4543,16 +5245,12 @@
 | http_route | GET | `/api/v1/admin/roles` |
 | http_route | GET | `/api/v1/admin/roles/{id}` |
 | http_route | GET | `/api/v1/admin/roles/export` |
-| http_route | HEAD | `/api/v1/admin/roles/export` |
 | http_route | GET | `/api/v1/admin/roles/{id}/export` |
-| http_route | HEAD | `/api/v1/admin/roles/{id}/export` |
 | http_route | GET | `/api/v1/admin/permissions` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role.read`
 
@@ -4565,8 +5263,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
-- `pkg/hub:TestRoleRoutesToken_WriteMethodsStillDenied`
 
 ---
 
@@ -4585,9 +5281,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `role_binding.read`
 
@@ -4600,7 +5294,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestRoleReadToken_DoesNotAdmitRoleWrites`
 
 ---
 
@@ -4608,7 +5301,7 @@
 
 **Domain:** access.constraint
 
-**Description:** Read access constraint definitions and the principals a constraint affects. A token needs access_constraint:read on a hub boundary; the write methods on the same routes stay refused to every token
+**Description:** Read access constraint definitions
 
 ### Entry Points
 
@@ -4616,13 +5309,10 @@
 |------|--------|---------|
 | http_route | GET | `/api/v1/admin/access-constraints` |
 | http_route | GET | `/api/v1/admin/access-constraints/{id}` |
-| http_route | GET | `/api/v1/admin/access-constraints/{id}/affected-principals` |
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
+**Credentials:** `session_jwt`
 
 **Base Permission:** `access_constraint.read`
 
@@ -4635,40 +5325,6 @@
 ### Tests
 
 - `pkg/hub/authzop:TestCatalogValidation`
-- `pkg/hub:TestConstraintReadToken_DoesNotAdmitConstraintAdmin`
-- `pkg/hub:TestConstraintWriteRoutesToken_WriteMethodsStillDenied`
-
----
-
-## hub.audit.constraint
-
-**Domain:** hub
-
-**Description:** Read one access constraint's audit history. hub.audit.read is a hub-level permission: a token needs hub_audit:read on a hub boundary and is checked against the hub-level constraint record; a denied caller gets the same not-found answer as for a missing constraint
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/admin/access-constraints/{id}/audit` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `not_found`
-
-### Tests
-
-- `pkg/hub:TestConstraintAuditToken_RequiresHubAuditReadOnHubBoundary`
 
 ---
 
@@ -4821,311 +5477,6 @@
 - `pkg/hub:TestUserInjectedSkillsWrite_ProjectBoundaryTokenDenied`
 - `pkg/hub:TestUserInjectedSkillsWrite_SessionAndDevUnchanged`
 - `pkg/hub:TestUserInjectedSkillsWrite_FederatedUserDenied`
-
----
-
-## hub.audit.effectiveaccess
-
-**Domain:** hub
-
-**Description:** Read any principal's effective access composition at the system scope. A token needs hub_audit:read on a hub boundary; HEAD answers whether the caller may read it
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/admin/effective-access` |
-| http_route | HEAD | `/api/v1/admin/effective-access` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
-
----
-
-## hub.audit.explain
-
-**Domain:** hub
-
-**Description:** Explain another principal's authorization, or compare two principals' effective permissions. A token needs hub_audit:read on a hub boundary; grant details of the other principal are redacted
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/authz/explain` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit` (target `hub_instance`; boundaries `hub`)
-
-**Base Permission:** `hub.audit.read`
-
-**Resource Resolver:** hub-scoped
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestHubAuditToken_EffectiveAccessAndCrossPrincipalExplain`
-
----
-
-## user.self.explain
-
-**Domain:** user
-
-**Description:** Explain the caller's own authorization. A token's decisions apply its ceiling and boundary, and its effective permission list holds only the permissions it may use; a project-boundary token explains only targets in its boundary project, while its holder is a current member of that project
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/authz/explain` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestExplainSelfToken_ProjectBoundaryLimitedToItsProject`
-
-### Exemptions
-
-- **authentication_only:** Explains the caller's own authorization; every explained decision runs with the caller's own credential (scope: caller's own authorization only) — waives: `base_permission`
-
----
-
-## user.self.profile
-
-**Domain:** user
-
-**Description:** Read the caller's own profile and preferences. Any token reads its holder's own profile
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/me` |
-
-**Principals:** `user`, `agent`
-
-**Credentials:** `session_jwt`, `scoped_uat`, `agent_jwt`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
-
-### Exemptions
-
-- **authentication_only:** Reads the caller's own profile; carries no authority (scope: caller's own profile only) — waives: `base_permission`
-
----
-
-## user.self.scopes
-
-**Domain:** user
-
-**Description:** List the token selectors and, for a requested boundary, the caller's own mint eligibility for each. Any token reads it
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/scopes` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestSelfIdentityReadsToken_AnyTokenReads`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestSelfIdentityReadsToken_AnyTokenReads`
-
-### Exemptions
-
-- **authentication_only:** Lists the selector catalog and the caller's own mint eligibility; carries no authority (scope: selector catalog and caller's own eligibility only) — waives: `base_permission`
-
----
-
-## user.self.adminstatus
-
-**Domain:** user
-
-**Description:** Read the caller's own admin status and system-scope permissions. For a token the permission list holds only the permissions its ceiling allows that are eligible for its boundary kind
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/auth/admin-status` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `none`; pinned by `TestAdminStatusToken_ReportsCeilingIntersection`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `read-one`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestAdminStatusToken_ReportsCeilingIntersection`
-
-### Exemptions
-
-- **authentication_only:** Reads the caller's own admin status; a token's permission list is limited to its ceiling and boundary (scope: caller's own admin status only) — waives: `base_permission`
-
----
-
-## user.self.groups
-
-**Domain:** user
-
-**Description:** List the caller's own effective groups. A project-boundary token lists groups that belong to no project and the groups of its boundary project, the latter only while its holder is a current member of that project
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | GET | `/api/v1/users/me/groups` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`, `scoped_uat`
-
-**Bearer:** `admit_self` (self filter `boundary_project`; pinned by `TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `list-scoped`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestMyGroupsToken_ProjectBoundaryFiltersProjectGroups`
-
-### Exemptions
-
-- **authentication_only:** Lists the caller's own group memberships; a project token sees only its boundary project's groups and groups with no project (scope: caller's own groups only) — waives: `base_permission`
-
----
-
-## user.invite.redeem
-
-**Domain:** user
-
-**Description:** Redeem an invitation code for the caller's identity. Session-only: a token does not bind an invitation to its holder
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/auth/invite/redeem` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestInviteRedeem_SessionOnly`
-
-### Exemptions
-
-- **authentication_only:** Redeems an invitation for the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
-
----
-
-## user.chatlink.verify
-
-**Domain:** user
-
-**Description:** Link a pending chat account to the caller's identity with a verification code. Session-only: a token does not bind an external account to its holder
-
-### Entry Points
-
-| Kind | Method | Pattern |
-|------|--------|---------|
-| http_route | POST | `/api/v1/telegram/link/verify` |
-| http_route | POST | `/api/v1/discord/link/verify` |
-| http_route | POST | `/api/v1/teams/link/verify` |
-
-**Principals:** `user`
-
-**Credentials:** `session_jwt`
-
-**Bearer:** `session_only` (reason `IDENTITY_BINDING`)
-
-**Resource Resolver:** self-principal
-
-**Effects:** `update-resource`
-
-**Denial Codes:** `forbidden`
-
-### Tests
-
-- `pkg/hub:TestChatLinkVerify_SessionOnly`
-
-### Exemptions
-
-- **authentication_only:** Links an external chat account to the caller's own identity; the handler requires an interactive session and refuses a federated caller (scope: caller's own identity only) — waives: `base_permission`
 
 ---
 
@@ -7477,7 +7828,7 @@
 
 **Domain:** testidentity
 
-**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer or an unscoped platform admin session; only on hubs where test identity web sessions are available
+**Description:** Mint a single-use, five-minute web-login code for a live test identity (kind test_fixture), for its issuer, a workload issuer delegation on the member-tier identities it issued, or an unscoped platform admin session; only on hubs where test identity web sessions are available
 
 ### Entry Points
 
@@ -7487,7 +7838,7 @@
 
 **Principals:** `user`
 
-**Credentials:** `session_jwt`, `scoped_uat`
+**Credentials:** `session_jwt`, `scoped_uat`, `workload_delegation`
 
 **Bearer:** `admit` (target `hub_collection`; boundaries `hub`)
 
@@ -7500,13 +7851,13 @@
 ### Governance
 
 - **Kind:** issuer_credential
-- Only the identity's issuer (or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
+- Only the identity's issuer (or a workload delegation, for the member-tier identities issued through it, or an unscoped platform admin session) mints a code; at most one unredeemed code per identity, redeemable once, never past the identity's expiry
 
 ### Audit
 
 - **Event Type:** `test_identity_web_code_issue`
 - **Context Fields:** actor_id, credential_id, credential_kind
-- **After Fields:** user_id, code_id, code_expires_at, issued_by
+- **After Fields:** user_id, code_id, code_expires_at, issued_by, workload_delegation
 - **Atomic:** Yes
 
 **Denial Codes:** `forbidden`, `not_found`, `conflict`
@@ -7515,6 +7866,9 @@
 
 - `pkg/hub/authzop:TestCatalogValidation`
 - `pkg/hub:TestTestIdentityWeb_Mint`
+- `pkg/hub:TestWorkloadDelegation_WebLoginCodeForOwnIdentity`
+- `pkg/hub:TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities`
+- `pkg/hub:TestWorkloadDelegation_RevokedAfterAuthMintsNothing`
 
 ---
 

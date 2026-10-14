@@ -459,7 +459,8 @@ func (a *AuthzService) devLocalHopUsable(ctx context.Context, edge *store.Delega
 // edge folds as an unrecorded terminal hop.
 //
 // Errors: ErrProvenanceMissing (also wrapping errOwnEdgeMissing when the
-// agent's own edge is the missing one), ErrProvenanceAmbiguous,
+// agent's own edge is the missing one, and an *ancestorEdgeMissingError
+// naming the creator or ancestor otherwise), ErrProvenanceAmbiguous,
 // ErrProvenanceChain, errSourceNotAllowed, and wrapped lookup errors. On an
 // error the returned ChainCeiling is the zero value.
 func (a *AuthzService) chainEffectCeiling(ctx context.Context, agent *store.Agent) (ChainCeiling, error) {
@@ -514,7 +515,7 @@ walk:
 			if depth == 0 {
 				return ChainCeiling{}, unrecorded, fmt.Errorf("%w: %w: agent %s", ErrProvenanceMissing, errOwnEdgeMissing, delegateID)
 			}
-			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceMissing, delegateID)
+			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: %w", ErrProvenanceMissing, &ancestorEdgeMissingError{AgentID: delegateID, Depth: depth})
 		}
 		if len(active) > 1 {
 			return ChainCeiling{}, unrecorded, fmt.Errorf("%w: agent %s", ErrProvenanceAmbiguous, delegateID)
@@ -585,6 +586,25 @@ func hopUnrecorded(edge *store.DelegationEdge) bool {
 // the edge backfill completed). The returned error wraps both sentinels, so
 // errors.Is(err, ErrProvenanceMissing) still holds.
 var errOwnEdgeMissing = errors.New("provenance: the agent has no edge of its own")
+
+// ancestorEdgeMissingError is the detail of a chainEffectCeiling
+// ErrProvenanceMissing found above depth 0: AgentID is the agent's creator
+// (Depth 1) or a further ancestor (Depth > 1) that has no active edge in the
+// agent's project: for example it was deleted, its own delegator was
+// deleted, its create was rolled back, or (in stored or legacy data) it is
+// in another project. The walk wraps it together with
+// ErrProvenanceMissing, so errors.Is(err, ErrProvenanceMissing) still holds.
+type ancestorEdgeMissingError struct {
+	AgentID string
+	Depth   int
+}
+
+func (e *ancestorEdgeMissingError) Error() string {
+	if e.Depth == 1 {
+		return "creator agent " + e.AgentID
+	}
+	return fmt.Sprintf("ancestor agent %s (%d levels up)", e.AgentID, e.Depth)
+}
 
 // foldCeilings returns the fold of the bounded hops' ceilings: bounded V1
 // over the registry permissions every bounded hop allows when there is any

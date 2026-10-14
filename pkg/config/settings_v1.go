@@ -33,7 +33,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/fsutil"
@@ -135,14 +137,27 @@ func (vs *VersionedSettings) ResolveHarnessConfig(profileName, harnessConfigName
 
 // ResolveRuntime resolves the runtime config for a profile.
 // Returns the runtime config, the effective runtime type, and any error.
-// If profileName is empty, ActiveProfile is used.
+// If profileName is empty, ActiveProfile is used; when the hub settings
+// overlay replaced the profiles map and ActiveProfile is not one of them,
+// the only stored profile is used when there is exactly one (the overlay
+// sets ActiveProfile to it); with zero or several, the error is an
+// *ActiveProfileError naming the configured value and the stored profiles.
+// A named profile missing
+// from an overlaid map gives a *StoredProfileNotFoundError naming it and
+// the stored profiles.
 // The runtime type is V1RuntimeConfig.Type if set, otherwise the map key name.
 func (vs *VersionedSettings) ResolveRuntime(profileName string) (V1RuntimeConfig, string, error) {
 	if profileName == "" {
+		if vs.activeProfileErr != nil {
+			return V1RuntimeConfig{}, "", vs.activeProfileErr
+		}
 		profileName = vs.ActiveProfile
 	}
 	profile, ok := vs.Profiles[profileName]
 	if !ok {
+		if vs.storedProfileNames != nil {
+			return V1RuntimeConfig{}, "", &StoredProfileNotFoundError{Requested: profileName, Available: vs.storedProfileNames}
+		}
 		return V1RuntimeConfig{}, "", fmt.Errorf("profile %q not found", profileName)
 	}
 	rtConfig, ok := vs.Runtimes[profile.Runtime]
@@ -183,10 +198,22 @@ func (vs *VersionedSettings) ResolveSharedDirDefaults(profileName string) (stora
 // returns the settings key the size came from
 // ("profiles.NAME.shared_dir_size" or "runtimes.NAME.shared_dir_size"), so
 // an error about the value can name where it is set. sizeKey is empty when
-// size is empty.
+// size is empty. On a flat instance view (ForFlatInstance) the values come
+// from the instance's runtime_target instead, and sizeKey is
+// "server.broker.instances[KEY].runtime_target.shared_dir_size".
 func (vs *VersionedSettings) ResolveSharedDirDefaultsWithSource(profileName string) (storageClass, size, sizeKey string) {
 	if vs == nil {
 		return "", "", ""
+	}
+	if vs.flat != nil {
+		// Flat instance: the instance's runtime_target takes the profile
+		// and runtime-entry rung; no profile is consulted. There is no
+		// lower settings rung, so unset means the runtime default.
+		t := vs.flat.Target
+		if t.SharedDirSize != "" {
+			sizeKey = vs.flat.path("runtime_target.shared_dir_size")
+		}
+		return t.SharedDirStorageClass, t.SharedDirSize, sizeKey
 	}
 	if profileName == "" {
 		profileName = vs.ActiveProfile
@@ -1078,11 +1105,6 @@ func (vs *VersionedSettings) IsHubExplicitlyDisabled() bool {
 	return vs.Hub != nil && vs.Hub.Enabled != nil && !*vs.Hub.Enabled
 }
 
-// IsHubLocalOnly returns true if the project is configured for local-only mode.
-func (vs *VersionedSettings) IsHubLocalOnly() bool {
-	return vs.Hub != nil && vs.Hub.LocalOnly != nil && *vs.Hub.LocalOnly
-}
-
 // IsImageRegistryConfigured returns true if image_registry is set at any level
 // (top-level or in any profile).
 func (vs *VersionedSettings) IsImageRegistryConfigured(profileName string) bool {
@@ -1183,6 +1205,21 @@ type VersionedSettings struct {
 	SharedDirs           []api.SharedDir               `json:"shared_dirs,omitempty" yaml:"shared_dirs,omitempty" koanf:"shared_dirs"`
 	ManagedAgents        *V1ManagedAgentsConfig        `json:"managed_agents,omitempty" yaml:"managed_agents,omitempty" koanf:"managed_agents"`
 
+	// activeProfileErr is set by the hub settings overlay when it replaced
+	// Profiles, ActiveProfile is not one of them, and there is not exactly
+	// one stored profile to use instead (see resolveOverlaidActiveProfile).
+	// It is not serialized.
+	activeProfileErr *ActiveProfileError
+	// activeProfileFallbackFrom is the configured ActiveProfile the hub
+	// settings overlay replaced with the only stored profile (see
+	// resolveOverlaidActiveProfile); nil when no fallback applied. It is not
+	// serialized; ConfiguredActiveProfile reads it.
+	activeProfileFallbackFrom *string
+	// storedProfileNames is the sorted list of profile names when the hub
+	// settings overlay replaced Profiles (non-nil exactly then); nil
+	// otherwise. It is not serialized.
+	storedProfileNames []string
+
 	// Default agent limits (applied when no explicit value is set)
 	DefaultMaxTurns      int               `json:"default_max_turns,omitempty" yaml:"default_max_turns,omitempty" koanf:"default_max_turns"`
 	DefaultMaxModelCalls int               `json:"default_max_model_calls,omitempty" yaml:"default_max_model_calls,omitempty" koanf:"default_max_model_calls"`
@@ -1247,6 +1284,12 @@ type VersionedSettings struct {
 	ProjectID string `json:"project_id,omitempty" yaml:"project_id,omitempty" koanf:"project_id"`
 	// HubConnections holds named Hub connections for a Runtime Broker.
 	HubConnections map[string]V1HubConnectionConfig `json:"hub_connections,omitempty" yaml:"hub_connections,omitempty" koanf:"hub_connections"`
+
+	// flat is the flat Runtime Broker instance policy of a view returned by
+	// ForFlatInstance; nil on loaded settings. The resolvers' flat branches
+	// read it in place of the profile and runtime-entry tier. It is never
+	// serialized.
+	flat *FlatInstancePolicy
 }
 
 // AutoExposePortsSettings holds the auto-expose ports configuration.
@@ -1586,8 +1629,6 @@ type V1ServerHubConfig struct {
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
-	// AsyncAgentLaunch is the non-blocking agent create kill switch.
-	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
@@ -1606,6 +1647,20 @@ type V1ServerHubConfig struct {
 	// PortProxy holds the agent port proxy settings. Read at startup;
 	// changes need a restart.
 	PortProxy *V1ServerHubPortProxyConfig `json:"port_proxy,omitempty" yaml:"port_proxy,omitempty" koanf:"port_proxy"`
+	// Observability holds the hub's own metrics and trace export switches
+	// (server.hub.observability). Read at startup; changes need a restart.
+	Observability *V1ServerHubObservabilityConfig `json:"observability,omitempty" yaml:"observability,omitempty" koanf:"observability"`
+}
+
+// V1ServerHubObservabilityConfig holds the switches for the hub's own
+// metrics and trace export (server.hub.observability). A nil switch is
+// unset: the hub then keeps the rule that applied before the switch existed
+// (see HubObservabilityConfig).
+type V1ServerHubObservabilityConfig struct {
+	// MetricsEnabled turns the hub metrics exporter on or off.
+	MetricsEnabled *bool `json:"metrics_enabled,omitempty" yaml:"metrics_enabled,omitempty" koanf:"metrics_enabled"`
+	// TracingEnabled turns the hub trace exporter on or off.
+	TracingEnabled *bool `json:"tracing_enabled,omitempty" yaml:"tracing_enabled,omitempty" koanf:"tracing_enabled"`
 }
 
 // V1ServerHubPortProxyConfig holds the agent port proxy settings of the
@@ -1747,6 +1802,14 @@ type V1RuntimeTargetConfig struct {
 	// descriptor or the persisted target identity. Kubernetes only.
 	KubernetesBlockServiceAccount    string            `json:"kubernetes_block_service_account,omitempty" yaml:"kubernetes_block_service_account,omitempty" koanf:"kubernetes_block_service_account"`
 	KubernetesServiceAccountMappings map[string]string `json:"kubernetes_service_account_mappings,omitempty" yaml:"kubernetes_service_account_mappings,omitempty" koanf:"kubernetes_service_account_mappings"`
+	// SharedDirStorageClass and SharedDirSize are this Kubernetes
+	// instance's defaults for the ReadWriteMany PVCs backing project shared
+	// dirs: the flat counterparts of the runtime entry and profile settings
+	// of the same name, at the same rung (a template's or agent's
+	// kubernetes block wins over them). Local operator policy: never part
+	// of the persisted target identity. Kubernetes only.
+	SharedDirStorageClass string `json:"shared_dir_storage_class,omitempty" yaml:"shared_dir_storage_class,omitempty" koanf:"shared_dir_storage_class"`
+	SharedDirSize         string `json:"shared_dir_size,omitempty" yaml:"shared_dir_size,omitempty" koanf:"shared_dir_size"`
 }
 
 // V1DatabaseConfig holds database settings.
@@ -2386,6 +2449,10 @@ type V1TelemetryTLSConfig struct {
 	Enabled            *bool  `json:"enabled,omitempty" yaml:"enabled,omitempty" koanf:"enabled"`
 	InsecureSkipVerify *bool  `json:"insecure_skip_verify,omitempty" yaml:"insecure_skip_verify,omitempty" koanf:"insecure_skip_verify"`
 	CAFile             string `json:"ca_file,omitempty" yaml:"ca_file,omitempty" koanf:"ca_file"`
+	// CertFile and KeyFile are paths, inside the agent container, to a
+	// PEM-encoded client certificate and key for OTLP mTLS. Set both or neither.
+	CertFile string `json:"cert_file,omitempty" yaml:"cert_file,omitempty" koanf:"cert_file"`
+	KeyFile  string `json:"key_file,omitempty" yaml:"key_file,omitempty" koanf:"key_file"`
 }
 
 // V1TelemetryBatchConfig holds batch export settings.
@@ -2703,6 +2770,8 @@ type HarnessConfigEntry struct {
 	InterruptKey      string                           `json:"interrupt_key,omitempty" yaml:"interrupt_key,omitempty" koanf:"interrupt_key"`
 	InterruptSequence []string                         `json:"interrupt_sequence,omitempty" yaml:"interrupt_sequence,omitempty" koanf:"interrupt_sequence"`
 	InterruptSignal   string                           `json:"interrupt_signal,omitempty" yaml:"interrupt_signal,omitempty" koanf:"interrupt_signal"`
+	Ready             *HarnessReadyConfig              `json:"ready,omitempty" yaml:"ready,omitempty" koanf:"ready"`
+	Delivery          *HarnessDeliveryConfig           `json:"delivery,omitempty" yaml:"delivery,omitempty" koanf:"delivery"`
 	InstructionsFile  string                           `json:"instructions_file,omitempty" yaml:"instructions_file,omitempty" koanf:"instructions_file"`
 	SystemPromptFile  string                           `json:"system_prompt_file,omitempty" yaml:"system_prompt_file,omitempty" koanf:"system_prompt_file"`
 	SystemPromptMode  string                           `json:"system_prompt_mode,omitempty" yaml:"system_prompt_mode,omitempty" koanf:"system_prompt_mode"`
@@ -2758,6 +2827,302 @@ func (t *HarnessThinkingConfig) Validate() error {
 		return fmt.Errorf("thinking.levels last max must be 100, got %d", last)
 	}
 	return nil
+}
+
+// Ready strategies for HarnessReadyConfig.Strategy, shared with the
+// readiness readers in pkg/agent/state.
+const (
+	// ReadyStrategyHook means the harness is ready once the ready marker for
+	// the current run is written (by a session-start hook) plus the settle.
+	ReadyStrategyHook = state.ReadyStrategyHook
+	// ReadyStrategyDelay means the harness is ready once its tmux session has
+	// existed for the settle period.
+	ReadyStrategyDelay = state.ReadyStrategyDelay
+)
+
+// Ready and delivery limits and delivery defaults. The ready defaults are
+// state.DefaultReadySpec and the ready limits are pkg/agent/state's, the
+// same values the readiness readers fall back to and check. The delivery
+// defaults reproduce the historical hard-coded delivery: Enter, then two
+// more Enters 300ms apart.
+const (
+	maxReadySettle            = state.MaxReadySettle
+	minReadyTimeout           = state.MinReadyTimeout
+	maxReadyTimeout           = state.MaxReadyTimeout
+	defaultDeliverySubmitKey  = "Enter"
+	defaultDeliveryExtras     = 2
+	defaultDeliveryExtraDelay = 300 * time.Millisecond
+	maxDeliverySubmitKeys     = 4
+	maxDeliverySubmitKeyBytes = 32
+	maxDeliveryExtraSubmits   = 5
+	maxDeliveryExtraDelay     = 5 * time.Second
+)
+
+// ReadySpec and DeliverySpec are the resolved, defaults-applied forms of the
+// ready and delivery blocks. They are defined in pkg/api so api.Harness can
+// return them without an import cycle.
+type ReadySpec = api.ReadySpec
+
+type DeliverySpec = api.DeliverySpec
+
+// HarnessReadyConfig declares how a harness's readiness for a pasted message
+// is decided. The rule is: ready = signal time + settle. Durations are Go
+// duration strings. All fields are optional; see ResolvedReady for defaults.
+type HarnessReadyConfig struct {
+	// Strategy is "hook" or "delay" (the default).
+	Strategy string `json:"strategy,omitempty" yaml:"strategy,omitempty" koanf:"strategy"`
+	// Settle is the wait after the signal, 0 to 60s. Defaults to 8s for
+	// delay and 1.5s for hook.
+	Settle string `json:"settle,omitempty" yaml:"settle,omitempty" koanf:"settle"`
+	// Timeout is the deadline from launch for the hook strategy, 10s to
+	// 10m, default 90s. It is rejected for the delay strategy.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty" koanf:"timeout"`
+}
+
+// HarnessDeliveryConfig declares how a message is submitted after it is
+// pasted into the harness's terminal. All fields are optional; see
+// ResolvedDelivery for defaults.
+type HarnessDeliveryConfig struct {
+	// SubmitKeys are tmux key names sent after the paste, one send-keys call
+	// each. 1 to 4 entries; default [Enter].
+	SubmitKeys []string `json:"submit_keys,omitempty" yaml:"submit_keys,omitempty" koanf:"submit_keys"`
+	// ExtraSubmits is how many more times SubmitKeys is sent after the first
+	// submit, 0 to 5, default 2. A pointer so an explicit 0 differs from
+	// unset.
+	ExtraSubmits *int `json:"extra_submits,omitempty" yaml:"extra_submits,omitempty" koanf:"extra_submits"`
+	// ExtraSubmitDelay is the wait before each extra submit, 0 to 5s,
+	// default 300ms.
+	ExtraSubmitDelay string `json:"extra_submit_delay,omitempty" yaml:"extra_submit_delay,omitempty" koanf:"extra_submit_delay"`
+}
+
+// DefaultReadySpec returns the ready spec used for strategy when no value is
+// configured. An unknown strategy gets the delay defaults. It is
+// state.DefaultReadySpec.
+func DefaultReadySpec(strategy string) ReadySpec {
+	return state.DefaultReadySpec(strategy)
+}
+
+// DefaultDeliverySpec returns the delivery spec used when no value is
+// configured. Each call returns a fresh SubmitKeys slice.
+func DefaultDeliverySpec() DeliverySpec {
+	return DeliverySpec{
+		SubmitKeys:       []string{defaultDeliverySubmitKey},
+		ExtraSubmits:     defaultDeliveryExtras,
+		ExtraSubmitDelay: defaultDeliveryExtraDelay,
+	}
+}
+
+// parseBoundedDuration parses a Go duration string and checks it lies in
+// [lo, hi].
+func parseBoundedDuration(field, value string, lo, hi time.Duration) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", field, value, err)
+	}
+	if d < lo || d > hi {
+		return 0, fmt.Errorf("%s must be between %s and %s, got %s", field, lo, hi, value)
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) strategy() (string, error) {
+	switch r.Strategy {
+	case "":
+		return ReadyStrategyDelay, nil
+	case ReadyStrategyHook, ReadyStrategyDelay:
+		return r.Strategy, nil
+	}
+	return ReadyStrategyDelay, fmt.Errorf("ready.strategy must be %q or %q, got %q", ReadyStrategyHook, ReadyStrategyDelay, r.Strategy)
+}
+
+func (r *HarnessReadyConfig) settle(strategy string) (time.Duration, error) {
+	if r.Settle == "" {
+		return DefaultReadySpec(strategy).Settle, nil
+	}
+	d, err := parseBoundedDuration("ready.settle", r.Settle, 0, maxReadySettle)
+	if err != nil {
+		return DefaultReadySpec(strategy).Settle, err
+	}
+	return d, nil
+}
+
+func (r *HarnessReadyConfig) timeout(strategy string) (time.Duration, error) {
+	def := DefaultReadySpec(strategy).Timeout
+	if r.Timeout == "" {
+		return def, nil
+	}
+	if strategy == ReadyStrategyDelay {
+		return def, fmt.Errorf("ready.timeout is not allowed with strategy %q", ReadyStrategyDelay)
+	}
+	d, err := parseBoundedDuration("ready.timeout", r.Timeout, minReadyTimeout, maxReadyTimeout)
+	if err != nil {
+		return def, err
+	}
+	return d, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: duration ranges
+// and that timeout is not set for the delay strategy. A nil block is valid.
+func (r *HarnessReadyConfig) Validate() error {
+	if r == nil {
+		return nil
+	}
+	strategy, err := r.strategy()
+	if err != nil {
+		return err
+	}
+	if _, err := r.settle(strategy); err != nil {
+		return err
+	}
+	if _, err := r.timeout(strategy); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) submitKeys() ([]string, error) {
+	if len(d.SubmitKeys) == 0 {
+		return DefaultDeliverySpec().SubmitKeys, nil
+	}
+	if len(d.SubmitKeys) > maxDeliverySubmitKeys {
+		return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys must have 1 to %d entries, got %d", maxDeliverySubmitKeys, len(d.SubmitKeys))
+	}
+	for i, key := range d.SubmitKeys {
+		if err := validateSubmitKey(key); err != nil {
+			return DefaultDeliverySpec().SubmitKeys, fmt.Errorf("delivery.submit_keys[%d]: %w", i, err)
+		}
+	}
+	return slices.Clone(d.SubmitKeys), nil
+}
+
+// validateSubmitKey checks one tmux key name: 1 to 32 bytes with no
+// whitespace or control characters, no leading "-" and no trailing ";", so it
+// is passed to send-keys as exactly one key. tmux would parse a leading "-"
+// as a send-keys option, and it strips a trailing ";" from an argument and
+// treats it as a command separator, so the key would be cut short or lost.
+func validateSubmitKey(key string) error {
+	if key == "" || len(key) > maxDeliverySubmitKeyBytes {
+		return fmt.Errorf("key must be 1 to %d bytes, got %d", maxDeliverySubmitKeyBytes, len(key))
+	}
+	if strings.HasPrefix(key, "-") {
+		return fmt.Errorf("key %q must not start with \"-\"", key)
+	}
+	if strings.HasSuffix(key, ";") {
+		return fmt.Errorf("key %q must not end with \";\"", key)
+	}
+	for _, r := range key {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return fmt.Errorf("key %q must not contain whitespace or control characters", key)
+		}
+	}
+	return nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmits() (int, error) {
+	if d.ExtraSubmits == nil {
+		return defaultDeliveryExtras, nil
+	}
+	if n := *d.ExtraSubmits; n < 0 || n > maxDeliveryExtraSubmits {
+		return defaultDeliveryExtras, fmt.Errorf("delivery.extra_submits must be between 0 and %d, got %d", maxDeliveryExtraSubmits, n)
+	}
+	return *d.ExtraSubmits, nil
+}
+
+func (d *HarnessDeliveryConfig) extraSubmitDelay() (time.Duration, error) {
+	if d.ExtraSubmitDelay == "" {
+		return defaultDeliveryExtraDelay, nil
+	}
+	v, err := parseBoundedDuration("delivery.extra_submit_delay", d.ExtraSubmitDelay, 0, maxDeliveryExtraDelay)
+	if err != nil {
+		return defaultDeliveryExtraDelay, err
+	}
+	return v, nil
+}
+
+// Validate checks the rules the JSON schema cannot express: key contents and
+// duration ranges. A nil block is valid. On load paths the schema runs first
+// and is the stricter gate for an empty submit_keys list and for a bare "0"
+// duration, both of which Validate treats as acceptable. Validate is the
+// stricter gate for key length, which it counts in bytes where the schema
+// counts code points, and for non-ASCII whitespace and control characters,
+// which the schema's ASCII-only character classes let through.
+func (d *HarnessDeliveryConfig) Validate() error {
+	if d == nil {
+		return nil
+	}
+	if _, err := d.submitKeys(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmits(); err != nil {
+		return err
+	}
+	if _, err := d.extraSubmitDelay(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// resolveWarned records which invalid harness-config fields have already been
+// logged by ResolvedReady and ResolvedDelivery, so each is warned once per
+// process.
+var resolveWarned sync.Map
+
+func warnResolveFallback(harness string, err error) {
+	key := harness + "\x00" + err.Error()
+	if _, loaded := resolveWarned.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	slog.Warn("Invalid harness-config value; using the default", "harness", harness, "error", err)
+}
+
+// ResolvedReady returns the ready spec with defaults applied. It never fails:
+// a field that is invalid (for example from a path that skips Validate) falls
+// back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedReady() ReadySpec {
+	if e == nil || e.Ready == nil {
+		return DefaultReadySpec(ReadyStrategyDelay)
+	}
+	r := e.Ready
+	strategy, strategyErr := r.strategy()
+	if strategyErr != nil {
+		warnResolveFallback(e.Harness, strategyErr)
+	}
+	spec := DefaultReadySpec(strategy)
+	var err error
+	if spec.Settle, err = r.settle(strategy); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	// After a strategy fallback the timeout check would describe a strategy
+	// the author never wrote, so keep the fallback's default timeout and rely
+	// on the strategy warning alone.
+	if strategyErr == nil {
+		if spec.Timeout, err = r.timeout(strategy); err != nil {
+			warnResolveFallback(e.Harness, err)
+		}
+	}
+	return spec
+}
+
+// ResolvedDelivery returns the delivery spec with defaults applied. It never
+// fails: a field that is invalid (for example from a path that skips
+// Validate) falls back to its default, and a warning is logged once.
+func (e *HarnessConfigEntry) ResolvedDelivery() DeliverySpec {
+	if e == nil || e.Delivery == nil {
+		return DefaultDeliverySpec()
+	}
+	d := e.Delivery
+	var spec DeliverySpec
+	var err error
+	if spec.SubmitKeys, err = d.submitKeys(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmits, err = d.extraSubmits(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	if spec.ExtraSubmitDelay, err = d.extraSubmitDelay(); err != nil {
+		warnResolveFallback(e.Harness, err)
+	}
+	return spec
 }
 
 // HarnessProvisionerConfig declares how a harness-config is provisioned.
@@ -2952,6 +3317,7 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 
 	// 3. Load in-repo project settings (.scion/settings.yaml)
 	effectiveProjectPath := resolveEffectiveProjectPath(projectPath)
+	dropInheritedHubProjectID(k, projectPath, effectiveProjectPath, globalDir)
 	if projectPath != "" && projectPath != globalDir {
 		migratedHub, err := loadSettingsFile(k, projectPath)
 		if err != nil {
@@ -3028,13 +3394,26 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 		return nil, err
 	}
 	if settings.Telemetry != nil && settings.Telemetry.Cloud != nil && settings.Telemetry.Cloud.TLS != nil {
-		tls := settings.Telemetry.Cloud.TLS
-		if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "") {
-			return nil, fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification settings")
+		if err := validateTelemetryTLS(settings.Telemetry.Cloud.TLS); err != nil {
+			return nil, err
 		}
 	}
 
 	return settings, nil
+}
+
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
+// plaintext together with verification or client certificate options, and
+// a client certificate without its key (or the reverse).
+func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
+	clientCert := tls.CertFile != "" || tls.KeyFile != ""
+	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
+		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
+	}
+	if (tls.CertFile == "") != (tls.KeyFile == "") {
+		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
+	}
+	return nil
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -3312,6 +3691,8 @@ var knownCompoundFields = []string{
 	"platform_auth_sa",
 	"interval_seconds",
 	"public_key_file",
+	"metrics_enabled",
+	"tracing_enabled",
 	"max_concurrency",
 	"oidc_audience",
 	"jwks_url",
@@ -3344,6 +3725,16 @@ var knownCompoundFields = []string{
 	"max_age",
 }
 
+// collapsedCompoundFields maps the canonical env spelling of a compound
+// field, which drops the field's underscores (METRICSENABLED), to the field
+// name. Only fields listed here accept that spelling in this mapper; the
+// underscored spelling (METRICS_ENABLED) is accepted through
+// knownCompoundFields.
+var collapsedCompoundFields = map[string]string{
+	"metricsenabled": "metrics_enabled",
+	"tracingenabled": "tracing_enabled",
+}
+
 // mapServerEnvKey maps the portion after "server_" to a dotted path, recognizing
 // known multi-word snake_case fields so they are not incorrectly split.
 // For example: "hub_read_timeout" -> "hub.read_timeout"
@@ -3366,6 +3757,9 @@ func mapEnvKeyRecursive(key string) string {
 		if key == compound {
 			return key
 		}
+	}
+	if field, ok := collapsedCompoundFields[key]; ok {
+		return field
 	}
 
 	// Try to match the longest known compound field at the end,
@@ -3490,6 +3884,8 @@ func mapTelemetryEnvKey(key string) string {
 //	"insecure" -> "telemetry.cloud.tls.enabled" (value inverted after env load)
 //	"skip_tls_verify" -> "telemetry.cloud.tls.insecure_skip_verify"
 //	"ca_file" -> "telemetry.cloud.tls.ca_file"
+//	"cert_file" -> "telemetry.cloud.tls.cert_file"
+//	"key_file" -> "telemetry.cloud.tls.key_file"
 func mapOtelEnvKey(key string) string {
 	switch key {
 	case "endpoint":
@@ -3504,6 +3900,10 @@ func mapOtelEnvKey(key string) string {
 		return "telemetry.cloud.tls.insecure_skip_verify"
 	case "ca_file":
 		return "telemetry.cloud.tls.ca_file"
+	case "cert_file":
+		return "telemetry.cloud.tls.cert_file"
+	case "key_file":
+		return "telemetry.cloud.tls.key_file"
 	default:
 		return "telemetry.cloud." + key
 	}
@@ -3613,9 +4013,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
-		if v1.Hub.AsyncAgentLaunch != nil {
-			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
-		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -3676,6 +4073,12 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 		}
 		if p := v1.Hub.PortProxy; p != nil {
 			gc.Hub.PortProxy = HubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
+		}
+		if o := v1.Hub.Observability; o != nil {
+			gc.Hub.Observability = HubObservabilityConfig{
+				MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+				TracingEnabled: copyBoolPtr(o.TracingEnabled),
+			}
 		}
 	}
 
@@ -4034,6 +4437,12 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if p := gc.Hub.PortProxy; !p.IsZero() {
 		v1Hub.PortProxy = &V1ServerHubPortProxyConfig{ResponseHeaderTimeout: p.ResponseHeaderTimeout}
 	}
+	if o := gc.Hub.Observability; !o.IsZero() {
+		v1Hub.Observability = &V1ServerHubObservabilityConfig{
+			MetricsEnabled: copyBoolPtr(o.MetricsEnabled),
+			TracingEnabled: copyBoolPtr(o.TracingEnabled),
+		}
+	}
 	if gc.Hub.StartClaimLeaseTTL > 0 {
 		v1Hub.StartClaimLeaseTTL = gc.Hub.StartClaimLeaseTTL.String()
 	}
@@ -4053,10 +4462,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
-	}
-	if gc.Hub.AsyncAgentLaunch {
-		asyncLaunch := true
-		v1Hub.AsyncAgentLaunch = &asyncLaunch
 	}
 	if gc.Hub.PerfTrace {
 		perfTrace := true
@@ -4229,7 +4634,7 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	}
 
 	// OIDC Identity Provider config
-	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" {
+	if gc.OIDC.Enabled || gc.OIDC.IssuerURL != "" || len(gc.OIDC.UserTokenAudiences) > 0 || gc.OIDC.UserTokenLifetime != 0 {
 		oidc := gc.OIDC
 		v1.OIDC = &oidc
 	}

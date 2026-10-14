@@ -193,50 +193,17 @@ func loginEndpointHome(t *testing.T, settingsYAML string) string {
 func TestPersistLoginEndpoint_SavesEndpointWhenUnset(t *testing.T) {
 	globalDir := loginEndpointHome(t, "schema_version: \"1\"\n")
 	var out bytes.Buffer
-	asked := 0
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
 		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
-		Interactive: false,
-		Confirm:     func(string) bool { asked++; return true },
 	}))
 
 	s, err := config.LoadSettingsFromDir(globalDir)
 	require.NoError(t, err)
 	require.NotNil(t, s.Hub)
 	assert.Equal(t, "https://hub.example.com", s.Hub.Endpoint)
-	assert.False(t, s.IsHubEnabled(), "never enabled without an interactive answer")
-	assert.Zero(t, asked, "no prompt when not interactive")
+	assert.Nil(t, s.Hub.Enabled, "hub.enabled is not written: an endpoint is enough")
 	assert.Contains(t, out.String(), "Saved hub endpoint https://hub.example.com to global settings")
-	assert.Contains(t, out.String(), "scion hub enable")
-}
-
-func TestPersistLoginEndpoint_InteractiveEnable(t *testing.T) {
-	globalDir := loginEndpointHome(t, "")
-	var out bytes.Buffer
-	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
-		Interactive: true,
-		Confirm:     func(string) bool { return true },
-	}))
-	s, err := config.LoadSettingsFromDir(globalDir)
-	require.NoError(t, err)
-	assert.Equal(t, "https://hub.example.com", s.Hub.Endpoint)
-	assert.True(t, s.IsHubEnabled())
-	assert.Contains(t, out.String(), "Hub mode enabled (global scope)")
-}
-
-func TestPersistLoginEndpoint_InteractiveDecline(t *testing.T) {
-	globalDir := loginEndpointHome(t, "")
-	var out bytes.Buffer
-	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
-		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
-		Interactive: true,
-		Confirm:     func(string) bool { return false },
-	}))
-	s, err := config.LoadSettingsFromDir(globalDir)
-	require.NoError(t, err)
-	assert.False(t, s.IsHubEnabled())
-	assert.Contains(t, out.String(), "scion hub enable")
+	assert.NotContains(t, out.String(), "hub enable")
 }
 
 func TestPersistLoginEndpoint_NeverOverwritesOtherEndpoint(t *testing.T) {
@@ -245,8 +212,6 @@ func TestPersistLoginEndpoint_NeverOverwritesOtherEndpoint(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
 		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
-		Interactive: true,
-		Confirm:     func(string) bool { t.Fatal("must not prompt"); return false },
 	}))
 	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)
@@ -261,8 +226,6 @@ func TestPersistLoginEndpoint_SameEndpointAlreadyEnabled(t *testing.T) {
 	var out bytes.Buffer
 	require.NoError(t, persistLoginEndpoint(&out, loginEndpointOptions{
 		HubURL: "https://hub.example.com", ProjectPath: globalDir, IsGlobal: true, TargetGlobal: true,
-		Interactive: true,
-		Confirm:     func(string) bool { t.Fatal("must not prompt"); return false },
 	}))
 	data, err := os.ReadFile(filepath.Join(globalDir, "settings.yaml"))
 	require.NoError(t, err)

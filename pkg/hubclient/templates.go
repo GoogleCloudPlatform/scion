@@ -37,9 +37,6 @@ type TemplateService interface {
 	// Create creates a new template.
 	Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error)
 
-	// Update updates a template.
-	Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error)
-
 	// Delete removes a template.
 	Delete(ctx context.Context, templateID string) error
 
@@ -56,8 +53,10 @@ type TemplateService interface {
 	// Finalize finalizes a template after file upload.
 	// expectedContentHash, when non-empty, is the content hash the manifest
 	// was diffed against; the Hub answers 409 template_conflict if the
-	// template has changed since (see IsTemplateConflictError).
-	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash string) (*Template, error)
+	// template has changed since (see IsTemplateConflictError). uploadID,
+	// when non-empty, is the UploadResponse.UploadID whose staged files the
+	// finalize commits; empty when nothing was uploaded for it.
+	Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash, uploadID string) (*Template, error)
 
 	// RequestDownloadURLs requests signed URLs for downloading template files.
 	RequestDownloadURLs(ctx context.Context, templateID string) (*DownloadResponse, error)
@@ -96,18 +95,13 @@ type ListTemplatesResponse struct {
 }
 
 // CreateTemplateRequest is the request for creating a template.
+// A template's job config comes from its scion-agent.yaml; the Hub refuses
+// a create body that carries config or image (ptone/scion#4223).
 type CreateTemplateRequest struct {
-	Name      string          `json:"name"`
-	Harness   string          `json:"harness,omitempty"`
-	Scope     string          `json:"scope"`
-	ProjectID string          `json:"projectId,omitempty"`
-	Config    *TemplateConfig `json:"config,omitempty"`
-}
-
-// UpdateTemplateRequest is the request for updating a template.
-type UpdateTemplateRequest struct {
-	Name   string          `json:"name,omitempty"`
-	Config *TemplateConfig `json:"config,omitempty"`
+	Name      string `json:"name"`
+	Harness   string `json:"harness,omitempty"`
+	Scope     string `json:"scope"`
+	ProjectID string `json:"projectId,omitempty"`
 }
 
 // ReimportTemplateRequest is the request body for reimporting a template.
@@ -289,15 +283,6 @@ func (s *templateService) Create(ctx context.Context, req *CreateTemplateRequest
 	return apiclient.DecodeRequired[CreateTemplateResponse](resp)
 }
 
-// Update updates a template.
-func (s *templateService) Update(ctx context.Context, templateID string, req *UpdateTemplateRequest) (*Template, error) {
-	resp, err := s.c.patch(ctx, "/api/v1/templates/"+templateID, req, nil)
-	if err != nil {
-		return nil, err
-	}
-	return apiclient.DecodeRequired[Template](resp)
-}
-
 // Delete removes a template.
 func (s *templateService) Delete(ctx context.Context, templateID string) error {
 	resp, err := s.c.delete(ctx, "/api/v1/templates/"+templateID, nil)
@@ -342,10 +327,11 @@ func (s *templateService) RequestUploadURLs(ctx context.Context, templateID stri
 }
 
 // Finalize finalizes a template after file upload.
-func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash string) (*Template, error) {
+func (s *templateService) Finalize(ctx context.Context, templateID string, manifest *TemplateManifest, expectedContentHash, uploadID string) (*Template, error) {
 	req := FinalizeRequest{
 		Manifest:            manifest,
 		ExpectedContentHash: expectedContentHash,
+		UploadID:            uploadID,
 	}
 	resp, err := s.c.post(ctx, "/api/v1/templates/"+templateID+"/finalize", req, nil)
 	if err != nil {
