@@ -144,7 +144,9 @@ func mergeEnvironmentVolumes(settingsVolumes, fileVolumes, own []api.VolumeMount
 // resources are own, lowest tier first: built-in default (applied separately
 // by applyBuiltinResourceDefaults) < settings default_resources < hub
 // agent_defaults.resources < profile resources < the agent's own <
-// profile harness_overrides.<harness-config>.resources.
+// profile harness_overrides.<harness-config>.resources. On a flat instance
+// the instance's agent_defaults resources and harness override resources
+// take the profile's two rungs.
 //
 // The hub tier sits below broker profile resources and harness overrides
 // but above default_resources only (see the hub agent_defaults comment in
@@ -155,20 +157,15 @@ func resolveEnvironmentResources(ctx context.Context, own *api.ResourceSpec, set
 		cpy := *own
 		res = &cpy
 	}
-	if settings != nil {
-		effectiveProfile := profileName
-		if effectiveProfile == "" {
-			effectiveProfile = settings.ActiveProfile
-		}
-		if p, ok := settings.Profiles[effectiveProfile]; ok {
-			if p.Resources != nil {
-				base := *p.Resources
-				res = config.MergeResourceSpec(&base, res)
-			}
-			if ho, ok := p.HarnessOverrides[harnessConfigName]; ok && ho.Resources != nil {
-				res = config.MergeResourceSpec(res, ho.Resources)
-			}
-		}
+	// The profile tier, or on a flat instance its agent_defaults
+	// (TierResources).
+	tierRes, hoRes, _ := settings.TierResources(profileName, harnessConfigName)
+	if tierRes != nil {
+		base := *tierRes
+		res = config.MergeResourceSpec(&base, res)
+	}
+	if hoRes != nil {
+		res = config.MergeResourceSpec(res, hoRes)
 	}
 	if hd := api.HubAgentDefaultsFromContext(ctx); hd != nil && hd.Resources != nil {
 		base := *hd.Resources

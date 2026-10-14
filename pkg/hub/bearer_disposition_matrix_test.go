@@ -221,7 +221,8 @@ func bearerMatrixGuardSelector(ep authzop.EntryPoint) string {
 
 // bearerMatrixCompanionSelectors lists, per operation, the selectors an
 // admitting token carries besides the operation's own: the operation also
-// checks project:read or agent:read on a target the record names.
+// checks project:read or agent:read on a target the record names, or
+// broker:read on the broker whose settings it writes.
 var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.conversation.create":              {"project:read"},
 	"inbox.conversation.direct.read":         {"agent:read"},
@@ -233,6 +234,7 @@ var bearerMatrixCompanionSelectors = map[authzop.OperationID][]string{
 	"inbox.threadgroup.create":               {"project:read"},
 	"inbox.threadgroup.update":               {"project:read"},
 	"inbox.threadgroup.delete":               {"project:read"},
+	"quota.brokersettings.update":            {"broker:read"},
 }
 
 // TestBearerDispositionMatrix_CatalogEntryPoints drives real tokens through
@@ -472,6 +474,36 @@ var bearerMatrixPositiveServerErrors = map[liveInventoryKey]bearerMatrixPositive
 		http.StatusServiceUnavailable, "the test server configures no GitHub App"},
 	{"hub.githubapp.update", http.MethodPost, "/api/v1/github-app/sync-permissions"}: {
 		http.StatusBadGateway, "the test server configures no GitHub App"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/logs"}: {
+		http.StatusNotImplemented, "the test server configures no agent dispatcher"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/logs"}: {
+		http.StatusNotImplemented, "the test server configures no agent dispatcher"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/agents/{id}/cloud-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.logs.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/cloud-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.messages.read", http.MethodGet, "/api/v1/projects/{projectId}/agents/{id}/message-logs"}: {
+		http.StatusNotImplemented, "the test server configures no log query service"},
+	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-from"}: {
+		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},
+	{"agent.workspace.sync", http.MethodPost, "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+		http.StatusBadGateway, "the fixture agent's runtime broker is not connected through the control channel"},
+	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/agents/{id}/keys"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"agent.lifecycle.keys", http.MethodPost, "/api/v1/projects/{projectId}/agents/{id}/keys"}: {
+		http.StatusServiceUnavailable, "the test server configures no agent dispatcher"},
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodPost, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodPut, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodDelete, "/api/v1/agents/{id}/ports/{port}/proxy"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
+	{"agent.portaccess", http.MethodGet, "/api/v1/agents/{id}/ports/{port}/proxy/{subpath}"}: {
+		http.StatusServiceUnavailable, "the fixture agent has no port tunnel"},
 }
 
 // bearerMatrixAuthzErrorCodes are error codes that report an authorization

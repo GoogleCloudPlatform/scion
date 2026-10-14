@@ -17,6 +17,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -293,12 +294,28 @@ func expandEnvMap(m map[string]string) map[string]string {
 	}
 	expanded := make(map[string]string)
 	for k, v := range m {
-		ek, _ := util.ExpandEnv(k)
+		// These maps become agent env, so names refused for agents
+		// (util.IsAgentRefusedHostEnvName) expand to empty.
+		ek, _, refusedInKey := util.ExpandEnvRefusing(k, util.IsAgentRefusedHostEnvName)
+		val, _, refusedInValue := util.ExpandEnvRefusing(v, util.IsAgentRefusedHostEnvName)
+		for _, name := range append(refusedInKey, refusedInValue...) {
+			slog.Warn("settings env: host environment variable is reserved for the server and is not expanded", "variable", name)
+		}
 		if ek == "" {
 			continue
 		}
-		val, _ := util.ExpandEnv(v)
 		expanded[ek] = val
+	}
+	return expanded
+}
+
+// expandAgentVisiblePath expands ${VAR} references in a path an agent can see,
+// with names refused for agents (util.IsAgentRefusedHostEnvName) expanding to
+// empty and logged by name.
+func expandAgentVisiblePath(path string) string {
+	expanded, _, refused := util.ExpandEnvRefusing(path, util.IsAgentRefusedHostEnvName)
+	for _, name := range refused {
+		slog.Warn("settings volume: host environment variable is reserved and is not expanded", "variable", name)
 	}
 	return expanded
 }
@@ -309,8 +326,10 @@ func expandVolumeMounts(volumes []api.VolumeMount) []api.VolumeMount {
 	}
 	expanded := make([]api.VolumeMount, len(volumes))
 	for i, v := range volumes {
-		s, _ := util.ExpandEnv(v.Source)
-		t, _ := util.ExpandEnv(v.Target)
+		// Mount paths are visible to the agent, so names refused for
+		// agents expand to empty.
+		s := expandAgentVisiblePath(v.Source)
+		t := expandAgentVisiblePath(v.Target)
 		expanded[i] = api.VolumeMount{
 			Source:   s,
 			Target:   t,

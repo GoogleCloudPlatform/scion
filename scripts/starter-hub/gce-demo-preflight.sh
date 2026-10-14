@@ -102,7 +102,7 @@ for tool in gcloud git openssl; do
         case "$tool" in
             gcloud)  check_fail "$tool not found" "Install Google Cloud SDK: https://cloud.google.com/sdk/docs/install" ;;
             git)     check_fail "$tool not found" "Install git: https://git-scm.com/downloads" ;;
-            openssl) check_fail "$tool not found" "Install openssl (needed to generate SESSION_SECRET)" ;;
+            openssl) check_fail "$tool not found" "Install openssl (needed to generate SCION_SERVER_SESSION_SECRET)" ;;
         esac
     fi
 done
@@ -151,7 +151,7 @@ else
 
     REQUIRED_VARS=(
         SCION_HUB_STORAGE_BUCKET
-        SESSION_SECRET
+        SCION_SERVER_SESSION_SECRET
         SCION_SERVER_BASE_URL
         SCION_IMAGE_REGISTRY
     )
@@ -176,7 +176,7 @@ else
         val=$(get_env_value "$var" "${HUB_ENV_FILE}")
         if is_placeholder "$val"; then
             hint="Set ${var} in ${HUB_ENV_FILE}"
-            if [[ "$var" == "SESSION_SECRET" ]]; then
+            if [[ "$var" == "SCION_SERVER_SESSION_SECRET" ]]; then
                 hint="Generate with: openssl rand -base64 32"
             fi
             check_fail "${var} is missing or still a placeholder" "$hint"

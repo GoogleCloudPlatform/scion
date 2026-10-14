@@ -77,7 +77,12 @@ func NewGCPHandler(w io.Writer, opts *slog.HandlerOptions, component, hubName st
 
 		switch a.Key {
 		case slog.LevelKey:
-			level := a.Value.Any().(slog.Level)
+			// Only the top-level record level carries a slog.Level. A caller
+			// attr keyed "level" (any type, or inside a group) is left as is.
+			level, ok := a.Value.Any().(slog.Level)
+			if !ok || len(groups) != 0 {
+				return a
+			}
 			return slog.String(GCPKeySeverity, levelToSeverity[level])
 		case slog.MessageKey:
 			// Suppress empty messages (e.g. HTTP request logs).
