@@ -491,8 +491,10 @@ var reconcileBrokerListLimit = brokerScopedListLimit
 // the stored row holding no capacity (store.ReleaseReservationIfAgent). A
 // start that claimed the agent, minted a run or re-reserved since the read
 // therefore keeps its slot, including a same-broker start that reuses the
-// row as an idempotent retry (it holds a start claim from before its
-// reserve).
+// row as an idempotent retry once it holds its claim. A start takes its
+// claim before it reserves, except a restart, which reserves first; in that
+// reserve-to-claim window the restart is covered, as before, only by the
+// grace period and beginStartDispatch's "starting" write.
 //
 // Idempotent both ways: releasing an already-released reservation and
 // re-running the backfill after a prior successful pass are no-ops (the
