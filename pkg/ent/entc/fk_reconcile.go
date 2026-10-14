@@ -109,57 +109,89 @@ type FKRepairGroup struct {
 	Action string
 	// Rows is the number of orphaned rows.
 	Rows int
-	// Orphans is a digest of which rows are orphaned: their sorted rowids,
-	// the count of rows without one, and their foreign key column values.
-	// Two sets of orphans with the same count can be told apart, including
-	// a row that reuses the rowid of an earlier, deleted orphan with a
-	// different key value. Orphans with the same rowids and the same key
-	// values give the same digest: the reconcile then makes the same change
-	// to the same rows (by rowid and key), so reusing a snapshot taken for
-	// that change is harmless. Columns outside the key are not compared.
+	// Orphans is a digest of the orphaned rows: their sorted rowids, the
+	// count of rows without one, and each row's full content (every column,
+	// in table order, rendered with quote(), together with its rowid). Two
+	// sets of orphans give the same digest only when these rows are
+	// byte-identical, so a snapshot reused for the same digest holds exactly
+	// the rows the reconcile starts from. Rows that a CASCADE repair reaches
+	// further down (children of the deleted rows) are not part of the
+	// digest.
 	Orphans string
 }
 
-// orphanDigest returns a stable hex digest of the violating rows of fk:
-// their rowids and the values of fk's columns (one SELECT); see
-// FKRepairGroup.Orphans for what it does and does not tell apart.
+// orphanDigest returns a stable hex digest of the violating rows of fk,
+// with one SELECT over their full content; see FKRepairGroup.Orphans.
 func orphanDigest(ctx context.Context, q sqlQuerier, fk fkInfo, r *fkViolatingRows) (string, error) {
 	ids := make([]int64, 0, len(r.rowids))
 	for id := range r.rowids {
 		ids = append(ids, id)
 	}
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	cols := make([]string, len(fk.from))
-	for i, c := range fk.from {
-		cols[i] = "quote(" + quoteIdent(c) + ")"
-	}
-	rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s WHERE %s",
-		strings.Join(cols, " || ',' || "), quoteIdent(fk.table), orphanPredicate(fk)))
+	cols, err := orderedColumns(ctx, q, fk.table)
 	if err != nil {
-		return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+		return "", err
+	}
+	if len(cols) == 0 {
+		return "", fmt.Errorf("reading orphaned rows of %s: no columns", fk.table)
+	}
+	exprs := make([]string, len(cols))
+	for i, c := range cols {
+		exprs[i] = "quote(" + quoteIdent(c) + ")"
+	}
+	sel := strings.Join(exprs, " || ',' || ")
+	// foreign_key_check reports a NULL rowid only for WITHOUT ROWID
+	// tables, which have no rowid to select.
+	if len(r.rowids) > 0 {
+		sel = "quote(rowid) || '|' || " + sel
+	}
+	rows, err := q.QueryContext(ctx, fmt.Sprintf("SELECT %s FROM %s WHERE %s", sel, quoteIdent(fk.table), orphanPredicate(fk)))
+	if err != nil {
+		return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
 	}
 	defer func() { _ = rows.Close() }()
-	var keys []string
+	var content []string
 	for rows.Next() {
-		var k string
-		if err := rows.Scan(&k); err != nil {
-			return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
 		}
-		keys = append(keys, k)
+		content = append(content, c)
 	}
 	if err := rows.Err(); err != nil {
-		return "", fmt.Errorf("reading orphaned keys of %s: %w", fk.table, err)
+		return "", fmt.Errorf("reading orphaned rows of %s: %w", fk.table, err)
 	}
-	sort.Strings(keys)
+	sort.Strings(content)
 	h := sha256.New()
 	for _, id := range ids {
 		fmt.Fprintf(h, "%d\n", id)
 	}
 	fmt.Fprintf(h, "norowid=%d\n", r.noRowid)
-	for _, k := range keys {
-		fmt.Fprintf(h, "key=%s\n", k)
+	for _, c := range content {
+		fmt.Fprintf(h, "row=%d:%s\n", len(c), c)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// orderedColumns returns the table's columns in declaration order.
+func orderedColumns(ctx context.Context, q sqlQuerier, table string) ([]string, error) {
+	rows, err := q.QueryContext(ctx, "SELECT name FROM pragma_table_info(?) ORDER BY cid", table)
+	if err != nil {
+		return nil, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var cols []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("PRAGMA table_info(%s): scanning: %w", table, err)
+		}
+		cols = append(cols, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
+	}
+	return cols, nil
 }
 
 // diagnostic renders the unrepaired orphans with suggested repair SQL. It

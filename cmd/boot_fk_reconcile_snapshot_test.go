@@ -274,6 +274,59 @@ func TestFKReconcileSnapshot_SameCountDifferentRowsNewSnapshot(t *testing.T) {
 	assert.Equal(t, sql.NullString{String: gone, Valid: true}, roleDefinitionRef(t, snapDB, secondID), "the new snapshot holds the new orphan")
 }
 
+// After a completed reconcile, an orphan with the same rowid and the same
+// key but different content in another column gets a new snapshot that
+// holds it; the earlier snapshot, still on disk, is not reused.
+func TestFKReconcileSnapshot_ChangedRowContentNewSnapshot(t *testing.T) {
+	f := newRepairFixture(t)
+	s := f.boot(t)
+	require.NoError(t, s.Close())
+
+	db := openRawFKDB(t, f.dbPath)
+	bindingID, gone := uuid.NewString(), uuid.NewString()
+	fkInsertRow(t, db, "role_bindings", map[string]any{"id": bindingID, "principal_id": "p1", "role_definition_id": gone})
+	var rowid int64
+	require.NoError(t, db.QueryRow(`SELECT rowid FROM role_bindings WHERE id = ?`, bindingID).Scan(&rowid))
+	require.NoError(t, db.Close())
+
+	s = f.boot(t) // snapshot 1, then the reconcile clears the reference
+	require.NoError(t, s.Close())
+	first := fkSnapshots(t, f.dbPath)
+	require.Len(t, first, 1)
+
+	// The same row, by rowid and key, is orphaned again with a different
+	// principal.
+	db = openRawFKDB(t, f.dbPath)
+	_, err := db.Exec(`UPDATE role_bindings SET role_definition_id = ?, principal_id = 'p2' WHERE id = ?`, gone, bindingID)
+	require.NoError(t, err)
+	var again int64
+	require.NoError(t, db.QueryRow(`SELECT rowid FROM role_bindings WHERE id = ?`, bindingID).Scan(&again))
+	require.Equal(t, rowid, again, "fixture: same rowid")
+	require.NoError(t, db.Close())
+
+	logs, restore := captureSlog(t)
+	defer restore()
+	s = f.boot(t)
+	require.NoError(t, s.Close())
+	snaps := fkSnapshots(t, f.dbPath)
+	require.Len(t, snaps, 2, "the earlier snapshot must not be reused: %s", logs.String())
+	assert.NotContains(t, logs.String(), "reusing the database snapshot")
+	var latest string
+	for _, p := range snaps {
+		if p != first[0] {
+			latest = p
+		}
+	}
+	snapDB, err := sql.Open("sqlite", "file:"+latest+"?mode=ro")
+	require.NoError(t, err)
+	defer func() { _ = snapDB.Close() }()
+	var principal string
+	var ref sql.NullString
+	require.NoError(t, snapDB.QueryRow(`SELECT principal_id, role_definition_id FROM role_bindings WHERE id = ?`, bindingID).Scan(&principal, &ref))
+	assert.Equal(t, "p2", principal, "the new snapshot holds the row as it is now")
+	assert.Equal(t, sql.NullString{String: gone, Valid: true}, ref)
+}
+
 // The maintenance migrate helper snapshots too.
 func TestFKReconcileSnapshot_MaintenanceMigrate(t *testing.T) {
 	ctx := context.Background()

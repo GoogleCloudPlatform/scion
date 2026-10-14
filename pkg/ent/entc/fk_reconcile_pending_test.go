@@ -328,3 +328,43 @@ func TestAutoMigrate_BeforeFKReconcilePreCheckFailureContinues(t *testing.T) {
 	require.Equal(t, 1, fkCountRows(t, db, fmt.Sprintf(
 		`SELECT count(*) FROM role_bindings WHERE id = '%s' AND role_definition_id IS NULL`, bindingID)))
 }
+
+// The digest covers the orphaned rows' full content: the same rowid and the
+// same key with a different value in another column give a new digest,
+// while byte-identical rows give the same one.
+func TestPendingSQLiteFKRepairs_OrphanDigestCoversRowContent(t *testing.T) {
+	ctx := context.Background()
+	db := openFKTestDB(t)
+	mustExec(t, db,
+		`CREATE TABLE parent (id TEXT PRIMARY KEY)`,
+		`CREATE TABLE child (id TEXT PRIMARY KEY, pid TEXT REFERENCES parent(id) ON DELETE CASCADE, note TEXT)`,
+		`INSERT INTO child VALUES ('a', 'gone', 'first')`,
+	)
+	digest := func() string {
+		t.Helper()
+		g, err := PendingSQLiteFKRepairs(ctx, db)
+		require.NoError(t, err)
+		require.Len(t, g, 1)
+		require.Equal(t, 1, g[0].Rows)
+		return g[0].Orphans
+	}
+	rowid := func() int64 {
+		t.Helper()
+		var id int64
+		require.NoError(t, db.QueryRow(`SELECT rowid FROM child WHERE id = 'a'`).Scan(&id))
+		return id
+	}
+	first, firstRowid := digest(), rowid()
+
+	// The row is deleted (as a CASCADE repair would) and the same row comes
+	// back with the same rowid and key but a different note.
+	mustExec(t, db, `DELETE FROM child WHERE id = 'a'`, `INSERT INTO child VALUES ('a', 'gone', 'second')`)
+	require.Equal(t, firstRowid, rowid(), "fixture: the rowid is reused")
+	second := digest()
+	require.NotEqual(t, first, second, "same rowid and key, different non-key column")
+
+	// Byte-identical rows give the same digest.
+	mustExec(t, db, `DELETE FROM child WHERE id = 'a'`, `INSERT INTO child VALUES ('a', 'gone', 'first')`)
+	require.Equal(t, firstRowid, rowid())
+	require.Equal(t, first, digest())
+}
