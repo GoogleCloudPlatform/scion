@@ -19,8 +19,10 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
+	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokerhost"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
@@ -56,6 +58,32 @@ func (a *recordingActivator) Refused(inst config.V1RuntimeBrokerInstanceConfig, 
 	a.colocatedFlatActivator.Refused(inst, err)
 }
 
+// dockerScopeProbe adapts probe, a stand-in for the Docker daemon probe, to
+// the host's scope prober. A runtime that is not Docker is an error rather
+// than a panic (ptone/scion#5088): where an ambient Kubernetes config is
+// reachable, a non-Docker target can build a real Kubernetes runtime.
+func dockerScopeProbe(probe func(context.Context, string) (brokeridentity.ExecutionScope, error)) brokerhost.ScopeProber {
+	return func(ctx context.Context, _ config.V1RuntimeBrokerInstanceConfig, rt runtime.Runtime) (brokeridentity.ExecutionScope, error) {
+		d, ok := rt.(*runtime.DockerRuntime)
+		if !ok {
+			return brokeridentity.ExecutionScope{}, fmt.Errorf("test docker probe: runtime is %T, not *runtime.DockerRuntime", rt)
+		}
+		return probe(ctx, d.Command)
+	}
+}
+
+// isolateKubernetesEnv keeps a test from reaching an ambient Kubernetes
+// cluster (ptone/scion#5088): it clears the in-cluster service variables and
+// points KUBECONFIG at a file that does not exist, so a Kubernetes client
+// built from the default loading rules fails instead of using the cluster
+// the tests happen to run in or next to.
+func isolateKubernetesEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("KUBERNETES_SERVICE_HOST", "")
+	t.Setenv("KUBERNETES_SERVICE_PORT", "")
+	t.Setenv("KUBECONFIG", filepath.Join(t.TempDir(), "no-kubeconfig"))
+}
+
 // prepareFlatInstance activates one co-located flat instance through the
 // production host (brokerhost.Host with the co-located activator and the
 // production runtime factory), with probe standing in for the Docker scope
@@ -68,10 +96,8 @@ func prepareFlatInstance(ctx context.Context, hubSrv *hub.Server, _ *runtime.Doc
 		Mode:       brokerhost.ModeColocated,
 		LegacyIDs:  legacyIDs,
 		NewRuntime: newFlatInstanceRuntime,
-		ProbeScope: func(ctx context.Context, _ config.V1RuntimeBrokerInstanceConfig, rt runtime.Runtime) (brokeridentity.ExecutionScope, error) {
-			return probe(ctx, rt.(*runtime.DockerRuntime).Command)
-		},
-		Activator: act,
+		ProbeScope: dockerScopeProbe(probe),
+		Activator:  act,
 		BuildServer: func(ic brokerhost.InstanceContext) (*runtimebroker.Server, error) {
 			cfg := runtimebroker.DefaultServerConfig()
 			cfg.BrokerID = ic.Identity.RuntimeBrokerID
