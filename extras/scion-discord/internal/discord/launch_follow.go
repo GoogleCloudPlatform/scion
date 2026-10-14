@@ -72,7 +72,11 @@ func (h *CommandHandler) followCreateLaunch(s *discordgo.Session, i *discordgo.I
 			h.log.Warn("Failed to edit status message while following launch", "error", err, "slug", slug)
 		}
 	}
-	editStatus(fmt.Sprintf("⏳ Starting agent `%s`…", slug))
+	// OnStep reports the create answer's step at once; without one, say
+	// the agent is starting.
+	if resp.Agent == nil || resp.Agent.Launch == nil || resp.Agent.Launch.Step == "" {
+		editStatus(fmt.Sprintf("⏳ Starting agent `%s`…", slug))
+	}
 
 	id := resp.ID
 	if id == "" {
