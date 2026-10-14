@@ -182,3 +182,28 @@ func TestConduitGrantRingSettledWithoutTraffic(t *testing.T) {
 	require.Eventually(t, func() bool { return len(seed()) == 0 }, 5*time.Second, 10*time.Millisecond,
 		"the stored ring still holds the outgoing seed one settle period after activation")
 }
+
+// TestConduitGrantRingSingleKeyNotRewritten: a stored ring with one active
+// key and no successor is never written back by loading or settling it, so
+// a hub upgraded onto an existing ring writes nothing.
+func TestConduitGrantRingSingleKeyNotRewritten(t *testing.T) {
+	srv, _ := testServer(t)
+	keyClock := &conduitTestClock{now: time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)}
+	mem := &memoryConduitGrantKeyStore{}
+	srv.conduitGrants = newConduitGrantKeys(mem, keyClock.Now)
+	setConduitExperiment(t, srv, true)
+	ctx := context.Background()
+	_, err := srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	_, rev, err := mem.Load(ctx)
+	require.NoError(t, err)
+	for range 3 {
+		keyClock.Advance(conduitGrantKeyRefresh)
+		require.NoError(t, srv.conduitGrants.settleNow(ctx))
+		_, err := srv.ConduitGrantPublicKeys(ctx)
+		require.NoError(t, err)
+	}
+	_, after, err := mem.Load(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, rev, after, "the single-key ring was rewritten")
+}

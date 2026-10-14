@@ -309,3 +309,23 @@ func TestKeyRingValidateSeedless(t *testing.T) {
 		t.Fatal("a key with neither seed nor public key validated")
 	}
 }
+
+// TestKeyRingSettleSingleKeyNoChange: a ring with one active key and no
+// successor is unchanged by Settle at any later time, so an upgraded hub
+// never rewrites it.
+func TestKeyRingSettleSingleKeyNoChange(t *testing.T) {
+	now := time.Date(2026, 10, 3, 12, 0, 0, 0, time.UTC)
+	k, err := NewRingKey(now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ring := &KeyRing{Keys: []RingKey{k}}
+	for _, at := range []time.Duration{0, time.Minute, time.Hour, 30 * 24 * time.Hour} {
+		if ring.Settle(now.Add(at), 8*time.Hour) {
+			t.Fatalf("Settle changed a single-key ring at +%v", at)
+		}
+	}
+	if len(ring.Keys) != 1 || len(ring.Keys[0].Seed) == 0 || len(ring.Retained) != 0 {
+		t.Fatalf("ring changed: %+v", ring)
+	}
+}
