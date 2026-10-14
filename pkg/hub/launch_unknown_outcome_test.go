@@ -31,7 +31,10 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/GoogleCloudPlatform/scion/pkg/wsprotocol"
+	conduitv1 "github.com/GoogleCloudPlatform/scion/proto/conduit/v1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -109,6 +112,47 @@ func TestDispatchAgentCreate_UnknownSendOutcomeKeepsLaunch(t *testing.T) {
 			assert.Contains(t, warns.Warnings(), launchOutcomeUnknownWarning)
 		})
 	}
+}
+
+// conduitDropAfterSendErr returns the error a conduit tunnel gives when the
+// broker's session ends after the request reached it, before any answer:
+// a real session pair, as in TestConduitBrokerTunnel_LostResponseIsOutcomeUnknown.
+func conduitDropAfterSendErr(t *testing.T) error {
+	t.Helper()
+	var drop func()
+	ready := make(chan struct{})
+	reached := make(chan struct{}, 1)
+	rpc := conduit.RPCHandlerFunc(func(ctx context.Context, _ *conduitv1.RpcRequest) *conduitv1.RpcResponse {
+		reached <- struct{}{}
+		<-ready
+		drop()       // the broker goes away before answering
+		<-ctx.Done() // the session has ended: no response is sent
+		return nil
+	})
+	hub, d := newBrokerConduitPair(t, conduit.Config{RPCHandler: rpc})
+	drop = d
+	close(ready)
+	tun := newConduitBrokerTunnel(func(string) conduit.Session { return hub }, 0)
+	_, err := tun.TunnelRequest(context.Background(), "broker-1", wsprotocol.NewRequestEnvelope("drop-1", http.MethodPost, "/api/v1/agents", "", nil, []byte(`{}`)))
+	require.Error(t, err)
+	require.Len(t, reached, 1, "the request reached the broker before the session ended")
+	return err
+}
+
+// A conduit session that ends after the create request reached the broker
+// keeps the launch accepted, as a control-channel connection loss does.
+func TestDispatchAgentCreate_ConduitDropAfterSendKeepsLaunch(t *testing.T) {
+	sendErr := conduitDropAfterSendErr(t)
+	f := newAsyncLaunchFixture(t, &store.BrokerCapabilities{AsyncLaunch: true})
+	gen := withMintingTokens(f)
+	f.client.answer = func(*RemoteCreateAgentRequest) (*RemoteAgentResponse, *RemoteEnvRequirementsResponse, error) {
+		return nil, nil, sendErr
+	}
+	agent := f.agent(t, "conduit-drop", string(state.PhaseCreated), true)
+
+	res, err := f.dispatcher.DispatchAgentCreate(context.Background(), agent)
+	require.NoError(t, err)
+	assertKeptAcceptedLaunch(t, f, gen, agent.ID, res.AcceptedLaunch())
 }
 
 func TestDispatchAgentCreateWithGather_UnknownSendOutcomeKeepsLaunch(t *testing.T) {
