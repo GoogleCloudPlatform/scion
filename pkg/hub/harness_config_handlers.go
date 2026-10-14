@@ -16,6 +16,7 @@ package hub
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -29,7 +30,6 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/harness"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/imagecheck"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -126,15 +126,40 @@ func (s *Server) checkRegistryImage(ctx context.Context, longImage string) Regis
 
 // CreateHarnessConfigRequest is the request body for creating a harness config.
 type CreateHarnessConfigRequest struct {
-	Name        string                   `json:"name"`
-	Slug        string                   `json:"slug,omitempty"`
-	DisplayName string                   `json:"displayName,omitempty"`
-	Description string                   `json:"description,omitempty"`
-	Harness     string                   `json:"harness"`
-	Scope       string                   `json:"scope"`
-	ScopeID     string                   `json:"scopeId,omitempty"`
-	Config      *store.HarnessConfigData `json:"config,omitempty"`
-	Files       []FileUploadRequest      `json:"files,omitempty"`
+	Name        string              `json:"name"`
+	Slug        string              `json:"slug,omitempty"`
+	DisplayName string              `json:"displayName,omitempty"`
+	Description string              `json:"description,omitempty"`
+	Harness     string              `json:"harness"`
+	Scope       string              `json:"scope"`
+	ScopeID     string              `json:"scopeId,omitempty"`
+	Files       []FileUploadRequest `json:"files,omitempty"`
+
+	// Config is not settable (ptone/scion#4219): a harness-config's
+	// config is derived from its config.yaml. It is decoded only so a body
+	// that carries it is refused with 400 harness_config_config_in_file.
+	Config json.RawMessage `json:"config,omitempty"`
+}
+
+// Error code for a harness-config create that carries config
+// (ptone/scion#4219).
+const (
+	ErrCodeHarnessConfigConfigInFile = "harness_config_config_in_file"
+	harnessConfigConfigInFileMessage = "harness config config is not settable through the API; set it in config.yaml"
+)
+
+// UpdateHarnessConfigRequest is the request body of a harness-config PUT. A
+// PUT replaces only the metadata (name, slug, display name, description);
+// every other field keeps its stored value (ptone/scion#4219). Unlike a
+// template PUT, a body that carries other fields (config, files, ...) is not
+// refused: a harness-config GET returns the config derived from config.yaml,
+// so a client that PUTs back what it read must keep working. Those fields
+// are ignored.
+type UpdateHarnessConfigRequest struct {
+	Name        string `json:"name"`
+	Slug        string `json:"slug,omitempty"`
+	DisplayName string `json:"displayName,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // CreateHarnessConfigResponse is the response for harness config creation.
@@ -269,6 +294,10 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		ValidationError(w, "harness is required", nil)
 		return
 	}
+	if carriesJSONValue(req.Config) {
+		writeError(w, http.StatusBadRequest, ErrCodeHarnessConfigConfigInFile, harnessConfigConfigInFileMessage, nil)
+		return
+	}
 	if !isValidHarnessConfigScope(req.Scope) {
 		ValidationError(w, fmt.Sprintf("invalid scope %q: must be \"global\", \"project\" or \"user\"", req.Scope), nil)
 		return
@@ -308,9 +337,16 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 
 	slug := req.Slug
 	if slug == "" {
-		slug = api.Slugify(req.Name)
+		slug = req.Name
+	}
+	slug = api.Slugify(slug)
+	if slug == "" {
+		ValidationError(w, "slug is empty after normalization", nil)
+		return
 	}
 
+	// The row carries the requested harness until its first commit derives
+	// Harness and Config from config.yaml.
 	hc := &store.HarnessConfig{
 		ID:          api.NewUUID(),
 		Name:        req.Name,
@@ -318,7 +354,6 @@ func (s *Server) createHarnessConfig(w http.ResponseWriter, r *http.Request) {
 		DisplayName: req.DisplayName,
 		Description: req.Description,
 		Harness:     req.Harness,
-		Config:      req.Config,
 		Scope:       req.Scope,
 		ScopeID:     req.ScopeID,
 		Status:      store.HarnessConfigStatusPending,
@@ -558,26 +593,16 @@ func (s *Server) getHarnessConfig(w http.ResponseWriter, r *http.Request, hc *st
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// harnessConfigImage is the image the image handlers show and check: the
+// built image when the build executor has set one, otherwise config.yaml's
+// image (effectiveHarnessConfigImage).
 func (s *Server) harnessConfigImage(hc *store.HarnessConfig) string {
-	if hc.Config != nil {
-		return hc.Config.Image
-	}
-	return ""
-}
-
-func extractImageFromStorage(ctx context.Context, stor storage.Storage, storagePath string) string {
-	entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, storagePath)
-	if !ok {
-		return ""
-	}
-	return entry.Image
+	return effectiveHarnessConfigImage(hc)
 }
 
 // extractHarnessConfigEntryFromStorage downloads and parses config.yaml from
 // a harness config's storage path, returning ok=false if it can't be
-// downloaded or parsed. Callers that only need one field (extractImageFromStorage)
-// or that need to stamp several fields at once (the file upload and finalize
-// handlers, via applyModelConfigFromEntry) share this single download+parse.
+// downloaded or parsed.
 func extractHarnessConfigEntryFromStorage(ctx context.Context, stor storage.Storage, storagePath string) (config.HarnessConfigEntry, bool) {
 	objectPath := storagePath + "/config.yaml"
 	reader, _, err := stor.Download(ctx, objectPath)
@@ -605,32 +630,23 @@ func (s *Server) updateHarnessConfig(w http.ResponseWriter, r *http.Request, exi
 		return
 	}
 
-	var hc store.HarnessConfig
-	if err := readJSON(r, &hc); err != nil {
+	var req UpdateHarnessConfigRequest
+	if err := readJSON(r, &req); err != nil {
 		BadRequest(w, "Invalid request body: "+err.Error())
 		return
 	}
 
-	// Preserve immutable fields
-	hc.ID = existing.ID
-	hc.Created = existing.Created
-	hc.CreatedBy = existing.CreatedBy
-	hc.Scope = existing.Scope
-	hc.ScopeID = existing.ScopeID
-	hc.OwnerID = existing.OwnerID
-	hc.StoragePath = existing.StoragePath
-	hc.StorageURI = existing.StorageURI
-	hc.StorageBucket = existing.StorageBucket
-	// Content state is computed by the server during upload/finalize and
-	// is carried over from the existing record.
-	hc.ContentHash = existing.ContentHash
-	hc.Files = existing.Files
-	// Lifecycle and image-check state are managed by the server and are
-	// carried over from the existing record.
-	hc.Status = existing.Status
-	hc.ImageStatus = existing.ImageStatus
-	hc.ImageStatusCheckedAt = existing.ImageStatusCheckedAt
-	// The updater is the authenticated caller.
+	// A PUT replaces only the metadata. Everything else keeps its stored
+	// value: identity, scope and ownership, the files and what is derived
+	// from them (managed by the commit path), storage, lifecycle, image
+	// state and provenance. The store's metadata update writes none of the
+	// content columns either, so a PUT from a stale read cannot revert a
+	// commit (ptone/scion#4219).
+	hc := *existing
+	hc.Name = req.Name
+	hc.Slug = req.Slug
+	hc.DisplayName = req.DisplayName
+	hc.Description = req.Description
 	hc.UpdatedBy = identity.ID()
 	if hc.Slug == "" {
 		hc.Slug = api.Slugify(hc.Name)
@@ -875,51 +891,21 @@ func (s *Server) handleHarnessConfigFinalize(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	contentHash, err := verifyAndFinalizeFiles(ctx, stor, hc.StoragePath, req.Manifest.Files)
-	if err != nil {
-		if writeInvalidFilePathError(w, err) {
-			return
-		}
-		ValidationError(w, err.Error(), nil)
-		return
-	}
-
-	previousFiles := hc.Files
-	hc.Files = req.Manifest.Files
-	hc.ContentHash = contentHash
 	hc.Status = store.HarnessConfigStatusActive
 	if sourceURL != "" {
 		hc.SourceURL = sourceURL
 	}
-
-	if entry, ok := extractHarnessConfigEntryFromStorage(ctx, stor, hc.StoragePath); ok {
-		// Refuse a provisioner block that could never provision an agent
-		// (builtin type, or no command) at upload time, with the same code
-		// dispatch would return, instead of accepting it and failing every
-		// later launch (ptone/scion#3133).
-		if perr := harness.CheckProvisionerUsable(hc.Name, nil, entry); perr != nil {
-			writeError(w, http.StatusUnprocessableEntity, harnessConfigUnusableErrorCode, perr.PublicMessage(), nil)
-			return
-		}
-		if entry.Image != "" {
-			if hc.Config == nil {
-				hc.Config = &store.HarnessConfigData{}
-			}
-			hc.Config.Image = entry.Image
-		}
-		applyModelConfigFromEntry(hc, entry)
-	}
-
-	if err := s.store.UpdateHarnessConfig(ctx, hc); err != nil {
-		writeErrorFromErr(w, err, "")
+	// The commit verifies every manifest object, refuses an unusable
+	// provisioner (422, ptone/scion#3133), derives Harness and Config from
+	// config.yaml, writes the row with a compare-and-swap against the
+	// content hash read above (409 harness_config_conflict when another
+	// commit won), and then deletes the objects of files the manifest
+	// dropped. Brokers with local storage hydrate the whole storage
+	// directory, so a stale object would otherwise still reach agents.
+	if err := s.commitHarnessConfigFiles(ctx, hc, req.Manifest.Files, harnessConfigCommitOpts{verifyAll: true}); err != nil {
+		writeHarnessConfigCommitError(w, err)
 		return
 	}
-
-	// The manifest is the complete file list, so files the previous record
-	// listed but the manifest does not (deleted locally before a sync) are
-	// removed from storage. Brokers with local storage hydrate the whole
-	// storage directory, so a stale object would otherwise still reach agents.
-	s.deleteRemovedHarnessConfigFiles(ctx, stor, hc, previousFiles)
 
 	writeJSON(w, http.StatusOK, hc)
 }
@@ -953,11 +939,11 @@ func (s *Server) deleteRemovedHarnessConfigFiles(ctx context.Context, stor stora
 		}
 	}
 	if len(skipped) > 0 {
-		s.resourceLog.Warn("harness-config finalize: skipped deleting removed files with invalid paths",
+		s.resourceLog.Warn("harness-config commit: skipped deleting removed files with invalid paths",
 			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", skipped)
 	}
 	if len(failed) > 0 {
-		s.resourceLog.Warn("harness-config finalize: failed to delete removed files from storage",
+		s.resourceLog.Warn("harness-config commit: failed to delete removed files from storage",
 			"id", hc.ID, "name", hc.Name, "storagePath", hc.StoragePath, "paths", failed)
 	}
 }
@@ -1280,11 +1266,13 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 		Slug:        api.Slugify(req.Name),
 		DisplayName: source.DisplayName,
 		Description: source.Description,
-		Harness:     source.Harness,
-		Config:      source.Config,
-		Scope:       destScope,
-		ScopeID:     scopeID,
-		Status:      store.HarnessConfigStatusPending,
+		// Harness is the fallback for a config.yaml that sets none; Config
+		// is never copied: the commit below re-derives both from the
+		// copied files (ptone/scion#4219).
+		Harness: source.Harness,
+		Scope:   destScope,
+		ScopeID: scopeID,
+		Status:  store.HarnessConfigStatusPending,
 	}
 
 	// For user-scoped clones, set the owner from the authenticated user
@@ -1331,12 +1319,19 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 				return
 			}
 		}
-		clone.Files = source.Files
-		clone.ContentHash = source.ContentHash
 		clone.Status = store.HarnessConfigStatusActive
 	}
 
-	if err := s.store.CreateHarnessConfig(ctx, clone); err != nil {
+	// A clone with copied files is created through the commit path, which
+	// re-derives Harness and Config from the copied config.yaml instead of
+	// copying the source's derived fields (ptone/scion#4219).
+	var createErr error
+	if stor != nil && len(source.Files) > 0 && source.StoragePath != "" {
+		createErr = s.commitHarnessConfigFiles(ctx, clone, source.Files, harnessConfigCommitOpts{create: true})
+	} else {
+		createErr = s.store.CreateHarnessConfig(ctx, clone)
+	}
+	if err := createErr; err != nil {
 		if stor != nil {
 			_ = stor.DeletePrefix(ctx, storage.DirPrefix(storagePath))
 		}
@@ -1344,7 +1339,7 @@ func (s *Server) handleHarnessConfigClone(w http.ResponseWriter, r *http.Request
 			writeError(w, http.StatusConflict, "conflict", "A resource with this slug already exists in the target scope. Choose a different name.", nil)
 			return
 		}
-		writeErrorFromErr(w, err, "")
+		writeHarnessConfigCommitError(w, err)
 		return
 	}
 
@@ -1441,7 +1436,19 @@ func (s *Server) handleHarnessConfigReimport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// The slug filter selects the source entry (ptone/scion#4213); the
+	// target store writes it into the row with hc's ID, whatever the slug
+	// of the entry or the row is by the time it is persisted
+	// (ptone/scion#4219).
 	kind := s.harnessConfigImportKind()
+	targetID := hc.ID
+	kind.newStore = func(dir string) (*ResourceStore, error) {
+		// The same config.yaml validation as an import.
+		if _, err := config.LoadHarnessConfigDir(dir); err != nil {
+			return nil, err
+		}
+		return s.targetHarnessConfigStore(targetID), nil
+	}
 	slug := reimportTargetSlug(hc)
 	run := func(progress importProgressFunc) ([]string, error) {
 		return s.importFromRemoteSelected(ctx, hc.ScopeID, sourceURL, hc.Scope, kind, progress,
