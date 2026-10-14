@@ -30,9 +30,10 @@ const RenewalTokenType = "conduit-renewal+jwt"
 // RenewalClaims is the payload of a renewal grant: the hub's renewal of one
 // open stream's authorization deadline (design §3.5, "Enforcement point").
 // It is signed with the same key ring as stream grants and is bound to the
-// stream it renews twice over: by StreamID, the id the target knows the
-// stream by, and by OpenJTI, the jti of the grant the stream was opened
-// with, together with the target's session, epoch and incarnation.
+// stream it renews: by StreamID, the id the target knows the stream by, by
+// OpenJTI, the jti of the grant the stream was opened with, and by Stream,
+// the open grant's signed kind and params, copied unchanged (design v2.21.26
+// §3.5), together with the target's session, epoch and incarnation.
 type RenewalClaims struct {
 	Issuer    string
 	Audience  string
@@ -41,8 +42,12 @@ type RenewalClaims struct {
 	Subject   string
 	ProjectID string
 	Target    Target
-	StreamID  uint32
-	OpenJTI   string
+	// Stream is the stream's kind and params, copied unchanged from the
+	// grant the renewal was minted from (the open grant or an earlier
+	// renewal for the same OpenJTI).
+	Stream   StreamHeader
+	StreamID uint32
+	OpenJTI  string
 	// AuthzUntil is the stream's new authorization deadline.
 	AuthzUntil time.Time
 	NotBefore  time.Time
@@ -51,18 +56,19 @@ type RenewalClaims struct {
 
 // wireRenewal is the JSON form of RenewalClaims. Times are Unix seconds.
 type wireRenewal struct {
-	Issuer     string `json:"iss"`
-	Audience   string `json:"aud"`
-	KeyID      string `json:"kid"`
-	JTI        string `json:"jti"`
-	Subject    string `json:"sub"`
-	ProjectID  string `json:"project_id"`
-	Target     Target `json:"target"`
-	StreamID   uint32 `json:"stream_id"`
-	OpenJTI    string `json:"open_jti"`
-	AuthzUntil int64  `json:"authz_until"`
-	NotBefore  int64  `json:"nbf"`
-	Expiry     int64  `json:"exp"`
+	Issuer     string       `json:"iss"`
+	Audience   string       `json:"aud"`
+	KeyID      string       `json:"kid"`
+	JTI        string       `json:"jti"`
+	Subject    string       `json:"sub"`
+	ProjectID  string       `json:"project_id"`
+	Target     Target       `json:"target"`
+	Stream     StreamHeader `json:"stream"`
+	StreamID   uint32       `json:"stream_id"`
+	OpenJTI    string       `json:"open_jti"`
+	AuthzUntil int64        `json:"authz_until"`
+	NotBefore  int64        `json:"nbf"`
+	Expiry     int64        `json:"exp"`
 }
 
 func (c *RenewalClaims) validate() error {
@@ -77,6 +83,8 @@ func (c *RenewalClaims) validate() error {
 		return fmt.Errorf("%w: missing project_id", ErrInvalidClaims)
 	case !c.Target.complete():
 		return fmt.Errorf("%w: incomplete target", ErrInvalidClaims)
+	case !IsStreamKind(c.Stream.Kind):
+		return fmt.Errorf("%w: missing or unknown stream kind %q", ErrInvalidClaims, c.Stream.Kind)
 	case c.StreamID == 0:
 		return fmt.Errorf("%w: missing stream_id", ErrInvalidClaims)
 	case c.OpenJTI == "":
@@ -126,7 +134,7 @@ func MintRenewal(signer *Signer, c RenewalClaims) ([]byte, error) {
 	}
 	return sign(signer, RenewalTokenType, wireRenewal{
 		Issuer: c.Issuer, Audience: c.Audience, KeyID: c.KeyID, JTI: c.JTI,
-		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target,
+		Subject: c.Subject, ProjectID: c.ProjectID, Target: c.Target, Stream: c.Stream,
 		StreamID: c.StreamID, OpenJTI: c.OpenJTI, AuthzUntil: c.AuthzUntil.Unix(),
 		NotBefore: c.NotBefore.Unix(), Expiry: c.Expiry.Unix(),
 	})
@@ -142,6 +150,9 @@ type RenewalExpectation struct {
 	Target    Target
 	ProjectID string
 	Subject   string
+	// Stream is the admitted open grant's signed stream (kind and params);
+	// the renewal's stream claim must equal it. Required.
+	Stream StreamHeader
 	// StreamID and OpenJTI name the stream: the id the renewal arrived
 	// for and the jti of its open grant. Required.
 	StreamID uint32
@@ -167,7 +178,7 @@ func VerifyRenewal(ctx context.Context, token []byte, keys KeySet, expect Renewa
 	if keys == nil || replay == nil {
 		return nil, fmt.Errorf("%w: nil key set or replay cache", ErrExpectation)
 	}
-	if !expect.Target.complete() || expect.ProjectID == "" || expect.Subject == "" ||
+	if !expect.Target.complete() || expect.ProjectID == "" || expect.Subject == "" || !IsStreamKind(expect.Stream.Kind) ||
 		expect.StreamID == 0 || expect.OpenJTI == "" || expect.After.IsZero() || expect.NotAfter.IsZero() {
 		return nil, ErrExpectation
 	}
@@ -186,7 +197,7 @@ func VerifyRenewal(ctx context.Context, token []byte, keys KeySet, expect Renewa
 	}
 	c := &RenewalClaims{
 		Issuer: w.Issuer, Audience: w.Audience, KeyID: w.KeyID, JTI: w.JTI,
-		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target,
+		Subject: w.Subject, ProjectID: w.ProjectID, Target: w.Target, Stream: w.Stream,
 		StreamID: w.StreamID, OpenJTI: w.OpenJTI, AuthzUntil: timeOrZero(w.AuthzUntil),
 		NotBefore: time.Unix(w.NotBefore, 0), Expiry: time.Unix(w.Expiry, 0),
 	}
@@ -219,6 +230,9 @@ func VerifyRenewal(ctx context.Context, token []byte, keys KeySet, expect Renewa
 	}
 	if c.StreamID != expect.StreamID || c.OpenJTI != expect.OpenJTI {
 		return nil, ErrStreamBinding
+	}
+	if !c.Stream.Equal(expect.Stream) {
+		return nil, ErrStream
 	}
 	if !c.AuthzUntil.After(expect.After) || c.AuthzUntil.After(expect.NotAfter) {
 		return nil, ErrAuthzUntil

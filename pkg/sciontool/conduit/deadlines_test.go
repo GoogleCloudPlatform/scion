@@ -147,11 +147,17 @@ func withDeadline(jti string, until time.Time, interval time.Duration) func(*gra
 }
 
 // renewalFor mints a renewal minted at now for the stream st on s, opened
-// with a grant whose jti is openJTI.
-func renewalFor(t *testing.T, key testKey, s core.LocalSession, st core.Stream, now time.Time, openJTI string, until time.Time, mut func(*grant.RenewalClaims)) []byte {
+// by open with a grant whose jti is openJTI; its stream claim is copied
+// from open.
+func renewalFor(t *testing.T, key testKey, s core.LocalSession, st core.Stream, open *conduitv1.StreamOpen, now time.Time, openJTI string, until time.Time, mut func(*grant.RenewalClaims)) []byte {
 	t.Helper()
 	info := s.Info()
+	kind, err := core.StreamKindFromProto(open.GetKind())
+	if err != nil {
+		t.Fatal(err)
+	}
 	c := grant.RenewalClaims{
+		Stream: grant.StreamHeader{Kind: string(kind), Params: open.GetParams()},
 		Issuer: "scion-hub", Subject: "user:u1", ProjectID: testProjectID,
 		Target: grant.Target{
 			Kind: grant.TargetKindAgent, ID: testAgentID, EndpointIncarnation: "launch-1",
@@ -397,8 +403,8 @@ func TestAgentDeadlineModeOff(t *testing.T) {
 // TestAgentStreamClosesAtDeadline: a stream whose grant carries
 // authz_until is closed with 4401 at authz_until + 30s, not before, when
 // no valid renewal arrives. Refused renewals (another open_jti, another
-// iss, past the cap) neither extend the deadline nor close the stream
-// early, and each is logged.
+// iss, past the cap, another stream) neither extend the deadline nor close
+// the stream early, and each is logged.
 func TestAgentStreamClosesAtDeadline(t *testing.T) {
 	readLog := captureLog(t)
 	k1 := newTestKey(t, "k1")
@@ -408,13 +414,17 @@ func TestAgentStreamClosesAtDeadline(t *testing.T) {
 	fa.keysFetched(t, true)
 	now := fakeStart
 	until := now.Add(10 * time.Second)
-	st := mustOpen(t, s, openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute)), "stream with a deadline")
+	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute))
+	st := mustOpen(t, s, open, "stream with a deadline")
 
 	r := st.(core.StreamRenewer)
 	refused := [][]byte{
-		renewalFor(t, k1, s, st, now, "open-2", until.Add(20*time.Second), nil),
-		renewalFor(t, k1, s, st, now, "open-1", until.Add(20*time.Second), func(c *grant.RenewalClaims) { c.Issuer = "other-hub" }),
-		renewalFor(t, k1, s, st, now, "open-1", now.Add(time.Minute+target.DeadlineGrace+time.Second), nil),
+		renewalFor(t, k1, s, st, open, now, "open-2", until.Add(20*time.Second), nil),
+		renewalFor(t, k1, s, st, open, now, "open-1", until.Add(20*time.Second), func(c *grant.RenewalClaims) { c.Issuer = "other-hub" }),
+		renewalFor(t, k1, s, st, open, now, "open-1", now.Add(time.Minute+target.DeadlineGrace+time.Second), nil),
+		renewalFor(t, k1, s, st, open, now, "open-1", until.Add(20*time.Second), func(c *grant.RenewalClaims) {
+			c.Stream = grant.StreamHeader{Kind: grant.StreamKindPTY}
+		}),
 	}
 	for _, tok := range refused {
 		if err := r.Renew(tok); err != nil {
@@ -452,10 +462,11 @@ func TestAgentRenewalExtendsDeadline(t *testing.T) {
 	fa.keysFetched(t, true)
 	now := fakeStart
 	until := now.Add(10 * time.Second)
-	st := mustOpen(t, s, openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute)), "stream with a deadline")
+	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", until, time.Minute))
+	st := mustOpen(t, s, open, "stream with a deadline")
 
 	renewed := until.Add(20 * time.Second)
-	if err := st.(core.StreamRenewer).Renew(renewalFor(t, k1, s, st, now, "open-1", renewed, nil)); err != nil {
+	if err := st.(core.StreamRenewer).Renew(renewalFor(t, k1, s, st, open, now, "open-1", renewed, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if out := fa.nextRenewal(t); out.err != nil || out.streamID != st.ID() {
@@ -478,8 +489,8 @@ func TestAgentRenewalExtendsDeadline(t *testing.T) {
 	}
 }
 
-// TestAgentAdvertisesStreamRenewal: the Hello lists the stream_renewal
-// feature.
+// TestAgentAdvertisesStreamRenewal: the Hello lists the stream_renewal.v2
+// feature (design v2.21.26).
 func TestAgentAdvertisesStreamRenewal(t *testing.T) {
 	h := newFakeHub(t, newTestKey(t, "k1").public)
 	startFakeAgent(t, h, nil)
@@ -501,13 +512,14 @@ func TestAgentRenewalUnknownKidDoesNotStallFrames(t *testing.T) {
 	s := h.nextSession(t)
 	fa.keysFetched(t, true)
 	now := fakeStart
-	st := mustOpen(t, s, openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour)), "stream with a deadline")
+	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour))
+	st := mustOpen(t, s, open, "stream with a deadline")
 
 	h.set(func(h *fakeHub) { h.keys = []grant.PublicKey{k1.public, k2.public} })
 	blocking.Store(true)
 	r := st.(core.StreamRenewer)
 	viaK2 := now.Add(30 * time.Minute)
-	if err := r.Renew(renewalFor(t, k2, s, st, now, "open-1", viaK2, nil)); err != nil {
+	if err := r.Renew(renewalFor(t, k2, s, st, open, now, "open-1", viaK2, nil)); err != nil {
 		t.Fatal(err)
 	}
 	waitEntered(t, entered)
@@ -517,7 +529,7 @@ func TestAgentRenewalUnknownKidDoesNotStallFrames(t *testing.T) {
 		t.Fatal("stream stalled while a key fetch was in flight")
 	}
 	viaK1 := now.Add(10 * time.Minute)
-	if err := r.Renew(renewalFor(t, k1, s, st, now, "open-1", viaK1, nil)); err != nil {
+	if err := r.Renew(renewalFor(t, k1, s, st, open, now, "open-1", viaK1, nil)); err != nil {
 		t.Fatal(err)
 	}
 	if out := fa.nextRenewal(t); out.err != nil {
@@ -549,14 +561,15 @@ func TestAgentRenewalQueueFull(t *testing.T) {
 	s := h.nextSession(t)
 	fa.keysFetched(t, true)
 	now := fakeStart
-	st := mustOpen(t, s, openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour)), "stream with a deadline")
+	open := openAt(t, k1, s, echoListener(t), now, withDeadline("open-1", now.Add(time.Minute), time.Hour))
+	st := mustOpen(t, s, open, "stream with a deadline")
 
 	h.set(func(h *fakeHub) { h.keys = []grant.PublicKey{k1.public, k2.public} })
 	blocking.Store(true)
 	r := st.(core.StreamRenewer)
 	// The first unknown-kid renewal takes the worker, which blocks in the
 	// key fetch.
-	if err := r.Renew(renewalFor(t, k2, s, st, now, "open-1", now.Add(2*time.Minute), nil)); err != nil {
+	if err := r.Renew(renewalFor(t, k2, s, st, open, now, "open-1", now.Add(2*time.Minute), nil)); err != nil {
 		t.Fatal(err)
 	}
 	waitEntered(t, entered)
@@ -564,14 +577,14 @@ func TestAgentRenewalQueueFull(t *testing.T) {
 	queued := now.Add(2 * time.Minute)
 	for i := range renewalQueueSize {
 		queued = now.Add(2*time.Minute + time.Duration(i+1)*time.Second)
-		if err := r.Renew(renewalFor(t, k2, s, st, now, "open-1", queued, nil)); err != nil {
+		if err := r.Renew(renewalFor(t, k2, s, st, open, now, "open-1", queued, nil)); err != nil {
 			t.Fatal(err)
 		}
 	}
 	overflow := now.Add(50 * time.Minute)
 	const extra = 2
 	for range extra {
-		if err := r.Renew(renewalFor(t, k2, s, st, now, "open-1", overflow, nil)); err != nil {
+		if err := r.Renew(renewalFor(t, k2, s, st, open, now, "open-1", overflow, nil)); err != nil {
 			t.Fatal(err)
 		}
 		if out := fa.nextRenewal(t); !errors.Is(out.err, errRenewalQueueFull) {

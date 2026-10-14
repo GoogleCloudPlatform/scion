@@ -180,9 +180,11 @@ type Resizable interface {
 }
 
 // FeatureStreamRenewal is the Hello capabilities feature of a target that
-// enforces stream authorization deadlines and accepts renewal grants
-// (design v2.21.17 §3.5, "Target-side deadlines").
-const FeatureStreamRenewal = "stream_renewal"
+// enforces stream authorization deadlines and accepts renewal grants that
+// carry the stream's kind and params (design v2.21.26 §3.5, "Target-side
+// deadlines"). A target advertising an earlier version counts as lacking
+// renewal.
+const FeatureStreamRenewal = "stream_renewal.v2"
 
 // StreamRenewer is implemented by every Stream the relay side opens toward
 // a target, local or bridged to another relay. Renew sends the hub's

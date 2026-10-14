@@ -35,6 +35,7 @@ func baseRenewal() RenewalClaims {
 		Subject:    "user:u1",
 		ProjectID:  "proj-1",
 		Target:     baseTarget(),
+		Stream:     baseClaims().Stream,
 		StreamID:   3,
 		OpenJTI:    testOpenJTI,
 		AuthzUntil: t0.Add(2 * time.Hour),
@@ -48,6 +49,7 @@ func baseRenewalExpect() RenewalExpectation {
 		Target:    baseTarget(),
 		ProjectID: "proj-1",
 		Subject:   "user:u1",
+		Stream:    baseClaims().Stream,
 		StreamID:  3,
 		OpenJTI:   testOpenJTI,
 		After:     t0.Add(time.Hour),
@@ -97,6 +99,10 @@ func TestVerifyRenewal_Refusals(t *testing.T) {
 		{name: "other subject", claims: func(c *RenewalClaims) { c.Subject = "user:u2" }, want: ErrSubject},
 		{name: "other stream id", claims: func(c *RenewalClaims) { c.StreamID = 5 }, want: ErrStreamBinding},
 		{name: "other open jti", claims: func(c *RenewalClaims) { c.OpenJTI = "open-jti-2" }, want: ErrStreamBinding},
+		{name: "other stream kind", claims: func(c *RenewalClaims) { c.Stream = StreamHeader{Kind: StreamKindPTY} }, want: ErrStream},
+		{name: "other stream params", claims: func(c *RenewalClaims) {
+			c.Stream = StreamHeader{Kind: StreamKindTCP, Params: map[string]string{ParamHost: "127.0.0.1", ParamPort: "9090"}}
+		}, want: ErrStream},
 		{name: "wrong issuer", expect: func(e *RenewalExpectation) { e.Issuer = "other-hub" }, want: ErrIssuer},
 		{name: "does not extend", claims: func(c *RenewalClaims) { c.AuthzUntil = t0.Add(time.Hour) }, want: ErrAuthzUntil},
 		{name: "earlier than current", claims: func(c *RenewalClaims) { c.AuthzUntil = t0.Add(30 * time.Minute) }, want: ErrAuthzUntil},
@@ -217,6 +223,7 @@ func TestMintRenewal_RejectsInvalidClaims(t *testing.T) {
 	tests := map[string]func(*RenewalClaims){
 		"missing stream id":      func(c *RenewalClaims) { c.StreamID = 0 },
 		"missing open jti":       func(c *RenewalClaims) { c.OpenJTI = "" },
+		"missing stream":         func(c *RenewalClaims) { c.Stream = StreamHeader{} },
 		"missing authz_until":    func(c *RenewalClaims) { c.AuthzUntil = time.Time{} },
 		"authz_until before nbf": func(c *RenewalClaims) { c.AuthzUntil = t0.Add(-time.Second) },
 		"validity over 60s":      func(c *RenewalClaims) { c.Expiry = t0.Add(61 * time.Second) },
@@ -361,4 +368,25 @@ func TestVerify_RequireDeadlineFor(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+// TestVerifyRenewal_StreamClaimRequired: a renewal token without the stream
+// claim (signed with a valid key) is refused and does not consume its jti
+// (design v2.21.26 §3.5).
+func TestVerifyRenewal_StreamClaimRequired(t *testing.T) {
+	f := newFixture(t)
+	now := t0.Add(time.Second)
+	c := baseRenewal()
+	c.JTI = "renewal-jti-fixed"
+	tok := f.mintRenewal(t, c)
+	pl := payloadOf(t, tok)
+	delete(pl, "stream")
+	forged := forge(f.signer.Key, header{Algorithm, RenewalTokenType, f.signer.KeyID}, pl)
+	cache := newCache()
+	if _, err := VerifyRenewal(context.Background(), forged, f.keys, baseRenewalExpect(), cache, now); err == nil {
+		t.Fatal("renewal without a stream claim accepted")
+	}
+	if _, err := VerifyRenewal(context.Background(), tok, f.keys, baseRenewalExpect(), cache, now); err != nil {
+		t.Fatalf("the same jti with the stream claim: %v", err)
+	}
 }

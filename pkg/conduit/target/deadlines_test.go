@@ -89,7 +89,7 @@ func (df *deadlineFixture) renewal(t *testing.T, until time.Time, mut func(*gran
 	now := df.clk.Now()
 	c := grant.RenewalClaims{
 		Issuer: df.open.Issuer, Subject: df.open.Subject, ProjectID: df.open.ProjectID,
-		Target: df.open.Target, StreamID: 3, OpenJTI: df.open.JTI,
+		Target: df.open.Target, Stream: df.open.Stream, StreamID: 3, OpenJTI: df.open.JTI,
 		AuthzUntil: until, NotBefore: now, Expiry: now.Add(30 * time.Second),
 	}
 	if mut != nil {
@@ -191,7 +191,7 @@ func TestDeadlinesRefusedRenewalsChangeNothing(t *testing.T) {
 	otherKey := otherSigner(t)
 	unknownKid, err := grant.MintRenewal(otherKey, grant.RenewalClaims{
 		Issuer: df.open.Issuer, Subject: df.open.Subject, ProjectID: df.open.ProjectID,
-		Target: df.open.Target, StreamID: 3, OpenJTI: df.open.JTI,
+		Target: df.open.Target, Stream: df.open.Stream, StreamID: 3, OpenJTI: df.open.JTI,
 		AuthzUntil: now.Add(testInterval), NotBefore: now, Expiry: now.Add(30 * time.Second),
 	})
 	if err != nil {
@@ -382,5 +382,39 @@ func TestDeadlinesConcurrentRenewalsOneWins(t *testing.T) {
 	}
 	if reused != 1 {
 		t.Fatalf("%d jtis reusable after the race, want 1 (the loser's)", reused)
+	}
+}
+
+// TestDeadlinesRenewalStreamMustMatch: a renewal whose stream claim (kind
+// or params) differs from the admitted open grant's, or that has none, is
+// refused: the deadline and the stream are unchanged and its jti is not
+// consumed, so a matching renewal with the same jti still extends (design
+// v2.21.26 §3.5).
+func TestDeadlinesRenewalStreamMustMatch(t *testing.T) {
+	df := newDeadlineFixture(t)
+	ctx := context.Background()
+	before := df.deadline(t)
+	until := df.clk.Now().Add(testInterval + 10*time.Second)
+	const jti = "renewal-stream"
+	for name, mut := range map[string]func(*grant.RenewalClaims){
+		"other kind": func(c *grant.RenewalClaims) { c.JTI, c.Stream = jti, grant.StreamHeader{Kind: grant.StreamKindPTY} },
+		"other params": func(c *grant.RenewalClaims) {
+			c.JTI = jti
+			c.Stream.Params = map[string]string{grant.ParamHost: "127.0.0.1", grant.ParamPort: "9999"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			jtis := df.cache.Len()
+			if _, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, mut)); !errors.Is(err, grant.ErrStream) {
+				t.Fatalf("err = %v, want ErrStream", err)
+			}
+			if got := df.deadline(t); !got.Equal(before) || df.rec.count() != 0 || df.cache.Len() != jtis {
+				t.Fatalf("a refused renewal changed something: deadline %v, closes %d, jtis %d (was %d)", got, df.rec.count(), df.cache.Len(), jtis)
+			}
+		})
+	}
+	got, err := df.d.Renew(ctx, testBinding, 3, df.renewal(t, until, func(c *grant.RenewalClaims) { c.JTI = jti }))
+	if err != nil || !got.Equal(until) {
+		t.Fatalf("matching renewal with the same jti: %v, %v", got, err)
 	}
 }

@@ -46,9 +46,10 @@ var ErrUntracked = errors.New("conduit target: renewal for a stream without a de
 // are not tracked.
 //
 // A renewal is accepted only as a renewal grant signed with a key in Keys
-// and bound to the stream: its target, project and subject equal the open
-// grant's, its stream_id is the stream's id on the session the renewal
-// arrived on, and its open_jti is the open grant's jti. It may only move
+// and bound to the stream: its target, project, subject and stream (kind
+// and params) equal the open grant's, its stream_id is the stream's id on
+// the session the renewal arrived on, and its open_jti is the open grant's
+// jti. It may only move
 // the deadline later, to at most now + the open grant's authz_interval +
 // Grace. A refused renewal changes nothing (design v2.21.17 §3.5
 // "Target-side deadlines").
@@ -195,6 +196,7 @@ func (d *Deadlines) Renew(ctx context.Context, b Binding, streamID uint32, token
 		Target:    e.open.Target,
 		ProjectID: e.open.ProjectID,
 		Subject:   e.open.Subject,
+		Stream:    e.open.Stream,
 		StreamID:  streamID,
 		OpenJTI:   e.open.JTI,
 		Issuer:    issuer,
