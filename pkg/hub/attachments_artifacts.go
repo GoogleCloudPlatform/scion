@@ -60,17 +60,16 @@ func (s *Server) attachmentArtifactsReady() bool {
 
 // attachmentUploadsToArtifacts reports, for one upload request, whether its
 // files are stored as artifacts: the experiment is on, the artifact service
-// is ready, and the service can own an upload of the caller as a user
-// principal (a session, the dev user or a user access token). Otherwise
-// uploads go to the AttachmentStore as before, so a caller the artifact
-// service cannot own, a federated user for example, keeps uploading as it
-// did with the experiment off.
+// is ready, and the caller is one the service lets read attachments
+// (PermitsMessageRead: a session of a user or the dev user). Otherwise
+// uploads go to the AttachmentStore as before, so a user access token or a
+// federated user keeps uploading, and reading what it uploads, as it did
+// with the experiment off.
 func (s *Server) attachmentUploadsToArtifacts(ctx context.Context) bool {
 	if !s.experimentEnabled(experiments.AttachmentArtifacts) || !s.attachmentArtifactsReady() {
 		return false
 	}
-	kind, _, _, ok := newArtifactHost(s).Principal(ctx)
-	return ok && kind == artifacts.PrincipalKindUser
+	return newArtifactHost(s).PermitsMessageRead(ctx)
 }
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file

@@ -28,7 +28,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
-	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -642,123 +641,16 @@ func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bo
 
 var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 
-// tokenMayReadMessage applies a user access token's boundary to msg, with
-// the rule the conversation routes apply (tokenMayUseConversation for
-// inbox.read): the project of the message's conversation, or, for a
-// message stored without one, of its thread (a DM key names its peer agent's
-// project, or none for two users; a topic its project), must pass the
-// token's self-scope check, and for a participant of a DM with an agent
-// (whose peer is that agent) also agent:read on that agent. A message of a
-// conversation that belongs to a project (a group's project, or the project
-// of an agent of a direct message, whoever the caller is:
-// attachmentConversationProjects) also needs project:read on that project
-// through the token (canReadProject), the rule the AttachmentStore download
-// route applies to a project's file.
-// Every lookup failure answers false.
-func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
-	s := h.server
-	if token == nil || msg == nil {
-		return false
-	}
-	var conv *store.Conversation
-	switch {
-	case msg.ConversationID != "":
-		c, err := s.store.GetConversation(ctx, msg.ConversationID)
-		if err != nil || c == nil {
-			return false
-		}
-		conv = c
-	case strings.HasPrefix(msg.ThreadID, "dm:"):
-		conv = &store.Conversation{Kind: "direct", ExternalRef: msg.ThreadID}
-	case msg.ThreadID != "":
-		s.mu.RLock()
-		wcs := s.webChatStore
-		s.mu.RUnlock()
-		if wcs == nil {
-			return false
-		}
-		topic, err := wcs.GetTopic(ctx, msg.ThreadID)
-		if err != nil || topic == nil || topic.ProjectID == "" {
-			return false
-		}
-		pid := topic.ProjectID
-		conv = &store.Conversation{Kind: "group", ProjectID: &pid}
-	default:
-		return false
-	}
-	ok, err := s.tokenMayUseConversation(ctx, token, s.newSelfScopeCheck(ctx, token, permInboxRead), conv)
-	if err != nil {
-		slog.WarnContext(ctx, "artifacts: attachment token boundary check failed", "message", msg.ID, "error", err)
-		return false
-	}
-	if !ok {
-		return false
-	}
-	// A message whose conversation belongs to a project (a group's project,
-	// or the project of an agent of a direct message) also needs
-	// project:read on that project through the token, as the
-	// AttachmentStore download route requires for a project's file. This
-	// applies before the native and addressee checks, so a participant's or
-	// an addressee's token reads no more than the token reads of the
-	// project. A direct message between users has no project.
-	projects, err := h.attachmentConversationProjects(ctx, conv)
-	if err != nil {
-		slog.WarnContext(ctx, "artifacts: attachment token project lookup failed", "message", msg.ID, "error", err)
-		return false
-	}
-	for _, projectID := range projects {
-		if !s.canReadProject(ctx, token, projectID) {
-			return false
-		}
-	}
-	return true
-}
-
-// attachmentConversationProjects returns the projects whose project:read a
-// user access token needs to read an attachment of a message of conv. It
-// does not depend on the caller: a group's project, or the project of each
-// agent named in a direct conversation's key. A direct conversation between
-// users has none. An agent of the key that cannot be found (deleted, for
-// example), an agent without a project and any lookup failure answer an
-// error, so the token is refused.
-func (h *artifactHost) attachmentConversationProjects(ctx context.Context, conv *store.Conversation) ([]string, error) {
-	if conv.Kind != "direct" {
-		if conv.ProjectID == nil || *conv.ProjectID == "" {
-			return nil, nil
-		}
-		return []string{*conv.ProjectID}, nil
-	}
-	kindA, idA, kindB, idB, err := messages.ParseDMKey(conv.ExternalRef)
-	if err != nil {
-		return nil, err
-	}
-	var projects []string
-	for _, slot := range [][2]string{{kindA, idA}, {kindB, idB}} {
-		if slot[0] != "agent" {
-			continue
-		}
-		agent, err := h.server.store.GetAgent(ctx, slot[1])
-		if err != nil {
-			return nil, err
-		}
-		if agent == nil || agent.ProjectID == "" {
-			return nil, errors.New("direct message agent has no project")
-		}
-		projects = append(projects, agent.ProjectID)
-	}
-	return projects, nil
-}
-
 // PermitsMessageRead implements artifacts.MessageScopeHost: whether the
-// caller's credential allows reading messages at all, classified the way
-// the inbox and conversation routes classify it (inboxCredentialOf). A
-// session (the session allowlist) of a user or the dev user may. A user
-// access token may when its ceiling allows inbox.read; which messages it
-// reaches is then limited by its boundary, per message, in MayReadMessage.
-// Every other credential is refused: agents read attachments only through
-// the fetch path of a later phase (ptone/scion#4596).
+// caller's credential allows reading attachments stored as artifacts at
+// all, classified the way the inbox and conversation routes classify it
+// (inboxCredentialOf). Only a session (the session allowlist) of a user or
+// the dev user may. Every other credential is refused: user access tokens
+// read only attachments of the AttachmentStore until token access comes
+// with its own design, and agents read attachments only through the fetch
+// path of a later phase (both ptone/scion#4596).
 func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
-	cred, token := inboxCredentialOf(ctx)
+	cred, _ := inboxCredentialOf(ctx)
 	switch cred {
 	case inboxCredentialSession:
 		switch id := GetIdentityFromContext(ctx).(type) {
@@ -767,7 +659,7 @@ func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
 		}
 		return false
 	case inboxCredentialToken:
-		return token != nil && token.ID() != "" && token.Ceiling().Allows(permInboxRead)
+		return false // user access tokens: ptone/scion#4596
 	default:
 		return false
 	}
@@ -808,13 +700,6 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) boo
 		if ext != nil && ext.DeletedAt != nil {
 			return false
 		}
-	}
-	// A user access token reaches only the messages its boundary admits,
-	// as on the inbox routes: a project-boundary token the messages of its
-	// boundary project while its holder is a member, never a direct message
-	// between users or a message of another project.
-	if cred, token := inboxCredentialOf(ctx); cred == inboxCredentialToken && !h.tokenMayReadMessage(ctx, token, msg) {
-		return false
 	}
 	if s.canReadNativeMessage(ctx, user, msg) {
 		return true

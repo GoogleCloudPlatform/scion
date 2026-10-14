@@ -509,195 +509,92 @@ func (f *refFixture) downloadAs(t *testing.T, identity Identity, id string) refA
 	return refAnswer{status: rec.Code, body: rec.Body.String()}
 }
 
-// A user access token reaches attachments only within its boundary, as on
-// the other inbox routes: a project-boundary token with inbox.read reads an
-// attachment of its boundary project while its holder is a member, never
-// one of a direct message between users, and never without inbox.read.
-func TestAttachmentArtifacts_ScopedTokenBoundary(t *testing.T) {
+// User access tokens read no attachment stored as an artifact: whatever the
+// token carries and whatever the conversation, including an upload not sent
+// yet, a token gets the answer of an unknown id, while the session of the
+// same user reads the attachment. Token access comes with its own design
+// (ptone/scion#4596).
+func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
-	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	dmFile := f.uploadAs(t, f.ua, "", "dm.txt", "direct")
-	f.sendWith(t, f.ua, dm, dmFile)
+	ctx := context.Background()
+
 	threadFile := f.uploadAs(t, f.ua, f.projA.ID, "thread.txt", "in project A")
 	f.sendWith(t, f.ua, f.topicA, threadFile)
-	threadFileB := f.uploadAs(t, f.ub, f.projB.ID, "b.txt", "in project B")
-	f.sendWith(t, f.ub, f.topicB, threadFileB)
-
-	inA := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read")
-	missing := f.downloadAs(t, inA, uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-
-	got := f.downloadAs(t, inA, threadFile)
-	require.Equal(t, http.StatusOK, got.status, "boundary project, live member: %s", got.body)
-	assert.Equal(t, "in project A", got.body)
-	requireSameAnswer(t, missing, f.downloadAs(t, inA, dmFile))
-
-	// Without inbox.read the token reads no attachment at all.
-	noInbox := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read")
-	requireSameAnswer(t, missing, f.downloadAs(t, noInbox, threadFile))
-
-	// A token of bob bounded to project A, where bob is not a member, reads
-	// nothing there, and nothing of his own project B either.
-	bobInA := selfToken(t, f.ub.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read")
-	requireSameAnswer(t, missing, f.downloadAs(t, bobInA, threadFile))
-	requireSameAnswer(t, missing, f.downloadAs(t, bobInA, threadFileB))
-	bobInB := selfToken(t, f.ub.ID, projectBoundary(f.projB.ID), "project:read", "inbox:read")
-	require.Equal(t, http.StatusOK, f.downloadAs(t, bobInB, threadFileB).status)
-}
-
-// A user access token reads an attachment of a project's message only with
-// project:read on that project through the token, as on the AttachmentStore
-// download route, even when its holder is an addressee of the message: the
-// addressee rule that admits bob's session does not widen his tokens.
-func TestAttachmentArtifacts_TokenProjectMessageNeedsProjectRead(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-	convID, err := f.srv.conversationIDForKey(ctx, f.wcs, f.topicA)
-	require.NoError(t, err)
-	msgID := f.seedMessage(t, f.projA.ID, f.topicA, convID, "for bob too")
-	id := f.uploadAs(t, f.ua, "", "brief.txt", "addressed")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
-	// bob, of project B, is an addressee of the message.
-	require.NoError(t, f.st.AddAddressee(ctx, &store.MessageAddressee{ID: uuid.NewString(), MessageID: msgID,
-		PrincipalKind: "user", PrincipalID: f.ub.ID, Via: "explicit", DeliveryState: "delivered"}))
-	require.Equal(t, http.StatusOK, f.download(t, f.ub, id).status, "bob's session reads it as an addressee")
-
-	missing := f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-
-	// bob's hub-boundary tokens read nothing of project A, where he is not
-	// a member: neither with inbox:read alone nor with project:read too.
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "inbox:read alone")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "project:read", "inbox:read"), id), "with project:read")
-
-	// alice, a member of project A, reads it with a token carrying both.
-	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read"), id)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "addressed", got.body)
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), id), "member without project:read")
-}
-
-// A user access token reads an attachment of a direct message with an
-// agent only with project:read on the agent's project as well, as the
-// AttachmentStore download route requires for the same file, which the web
-// client uploads with the agent's project.
-func TestAttachmentArtifacts_TokenAgentDMNeedsProjectRead(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	msgID := f.seedMessage(t, f.projA.ID, dm, "", "for the agent")
-	id := f.uploadAs(t, f.ua, f.projA.ID, "notes.txt", "agent dm")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
-	require.Equal(t, http.StatusOK, f.download(t, f.ua, id).status, "alice's session reads it")
-
-	missing := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), id), "without project:read")
-	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "agent dm", got.body)
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read"), id), "without agent:read")
-
-	// A direct message between users has no project: a hub-boundary token
-	// with inbox:read alone reads its attachment, as before.
+	unsent := f.uploadAs(t, f.ua, f.projA.ID, "unsent.txt", "not sent yet")
 	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
-	dmFile := f.uploadAs(t, f.ua, "", "between-users.txt", "users only")
+	dmFile := f.uploadAs(t, f.ua, "", "dm.txt", "between users")
 	f.sendWith(t, f.ua, userDM, dmFile)
-	got = f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), dmFile)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "users only", got.body)
-}
-
-// The project a token needs for a direct message with an agent does not
-// depend on who calls: it is the agent's project for a participant, for an
-// addressee who is not a participant, and on a stored direct conversation
-// (the production path). A direct message whose agent no longer exists is
-// refused to every token; sessions keep their rules.
-func TestAttachmentArtifacts_TokenAgentDMProjectIndependentOfCaller(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
-	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
-	convID := uuid.NewString()
-	now := time.Now().UTC()
-	require.NoError(t, f.st.CreateConversation(ctx, &store.Conversation{
-		ID: convID, Kind: "direct", Surface: "native", ExternalRef: dm,
-		DriftState: "active", LastActivityAt: now, CreatedAt: now,
-	}))
-	for _, p := range []struct{ kind, id string }{{"user", f.ua.ID}, {"agent", f.aa.ID}} {
-		require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{
-			ID: uuid.NewString(), ConversationID: convID, PrincipalKind: p.kind, PrincipalID: p.id, Role: "member", JoinedAt: now,
-		}))
-	}
-	msgID := f.seedMessage(t, f.projA.ID, dm, convID, "for the agent, stored conversation")
-	id := f.uploadAs(t, f.ua, f.projA.ID, "stored.txt", "stored dm")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
-	// bob, of project B, is an addressee of the message, not a participant.
-	require.NoError(t, f.st.AddAddressee(ctx, &store.MessageAddressee{ID: uuid.NewString(), MessageID: msgID,
-		PrincipalKind: "user", PrincipalID: f.ub.ID, Via: "explicit", DeliveryState: "delivered"}))
-
-	missing := f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), uuid.NewString())
-	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-
-	// The addressee: his session reads it; his tokens need project:read on
-	// the agent's project, which he cannot hold.
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "addressee token, inbox:read")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id), "addressee token, all three")
-	require.Equal(t, http.StatusOK, f.download(t, f.ub, id).status, "addressee session")
-
-	// The participant, on the stored conversation.
-	require.Equal(t, http.StatusOK, f.download(t, f.ua, id).status, "participant session")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), id), "participant token without project:read")
-	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id)
-	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "stored dm", got.body)
-
-	// A direct message whose agent no longer exists: no token reads it,
-	// whatever it carries; the participant's session still does.
-	goneDM := dmKeyFor(t, "user", f.ua.ID, "agent", uuid.NewString())
-	goneMsg := f.seedMessage(t, f.projA.ID, goneDM, "", "for an agent that is gone")
-	goneFile := f.uploadAs(t, f.ua, f.projA.ID, "gone.txt", "agent gone")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, goneFile, artifacts.PrincipalKindUser, f.ua.ID, goneMsg))
-	require.Equal(t, http.StatusOK, f.download(t, f.ua, goneFile).status, "participant session, agent gone")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), goneFile), "token, agent gone")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), goneFile), "token with all three, agent gone")
-}
-
-// A group without a project has no project to check: a participant's
-// hub-boundary token with inbox:read reads its attachment, a
-// project-boundary token reads nothing of it, and a non-participant's token
-// reads nothing either.
-func TestAttachmentArtifacts_TokenProjectlessGroup(t *testing.T) {
-	f := newRefFixture(t)
-	enableAttachmentArtifacts(t, f)
-	ctx := context.Background()
+	agentDM := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+	agentMsg := f.seedMessage(t, f.projA.ID, agentDM, "", "for the agent")
+	agentFile := f.uploadAs(t, f.ua, f.projA.ID, "agent.txt", "agent dm")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, agentFile, artifacts.PrincipalKindUser, f.ua.ID, agentMsg))
 	conv, err := f.st.UpsertConversationByExternalRef(ctx, &store.Conversation{
 		Kind: "group", Surface: "native", ExternalRef: "group:none:" + uuid.NewString(), DriftState: "active",
 	})
 	require.NoError(t, err)
 	require.NoError(t, f.st.AddParticipant(ctx, &store.ConversationParticipant{ID: uuid.NewString(),
 		ConversationID: conv.ID, PrincipalKind: "user", PrincipalID: f.ua.ID, Role: "member", JoinedAt: time.Now()}))
-	msgID := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
-	id := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
-	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	groupMsg := f.seedMessage(t, uuid.Nil.String(), "group-thread-"+conv.ID, conv.ID, "in a group without a project")
+	groupFile := f.uploadAs(t, f.ua, "", "group.txt", "projectless group")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, groupFile, artifacts.PrincipalKindUser, f.ua.ID, groupMsg))
 
-	missing := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), uuid.NewString())
+	hubToken := selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read")
+	missing := f.downloadAs(t, hubToken, uuid.NewString())
 	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
-	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), id)
+	tokens := []struct {
+		name  string
+		token *ScopedUserIdentity
+	}{
+		{"hub boundary", hubToken},
+		{"project A boundary", selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "agent:read")},
+	}
+	files := []struct{ name, id string }{
+		{"project thread", threadFile},
+		{"upload not sent", unsent},
+		{"direct message between users", dmFile},
+		{"direct message with an agent", agentFile},
+		{"group without a project", groupFile},
+	}
+	for _, file := range files {
+		require.Equal(t, http.StatusOK, f.download(t, f.ua, file.id).status, "session: %s", file.name)
+		for _, tk := range tokens {
+			require.Equal(t, missing, f.downloadAs(t, tk.token, file.id), "%s token: %s", tk.name, file.name)
+		}
+	}
+}
+
+// With the experiment on, a user access token's upload is stored in the
+// AttachmentStore, not in the artifact service, and the token reads it back
+// under the AttachmentStore's rule, as with the experiment off.
+func TestAttachmentArtifacts_TokenUploadsUseAttachmentStore(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
+
+	req := attachmentUploadRequest(t, f.projA.ID, "token.txt", "from a token")
+	rec := httptest.NewRecorder()
+	f.srv.chatRoute(f.srv.handleChatAttachments)(rec, req.WithContext(contextWithIdentity(req.Context(), token)))
+	id := uploadedAttachmentID(t, rec, "token.txt")
+
+	meta, err := f.wcs.GetAttachment(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, meta, "the upload is a row of the AttachmentStore")
+	assert.Equal(t, f.ua.ID, meta.UploadedBy)
+	assert.Equal(t, f.projA.ID, meta.ProjectID)
+	_, err = st.GetAttachment(ctx, id)
+	require.ErrorIs(t, err, artifacts.ErrNotFound, "nothing is stored in the artifact service")
+
+	got := f.downloadAs(t, token, id)
 	require.Equal(t, http.StatusOK, got.status, got.body)
-	assert.Equal(t, "projectless group", got.body)
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read"), id), "project-boundary token")
-	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ub.ID, hubBoundary(), "inbox:read"), id), "non-participant token")
+	assert.Equal(t, "from a token", got.body)
 }
 
 // With the experiment on, uploads go to the artifact service only for a
-// caller it can own as a user principal: a session or a user access token.
-// A federated user, which the artifact service does not serve, uploads to
-// the AttachmentStore as with the experiment off, instead of failing.
+// caller it lets read attachments: a session. A user access token and a
+// federated user upload to the AttachmentStore as with the experiment off,
+// instead of storing a file they could not read back (or failing).
 func TestAttachmentArtifacts_FederatedUploadsUseAttachmentStore(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
@@ -705,15 +602,14 @@ func TestAttachmentArtifacts_FederatedUploadsUseAttachmentStore(t *testing.T) {
 
 	require.True(t, f.srv.attachmentUploadsToArtifacts(f.sessionContext(f.ua)), "session")
 	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:write")
-	require.True(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
+	require.False(t, f.srv.attachmentUploadsToArtifacts(contextWithIdentity(ctx, token)), "user access token")
 
 	fed := NewFederatedUserIdentity("https://issuer.attachments.test", "att-fed", "att-fed@test.com", "Fed", "member", nil)
 	fedCtx := contextWithCredentialContext(contextWithIdentity(ctx, fed), CredentialContext{Kind: CredentialKindFederation})
 	require.False(t, f.srv.attachmentUploadsToArtifacts(fedCtx), "federated user")
 	require.False(t, f.srv.attachmentUploadsToArtifacts(ctx), "no identity")
 
-	// The artifact service would refuse the federated upload, which is why
-	// it is routed to the AttachmentStore.
+	// The artifact service could not own a federated upload either.
 	_, _, _, ok := newArtifactHost(f.srv).Principal(fedCtx)
 	require.False(t, ok)
 }
