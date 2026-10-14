@@ -182,6 +182,32 @@ class AntigravityProvisionTest(unittest.TestCase):
         self.assertEqual(env["SCION_USAGE_SOURCE"], "hooks")
 
 
+class VertexLocationPrecedenceTest(unittest.TestCase):
+    """GOOGLE_CLOUD_LOCATION wins over GOOGLE_CLOUD_REGION (ptone/scion#4719)."""
+
+    def _location(self, env: dict[str, str]) -> tuple[str, list[str]]:
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle = os.path.join(tmp, ".scion", "harness")
+            os.makedirs(os.path.join(bundle, "inputs"))
+            clear = {"GOOGLE_CLOUD_LOCATION": "", "GOOGLE_CLOUD_REGION": "", "CLOUD_ML_REGION": ""}
+            with unittest.mock.patch.dict(os.environ, {**clear, **env}):
+                ctx = scion_harness.ProvisionContext("antigravity", {"harness_bundle_dir": bundle})
+                warnings: list[str] = []
+                ctx.warn = warnings.append
+                return provision._resolve_location(ctx), warnings
+
+    def test_both_differ_location_wins_with_warning(self) -> None:
+        location, warnings = self._location({"GOOGLE_CLOUD_LOCATION": "europe-west4", "GOOGLE_CLOUD_REGION": "us-central1"})
+        self.assertEqual(location, "europe-west4")
+        self.assertEqual(len(warnings), 1)
+
+    def test_region_alone(self) -> None:
+        self.assertEqual(self._location({"GOOGLE_CLOUD_REGION": "us-central1"}), ("us-central1", []))
+
+    def test_cloud_ml_region_not_read(self) -> None:
+        self.assertEqual(self._location({"CLOUD_ML_REGION": "europe-west4"}), ("", []))
+
+
 class ExplicitOAuthTokenTest(unittest.TestCase):
     # config.yaml declares oauth-token as the AGY_TOKEN file; the provisioner
     # also takes AGY_TOKEN from the env. An explicit oauth-token must be

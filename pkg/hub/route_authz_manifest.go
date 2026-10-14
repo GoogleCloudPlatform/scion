@@ -66,7 +66,7 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/auth/invite/redeem": "authenticated", // Invite redemption — requires user session
 	"/api/v1/auth/admin-status":  "authenticated", // Admin status check — requires valid session
 	"/api/v1/auth/scopes":        "authenticated", // Auth scopes — requires valid session
-	// Federation user token for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
+	// User access credential for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
 	"POST /api/v1/auth/federation-token": "authenticated",
 
 	// ── Authorization ──────────────────────────────────────────────────
@@ -238,6 +238,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/conversations":         "authenticated", // List/create conversations
 	"/api/v1/conversations/":        "authenticated", // Conversation routes
 	"/api/v1/conversations/resolve": "authenticated", // Resolve a conversation reference
+	"/api/v1/thread-groups":         "authenticated", // List/create thread groups (experiment hub.chat_thread_groups)
+	"/api/v1/thread-groups/":        "authenticated", // Thread group routes (experiment hub.chat_thread_groups)
 
 	// ── Cross-project messaging ────────────────────────────────────────
 	"/api/v1/messaging/capabilities":    "authenticated", // Messaging feature capabilities

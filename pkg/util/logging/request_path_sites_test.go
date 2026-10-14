@@ -98,6 +98,7 @@ var requestPathSites = []requestPathSite{
 	{"handlers_quota.go", "Server.handleAdminLimitByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_roles.go", "Server.handleAdminRoleBindingByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"handlers_runtime_brokers.go", "Server.handleRuntimeBrokerRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
+	{"handlers_thread_groups.go", "Server.handleThreadGroupRoutes", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"harness_config_handlers.go", "Server.handleHarnessConfigByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"hub_pre_start_hook_handlers.go", "Server.handleHubPreStartHookByID", "URL.Path", 1, "routing: extracts ids and sub-routes"},
 	{"lifecycle_hook_executor.go", "HTTPExecutor.doHTTPRequest", "URL(bare)", 1, "not a request URL: a lifecycle hook action's configured URL"},

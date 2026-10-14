@@ -167,32 +167,40 @@ func TestArtifactHostAgentWithoutReadScopeIsNotServed(t *testing.T) {
 }
 
 // TestArtifactHostMissingScope: only an agent that presented a real token
-// is told which artifact scope it lacks; users, synthetic in-process
-// identities and unauthenticated callers are told nothing, and an agent
-// holding the scopes is told nothing either.
+// is told which artifact scopes it lacks, every one of them in order
+// (ptone/scion#4571); users, synthetic in-process identities and
+// unauthenticated callers are told nothing, and an agent holding the scopes
+// is told nothing either. MissingScope reports the first of them.
 func TestArtifactHostMissingScope(t *testing.T) {
 	host := newArtifactHost(&Server{})
 	agentCtx := func(scopes ...AgentTokenScope) context.Context {
 		return contextWithIdentity(context.Background(), artifactTestAgent("agent-1", "proj-1", scopes...))
 	}
+	read, write := string(ScopeProjectArtifactRead), string(ScopeProjectArtifactWrite)
 	for name, tc := range map[string]struct {
 		ctx        context.Context
 		permission string
-		want       string
+		want       []string
 	}{
-		"no scopes":              {agentCtx(), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, string(ScopeProjectArtifactRead)},
-		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, string(ScopeProjectArtifactWrite)},
-		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, ""},
-		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, ""},
-		"unknown permission":     {agentCtx(), "agent.read", ""},
-		"no identity":            {context.Background(), artifacts.PermissionCreate, ""},
-		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, ""},
-		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, ""},
-		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, ""},
+		"no scopes":              {agentCtx(), artifacts.PermissionCreate, []string{read, write}},
+		"project:read only":      {agentCtx(ScopeProjectRead), artifacts.PermissionCreate, []string{read, write}},
+		"write without read":     {agentCtx(ScopeProjectArtifactWrite), artifacts.PermissionCreate, []string{read}},
+		"read without write":     {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionCreate, []string{write}},
+		"both scopes":            {agentCtx(ScopeProjectArtifactRead, ScopeProjectArtifactWrite), artifacts.PermissionCreate, nil},
+		"no scopes, read":        {agentCtx(), artifacts.PermissionRead, []string{read}},
+		"read for read":          {agentCtx(ScopeProjectArtifactRead), artifacts.PermissionRead, nil},
+		"unknown permission":     {agentCtx(), "agent.read", nil},
+		"no identity":            {context.Background(), artifacts.PermissionCreate, nil},
+		"user":                   {contextWithIdentity(context.Background(), NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web")), artifacts.PermissionCreate, nil},
+		"user access token":      {contextWithIdentity(context.Background(), NewScopedUserIdentityWithCeiling(NewAuthenticatedUser("u1", "u1@example.com", "U1", "member", "web"), "proj-1", []string{"agent:read"}, "uat-1", permissions.FrozenPermissionCeiling{Version: permissions.CeilingVersionV1, PermissionIDs: []string{"agent.read"}})), artifacts.PermissionCreate, nil},
+		"synthetic agent, no id": {contextWithIdentity(context.Background(), &agentIdentityWrapper{&AgentTokenClaims{Claims: jwt.Claims{Subject: "agent-1"}, ProjectID: "proj-1"}}), artifacts.PermissionCreate, nil},
 	} {
-		assert.Equal(t, tc.want, host.MissingScope(tc.ctx, tc.permission), name)
+		assert.Equal(t, tc.want, host.MissingScopes(tc.ctx, tc.permission), name)
+		first := ""
+		if len(tc.want) > 0 {
+			first = tc.want[0]
+		}
+		assert.Equal(t, first, host.MissingScope(tc.ctx, tc.permission), name)
 	}
 }
 

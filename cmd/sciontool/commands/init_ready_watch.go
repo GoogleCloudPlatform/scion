@@ -32,10 +32,12 @@ const readyWatchReportTimeout = 10 * time.Second
 // readyWatchConfig drives watchHarnessReady. It uses the same readiness
 // decision as the runtime message buffer (pkg/agent/harness_ready.go): the
 // mode and nonce from the init-run file, the hook ready marker, and the
-// state.ReadySettleSession / state.ReadyDeadline timings.
+// ready spec's settle and deadline, which init also writes to the init-run
+// file for the runtime. The rule is: ready = signal time + Settle.
 type readyWatchConfig struct {
 	// Nonce is the current init-run nonce; empty when the init-run file
-	// could not be written, which uses the settle rule like the runtime.
+	// could not be written, which uses the session-age rule with
+	// FallbackSettle, like the runtime when it finds no init-run file.
 	Nonce string
 	// Mode is state.ReadyModeHook or state.ReadyModeSettle.
 	Mode string
@@ -43,11 +45,20 @@ type readyWatchConfig struct {
 	Start time.Time
 
 	PollInterval time.Duration // zero uses readyWatchPollInterval
-	Settle       time.Duration // zero uses state.ReadySettleSession
-	Deadline     time.Duration // zero uses state.ReadyDeadline
+	// Settle is the wait after the signal: after Start in settle mode,
+	// after the ready marker's mtime in hook mode. Used as given; zero
+	// means ready at the signal.
+	Settle time.Duration
+	// Deadline bounds the wait for the hook marker, from Start. Zero uses
+	// state.ReadyDeadline.
+	Deadline time.Duration
+	// FallbackSettle is the session age that counts as ready in hook mode
+	// without a nonce. Zero uses state.ReadySettleSession.
+	FallbackSettle time.Duration
 
-	// MarkerReady reports whether the ready marker carries Nonce.
-	MarkerReady func(nonce string) bool
+	// MarkerTime reports whether the ready marker carries Nonce and, if
+	// so, when it was written.
+	MarkerTime func(nonce string) (time.Time, bool)
 	// LocalActivity returns the activity in agent-info.json.
 	LocalActivity func() state.Activity
 	// ReplaceLocal sets the local activity to `to` only if it is `from`.
@@ -72,7 +83,9 @@ const (
 // cancels it before reporting shutdown, so it cannot report working after
 // stopping).
 //
-//   - Hook mode: a readiness hook event writes its activity to the local
+//   - Hook mode: ready once the marker is seen and Settle has passed since
+//     its mtime, or since the watcher first saw it if that is earlier. A
+//     readiness hook event writes its activity to the local
 //     agent-info.json and only then the ready marker (the marker is a
 //     handler registered right after the status handler in `sciontool
 //     hook`), and its hub handler reports that activity. So when the watcher
@@ -82,12 +95,15 @@ const (
 //     needs a sync: if the marker already exists when the watcher starts,
 //     the hook may have reported to the hub before init's own initializing
 //     report landed and been overwritten by it, so the watcher re-sends the
-//     current local activity.
-//   - Settle mode (or no nonce): at Start+Settle the watcher swaps
-//     initializing to working and reports working if the swap happened.
+//     current local activity once ready.
+//   - Settle mode: at Start+Settle the watcher swaps initializing to
+//     working and reports working if the swap happened. Hook mode without
+//     a nonce does the same at Start+FallbackSettle.
 //   - Deadline: if the hook marker has not appeared by Start+Deadline, the
 //     watcher does the same swap (logged at Info), matching the runtime
-//     buffer, which pastes buffered messages at the same deadline.
+//     buffer, which pastes buffered messages at the same deadline. Once the
+//     marker has been seen, its settle is waited out even past the
+//     deadline, as the runtime does.
 //
 // The hub is only told "working" when the local swap from initializing
 // succeeds. The swap is one locked read-modify-write of agent-info.json
@@ -99,34 +115,61 @@ func watchHarnessReady(ctx context.Context, cfg readyWatchConfig) readyWatchOutc
 		poll = readyWatchPollInterval
 	}
 	settle := cfg.Settle
-	if settle <= 0 {
-		settle = state.ReadySettleSession
+	if settle < 0 {
+		settle = 0
 	}
 	deadline := cfg.Deadline
 	if deadline <= 0 {
 		deadline = state.ReadyDeadline
 	}
-	hookMode := cfg.Mode == state.ReadyModeHook && cfg.Nonce != "" && cfg.MarkerReady != nil
+	hookMode := cfg.Mode == state.ReadyModeHook && cfg.Nonce != "" && cfg.MarkerTime != nil
+	sessionSettle := settle
+	if cfg.Mode == state.ReadyModeHook {
+		// The hook spec's settle follows the marker; without a marker to
+		// wait for, use the runtime's no-init-run session age.
+		sessionSettle = cfg.FallbackSettle
+		if sessionSettle <= 0 {
+			sessionSettle = state.ReadySettleSession
+		}
+	}
 
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 
 	first := true
+	markerAtStart := false
+	markerSeen := false
+	var firstSeenAt time.Time
 	for {
 		now := time.Now()
+		var markerAt time.Time
+		if hookMode {
+			markerAt, markerSeen = cfg.MarkerTime(cfg.Nonce)
+			if markerSeen && firstSeenAt.IsZero() {
+				firstSeenAt = now
+				markerAtStart = first
+			}
+			// The signal is the marker's mtime, but never later than when
+			// the watcher first saw it: a future mtime (a clock anomaly, or
+			// the agent user touching its own marker) must not hold
+			// readiness past firstSeenAt + Settle.
+			if markerSeen && markerAt.After(firstSeenAt) {
+				markerAt = firstSeenAt
+			}
+		}
 		switch {
-		case hookMode && cfg.MarkerReady(cfg.Nonce):
-			if first {
+		case markerSeen && !now.Before(markerAt.Add(settle)):
+			if markerAtStart {
 				syncLocalActivity(ctx, cfg)
 			}
 			markReady(ctx, cfg, "Harness ready")
-			log.Debug("Harness readiness: hook marker seen")
+			log.Debug("Harness readiness: hook marker seen and settled")
 			return readyOutcomeHookMarker
-		case !hookMode && !now.Before(cfg.Start.Add(settle)):
+		case !hookMode && !now.Before(cfg.Start.Add(sessionSettle)):
 			markReady(ctx, cfg, "Harness started")
 			log.Debug("Harness readiness: settle period elapsed")
 			return readyOutcomeSettled
-		case hookMode && !now.Before(cfg.Start.Add(deadline)):
+		case hookMode && !markerSeen && !now.Before(cfg.Start.Add(deadline)):
 			if markReady(ctx, cfg, "Harness readiness not confirmed by deadline; assuming ready") {
 				log.Info("Harness readiness: no ready hook event within %s; reporting working", deadline)
 			}

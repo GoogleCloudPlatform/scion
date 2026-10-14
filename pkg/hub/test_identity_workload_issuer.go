@@ -302,10 +302,11 @@ func isWorkloadDelegationRequest(r *http.Request, a *workloadIssuerAuthenticator
 	return false
 }
 
-// isTestIdentityIssuanceRoute reports whether r targets one of the four
-// test identity issuance routes, the only routes a workload token is
-// accepted on. The match is exact on the decoded path; an escaped path is
-// refused.
+// isTestIdentityIssuanceRoute reports whether r targets one of the test
+// identity routes a workload token is accepted on: issue and list, token
+// re-issue, delete, and the web-login code (ptone/scion#4240, X3b). The
+// handlers scope each one to the identities the same delegation issued.
+// The match is exact on the decoded path; an escaped path is refused.
 func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	if r.URL.RawPath != "" {
 		return false
@@ -317,6 +318,9 @@ func isTestIdentityIssuanceRoute(r *http.Request) bool {
 	case strings.HasPrefix(p, testIdentityIssuanceRoutePath+"/"):
 		rest := strings.TrimPrefix(p, testIdentityIssuanceRoutePath+"/")
 		if id, ok := strings.CutSuffix(rest, "/token"); ok {
+			return r.Method == http.MethodPost && validPathID(id)
+		}
+		if id, ok := strings.CutSuffix(rest, "/web-login-code"); ok {
 			return r.Method == http.MethodPost && validPathID(id)
 		}
 		return r.Method == http.MethodDelete && validPathID(rest)

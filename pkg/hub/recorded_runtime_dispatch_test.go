@@ -337,8 +337,10 @@ func TestRecordedRuntime_BulkResetAuthMarksRuntimeUnavailable(t *testing.T) {
 			ID   string `json:"id"`
 			Code string `json:"code"`
 		} `json:"failed"`
+		FailedByCode map[string]int `json:"failed_by_code"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	require.Equal(t, map[string]int{brokerCodeRuntimeUnavailable: 1}, body.FailedByCode)
 	var found bool
 	for _, f := range body.Failed {
 		if f.ID == agent.ID {

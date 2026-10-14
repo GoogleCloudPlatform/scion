@@ -4742,7 +4742,7 @@ func unwrapTestFixtureClamp(s store.Store) store.Store {
 type kindErrStore struct{ store.Store }
 
 // enableTestIdentitiesForTest turns the feature on for a server built by a
-// shared helper (the effect of --enable-test-identities).
+// shared helper (the effect of --test-mode=member).
 func enableTestIdentitiesForTest(srv *Server) {
 	srv.testIdentities = newTestIdentityState(true)
 	srv.authConfig.TestIdentitiesEnabled = true

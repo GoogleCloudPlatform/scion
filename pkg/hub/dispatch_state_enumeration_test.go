@@ -18,7 +18,6 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -36,10 +35,12 @@ func TestDispatchStateEnumeration(t *testing.T) {
 	fset := token.NewFileSet()
 
 	// pkgmove:scan-covers pkg/hub/apierr
-	// unaffected: guards store.Message literals, which errors.go and json_response.go do not contain.
+	// scanned through guardScanSubdirs; guards store.Message literals.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards store.Message literals, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(hubDir)
+	// scanned through guardScanSubdirs; guards store.Message literals.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards store.Message literals.
+	entries, err := readGuardScanDirs(hubDir)
 	if err != nil {
 		t.Fatalf("failed to read hub directory: %v", err)
 	}

@@ -27,6 +27,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -72,7 +73,10 @@ Commands:
   scion artifact publish <file|dir> --review <ref> [--note]
   scion artifact get <ref> [--out <path>] [--clean|--accept] [--kind publish]
   scion artifact versions <ref>                List an artifact's versions
+  scion artifact list [--mine] [--all]         List the artifacts you can read
+  scion artifact view <ref> [--check] [--show-link]
   scion artifact share <ref> [--ttl 7d]        Create a share link (users only)
+  scion artifact grants <ref> [--add|--remove] List or change grants (users only)
   scion artifact delete <ref> [--yes]          Delete an artifact (users only)`,
 	// Args/Run make this command Runnable so cobra validates subcommand
 	// names, as for "scion hub": an unrecognized subcommand, including one
@@ -103,6 +107,13 @@ A folder is published as a bundle of its regular files (hidden files and
 folders, whose names start with ".", are left out; symbolic links inside
 the folder are refused). Its entry file, the one the web UI opens, is --entry, or else
 index.html, index.md or README.md at the top of the folder.
+
+An HTML entry file is shown in a sandboxed frame. The page's scripts run in
+an isolated origin; they cannot reach the hub page around the frame, your
+session or the hub's API. Relative links (img/chart.png, css/site.css) load
+the bundle's own files. Remote images are not loaded, so include them in
+the bundle; publishing warns when an HTML entry references them. See "HTML
+artifacts" in the artifacts reference.
 
 With --key, publishing again under the same key adds a new version to the
 same artifact instead of creating another one. Files unchanged since the
@@ -546,12 +557,7 @@ func artifactErrorHint(err error, publishing bool) string {
 	}
 	switch {
 	case apiErr.StatusCode == http.StatusForbidden && apiErr.Code == artifacts.CodeMissingScope:
-		scope := "a required"
-		if v, ok := apiErr.Details["scope"].(string); ok && v != "" {
-			scope = "the " + v
-		}
-		return "\nThis agent's credential does not carry " + scope + " scope, usually because the agent was created " +
-			"before artifacts were available to it. Recreate the agent so it is issued a current credential."
+		return missingScopeHint(apiErr.Details)
 	case apiErr.StatusCode == http.StatusUnauthorized:
 		return "\nThe hub did not accept the credential: sign in again; an agent token may be invalid or expired."
 	case apiErr.StatusCode == http.StatusNotFound && !publishing:
@@ -563,6 +569,44 @@ func artifactErrorHint(err error, publishing bool) string {
 		return "\nYou may not publish artifacts in this project, or may not add versions to this artifact."
 	}
 	return ""
+}
+
+// missingScopeHint is the hint for a 403 missing_scope (ptone/scion#4571).
+// It names every scope the hub reported: details.scopes, or the single
+// details.scope an older hub sends. The usual cause is the scope ceiling of
+// the agent's creator, so recreating the agent from the same parent does
+// not help; a scope re-issue does, once the creator holds the scopes, and
+// only a hub super-admin can run it.
+func missingScopeHint(details map[string]any) string {
+	var scopes []string
+	if list, ok := details["scopes"].([]any); ok {
+		for _, v := range list {
+			if s, ok := v.(string); ok && s != "" && !slices.Contains(scopes, s) {
+				scopes = append(scopes, s)
+			}
+		}
+	}
+	if len(scopes) == 0 {
+		if v, ok := details["scope"].(string); ok && v != "" {
+			scopes = []string{v}
+		}
+	}
+	what := "a required scope"
+	switch len(scopes) {
+	case 0:
+	case 1:
+		what = "the " + scopes[0] + " scope"
+	default:
+		what = "the " + strings.Join(scopes, " and ") + " scopes"
+	}
+	agent := os.Getenv("SCION_AGENT_SLUG")
+	if agent == "" {
+		agent = "<agent>"
+	}
+	return "\nThis agent's credential does not carry " + what + ". The usual cause is the scope ceiling of the " +
+		"agent's creator; recreating the agent from the same parent gives it the same scopes. Ask the agent's user " +
+		"to have a hub super-admin re-issue its scopes once its creator holds them: scion reset-auth " + agent +
+		" --reissue-scopes (parents before children)."
 }
 
 // copyVerified copies src to dst and fails unless the bytes are exactly

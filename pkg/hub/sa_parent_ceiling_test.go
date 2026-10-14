@@ -790,9 +790,13 @@ func TestSAParentCeiling_UseHasNoAgentScopeAndNoSeededRole(t *testing.T) {
 // not wired into a handler: the GCP token endpoints compose it with the
 // actAs check in a later change, which removes this test.
 func TestSAParentCeiling_NotCalledFromTokenHandlers(t *testing.T) {
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards EvaluateServiceAccountParentCeiling callers.
 	// pkgmove:scan-covers pkg/hub/internal/principal
-	// unaffected: guards EvaluateServiceAccountParentCeiling callers, which identity.go and identity_credential.go do not contain.
-	entries, err := os.ReadDir(".")
+	// scanned through guardScanSubdirs; guards EvaluateServiceAccountParentCeiling callers.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards EvaluateServiceAccountParentCeiling callers.
+	entries, err := readGuardScanDirs(".")
 	require.NoError(t, err)
 	for _, e := range entries {
 		name := e.Name()

@@ -19,7 +19,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,6 +38,7 @@ var (
 	deleteStopped     bool
 	deleteForce       bool
 	deleteCleanupOnly bool
+	deleteSelf        bool
 )
 
 // deleteCmd represents the delete command
@@ -64,7 +64,12 @@ agent directory and, unless --preserve-branch is given, its git branch. Use
 it when a delete went through on the Hub but the local cleanup failed. It
 refuses while the Hub still has the agent (run 'scion delete <agent>'
 instead). When the Hub cannot be checked (unreachable, or no Hub in use) it
-refuses unless --force is given.`,
+refuses unless --force is given.
+
+Inside an agent, if a named agent is the current agent (the one the
+command runs in), the command refuses and deletes none of the named agents
+unless --self is given. Other agents are deleted as usual. Outside an agent
+container --self has no effect.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
@@ -90,13 +95,23 @@ refuses unless --force is given.`,
 			args[i] = api.Slugify(a)
 		}
 
-		projectDir, _ := config.GetResolvedProjectDir(projectPath)
-		if preserveBranch && !util.IsGitRepoDir(projectDir) {
-			statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+		// A target-hub profile refuses the flags that need local state,
+		// and reads no local project (ptone/scion#4240).
+		if err := checkProfileAgentFlags(cmd); err != nil {
+			return err
+		}
+		if !hubProfileSelected() {
+			projectDir, _ := config.GetResolvedProjectDir(projectPath)
+			if preserveBranch && !util.IsGitRepoDir(projectDir) {
+				statusln("Warning: --preserve-branch used outside a git repository; this flag has no effect.")
+			}
 		}
 
 		if deleteCleanupOnly {
 			hubCtx, hubErr := CheckHubAvailabilityForAgents(projectPath, args, true)
+			if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
+				return err
+			}
 			return deleteAgentsCleanupOnly(hubCtx, hubErr, args)
 		}
 
@@ -107,6 +122,13 @@ refuses unless --force is given.`,
 		}
 		hubCtx, err := CheckHubAvailabilityForAgents(projectPath, excludedAgents, true)
 		if err != nil {
+			return err
+		}
+
+		// Checked for every named agent before any delete, so a refusal
+		// leaves all of them in place. With --stopped there are no named
+		// agents, and the current agent is running, so it is never listed.
+		if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
 			return err
 		}
 
@@ -322,6 +344,10 @@ func deleteAgentsViaHub(hubCtx *HubContext, agentNames []string) error {
 // local files is not an error. Calls must not overlap: they run git
 // worktree operations.
 func cleanupAfterHubDelete(hubCtx *HubContext, agentName string, removeBranch bool) (branchDeleted bool, err error) {
+	// A target-hub profile has no local agent files or sync state.
+	if hubCtx.profileLocalOnly() {
+		return false, nil
+	}
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
 	branchDeleted, err = agent.DeleteAgentFiles(agentName, projectPath, removeBranch)
@@ -504,7 +530,12 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	if err != nil {
 		err = wrapHubError(err)
 	} else {
-		err = hubDeleteFailure(agentName, outcome, "local worktree kept")
+		kept := "local worktree kept"
+		if hubCtx.profileLocalOnly() {
+			// A target-hub profile has no local worktree.
+			kept = "agent kept"
+		}
+		err = hubDeleteFailure(agentName, outcome, kept)
 	}
 	if err != nil {
 		job.errMsg = fmt.Sprintf("%s: %v", agentName, err)
@@ -524,13 +555,20 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 		// nothing local is touched: the worktree is kept, and the sync
 		// state is left alone so that a later sync sees the agent as
 		// stale once the hub finishes.
-		msg := hubDeletePendingMessage(outcome)
+		// A target-hub profile has no local worktree to keep.
+		kept := "local worktree kept"
+		if hubCtx.profileLocalOnly() {
+			kept = ""
+		}
+		msg := hubDeletePendingMessage(outcome, kept)
 		if isJSONOutput() {
 			job.result = map[string]interface{}{
-				"agent":        agentName,
-				"status":       "accepted",
-				"message":      msg,
-				"worktreeKept": true,
+				"agent":   agentName,
+				"status":  "accepted",
+				"message": msg,
+			}
+			if !hubCtx.profileLocalOnly() {
+				job.result["worktreeKept"] = true
 			}
 		} else {
 			job.lines = append(job.lines, fmt.Sprintf("Agent '%s': %s.", agentName, msg))
@@ -542,6 +580,15 @@ func finishHubDelete(hubCtx *HubContext, job *hubDeleteJob) {
 	// Also clean up local agent files (worktree, agent directory).
 	// The Hub dispatches container cleanup to the runtime broker, but local
 	// filesystem artifacts must be removed by the CLI to avoid orphaned agents.
+	// A target-hub profile has none (ptone/scion#4240).
+	if hubCtx.profileLocalOnly() {
+		if isJSONOutput() {
+			job.result = map[string]interface{}{"agent": agentName, "status": "success"}
+		} else {
+			job.lines = append(job.lines, fmt.Sprintf("Agent '%s' deleted via Hub.", agentName))
+		}
+		return
+	}
 	branchDeleted, err := cleanupAfterHubDelete(hubCtx, agentName, !preserveBranch)
 	if err != nil {
 		job.lines = append(job.lines,
@@ -709,19 +756,12 @@ func deleteAgentLocal(agentName string) error {
 	}
 
 	if !containerFound {
-		// Check if agent definition exists on the filesystem
-		agentDirExists := false
-		if projectDir, err := config.GetResolvedProjectDir(projectPath); err == nil {
-			if _, err := os.Stat(filepath.Join(projectDir, "agents", agentName)); err == nil {
-				agentDirExists = true
-			}
-		}
-		if !agentDirExists {
-			if globalDir, err := config.GetGlobalAgentsDir(); err == nil {
-				if _, err := os.Stat(filepath.Join(globalDir, agentName)); err == nil {
-					agentDirExists = true
-				}
-			}
+		// Check if an agent directory exists on the filesystem, in any
+		// state-directory layout DeleteAgentFiles removes (including an
+		// external one, and a directory kept by stale-directory cleanup).
+		agentDirExists, err := agent.LocalAgentDirExists(agentName, projectPath)
+		if err != nil {
+			return err
 		}
 		if !agentDirExists {
 			return fmt.Errorf("agent '%s' not found", agentName)
@@ -749,5 +789,6 @@ func init() {
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
 	deleteCmd.Flags().BoolVar(&deleteCleanupOnly, "cleanup-only", false, "Only remove the agent's local files (worktree, agent directory, branch unless --preserve-branch); refuses while the Hub still has the agent")
+	deleteCmd.Flags().BoolVar(&deleteSelf, "self", false, "Allow deleting the current agent when run inside an agent; without it, naming the current agent is refused")
 	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Delete from the Hub even if the broker is unreachable or cannot find the agent; permanent (no soft-delete)")
 }

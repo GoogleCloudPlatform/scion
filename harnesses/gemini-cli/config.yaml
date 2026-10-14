@@ -28,6 +28,15 @@ provisioner:
 config_dir: .gemini
 skills_dir: .gemini/skills
 interrupt_key: C-c
+# Readiness and message delivery; see the authoring guide.
+ready:
+  strategy: hook
+  settle: 1.5s
+  timeout: 90s
+delivery:
+  submit_keys: [Enter]
+  extra_submits: 2
+  extra_submit_delay: 300ms
 instructions_file: .gemini/GEMINI.md
 system_prompt_file: .gemini/system_prompt.md
 system_prompt_mode: native

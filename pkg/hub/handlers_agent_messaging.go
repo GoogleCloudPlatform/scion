@@ -1543,13 +1543,6 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// caller's own free-text thread_id (Rules 2/3) is minted on demand, so
 	// its external_ref embeds whatever the caller chose to send; fan-out
 	// treats that the same as no group context at all.
-	//
-	// Delivery of an agent's group post to the conversation's default
-	// agent, when added, belongs here: the sender's agentGroupPostDecision
-	// already allowed the post in resolveOutboundRouting; the default
-	// agent still needs the pairwise authorizeAgentMessage check, a loop
-	// guard, and groupAgentJoinAllowed before it is registered as a
-	// participant (group_message_mode.go).
 	mentionResults := s.fanOutAgentMentions(ctx, agentMentionFanoutInput{
 		Sender:             agent,
 		SenderIdent:        agentIdent,
@@ -1562,6 +1555,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		Channel:            result.Channel,
 		HumanMembers:       humanMembers,
 	})
+
+	// A group post that @mentions no agent goes to the conversation's
+	// default agent. The sender's agentGroupPostDecision already allowed
+	// the post in resolveOutboundRouting; wakeGroupDefaultAgent adds the
+	// pairwise check, the loop guard, and groupAgentJoinAllowed
+	// (group_message_mode.go).
+	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
+	var defaultAgentResult *messages.MentionResult
+	if isGroupPost {
+		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
+			Sender:          agent,
+			SenderIdent:     agentIdent,
+			Conv:            result.ConvResult,
+			Msg:             originalMsgForMentions,
+			Type:            req.Type,
+			MentionResults:  mentionResults,
+			ParentMessageID: storeMsg.ID,
+			Channel:         result.Channel,
+		})
+	}
 
 	// One message record per message: when the delivery path already
 	// wrote it, this line is a lifecycle entry; otherwise it is the record.
@@ -1600,6 +1613,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
+	}
+	// Which agents a group post reached, and an explicit flag when none.
+	// Types that never reach an agent (outside mentionFanoutTypes) report
+	// neither.
+	if isGroupPost && mentionFanoutTypes[req.Type] {
+		if defaultAgentResult != nil {
+			respBody["default_agent_result"] = defaultAgentResult
+		}
+		if woken := wokenAgentSlugs(mentionResults, defaultAgentResult); len(woken) > 0 {
+			respBody["woken_agents"] = woken
+		} else {
+			respBody["no_agent_woken"] = true
+		}
 	}
 	// ptone/scion#3667: attachments the hub could not record. Additive: the
 	// message was still sent, and the status is unchanged.
