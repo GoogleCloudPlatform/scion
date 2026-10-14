@@ -201,9 +201,11 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 		// Refine: a failed report when the stored reason is timed_out/lost
 		// and the phase is error (the reaper got there first) — the Hub has
 		// just confirmed the agent never ran, so the broker must clean up.
+		// For a start-kind launch the reaper's failure phase can also be
+		// stopped (failureEndPhase; ptone/scion#4669).
 		if r.State == store.LaunchReportStateFailed &&
 			(current.LaunchEndReason == store.LaunchEndReasonTimedOut || current.LaunchEndReason == store.LaunchEndReasonLost) &&
-			state.Phase(current.Phase) == state.PhaseError {
+			state.Phase(current.Phase) == failureEndPhase(current) {
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {
@@ -246,6 +248,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		if r.State == store.LaunchReportStateSucceeded {
 			applySucceededAgentInfo(upd, current, r)
 			upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonSucceeded)
+			withStartEndClearsMemory(upd, current)
 			updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonSucceeded, now).Save(ctx)
 			if err != nil {
 				return store.LaunchReportAnswer{}, nil, mapError(err)
@@ -255,6 +258,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// Non-terminal or failed: end the launch as running_observed. The
 		// broker does not clean up on `completed` (§3.8.2).
 		upd.SetLaunchState(store.LaunchStateEnded).SetLaunchEndReason(store.LaunchEndReasonRunningObserved)
+		withStartEndClearsMemory(upd, current)
 		updated, err := withLaunchEndSettlement(upd, current, store.LaunchEndReasonRunningObserved, now).Save(ctx)
 		if err != nil {
 			return store.LaunchReportAnswer{}, nil, mapError(err)
@@ -269,6 +273,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchError(store.LaunchErrorLaunchStopped).
 			SetMessage("stopped during launch").
 			SetStateVersion(current.StateVersion + 1)
+		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -310,6 +315,11 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 			SetLaunchCause(newLaunchCause).
 			SetMessage(newMessage).
 			SetStateVersion(current.StateVersion + 1)
+		// A start-kind launch ends by its own failure rule even though
+		// another writer moved the row to error first (ptone/scion#4669):
+		// a restart ends stopped, a start restores a stopped prior or
+		// remembers a suspended/created/provisioning one.
+		withStartFailureEnd(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -347,6 +357,7 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
 		applySucceededAgentInfo(upd, current, r)
+		withStartEndClearsMemory(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}
@@ -376,6 +387,9 @@ func (s *AgentStore) applyLaunchReportPreRunning(ctx context.Context, ltx *launc
 			SetLaunchEndReason(store.LaunchEndReasonFailed).
 			SetLaunchLastReportAt(now).
 			SetStateVersion(current.StateVersion + 1)
+		// A start-kind launch ends in its failure phase (stopped for a
+		// restart or a stopped prior) with its resume memory.
+		withStartFailureEnd(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)
 		}

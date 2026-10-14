@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/stdlib"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/migrate"
 )
@@ -238,6 +239,44 @@ func UTCTimeHook(next ent.Mutator) ent.Mutator {
 	})
 }
 
+// ClearLaunchResumePhaseHook is an Ent mutation hook that ends an agent's
+// resume memory (launch_resume_phase, ptone/scion#4669) at one choke
+// point: an Agent update (UpdateOne or bulk Update) that sets phase to a
+// value other than starting or error, and does not itself set
+// launch_resume_phase, also sets launch_resume_phase to "". A later
+// success, stop, suspend or any create-path write therefore clears the
+// memory whichever writer makes it. starting (a start dispatch) and error
+// (a failed start, or the rollback of a synchronous start taken from a
+// memory row) keep it. An explicit launch_resume_phase in the same mutation
+// wins, which is how a failed start-kind launch writes the memory.
+//
+// Registered next to UTCTimeHook by OpenSQLite, OpenSQLiteReadOnly and
+// openPostgres, and by the launch store's transaction client
+// (entadapter.newTxClient), which every launch writer uses. A new
+// *ent.Client constructor that writes agents must register it too
+// (TestEntClientConstructorsRegisterResumeHook checks this).
+func ClearLaunchResumePhaseHook(next ent.Mutator) ent.Mutator {
+	return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+		am, ok := m.(*ent.AgentMutation)
+		if !ok || !(am.Op().Is(ent.OpUpdate) || am.Op().Is(ent.OpUpdateOne)) {
+			return next.Mutate(ctx, m)
+		}
+		phase, set := am.Phase()
+		if !set {
+			return next.Mutate(ctx, m)
+		}
+		if _, explicit := am.LaunchResumePhase(); explicit {
+			return next.Mutate(ctx, m)
+		}
+		switch state.Phase(phase) {
+		case state.PhaseStarting, state.PhaseError:
+		default:
+			am.SetLaunchResumePhase("")
+		}
+		return next.Mutate(ctx, m)
+	})
+}
+
 // OpenSQLite creates an Ent client backed by SQLite.
 // The dsn should be a SQLite connection string (e.g. "file:ent?mode=memory&cache=shared").
 // Foreign keys and WAL journal mode are enabled automatically. Foreign keys
@@ -262,7 +301,7 @@ func OpenSQLite(dsn string, pool PoolConfig, opts ...ent.Option) (*ent.Client, e
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 
@@ -295,7 +334,7 @@ func OpenSQLiteReadOnly(dsn string, opts ...ent.Option) (*ent.Client, error) {
 	}
 	drv := entsql.OpenDB(dialect.SQLite, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 
@@ -377,7 +416,7 @@ func openPostgres(dsn string, pool PoolConfig, readOnly bool, opts ...ent.Option
 	pool.apply(db)
 	drv := entsql.OpenDB(dialect.Postgres, db)
 	client := ent.NewClient(append(opts, ent.Driver(drv))...)
-	client.Use(UTCTimeHook)
+	client.Use(UTCTimeHook, ClearLaunchResumePhaseHook)
 	return client, nil
 }
 

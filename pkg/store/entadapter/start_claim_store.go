@@ -480,17 +480,42 @@ func (s *AgentStore) SettleEndedLaunchClaim(ctx context.Context, agentID, claimI
 	return changed, notFoundAsLost(err)
 }
 
+// launchClaimKind is the start claim kind a launch of launchKind is linked
+// to and settles (ptone/scion#4669): a create launch its create claim, a
+// start launch its user claim, a restart launch its restart claim. Every
+// other claim kind (wake, recovery, reincarnate, stop) is never adopted by
+// a launch. ok is false for an unknown launch kind.
+func launchClaimKind(launchKind string) (kind store.StartClaimKind, ok bool) {
+	switch launchKind {
+	case store.LaunchKindCreate:
+		return store.StartClaimCreate, true
+	case store.LaunchKindStart:
+		return store.StartClaimUser, true
+	case store.LaunchKindRestart:
+		return store.StartClaimRestart, true
+	}
+	return "", false
+}
+
+// claimPairsWithLaunch reports whether row holds a start claim of the kind
+// a launch of launchKind pairs with (launchClaimKind).
+func claimPairsWithLaunch(row *ent.Agent, launchKind string) bool {
+	kind, ok := launchClaimKind(launchKind)
+	return ok && row.StartClaimID != nil && row.StartClaimKind == string(kind)
+}
+
 // settleLaunchClaim adds to u the change a launch ending with endReason
-// makes to row's create claim, when the claim is linked to that launch
-// (the row's current launch; see linkLaunchClaim): release, or demote a
-// live claim to unconfirmed (hold_until left unset; the reaper applies the kind's hold
-// from unconfirmed_at). It returns nil when there is nothing to settle: no
-// create claim, or the end reason settles nothing, or the claim is already
+// makes to row's start claim, when the claim pairs with the launch's kind
+// (launchClaimKind) and is linked to that launch (the row's current launch;
+// see linkLaunchClaim): release, or demote a live claim to unconfirmed
+// (hold_until left unset; the reaper applies the kind's hold from
+// unconfirmed_at). It returns nil when there is nothing to settle: no
+// paired claim, or the end reason settles nothing, or the claim is already
 // unconfirmed and would only be demoted. Callers writing a launch's terminal
 // transition call it on the same update so the claim settles in the same
 // transaction.
 func settleLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, endReason string, now time.Time) *ent.AgentUpdateOne {
-	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) ||
+	if !claimPairsWithLaunch(row, row.LaunchKind) ||
 		row.StartClaimLaunchID == "" || row.StartClaimLaunchID != row.LaunchID {
 		return nil
 	}
@@ -577,22 +602,27 @@ func notFoundAsLost(err error) error {
 	return err
 }
 
-// linkLaunchClaim adds to u, a BeginLaunch write of launch launchID on row,
-// the link from row's create claim to that launch, so only that launch's
-// end settles the claim. A claim with no link is linked. A claim linked to
-// an earlier launch is relinked while it is live with an unexpired lease:
-// its holder is still running the start, and a deferred create runs a
-// second BeginLaunch for the same start on the node that owns the broker.
+// linkLaunchClaim adds to u, a BeginLaunch or BeginStartLaunch write of
+// launch launchID (of kind launchKind) on row, the link from row's paired
+// start claim (launchClaimKind: create for a create launch, user for a
+// start, restart for a restart) to that launch, so only that launch's end
+// settles the claim. A claim with no link is linked. A claim linked to an
+// earlier launch is relinked while it is live with an unexpired lease: its
+// holder is still running the start, and a deferred create runs a second
+// BeginLaunch for the same start on the node that owns the broker.
 // Otherwise (unconfirmed, or an expired lease) the link is left alone and
 // the start-claim reaper settles the claim. Nothing is added when row holds
-// no create claim.
+// no paired claim.
 //
-// This relies on every BeginLaunch of an agent holding a create claim
+// This relies on every launch begun on an agent holding a paired claim
 // coming from the claim's holder or from its deferred continuation on the
 // node that owns the broker: BeginLaunch has no claim ID, so a launch begun
-// by anyone else would be adopted by the claim.
-func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchID string, now time.Time) *ent.AgentUpdateOne {
-	if row.StartClaimID == nil || row.StartClaimKind != string(store.StartClaimCreate) {
+// by anyone else would be adopted by the claim. For user and restart
+// claims this holds because the Hub begins start launches only from the
+// claimed start dispatch; wake-DM, reincarnation and the cross-node owner
+// loop stay synchronous and begin no launch (ptone/scion#4669).
+func linkLaunchClaim(u *ent.AgentUpdateOne, row *ent.Agent, launchKind, launchID string, now time.Time) *ent.AgentUpdateOne {
+	if !claimPairsWithLaunch(row, launchKind) {
 		return u
 	}
 	switch {
