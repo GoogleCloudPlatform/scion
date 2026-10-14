@@ -689,7 +689,11 @@ async function waitFrameReadyToClick(
   while (Date.now() - started < budgetMs) {
     const visible = await frameEl.isVisible().catch(() => false);
     const boxRead = frameEl.evaluate(twoFrameBoxes, undefined, { timeout: 2_000 });
-    const boxes = await withTimeout(boxRead.catch(() => null), 2_000, null);
+    const boxes = await withTimeout(
+      boxRead.catch(() => null),
+      2_000,
+      null
+    );
     const [b0, b1] = boxes ?? [[], []];
     const nonZero = (b1[2] ?? 0) > 0 && (b1[3] ?? 0) > 0;
     const stableBox = nonZero && b0.length === 4 && b0.every((v, k) => v === b1[k]);
