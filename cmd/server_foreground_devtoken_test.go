@@ -111,7 +111,11 @@ func TestInitDevAuth_LogsTokenFilePath(t *testing.T) {
 // creates) that file, and the log shows its absolute path, never the value.
 func TestInitDevAuth_RelativeTokenFile(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
+		name string
+		// global sets --global. These rows pin that --global, which in
+		// foreground changes to the home directory before dev auth (the
+		// temp working directory plays home here), still resolves to the
+		// same file under the global directory.
 		global bool
 		// existing, when true, writes the token file before startup.
 		existing bool
