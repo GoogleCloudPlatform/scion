@@ -205,11 +205,16 @@ func (s *AgentStore) applyLaunchReportEnded(ctx context.Context, ltx *launchTx, 
 		// deadline or staleness reap writes its failure phase
 		// (failureEndPhase, stopped for a restart or a stopped prior), and a
 		// wind-down reap leaves an error row in error (ptone/scion#4669).
-		// For a create launch both are error.
+		// For a create launch both are error. A wind-down reap of a row the
+		// user stopped also leaves stopped, with launch_error
+		// launch_stopped; that is not the reaper's failure end, so it gets
+		// 409 as a create launch (and the report before the reap) does.
 		phase := state.Phase(current.Phase)
+		reaperFailureEnd := phase == state.PhaseError ||
+			(phase == failureEndPhase(current) && current.LaunchError != store.LaunchErrorLaunchStopped)
 		if r.State == store.LaunchReportStateFailed &&
 			(current.LaunchEndReason == store.LaunchEndReasonTimedOut || current.LaunchEndReason == store.LaunchEndReasonLost) &&
-			(phase == state.PhaseError || phase == failureEndPhase(current)) {
+			reaperFailureEnd {
 			upd := ltx.client.Agent.UpdateOneID(current.ID).
 				SetStateVersion(current.StateVersion + 1)
 			if r.ErrorCode != "" {

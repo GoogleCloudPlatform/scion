@@ -24,6 +24,7 @@ package entadapter
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -411,6 +412,43 @@ func TestStartLaunch_LateFailedAfterWindDownErrorRefines(t *testing.T) {
 			got, err := s.GetAgent(ctx, a.ID)
 			require.NoError(t, err)
 			assert.Equal(t, "image_pull_failed", got.LaunchError)
+		})
+	}
+}
+
+// TestStartLaunch_LateFailedAfterWindDownStoppedIsStale pins that a wind-down
+// reap of a start-kind row the user stopped is not mistaken for the
+// reaper's own failure end, even when the launch's failure phase is
+// stopped (a restart, or a start from stopped): a late failed report gets
+// 409 stale_launch, as it would for a create launch or before the reap.
+func TestStartLaunch_LateFailedAfterWindDownStoppedIsStale(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct{ kind, prior string }{
+		{store.LaunchKindRestart, "running"},
+		{store.LaunchKindStart, "stopped"},
+	} {
+		t.Run(tc.kind+"/prior="+tc.prior, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "late-wd-stop", tc.kind, tc.prior, "")
+			setRowPhaseAndMemory(t, ctx, s, a.ID, "stopped", "")
+			_, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
+			require.NoError(t, err)
+			setLaunchReaperArmedSince(t, ctx, s, readStoreNow(t, ctx, s).Add(-time.Hour))
+			setAgentLastReportAt(t, ctx, s, a.ID, readStoreNow(t, ctx, s).Add(-time.Hour))
+			res, err := s.RunLaunchReaperTick(ctx, wideWindowReaperParams)
+			require.NoError(t, err)
+			require.Len(t, res.Reaped, 1)
+			require.Equal(t, "stopped", res.Reaped[0].Phase, "a wind-down reap leaves the stopped phase")
+
+			answer, _, err := s.ApplyLaunchReport(ctx, a.ID, a.RuntimeBrokerID, store.LaunchReport{
+				LaunchID: launchID, InstanceID: "i1", State: store.LaunchReportStateFailed, ErrorCode: "image_pull_failed",
+			})
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusConflict, answer.HTTPStatus, "a late failed report after a user stop is stale")
+			assert.Equal(t, store.LaunchReportCodeStaleLaunch, answer.Code)
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, store.LaunchErrorLaunchStopped, got.LaunchError, "the stop's launch error stands")
 		})
 	}
 }
