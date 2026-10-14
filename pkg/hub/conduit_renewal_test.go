@@ -78,13 +78,17 @@ type renewalFixture struct {
 
 const renewalSessionID = "sess-renew"
 
+// newRenewalFixture builds the renewal fixture. Use one per test scope: a
+// second one needs its own t.Run subtest, because the registry test database
+// is named after the test.
 func newRenewalFixture(t *testing.T) *renewalFixture {
 	t.Helper()
 	return newRenewalFixtureWithIncarnation(t, "inc-renew")
 }
 
 // newRenewalFixtureWithIncarnation is newRenewalFixture with the agent
-// session's endpoint incarnation set to inc.
+// session's endpoint incarnation set to inc. Use one per test scope, as for
+// newRenewalFixture.
 func newRenewalFixtureWithIncarnation(t *testing.T, inc string) *renewalFixture {
 	t.Helper()
 	ctx := context.Background()
@@ -243,14 +247,18 @@ func TestConduitRenewStream_OriginDecidesActions(t *testing.T) {
 	_, err = f.renew(proxyTCP, proxyTCPOpen, 1)
 	assert.ErrorIs(t, err, errConduitForbidden)
 
-	g := newRenewalFixture(t)
-	tunnelPTY, tunnelPTYOpen = g.openGrant(t, grant.ViaTunnel, ptyHeader(), nil)
-	proxyTCP, proxyTCPOpen = g.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
-	g.deleteBinding(t, g.attachBind)
-	_, err = g.renew(tunnelPTY, tunnelPTYOpen, 1)
-	assert.ErrorIs(t, err, errConduitForbidden, "tunnel PTY without attach")
-	_, err = g.renew(proxyTCP, proxyTCPOpen, 1)
-	assert.NoError(t, err, "a proxy TCP stream needs no attach")
+	// A second fixture runs in its own subtest: the registry test client is
+	// named after the test, so two in one test would share one database.
+	t.Run("attach removed", func(t *testing.T) {
+		g := newRenewalFixture(t)
+		tunnelPTY, tunnelPTYOpen := g.openGrant(t, grant.ViaTunnel, ptyHeader(), nil)
+		proxyTCP, proxyTCPOpen := g.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+		g.deleteBinding(t, g.attachBind)
+		_, err := g.renew(tunnelPTY, tunnelPTYOpen, 1)
+		assert.ErrorIs(t, err, errConduitForbidden, "tunnel PTY without attach")
+		_, err = g.renew(proxyTCP, proxyTCPOpen, 1)
+		assert.NoError(t, err, "a proxy TCP stream needs no attach")
+	})
 }
 
 // TestConduitRenewStream_Refusals: requests the hub refuses without
@@ -605,10 +613,15 @@ func TestConduitRenewStream_OversizeRenewalRefused(t *testing.T) {
 	require.True(t, openFits)
 	require.False(t, renewalFits, "a renewal is never larger than its open grant here; the test cannot build the case")
 
-	f := newRenewalFixtureWithIncarnation(t, inc)
-	tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
-	r, err := f.renew(tok, open, 7)
-	assert.Nil(t, r)
-	assert.ErrorIs(t, err, errConduitAuthzUnavailable)
-	assert.ErrorIs(t, err, grant.ErrTooLarge)
+	// The renewal fixture runs in its own subtest: the registry test client
+	// is named after the test, so a second fixture in this test would share
+	// the probe's database.
+	t.Run("renewal", func(t *testing.T) {
+		f := newRenewalFixtureWithIncarnation(t, inc)
+		tok, open := f.openGrant(t, grant.ViaProxy, tcpHeader("3000"), nil)
+		r, err := f.renew(tok, open, 7)
+		assert.Nil(t, r)
+		assert.ErrorIs(t, err, errConduitAuthzUnavailable)
+		assert.ErrorIs(t, err, grant.ErrTooLarge)
+	})
 }
