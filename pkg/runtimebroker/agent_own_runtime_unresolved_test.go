@@ -35,6 +35,10 @@ import (
 
 const savedProfileUnresolvedMsg = "Agent's saved profile no longer resolves"
 
+// The unresolved saved profile in these tests is "gke-gone": it must be
+// absent from the embedded default settings too, which define "local" and
+// "remote".
+
 // unresolvedFixture is an ownRTFixture whose agent log keeps debug records
 // and whose profile resolutions are counted.
 type unresolvedFixture struct {
@@ -116,7 +120,7 @@ func memoEntries(m interface{ Range(func(any, any) bool) }) int {
 // second agent with the same saved profile gets its own warn record but no
 // further resolution.
 func TestEnsureAgentOwnRuntime_UnresolvedProfileWarnsOnceResolvesOnce(t *testing.T) {
-	f := newUnresolvedFixture(t, "local")
+	f := newUnresolvedFixture(t, "gke-gone")
 	const n = 5
 	for i := 0; i < n; i++ {
 		if own := f.ensure(ownRTAgent); own != nil {
@@ -131,7 +135,7 @@ func TestEnsureAgentOwnRuntime_UnresolvedProfileWarnsOnceResolvesOnce(t *testing
 		t.Fatalf("profile resolved %d times for %d requests, want 1", got, n)
 	}
 
-	f.addAgent(t, "other-agent", "local")
+	f.addAgent(t, "other-agent", "gke-gone")
 	f.ensure("other-agent")
 	f.ensure("other-agent")
 	if got := f.levels(t, "other-agent"); strings.Join(got, ",") != "WARN,DEBUG" {
@@ -151,14 +155,14 @@ func TestEnsureAgentOwnRuntime_UnresolvedProfileWarnsOnceResolvesOnce(t *testing
 // A settings change that adds the saved profile makes the next request
 // resolve it, register and memoise its runtime, and clear the failure.
 func TestEnsureAgentOwnRuntime_UnresolvedProfileAddedResolves(t *testing.T) {
-	f := newUnresolvedFixture(t, "local")
+	f := newUnresolvedFixture(t, "gke-gone")
 	f.ensure(ownRTAgent)
 	f.ensure(ownRTAgent)
 	if got := f.resolves.Load(); got != 1 {
 		t.Fatalf("profile resolved %d times before the settings change, want 1", got)
 	}
 
-	f.editSettings(t, "profiles:\n", "profiles:\n    local:\n        runtime: k8s-agents\n")
+	f.editSettings(t, "profiles:\n", "profiles:\n    gke-gone:\n        runtime: k8s-agents\n")
 
 	first := f.ensure(ownRTAgent)
 	if first == nil {
@@ -184,13 +188,13 @@ func TestEnsureAgentOwnRuntime_UnresolvedProfileAddedResolves(t *testing.T) {
 // A profile that resolves again and then disappears once more, back to a
 // catalog whose failure was already logged, is logged at warn level again.
 func TestEnsureAgentOwnRuntime_ProfileLostAgainWarnsAgain(t *testing.T) {
-	f := newUnresolvedFixture(t, "local")
+	f := newUnresolvedFixture(t, "gke-gone")
 	f.ensure(ownRTAgent)
-	f.editSettings(t, "profiles:\n", "profiles:\n    local:\n        runtime: k8s-agents\n")
+	f.editSettings(t, "profiles:\n", "profiles:\n    gke-gone:\n        runtime: k8s-agents\n")
 	if own := f.ensure(ownRTAgent); own == nil {
 		t.Fatal("request after adding the profile did not resolve the own runtime")
 	}
-	f.editSettings(t, "profiles:\n    local:\n        runtime: k8s-agents\n", "profiles:\n")
+	f.editSettings(t, "profiles:\n    gke-gone:\n        runtime: k8s-agents\n", "profiles:\n")
 	if own := f.ensure(ownRTAgent); own != nil {
 		t.Fatal("request after removing the profile produced an own runtime")
 	}
@@ -222,7 +226,7 @@ func TestEnsureAgentOwnRuntime_ProfileRuntimeFixedResolves(t *testing.T) {
 // A flat instance returns before reading the saved profile: no resolution,
 // no log record, no memo entry.
 func TestEnsureAgentOwnRuntime_FlatInstanceSkipsSavedProfile(t *testing.T) {
-	f := newUnresolvedFixture(t, "local")
+	f := newUnresolvedFixture(t, "gke-gone")
 	f.srv.config.FlatInstance = &FlatInstanceConfig{Identity: &brokeridentity.Identity{RuntimeBrokerID: "rb-flat"}, HubInProcess: true}
 	if !f.srv.isFlat() {
 		t.Fatal("fixture is not a flat instance")
