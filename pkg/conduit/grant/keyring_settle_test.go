@@ -239,8 +239,57 @@ func TestKeyRingRevoke(t *testing.T) {
 	if _, err := Verify(context.Background(), mintAt(s2, at), r.RecheckKeys(at, testRetain), baseExpect(), newCache(), at); err != nil {
 		t.Fatalf("grant from the unrevoked key: %v", err)
 	}
-	if strings.Contains(r.String(), k1.KeyID) {
-		t.Fatal("revoked kid still in the ring")
+	if _, ok := ringKeyByID(r, k1.KeyID); ok {
+		t.Fatal("revoked kid still in Keys")
+	}
+	if _, ok := retainedByID(r, k1.KeyID); ok {
+		t.Fatal("revoked kid still retained")
+	}
+	if !strings.Contains(r.String(), "revoked:["+k1.KeyID+"]") {
+		t.Fatalf("revoked kid not remembered: %s", r.String())
+	}
+}
+
+// TestKeyRingKIDsNeverReused: a key whose kid equals a live, retained or
+// revoked kid cannot be rotated in; a revoked kid is remembered until its
+// revocation plus the retention, then forgotten.
+func TestKeyRingKIDsNeverReused(t *testing.T) {
+	r, k1, k2 := rotatedRing(t)
+	activate := t0.Add(testActivateAfter)
+	notAfter := activate.Add(testOverlap)
+	r.Settle(notAfter, testRetain) // k1 is now retained
+	k3, err := NewRingKey(notAfter, notAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Rotate(notAfter, k3, testActivateAfter, testOverlap); err != nil {
+		t.Fatal(err)
+	}
+	r.Settle(notAfter.Add(testActivateAfter), testRetain)
+	revokedAt := notAfter.Add(testActivateAfter)
+	if err := r.Revoke(revokedAt, k2.KeyID); err != nil { // k3 signs now; k2 is revocable
+		t.Fatal(err)
+	}
+	for name, kid := range map[string]string{"live": k3.KeyID, "retained": k1.KeyID, "revoked": k2.KeyID} {
+		t.Run(name, func(t *testing.T) {
+			dup, err := NewRingKey(revokedAt, revokedAt)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dup.KeyID = kid
+			rr := r
+			rr.Keys = append([]RingKey(nil), r.Keys...)
+			if err := rr.Rotate(revokedAt.Add(time.Hour), dup, testActivateAfter, testOverlap); err == nil {
+				t.Fatalf("a %s kid was reused", name)
+			}
+		})
+	}
+	if err := r.Validate(); err != nil {
+		t.Fatalf("ring with a revoked entry does not validate: %v", err)
+	}
+	r.Settle(revokedAt.Add(testRetain), testRetain)
+	if strings.Contains(r.String(), "revoked:["+k2.KeyID+"]") {
+		t.Fatal("revoked kid remembered past the retention")
 	}
 }
 

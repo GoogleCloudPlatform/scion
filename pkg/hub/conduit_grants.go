@@ -233,6 +233,7 @@ func cloneKeyRing(r *grant.KeyRing) *grant.KeyRing {
 	return &grant.KeyRing{
 		Keys:     append([]grant.RingKey(nil), r.Keys...),
 		Retained: append([]grant.RetainedKey(nil), r.Retained...),
+		Revoked:  append([]grant.RevokedKey(nil), r.Revoked...),
 	}
 }
 

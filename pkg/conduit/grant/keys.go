@@ -154,6 +154,15 @@ func NewRingKey(now, activateAt time.Time) (RingKey, error) {
 type KeyRing struct {
 	Keys     []RingKey     `json:"keys"`
 	Retained []RetainedKey `json:"retained,omitempty"`
+	// Revoked remembers revoked kids until RevokedAt + the retention, so a
+	// revoked kid is never used again.
+	Revoked []RevokedKey `json:"revoked,omitempty"`
+}
+
+// RevokedKey records a revoked kid. It holds no key material.
+type RevokedKey struct {
+	KeyID     string    `json:"kid"`
+	RevokedAt time.Time `json:"revoked_at"`
 }
 
 // RetainedKey is the public half of a key past its not_after, kept until
@@ -175,7 +184,11 @@ func (r KeyRing) String() string {
 	for i, k := range r.Retained {
 		ret[i] = k.KeyID
 	}
-	return fmt.Sprintf("grant.KeyRing{kids:%v retained:%v}", ids, ret)
+	rev := make([]string, len(r.Revoked))
+	for i, k := range r.Revoked {
+		rev[i] = k.KeyID
+	}
+	return fmt.Sprintf("grant.KeyRing{kids:%v retained:%v revoked:%v}", ids, ret, rev)
 }
 
 // GoString redacts every seed.
@@ -200,6 +213,15 @@ func (r *KeyRing) Validate() error {
 		default:
 			return fmt.Errorf("grant: ring key %q has neither a valid seed nor a valid public key", k.KeyID)
 		}
+	}
+	for _, k := range r.Revoked {
+		if k.KeyID == "" {
+			return errors.New("grant: revoked entry with empty kid")
+		}
+		if seen[k.KeyID] {
+			return fmt.Errorf("grant: duplicate ring kid %q", k.KeyID)
+		}
+		seen[k.KeyID] = true
 	}
 	for _, k := range r.Retained {
 		if k.KeyID == "" {
@@ -272,10 +294,8 @@ func (r *KeyRing) Rotate(now time.Time, next RingKey, activateAfter, overlap tim
 	if len(next.Seed) != ed25519.SeedSize || next.KeyID == "" {
 		return errors.New("grant: invalid rotation key")
 	}
-	for _, k := range r.Keys {
-		if k.KeyID == next.KeyID {
-			return fmt.Errorf("grant: kid %q already in ring", next.KeyID)
-		}
+	if r.hasKID(next.KeyID) {
+		return fmt.Errorf("grant: kid %q already in ring", next.KeyID)
 	}
 	next.ActivateAt = now.Add(activateAfter).UTC()
 	retire := next.ActivateAt.Add(overlap)
@@ -310,7 +330,9 @@ func (r *KeyRing) Prune(now time.Time) {
 //     only, until not_after + retain;
 //   - a retained key's RetainUntil only moves later (to RetiredAt + retain
 //     when that is later), never earlier;
-//   - a retained key past its RetainUntil is dropped.
+//   - a retained key past its RetainUntil is dropped;
+//   - a revoked kid is remembered until its revocation + retain, then
+//     forgotten.
 func (r *KeyRing) Settle(now time.Time, retain time.Duration) bool {
 	changed := false
 	for i := range r.Keys {
@@ -347,7 +369,37 @@ func (r *KeyRing) Settle(now time.Time, retain time.Duration) bool {
 		ret = append(ret, k)
 	}
 	r.Retained = ret
+	rev := r.Revoked[:0]
+	for _, k := range r.Revoked {
+		if !now.Before(k.RevokedAt.Add(retain)) {
+			changed = true
+			continue
+		}
+		rev = append(rev, k)
+	}
+	r.Revoked = rev
 	return changed
+}
+
+// hasKID reports whether kid is in use or remembered: in Keys, Retained or
+// Revoked.
+func (r *KeyRing) hasKID(kid string) bool {
+	for _, k := range r.Keys {
+		if k.KeyID == kid {
+			return true
+		}
+	}
+	for _, k := range r.Retained {
+		if k.KeyID == kid {
+			return true
+		}
+	}
+	for _, k := range r.Revoked {
+		if k.KeyID == kid {
+			return true
+		}
+	}
+	return false
 }
 
 // superseded reports whether a key activated after r.Keys[i] has itself
@@ -369,8 +421,9 @@ var (
 )
 
 // Revoke removes kid from the ring at once, from Keys and from Retained:
-// it no longer verifies anything, in admission or in re-check. The key that
-// signs at now cannot be revoked (rotate first).
+// it no longer verifies anything, in admission or in re-check. The kid is
+// remembered in Revoked, so no later key reuses it. The key that signs at
+// now cannot be revoked (rotate first).
 func (r *KeyRing) Revoke(now time.Time, kid string) error {
 	if s, err := r.Signer(now); err == nil && s.KeyID == kid {
 		return ErrRevokeActiveSigner
@@ -397,6 +450,7 @@ func (r *KeyRing) Revoke(now time.Time, kid string) error {
 	if !found {
 		return ErrRevokeUnknown
 	}
+	r.Revoked = append(r.Revoked, RevokedKey{KeyID: kid, RevokedAt: now.UTC()})
 	return nil
 }
 
