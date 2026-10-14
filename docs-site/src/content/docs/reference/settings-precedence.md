@@ -951,9 +951,9 @@ template image from the template's files. Put it in the template file.
 **Behaviour change to watch for:** a profile that sets `harness_overrides.<name>.image` now
 overrides the image of every template that uses that harness config under that profile. Remove
 the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
-`--image` (or `--config` image) now persists across plain restarts; a later local `scion start
---image` applies to that one start only (`--image` is not applied to an existing
-agent). Re-create the agent to drop a create-time image.
+`--image` (or `--config` image) now persists across plain restarts. A later `scion start --image`
+is not applied to an existing agent; the CLI warns that the flag is ignored. Re-create the agent to
+change or drop a create-time image.
 
 #### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default
 
