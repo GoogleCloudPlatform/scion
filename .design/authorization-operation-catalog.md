@@ -6622,7 +6622,7 @@
 
 ### Audit
 
-- **Event Type:** `group.delete`
+- **Event Type:** `group_delete`
 - **Context Fields:** actor_id
 - **Before Fields:** group_id, group_name
 - **Atomic:** Yes

@@ -446,9 +446,19 @@ type Server struct {
 	// agentOwnRuntimes memoises the runtime an existing agent's saved
 	// profile resolves to (see ensureAgentOwnRuntime), keyed by project dir
 	// and profile; agentOwnRuntimeGroup collapses concurrent resolutions of
-	// one key into a single call. Failed resolutions are not stored.
+	// one key into a single call. Failed runtime resolutions are not stored.
 	agentOwnRuntimes     sync.Map
 	agentOwnRuntimeGroup singleflight.Group
+	// savedProfileFailures memoises a saved profile that does not resolve in
+	// the loaded profile catalog, keyed by project dir and profile, and
+	// savedProfileWarned records, per project dir, agent and profile, the
+	// catalog whose failure was last logged at warn level (see
+	// ensureAgentOwnRuntime).
+	savedProfileFailures sync.Map
+	savedProfileWarned   sync.Map
+	// resolveProfileRuntime, when set, replaces VersionedSettings.ResolveRuntime
+	// in ensureAgentOwnRuntime. Tests set it to count resolutions.
+	resolveProfileRuntime func(vs *config.VersionedSettings, profile string) (config.V1RuntimeConfig, string, error)
 
 	// workspaceLocks serializes operations on shared local paths (worktree
 	// provisioning, project and agent file cleanup) with every server of
