@@ -133,6 +133,8 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestIdentityWeb_Mint"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_RefusedWithoutSetting"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_MintNeedsTheKindsIssuerChecks"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeForOwnIdentity"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_WebLoginCodeRefusedOutsideOwnMemberIdentities"},
 			{Package: "pkg/hub", Function: "TestWorkloadDelegation_RevokedAfterAuthMintsNothing"},
@@ -231,6 +233,7 @@ var testIdentityOperations = []OperationSpec{
 		TestRefs: []TestRef{
 			{Package: "pkg/hub/authzop", Function: "TestCatalogValidation"},
 			{Package: "pkg/hub", Function: "TestTestAdmin_RevokeAll"},
+			{Package: "pkg/hub", Function: "TestAdminWebSessions_RevokeAllEndsLiveSession"},
 		},
 		Bearer: SessionOnly(ReasonCredentialManagement),
 	},
