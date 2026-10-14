@@ -216,6 +216,16 @@ type ImportResourcesResponse struct {
 	Failed   []ImportFailure `json:"failed,omitempty"`
 }
 
+// userScopeImportResource returns the Resource for a new record of
+// authzType ("template" or "harness_config") in the caller's own user
+// scope.
+func userScopeImportResource(authzType string, userIdent UserIdentity) Resource {
+	if authzType == "harness_config" {
+		return harnessConfigUserScopeResource(userIdent)
+	}
+	return templateUserScopeResource(userIdent)
+}
+
 // handleResourcesImport handles POST /api/v1/resources/import: a single,
 // kind/scope-generic import endpoint sitting over the shared import driver
 // (resource_import.go). Global-scope import requires hub-admin; project-scope
@@ -317,9 +327,17 @@ func (s *Server) handleResourcesImport(w http.ResponseWriter, r *http.Request) {
 		if !requireProfileWriter(w, r) {
 			return
 		}
+		// Import creates records in the caller's user scope: a user access
+		// token needs the create selector of the kind (template:create or
+		// harness_config:create) on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to import "+kind.noun+" into your user scope", nil)
+			return
+		}
 		// projectID carries the user ID here. importFromRemote uses it for:
-		// 1. Auth token lookup in fetchRemoteForImport — will find no project,
-		//    so the fetch proceeds unauthenticated (correct for user scope).
+		// 1. The credential lookup in fetchRemoteForImport, which reads the
+		//    user's own GH_ and GITHUB_TOKEN credentials (see importCredential).
 		// 2. scopeID in importResourceDirs/Bootstrap — correctly uses the user
 		//    ID as the template's scope identifier.
 		projectID, scope = userIdent.ID(), "user"
@@ -578,7 +596,7 @@ func (s *Server) handleProjectDiscoverResources(
 		names, skipped, err = s.discoverFromWorkspace(ctx, project, req.WorkspacePath, kind)
 	} else {
 		req.SourceURL = config.NormalizeTemplateSourceURL(req.SourceURL)
-		names, skipped, err = s.discoverFromRemote(ctx, projectID, req.SourceURL, kind)
+		names, skipped, err = s.discoverFromRemote(ctx, store.TemplateScopeProject, projectID, req.SourceURL, kind)
 	}
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
@@ -649,7 +667,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 
 	sourceURL := config.NormalizeTemplateSourceURL(req.SourceURL)
 
-	var projectID string
+	var scope, scopeID string
 	switch req.Scope {
 	case "global", "":
 		userIdent := GetUserIdentityFromContext(ctx)
@@ -663,7 +681,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"You don't have permission to discover global "+kind.noun, nil)
 			return
 		}
-		projectID = ""
+		scope = store.TemplateScopeGlobal
 
 	case "project":
 		if req.ScopeID == "" {
@@ -682,7 +700,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 			writeErrorFromErr(w, perr, "")
 			return
 		}
-		projectID = req.ScopeID
+		scope, scopeID = store.TemplateScopeProject, req.ScopeID
 
 	case "user":
 		userIdent := GetUserIdentityFromContext(ctx)
@@ -691,10 +709,17 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 				"Authentication required", nil)
 			return
 		}
-		// No authz check — users can always discover for their own scope.
-		// projectID stays empty — discovery is scope-independent (only fetches
-		// and walks directories) and user scope has no project for auth tokens.
-		projectID = ""
+		// Discovery for the caller's user scope needs the create permission
+		// of the kind, as import does: a user access token needs
+		// template:create or harness_config:create on a hub boundary.
+		if !s.authzService.CheckAccess(ctx, userIdent, userScopeImportResource(authzType, userIdent), ActionCreate).Allowed {
+			writeError(w, http.StatusForbidden, ErrCodeForbidden,
+				"You don't have permission to discover "+kind.noun+" for your user scope", nil)
+			return
+		}
+		// Discovery only fetches and walks directories; the fetch uses the
+		// caller's own credentials (see importCredential).
+		scope, scopeID = store.TemplateScopeUser, userIdent.ID()
 
 	default:
 		writeError(w, http.StatusBadRequest, "invalid_request",
@@ -702,7 +727,7 @@ func (s *Server) handleResourcesDiscover(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	names, skipped, err := s.discoverFromRemote(ctx, projectID, sourceURL, kind)
+	names, skipped, err := s.discoverFromRemote(ctx, scope, scopeID, sourceURL, kind)
 	if err != nil {
 		if writeWorkspaceStorageUnavailable(w, err) {
 			return

@@ -156,6 +156,7 @@ server:
         allowed_gcp_projects: [gp]
         allowed_domains: [example.com]
         accept_user_tokens: true
+        allow_visitor_grants: true
     algorithms: [RS256]
     refresh_interval: 1h
     debounce_interval: 30s

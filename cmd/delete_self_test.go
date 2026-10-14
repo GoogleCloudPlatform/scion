@@ -152,34 +152,9 @@ func TestDeleteCmd_CleanupOnlyCurrentAgentRefused(t *testing.T) {
 	assert.Empty(t, queries)
 }
 
-// Without a Hub the target project is unknown, so a name match alone
-// refuses (fail closed): none of the named agents is deleted locally.
-func TestDeleteCmd_LocalCurrentAgentWithoutSelfRefused(t *testing.T) {
-	projectDir := setupSelfDeleteLocal(t)
-	agentDir := createAgentDir(t, projectDir, selfAgentName)
-	otherDir := createAgentDir(t, projectDir, "other-agent")
-
-	_, err := runDelete(t, "other-agent", selfAgentName)
-	require.Error(t, err, "a local delete of the current agent without --self must be refused")
-	assert.Contains(t, err.Error(), "--self is required")
-	assert.DirExists(t, agentDir)
-	assert.DirExists(t, otherDir, "a refusal leaves the other named agents in place too")
-}
-
-// Without a Hub, --self deletes the current agent as usual.
-func TestDeleteCmd_LocalCurrentAgentWithSelfDeletes(t *testing.T) {
-	projectDir := setupSelfDeleteLocal(t)
-	agentDir := createAgentDir(t, projectDir, selfAgentName)
-	deleteSelf = true
-
-	_, err := runDelete(t, selfAgentName)
-	require.NoError(t, err, "--self must allow a local delete of the current agent")
-	assert.NoDirExists(t, agentDir)
-}
-
-// setupSelfDeleteLocal prepares a local (no Hub) run of the delete command
-// inside agent selfAgentName of project selfProjectID, and returns the
-// project directory.
+// setupSelfDeleteLocal prepares a run of the delete command with no hub
+// configured, inside agent selfAgentName of project selfProjectID, and
+// returns the project directory. Only --cleanup-only works without a hub.
 func setupSelfDeleteLocal(t *testing.T) string {
 	t.Helper()
 	orig := saveDeleteTestState()
@@ -188,7 +163,6 @@ func setupSelfDeleteLocal(t *testing.T) string {
 	setCurrentAgentEnv(t, selfAgentName, selfAgentName, selfAgentID, selfProjectID)
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
-	noHub = true
 	preserveBranch = true
 	deleteStopped = false
 	deleteForce = false

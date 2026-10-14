@@ -51,14 +51,14 @@ func setProjectFlagForTest(t *testing.T, flag string) {
 	projectPath, globalMode = flag, false
 }
 
-// TestCheckHubAvailability_ProjectFlagPrecedence drives the CLI entry point
+// TestRequireHub_ProjectFlagPrecedence drives the CLI entry point
 // with the --project / -g / --global values the root command passes through
 // (--global becomes "global"). An explicit flag must win over the
 // SCION_PROJECT* environment of an agent container (ptone/scion#3123), and
 // -g global with no project ID resolves to the hub's Global project
 // (ptone/scion#3124). The full precedence table lives in
 // pkg/hubsync TestEnsureHubReady_ProjectPrecedence.
-func TestCheckHubAvailability_ProjectFlagPrecedence(t *testing.T) {
+func TestRequireHub_ProjectFlagPrecedence(t *testing.T) {
 	const (
 		envProjectID  = "env-project-id"
 		globalLocalID = "global-local-id"
@@ -129,7 +129,7 @@ func TestCheckHubAvailability_ProjectFlagPrecedence(t *testing.T) {
 				arg = resolved
 			}
 
-			hubCtx, err := CheckHubAvailabilityWithOptions(arg, true)
+			hubCtx, err := requireHub(arg)
 			require.NoError(t, err)
 			require.NotNil(t, hubCtx)
 			assert.Equal(t, tc.wantID, hubCtx.ProjectID)
@@ -231,12 +231,12 @@ func setupFlagPrecedenceHome(t *testing.T, endpoint, localID, envID string) {
 	t.Chdir(tmpHome)
 }
 
-// TestCheckHubAvailability_ClearedPathKeepsEnvProject covers a
+// TestRequireHub_ClearedPathKeepsEnvProject covers a
 // cross-project message send: --project names another project, but the
 // caller clears the path to resolve the sender's own project. An empty
 // path is not an explicit target, so SCION_PROJECT_ID wins and the hub
 // Global project is never looked up.
-func TestCheckHubAvailability_ClearedPathKeepsEnvProject(t *testing.T) {
+func TestRequireHub_ClearedPathKeepsEnvProject(t *testing.T) {
 	const envProjectID = "env-project-id"
 	for _, hubHasGlobal := range []bool{true, false} {
 		t.Run(fmt.Sprintf("hub Global %v", hubHasGlobal), func(t *testing.T) {
@@ -264,7 +264,7 @@ func TestCheckHubAvailability_ClearedPathKeepsEnvProject(t *testing.T) {
 			setupFlagPrecedenceHome(t, server.URL, "", envProjectID)
 			setProjectFlagForTest(t, "other-project")
 
-			hubCtx, err := CheckHubAvailabilityWithOptions("", true)
+			hubCtx, err := requireHub("")
 			require.NoError(t, err)
 			require.NotNil(t, hubCtx)
 			assert.Equal(t, envProjectID, hubCtx.ProjectID)
@@ -290,7 +290,6 @@ func TestSkillResolverHubOptions(t *testing.T) {
 			setProjectFlagForTest(t, tc.flag)
 			opts := skillResolverHubOptions(tc.path)
 			assert.Equal(t, tc.want, opts.ExplicitProject)
-			assert.True(t, opts.SkipSync)
 			assert.True(t, opts.AutoConfirm)
 		})
 	}
@@ -367,20 +366,28 @@ func TestTemplateSyncHubContext_SymlinkedGlobalDir(t *testing.T) {
 	assert.Equal(t, linkedID, hubCtx.ProjectID)
 }
 
-// TestResolveProjectIDByGitRemote_NilContext checks that a nil hub context
-// returns an error instead of panicking.
-func TestResolveProjectIDByGitRemote_NilContext(t *testing.T) {
-	for _, failOnAmbiguous := range []bool{true, false} {
-		assert.NotPanics(t, func() {
-			id, err := resolveProjectIDByGitRemote(nil, failOnAmbiguous)
-			assert.Error(t, err)
+// TestGetProjectID_NoGitRemoteNonGlobal pins the error for a non-global
+// project with no project ID and no git origin remote: it points at
+// 'scion hub link' and, with local-only mode removed, no longer suggests
+// --no-hub.
+func TestGetProjectID_NoGitRemoteNonGlobal(t *testing.T) {
+	t.Chdir(t.TempDir()) // not a git repository: no origin remote
+	hubCtx := &HubContext{Settings: &config.Settings{}, IsGlobal: false}
+
+	for name, get := range map[string]func(*HubContext) (string, error){
+		"GetProjectID":        GetProjectID,
+		"getProjectIDForKeys": getProjectIDForKeys,
+	} {
+		t.Run(name, func(t *testing.T) {
+			id, err := get(hubCtx)
+			require.Error(t, err)
 			assert.Empty(t, id)
+			assert.Contains(t, err.Error(), "no git origin remote found for this project")
+			assert.Contains(t, err.Error(), "Run 'scion hub link' to link this project with the Hub")
+			assert.NotContains(t, err.Error(), "--no-hub")
+			assert.NotContains(t, err.Error(), "local-only")
 		})
 	}
-	assert.NotPanics(t, func() {
-		_, err := GetProjectID(nil)
-		assert.Error(t, err)
-	})
 }
 
 // TestLoadHubClient_ProjectFlagPrecedence drives "project messaging get",

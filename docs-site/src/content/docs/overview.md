@@ -19,11 +19,10 @@ infrastructure sits behind the agents** — captured by Scion's [run modes](/sci
 
 Scion's run modes form a **spine of increasing infrastructure**:
 
-**Local → Workstation → Single-node hosted → HA hosted**
+**Workstation → Single-node hosted → HA hosted**
 
-- **Local** — no server; agents launched directly through the CLI with git-worktree isolation.
-- **Workstation** — a single-tenant combo server (Hub + Runtime Broker + Web) on your own machine,
-  giving the hosted experience locally.
+- **Workstation** — a single-tenant combo server (Hub + Runtime Broker + Web) on your own machine.
+  The CLI and the web dashboard both run agents through it.
 - **Single-node hosted** — a cheap, networked Hub on one node with an embedded SQLite database.
 - **HA hosted** — a Hub replicated behind a load balancer, backed by external Postgres and object
   storage, for durable always-on operation.
@@ -39,15 +38,14 @@ the agent containers they manage):
   (`scion templates`), projects, and configuration.
 - **Hub** — the control plane. It owns identity, auth, project registration, and state, exposes
   the APIs and notifications that agents and users interact with, and **dispatches** commands to
-  runtime brokers. Present in both Workstation and hosted modes.
+  runtime brokers. Present in every mode: the CLI always runs agents through a Hub.
 - **Runtime Broker** — a *service* (not a machine) that manages the lifecycle of containerized
   agents on behalf of the Hub: provisioning workspaces, hydrating templates, and delegating
   container operations to a pluggable runtime (Docker, Podman, Apple Container, Kubernetes).
 - **Agents** — isolated containers running vendor-supplied harness software such as Claude Code,
   Gemini CLI, or OpenAI Codex.
 
-In **Local mode** there is no server: the CLI provisions containers directly. In **Workstation
-mode** the Hub, a Runtime Broker, and the Web dashboard run together as a *combo server* on
+In **Workstation mode** the Hub, a Runtime Broker, and the Web dashboard run together as a *combo server* on
 loopback. In **hosted** modes the Hub is networked and dispatches to standalone or embedded
 brokers.
 

@@ -265,9 +265,9 @@ func (Agent) Fields() []ent.Field {
 
 		// --- T1 async agent create (design t1-async-create-v11.md §3.3) ---
 		// launch_async_opt_in records whether the client that created (or is
-		// finalizing) this agent opted into non-blocking launch. The Hub flag
-		// hub.asyncAgentLaunch is the kill switch; this is the per-request
-		// half of the gate.
+		// finalizing) this agent opted into non-blocking launch. The Hub
+		// experiment hub.async_agent_launch is the switch; this is the
+		// per-request half of the gate.
 		field.Bool("launch_async_opt_in").
 			Default(false),
 		// launch_id is the current or most recent launch's identity. It is

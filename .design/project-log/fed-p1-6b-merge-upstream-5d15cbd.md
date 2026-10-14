@@ -24,3 +24,6 @@ Date: 2026-10-14. Branch: scion/mmr-fed-p1-6b (ptone/scion#4868, tracked in pton
 ## To confirm in the gate run
 - pkg/config tests, the item 6B pkg/hub tests, the catalog staleness test and the masked
   `./cmd/...` build at the merged head.
+
+## Later merge of upstream main (8900c9cb4, with GoogleCloudPlatform/scion#3660)
+- accept_user_tokens and allow_visitor_grants are kept side by side on trusted issuers (schema, both config structs in the same order, tests); the user access credential check reads the now optional email_verified claim and still refuses a credential whose claim is absent or false.

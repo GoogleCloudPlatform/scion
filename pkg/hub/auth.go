@@ -157,8 +157,10 @@ type AuthConfig struct {
 	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
 	// verified identity, which it does for every identity that is not a
 	// linked active account and whenever the federation.project_visitors
-	// experiment is off. An error answers 503. Nil keeps every verified
-	// identity.
+	// experiment is off. errFederatedVisitorRefused (a suspended account)
+	// and errFederatedVisitorIssuerNotAccepted (an issuer the hub no longer
+	// accepts visitors from) answer 403; any other error answers 503. Nil
+	// keeps every verified identity.
 	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
 	// FederationHubUserTokensEnabled reports, on each request, whether
 	// user access credentials from hub issuers may be accepted at all
@@ -392,10 +394,21 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 				}
 				// A verified user token whose (issuer, subject) is linked
 				// to an active federated account becomes that account's
-				// VisitorIdentity; every other case keeps the verified
-				// identity unchanged.
+				// VisitorIdentity; a suspended account, or one whose issuer
+				// the hub no longer accepts visitors from, is refused; every
+				// other case keeps the verified identity unchanged.
 				if cfg.ResolveFederatedVisitor != nil {
 					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if errors.Is(vErr, errFederatedVisitorRefused) {
+						writeError(w, http.StatusForbidden, ErrCodeForbidden,
+							visitorAccountRefusedMessage, nil)
+						return
+					}
+					if errors.Is(vErr, errFederatedVisitorIssuerNotAccepted) {
+						writeError(w, http.StatusForbidden, ErrCodeForbidden,
+							visitorRouteRefusalMessage, nil)
+						return
+					}
 					if vErr != nil {
 						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
 						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,

@@ -78,7 +78,7 @@ has no effect.`,
 			return err
 		}
 		if stopAll {
-			hubCtx, err := CheckHubAvailability(projectPath)
+			hubCtx, err := requireHub(projectPath)
 			if err != nil {
 				return err
 			}
@@ -91,7 +91,7 @@ has no effect.`,
 		agentName := api.Slugify(args[0])
 
 		// Check if Hub should be used, excluding the target agent from sync requirements.
-		hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+		hubCtx, err := requireHub(projectPath)
 		if err != nil {
 			return err
 		}

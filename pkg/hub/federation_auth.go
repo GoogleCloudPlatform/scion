@@ -70,7 +70,7 @@ type federationClaims struct {
 	Ancestry      []string `json:"ancestry,omitempty"`
 	RootUser      string   `json:"root_user,omitempty"`
 	Email         string   `json:"email,omitempty"`
-	EmailVerified bool     `json:"email_verified,omitempty"`
+	EmailVerified *bool    `json:"email_verified,omitempty"` // nil when the token has no email_verified claim
 	Name          string   `json:"name,omitempty"`
 	// TokenKind is the scion_token_kind claim a Scion hub sets on the
 	// tokens it signs ("user" or "agent"). Tokens from hubs that predate
@@ -463,7 +463,7 @@ func extractHubUserClaims(claims *federationClaims, issuerCfg config.TrustedIssu
 	if claims.Email == "" {
 		return nil, fmt.Errorf("federation: user access credential missing email claim")
 	}
-	if !claims.EmailVerified {
+	if claims.EmailVerified == nil || !*claims.EmailVerified {
 		return nil, fmt.Errorf("federation: user access credential email is not verified")
 	}
 	if len(issuerCfg.AllowedEmails) > 0 && !matchesAllowedEmails(issuerCfg.AllowedEmails, claims.Email) {
@@ -524,9 +524,11 @@ func extractUserClaims(claims *federationClaims,
 	if role == "" || role == "admin" {
 		role = "viewer"
 	}
-	return NewFederatedUserIdentity(
+	identity := NewFederatedUserIdentity(
 		claims.Issuer, claims.Subject, claims.Email, claims.Name, role, scopes,
-	), nil
+	)
+	identity.emailVerified = claims.EmailVerified
+	return identity, nil
 }
 
 // matchesAllowedEmails checks if an email matches any pattern in the allowed list.

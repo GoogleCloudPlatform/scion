@@ -15,10 +15,8 @@
 package cmd
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
 	"text/tabwriter"
@@ -158,7 +156,8 @@ func hubProfileSelected() bool { return hubProfileName() != "" }
 
 // checkHubProfileGate runs from root's PersistentPreRunE. With a profile
 // selected it refuses every command outside hubProfileAllowed, and
-// --hub-profile together with --hub or --no-hub. Without one it refuses
+// --hub-profile together with --hub (root rejects the removed --no-hub
+// before this gate runs). Without one it refuses
 // --as and --run. In agent mode it applies the target-profile rule to the
 // commands in hubProfileAgentRuntime.
 func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
@@ -182,8 +181,8 @@ func checkHubProfileGate(cmd *cobra.Command, mode CLIMode) error {
 	if !hubProfileAllowed[path] {
 		return fmt.Errorf("'%s' is not available with a hub profile (%q): with a profile selected, only the target-hub commands run (hub status, hub profile, hub test-identity except delegate, hub projects, artifact publish/get/versions/delete, and create, start, list, stop, delete, look and logs with --project); unset %s or drop --hub-profile to use it", cmd.CommandPath(), hubProfileName(), hubprofile.EnvHubProfile)
 	}
-	if hubEndpoint != "" || noHub {
-		return errors.New("--hub and --no-hub cannot be used with a hub profile: the profile names the hub")
+	if hubEndpoint != "" {
+		return errors.New("--hub cannot be used with a hub profile: the profile names the hub")
 	}
 	if mode == ModeAgent && !hubProfileNoSession[path] {
 		// The session itself refuses the agent's own hub (hubprofile.Open);
@@ -450,7 +449,7 @@ func runHubProfileList(cmd *cobra.Command, _ []string) error {
 		if profiles == nil {
 			profiles = []*hubprofile.Profile{}
 		}
-		return writeIndentedJSON(out, map[string]any{"profiles": profiles})
+		return writeJSONTo(out, map[string]any{"profiles": profiles})
 	}
 	if len(profiles) == 0 {
 		_, _ = fmt.Fprintln(out, "No hub profiles.")
@@ -485,7 +484,7 @@ func runHubProfileShow(cmd *cobra.Command, args []string) error {
 	}
 	out := cmd.OutOrStdout()
 	if hubProfileJSON {
-		return writeIndentedJSON(out, map[string]any{"profile": p, "runs": runs})
+		return writeJSONTo(out, map[string]any{"profile": p, "runs": runs})
 	}
 	_, _ = fmt.Fprintf(out, "Profile:            %s\n", p.Name)
 	_, _ = fmt.Fprintf(out, "Endpoint:           %s\n", p.Endpoint)
@@ -517,12 +516,6 @@ func runHubProfileRemove(cmd *cobra.Command, args []string) error {
 	}
 	_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Removed hub profile %q.\n", args[0])
 	return nil
-}
-
-func writeIndentedJSON(out io.Writer, v any) error {
-	enc := json.NewEncoder(out)
-	enc.SetIndent("", "  ")
-	return enc.Encode(v)
 }
 
 // hubProfileRequested reports whether a profile is selected, before or

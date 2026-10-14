@@ -58,6 +58,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/messaging"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dbmetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/dispatchmetrics"
+	"github.com/GoogleCloudPlatform/scion/pkg/observability/hubexport"
 	"github.com/GoogleCloudPlatform/scion/pkg/observability/reapermetrics"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
@@ -225,10 +226,6 @@ type ServerConfig struct {
 	SoftDeleteRetention time.Duration
 	// SoftDeleteRetainFiles controls whether workspace files are preserved during soft-delete.
 	SoftDeleteRetainFiles bool
-	// AsyncAgentLaunch is the non-blocking agent create kill switch. Off by
-	// default; a launch is non-blocking only when this is on AND the request
-	// opts in.
-	AsyncAgentLaunch bool
 	// PerfTrace turns on per-request performance tracing
 	// (server.hub.perf_trace): phase timings, authorization store-call and
 	// decision-audit counts, and DB pool waits, logged per request and
@@ -962,6 +959,10 @@ type DeleteAgentOptions struct {
 	// its files on the NFS export or its branch (runtimebroker deleteAgent,
 	// ?localOnly). Send it only to a broker advertising AgentMove.
 	LocalOnly bool
+	// PurgeRetained sends the delete as a removal of a soft-deleted agent's
+	// retained files after the retention window (api.PurgeRetainedQueryParam,
+	// ptone/scion#4744). Set by the purge job through withPurgeRetained.
+	PurgeRetained bool
 }
 
 // deleteAgentQuery renders opts (and the context's linked-project path) as
@@ -985,6 +986,9 @@ func deleteAgentQuery(ctx context.Context, projectID string, opts DeleteAgentOpt
 	}
 	if opts.LocalOnly {
 		query += "&localOnly=true"
+	}
+	if opts.PurgeRetained {
+		query += "&" + api.PurgeRetainedQueryParam + "=true"
 	}
 	// The recorded runtime (GoogleCloudPlatform/scion#2423) rides on ctx, as
 	// for every other existing-agent operation, so both transports send it
@@ -1607,6 +1611,9 @@ type Server struct {
 	// notificationApply serializes notification channel registry rebuilds
 	// (applyNotificationChannels) and guards the channels last applied.
 	notificationApply notificationChannelsApplyState
+	// federationApply records why the last ApplySnapshot did not install
+	// the federation configuration, for the save report.
+	federationApply federationApplyState
 
 	config ServerConfig
 	// startupHubName is the name resolved at startup (ServerConfig.HubName,
@@ -1919,6 +1926,10 @@ type Server struct {
 	// check call succeeds or the check stops being enforced. Updated only
 	// by NoteSAAssignCheckCall. Shown on the admin health summary.
 	saAssignCheckDiag atomic.Pointer[saAssignCheckDiagnostic]
+	// observabilityExport is the startup state of the hub's own metrics
+	// and trace exporters (SetObservabilityExportStatus); nil until set.
+	// Shown read-only in the admin settings view.
+	observabilityExport atomic.Pointer[hubexport.Status]
 	// gcpIAMStartup is the deploy-time pair of GCP permission-check
 	// settings, resolved once in New. A stored value that is absent or
 	// cannot be used resolves to it (resolveGCPIAMSettings).
@@ -4694,8 +4705,9 @@ func (s *Server) CreateAuthenticatedDispatcher() *HTTPAgentDispatcher {
 	dispatcher.SetHubTelemetryProvider(s.hubTelemetryDefault)
 	dispatcher.SetTemplateJobConfigProvider(s.templateJobConfigByID)
 
-	// Wire the async agent launch settings. They are static after startup;
-	// the accessor reads them under s.mu.
+	// Wire the async agent launch settings. Enabled follows the
+	// hub.async_agent_launch experiment at each send; the timeout and
+	// keepalive are static after startup.
 	dispatcher.SetAsyncLaunchSettingsProvider(s.asyncLaunchSettings)
 	dispatcher.SetAutoExposePortsDefaultProvider(s.autoExposePortsDefault)
 	dispatcher.SetDispatchExperimentsProvider(s.dispatchExperiments)
@@ -4989,9 +5001,14 @@ func (s *Server) purgeHandler() func(ctx context.Context) {
 		// and agents soft-deleted earlier stay until a retention is set
 		// again. That is what a hub started with retention 0 does, and a
 		// save never deletes those agents at once.
+		//
+		// Each expired agent's broker is first asked to remove the files a
+		// soft delete retained there (retained_files_purge.go,
+		// ptone/scion#4744); a record whose broker cannot be reached yet
+		// is kept for a later run.
 		if retention, _ := s.softDeleteSettings(); retention > 0 {
 			cutoff := time.Now().Add(-retention)
-			purged, err := s.store.PurgeDeletedAgents(ctx, cutoff)
+			purged, err := s.purgeExpiredAgents(ctx, cutoff)
 			if err != nil {
 				slog.Error("Scheduler: agent purge failed", "error", err)
 			} else if purged > 0 {
@@ -5341,7 +5358,7 @@ func (s *Server) applyScheduledProjectDefaultGCPIdentity(ctx context.Context, ag
 	}
 	// A per-profile default for the profile this agent runs under wins over
 	// the project-wide default, as on the create path.
-	if profileName, profileSAID := s.projectProfileDefaultSA(ctx, agent.RuntimeBrokerID, project, agent.AppliedConfig.Profile); profileSAID != "" {
+	if profileName, profileSAID := s.profileDefaultSAUnlessPinned(ctx, agent, agent.RuntimeBrokerID, project); profileSAID != "" {
 		cfg, err := s.resolveDefaultSAAssignmentCore(ctx, nil, agent.ProjectID,
 			profileSAID, SurfaceProjectDefault, profileDefaultTier(profileName))
 		if err != nil {
@@ -5765,8 +5782,8 @@ func (s *Server) dispatchAgentEventHandler() EventHandler {
 		}
 
 		// Scheduled creates have no waiting client, so they opt in to
-		// asynchronous launch server-side. It only takes effect when
-		// hub.asyncAgentLaunch is on.
+		// asynchronous launch server-side. It only takes effect while the
+		// hub.async_agent_launch experiment is on.
 		agent.LaunchAsyncOptIn = true
 
 		// Success-path audit for scheduled dispatch. The deny-path records
@@ -6948,21 +6965,23 @@ func (s *Server) registerRoutes() {
 	// leaving a live API behind a hidden UI. This is a startup-time gate:
 	// flipping the toggle requires a hub restart (same as the message broker).
 	if s.nativeChatEnabled() {
+		// chatRoute refuses every credential the chat routes do not accept
+		// (chatCredentialAllowed) before the handler runs.
 		// Chat thread prefs (Phase 3 — visibility mode persistence)
-		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.handleChatPrefs))
+		s.mux.HandleFunc("/api/v1/chat/prefs", s.guarded("/api/v1/chat/prefs", s.chatRoute(s.handleChatPrefs)))
 
 		// Wave-2 chat endpoints (conversation REST API)
-		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.handleChatSpaces))
-		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.handleChatSpaceRoutes))
-		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.handleChatConversationRoutes))
-		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.handleChatTopicRoutes))
-		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.handleChatDMs))
-		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.handleChatUnreadCount))
-		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.handleChatUserPrefs))
-		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.handleChatPresence))
-		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.handleChatSearch))
-		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.handleChatAttachments))
-		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.handleChatAttachmentByID))
+		s.mux.HandleFunc("/api/v1/chat/spaces", s.guarded("/api/v1/chat/spaces", s.chatRoute(s.handleChatSpaces)))
+		s.mux.HandleFunc("/api/v1/chat/spaces/", s.guarded("/api/v1/chat/spaces/", s.chatRoute(s.handleChatSpaceRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/conversations/", s.guarded("/api/v1/chat/conversations/", s.chatRoute(s.handleChatConversationRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/topics/", s.guarded("/api/v1/chat/topics/", s.chatRoute(s.handleChatTopicRoutes)))
+		s.mux.HandleFunc("/api/v1/chat/dms", s.guarded("/api/v1/chat/dms", s.chatRoute(s.handleChatDMs)))
+		s.mux.HandleFunc("/api/v1/chat/unread-count", s.guarded("/api/v1/chat/unread-count", s.chatRoute(s.handleChatUnreadCount)))
+		s.mux.HandleFunc("/api/v1/chat/user-prefs", s.guarded("/api/v1/chat/user-prefs", s.chatRoute(s.handleChatUserPrefs)))
+		s.mux.HandleFunc("/api/v1/chat/presence", s.guarded("/api/v1/chat/presence", s.chatRoute(s.handleChatPresence)))
+		s.mux.HandleFunc("/api/v1/chat/search", s.guarded("/api/v1/chat/search", s.chatRoute(s.handleChatSearch)))
+		s.mux.HandleFunc("/api/v1/chat/attachments", s.guarded("/api/v1/chat/attachments", s.chatRoute(s.handleChatAttachments)))
+		s.mux.HandleFunc("/api/v1/chat/attachments/", s.guarded("/api/v1/chat/attachments/", s.chatRoute(s.handleChatAttachmentByID)))
 	}
 
 	// WebSocket control channel endpoint for Runtime Brokers
