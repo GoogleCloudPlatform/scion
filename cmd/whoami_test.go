@@ -15,14 +15,11 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 
@@ -32,34 +29,6 @@ import (
 	"github.com/GoogleCloudPlatform/scion/cmd/internal/cliutil"
 	sciontoolhub "github.com/GoogleCloudPlatform/scion/pkg/sciontool/hub"
 )
-
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	old := os.Stdout
-	os.Stdout = w
-	fn()
-	_ = w.Close()
-	os.Stdout = old
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	return buf.String()
-}
-
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	old := os.Stderr
-	os.Stderr = w
-	fn()
-	_ = w.Close()
-	os.Stderr = old
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, r)
-	return buf.String()
-}
 
 func TestWhoamiAgentContext(t *testing.T) {
 	t.Setenv("SCION_AGENT_SLUG", "my-agent")
