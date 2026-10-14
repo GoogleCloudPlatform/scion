@@ -338,6 +338,10 @@ var compiled = []Experiment{
 
 // compiledRetired lists names that PUT rejects true/false for, ignores and
 // prunes if still stored, and that must never be reused.
+//
+// Retiring or graduating an experiment also requires removing its entry from
+// testAdminExperimentPolicy in pkg/hub/test_admin_policy.go; otherwise the
+// TestAdminPolicy classification check reports a stale entry and fails.
 var compiledRetired = []string{
 	"web.access_boundaries_read",
 	"web.access_boundaries_authoring",
