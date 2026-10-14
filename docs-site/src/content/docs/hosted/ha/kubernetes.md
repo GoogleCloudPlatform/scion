@@ -711,16 +711,15 @@ Each KSA must exist in its namespace, carry the `iam.gke.io/gcp-service-account`
 
 Starting an agent pod can take several minutes when the cluster has to add a node first, for example a GKE Autopilot cold start followed by a multi-minute image pull. A synchronous Hub create is bounded by the CLI's 30-second HTTP timeout and the Hub's `write_timeout`, so it is not suited to these starts.
 
-Turn on asynchronous create on the Hub and raise the launch budget above your slowest expected start:
+Turn on asynchronous create on the Hub, the `hub.async_agent_launch` [experiment](/scion/reference/experiments/) in **Admin → Server Config → Experiments** (no restart needed), and raise the launch budget above your slowest expected start:
 
 ```yaml
 server:
   hub:
-    async_agent_launch: true
     launch_timeout: "15m"   # default 5m
 ```
 
-Both keys are read only at Hub startup, so restart the Hub after changing them. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
+`launch_timeout` is read only at Hub startup, so restart the Hub after changing it. The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. With an older broker the Hub falls back to the synchronous create. `scion start` waits for the agent by default; if the wait ends first, the agent still comes up unless the launch reaches `launch_timeout`. See [Asynchronous agent create](/scion/reference/server-config/#asynchronous-agent-create) for the details.
 
 ## Architecture & Security
 

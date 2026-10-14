@@ -31,6 +31,8 @@ This command performs several actions simultaneously:
 
 **Listen addresses.** `--host` sets the listen address of the Hub API and web server only. The Runtime Broker stays on `127.0.0.1` unless `server.broker.host` is set to another address (`0.0.0.0` counts as unset), so exposing the dashboard on your network does not expose the Runtime Broker.
 
+To use the local Hub together with remote ones, see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
+
 `scion server start` returns only after the started components answer their `/healthz` endpoints (the web port, which also serves the Hub API, and the broker port when the broker starts; without an image registry the server starts without the broker, and start waits only for the web port), so a command run right after it, such as `scion hub link`, can reach the server. If they do not answer within about 30 seconds, the command exits non-zero and says which component did not answer. The server is left running in that case; check the log and `scion server status`. If the server process exits during startup, the command says so at once. `scion server restart` waits the same way.
 
 When the server is up, `scion server start` asks the Hub whether onboarding is complete. If it is not, it prints and opens the [onboarding wizard](/scion/getting-started/onboarding/) (`/onboarding`); otherwise it opens the Web Dashboard. If the Hub's onboarding status cannot be read, Scion opens the wizard only when no global settings file existed before this start.

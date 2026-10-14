@@ -66,7 +66,6 @@ Controls the central Hub API server.
 | `stalled_threshold` | duration | `"5m"` | How long a `running` agent with a recent heartbeat may go without activity events before the Hub marks it `stalled`. A value under `2m` falls back to the default. Editable in **Server Config**. Applied without a restart when settings are stored in the database; in file mode, at the next restart. Env: `SCION_SERVER_HUB_STALLEDTHRESHOLD` (seed: `SCION_SEED_SERVER_HUB_STALLEDTHRESHOLD`). |
 | `soft_delete_retention` | duration | | Duration to retain soft-deleted agents (e.g., `"72h"`). The same window applies to agent directories that stale-directory cleanup keeps because their workspace may hold work: once it has passed, the next agent create or start that uses the same agents directory removes them, and the removal is logged. That check reads this value only from `~/.scion/settings.yaml` or `SCION_SERVER_HUB_SOFTDELETERETENTION` on the machine that holds the directory (the CLI machine, or the Runtime Broker). A value set in a `scion server start --config` file or in the Hub's admin settings is not seen. Unset or `0` keeps such directories until they are deleted. |
 | `soft_delete_retain_files` | bool | `false` | Preserve workspace files during the soft-delete period. |
-| `async_agent_launch` | bool | `false` | Turns on asynchronous agent create. A create is asynchronous only when this is on **and** the request opts in (`acceptAsyncLaunch`); `scion start`, `scion resume`, and scheduled agent creates opt in, other clients stay synchronous. Provision-only creates and reprovisioning are always synchronous. See [Asynchronous agent create](#asynchronous-agent-create). Startup-only: restart required to change. Env: `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`. |
 | `launch_timeout` | duration | `"5m"` | Whole-launch budget for an asynchronous create, from the moment the Hub begins the launch until the agent reaches a terminal Hub state. A launch that has not reached one by this deadline is ended and the agent is set to `error` (`launch_timeout`). A Go duration string such as `"15m"`. There is no upper limit. A non-zero value below `30s` is replaced by the default (`5m`) with a warning in the Hub log. In `settings.yaml`, a value that is not a valid duration is ignored and the default applies. Raise it for clusters with slow pod starts. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_LAUNCHTIMEOUT`. |
 | `launch_keepalive_seconds` | int | `15` | Keepalive interval, in seconds, that the Hub sends to the Runtime Broker with each asynchronous create. A launch whose broker sends no report for 8x this interval (120s at the default) is ended and the agent is set to `error` (`broker_lost`). Values of `0` or less use the default. Startup-only: restart required to change. Env: `SCION_SERVER_HUB_LAUNCHKEEPALIVESECONDS`. |
 | `missing_agent_grace` | duration | `"3m"` | How long a `running` (or `stopping`) agent may be absent from its Runtime Broker's heartbeat before the Hub marks it `error` with exit reason `container_missing` (an existing `preempted` or `evicted` exit reason and its message are kept). Applies only when the broker is online, reported a complete runtime inventory, and sent a recent previous heartbeat; agents with a lifecycle operation in progress are skipped. Values below `"1m"` fall back to the default. Env: `SCION_SERVER_HUB_MISSINGAGENTGRACE`. |
@@ -156,11 +155,12 @@ Metrics are exported every 60 seconds and every trace is sampled. Neither can be
 
 By default, a Hub agent create is synchronous: the Hub holds the create request open while the Runtime Broker provisions the workspace and starts the agent. That request is bounded by the CLI's HTTP client timeout (30s) and by the Hub's `write_timeout` (`60s` by default), so the synchronous path is not suited to agents that take several minutes to start.
 
-With `async_agent_launch: true`, the Hub instead answers as soon as the broker accepts the create. The agent is returned in a pre-running phase with an active launch, and the broker finishes the start in the background:
+Asynchronous create is the `hub.async_agent_launch` [experiment](/scion/reference/experiments/), off by default. An admin turns it on or off in **Admin → Server Config → Experiments**; no restart is needed, and the Hub checks it each time it sends a create to a broker. With it on, the Hub instead answers as soon as the broker accepts the create. The agent is returned in a pre-running phase with an active launch, and the broker finishes the start in the background:
 
-- **Opt-in per request.** `scion start` and `scion resume` opt in on every Hub create and then poll the agent until it is `running`, `error`, or `stopped`. By default they wait for the Hub's remaining launch budget plus 30 seconds (5 minutes when the Hub does not report a budget); `--wait-timeout` overrides this and `--no-wait` returns once the Hub has accepted. See [`scion start`](/scion/reference/cli/#scion-start-or-run). Scheduled agent creates opt in server-side. Requests that do not opt in are synchronous.
+- **Opt-in per request.** A create is asynchronous only when the experiment is on **and** the request opts in (`acceptAsyncLaunch`). Provision-only creates and reprovisioning are always synchronous. `scion start` and `scion resume` opt in on every Hub create and then poll the agent until it is `running`, `error`, or `stopped`. By default they wait for the Hub's remaining launch budget plus 30 seconds (5 minutes when the Hub does not report a budget); `--wait-timeout` overrides this and `--no-wait` returns once the Hub has accepted. See [`scion start`](/scion/reference/cli/#scion-start-or-run). The web UI's create form also opts in, and scheduled agent creates opt in server-side. Requests that do not opt in are synchronous.
 - **The wait is not the launch.** If the CLI stops waiting (the wait budget runs out, or Ctrl-C), the launch continues on the Hub and broker, and the agent still comes up. Run `scion start <agent>` again to resume waiting.
 - **Bounded by `launch_timeout`.** A launch that has not reached a terminal Hub state by its deadline is ended: the broker stops it shortly before the deadline, and the Hub sets the agent to `error` with launch error `launch_timeout` shortly after. Starting such an agent is refused with `agent_create_incomplete`; delete it and create it again.
+- **Turning it off.** Creates sent after the experiment is turned off are synchronous. Launches the broker has already accepted are not cancelled: they finish, or are ended by `launch_timeout` or broker loss, as before.
 - **Starts during a launch.** While a launch is in progress and before its deadline, a start or restart of that agent returns the launching agent with HTTP 200 instead of starting it again (a restart adds the warning `agent is launching; restart not performed`), and `scion start` keeps waiting. Restore, reincarnate, and wake are refused with `agent_launching`.
 
 **Requirements.** The Hub, the Runtime Broker, and the CLI must all run a version that includes asynchronous create. A broker that reports no async launch support, or that answers the create synchronously, gets the synchronous create, so mixing versions is safe but slow starts on an older broker keep the synchronous limits. A broker runtime that cannot serve an asynchronous launch (currently `substrate`, `cloudrun`, and `cloudrun-sandbox`) also falls back to the synchronous create.
@@ -170,11 +170,12 @@ With `async_agent_launch: true`, the Hub instead answers as soon as the broker a
 ```yaml
 server:
   hub:
-    async_agent_launch: true
     launch_timeout: "15m"
 ```
 
-Both keys are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
+`launch_timeout` and `launch_keepalive_seconds` are read only at Hub startup; restart the Hub after changing them. They cannot be set through the admin server-config API (see [Layer 0](#layer-0--bootstrap-file--env-only)).
+
+**Retired setting.** The `server.hub.async_agent_launch` setting (env `SCION_SERVER_HUB_ASYNCAGENTLAUNCH`) has been retired and is ignored. A Hub that still has it set logs this warning at startup: "server.hub.async_agent_launch is retired; enable the hub.async_agent_launch experiment instead". Remove it, and turn on the experiment to keep asynchronous create. An admin server-config save (`PUT /api/v1/admin/server-config`) that still carries the key is refused with 422 and the same message.
 
 **Brokers on a Cloud Run service.** An asynchronous launch keeps running in the Runtime Broker after the create response. A broker hosted on a Cloud Run service therefore needs CPU allocated outside requests: deploy the service with `--no-cpu-throttling`, and keep its minimum instances above zero.
 
@@ -293,6 +294,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS brokerdispatch_state_updated_at ON broke
 | `mode` | string | | Human auth mode. `"proxy"` is the only value the server checks: it then uses the proxy authenticator configured under `proxy` and offers no OAuth providers. Any other value, including unset (the default), `"oauth"` and `"dev"`, leaves the hub handling authentication itself. |
 | `dev_mode` | bool | `false` | Enable insecure development authentication. This (or the `--dev-auth` flag) is the dev auth switch; `mode` does not enable it. |
 | `dev_token` | string | | Static token for dev mode. |
+| `dev_token_file` | string | `~/.scion/dev-token` | File the dev mode token is read from, or written to if it does not exist. A relative path is resolved against the global config directory (`~/.scion`). |
 | `authorized_domains` | list | `[]` | Limit access to specific email domains. |
 | `user_access_mode` | string | `"open"` | Who may sign in: `"open"` (any verified email, subject to `authorized_domains` if set), `"domain_restricted"` (email domain must be in `authorized_domains`), or `"invite_only"` (the email must belong to an invited, allow-listed or existing user). Users in `admin_emails` are always allowed. |
 | `default_user_role` | string | `"member"` | Hub role given to a user when their account is first created or activated: first sign-in, including the first sign-in of an invited or allow-listed user. Values: `"member"` or `"viewer"` (`"admin"` is rejected; use `admin_emails`). Users in `admin_emails` are always admins. Changing it does not affect existing users. It is also the role given to an admin who is removed from `admin_emails`. See [Hub roles](/scion/hosted/ha/permissions/#hub-roles). Environment: `SCION_SEED_SERVER_AUTH_DEFAULTUSERROLE` (recommended) or `SCION_SERVER_AUTH_DEFAULTUSERROLE` (per-node, deprecated for Layer-1 keys). |
@@ -1021,6 +1023,20 @@ For local development where the Hub runs on `localhost` but agents are in contai
 
 The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
 
+#### The hub a Runtime Broker reports to
+
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose Runtime Broker runs next to the Hub, the Runtime Broker uses the Hub's localhost address when that setting is unset. A server that runs only a Runtime Broker falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+
+#### Deprecated fallback to the CLI's hub endpoint
+
+`hub.endpoint` and `SCION_HUB_ENDPOINT` are CLI settings. The CLI now keeps its Hubs in a per-user hub list (see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/)), and the server's own endpoints belong in `server.hub.public_url` and `server.broker.hub_endpoint`. When the server's endpoint actually comes from the legacy fallback, the server logs this warning once at startup:
+
+```text
+deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
+```
+
+There is no warning when removing the fallback would not change the result, for example on a workstation whose `hub.endpoint` is its own loopback address. On a host configured as a server, `scion doctor` reports the same text as its `server-hub-endpoint` check; it cannot see the server's flags, so it warns only when every way the server could run would be affected. Selecting a Hub with `scion use` never changes the endpoint a server advertises.
+
 #### Splitting the agent endpoint from the public URL
 
 `server.hub.agent_endpoint` overrides the endpoint above for agents only — invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep reading `public_url`. Use it when agents must reach the Hub on an address that would be wrong for a human clicking a link, such as an internal VPC IP in a topology where a proxy fronts the Hub for users. When unset, agents receive the Hub's regular endpoint — `public_url`, or the endpoint the Hub resolves above when `public_url` is itself unset.
@@ -1206,7 +1222,7 @@ Settings required before the database connection exists, or that are restart-bou
 | Logging | `log_level`, `log_format` (`log_format` is accepted but ignored) |
 | CORS | `hub.cors.*`, `broker.cors` |
 | Messaging/plugins | `message_broker.*`, `plugins.*` |
-| Async agent create | `hub.async_agent_launch`, `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
+| Async agent create | `hub.launch_timeout`, `hub.launch_keepalive_seconds` |
 | Diagnostics | `hub.perf_trace` |
 | Membership standing | `hub.membership_sweep_report_only` |
 | Heartbeat reconcile | `hub.missing_agent_grace` |

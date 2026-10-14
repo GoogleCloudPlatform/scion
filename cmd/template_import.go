@@ -46,6 +46,10 @@ path and content. Use --harness to override detection.
 
 Scion-format templates are copied directly without conversion.
 
+For a GitHub URL the fetch authenticates with the first of these environment
+variables that is set: GH_{OWNER}__{REPO}, GH_{OWNER}, then GITHUB_TOKEN
+(OWNER and REPO uppercased, with "-" and "." as "_").
+
 Examples:
   # Import a single Claude sub-agent definition
   scion templates import .claude/agents/code-reviewer.md
@@ -90,7 +94,7 @@ func runTemplateImport(cmd *cobra.Command, args []string) error {
 		}
 
 		fmt.Printf("Fetching remote source: %s\n", source)
-		cachePath, err := config.FetchRemoteTemplate(context.Background(), source)
+		cachePath, err := config.FetchRemoteTemplate(context.Background(), source, remoteFetchCredential(source))
 		if err != nil {
 			return fmt.Errorf("failed to fetch remote source: %w", err)
 		}

@@ -1629,8 +1629,6 @@ type V1ServerHubConfig struct {
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`
-	// AsyncAgentLaunch is the non-blocking agent create kill switch.
-	AsyncAgentLaunch *bool `json:"async_agent_launch,omitempty" yaml:"async_agent_launch,omitempty" koanf:"async_agent_launch"`
 	// PerfTrace turns on per-request performance tracing. Off by default.
 	PerfTrace *bool `json:"perf_trace,omitempty" yaml:"perf_trace,omitempty" koanf:"perf_trace"`
 	// MembershipSweepReportOnly makes the membership-standing sweep log and
@@ -3404,18 +3402,16 @@ func LoadVersionedSettings(projectPath string) (*VersionedSettings, error) {
 	return settings, nil
 }
 
-// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings:
-// plaintext together with verification or client certificate options, and
-// a client certificate without its key (or the reverse).
+// validateTelemetryTLS rejects contradictory telemetry.cloud.tls settings;
+// see ValidateTelemetryTLS.
 func validateTelemetryTLS(tls *V1TelemetryTLSConfig) error {
-	clientCert := tls.CertFile != "" || tls.KeyFile != ""
-	if tls.Enabled != nil && !*tls.Enabled && ((tls.InsecureSkipVerify != nil && *tls.InsecureSkipVerify) || tls.CAFile != "" || clientCert) {
-		return fmt.Errorf("telemetry.cloud.tls: plaintext conflicts with certificate verification or client certificate settings")
-	}
-	if (tls.CertFile == "") != (tls.KeyFile == "") {
-		return fmt.Errorf("telemetry.cloud.tls: cert_file and key_file must be set together")
-	}
-	return nil
+	return ValidateTelemetryTLS(&api.TelemetryTLS{
+		Enabled:            tls.Enabled,
+		InsecureSkipVerify: tls.InsecureSkipVerify,
+		CAFile:             tls.CAFile,
+		CertFile:           tls.CertFile,
+		KeyFile:            tls.KeyFile,
+	})
 }
 
 // unmarshalVersionedSettings decodes k into settings after normalizing
@@ -4015,9 +4011,6 @@ func ConvertV1ServerToGlobalConfig(v1 *V1ServerConfig) *GlobalConfig {
 				gc.Hub.StalledThreshold = d
 			}
 		}
-		if v1.Hub.AsyncAgentLaunch != nil {
-			gc.Hub.AsyncAgentLaunch = *v1.Hub.AsyncAgentLaunch
-		}
 		if v1.Hub.PerfTrace != nil {
 			gc.Hub.PerfTrace = *v1.Hub.PerfTrace
 		}
@@ -4467,10 +4460,6 @@ func ConvertGlobalToV1ServerConfig(gc *GlobalConfig) *V1ServerConfig {
 	if gc.Hub.DisableLegacyStorageFallback {
 		disableLegacy := true
 		v1Hub.DisableLegacyStorageFallback = &disableLegacy
-	}
-	if gc.Hub.AsyncAgentLaunch {
-		asyncLaunch := true
-		v1Hub.AsyncAgentLaunch = &asyncLaunch
 	}
 	if gc.Hub.PerfTrace {
 		perfTrace := true

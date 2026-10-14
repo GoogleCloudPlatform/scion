@@ -161,7 +161,6 @@
     "server.message_broker",
     "server.plugins",
     "server.native_chat",
-    "server.hub.async_agent_launch",
     "server.hub.launch_timeout",
     "server.hub.launch_keepalive_seconds",
     "server.hub.perf_trace",
