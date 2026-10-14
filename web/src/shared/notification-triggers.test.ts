@@ -50,7 +50,12 @@ describe('triggerLabel', () => {
   });
 
   it('keeps the API trigger values unchanged', () => {
-    expect(DEFAULT_TRIGGERS).toEqual(['COMPLETED', 'WAITING_FOR_INPUT', 'LIMITS_EXCEEDED', 'HALTED']);
+    expect(DEFAULT_TRIGGERS).toEqual([
+      'COMPLETED',
+      'WAITING_FOR_INPUT',
+      'LIMITS_EXCEEDED',
+      'HALTED',
+    ]);
   });
 });
 
