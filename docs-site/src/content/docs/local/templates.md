@@ -50,11 +50,6 @@ model: large                       # portable size alias — see Model size alia
 
 skills:
   - uri: "gh://scion-frontiers/agent-team/pr-code-review"
-
-resources:
-  requests:
-    cpu: "500m"
-    memory: "512Mi"
 ```
 
 Common fields:
@@ -68,19 +63,29 @@ Common fields:
 | `default_harness_config` | The harness-config to use when the user does not pass one. |
 | `model` | Model **size alias** (`small`, `medium`, `large`, `extra-large`) — see [Model size aliases](#model-size-aliases). |
 | `skills` | Skill references to resolve at provision time — see [Skills](#skills). |
-| `env` | Environment variables for the agent. |
-| `resources` | CPU/memory requests and limits. |
+| `env` | Environment variables for the job's own tools. Each one is set only when no other source sets it, and its value is used literally. See [Environment keys are ignored](#environment-keys-are-ignored). |
 | `mcp_servers` | MCP server definitions, translated per harness. |
 | `secrets` | Secrets the agent requires. |
-| `volumes`, `services`, `max_turns`, `max_duration`, `telemetry`, `kubernetes` | Further runtime knobs. |
+| `services`, `max_turns`, `max_duration` | Further job settings. |
 
 :::tip
 Top-level keys accept **either hyphens or underscores** — `default-harness-config` and `default_harness_config` are equivalent. Underscored form is canonical.
 :::
 
 :::caution
-Keep harness-specific settings **out** of the template. `image`, `auth_selectedType`, and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
+Keep harness-specific settings **out** of the template. `auth_selectedType` and concrete `model` names (e.g. `opus`, `gemini-pro`) are still accepted for backward compatibility but emit a deprecation warning, and `image` is ignored (see below) — they belong in a [harness-config](#harness-configs) so the template stays portable. The legacy `harness` field is rejected outright; use `default_harness_config` or the `--harness-config` flag instead.
 :::
+
+### Environment keys are ignored
+
+A template describes the agent's job, not the environment it runs in. These keys in a template are **ignored** with a warning: in the `scion start` output for local agents, and in the Runtime Broker log for Hub-dispatched agents (the Hub also logs one when such a template is uploaded):
+
+- `image`, `resources`, `volumes`, `telemetry`, `hub` and `kubernetes`.
+- `env` entries whose name starts with `SCION_`, the platform's own namespace.
+
+Template uploads that contain them are not rejected. Set these values in [settings](/scion/reference/settings-precedence/), a profile, the harness-config or the Hub defaults instead. Hub administrators can find templates that still set them in the `templateConfigFindings` section of `GET /api/v1/admin/validate-resources` (finding kind `environment_keys`).
+
+The remaining `env` entries are a separate, lowest-precedence layer: each is set only when no other source (settings, profile, harness-config, Hub or project env, secrets) sets that variable. It never sets the harness-config's credential variables. Values are literal: `${VAR}` is not expanded, and an empty value is skipped (with a warning in the `scion start` output for local agents) instead of being taken from the host environment. For Hub-dispatched agents a template `TZ` is not applied; see [Times and timezones](/scion/reference/times-and-timezones/).
 
 ## Creating an agent from a template
 

@@ -210,6 +210,27 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'agent:set_message_mode',
+    label: 'agent:set_message_mode',
+    description: 'Change agent message mode',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:stop_all',
+    label: 'agent:stop_all',
+    description: 'Stop all agents',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
+    value: 'agent:update',
+    label: 'agent:update',
+    description: 'Update agents (metadata, configuration, status, workspace sync)',
+    resource: 'agent',
+    isAlias: false,
+  },
+  {
     value: 'artifact:create',
     label: 'artifact:create',
     description: 'Publish artifacts',
@@ -249,6 +270,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     label: 'broker:read',
     description: 'Read brokers',
     resource: 'broker',
+    isAlias: false,
+  },
+  {
+    value: 'federation_token:mint',
+    label: 'federation_token:mint',
+    description:
+      'Obtain a short-lived user access credential for yourself to present to a peer hub',
+    resource: 'federation_token',
     isAlias: false,
   },
   {

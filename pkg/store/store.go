@@ -1663,10 +1663,12 @@ type TemplateStore interface {
 
 	// SetTemplateAgentConfig writes only the AgentConfig snapshot of
 	// template id, and only while the stored row has no snapshot and still
-	// matches expected (one conditional UPDATE). No other column changes,
-	// Updated included. It reports whether a row was written: false with a
-	// nil error means the row already has a snapshot, its content or layout
-	// changed, or it no longer exists. A nil cfg writes nothing. Used to
+	// matches expected and the Updated time it read (one conditional
+	// UPDATE). No other column changes, Updated included. It reports whether
+	// a row was written: false with a nil error means the row already has a
+	// snapshot, its content or layout changed, a concurrent write changed its
+	// Updated time (ptone/scion#4674), or it no longer exists. A nil cfg
+	// writes nothing. Used to
 	// backfill rows committed before the snapshot existed (ptone/scion#4222).
 	SetTemplateAgentConfig(ctx context.Context, id string, cfg *api.ScionConfig, expected TemplateContentPrecondition) (bool, error)
 
@@ -2460,6 +2462,21 @@ type NotificationStore interface {
 	// dispatched=false so a future sweep can retry. Used when delivery cannot
 	// proceed (no dispatcher, no broker) after an optimistic claim.
 	UnmarkNotificationDispatched(ctx context.Context, id string) error
+
+	// RecordNotificationDispatchAttempt atomically increments a
+	// notification's DispatchAttempts by one. Callers record an attempt just
+	// before each delivery attempt to a subscriber agent; one attempt is one
+	// dispatchWithBrokerRetry call in pkg/hub, whose internal deferred-retry
+	// loop is not counted separately.
+	// Returns ErrNotFound if the notification doesn't exist.
+	RecordNotificationDispatchAttempt(ctx context.Context, id string) error
+
+	// SetNotificationDispatchOutcome records a notification's terminal
+	// dispatch outcome (NotificationOutcomeDelivered or
+	// NotificationOutcomeFailed) and sets dispatched=true, so the sweep does
+	// not pick it up again. Returns ErrInvalidInput for any other outcome
+	// and ErrNotFound if the notification doesn't exist.
+	SetNotificationDispatchOutcome(ctx context.Context, id string, outcome string) error
 
 	// GetUndispatchedAgentNotifications returns agent-targeted notifications
 	// with dispatched=false.

@@ -130,6 +130,14 @@ type idFixtures struct {
 	// the dev user's here, the matrix super-admin's in the bearer
 	// disposition matrix.
 	inbox inboxRecords
+	// agentDelProject is a disposable agent for the project-form DELETE,
+	// so the by-ID DELETE keeps agentDel.
+	agentDelProject string
+	// agentPorts is the target of the port registration entries, with one
+	// exposed port (agentPortsPort), so clearing its ports leaves agent's
+	// port for the proxy entries.
+	agentPorts     string
+	agentPortsPort string
 }
 
 // seedInboxRecords creates inboxRecords for userID in projectID; agentID
@@ -211,6 +219,10 @@ func seedInboxRecords(t *testing.T, ctx context.Context, s store.Store, userID, 
 	return r
 }
 
+// liveInventoryFederationAudience is the peer hub audience the live
+// inventory server allows for POST /api/v1/auth/federation-token.
+const liveInventoryFederationAudience = "https://peer-hub.example.com"
+
 // seedLiveInventoryFixtures creates one real store row per resource family
 // (plus a second, disposable instance for families with a destructive
 // catalog operation, so a DELETE entry tested earlier in catalog
@@ -267,6 +279,9 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 		agentRestore:         tid("li-agent-restore"),
 		agentRestoreProject:  tid("li-agent-restore-project"),
 		agentProvisioning:    tid("li-agent-provisioning"),
+		agentDelProject:      tid("li-agent-del-project"),
+		agentPorts:           tid("li-agent-ports"),
+		agentPortsPort:       "18081",
 	}
 
 	f.projectSharedDir = "li-shared"
@@ -310,6 +325,10 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	// "no runtime broker available" before persisting anything, for either
 	// form, leaving this fixture's phase untouched.
 	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentProvisioning, Slug: "li-agent-provisioning", Name: "LI Agent Provisioning", ProjectID: f.project, Phase: string(state.PhaseProvisioning)}))
+
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentDelProject, Slug: "li-agent-del-project", Name: "LI Agent Del Project", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.CreateAgent(ctx, &store.Agent{ID: f.agentPorts, Slug: "li-agent-ports", Name: "LI Agent Ports", ProjectID: f.project, Phase: string(state.PhaseRunning)}))
+	require.NoError(t, s.UpdateAgentExposedPorts(ctx, f.agentPorts, []store.ExposedPort{{Port: 18081, Host: "127.0.0.1", Label: "li-ports", Mode: "rw", ExposedAt: now, ExposedBy: "agent"}}))
 
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.group, Slug: "li-group", Name: "LI Group"}))
 	require.NoError(t, s.CreateGroup(ctx, &store.Group{ID: f.groupDel, Slug: "li-group-del", Name: "LI Group Del"}))
@@ -512,13 +531,13 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	artStore, artBlobs := enableArtifactsForTest(t, srv)
 	f.artifact = seedLiveInventoryArtifact(t, ctx, artStore, artBlobs, f.project)
 
-	// hub.conduit, hub.agent_delegation and hub.chat_thread_groups on
-	// too, so their experiment-gated routes are live: the registry above
-	// with all three also defaulting on (no operational settings, which
-	// the other entries rely on, are replaced).
+	// hub.conduit, hub.agent_delegation, hub.chat_thread_groups and
+	// federation.project_visitors on too, so their experiment-gated routes
+	// are live: the registry above with all four also defaulting on (no
+	// operational settings, which the other entries rely on, are replaced).
 	var active []experiments.Experiment
 	for _, e := range srv.experimentRegistry().All() {
-		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups {
+		if e.Name == conduitExperiment || e.Name == experiments.AgentDelegation || e.Name == experiments.ChatThreadGroups || e.Name == experiments.FederationProjectVisitors {
 			e.Default = true
 		}
 		active = append(active, e)
@@ -530,6 +549,12 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.True(t, srv.experimentEnabled(experiments.Artifacts))
 	require.True(t, srv.experimentEnabled(experiments.AgentDelegation))
 	require.True(t, srv.experimentEnabled(experiments.ChatThreadGroups))
+	require.True(t, srv.experimentEnabled(experiments.FederationProjectVisitors))
+	// POST /api/v1/auth/federation-token also answers 404 while the OIDC
+	// provider is off: install a test key manager and allow the audience
+	// that bodyOverrides sends, so the route reaches its caller checks.
+	installTestOIDCKeyManager(t, srv)
+	srv.config.OIDCConfig.UserTokenAudiences = []string{liveInventoryFederationAudience}
 
 	// Inbox, conversation and notification records of the dev user.
 	f.inbox = seedInboxRecords(t, ctx, s, DevUserID, f.project, f.agent)
@@ -587,6 +612,8 @@ type overrideKey struct {
 func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 	return map[overrideKey]map[string]string{
 		{"agent.lifecycle.delete", "/api/v1/agents/{id}"}:                         {"id": f.agentDel},
+		{"agent.lifecycle.delete", "/api/v1/projects/{projectId}/agents/{id}"}:    {"projectId": f.project, "id": f.agentDelProject},
+		{"agent.port.register", "/api/v1/agents/{id}/ports"}:                      {"id": f.agentPorts},
 		{"project.lifecycle.delete", "/api/v1/projects/{id}"}:                     {"id": f.projectDel},
 		{"group.delete", "/api/v1/groups/{id}"}:                                   {"id": f.groupDel},
 		{"user.admin.delete", "/api/v1/users/{id}"}:                               {"id": f.userDel},
@@ -658,6 +685,28 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/agents/{id}/delegations/{grantId}":                            {"id": f.agent, "grantId": f.delegation.grant},
 		"/api/v1/agents/{id}/delegations/{grantId}/credentials/{credentialId}": {"id": f.agent, "grantId": f.delegation.grant, "credentialId": f.delegation.credential},
 		"/api/v1/projects/{projectId}/agents/{id}/set_message_mode":            {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/ports/{port}":                                     {"id": f.agentPorts, "port": f.agentPortsPort},
+		"/api/v1/projects/{projectId}/agents":                                  {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/stop-all":                         {"projectId": f.project},
+		"/api/v1/projects/{projectId}/agents/{id}":                             {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/status":                                           {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/status":                      {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/workspace":                                        {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-from":                              {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to":                                {"id": f.agent},
+		"/api/v1/agents/{id}/workspace/sync-to/finalize":                       {"id": f.agent},
+		"/api/v1/agents/{id}/logs":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/logs":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/cloud-logs":                                       {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/cloud-logs":                  {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/messages":                                         {"id": f.agent},
+		"/api/v1/agents/{id}/message-logs":                                     {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message-logs":                {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/metrics/summary":                                  {"id": f.agent},
+		"/api/v1/agents/{id}/keys":                                             {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/keys":                        {"projectId": f.project, "id": f.agent},
+		"/api/v1/agents/{id}/message":                                          {"id": f.agent},
+		"/api/v1/projects/{projectId}/agents/{id}/message":                     {"projectId": f.project, "id": f.agent},
 
 		// --- agent self-access family (agent JWT routes) ---
 		"/api/v1/agents/{id}/token/refresh":                         {"id": f.agent},
@@ -890,6 +939,10 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 			"boundary": map[string]string{"kind": "hub"}, "permissions": []string{"agent:read"}, "name": "live-inventory",
 		},
 		{"agent.delegation.exchange", "/api/v1/agents/{id}/delegations/{grantId}/exchange"}: {"audience": "scion-hub"},
+		// User access credential for a peer hub: an allowed audience, so
+		// an admitted caller gets 200 instead of a body 400
+		// (seedLiveInventoryFixtures allows it).
+		{"federation.token.mint", "/api/v1/auth/federation-token"}: {"audience": liveInventoryFederationAudience},
 		// updateProjectMemberRole (handlers_project_members.go) 400s
 		// "roleDefinitionId is required" on an empty body before the
 		// binding ID is used for anything; with a real role ID, the
@@ -926,6 +979,19 @@ func bodyOverrides(f idFixtures) map[overrideKey]map[string]interface{} {
 		// body before it loads the project or checks authorization; a real
 		// email lets every probe reach those steps.
 		{"project.gcpsa.create", "/api/v1/projects/{id}/gcp-service-accounts"}: {"email": "li-project-sa@li-gcp-project.iam.gserviceaccount.com"},
+		// handleWorkspaceSyncTo and handleWorkspaceSyncToFinalize validate
+		// the file list and the manifest before they look up the agent or
+		// check authorization.
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to"}: {
+			"files": []interface{}{map[string]interface{}{"path": "li.txt", "size": 3, "hash": "li-hash"}},
+		},
+		{"agent.workspace.sync", "/api/v1/agents/{id}/workspace/sync-to/finalize"}: {
+			"manifest": map[string]interface{}{"version": "1", "files": []interface{}{}},
+		},
+		// beginAgentKeysRequest validates the body before the agent lookup
+		// and the authorization check.
+		{"agent.lifecycle.keys", "/api/v1/agents/{id}/keys"}:                      {"keys": "li"},
+		{"agent.lifecycle.keys", "/api/v1/projects/{projectId}/agents/{id}/keys"}: {"keys": "li"},
 	}
 }
 

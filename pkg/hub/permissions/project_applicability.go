@@ -186,6 +186,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// records, never an existing project, so no project role binding or
 	// system authority proof admits them.
 	"inbox.read": false, "inbox.write": false, "user_skill_injection.update": false,
+	"federation_token.mint": false,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
@@ -217,6 +218,7 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	"agent.list": {BoundaryKindProject, BoundaryKindHub}, "agent.delete": {BoundaryKindProject, BoundaryKindHub},
 	"agent.attach": {BoundaryKindProject, BoundaryKindHub}, "agent.lifecycle": {BoundaryKindProject, BoundaryKindHub},
 	"agent.port_access": {BoundaryKindProject, BoundaryKindHub}, "agent.message": {BoundaryKindProject, BoundaryKindHub},
+	"agent.update": {BoundaryKindProject, BoundaryKindHub}, "agent.stop_all": {BoundaryKindProject, BoundaryKindHub}, "agent.set_message_mode": {BoundaryKindProject, BoundaryKindHub},
 	"project.read": {BoundaryKindProject, BoundaryKindHub}, "project.update": {BoundaryKindProject, BoundaryKindHub},
 	"project.manage": {BoundaryKindProject, BoundaryKindHub}, "project.clone": {BoundaryKindProject, BoundaryKindHub}, "project.set_messaging_policy": {BoundaryKindProject, BoundaryKindHub},
 	"skill.create": {BoundaryKindProject, BoundaryKindHub}, "skill.read": {BoundaryKindProject, BoundaryKindHub},
@@ -249,6 +251,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// skills reach agents in every project.
 	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
 	"user_skill_injection.update": {BoundaryKindHub},
+	// federation_token.mint is hub-only: the credential it yields names the
+	// holder, not a project.
+	"federation_token.mint": {BoundaryKindHub},
 
 	// hub.* configuration permissions act on the hub itself, so their
 	// selectors are hub-only.
@@ -353,6 +358,10 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	"agent.list": {TargetClassKindProjectScoped}, "agent.delete": {TargetClassKindProjectScoped},
 	"agent.attach": {TargetClassKindProjectScoped}, "agent.lifecycle": {TargetClassKindProjectScoped},
 	"agent.port_access": {TargetClassKindProjectScoped}, "agent.message": {TargetClassKindProjectScoped},
+	"agent.update": {TargetClassKindProjectScoped}, "agent.set_message_mode": {TargetClassKindProjectScoped},
+	// agent.stop_all targets a project's agents (project form) or every
+	// agent on the hub (hub form, hubScopedResource("agent", "hub")).
+	"agent.stop_all": {TargetClassKindProjectScoped, TargetClassKindHubResource},
 
 	// project.* — read/update/manage/set_messaging_policy target an existing
 	// project; clone is a hub-level collection action (false in
@@ -430,6 +439,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
+	"federation_token.mint":       {TargetClassKindSelf},
 
 	// hub.* configuration permissions target the hub instance.
 	"hub.config.read": {TargetClassKindHubResource}, "hub.config.update": {TargetClassKindHubResource},

@@ -367,6 +367,10 @@ type Server struct {
 	// positive (see beginCreateRegistration). Zero in production.
 	createSupersedeWait time.Duration
 
+	// syncStartMaxDuration overrides defaultSyncStartMaxDuration when
+	// positive (see syncStart.bind). Zero in production.
+	syncStartMaxDuration time.Duration
+
 	stateDir string
 
 	// ownership is a flat instance's durable ownership record store

@@ -52,7 +52,7 @@ func init() {
 
 	resumeCmd.Flags().StringVar(&runtimeBrokerID, "broker", "", "Preferred runtime broker ID, name, or slug")
 
-	// Template resolution flags for Hub mode (Section 9.4)
+	// Template resolution flags (Section 9.4)
 	resumeCmd.Flags().BoolVar(&uploadTemplate, "upload-template", false, "Automatically upload local template to Hub if not found")
 	resumeCmd.Flags().BoolVar(&noUpload, "no-upload", false, "Fail if template requires upload (never prompt)")
 	resumeCmd.Flags().StringVar(&templateScope, "template-scope", "project", "Scope for uploaded template (global, project, user)")
@@ -65,8 +65,8 @@ func init() {
 	resumeCmd.Flags().StringVar(&agentLogLevelFlag, agentLogLevelFlagName, "", agentLogLevelFlagUsage)
 
 	// Hub launch wait flags
-	resumeCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Hub mode: return once the Hub accepts the agent, without waiting for it to be running")
-	resumeCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "Hub mode: how long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
+	resumeCmd.Flags().BoolVar(&startNoWait, "no-wait", false, "Return once the Hub accepts the agent, without waiting for it to be running")
+	resumeCmd.Flags().DurationVar(&startWaitTimeout, "wait-timeout", 0, "How long to wait for the agent to be running (default: the Hub's remaining launch time plus 30s, or 5m when the Hub does not report it)")
 
 	// Inline config flag
 	resumeCmd.Flags().StringVar(&inlineConfigPath, "config", "", "Path to inline agent config file (YAML/JSON), or '-' for stdin")

@@ -27,6 +27,7 @@ package hub
 //	authenticated  — Requires valid user/agent session (via UnifiedAuthMiddleware).
 //	admin          — Requires admin role (inline admin-role guard in handler).
 //	workstation    — Requires workstation mode (requireWorkstation middleware).
+//	workstation-admin — Workstation mode and a hub admin permission check.
 //	broker-hmac    — Authenticated via runtime broker HMAC signature.
 //	webhook        — Authenticated via webhook signature (e.g. GitHub X-Hub-Signature-256).
 //	agent-token    — Authenticated via agent JWT token.
@@ -66,6 +67,8 @@ var routeAuthzManifest = map[string]string{
 	"/api/v1/auth/invite/redeem": "authenticated", // Invite redemption — requires user session
 	"/api/v1/auth/admin-status":  "authenticated", // Admin status check — requires valid session
 	"/api/v1/auth/scopes":        "authenticated", // Auth scopes — requires valid session
+	// User access credential for a peer hub — session or UAT with federation_token:mint; 404 while the experiment is off
+	"POST /api/v1/auth/federation-token": "authenticated",
 
 	// ── Authorization ──────────────────────────────────────────────────
 	"/api/v1/authz/explain": "authenticated", // Authorization explain — requires valid session
@@ -324,16 +327,16 @@ var routeAuthzManifest = map[string]string{
 	"/github-app/setup":       "public",  // GitHub App post-install callback — browser redirect
 
 	// ── Workstation-only system endpoints ──────────────────────────────
-	"/api/v1/system/identity":             "workstation", // System identity
-	"/api/v1/system/status":               "workstation", // System status
-	"/api/v1/system/check":                "workstation", // System check
-	"/api/v1/system/runtime":              "workstation", // System runtime
-	"/api/v1/system/init":                 "workstation", // System init
-	"/api/v1/system/images/pull":          "workstation", // Image pull
-	"/api/v1/system/images/build":         "workstation", // Image build
-	"/api/v1/system/apple-dns":            "workstation", // Apple DNS helper
-	"/api/v1/system/registry":             "workstation", // System registry
-	"/api/v1/system/workstation-settings": "workstation", // Workstation settings
+	"/api/v1/system/identity":             "workstation-admin", // System identity
+	"/api/v1/system/status":               "workstation",       // System status
+	"/api/v1/system/check":                "workstation",       // System check
+	"/api/v1/system/runtime":              "workstation",       // System runtime
+	"/api/v1/system/init":                 "workstation",       // System init
+	"/api/v1/system/images/pull":          "workstation",       // Image pull
+	"/api/v1/system/images/build":         "workstation",       // Image build
+	"/api/v1/system/apple-dns":            "workstation",       // Apple DNS helper
+	"/api/v1/system/registry":             "workstation",       // System registry
+	"/api/v1/system/workstation-settings": "workstation-admin", // Workstation settings
 
 	// ── Workstation-only filesystem endpoints ──────────────────────────
 	"/api/v1/system/fs/list":          "workstation", // Filesystem listing
