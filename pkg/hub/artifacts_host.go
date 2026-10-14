@@ -647,12 +647,13 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // inbox.read): the project of the message's conversation, or, for a
 // message stored without one, of its thread (a DM key names its peer agent's
 // project, or none for two users; a topic its project), must pass the
-// token's self-scope check, and a DM with an agent also needs agent:read on
-// that agent. A message of a conversation that belongs to a project (a
-// group's project, or the project of an agent of a direct message,
-// whoever the caller is: attachmentConversationProjects) also needs
-// project:read on that project through the token (canReadProject), the
-// rule the AttachmentStore download route applies to a project's file.
+// token's self-scope check, and for a participant of a DM with an agent
+// (whose peer is that agent) also agent:read on that agent. A message of a
+// conversation that belongs to a project (a group's project, or the project
+// of an agent of a direct message, whoever the caller is:
+// attachmentConversationProjects) also needs project:read on that project
+// through the token (canReadProject), the rule the AttachmentStore download
+// route applies to a project's file.
 // Every lookup failure answers false.
 func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
 	s := h.server
