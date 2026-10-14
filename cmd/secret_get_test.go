@@ -73,16 +73,25 @@ func (h *secretGetTestHub) start(t *testing.T) *httptest.Server {
 	return srv
 }
 
-// useSecretGetHub points the value client factory at srv and resets the
-// get flags and output format for the test.
+// errSecretGetValuePathExpected is returned by the metadata fetch stub that
+// the value-path tests install.
+var errSecretGetValuePathExpected = errors.New("value path expected: the metadata fetch must not run")
+
+// useSecretGetHub points the value client factory at srv, replaces the
+// metadata fetch with a stub that returns errSecretGetValuePathExpected (so
+// a test expecting the value never reaches requireHub or a real hub), and
+// resets the get flags and output format for the test.
 func useSecretGetHub(t *testing.T, srv *httptest.Server) {
 	t.Helper()
 	t.Cleanup(sciontoolhub.SetHubTestSandboxed())
-	orig := newSecretValueHubClient
+	origClient, origFetch := newSecretValueHubClient, fetchProjectSecretMeta
 	newSecretValueHubClient = func() *sciontoolhub.Client {
 		return sciontoolhub.NewClientWithConfig(srv.URL, secretGetTestToken, secretGetTestAgentID)
 	}
-	t.Cleanup(func() { newSecretValueHubClient = orig })
+	fetchProjectSecretMeta = func(*cobra.Command, string) (*hubclient.Secret, error) {
+		return nil, errSecretGetValuePathExpected
+	}
+	t.Cleanup(func() { newSecretValueHubClient, fetchProjectSecretMeta = origClient, origFetch })
 	resetSecretGetFlags(t)
 }
 
@@ -229,9 +238,12 @@ func TestSecretGet_ValueOutsideAgent(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			resetSecretGetFlags(t)
-			orig := newSecretValueHubClient
+			origClient, origFetch := newSecretValueHubClient, fetchProjectSecretMeta
 			newSecretValueHubClient = tc.factory
-			t.Cleanup(func() { newSecretValueHubClient = orig })
+			fetchProjectSecretMeta = func(*cobra.Command, string) (*hubclient.Secret, error) {
+				return nil, errSecretGetValuePathExpected
+			}
+			t.Cleanup(func() { newSecretValueHubClient, fetchProjectSecretMeta = origClient, origFetch })
 
 			out, err := runSecretGetTest(t, "MY_KEY")
 			require.Error(t, err)
