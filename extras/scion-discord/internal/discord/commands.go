@@ -11,6 +11,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/api"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/projectkeys"
 	"github.com/GoogleCloudPlatform/scion/pkg/version"
@@ -61,12 +62,22 @@ type TemplateList struct {
 type CreateAgentRequest struct {
 	Name     string `json:"name"`
 	Template string `json:"template,omitempty"`
+	// AcceptAsyncLaunch opts in to a non-blocking create. A hub with async
+	// launch enabled then answers once the broker accepts the create, with
+	// an active launch on the agent; other hubs ignore it and answer
+	// synchronously.
+	AcceptAsyncLaunch bool `json:"acceptAsyncLaunch,omitempty"`
 }
 
 // CreateAgentResponse holds the hub's response after creating an agent.
 type CreateAgentResponse struct {
+	ID   string `json:"id"`
 	Slug string `json:"slug"`
 	Name string `json:"name"`
+	// Agent is the agent as the hub returned it, including its phase and
+	// launch. hubclient.LaunchActive(Agent) tells an asynchronous answer
+	// from a synchronous one.
+	Agent *hubclient.Agent `json:"-"`
 }
 
 // HubClient provides access to the Scion hub API for project and agent listing.
@@ -87,6 +98,10 @@ type HubClient interface {
 	// onBehalfOf is a namespaced principal (e.g. "user:alice@example.com"); it is
 	// sent as the X-Scion-On-Behalf-Of header, NOT in the body.
 	CreateAgent(ctx context.Context, projectID string, req CreateAgentRequest, onBehalfOf string) (*CreateAgentResponse, error)
+
+	// GetAgent reads one agent of the project by ID or slug. onBehalfOf is
+	// sent as X-Scion-On-Behalf-Of. A non-OK answer is a *HubError.
+	GetAgent(ctx context.Context, projectID, agentID, onBehalfOf string) (*hubclient.Agent, error)
 
 	// HubBaseURL returns the base URL of the hub (e.g. "https://hub.example.com").
 	HubBaseURL() string
@@ -116,6 +131,14 @@ type CommandHandler struct {
 	agentCacheTTL  time.Duration
 	searchRoot     string // base directory for /scion send file searches
 	deliverInbound func(topic string, msg *messages.StructuredMessage) *hubError
+
+	// asyncCreate makes /scion thread opt in to an asynchronous create
+	// (config async_create, default true). The hub flag stays the real
+	// gate: a hub without async launch answers synchronously.
+	asyncCreate bool
+	// launchPollInterval is the poll interval while following an
+	// asynchronous create; 0 uses hubclient's default. Tests shorten it.
+	launchPollInterval time.Duration
 }
 
 // NewCommandHandler creates a new CommandHandler. agentCacheTTL controls how
@@ -138,6 +161,7 @@ func NewCommandHandler(store Store, session *discordgo.Session, hubClient HubCli
 		appID:          appID,
 		guildIDs:       guildIDs,
 		agentCacheTTL:  agentCacheTTL,
+		asyncCreate:    true,
 		searchRoot:     searchRoot,
 	}
 }
@@ -1595,8 +1619,9 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		createCtx, createCancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer createCancel()
 		agentResp, agentErr = h.hubClient.CreateAgent(createCtx, link.ProjectID, CreateAgentRequest{
-			Name:     slug,
-			Template: templateName,
+			Name:              slug,
+			Template:          templateName,
+			AcceptAsyncLaunch: h.asyncCreate,
 		}, onBehalfOf)
 	}()
 
@@ -1690,12 +1715,25 @@ func (h *CommandHandler) HandleThread(s *discordgo.Session, i *discordgo.Interac
 		if strings.Contains(threadErrMsg, "403") || strings.Contains(threadErrMsg, "Missing Access") {
 			threadErrMsg += " (This may be a permissions issue — try re-inviting the bot from the admin settings page.)"
 		}
+		agentState := "is running"
+		if hubclient.LaunchActive(agentResp.Agent) {
+			agentState = "is starting"
+		}
 		h.followup(s, i, fmt.Sprintf(
 			"Agent **%s** was created but the Discord thread could not be created.\n"+
 				"Error: %s\n"+
-				"The agent is running. Create a thread manually and run `/scion default %s` in it to bind.",
-			agentResp.Slug, threadErrMsg, agentResp.Slug))
+				"The agent %s. Create a thread manually and run `/scion default %s` in it to bind.",
+			agentResp.Slug, threadErrMsg, agentState, agentResp.Slug))
 		return
+	}
+
+	// An asynchronous create answers while the agent is still launching:
+	// follow the launch, and bind and send the kickoff only once the agent
+	// is running.
+	if hubclient.LaunchActive(agentResp.Agent) {
+		if !h.followCreateLaunch(s, i, thread.ID, statusMsgID, link.ProjectID, onBehalfOf, agentResp) {
+			return
+		}
 	}
 
 	// --- Both succeeded: Phase 7 — Binding + Kickoff ---
