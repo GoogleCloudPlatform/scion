@@ -2005,6 +2005,51 @@ server:
 		t.Fatal(err)
 	}
 
+	got := supersededSourcesWithAboveSeed(t)
+	for key, want := range map[string]string{
+		"default_template":        "seed_env", // seed value equal to the default
+		"default_harness_config":  "yaml",     // settings.yaml value equal to the default
+		"server.hub.admin_emails": "default",  // only the coded default
+		"server.hub.public_url":   "yaml",     // seed and settings.yaml
+	} {
+		if got[key] != want {
+			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
+		}
+	}
+}
+
+// TestGetServerConfigDB_SupersededServerEnvEqualToDefault checks, with the
+// unseeded and above-seed bootstraps set, that a SCION_SERVER_* value equal
+// to the coded default is attributed to the server environment, also when a
+// seed value sets the key to the same value (ptone/scion#4983).
+func TestGetServerConfigDB_SupersededServerEnvEqualToDefault(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{
+		"SCION_SERVER_DEFAULTHARNESSCONFIG", "SCION_SEED_DEFAULTHARNESSCONFIG",
+		"SCION_SERVER_HUB_ADMINEMAILS", "SCION_SEED_SERVER_HUB_ADMINEMAILS",
+		"SCION_SERVER_HUB_ENDPOINT", "SCION_SEED_SERVER_HUB_ENDPOINT",
+	} {
+		t.Setenv(name, "")
+	}
+	defaultTemplate := config.LoadUnseededBootstrapKoanfWithConfigPath("").String("default_template")
+	if defaultTemplate == "" {
+		t.Fatal("precondition: the coded defaults should set default_template")
+	}
+	t.Setenv("SCION_SERVER_DEFAULTTEMPLATE", defaultTemplate)
+	t.Setenv("SCION_SEED_DEFAULTTEMPLATE", defaultTemplate)
+
+	got := supersededSourcesWithAboveSeed(t)
+	if got["default_template"] != "server_env" {
+		t.Errorf("superseded default_template source = %q, want server_env (all: %v)", got["default_template"], got)
+	}
+}
+
+// supersededSourcesWithAboveSeed builds the bootstrap merges from HOME and
+// the environment as startup does, with the unseeded and above-seed merges
+// set, saves managed agent_defaults, access and endpoints rows that differ
+// from them, and returns the source of each superseded key.
+func supersededSourcesWithAboveSeed(t *testing.T) map[string]string {
+	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	ops := NewOperationalSettings(fakeStore, config.LoadBootstrapKoanf(), emptyKoanf())
 	ops.SetUnseededBootstrap(config.LoadUnseededBootstrapKoanfWithConfigPath(""))
@@ -2028,16 +2073,7 @@ server:
 			got[sk.Key] = sk.Source
 		}
 	}
-	for key, want := range map[string]string{
-		"default_template":        "seed_env", // seed value equal to the default
-		"default_harness_config":  "yaml",     // settings.yaml value equal to the default
-		"server.hub.admin_emails": "default",  // only the coded default
-		"server.hub.public_url":   "yaml",     // seed and settings.yaml
-	} {
-		if got[key] != want {
-			t.Errorf("superseded %s source = %q, want %q (all: %v)", key, got[key], want, got)
-		}
-	}
+	return got
 }
 
 func TestGetServerConfigDB_DeprecatedEnvKeys(t *testing.T) {

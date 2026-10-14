@@ -511,7 +511,8 @@ func (s *Server) computeSupersededKeys(ops *OperationalSettings) map[string][]Su
 			keySeedEnvK := seedEnvK
 			unsetAboveSeed := false
 			if unseededVal, ok := unseededMap[key]; ok && reflect.DeepEqual(unseededVal, bootstrapVal) {
-				if _, above := aboveSeedMap[key]; aboveSeedK == nil || above {
+				_, above := aboveSeedMap[key]
+				if aboveSeedK == nil || above {
 					// A layer above the seed (settings.yaml, the --config
 					// location or SCION_SERVER_*) gives the key this value
 					// and wins over a seed value, so the key is not
@@ -829,8 +830,6 @@ func bodyMergeOptions(section string) sectionMergeOptions {
 // settings.yaml wins over the seed layer, so a caller that can tell a layer
 // above the seed gives the key its value passes a nil seedEnvK
 // (computeSupersededKeys, ptone/scion#4904).
-// computeSupersededKeys reports "default" in place of the yaml fallback for
-// a key that no layer above the seed sets (ptone/scion#4983).
 func detectKeySource(seedEnvK, serverEnvK *koanf.Koanf, sectionName, key string) string {
 	sec := opsettings.SectionByName(sectionName)
 	if sec == nil {
