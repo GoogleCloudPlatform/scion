@@ -118,9 +118,9 @@ func TestListMessages_ProjectPageUsesIndexOrder(t *testing.T) {
 		name string
 		opts store.ListOptions
 	}{
-		{"first-page", store.ListOptions{Limit: 2}},
-		{"cursor-page", store.ListOptions{Limit: 2, Cursor: first.NextCursor}},
-		{"cursor-page-asc", store.ListOptions{Limit: 2, Cursor: first.NextCursor, SortDir: "asc"}},
+		{"first_page", store.ListOptions{Limit: 2}},
+		{"cursor_page", store.ListOptions{Limit: 2, Cursor: first.NextCursor}},
+		{"cursor_page_asc", store.ListOptions{Limit: 2, Cursor: first.NextCursor, SortDir: "asc"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
