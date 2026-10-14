@@ -324,10 +324,11 @@ func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key
 }
 
 // validateChatSendInput checks the content, reply target and attachments of
-// a send by user and returns the trimmed content and the attachment
+// a send by user and returns the trimmed content, with agent-prefixed
+// mentions rewritten (rewriteIncomingAgentMentions), and the attachment
 // references. It writes nothing, so a refused send leaves no trace.
 func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
-	content := strings.TrimSpace(in.Content)
+	content := rewriteIncomingAgentMentions(strings.TrimSpace(in.Content))
 	if content == "" && len(in.Attachments) == 0 {
 		return "", nil, chatSendValidationError("content or attachments required")
 	}
