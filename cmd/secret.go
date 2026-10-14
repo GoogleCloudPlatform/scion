@@ -83,8 +83,8 @@ labels, so it is safe to capture with $(...). Reading a value requires an
 agent's hub identity: run it inside an agent container.
 
 Use --metadata to print the secret's metadata (key, scope, type, target,
-version and timestamps) instead. --json always prints the metadata object
-and never the value.
+version and timestamps) instead. --format json always prints the metadata
+object and never the value.
 
 Examples:
   # Print a secret value
@@ -161,7 +161,7 @@ func init() {
 func secretGetWantsValue(metadata, value, jsonOutput bool) (bool, error) {
 	if jsonOutput {
 		if value {
-			return false, newUsageError("--value cannot be combined with --json: --json prints metadata only")
+			return false, newUsageError("--value cannot be combined with --format json: JSON output is metadata only")
 		}
 		return false, nil
 	}
@@ -210,14 +210,16 @@ func runAgentSecretGetValue(cmd *cobra.Command, key string) error {
 	return nil
 }
 
-func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
+// fetchProjectSecretMeta reads the metadata of a project-scoped secret from
+// the Hub for `scion secret get --metadata`. Overridden in tests.
+var fetchProjectSecretMeta = func(cmd *cobra.Command, key string) (*hubclient.Secret, error) {
 	hubCtx, err := requireHub(projectPath)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	projectID, err := GetProjectID(hubCtx)
 	if err != nil {
-		return wrapHubError(err)
+		return nil, wrapHubError(err)
 	}
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 30*time.Second)
@@ -230,11 +232,19 @@ func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
 
 	secret, err := hubCtx.Client.Secrets().Get(ctx, key, opts)
 	if err != nil {
-		return wrapHubError(fmt.Errorf("failed to get secret: %w", err))
+		return nil, wrapHubError(fmt.Errorf("failed to get secret: %w", err))
+	}
+	return secret, nil
+}
+
+func runAgentSecretGetMetadata(cmd *cobra.Command, key string) error {
+	secret, err := fetchProjectSecretMeta(cmd, key)
+	if err != nil {
+		return err
 	}
 
 	if isJSONOutput() {
-		enc := json.NewEncoder(os.Stdout)
+		enc := json.NewEncoder(cmd.OutOrStdout())
 		enc.SetIndent("", "  ")
 		return enc.Encode(secret)
 	}

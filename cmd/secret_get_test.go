@@ -129,17 +129,61 @@ func TestSecretGet_ValueFlagPrintsValue(t *testing.T) {
 	assert.Equal(t, secretGetTestValue, out)
 }
 
-// TestSecretGet_MetadataFlagSkipsValue checks that --metadata never reads
-// the value, whatever the default is.
-func TestSecretGet_MetadataFlagSkipsValue(t *testing.T) {
-	resetSecretGetFlags(t)
-	agentSecretGetMetadata = true
-	wantValue, err := secretGetWantsValue(agentSecretGetMetadata, agentSecretGetValue, isJSONOutput())
-	require.NoError(t, err)
-	assert.False(t, wantValue)
+// useSecretMetaFake replaces the metadata fetch with a fake returning meta,
+// and the value client factory with one that fails the test if called.
+func useSecretMetaFake(t *testing.T, meta *hubclient.Secret) {
+	t.Helper()
+	origFetch, origClient := fetchProjectSecretMeta, newSecretValueHubClient
+	fetchProjectSecretMeta = func(_ *cobra.Command, key string) (*hubclient.Secret, error) {
+		assert.Equal(t, meta.Key, key)
+		return meta, nil
+	}
+	newSecretValueHubClient = func() *sciontoolhub.Client {
+		t.Error("the metadata view must not build the value client")
+		return nil
+	}
+	t.Cleanup(func() { fetchProjectSecretMeta, newSecretValueHubClient = origFetch, origClient })
 }
 
-// TestSecretGetWantsValue covers how the flags, --json and the default
+func secretGetTestMeta() *hubclient.Secret {
+	ts := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	return &hubclient.Secret{Key: "MY_KEY", Scope: "project", SecretType: "environment", Version: 2, Created: ts, Updated: ts}
+}
+
+// TestSecretGet_MetadataFlagPrintsMetadata checks that --metadata prints the
+// metadata view and never reads the value, whatever the default is.
+func TestSecretGet_MetadataFlagPrintsMetadata(t *testing.T) {
+	resetSecretGetFlags(t)
+	meta := secretGetTestMeta()
+	useSecretMetaFake(t, meta)
+	agentSecretGetMetadata = true
+
+	out, err := runSecretGetTest(t, "MY_KEY")
+	require.NoError(t, err)
+	var want bytes.Buffer
+	printSecretMetadata(&want, meta)
+	assert.Equal(t, want.String(), out)
+	assert.Contains(t, out, "Secret: MY_KEY\n")
+	assert.NotContains(t, out, secretGetTestValue)
+}
+
+// TestSecretGet_FormatJSONPrintsMetadata checks that --format json prints the
+// metadata object, with no value field, and never reads the value.
+func TestSecretGet_FormatJSONPrintsMetadata(t *testing.T) {
+	resetSecretGetFlags(t)
+	useSecretMetaFake(t, secretGetTestMeta())
+	outputFormat = "json"
+
+	out, err := runSecretGetTest(t, "MY_KEY")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), "output: %s", out)
+	assert.Equal(t, "MY_KEY", got["key"])
+	assert.Equal(t, "project", got["scope"])
+	assert.NotContains(t, got, "value")
+}
+
+// TestSecretGetWantsValue covers how the flags, --format json and the default
 // select the value or the metadata view. Only the default row depends on
 // secretGetPrintsValueByDefault.
 func TestSecretGetWantsValue(t *testing.T) {
@@ -152,9 +196,9 @@ func TestSecretGetWantsValue(t *testing.T) {
 		{name: "default prints the value", want: true},
 		{name: "--metadata", metadata: true, want: false},
 		{name: "--value", value: true, want: true},
-		{name: "--json prints metadata", json: true, want: false},
-		{name: "--json --metadata", json: true, metadata: true, want: false},
-		{name: "--json --value is refused", json: true, value: true, wantUsageErr: true},
+		{name: "--format json prints metadata", json: true, want: false},
+		{name: "--format json --metadata", json: true, metadata: true, want: false},
+		{name: "--format json --value is refused", json: true, value: true, wantUsageErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -266,15 +310,15 @@ func TestPrintSecretMetadata(t *testing.T) {
 // TestSecretCmd_AgentMode checks that agent mode keeps secret get and list
 // and removes secret set, against the real command tree (ptone/scion#5013).
 func TestSecretCmd_AgentMode(t *testing.T) {
-	real := resolveCommandPath(rootCmd, "secret")
-	require.NotNil(t, real, "scion secret must exist in the real command tree")
+	realSecret := resolveCommandPath(rootCmd, "secret")
+	require.NotNil(t, realSecret, "scion secret must exist in the real command tree")
 	for _, path := range []string{"secret.get", "secret.list", "secret.set"} {
 		require.NotNil(t, resolveCommandPath(rootCmd, path), "real tree should contain %s", path)
 	}
 
 	t.Setenv("SCION_CLI_MODE", "agent")
 	root := &cobra.Command{Use: "scion"}
-	root.AddCommand(cloneCommandShape(real))
+	root.AddCommand(cloneCommandShape(realSecret))
 	applyModeRestrictions(root, resolveMode())
 	assert.NotNil(t, resolveCommandPath(root, "secret.get"), "secret get must be available in agent mode")
 	assert.NotNil(t, resolveCommandPath(root, "secret.list"), "secret list must be available in agent mode")

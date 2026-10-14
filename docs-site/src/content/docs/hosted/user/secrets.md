@@ -143,7 +143,7 @@ To prevent silent integration failures (such as when the web UI sends raw plaint
 
 When writing a secret, the Hub checks if the payload is a valid base64-encoded string. If it is, the Hub decodes it back to raw bytes before encrypting. If it is not valid base64 (or if decoding fails), the Hub gracefully falls back to treating the payload as raw plaintext. This ensures that both base64-encoded binary payloads (e.g. key files) and raw plaintext API keys are accepted reliably.
 
-To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), the CLI commands `scion hub secret set` and `scion secret set` explicitly send `encoding: raw` to bypass server-side base64 validation and ensure the secret is stored exactly as typed.
+To prevent accidental base64-decoding when setting plaintext secrets that happen to look like valid base64 (e.g., specific API keys), `scion hub secret set` explicitly sends `encoding: raw` for plaintext values to bypass server-side base64 validation and ensure the secret is stored exactly as typed. `scion secret set` instead base64-encodes every value on the client (file contents from `@file` included), so the Hub decodes it back to exactly the bytes given.
 :::
 
 **Interactive Secrets-Gather:**

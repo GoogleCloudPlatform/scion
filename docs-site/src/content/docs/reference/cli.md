@@ -940,13 +940,12 @@ Unlike `scion hub secret` (which supports managing secrets at any scope: user, h
     - Flags:
         - `--type <string>`: Secret type: `environment` (default), `variable`, or `file`.
         - `--target <string>`: Injection target path (defaults to key for env, required for file-type secrets).
-        - `--allow-progeny`: Allow child agents (progeny) to inherit this secret.
 - `scion secret get KEY`: Print the value of a project-scoped secret. The decoded value is written to stdout as-is, with no added newline or labels, so `export API_KEY=$(scion secret get API_KEY)` works. Reading a value requires an agent's hub identity, so it works only inside an agent container; elsewhere the command fails and names `--metadata`.
     - Flags:
         - `--metadata`: Print the secret's metadata (key, scope, type, target, version, timestamps) instead of its value. This was the default output before the value became the default.
-        - `--value`: Print the value (the default). Cannot be combined with `--metadata` or `--json`.
-    - With `--json` or `--format json`, prints the metadata object. The value is never included in JSON output.
-- `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--json` or `--format json`, prints the same list shape as `scion hub secret list`.
+        - `--value`: Print the value (the default). Cannot be combined with `--metadata` or `--format json`.
+    - With `--format json`, prints the metadata object. The value is never included in JSON output.
+- `scion secret list`: List metadata (key, type, version, updated time) for all project-scoped secrets. Secret values are never returned. With `--format json`, prints the same list shape as `scion hub secret list`.
 
 ### `scion clean`
 
