@@ -402,7 +402,9 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 // errConduitRenewalRefused marks a renewal request the hub refuses without
 // evaluating authorization: the presented grant does not verify in re-check
 // mode, does not match the stream named by the request, or names an origin
-// and kind outside the origin table. The stream keeps its current deadline.
+// and kind outside the origin table. It also marks a renewal refused after
+// authorization for the agent's saved placement (conduitRenewalPlacement).
+// The stream keeps its current deadline.
 var errConduitRenewalRefused = errors.New("conduit renewal refused")
 
 // conduitRenewalRequest is what a relay presents to renew one user stream's
@@ -439,10 +441,12 @@ type conduitRenewal struct {
 // params and origin from the grant's signed claims.
 //
 // Errors wrap errConduitDisabled, errConduitRenewalRefused (bad or
-// mismatched grant, no target session, origin and kind outside the table),
-// errConduitForbidden (authorization denied, including an inactive user),
-// errConduitAuthzUnavailable (a lookup failed: no renewal, and the stream
-// is not closed early), or errConduitAgentGone.
+// mismatched grant, no target session, origin and kind outside the table,
+// or a pinned agent whose saved placement is inconsistent; see
+// conduitRenewalPlacement), errConduitForbidden (authorization denied,
+// including an inactive user), errConduitAuthzUnavailable (a lookup
+// failed: no renewal, and the stream is not closed early), or
+// errConduitAgentGone.
 func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalRequest) (*conduitRenewal, error) {
 	if !s.experimentEnabled(conduitExperiment) {
 		return nil, errConduitDisabled
@@ -522,6 +526,9 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 	default:
 		return nil, fmt.Errorf("%w: %s: %w", errConduitAuthzUnavailable, reason, err)
 	}
+	if err := s.conduitRenewalPlacement(ctx, agent, req); err != nil {
+		return nil, err
+	}
 
 	signer, err := keys.signer(ctx)
 	if err != nil {
@@ -558,6 +565,37 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 	}
 	rc.KeyID, rc.Audience = signer.KeyID, grant.Audience
 	return &conduitRenewal{Token: tok, AuthzUntil: rc.AuthzUntil, Claims: &rc}, nil
+}
+
+// conduitRenewalPlacement applies mintConduitGrant's placement guard
+// (checkAgentPinnedPlacement) to a renewal, after the re-check's
+// authorization verdict and before minting, so a stream to a pinned agent
+// whose saved placement is inconsistent gets no renewal, as an open gets no
+// grant. A placement refusal wraps errConduitRenewalRefused and the
+// *PlacementConflictError: no renewal is minted, and the stream is not
+// closed from here; it ends at its current deadline. A failed placement
+// read for a pinned agent wraps errConduitAuthzUnavailable, like the other
+// lookups that fail during a renewal: no renewal this attempt. As for an
+// open, an unpinned agent keeps today's path when the read fails, and a
+// managed runtime is not checked.
+func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent, req conduitRenewalRequest) error {
+	if isManagedAgentRuntime(agent.Runtime) {
+		return nil
+	}
+	_, err := checkAgentPinnedPlacement(ctx, s.store, agent)
+	if err == nil {
+		return nil
+	}
+	if r, refused := placementRefusalOf(err); refused {
+		slog.Warn("Conduit renewal refused for the agent's saved placement; no renewal minted",
+			"agent_id", agent.ID, "code", r.Code,
+			"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID)
+		return fmt.Errorf("%w: agent placement: %w", errConduitRenewalRefused, err)
+	}
+	if agent.IsPinned() {
+		return fmt.Errorf("%w: agent placement check: %w", errConduitAuthzUnavailable, err)
+	}
+	return nil
 }
 
 // conduitRenewalIdentity returns the identity a renewal re-check evaluates
