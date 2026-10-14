@@ -756,6 +756,8 @@ func (s *session) dispatch(f *conduitv1.Frame) {
 		s.handleGoAway(b.GoAway)
 	case *conduitv1.Frame_AuthRefresh:
 		s.handleAuthRefresh(b.AuthRefresh)
+	case *conduitv1.Frame_GrantKeysChanged:
+		s.handleGrantKeysChanged()
 	case *conduitv1.Frame_Hello, *conduitv1.Frame_Welcome:
 		s.protocolError("unexpected %s after handshake", FrameType(f))
 	default:
@@ -1299,6 +1301,40 @@ func (s *session) RefreshAuth(credential []byte, streamID uint32) error {
 
 // reasonBadFrame is the §3.3.1 reason token of a 4400 frame violation.
 const reasonBadFrame = "bad_frame"
+
+// ErrNotRelaySide is returned by NotifyGrantKeysChanged on a dialer.
+var ErrNotRelaySide = errors.New("conduit: only the relay side sends GrantKeysChanged")
+
+// NotifyGrantKeysChanged implements LocalSession.
+func (s *session) NotifyGrantKeysChanged() error {
+	if s.adm == nil {
+		return ErrNotRelaySide
+	}
+	if s.isDone() {
+		return ErrSessionClosed
+	}
+	return s.sendControl(s.ctx, &conduitv1.Frame{Body: &conduitv1.Frame_GrantKeysChanged{GrantKeysChanged: &conduitv1.GrantKeysChanged{}}})
+}
+
+// handleGrantKeysChanged handles GrantKeysChanged (design v2.21.27 §3.5,
+// Key-set freshness). It travels only from the relay toward the target. On
+// the target side it goes to Config.OnGrantKeysChanged, a signal to fetch
+// keys and nothing more. One sent by a dialer is a frame violation: it is
+// logged and ends the session with 4400 bad_frame.
+func (s *session) handleGrantKeysChanged() {
+	if s.adm == nil {
+		if s.cfg.OnGrantKeysChanged != nil {
+			s.cfg.OnGrantKeysChanged(s.ctx)
+		}
+		return
+	}
+	info := s.Info()
+	s.cfg.Logger.Warn("conduit: dialer sent GrantKeysChanged",
+		"session_id", info.SessionID,
+		"principal_kind", info.PrincipalKind,
+		"principal_id", info.PrincipalID)
+	s.closeWithCode(CloseProtocolError, reasonBadFrame+": grant_keys_changed from dialer")
+}
 
 // handleAuthRefresh validates refreshes one at a time, in arrival order;
 // refreshes arriving while one is in flight collapse to the latest (a

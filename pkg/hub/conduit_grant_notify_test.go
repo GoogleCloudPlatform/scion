@@ -19,6 +19,7 @@ package hub
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
+	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 )
 
 // Grant key changes across hub nodes (design v2.21.27 §3.5, Key-set
@@ -153,4 +155,27 @@ func TestConduitGrantKeyChangeEventNamesOnlyTheKey(t *testing.T) {
 		t.Fatalf("event published with hub.conduit off: %s", evt.Data)
 	case <-time.After(100 * time.Millisecond):
 	}
+}
+
+// TestConduitGrantKeyChangeHintsHubHeldTargets: after a rotation, the hub
+// sends GrantKeysChanged on the stream_renewal.v2 agent session it holds,
+// and the agent fetches and installs the rotated-in key without waiting
+// for its periodic refresh (whose timers do not fire in this test).
+func TestConduitGrantKeyChangeHintsHubHeldTargets(t *testing.T) {
+	f := newConduitProxyFixture(t, http.NotFoundHandler())
+	f.srv.SetEventPublisher(NewChannelEventPublisher())
+	f.startAgent(t)
+	ctx := context.Background()
+	first, err := f.srv.conduitGrants.signer(ctx)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := f.sciontool.Keys().Lookup(first.KeyID); return ok },
+		10*time.Second, 10*time.Millisecond, "the agent's first key fetch")
+
+	// Past the agent's spacing between fetches, so the hint is served at
+	// once.
+	f.clock.Advance(sconduit.GrantKeysHintInterval + time.Second)
+	rot, err := f.srv.RotateConduitGrantKey(ctx)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := f.sciontool.Keys().Lookup(rot.KeyID); return ok },
+		10*time.Second, 10*time.Millisecond, "the agent installs the rotated-in key after the hint")
 }

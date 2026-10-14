@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -1004,6 +1005,31 @@ func (r *Relay) CloseSessionsOf(kind, id string, code uint32, reason string) int
 		_ = e.sess.CloseWithCode(code, reason)
 	}
 	return len(hit)
+}
+
+// NotifyGrantKeysChanged sends GrantKeysChanged on every live local session
+// of a target (agent or broker) whose Hello advertised
+// conduit.FeatureStreamRenewal (design v2.21.27 §3.5, Key-set freshness),
+// and returns how many sessions it was sent on. The frame carries no keys.
+func (r *Relay) NotifyGrantKeysChanged() int {
+	r.mu.Lock()
+	var targets []*entry
+	for _, e := range r.sessions {
+		if e.rec.PrincipalKind == registry.PrincipalAgent || e.rec.PrincipalKind == registry.PrincipalBroker {
+			targets = append(targets, e)
+		}
+	}
+	r.mu.Unlock()
+	n := 0
+	for _, e := range targets {
+		if !slices.Contains(e.sess.Info().Capabilities.GetFeatures(), conduit.FeatureStreamRenewal) {
+			continue
+		}
+		if e.sess.NotifyGrantKeysChanged() == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Sessions returns the number of live local sessions.

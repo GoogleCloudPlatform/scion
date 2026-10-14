@@ -64,6 +64,17 @@ func (s *Server) conduitGrantKeysChangedHere() {
 	s.conduitGrantKeySet().invalidate()
 }
 
+// hintConduitGrantKeysChanged sends GrantKeysChanged to every
+// stream_renewal.v2 target session this node holds, after a change event.
+// Each target answers with its own authenticated key fetch.
+func (s *Server) hintConduitGrantKeysChanged() {
+	rt := s.conduit.Load()
+	if rt == nil || rt.relay == nil {
+		return
+	}
+	rt.relay.NotifyGrantKeysChanged()
+}
+
 // bindConduitGrantKeyEvents (re)binds this node to grant key changes on the
 // current event publisher, for as long as the conduit stream re-check runs:
 // the change subscription and, for a publisher with a LISTEN connection, a
@@ -129,6 +140,7 @@ func (s *Server) receiveConduitGrantKeysChanged(ctx context.Context, ch <-chan E
 				return
 			}
 			s.conduitGrantKeysChangedHere()
+			s.hintConduitGrantKeysChanged()
 		}
 	}
 }

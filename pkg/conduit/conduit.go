@@ -236,6 +236,12 @@ type LocalSession interface {
 	// The relay validates credential refreshes one at a time; if several
 	// arrive while one is being validated, only the latest is kept.
 	RefreshAuth(credential []byte, streamID uint32) error
+	// NotifyGrantKeysChanged sends GrantKeysChanged{} from the relay side:
+	// the hub's published grant keys changed, and the target should fetch
+	// them again over its own authenticated channel (design v2.21.27 §3.5,
+	// Key-set freshness). The frame carries no keys. On a dialer it
+	// returns ErrNotRelaySide and sends nothing.
+	NotifyGrantKeysChanged() error
 	// Stats returns scheduler and buffer counters.
 	Stats() Stats
 }
