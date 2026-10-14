@@ -411,7 +411,7 @@ func TestColocatedBrokerStop_BeforeHTTPDrain(t *testing.T) {
 			b.beforeHTTPDrain(clk, brokerStopWaitFallback, p.brokerContext)(context.Background())
 			returned <- clk.Now()
 		}()
-		require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(4*time.Second)))
+		require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(4*time.Second)), "the broker wait must arm the broker-phase deadline (T0+S/2)")
 		clk.Advance(4 * time.Second)
 		select {
 		case at := <-returned:
