@@ -113,13 +113,8 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 		scanProject(globalDir)
 	}
 
-	// 3. Fetch Hub agents (if enabled)
-	// Check --no-hub flag
-	noHubFlag, _ := cmd.Flags().GetBool("no-hub")
-	if !noHubFlag {
-		hubAgents := fetchHubAgentsForCompletion(resolvedPath)
-		addNames(hubAgents)
-	}
+	// 3. Fetch Hub agents (when a hub endpoint is configured)
+	addNames(fetchHubAgentsForCompletion(resolvedPath))
 
 	return names, cobra.ShellCompDirectiveNoFileComp
 }
@@ -128,22 +123,16 @@ func completeAgentNames(cmd *cobra.Command, args []string, toComplete string) ([
 // It uses a short timeout and falls back to cache if the Hub is slow or unavailable.
 // This function is designed to be silent - it never returns errors to avoid breaking completion.
 func fetchHubAgentsForCompletion(projectPath string) []string {
-	// Load settings to check if Hub is enabled
 	settings, err := config.LoadSettings(projectPath)
 	if err != nil {
 		return nil
 	}
 
-	// Check if Hub is enabled in settings
-	if !settings.IsHubEnabled() {
+	// Without a hub there is nothing to ask
+	if !hubConfigured(settings) {
 		return nil
 	}
-
-	// Get Hub endpoint
 	endpoint := GetHubEndpoint(settings)
-	if endpoint == "" {
-		return nil
-	}
 
 	// Generate cache key for this project
 	cacheKey := agentcache.GenerateCacheKey(projectPath)

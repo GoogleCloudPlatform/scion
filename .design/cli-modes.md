@@ -222,6 +222,7 @@ The existing `TestCheckAgentContainerContext` tests should be extended to cover 
 | `tunnel` | Y | - |
 | `tunnel status` | Y | - |
 | `version` | Y | Y |
+| `vscode` | Y | - |
 | `help` | Y | Y |
 | `completion` | Y | - |
 

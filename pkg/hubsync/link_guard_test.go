@@ -134,7 +134,7 @@ func TestEnsureHubReady_AutoLinkRefusesGlobalFallbackInGitRepo(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, err = EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: endpoint, SkipSync: true, AutoLinkLocal: true})
+		_, err = EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: endpoint})
 		if !errors.Is(err, ErrGitRepoNotProject) {
 			t.Fatalf("err = %v, want ErrGitRepoNotProject", err)
 		}
@@ -159,7 +159,7 @@ func TestEnsureHubReady_AutoLinkRefusesGlobalFallbackInGitRepo(t *testing.T) {
 	t.Run("explicit global still links", func(t *testing.T) {
 		_, endpoint, registers := setupGuardHub(t, projectID, false)
 		if _, err := EnsureHubReady("global", EnsureHubReadyOptions{
-			EndpointOverride: endpoint, SkipSync: true, AutoLinkLocal: true, ExplicitProject: true,
+			EndpointOverride: endpoint, ExplicitProject: true,
 		}); err != nil {
 			t.Fatalf("EnsureHubReady: %v", err)
 		}
@@ -170,7 +170,7 @@ func TestEnsureHubReady_AutoLinkRefusesGlobalFallbackInGitRepo(t *testing.T) {
 
 	t.Run("repository with its own .scion links", func(t *testing.T) {
 		_, endpoint, registers := setupGuardHub(t, projectID, true)
-		hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: endpoint, SkipSync: true, AutoLinkLocal: true})
+		hubCtx, err := EnsureHubReady("", EnsureHubReadyOptions{EndpointOverride: endpoint})
 		if err != nil {
 			t.Fatalf("EnsureHubReady: %v", err)
 		}

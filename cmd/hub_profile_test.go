@@ -100,7 +100,15 @@ func TestHubProfileGate_UnlistedCommandsRefused(t *testing.T) {
 	hubEndpoint = "https://other.example.com"
 	err := checkHubProfileGate(realCommand(t, "hub.status"), ModeHuman)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "--hub and --no-hub cannot be used with a hub profile")
+	assert.Contains(t, err.Error(), "--hub cannot be used with a hub profile")
+}
+
+// The removed --no-hub gets its removal guidance with a profile selected
+// too: root checks it before the hub-profile gate.
+func TestHubProfileGate_NoHubGetsRemovalError(t *testing.T) {
+	profileGateEnv(t, "t1")
+	_, err := runProfileRoot(t, "hub", "status", "--no-hub")
+	require.ErrorIs(t, err, errNoHubRemoved)
 }
 
 // --as and --run without a profile are refused (they never select an
