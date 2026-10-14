@@ -873,3 +873,58 @@ func TestHarnessConfigBlob_DeleteRemovesBlobsAndStaging(t *testing.T) {
 		t.Error("deleting a legacy row left its legacy tree or its migration blobs")
 	}
 }
+
+// Deleting a legacy harness-config with deleteFiles keeps a legacy tree
+// another harness-config still uses: a nested legacy clone at
+// <slug path>/<clone id>, or a newer row that shares the renamed parent's
+// path. The same guard decides as on migration
+// (legacyHarnessConfigTreeInUse). An unshared legacy tree is removed.
+func TestHarnessConfigBlob_DeleteKeepsSharedOrNestedLegacyTree(t *testing.T) {
+	ctx := context.Background()
+	stor := newCommitTestStorage(t)
+	srv, s := newCommitTestServer(t, stor)
+
+	parent := seedLegacyHC(t, srv, s, "foo", map[string]string{"config.yaml": hcCfgA})
+	parent.Name, parent.Slug = "bar", "bar"
+	require.NoError(t, s.UpdateHarnessConfig(ctx, parent))
+	cloneFiles := map[string]string{"config.yaml": hcCfgB}
+	clone := &store.HarnessConfig{
+		ID: api.NewUUID(), Name: "foo-clone", Slug: "foo-clone", Harness: "claude",
+		Scope: store.HarnessConfigScopeGlobal, Status: store.HarnessConfigStatusActive,
+		Files: commitManifest(cloneFiles),
+	}
+	clone.StoragePath = parent.StoragePath + "/" + clone.ID
+	clone.ContentHash = computeContentHash(clone.Files)
+	putObjects(t, stor, clone.StoragePath, cloneFiles)
+	require.NoError(t, s.CreateHarnessConfig(ctx, clone))
+
+	// The parent's tree holds a nested legacy clone: deleting the parent
+	// keeps the tree.
+	mustStatus(t, doTemplateRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+parent.ID+"?deleteFiles=true", "", nil), http.StatusNoContent)
+	if !objectExists(t, stor, clone.StoragePath+"/config.yaml") {
+		t.Fatal("deleting a legacy parent removed a nested legacy clone's files")
+	}
+	for _, f := range downloadHC(t, srv, clone.ID).Files {
+		if string(fetchHubURL(t, srv, f.URL)) != cloneFiles[f.Path] {
+			t.Errorf("nested clone's %s no longer hydrates after its parent was deleted", f.Path)
+		}
+	}
+
+	// Two rows on one legacy path (a rename, then a new row with the old
+	// name): deleting one keeps the tree the other reads.
+	a := seedLegacyHC(t, srv, s, "shared", map[string]string{"a.txt": "from A", "config.yaml": hcCfgA})
+	a.Name, a.Slug = "shared-renamed", "shared-renamed"
+	require.NoError(t, s.UpdateHarnessConfig(ctx, a))
+	b := seedLegacyHC(t, srv, s, "shared", map[string]string{"b.txt": "from B", "config.yaml": hcCfgB})
+	require.Equal(t, a.StoragePath, b.StoragePath, "precondition: the rows share the legacy path")
+	mustStatus(t, doTemplateRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+a.ID+"?deleteFiles=true", "", nil), http.StatusNoContent)
+	if !objectExists(t, stor, b.StoragePath+"/b.txt") {
+		t.Fatal("deleting one row removed the legacy tree another row shares")
+	}
+
+	// Now nothing else uses the path: deleting the last row removes it.
+	mustStatus(t, doTemplateRequest(t, srv, http.MethodDelete, "/api/v1/harness-configs/"+b.ID+"?deleteFiles=true", "", nil), http.StatusNoContent)
+	if !notExistOnDisk(t, stor, b.StoragePath) {
+		t.Error("deleting the last row on a legacy path kept its tree")
+	}
+}

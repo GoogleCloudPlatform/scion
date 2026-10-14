@@ -162,40 +162,51 @@ func (s *Server) generateHarnessConfigDownloadURLs(ctx context.Context, stor sto
 	return s.generateBlobRowDownloadURLs(ctx, stor, row)
 }
 
+// legacyHarnessConfigTreeInUse reports whether another harness-config than
+// hc still uses the legacy tree at path: a row with the same storage path (a
+// renamed config and a new one with the old name can share a legacy path),
+// or a row whose storage path is nested under it (legacy clones live at
+// <slug path>/<clone id>, so DeletePrefix of the parent's path would remove
+// them too). A failed or empty check counts as in use, so callers keep the
+// tree when they cannot prove it is unused.
+func (s *Server) legacyHarnessConfigTreeInUse(ctx context.Context, hc *store.HarnessConfig, path string) bool {
+	for _, filter := range []store.HarnessConfigFilter{
+		{StoragePath: path},
+		{StoragePathPrefix: storage.DirPrefix(path)},
+	} {
+		others, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: 10, SkipTotalCount: true})
+		if err != nil {
+			s.resourceLog.Warn("harness-config storage: cannot check for rows using a legacy path; keeping it",
+				"harness_config", hc.Name, "id", hc.ID, "path", path, "error", err)
+			return true
+		}
+		if others == nil {
+			s.resourceLog.Warn("harness-config storage: no result checking for rows using a legacy path; keeping it",
+				"harness_config", hc.Name, "id", hc.ID, "path", path)
+			return true
+		}
+		for _, o := range others.Items {
+			if o.ID != hc.ID {
+				s.resourceLog.Info("harness-config storage: legacy path is still used by another harness-config; keeping it",
+					"harness_config", hc.Name, "id", hc.ID, "path", path, "other", o.ID, "otherPath", o.StoragePath)
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // removeLegacyHarnessConfigTree removes a migrated row's legacy tree
-// (<oldPath>/), unless another harness-config still uses it: a row with the
-// same storage path (a renamed config and a new one with the old name can
-// share a legacy path), or a row whose storage path is nested under it
-// (legacy clones live at <slug path>/<clone id>, so DeletePrefix of the
-// parent's path would remove them too). DeletePrefix removes the directory
-// itself on local storage, so a co-located broker's direct read of the old
-// path misses instead of finding an empty directory.
+// (<oldPath>/), unless another harness-config still uses it
+// (legacyHarnessConfigTreeInUse). DeletePrefix removes the directory itself
+// on local storage, so a co-located broker's direct read of the old path
+// misses instead of finding an empty directory.
 func (s *Server) removeLegacyHarnessConfigTree(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig, oldPath string) {
 	if oldPath == "" || oldPath == hc.StoragePath || storage.DirPrefix(oldPath) == "" {
 		return
 	}
-	for _, filter := range []store.HarnessConfigFilter{
-		{StoragePath: oldPath},
-		{StoragePathPrefix: storage.DirPrefix(oldPath)},
-	} {
-		others, err := s.store.ListHarnessConfigs(ctx, filter, store.ListOptions{Limit: 10, SkipTotalCount: true})
-		if err != nil {
-			s.resourceLog.Warn("harness-config migration: cannot check for rows using the legacy path; keeping it",
-				"harness_config", hc.Name, "id", hc.ID, "error", err)
-			return
-		}
-		if others == nil {
-			s.resourceLog.Warn("harness-config migration: no result checking for rows using the legacy path; keeping it",
-				"harness_config", hc.Name, "id", hc.ID)
-			return
-		}
-		for _, o := range others.Items {
-			if o.ID != hc.ID {
-				s.resourceLog.Info("harness-config migration: legacy path is still used by another harness-config; keeping it",
-					"harness_config", hc.Name, "id", hc.ID, "other", o.ID, "otherPath", o.StoragePath)
-				return
-			}
-		}
+	if s.legacyHarnessConfigTreeInUse(ctx, hc, oldPath) {
+		return
 	}
 	if err := stor.DeletePrefix(ctx, storage.DirPrefix(oldPath)); err != nil {
 		s.resourceLog.Warn("harness-config migration: failed to remove the legacy tree",
@@ -206,6 +217,9 @@ func (s *Server) removeLegacyHarnessConfigTree(ctx context.Context, stor storage
 // deleteHarnessConfigStorage deletes everything a harness-config row owns in
 // storage: its blobs and staged uploads, and for a legacy row its legacy
 // tree plus any blobs or staged uploads already written for its migration.
+// A legacy tree another harness-config still uses (a shared renamed path, or
+// a nested legacy clone) is kept, as on migration
+// (legacyHarnessConfigTreeInUse).
 func (s *Server) deleteHarnessConfigStorage(ctx context.Context, stor storage.Storage, hc *store.HarnessConfig) error {
 	var prefixes []string
 	if isHarnessConfigBlobLayout(hc) {
@@ -214,7 +228,7 @@ func (s *Server) deleteHarnessConfigStorage(ctx context.Context, stor storage.St
 		}
 		prefixes = append(prefixes, templateBlobPrefix(hc.StoragePath), templateStagingPrefix(hc.StoragePath))
 	} else {
-		if hc.StoragePath != "" {
+		if hc.StoragePath != "" && storage.DirPrefix(hc.StoragePath) != "" && !s.legacyHarnessConfigTreeInUse(ctx, hc, hc.StoragePath) {
 			prefixes = append(prefixes, storage.DirPrefix(hc.StoragePath))
 		}
 		if hc.ID != "" && hc.Slug != "" {
