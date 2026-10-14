@@ -78,6 +78,10 @@ func (s *Server) keepUnknownOutcomeStart(ctx context.Context, w http.ResponseWri
 		return
 	case err == nil:
 		phase = fresh.Phase
+	default:
+		// The agent is still kept; the answer uses the dispatched copy's
+		// phase.
+		s.agentLifecycleLog.Warn("Failed to re-read the agent after an unknown start outcome", "agent_id", agent.ID, "error", err)
 	}
 
 	msg := startOutcomeUnknownMessage(cause)
@@ -89,11 +93,15 @@ func (s *Server) keepUnknownOutcomeStart(ctx context.Context, w http.ResponseWri
 		s.agentLifecycleLog.Warn("Failed to record the unknown start outcome on the agent", "agent_id", agent.ID, "error", err)
 	}
 
+	var causeText string
+	if cause != nil {
+		causeText = cause.Error()
+	}
 	summary, _ := json.Marshal(struct {
 		OriginalAuditID string `json:"original_audit_id,omitempty"`
 		Stage           string `json:"stage"`
 		Error           string `json:"error,omitempty"`
-	}{OriginalAuditID: createAuditID, Stage: stage, Error: truncateAuditText(cause.Error(), 512)})
+	}{OriginalAuditID: createAuditID, Stage: stage, Error: truncateAuditText(causeText, 512)})
 	s.emitMutationAudit(ctx, &store.MutationAuditRecord{
 		MutationType: mutationTypeAgentCreateOutcomeUnknown,
 		TargetType:   "agent",

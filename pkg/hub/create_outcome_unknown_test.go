@@ -29,6 +29,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -585,4 +586,43 @@ func TestHTTPAgentDispatcher_DeferredDefiniteFailureRevokesAll(t *testing.T) {
 	require.Len(t, gen.jtis, 1)
 	assert.NotNil(t, getTestAgentCredential(t, memStore, gen.lastJTI()).RevokedAt, "the requester's own credential is revoked")
 	assert.NotNil(t, getTestAgentCredential(t, memStore, "owner-kept-jti").RevokedAt, "the credential the owning node kept is revoked too")
+}
+
+// reReadFailStore fails GetAgent, so keepUnknownOutcomeStart's re-read of the
+// kept agent fails with a store error.
+type reReadFailStore struct {
+	store.Store
+}
+
+func (reReadFailStore) GetAgent(context.Context, string) (*store.Agent, error) {
+	return nil, errors.New("store unavailable")
+}
+
+// A kept start whose re-read fails is still answered 504 with the dispatched
+// copy's phase, and the store error is logged. A nil cause does not panic.
+func TestKeepUnknownOutcomeStart_ReReadFailureAndNilCause(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	project := &store.Project{ID: tid("kuo-project"), Slug: "kuo-project", Name: "kuo-project", Created: time.Now(), Updated: time.Now()}
+	require.NoError(t, s.CreateProject(ctx, project))
+	agent := &store.Agent{
+		ID: tid("kuo-agent"), Slug: "kuo-agent", Name: "kuo-agent", ProjectID: project.ID,
+		Phase: string(state.PhaseProvisioning), RuntimeBrokerID: "broker-1", StateVersion: 1,
+		Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateAgent(ctx, agent))
+	logs := &strings.Builder{}
+	srv.agentLifecycleLog = slog.New(slog.NewTextHandler(logs, nil))
+	srv.store = reReadFailStore{Store: s}
+
+	rec := httptest.NewRecorder()
+	require.NotPanics(t, func() {
+		srv.keepUnknownOutcomeStart(ctx, rec, agent, createStageDispatchEnvGather, nil, "", false, nil)
+	})
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code, rec.Body.String())
+	var errResp ErrorResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &errResp))
+	assert.Equal(t, ErrCodeStartOutcomeUnknown, errResp.Error.Code)
+	assert.Equal(t, string(state.PhaseProvisioning), errResp.Error.Details["phase"])
+	assert.Contains(t, logs.String(), "Failed to re-read the agent after an unknown start outcome")
 }
