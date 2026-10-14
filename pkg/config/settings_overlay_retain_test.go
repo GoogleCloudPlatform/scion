@@ -102,7 +102,7 @@ func mustNotFound(t *testing.T, vs *VersionedSettings, profile string) *StoredPr
 	return nf
 }
 
-// Ruling 8 / issue case: stored {gke, local-nfs}, agents saved on local,
+// Stored {gke, local-nfs}, agents saved on local,
 // active_profile local. local resolves to docker; remote (no references) is
 // not retained.
 func TestRetain_ReferencedBuiltinResolves(t *testing.T) {
@@ -122,7 +122,7 @@ func TestRetain_ReferencedBuiltinResolves(t *testing.T) {
 	}
 }
 
-// Ruling 1: the built-in definition is used even when the settings file
+// The built-in definition is used even when the settings file
 // defines the same name differently; a file-only profile is never retained.
 func TestRetain_BuiltinDefinitionAndNoFileOnly(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{profiles: storedGkeNFS})
@@ -138,7 +138,7 @@ func TestRetain_BuiltinDefinitionAndNoFileOnly(t *testing.T) {
 	mustNotFound(t, vs, "fp")
 }
 
-// Ruling 2: a stored entry always wins over the same-named built-in.
+// A stored entry always wins over the same-named built-in.
 func TestRetain_StoredEntryWins(t *testing.T) {
 	stored := map[string]V1ProfileConfig{"gke": {Runtime: "gke-autopilot"}, "local": {Runtime: "gke-autopilot"}}
 	o := newRetainOverlay(overlaySpec{profiles: stored})
@@ -176,7 +176,7 @@ func TestRetain_ManualWorkaroundUnchanged(t *testing.T) {
 	}
 }
 
-// Ruling 8: an empty stored set is unchanged (#5007), and retention sets
+// An empty stored set is unchanged (#5007), and retention sets
 // nothing.
 func TestRetain_EmptyStoredSetUnchanged(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{profiles: map[string]V1ProfileConfig{}})
@@ -208,7 +208,7 @@ func TestRetain_DisabledUntilEnabled(t *testing.T) {
 	mustNotFound(t, vs, "local")
 }
 
-// Ruling 3 (amended): runtime retention.
+// Runtime retention for stored and retained profiles.
 func TestRetain_Runtimes(t *testing.T) {
 	gkeOnly := map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}}
 
@@ -482,7 +482,7 @@ func TestRetain_WarnDedup(t *testing.T) {
 	}
 }
 
-// Ruling 7: flat views clear the retention markers.
+// Flat views clear the retention markers.
 func TestRetain_FlatViewsClearMarkers(t *testing.T) {
 	o := newRetainOverlay(overlaySpec{
 		runtimes: map[string]V1RuntimeConfig{"gke-autopilot": {Type: "kubernetes"}},
