@@ -393,6 +393,9 @@ func (s *Server) execDispatchDelete(ctx context.Context, d store.BrokerDispatch)
 		claim = args.Claim
 		intentNotAfter = args.NotAfter
 		applyDeleteIntentRuns(agent, args)
+		if args.PurgeRetained {
+			ctx = withPurgeRetained(ctx)
+		}
 	}
 	// A delete engine's intent applies only while the claim it was created
 	// under is still the row's current claim, live or failed in_doubt (see
