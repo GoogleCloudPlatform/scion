@@ -21,7 +21,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"sort"
 	"strings"
@@ -29,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/managedagent"
 	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
@@ -320,4 +323,97 @@ func TestDispatchContext_DetachesCancelKeepsCap(t *testing.T) {
 	dl, ok := ctx.Deadline()
 	require.True(t, ok, "the dispatch must be capped")
 	assert.WithinDuration(t, time.Now().Add(time.Minute), dl, 5*time.Second)
+}
+
+// pendlogManagedBackend is a managed backend whose cancel can be slow and
+// whose create can finish just as the send deadline expires.
+type pendlogManagedBackend struct {
+	// slowCancel makes CancelInteraction block until its context ends.
+	slowCancel bool
+	// createAtDeadline makes CreateInteraction succeed only once its
+	// context has ended (the create landed as the deadline hit).
+	createAtDeadline bool
+	createCtxErr     error
+	created          bool
+}
+
+func (b *pendlogManagedBackend) Name() string { return "pendlog-test" }
+func (b *pendlogManagedBackend) CreateAgent(context.Context, managedagent.CreateAgentConfig) (string, error) {
+	return "", errors.New("not used")
+}
+func (b *pendlogManagedBackend) DeleteAgent(context.Context, string) error { return nil }
+func (b *pendlogManagedBackend) CreateInteraction(ctx context.Context, _ managedagent.InteractionRequest) (*managedagent.InteractionHandle, error) {
+	if b.createAtDeadline {
+		<-ctx.Done()
+	} else if err := ctx.Err(); err != nil {
+		b.createCtxErr = err
+		return nil, err
+	}
+	b.created = true
+	return &managedagent.InteractionHandle{InteractionID: "interaction-4827"}, nil
+}
+func (b *pendlogManagedBackend) GetInteraction(context.Context, string) (*managedagent.InteractionState, error) {
+	return nil, errors.New("not used")
+}
+func (b *pendlogManagedBackend) CancelInteraction(ctx context.Context, _ string) error {
+	if b.slowCancel {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return nil
+}
+func (b *pendlogManagedBackend) StreamInteraction(context.Context, string, string) (io.ReadCloser, error) {
+	return nil, errors.New("not used")
+}
+
+func usePendlogManagedBackend(t *testing.T, b managedagent.ManagedAgentBackend) {
+	t.Helper()
+	managedBackendMu.Lock()
+	prev := managedBackendInst
+	managedBackendInst = b
+	managedBackendMu.Unlock()
+	t.Cleanup(func() {
+		managedBackendMu.Lock()
+		managedBackendInst = prev
+		managedBackendMu.Unlock()
+	})
+}
+
+// TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget pins that the
+// best-effort cancel before an interrupt send has its own short bound, so a
+// cancel that hangs cannot spend the send budget and fail the create (which
+// would leave the agent DM row pending).
+func TestManagedAgentMessage_SlowCancelLeavesCreateItsBudget(t *testing.T) {
+	srv, _, _, _, target, _, _ := deliverySetup(t)
+	prevCancel := managedInterruptCancelTimeout
+	managedInterruptCancelTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { managedInterruptCancelTimeout = prevCancel })
+	b := &pendlogManagedBackend{slowCancel: true}
+	usePendlogManagedBackend(t, b)
+	if target.Annotations == nil {
+		target.Annotations = map[string]string{}
+	}
+	target.Annotations[annotationInteractionID] = "running-4827"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := srv.managedAgentMessage(ctx, target, "interrupt-4827", true)
+	require.NoError(t, err, "a slow cancel must not fail the send")
+	assert.True(t, b.created, "the create must run with budget left")
+}
+
+// TestManagedAgentMessage_AnnotationSurvivesDeadline pins that the
+// interaction ID is recorded on a detached finalization context, so a create
+// that finishes as the send deadline expires still chains the next one.
+func TestManagedAgentMessage_AnnotationSurvivesDeadline(t *testing.T) {
+	srv, s, _, _, target, _, _ := deliverySetup(t)
+	b := &pendlogManagedBackend{createAtDeadline: true}
+	usePendlogManagedBackend(t, b)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	require.NoError(t, srv.managedAgentMessage(ctx, target, "deadline-4827", false))
+	got, err := s.GetAgent(context.Background(), target.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "interaction-4827", got.Annotations[annotationInteractionID], "the interaction ID must be persisted")
 }

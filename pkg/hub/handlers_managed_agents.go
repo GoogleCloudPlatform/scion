@@ -134,6 +134,12 @@ func (s *Server) managedAgentCreate(ctx context.Context, agent *store.Agent, tas
 	return nil
 }
 
+// managedInterruptCancelTimeout bounds the best-effort cancel of the running
+// interaction before an interrupt send. ExecuteAgentDM gives the whole
+// managed send agentDMDispatchTimeout (30s); 5s is ample for one small cancel
+// call and leaves the create at least 25s. A variable so tests can shrink it.
+var managedInterruptCancelTimeout = 5 * time.Second
+
 // managedAgentMessage sends a message to a managed agent by creating a new interaction.
 func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool) error {
 	backend, err := getManagedBackend()
@@ -143,7 +149,13 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 
 	if interrupt {
 		if interactionID := agent.Annotations[annotationInteractionID]; interactionID != "" {
-			if cancelErr := backend.CancelInteraction(ctx, interactionID); cancelErr != nil {
+			// The cancel is best effort and gets its own short bound, so a slow
+			// cancel cannot spend the send budget the create needs
+			// (ptone/scion#4827).
+			cancelCtx, cancelCancel := context.WithTimeout(ctx, managedInterruptCancelTimeout)
+			cancelErr := backend.CancelInteraction(cancelCtx, interactionID)
+			cancelCancel()
+			if cancelErr != nil {
 				slog.Warn("failed to cancel interaction for interrupt", "agent_id", agent.ID, "err", cancelErr)
 			}
 		}
@@ -173,7 +185,12 @@ func (s *Server) managedAgentMessage(ctx context.Context, agent *store.Agent, me
 		agent.Annotations[annotationEnvironmentID] = handle.EnvironmentID
 	}
 
-	if err := s.store.UpdateAgent(ctx, agent); err != nil {
+	// The interaction exists now: record its ID on a detached finalization
+	// context, so a send deadline that expires right after the create
+	// cannot lose the annotation that chains the next interaction.
+	finCtx, finCancel := finalizationContext(ctx)
+	defer finCancel()
+	if err := s.store.UpdateAgent(finCtx, agent); err != nil {
 		slog.Warn("failed to persist interaction annotations", "agent_id", agent.ID, "err", err)
 	}
 
