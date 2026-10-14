@@ -503,13 +503,14 @@ func TestAttachViaHub_UnsupportedBrokerAgentPath_Attaches(t *testing.T) {
 		_ = stdinW.Close()
 		_ = stdinR.Close()
 	})
-	oldStdin := os.Stdin
-	os.Stdin = stdinR
 
 	// The PTY client writes terminal data to os.Stdout. Capture it so the
 	// mock's prompt frame stays out of the shared test output, and check
-	// that the frame is all the attach wrote.
+	// that the frame is all the attach wrote. os.Stdin is swapped inside
+	// the captured call, so it is restored on every path out of it.
 	stdout, _ := captureStdoutStderr(t, func() {
+		oldStdin := os.Stdin
+		os.Stdin = stdinR
 		defer func() { os.Stdin = oldStdin }()
 		err = attachViaHub(&HubContext{Client: client, Endpoint: h.srv.URL, ProjectID: "proj-agent-path"}, "agent-path")
 	})
