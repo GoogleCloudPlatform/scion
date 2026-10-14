@@ -327,7 +327,7 @@ func (s *AgentStore) applyLaunchReportActive(ctx context.Context, ltx *launchTx,
 		// A start-kind launch ends by its own failure rule even though
 		// another writer moved the row to error first (ptone/scion#4669):
 		// a restart ends stopped, a start restores a stopped prior or
-		// remembers a suspended/created/provisioning one.
+		// remembers a suspended/created/provisioning/halted one.
 		withStartFailureEnd(upd, current)
 		if ownerToSet != "" {
 			upd.SetLaunchOwner(ownerToSet)

@@ -92,7 +92,7 @@ func TestBeginStartLaunch_KindPhaseTable(t *testing.T) {
 	ctx := context.Background()
 	s, projectID := newTestAgentStore(t)
 
-	phases := []string{"created", "provisioning", "cloning", "starting", "running", "stopping", "stopped", "suspended", "error"}
+	phases := []string{"created", "provisioning", "cloning", "starting", "running", "stopping", "stopped", "suspended", "error", "halted"}
 	accepted := map[string]map[string]bool{
 		store.LaunchKindStart:   {"starting": true},
 		store.LaunchKindRestart: {"starting": true, "running": true, "stopped": true},
@@ -453,6 +453,39 @@ func TestStartLaunch_LateFailedAfterWindDownStoppedIsStale(t *testing.T) {
 	}
 }
 
+// TestStartLaunch_HaltedPriorRemembered pins the halted prior (ruling Q4,
+// after ptone/scion#3643 added the phase): a failed start from halted ends
+// error and remembers halted, for a failed report and for a reaper
+// timeout, so EffectiveRestingPhase and launch.resumePhase show halted;
+// a later halted write ends the memory.
+func TestStartLaunch_HaltedPriorRemembered(t *testing.T) {
+	ctx := context.Background()
+	for _, how := range []string{"report_failed", "reaper_deadline"} {
+		t.Run(how, func(t *testing.T) {
+			s, projectID := newTestAgentStore(t)
+			a, launchID := beginStartKindLaunch(t, ctx, s, projectID, "halted-prior", store.LaunchKindStart, "halted", "")
+			endStartLaunchByFailure(t, ctx, s, a, launchID, how)
+
+			got, err := s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Equal(t, "error", got.Phase, "a failed start from halted ends error, so a phase-only wait ends")
+			assert.Equal(t, "halted", got.LaunchResumePhase, "and remembers halted")
+			assert.Equal(t, "halted", store.EffectiveRestingPhase(got))
+			l := store.ComputeAgentLaunch(got, time.Now())
+			require.NotNil(t, l)
+			assert.Equal(t, "halted", l.ResumePhase)
+
+			uid, err := parseUUID(a.ID)
+			require.NoError(t, err)
+			_, err = s.client.Agent.UpdateOneID(uid).SetPhase("halted").Save(ctx)
+			require.NoError(t, err)
+			got, err = s.GetAgent(ctx, a.ID)
+			require.NoError(t, err)
+			assert.Empty(t, got.LaunchResumePhase, "a halted write ends the memory")
+		})
+	}
+}
+
 // --- Resume-memory clearing hook (D-T12 e) ----------------------------------
 
 func TestClearLaunchResumePhaseHook(t *testing.T) {
@@ -460,7 +493,7 @@ func TestClearLaunchResumePhaseHook(t *testing.T) {
 	clears := map[string]bool{
 		"running": true, "stopped": true, "stopping": true, "suspended": true,
 		"created": true, "provisioning": true, "cloning": true,
-		"starting": false, "error": false,
+		"halted": true, "starting": false, "error": false,
 	}
 	// write runs one phase write of agent uid through client, by UpdateOne
 	// or by bulk Update.

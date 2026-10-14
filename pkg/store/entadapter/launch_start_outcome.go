@@ -36,8 +36,8 @@ func isStartKindLaunch(row *ent.Agent) bool {
 //   - a restart ends stopped, as the synchronous restart failure does;
 //   - a start from stopped or error restores that phase, as the
 //     synchronous rollback does;
-//   - a start from suspended, created or provisioning ends error and
-//     remembers that phase, so the failure is visible to phase-only
+//   - a start from suspended, created, provisioning or halted ends error
+//     and remembers that phase, so the failure is visible to phase-only
 //     readers (a released CLI's wait ends on error) while a later plain
 //     start or resume still behaves as it would have before the attempt
 //     (store.EffectiveRestingPhase);
@@ -50,7 +50,7 @@ func startLaunchFailureEnd(row *ent.Agent) (phase state.Phase, resume string) {
 	switch prior := state.Phase(row.LaunchPriorPhase); prior {
 	case state.PhaseStopped, state.PhaseError:
 		return prior, ""
-	case state.PhaseSuspended, state.PhaseCreated, state.PhaseProvisioning:
+	case state.PhaseSuspended, state.PhaseCreated, state.PhaseProvisioning, state.PhaseHalted:
 		return state.PhaseError, string(prior)
 	}
 	return state.PhaseError, ""
