@@ -41,13 +41,13 @@ import (
 const sandboxExecHolderBound = 5 * time.Second
 
 // sandboxExecHolderBin writes a mock sandbox CLI that starts a 15 s holder
-// (holderRedir is appended to the holder's command, e.g. "<&0"), records
-// its PID for cleanup, then runs tail.
+// with holderRedir ("<&3": the CLI's stdin, kept on fd 3 since sh gives a
+// background job /dev/null as stdin), records its PID, then runs tail.
 func sandboxExecHolderBin(t *testing.T, holderRedir, tail string) string {
 	t.Helper()
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
 	t.Cleanup(func() { killPIDFile(pidFile) })
-	return writeMockBin(t, fmt.Sprintf("sleep 15 %s & echo $! > %q\n%s", holderRedir, pidFile, tail))
+	return writeMockBin(t, fmt.Sprintf("exec 3<&0; sleep 15 %s 3<&- & echo $! > %q\n%s", holderRedir, pidFile, tail))
 }
 
 // sandboxExecHolderCall runs call, failing the test if it does not return
@@ -171,7 +171,7 @@ func TestSandboxExecHolder_ExecWithStdin(t *testing.T) {
 // 15 s holder exits, and the call exceeds the bound. With the WaitDelay,
 // the copy is abandoned after it and Wait reports exec.ErrWaitDelay.
 func TestSandboxExecHolder_StdinHeld(t *testing.T) {
-	rt := newWorkaroundTestRuntime(t, sandboxExecHolderBin(t, "<&0", "exit 0"))
+	rt := newWorkaroundTestRuntime(t, sandboxExecHolderBin(t, "<&3", "exit 0"))
 	payload := strings.Repeat("x", 1<<20)
 	var err error
 	d := sandboxExecHolderCall(t, func() {
