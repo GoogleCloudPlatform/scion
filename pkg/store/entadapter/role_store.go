@@ -660,7 +660,7 @@ func (r *RoleStore) createRoleBinding(ctx context.Context, rb *store.RoleBinding
 		// Option B: if the existing binding has the exact same role_definition_id,
 		// fall through to Save() so the Ent unique index produces ErrAlreadyExists
 		// (preserving idempotent retry semantics for callers like
-		// createProjectOwnerRoleBinding, seed backfill, etc.). Only block when
+		// createProjectOwnerRoleBindingTx, seed backfill, etc.). Only block when
 		// a *different* built-in membership role already exists.
 		existing, qErr := r.client.RoleBinding.Query().
 			Where(
