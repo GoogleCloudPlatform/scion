@@ -90,7 +90,9 @@ type Request struct {
 
 // Config configures a Router.
 type Config struct {
-	// Relay is the local relay (local sessions are used directly).
+	// Relay is the local relay (local sessions are used directly). Nil
+	// on a hub in external-relay mode (design §3.9): it runs no relay, so
+	// every session resolves to its owner relay's internal endpoint.
 	Relay *relay.Relay
 	// Registry answers Eligible.
 	Registry *registry.Registry
@@ -133,8 +135,8 @@ type Router struct{ cfg Config }
 
 // New returns a Router.
 func New(cfg Config) (*Router, error) {
-	if cfg.Relay == nil || cfg.Registry == nil || cfg.Store == nil || cfg.Peers == nil {
-		return nil, errors.New("conduit router: Relay, Registry, Store and Peers are required")
+	if cfg.Registry == nil || cfg.Store == nil || cfg.Peers == nil {
+		return nil, errors.New("conduit router: Registry, Store and Peers are required")
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -227,7 +229,10 @@ func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (
 	if err != nil {
 		return Resolved{}, err
 	}
-	self := r.cfg.Relay.InstanceID()
+	self := ""
+	if r.cfg.Relay != nil {
+		self = r.cfg.Relay.InstanceID()
+	}
 	for _, w := range wants {
 		recs, err := r.cfg.Registry.Eligible(ctx, req.Kind, req.ID, w, r.cfg.Now())
 		if err != nil {
@@ -240,7 +245,7 @@ func (r *Router) resolve(ctx context.Context, req Request, exclude exclusions) (
 			if exclude.excluded(rec) {
 				continue
 			}
-			if rec.RelayInstanceID == self {
+			if self != "" && rec.RelayInstanceID == self {
 				ls, lrec, ok := r.cfg.Relay.Local(ctx, rec.SessionID)
 				if !ok || lrec.RelayGeneration != rec.RelayGeneration {
 					continue // ending, or a previous generation's row

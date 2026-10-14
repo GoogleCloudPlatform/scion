@@ -522,7 +522,7 @@ func TestRequireArtifactProfileClient(t *testing.T) {
 
 	// Without --as: refused (the issuer credential is for test identity
 	// routes only).
-	_, _, err := requireArtifactHubClient()
+	_, _, _, err := requireArtifactHubClient()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "--as <alias>")
 
@@ -533,9 +533,9 @@ func TestRequireArtifactProfileClient(t *testing.T) {
 	_, err = hubprofile.IssueToCache(t.Context(), s, hubprofile.IssueRequest{Alias: "owner"})
 	require.NoError(t, err)
 	hubProfileAs = "owner"
-	settings, client, err := requireArtifactHubClient()
+	settings, client, endpoint, err := requireArtifactHubClient()
 	require.NoError(t, err)
-	assert.Equal(t, target.Srv.URL, settings.GetHubEndpoint(), "artifact refs name the target hub")
+	assert.Equal(t, target.Srv.URL, endpoint, "artifact refs name the target hub")
 	assert.Empty(t, settings.GetHubProjectID())
 	err = checkArtifactPublishScope(settings)
 	require.Error(t, err)

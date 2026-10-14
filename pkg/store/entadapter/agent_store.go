@@ -1511,6 +1511,18 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		return store.ErrRunChanged
 	}
 
+	// The exit reason is a closed set: a value outside it is dropped here,
+	// whatever the caller, before any rule reads it.
+	if su.ExitReason != "" && !state.ExitReason(su.ExitReason).IsValid() {
+		su.ExitReason = ""
+	}
+	// A reason that says the platform ended the run (store.IsHaltEvidence)
+	// is recorded only from the agent runtime's own report; any other write
+	// carrying one has it dropped. The container-missing CAS sets its own.
+	if su.ReportSource != store.StatusReportSourceRuntime && store.IsHaltEvidence(su.ExitReason) {
+		su.ExitReason = ""
+	}
+
 	now := time.Now()
 
 	// Guard 0c, enforced inside the transaction (design ptone/scion#2483
@@ -1550,6 +1562,54 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		su.Message = ""
 	}
 
+	// Only a hub rollback (Restore) may write phase halted directly; any
+	// other update naming it has the phase dropped (ptone/scion#4853).
+	if su.Phase == string(state.PhaseHalted) && !su.Restore {
+		su.Phase = ""
+	}
+
+	// Run check: a report from a run other than the row's current one
+	// describes an older (or unknown) run and must not change the agent's
+	// status. Only the last-seen and updated timestamps are written.
+	if isAgentReport(su) && su.ReportRunID != "" && su.ReportRunID != current.RunID {
+		if err := tx.Agent.UpdateOneID(uid).SetUpdated(now).SetLastSeen(now).Exec(ctx); err != nil {
+			return mapError(err)
+		}
+		return tx.Commit()
+	}
+
+	// The halted phase: sticky against reports, and the halt rule itself.
+	// See haltedStickyDrop and evaluateHalt. Only a broker heartbeat is
+	// evidence of how a run ended: the agent's own reports never halt it and
+	// never change a halted row's exit reason.
+	halting := false
+	var haltedFrom string
+	// A hub rollback (Restore) is never a report; the check documents that
+	// a restore never halts.
+	if isAgentReport(su) && !su.Restore {
+		if current.Phase == string(state.PhaseHalted) {
+			if haltedStickyDrop(current, su) {
+				su.Phase = ""
+				su.Activity = ""
+				// Only a broker heartbeat's halt evidence may refine why
+				// the run ended; any other reason or code is dropped, so a
+				// halted row never reads as a plain crash or limits stop.
+				if !isBrokerHeartbeat(su) || !store.IsHaltEvidence(su.ExitReason) {
+					su.ExitReason = ""
+					su.ExitCode = nil
+				}
+			}
+		} else if isBrokerHeartbeat(su) {
+			// The agent's own report applies as before, never as a halt.
+			if ok, from := evaluateHalt(current, su); ok {
+				halting = true
+				haltedFrom = from
+				su.Phase = string(state.PhaseHalted)
+				su.Activity = ""
+			}
+		}
+	}
+
 	upd := tx.Agent.UpdateOneID(uid).
 		SetUpdated(now).
 		SetLastSeen(now)
@@ -1574,7 +1634,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 		upd.SetStalledFromActivity("")
 		upd.SetLastActivityEvent(now)
 		upd.SetToolName(su.ToolName)
-	} else if su.Phase == "stopped" || su.Phase == "error" {
+	} else if store.IsTerminalPhase(su.Phase) {
 		// Transitioning to a terminal phase without an explicit activity: clear
 		// any leftover live activity (e.g. a lingering "stalled" set by the
 		// platform) so a stopped/crashed agent never displays a stale activity.
@@ -1586,6 +1646,13 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 			upd.SetToolName("")
 		}
 	}
+	// A halt clears the activity outright, a terminal one included: the
+	// exit reason says how the run ended.
+	if halting {
+		upd.SetActivity("")
+		upd.SetStalledFromActivity("")
+		upd.SetToolName("")
+	}
 
 	// A (re)start — a transition from a terminal phase (stopped/error) to running
 	// — clears terminal remnants from the prior stop/crash: the stale crash/stop
@@ -1595,7 +1662,7 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	// message in the same update (su.Message != "") wins and is set below.
 	// ClearTerminalRemnants applies the same clear whatever the current phase
 	// (a lifecycle start's final write; see store.AgentStatusUpdate).
-	if su.ClearTerminalRemnants || (su.Phase == "running" && (current.Phase == "stopped" || current.Phase == "error")) {
+	if su.ClearTerminalRemnants || (su.Phase == "running" && store.IsTerminalPhase(current.Phase)) {
 		if su.Message == "" {
 			upd.SetMessage("")
 		}
@@ -1669,7 +1736,116 @@ func (s *AgentStore) UpdateAgentStatus(ctx context.Context, id string, su store.
 	if err := upd.Exec(ctx); err != nil {
 		return mapError(err)
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if su.Result != nil {
+		*su.Result = store.AgentStatusResult{Halted: halting, HaltedFrom: haltedFrom}
+	}
+	return nil
+}
+
+// isAgentReport reports whether su is a status report about the agent's
+// run (ReportSource set by the broker heartbeat handler or the agent's
+// status endpoint). Reports are subject to the run check and to halted's
+// stickiness; of them, only a runtime report can halt
+// (isBrokerHeartbeat). Hub-internal writers (stop recordings, the launch
+// reaper, the failed launch report, the delete engine, reincarnation, the
+// start path) leave ReportSource empty.
+func isAgentReport(su store.AgentStatusUpdate) bool {
+	return su.ReportSource != ""
+}
+
+// isBrokerHeartbeat reports whether su is a broker heartbeat: the agent
+// runtime's own view of the container. sciontool's heartbeat goes through
+// the agent's status endpoint (source agent), so it is not one. Only a
+// broker heartbeat (and the container-missing CAS) can halt an agent or
+// refine a halted agent's exit reason.
+func isBrokerHeartbeat(su store.AgentStatusUpdate) bool {
+	return su.ReportSource == store.StatusReportSourceRuntime
+}
+
+// startClaimHeld reports whether a start claim (of any kind, live or
+// unconfirmed) is recorded on the row.
+func startClaimHeld(a *ent.Agent) bool {
+	return a.StartClaimID != nil && *a.StartClaimID != ""
+}
+
+// haltedStickyDrop reports whether a status report on a halted row must
+// have its phase and activity dropped. A halted row leaves halted only by
+// a hub lifecycle write (start, stop), with one exception: the agent's own
+// report of a non-terminal phase (starting or running) while a start claim
+// is held, which is the new run of a start whose outcome was in doubt. A
+// heartbeat never moves a halted row, whatever its phase. The other fields
+// (exit reason refinement, message, container status, ...) still apply.
+func haltedStickyDrop(current *ent.Agent, su store.AgentStatusUpdate) bool {
+	if su.ReportSource == store.StatusReportSourceAgent && startClaimHeld(current) {
+		switch state.Phase(su.Phase) {
+		case state.PhaseStarting, state.PhaseRunning:
+			return false
+		}
+	}
+	return true
+}
+
+// evaluateHalt applies the halt rule to a broker heartbeat on the locked
+// row: it reports whether the write is stored as phase halted instead, and
+// the phase the write would otherwise have stored when that differs from
+// the row's current phase (haltedFrom; "" otherwise). It reads only values
+// the agent runtime or the hub set: the report's own reason and exit code,
+// and row fields no agent report can write (run intent, start claim,
+// runtime, and a halt-evidence reason, which only a runtime write stores).
+//
+// All of these must hold: the run is meant to be running (run intent
+// running), no start claim is held, no reincarnation is in flight, the
+// agent's recorded runtime is one whose evidence is trusted
+// (RuntimeHaltEligible), and the report carries a halt-evidence reason
+// (store.IsHaltEvidence). Then either:
+//
+//   - the row is not terminal and the report moves it to stopped or error;
+//     or
+//   - the row is already stopped or error with no halt-evidence reason
+//     recorded, and the report (with no phase, or a stopped/error phase)
+//     brings one: a later report of the same run saying why it ended. Such
+//     an upgrade is blocked only when the report itself carries exit code
+//     0: the runtime saw a clean exit.
+func evaluateHalt(current *ent.Agent, su store.AgentStatusUpdate) (bool, string) {
+	if current.RunIntent == nil || store.RunIntent(*current.RunIntent) != store.RunIntentRunning {
+		return false, ""
+	}
+	if startClaimHeld(current) || store.ReincarnationInFlight(current.ReincarnationState) {
+		return false, ""
+	}
+	if !store.RuntimeHaltEligible(current.Runtime) || !store.IsHaltEvidence(su.ExitReason) {
+		return false, ""
+	}
+	curPhase := state.Phase(current.Phase)
+	newPhase := state.Phase(su.Phase)
+	switch {
+	case !store.IsTerminalPhase(current.Phase) && curPhase != state.PhaseSuspended:
+		if newPhase != state.PhaseStopped && newPhase != state.PhaseError {
+			return false, ""
+		}
+	case curPhase == state.PhaseStopped || curPhase == state.PhaseError:
+		if newPhase != "" && newPhase != state.PhaseStopped && newPhase != state.PhaseError {
+			return false, ""
+		}
+		if store.IsHaltEvidence(current.ExitReason) {
+			return false, ""
+		}
+		if su.ExitCode != nil && *su.ExitCode == 0 {
+			return false, ""
+		}
+		if newPhase == "" {
+			newPhase = curPhase
+		}
+	default:
+		return false, ""
+	}
+	if string(newPhase) != current.Phase {
+		return true, string(newPhase)
+	}
+	return true, ""
 }
 
 // SetAgentAnnotation implements store.AgentStore.SetAgentAnnotation. The
@@ -1857,8 +2033,8 @@ var containerMissingKeptExitReasons = []string{
 // the reason, message and exit code alone; the second, run only when the
 // first changed nothing, matches every other row and records
 // container_missing.
-func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string) (*store.Agent, error) {
-	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message)
+func (s *AgentStore) MarkAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string) (*store.Agent, error) {
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, haltRuntime, message)
 }
 
 // MarkAgentContainerMissingIfUnchanged implements store.AgentStore: it is
@@ -1869,7 +2045,9 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 	if pre.RunID == "" {
 		runID = agent.Or(agent.RunIDIsNil(), agent.RunIDEQ(""))
 	}
-	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, message,
+	// No runtime is passed: the exec path never halts (its precondition
+	// carries no runtime inventory to trust).
+	return s.markAgentContainerMissing(ctx, id, brokerID, cutoff, "", message,
 		// The exec agent_not_found path concludes only for an agent that
 		// was running; the heartbeat reconcile also settles stopping.
 		agent.PhaseEQ(string(state.PhaseRunning)),
@@ -1881,8 +2059,14 @@ func (s *AgentStore) MarkAgentContainerMissingIfUnchanged(ctx context.Context, i
 
 // markAgentContainerMissing is the shared body of MarkAgentContainerMissing
 // and MarkAgentContainerMissingIfUnchanged; extra predicates are added to
-// both conditional UPDATEs.
-func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, message string, extra ...predicate.Agent) (*store.Agent, error) {
+// every conditional UPDATE.
+//
+// When haltRuntime is one whose evidence the halt rule trusts
+// (store.RuntimeHaltEligible), two halted UPDATEs run first, crossed with
+// the kept-reason split: they also require run intent running and no start
+// claim, and store phase halted instead of error (ptone/scion#4853). Only
+// when they change nothing do the error UPDATEs run.
+func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID string, cutoff time.Time, haltRuntime, message string, extra ...predicate.Agent) (*store.Agent, error) {
 	uid, err := parseUUID(id)
 	if err != nil {
 		return nil, err
@@ -1894,8 +2078,8 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	guards := func(reason predicate.Agent) *ent.AgentUpdate {
-		return tx.Agent.Update().
+	guards := func(phase state.Phase, reason predicate.Agent) *ent.AgentUpdate {
+		u := tx.Agent.Update().
 			Where(
 				agent.IDEQ(uid),
 				agent.DeletedAtIsNil(),
@@ -1918,29 +2102,52 @@ func (s *AgentStore) markAgentContainerMissing(ctx context.Context, id, brokerID
 				),
 				reason,
 			).
-			Where(extra...).
-			SetPhase("error").
+			Where(extra...)
+		if phase == state.PhaseHalted {
+			// The halt rule's conditions: the run is meant to be running,
+			// and no start claim is held.
+			u = u.Where(
+				agent.RunIntentEQ(string(store.RunIntentRunning)),
+				agent.StartClaimIDIsNil(),
+			)
+		}
+		return u.
+			SetPhase(string(phase)).
 			SetActivity("").
 			SetStalledFromActivity("").
 			SetToolName("").
 			SetContainerStatus(containerMissingStatus)
 	}
-
-	n, err := guards(agent.ExitReasonIn(containerMissingKeptExitReasons...)).Save(ctx)
-	if err != nil {
-		return nil, mapError(err)
-	}
-	if n == 0 {
-		n, err = guards(agent.Or(
+	keptReason := agent.ExitReasonIn(containerMissingKeptExitReasons...)
+	otherReason := func() predicate.Agent {
+		return agent.Or(
 			agent.ExitReasonIsNil(),
 			agent.ExitReasonNotIn(containerMissingKeptExitReasons...),
-		)).
-			ClearExitCode().
-			SetExitReason(string(state.ExitReasonContainerMissing)).
-			SetMessage(message).
-			Save(ctx)
+		)
+	}
+
+	phases := []state.Phase{state.PhaseError}
+	if store.RuntimeHaltEligible(haltRuntime) {
+		phases = []state.Phase{state.PhaseHalted, state.PhaseError}
+	}
+	var n int
+	for _, phase := range phases {
+		n, err = guards(phase, keptReason).Save(ctx)
 		if err != nil {
 			return nil, mapError(err)
+		}
+		if n == 0 {
+			n, err = guards(phase, otherReason()).
+				ClearExitCode().
+				SetExitReason(string(state.ExitReasonContainerMissing)).
+				SetMessage(message).
+				Save(ctx)
+			if err != nil {
+				return nil, mapError(err)
+			}
+		}
+		if n > 0 {
+			break
 		}
 	}
 	if n == 0 {
@@ -2344,7 +2551,7 @@ func (s *AgentStore) FindOrphanedAgents(ctx context.Context, currentBrokerID str
 	excludeIDs = append(excludeIDs, flatIDs...)
 
 	// Terminal phases: agents in these states should not be reassigned.
-	terminalPhases := []string{"stopped", "error"}
+	terminalPhases := []string{"stopped", "error", "halted"}
 
 	rows, err := s.client.Agent.Query().
 		Where(
@@ -2497,10 +2704,13 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 			continue
 		}
 		result.Considered += sc.Count
-		if sc.Phase == string(state.PhaseError) || sc.Activity == string(state.ActivityCrashed) {
+		// A halted agent needs attention like one in error: the platform
+		// ended a run that should still be running.
+		problemPhase := sc.Phase == string(state.PhaseError) || sc.Phase == string(state.PhaseHalted)
+		if problemPhase || sc.Activity == string(state.ActivityCrashed) {
 			result.Errored += sc.Count
 		}
-		if sc.Phase == string(state.PhaseError) {
+		if problemPhase {
 			result.ErrorPhase.Count += sc.Count
 		}
 		switch sc.Activity {
@@ -2548,7 +2758,7 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 		group *store.AgentProblemGroup
 		where []predicate.Agent
 	}{
-		{"errored", &result.ErrorPhase, []predicate.Agent{agent.PhaseEQ(string(state.PhaseError))}},
+		{"errored", &result.ErrorPhase, []predicate.Agent{agent.PhaseIn(string(state.PhaseError), string(state.PhaseHalted))}},
 		{"crashed", &result.Crashed, []predicate.Agent{agent.ActivityEQ(string(state.ActivityCrashed)), notStopped}},
 		{"offline", &result.Offline, []predicate.Agent{agent.ActivityEQ(string(state.ActivityOffline)), notStopped}},
 	}
@@ -2567,10 +2777,10 @@ func (s *AgentStore) AggregateAgentHealth(ctx context.Context) (*store.AgentHeal
 }
 
 // agentNeedsAttention reports whether an agent in this phase and activity
-// needs an operator: phase error, or activity crashed or offline outside
-// phase stopped. Activity stalled never counts.
+// needs an operator: phase error or halted, or activity crashed or offline
+// outside phase stopped. Activity stalled never counts.
 func agentNeedsAttention(phase, activity string) bool {
-	if phase == string(state.PhaseError) {
+	if phase == string(state.PhaseError) || phase == string(state.PhaseHalted) {
 		return true
 	}
 	if phase == string(state.PhaseStopped) {

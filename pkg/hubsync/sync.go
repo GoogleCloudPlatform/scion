@@ -208,8 +208,9 @@ type EnsureHubReadyOptions struct {
 	// deterministic answer, such as several matching Hub projects, return
 	// an error instead of picking one.
 	NonInteractive bool
-	// EndpointOverride is the explicit Hub endpoint supplied by the caller.
-	// It takes precedence over project/global settings for this invocation.
+	// EndpointOverride is the Hub endpoint the caller resolved. It takes
+	// precedence over SCION_HUB_ENDPOINT and SCION_HUB_URL; settings are
+	// never read for the endpoint.
 	EndpointOverride string
 	// ExplicitProject reports that projectPath came from the --project / -g
 	// or --global flag. Only flag handling sets it: a caller passing a
@@ -237,7 +238,7 @@ type EnsureHubReadyOptions struct {
 var ErrProjectUnlinked = errors.New("this project was unlinked from the Hub; run 'scion hub link' to re-link it, or manage its agents on the hub with --project <hub-slug>")
 
 // HubNotConfiguredError is returned when a command needs a hub and no hub
-// endpoint is configured (flag, environment or settings). It is a type
+// endpoint is configured (flag, environment or the hub list). It is a type
 // rather than errors.New so the user-facing sentence can keep its capital
 // letter and full stop. Migration is set for a project that still has
 // agents from local-only mode and has never been linked: the message then
@@ -368,7 +369,7 @@ func errProjectMustBeLinked() error {
 // goes through a hub. It will:
 //  1. Resolve a hub project reference (slug, name, UUID, git URL) on the hub
 //  2. Refuse a project the user unlinked (ErrProjectUnlinked)
-//  3. Resolve the endpoint (override, then settings and environment); with
+//  3. Resolve the endpoint (override, then environment); with
 //     none, return a HubNotConfiguredError
 //  4. Ensure project_id exists (generate if missing)
 //  5. Check Hub connectivity; a local workstation endpoint that does not
@@ -435,20 +436,7 @@ func EnsureHubReady(projectPath string, opts EnsureHubReadyOptions) (*HubContext
 	}
 
 	// From here on, any failure is an error (no silent fallback).
-	endpoint := opts.EndpointOverride
-	if endpoint == "" {
-		endpoint = getEndpoint(settings)
-	}
-	// Settings loading may not pick up the env var (e.g. in a hub context
-	// where the project path resolves to a synthetic or tmpfs directory
-	// without a settings file, or the legacy SCION_HUB_URL). Fall back to
-	// the env vars, as the CLI's GetHubEndpoint does.
-	if endpoint == "" {
-		endpoint = os.Getenv("SCION_HUB_ENDPOINT")
-		if endpoint == "" {
-			endpoint = os.Getenv("SCION_HUB_URL")
-		}
-	}
+	endpoint := resolveEndpoint(opts)
 	if endpoint == "" {
 		return nil, notConfiguredError(resolvedPath, isGlobal)
 	}
@@ -1856,12 +1844,20 @@ func getProjectName(projectPath string, isGlobal bool) string {
 	return config.GetProjectName(projectPath)
 }
 
-// getEndpoint returns the Hub endpoint from settings.
-func getEndpoint(settings *config.Settings) string {
-	if settings.Hub != nil {
-		return settings.Hub.Endpoint
+// resolveEndpoint returns the hub endpoint for EnsureHubReady and hub
+// project references: the caller's EndpointOverride (the CLI's resolved
+// hub: --hub, a link entry or the current context), else
+// SCION_HUB_ENDPOINT, else SCION_HUB_URL (inside an agent container the
+// broker sets these). Settings are not read: hub.endpoint is not hub
+// configuration for the CLI.
+func resolveEndpoint(opts EnsureHubReadyOptions) string {
+	if opts.EndpointOverride != "" {
+		return opts.EndpointOverride
 	}
-	return ""
+	if ep := os.Getenv("SCION_HUB_ENDPOINT"); ep != "" {
+		return ep
+	}
+	return os.Getenv("SCION_HUB_URL")
 }
 
 // agentTokenFileRel is the agent token file's path relative to $HOME.

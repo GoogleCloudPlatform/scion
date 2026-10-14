@@ -98,9 +98,10 @@ func TestConduitRenewStream_PlacementRefusal(t *testing.T) {
 		f.clock.Advance(time.Minute)
 		r, err := f.renew(last.Token, open, 7)
 		assert.Nil(t, r, "%s: a renewal was minted", tc.name)
-		require.ErrorIs(t, err, errConduitRenewalRefused, tc.name)
+		require.ErrorIs(t, err, errConduitRenewalUnavailable, tc.name)
 		requirePlacementRefusal(t, err, tc.code)
 		assert.NotErrorIs(t, err, errConduitAuthzUnavailable, tc.name)
+		assert.NotErrorIs(t, err, errConduitRenewalRefused, "%s: a placement refusal must not close the stream", tc.name)
 	}
 
 	override.set(&consistent)
@@ -132,7 +133,7 @@ func TestConduitRenewStream_PlacementReadFailure(t *testing.T) {
 		assert.Nil(t, r, "a renewal was minted without a placement answer")
 		require.ErrorIs(t, err, errConduitAuthzUnavailable)
 		require.ErrorIs(t, err, boom)
-		assert.NotErrorIs(t, err, errConduitRenewalRefused)
+		assert.NotErrorIs(t, err, errConduitRenewalRefused, "a placement read failure must not close the stream")
 		_, refused := placementRefusalOf(err)
 		assert.False(t, refused)
 	})

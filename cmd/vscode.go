@@ -137,7 +137,7 @@ func init() {
 // vscodePreflight opens one SSH tunnel to the agent through the same client
 // as scion tunnel --ssh and closes it. Tests replace it.
 var vscodePreflight = func(ctx context.Context, endpoint, project, agent string, stderr io.Writer) error {
-	cfg, _, err := tunnelClientConfig(tunnelSettings(), endpoint, stderr)
+	cfg, _, err := tunnelClientConfig(endpoint, stderr)
 	if err != nil {
 		return err
 	}

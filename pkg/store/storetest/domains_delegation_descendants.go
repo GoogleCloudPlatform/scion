@@ -322,6 +322,43 @@ func DelegationDescendantsConformance(t *testing.T, factory Factory) {
 			assert.Empty(t, res.Agents)
 		})
 
+		t.Run("a purge deactivates the purged agent's active edge and the walk continues below it", func(t *testing.T) {
+			s := factory(t)
+			f := newDescFixture(t, ctx, s)
+			deletedAt := time.Now().Add(-time.Hour)
+			purged := f.agent(t, ctx, f.project, nil)
+			grand := f.agent(t, ctx, f.project, nil)
+			// The edge to the soft-deleted agent is active (a soft
+			// delete that deactivated nothing).
+			f.userEdge(t, ctx, purged)
+			f.agentEdge(t, ctx, purged, grand)
+			ag, err := s.GetAgent(ctx, purged)
+			require.NoError(t, err)
+			ag.DeletedAt = deletedAt
+			require.NoError(t, s.UpdateAgent(ctx, ag))
+			n, err := s.PurgeDeletedAgents(ctx, time.Now())
+			require.NoError(t, err)
+			require.GreaterOrEqual(t, n, 1)
+
+			active, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, purged)
+			require.NoError(t, err)
+			assert.Empty(t, active, "the purged agent keeps no active edge")
+			all, err := s.ListAllDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, purged)
+			require.NoError(t, err)
+			require.Len(t, all, 1)
+			assert.Equal(t, store.EdgeDeactivationAgentHardDelete, all[0].Cause)
+			assert.NotEmpty(t, all[0].OpID)
+			below, err := s.GetDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, grand)
+			require.NoError(t, err)
+			assert.Len(t, below, 1, "the edge from the purged agent to the agent below it is kept")
+
+			q := f.query()
+			q.IncludeSoftDeleted = true
+			res, err := listDescendants(t, s, q)
+			require.NoError(t, err)
+			assert.Equal(t, []string{grand}, refIDs(res.Agents), "the walk continues below the purged agent")
+		})
+
 		t.Run("a soft-deleted agent with an active edge is filtered on its row", func(t *testing.T) {
 			s := factory(t)
 			f := newDescFixture(t, ctx, s)

@@ -238,10 +238,9 @@ func (s *Server) softDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 // survive as history), then run the hard-delete hooks. Both the hard delete
 // (hardDeleteAgentTx) and the rollback of a committed create
 // (compensateAgentCreate) run it, so a hook registered for hard delete also
-// runs when a create is rolled back. The hooks run when rowRemoved is true
-// or anything was deactivated. label prefixes store errors; a hook error is
-// returned as is.
-func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string, rowRemoved bool) (edges, assignments int, err error) {
+// runs when a create is rolled back. label prefixes store errors; a hook
+// error is returned as is.
+func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *store.Agent, actor AuditActor, d store.Deactivation, label string) (edges, assignments int, err error) {
 	edges, err = tx.DeactivateDelegationEdgesForDelegate(ctx, store.DelegationPrincipalAgent, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate delegation edges: %w", label, err)
@@ -249,9 +248,6 @@ func (s *Server) agentHardDeleteWork(ctx context.Context, tx store.Store, a *sto
 	assignments, err = tx.DeactivateAgentServiceAccountAssignments(ctx, a.ID, d)
 	if err != nil {
 		return 0, 0, fmt.Errorf("%s: deactivate service-account assignments: %w", label, err)
-	}
-	if !rowRemoved && edges == 0 && assignments == 0 {
-		return 0, 0, nil
 	}
 	if err := runAgentTxHooks(ctx, "hard-delete", s.lifecycleTxHooks.snapshot(&s.lifecycleTxHooks.hardDelete), tx, a, actor); err != nil {
 		return 0, 0, err
@@ -279,7 +275,7 @@ func (s *Server) hardDeleteAgentTx(ctx context.Context, tx store.Store, a *store
 		Cause: store.EdgeDeactivationAgentHardDelete,
 		At:    &now,
 		OpID:  opID,
-	}, "hard delete", true)
+	}, "hard delete")
 	if err != nil {
 		return err
 	}

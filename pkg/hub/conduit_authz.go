@@ -399,13 +399,14 @@ func (s *Server) mintConduitGrant(ctx context.Context, req conduitGrantRequest) 
 	return tok, &claims, nil
 }
 
-// errConduitRenewalRefused marks a renewal request the hub refuses without
-// evaluating authorization: the presented grant does not verify in re-check
-// mode, does not match the stream named by the request, or names an origin
-// and kind outside the origin table. It also marks a renewal refused after
-// authorization for the agent's saved placement (conduitRenewalPlacement).
-// The stream keeps its current deadline.
-var errConduitRenewalRefused = errors.New("conduit renewal refused")
+// A renewal the hub declines for any reason other than an authorization
+// deny wraps errConduitRenewalUnavailable (conduit_renewal.go): the
+// presented grant does not verify in re-check mode, does not match the
+// stream named by the request, or names an origin and kind outside the
+// origin table, or the agent's saved placement refuses it
+// (conduitRenewalPlacement). Nothing is minted and nothing closes; the
+// stream keeps its current deadline. An authorization deny wraps
+// errConduitForbidden.
 
 // conduitRenewalRequest is what a relay presents to renew one user stream's
 // authorization deadline (design §3.5, Re-check). Only LatestGrant carries
@@ -440,7 +441,7 @@ type conduitRenewal struct {
 // identity comes from the registry, and the principal, project, kind,
 // params and origin from the grant's signed claims.
 //
-// Errors wrap errConduitDisabled, errConduitRenewalRefused (bad or
+// Errors wrap errConduitDisabled, errConduitRenewalUnavailable (bad or
 // mismatched grant, no target session, origin and kind outside the table,
 // or a pinned agent whose saved placement is inconsistent; see
 // conduitRenewalPlacement), errConduitForbidden (authorization denied,
@@ -452,7 +453,7 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		return nil, errConduitDisabled
 	}
 	if len(req.LatestGrant) == 0 || req.TargetSessionID == "" || req.TargetStreamID == 0 || req.OpenJTI == "" {
-		return nil, fmt.Errorf("%w: incomplete request", errConduitRenewalRefused)
+		return nil, fmt.Errorf("%w: incomplete request", errConduitRenewalUnavailable)
 	}
 	target, err := s.conduitRenewalTarget(ctx, req.TargetSessionID)
 	if err != nil {
@@ -468,25 +469,25 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 		Issuer: conduitGrantIssuer, Target: target, OpenJTI: req.OpenJTI, StreamID: req.TargetStreamID,
 	}, now)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errConduitRenewalRefused, err)
+		return nil, fmt.Errorf("%w: %v", errConduitRenewalUnavailable, err)
 	}
 	userID, ok := strings.CutPrefix(c.Subject, grant.SubjectUserPrefix)
 	if !ok || userID == "" {
-		return nil, fmt.Errorf("%w: not a user stream", errConduitRenewalRefused)
+		return nil, fmt.Errorf("%w: not a user stream", errConduitRenewalUnavailable)
 	}
 	if req.PrincipalID != "" && req.PrincipalID != userID {
-		return nil, fmt.Errorf("%w: principal does not match the grant", errConduitRenewalRefused)
+		return nil, fmt.Errorf("%w: principal does not match the grant", errConduitRenewalUnavailable)
 	}
 	if req.Kind != "" && req.Kind != c.Stream.Kind {
-		return nil, fmt.Errorf("%w: kind does not match the grant", errConduitRenewalRefused)
+		return nil, fmt.Errorf("%w: kind does not match the grant", errConduitRenewalUnavailable)
 	}
 	if conduitViaActions(c.Via, c.Stream.Kind) == nil {
-		return nil, fmt.Errorf("%w: origin %q does not carry kind %q", errConduitRenewalRefused, c.Via, c.Stream.Kind)
+		return nil, fmt.Errorf("%w: origin %q does not carry kind %q", errConduitRenewalUnavailable, c.Via, c.Stream.Kind)
 	}
 	var port int
 	if c.Stream.Kind == grant.StreamKindTCP {
 		if port, err = conduitTCPTarget(c.Stream.Params, false); err != nil {
-			return nil, fmt.Errorf("%w: %v", errConduitRenewalRefused, err)
+			return nil, fmt.Errorf("%w: %v", errConduitRenewalUnavailable, err)
 		}
 	}
 
@@ -571,7 +572,7 @@ func (s *Server) renewConduitStream(ctx context.Context, req conduitRenewalReque
 // (checkAgentPinnedPlacement) to a renewal, after the re-check's
 // authorization verdict and before minting, so a stream to a pinned agent
 // whose saved placement is inconsistent gets no renewal, as an open gets no
-// grant. A placement refusal wraps errConduitRenewalRefused and the
+// grant. A placement refusal wraps errConduitRenewalUnavailable and the
 // *PlacementConflictError: no renewal is minted, and the stream is not
 // closed from here; it ends at its current deadline. A failed placement
 // read for a pinned agent wraps errConduitAuthzUnavailable, like the other
@@ -590,7 +591,7 @@ func (s *Server) conduitRenewalPlacement(ctx context.Context, agent *store.Agent
 		slog.Warn("Conduit renewal refused for the agent's saved placement; no renewal minted",
 			"agent_id", agent.ID, "code", r.Code,
 			"target_session_id", req.TargetSessionID, "stream_id", req.TargetStreamID)
-		return fmt.Errorf("%w: agent placement: %w", errConduitRenewalRefused, err)
+		return fmt.Errorf("%w: agent placement: %w", errConduitRenewalUnavailable, err)
 	}
 	if agent.IsPinned() {
 		return fmt.Errorf("%w: agent placement check: %w", errConduitAuthzUnavailable, err)
@@ -717,7 +718,7 @@ func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (gr
 				continue
 			}
 			if r.PrincipalKind != registry.PrincipalAgent {
-				return grant.Target{}, fmt.Errorf("%w: session is not an agent target", errConduitRenewalRefused)
+				return grant.Target{}, fmt.Errorf("%w: session is not an agent target", errConduitRenewalUnavailable)
 			}
 			return grant.Target{
 				Kind: grant.TargetKindAgent, ID: r.PrincipalID, EndpointIncarnation: r.EndpointIncarnation,
@@ -725,5 +726,5 @@ func (s *Server) conduitRenewalTarget(ctx context.Context, sessionID string) (gr
 			}, nil
 		}
 	}
-	return grant.Target{}, fmt.Errorf("%w: target session not found", errConduitRenewalRefused)
+	return grant.Target{}, fmt.Errorf("%w: target session not found", errConduitRenewalUnavailable)
 }
