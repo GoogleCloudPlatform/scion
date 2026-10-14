@@ -783,15 +783,25 @@ func (p *flatColocatedPresenter) publish(ctx context.Context, now time.Time) (hu
 	return p.hub.ApplyRuntimeTargetPresentation(ctx, p.brokerID, p.targetID, &pres, p.epoch, p.seq, now)
 }
 
+// flatColocatedHeartbeatInterval is the co-located internal heartbeat
+// period. Tests shorten it.
+var flatColocatedHeartbeatInterval = 30 * time.Second
+
+// controlChannelState reports whether an instance's control channel is up
+// (*runtimebroker.Server).
+type controlChannelState interface {
+	IsControlChannelConnected() bool
+}
+
 // startFlatColocatedHeartbeat runs the co-located internal heartbeat for one
-// active instance: every 30s it writes the instance's status from its own
-// control channel state, then publishes its presentation (presenter, when
-// not nil).
-func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv *runtimebroker.Server, brokerID, brokerName string, presenter *flatColocatedPresenter) {
+// active instance: every flatColocatedHeartbeatInterval it writes the
+// instance's status from its own control channel state, then publishes its
+// presentation (presenter, when not nil).
+func startFlatColocatedHeartbeat(ctx context.Context, wg *sync.WaitGroup, s store.Store, srv controlChannelState, brokerID, brokerName string, presenter *flatColocatedPresenter) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(30 * time.Second)
+		ticker := time.NewTicker(flatColocatedHeartbeatInterval)
 		defer ticker.Stop()
 		prevOnline := srv.IsControlChannelConnected()
 		for {

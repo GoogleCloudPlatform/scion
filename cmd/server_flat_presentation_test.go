@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -89,4 +90,48 @@ func TestFlatColocatedPresenter_ExperimentOffWritesNothing(t *testing.T) {
 	assert.Nil(t, row.PresentationEpoch)
 
 	assert.Nil(t, newFlatColocatedPresenter(nil, "b", "t", inst, 1), "no Hub, no presenter")
+}
+
+// fixedControlChannel is a control channel state that never changes.
+type fixedControlChannel bool
+
+func (c fixedControlChannel) IsControlChannelConnected() bool { return bool(c) }
+
+// The co-located heartbeat loop itself publishes: started with a short
+// interval, it writes the row's status and its presentation within a few
+// ticks, and stops with its context.
+func TestFlatColocatedHeartbeat_LoopPublishesPresentation(t *testing.T) {
+	ctx := context.Background()
+	s := newTestStore(t)
+	srv := flatTestHub(t, s, true)
+	inst := flatTestInstance()
+	prep, err := prepareFlatInstance(ctx, srv, runtime.NewDockerRuntime(), inst, nil, t.TempDir(),
+		hub.EmbeddedFlatRegistrationOptions{Endpoint: "http://localhost:9800"}, fakeDockerProbe("daemon-1", nil))
+	require.NoError(t, err)
+
+	prev := flatColocatedHeartbeatInterval
+	flatColocatedHeartbeatInterval = 10 * time.Millisecond
+	t.Cleanup(func() { flatColocatedHeartbeatInterval = prev })
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	var wg sync.WaitGroup
+	presenter := newFlatColocatedPresenter(srv, prep.identity.RuntimeBrokerID, prep.identity.RuntimeTarget.ID, inst, 1_000)
+	startFlatColocatedHeartbeat(loopCtx, &wg, s, fixedControlChannel(true), prep.identity.RuntimeBrokerID, inst.Name, presenter)
+	t.Cleanup(func() {
+		cancel()
+		wg.Wait()
+	})
+
+	want := config.PresentInstance(inst).API()
+	require.Eventually(t, func() bool {
+		row, err := s.GetRuntimeBroker(ctx, prep.identity.RuntimeBrokerID)
+		return err == nil && row.RuntimeTargetPresentation != nil && row.PresentationSeq != nil && *row.PresentationSeq >= 2
+	}, 10*time.Second, 10*time.Millisecond, "the loop publishes the presentation on its ticks")
+	cancel()
+	wg.Wait()
+
+	row, err := s.GetRuntimeBroker(ctx, prep.identity.RuntimeBrokerID)
+	require.NoError(t, err)
+	assert.Equal(t, want, *row.RuntimeTargetPresentation)
+	assert.Equal(t, store.BrokerStatusOnline, row.Status, "the loop writes the status too")
 }
