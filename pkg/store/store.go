@@ -196,9 +196,12 @@ type Store interface {
 
 	// PurgeDeletedAgents permanently removes soft-deleted agents older than
 	// cutoff, together with the rows that reference them (group memberships,
-	// identity keys), in one transaction. Returns the number of agents
-	// purged. It is a Store method rather than an AgentStore one because the
-	// cascade spans several sub-stores.
+	// identity keys), in one transaction. In the same transaction it
+	// deactivates, with cause agent_hard_delete under one operation ID, the
+	// active delegation edges whose delegate is a removed agent and the
+	// removed agents' active service-account assignments. Returns the
+	// number of agents purged. It is a Store method rather than an
+	// AgentStore one because the cascade spans several sub-stores.
 	PurgeDeletedAgents(ctx context.Context, cutoff time.Time) (int, error)
 
 	// PurgeDeletedAgentsByID is PurgeDeletedAgents restricted to the agents
