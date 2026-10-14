@@ -270,6 +270,19 @@ func (b serverShutdownBudget) exitBy(t0 time.Time) time.Time {
 // stops waiting for the servers (no budget).
 const exitCloseBound = time.Second
 
+// onceCleanups returns a func that runs cleanups once, last first (the
+// order deferring each would give).
+func onceCleanups(cleanups []func()) func() {
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			for i := len(cleanups) - 1; i >= 0; i-- {
+				cleanups[i]()
+			}
+		})
+	}
+}
+
 // clockContext returns a child of parent cancelled at deadline on clk.
 func clockContext(parent context.Context, clk clock.Clock, deadline time.Time) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(parent)
@@ -368,7 +381,9 @@ func (p serverShutdownPlan) exitCloseContext() (context.Context, context.CancelF
 // armExitWatchdog makes sure the process exits within the grace: with the
 // budget set, once the shutdown begins, it ends the process at
 // T0 + G - exitWatchdogMargin if runServerStart has not returned by then
-// (done), whatever close is still running. It does nothing unset.
+// (done), whatever close is still running. It cannot flush the logs
+// itself (a close that overran is what it cuts); lines still buffered
+// then are lost. It does nothing unset.
 func (p serverShutdownPlan) armExitWatchdog(done <-chan struct{}) {
 	if !p.budget.set {
 		return

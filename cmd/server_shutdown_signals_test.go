@@ -297,7 +297,7 @@ func TestServerShutdown_SIGTERMOrderedPath(t *testing.T) {
 			func(context.Context) error {
 				events <- "close"
 				return nil
-			}, nil, nil)
+			}, nil, nil, nil)
 	}
 
 	done := make(chan error, 1)

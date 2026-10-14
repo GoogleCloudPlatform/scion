@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/compute/metadata"
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/cloudrunenv"
@@ -199,17 +200,61 @@ var (
 	conduitShutdownDrain = func(hubSrv *hub.Server, grace time.Duration, capDrain bool) {
 		hubSrv.DrainConduitForShutdown(grace, capDrain)
 	}
+	// conduitSetShutdownGrace records a set shutdown_grace on the hub, so
+	// the teardown's relay shutdown caps the drain too (ptone/scion#5105).
+	conduitSetShutdownGrace = func(hubSrv *hub.Server, grace time.Duration) {
+		hubSrv.SetConduitShutdownGrace(grace)
+	}
 )
+
+// conduitDrainStepFallback bounds the pre-cancel conduit drain step when
+// shutdown_grace is unset: the relay's own bound on its draining writes
+// (10s) before it sends the GoAways.
+const conduitDrainStepFallback = 10 * time.Second
+
+// conduitDrainStepBound is how long the pre-cancel conduit drain step may
+// hold the shutdown before cancel: with the budget set, min(grace, S/4),
+// so a stalled GoAway send cannot eat the later phases; unset,
+// conduitDrainStepFallback. The drain itself goes on in the background
+// and the teardown's relay shutdown waits for it.
+func conduitDrainStepBound(b serverShutdownBudget) time.Duration {
+	if !b.set {
+		return conduitDrainStepFallback
+	}
+	return min(b.grace, b.span()/4)
+}
 
 // registerConduitShutdownDrain makes the relay drain a pre-cancel step of
 // the process's single graceful shutdown (design §3.3, ptone/scion#5054):
 // on the first SIGINT or SIGTERM, after the servers are marked shutting
 // down, drain sends GoAway to every relay session, and only then is the
 // server context cancelled, so every session has its GoAway before any
-// listener closes. The conduit no longer subscribes to signals itself; a
-// second subscriber would cancel before the drain (ptone/scion#5105).
-func registerConduitShutdownDrain(q *serverShutdownSequence, drain func()) {
-	q.addStep(shutdownPhaseDrain, drain)
+// listener closes. The step waits for drain at most bound on q's clock.
+// The conduit no longer subscribes to signals itself; a second subscriber
+// would cancel before the drain (ptone/scion#5105). It returns false, and
+// the drain never runs from here, when the shutdown has already begun.
+func registerConduitShutdownDrain(q *serverShutdownSequence, bound time.Duration, drain func()) bool {
+	return q.addStep(shutdownPhaseDrain, boundedShutdownStep(q.clk, bound, "conduit drain", drain))
+}
+
+// boundedShutdownStep returns step bounded to bound on clk: it runs step
+// in its own goroutine and returns when step does or when bound has
+// passed, whichever is first (the step then goes on in the background).
+func boundedShutdownStep(clk clock.Clock, bound time.Duration, name string, step func()) func() {
+	return func() {
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			step()
+		}()
+		fire, stop := clock.After(clk, bound)
+		defer stop()
+		select {
+		case <-done:
+		case <-fire:
+			slog.Warn("Shutdown step still running at its bound; continuing the shutdown", "step", name, "bound", bound)
+		}
+	}
 }
 
 // conduitAdvertiseEndpoint derives the internal endpoint other hub nodes
@@ -274,9 +319,10 @@ func startConduit(ctx context.Context, q *serverShutdownSequence, cfg *config.Gl
 	if err == nil {
 		grace, capDrain := conduitShutdownDrainSetting(cfg)
 		if capDrain {
-			hubSrv.SetConduitShutdownGrace(grace)
+			conduitSetShutdownGrace(hubSrv, grace)
 		}
-		registerConduitShutdownDrain(q, func() { conduitShutdownDrain(hubSrv, grace, capDrain) })
+		bound := conduitDrainStepBound(serverShutdownBudgetFor(cfg))
+		registerConduitShutdownDrain(q, bound, func() { conduitShutdownDrain(hubSrv, grace, capDrain) })
 		return nil
 	}
 	if requireHA {

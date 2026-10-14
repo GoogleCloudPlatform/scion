@@ -567,7 +567,7 @@ func TestHandleBrokerSIGTERM_PublishedShutdownRunsOnce(t *testing.T) {
 
 	var f fakeSignalNotify
 	var cancels atomic.Int32
-	ctx, cancel := context.WithCancel(context.Background())
+	_, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	// The handler's lifetime is separate from the server context the
 	// shutdown cancels, as in runServerStart, so it still reads the

@@ -16,13 +16,19 @@ package cmd
 
 import (
 	"context"
+	"os"
+	"regexp"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestRegisterConduitShutdownDrain_DrainsBeforeCancel (design §3.3,
@@ -46,7 +52,7 @@ func TestRegisterConduitShutdownDrain_DrainsBeforeCancel(t *testing.T) {
 		record("cancel")
 		cancel()
 	})
-	registerConduitShutdownDrain(q, func() {
+	registerConduitShutdownDrain(q, time.Minute, func() {
 		assert.NoError(t, ctx.Err(), "the server context must still be live while GoAways are sent")
 		record("drain")
 	})
@@ -57,18 +63,66 @@ func TestRegisterConduitShutdownDrain_DrainsBeforeCancel(t *testing.T) {
 	assert.Error(t, ctx.Err())
 }
 
-// TestRegisterConduitShutdownDrain_NotRunWhenServerStopsOtherwise: when
-// the server stops for another reason (a fatal error cancels the server
-// context without the graceful shutdown), the drain step never runs; the
-// teardown's relay shutdown covers the relay.
-func TestRegisterConduitShutdownDrain_NotRunWhenServerStopsOtherwise(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	drained := false
-	q := newTestShutdown(cancel)
-	registerConduitShutdownDrain(q, func() { drained = true })
-	cancel()
-	<-ctx.Done()
-	assert.False(t, drained)
+// TestRegisterConduitShutdownDrain_RefusedAfterBegin: a drain registered
+// once the shutdown has begun is refused and never runs from the step (the
+// teardown's relay shutdown covers the relay).
+func TestRegisterConduitShutdownDrain_RefusedAfterBegin(t *testing.T) {
+	captureStdLog(t)
+	q := newTestShutdown(func() {})
+	q.begin(syscall.SIGTERM)
+	var drained atomic.Bool
+	assert.False(t, registerConduitShutdownDrain(q, time.Minute, func() { drained.Store(true) }), "a drain registered after the shutdown began must be refused")
+	q.begin(syscall.SIGTERM)
+	assert.False(t, drained.Load())
+}
+
+// TestRegisterConduitShutdownDrain_BoundedWait (conduit review F4): a drain
+// step that blocks (a stalled GoAway send) holds the shutdown only until
+// its bound on the shutdown clock; cancel then runs.
+func TestRegisterConduitShutdownDrain_BoundedWait(t *testing.T) {
+	captureStdLog(t)
+	clk := clock.NewFake(shutdownTestT0)
+	cancelled := make(chan time.Time, 1)
+	q := newServerShutdownSequence(func() { cancelled <- clk.Now() }, clk)
+	release := make(chan struct{})
+	defer close(release)
+	require.True(t, registerConduitShutdownDrain(q, 2*time.Second, func() { <-release }))
+	go q.begin(syscall.SIGTERM)
+	require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(2*time.Second)), "drain bound not armed")
+	clk.Advance(2 * time.Second)
+	select {
+	case at := <-cancelled:
+		assert.Equal(t, shutdownTestT0.Add(2*time.Second), at, "cancel at the drain bound")
+	case <-time.After(shutdownTestWait):
+		t.Fatal("a blocked drain held the shutdown past its bound")
+	}
+}
+
+// TestConduitDrainStepBound: min(grace, S/4) with shutdown_grace set (S =
+// max(G-2s, G/2)); 10s unset.
+func TestConduitDrainStepBound(t *testing.T) {
+	assert.Equal(t, conduitDrainStepFallback, conduitDrainStepBound(serverShutdownBudget{}))
+	assert.Equal(t, 2*time.Second, conduitDrainStepBound(serverShutdownBudget{grace: 10 * time.Second, set: true}))
+	assert.Equal(t, 4500*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: 20 * time.Second, set: true}))
+	assert.Equal(t, 125*time.Millisecond, conduitDrainStepBound(serverShutdownBudget{grace: time.Second, set: true}))
+}
+
+// TestHubServerPathSubscribesToSignalsOnce (conduit review F2,
+// ptone/scion#5105): on the hub server path, installServerShutdownSignals
+// is the only SIGINT/SIGTERM subscriber that can cancel; no other file on
+// that path calls signal.Notify or signal.NotifyContext. (cmd/broker.go's
+// foreground SIGTERM handler is the known exception: it removes the
+// broker record and calls the same run-once shutdown.)
+func TestHubServerPathSubscribesToSignalsOnce(t *testing.T) {
+	call := regexp.MustCompile(`signal\.Notify(Context)?\(`)
+	for _, f := range []string{"server_foreground.go", "server_conduit.go", "server_shutdown.go", "server_flat_host.go"} {
+		src, err := os.ReadFile(f)
+		require.NoError(t, err)
+		assert.Empty(t, call.FindAllString(string(src), -1), "%s subscribes to signals; only installServerShutdownSignals may (ptone/scion#5054)", f)
+	}
+	src, err := os.ReadFile("server_foreground.go")
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(src), "installServerShutdownSignals(signalsCtx, signal.Notify, "), "the server subscribes exactly once, through installServerShutdownSignals")
 }
 
 // TestConduitShutdownDrainSetting: shutdown_grace has no default, so unset

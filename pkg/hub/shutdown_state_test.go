@@ -103,6 +103,16 @@ func TestRefuseDuringShutdown_BrokerExemption(t *testing.T) {
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "unauthenticated broker-shaped request refused")
 	assert.Equal(t, int32(1), reached.Load())
 
+	// A broker request on behalf of a user is user work (code review K1).
+	user := NewAuthenticatedUser("u1", "user@example.com", "User", "member", "cli")
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/agents", nil)
+	ctx := contextWithBrokerIdentity(req.Context(), NewBrokerIdentity("b1"))
+	ctx = context.WithValue(contextWithIdentity(ctx, user), userContextKey{}, user)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req.WithContext(ctx))
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "a broker request on behalf of a user is refused")
+	assert.Equal(t, int32(1), reached.Load())
+
 	srv, _ := testServer(t)
 	srv.BeginShutdown()
 	req = httptest.NewRequest(http.MethodPost, "/api/v1/runtime-brokers/b1/heartbeat", nil)
@@ -113,16 +123,45 @@ func TestRefuseDuringShutdown_BrokerExemption(t *testing.T) {
 		"a forged broker header must not be served during shutdown (got %d)", rec.Code)
 }
 
+// R5 through the real middleware chain (code review Q2): the refusal runs
+// inside BrokerAuth, so after the mark a validly signed broker request is
+// answered exactly as before it (not 503), while the same path with a user
+// token gets 503 + Retry-After.
+func TestRefuseDuringShutdown_SignedBrokerServedFullChain(t *testing.T) {
+	srv, s := testServer(t)
+	require.NotNil(t, srv.brokerAuthService, "the test server must run broker HMAC auth")
+	brokerID, signReq := setupSignedBrokerRequest(t, srv.brokerAuthService, s)
+	path := "/api/v1/runtime-brokers/" + brokerID
+
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, signReq(http.MethodGet, path, nil))
+	before := rec.Code
+	require.NotEqual(t, http.StatusServiceUnavailable, before)
+	require.NotEqual(t, http.StatusUnauthorized, before, "the signed broker request must authenticate")
+
+	srv.BeginShutdown()
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, signReq(http.MethodGet, path, nil))
+	assert.Equal(t, before, rec.Code, "a signed broker request is served during shutdown as before the mark")
+	assert.Empty(t, rec.Header().Get("Retry-After"))
+
+	rec = doRequest(t, srv, http.MethodGet, path, nil)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "a user request to the same path is refused during shutdown")
+	assert.Equal(t, "10", rec.Header().Get("Retry-After"))
+}
+
 // The web server leaves requests for the mounted hub API to the hub's own
 // refusal (which knows the caller) and refuses its own routes.
 func TestWebServer_IsMountedHubRequest(t *testing.T) {
-	ws := &WebServer{}
+	ws := &WebServer{mux: http.NewServeMux()}
+	ws.mux.Handle("/api/v1/auth/test-login", http.NotFoundHandler()) // a web route under /api/v1/
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/agents", nil)
 	assert.False(t, ws.isMountedHubRequest(req), "no hub mounted")
-	ws.hubHandler = http.NotFoundHandler()
+	ws.MountHubAPI(http.NotFoundHandler(), nil)
 	assert.True(t, ws.isMountedHubRequest(req))
 	assert.True(t, ws.isMountedHubRequest(httptest.NewRequest(http.MethodGet, "/.well-known/openid-configuration", nil)))
 	assert.False(t, ws.isMountedHubRequest(httptest.NewRequest(http.MethodGet, "/agents", nil)))
+	assert.False(t, ws.isMountedHubRequest(httptest.NewRequest(http.MethodPost, "/api/v1/auth/test-login", nil)), "a web route under /api/v1/ stays with the web server's refusal (code review K4)")
 }
 
 // Streams (SSE) end when the server begins shutting down: their context is

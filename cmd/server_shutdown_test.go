@@ -16,7 +16,7 @@ package cmd
 
 import (
 	"context"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -204,11 +204,12 @@ func TestServerShutdownPlan_ExitSignal(t *testing.T) {
 }
 
 // TestShutdownExitSequence_WithinGrace (R2, ptone/scion#5105 timing): with
-// shutdown_grace = 10s, a server wait that never returns and an audit
-// close that blocks until its context ends, the whole exit sequence ends
-// the process (exitProcess) by T0 + G, without returning into the
-// deferred store close: the wait stops at T0+S and the audit close is cut
-// at T0+G-250ms (the watchdog backs it: TestShutdownExitWatchdog).
+// shutdown_grace = 10s, a server wait that never returns and a log flush
+// that blocks, the whole exit sequence ends the process (exitProcess) by
+// T0 + G, without returning into the deferred store close: the wait stops
+// at T0+S, the audit writer closes, then the logs are flushed (code review
+// Q1), and the flush is cut at T0+G-250ms (the watchdog backs it:
+// TestShutdownExitWatchdog).
 func TestShutdownExitSequence_WithinGrace(t *testing.T) {
 	grace := 10 * time.Second
 	serverCtx, serverCancel := context.WithCancel(context.Background())
@@ -221,26 +222,32 @@ func TestShutdownExitSequence_WithinGrace(t *testing.T) {
 	// TestShutdownExitWatchdog; it is not armed here, so exactly one exit
 	// (awaitServerExit's) is observed.
 
-	closeEntered := make(chan struct{})
+	var auditClosed atomic.Bool
+	flushEntered, releaseFlush := make(chan struct{}), make(chan struct{})
+	defer close(releaseFlush)
 	returned := make(chan error, 1)
 	go func() {
 		returned <- awaitServerExit(serverCtx, make(chan error), serverCancel,
 			func() { select {} }, // the servers never finish
 			func(ctx context.Context) error {
-				close(closeEntered)
-				<-ctx.Done() // a close that blocks until its bound
-				return ctx.Err()
+				auditClosed.Store(true)
+				return nil
 			},
-			p.exitSignal(lifetime.Done()), p.exitCloseContext)
+			p.exitSignal(lifetime.Done()), p.exitCloseContext,
+			func() { // a log flush that blocks
+				assert.True(t, auditClosed.Load(), "the audit writer closes before the log flush")
+				close(flushEntered)
+				<-releaseFlush
+			})
 	}()
 
 	q.begin(syscall.SIGTERM) // T0; cancels the server context
 	require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(8*time.Second)), "exit wait not armed")
 	clk.Advance(8 * time.Second) // T0 + S: stop waiting
 	select {
-	case <-closeEntered:
+	case <-flushEntered:
 	case <-time.After(shutdownTestWait):
-		t.Fatal("the audit close did not start at T0+S")
+		t.Fatal("the log flush did not start at T0+S")
 	}
 	require.True(t, clk.WaitForTimer(shutdownTestWait, shutdownTestT0.Add(9750*time.Millisecond)), "close bound not armed")
 	clk.Advance(1750 * time.Millisecond) // T0 + G - 250ms
@@ -330,34 +337,34 @@ func TestAwaitServerExit_ForcedExitsWithoutWaiting(t *testing.T) {
 	lifetime, stop := context.WithCancel(context.Background())
 	defer stop()
 
-	var mu sync.Mutex
-	var closeCtxDone bool
+	closeCtxEnded := make(chan struct{})
 	returned := make(chan error, 1)
 	go func() {
 		returned <- awaitServerExit(serverCtx, make(chan error), serverCancel,
 			func() { select {} },
 			func(ctx context.Context) error {
 				<-ctx.Done()
-				mu.Lock()
-				closeCtxDone = true
-				mu.Unlock()
+				close(closeCtxEnded)
 				return nil
 			},
-			p.exitSignal(lifetime.Done()), p.exitCloseContext)
+			p.exitSignal(lifetime.Done()), p.exitCloseContext, nil)
 	}()
 	q.begin(syscall.SIGTERM)
 	q.force(syscall.SIGINT)
 	require.True(t, clk.WaitFor(shutdownTestWait, func(n int) bool { return n == 1 }), "close bound not armed")
 	clk.Advance(exitCloseBound)
 	select {
-	case <-exits:
+	case at := <-exits:
+		assert.Equal(t, shutdownTestT0.Add(exitCloseBound), at, "the forced exit waits for the close only up to its bound")
 	case <-time.After(shutdownTestWait):
 		t.Fatal("the forced shutdown did not exit")
 	}
 	<-returned
-	mu.Lock()
-	defer mu.Unlock()
-	assert.True(t, closeCtxDone, "the audit close was bounded")
+	select {
+	case <-closeCtxEnded:
+	case <-time.After(shutdownTestWait):
+		t.Fatal("the audit close's context did not end at the bound")
+	}
 }
 
 // TestColocatedBrokerStop_BeforeHTTPDrain (R1, R3): the hub front waits
@@ -433,4 +440,14 @@ func TestColocatedBrokerStop_BeforeHTTPDrain(t *testing.T) {
 			t.Fatal("the wait outlived the fallback")
 		}
 	})
+}
+
+// TestOnceCleanups: the log cleanups run once, last first, whether the
+// early exit or the deferred call runs them first (code review Q1).
+func TestOnceCleanups(t *testing.T) {
+	var order []int
+	flush := onceCleanups([]func(){func() { order = append(order, 1) }, func() { order = append(order, 2) }})
+	flush()
+	flush()
+	assert.Equal(t, []int{2, 1}, order, "cleanups run once, in defer order")
 }

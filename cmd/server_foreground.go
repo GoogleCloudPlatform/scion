@@ -149,9 +149,11 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, cleanup := range logCleanups {
-		defer cleanup()
-	}
+	// The log cleanups (OTel, Cloud Logging flush) run once: deferred here,
+	// or earlier on the graceful shutdown's early exit (awaitServerExit),
+	// which ends the process without returning (ptone/scion#5054).
+	flushLogs := onceCleanups(logCleanups)
+	defer flushLogs()
 
 	// 2. Load & reconcile config
 	cfg, err := loadAndReconcileConfig(cmd)
@@ -944,7 +946,7 @@ func runServerStart(cmd *cobra.Command, args []string) error {
 	if hubSrv != nil {
 		closeAudit = hubSrv.CloseAuditWriter
 	}
-	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit, shutdownPlan.exitSignal(signalsCtx.Done()), shutdownPlan.exitCloseContext)
+	return awaitServerExit(ctx, errCh, cancel, wg.Wait, closeAudit, shutdownPlan.exitSignal(signalsCtx.Done()), shutdownPlan.exitCloseContext, flushLogs)
 }
 
 // serverShutdown is the run-once graceful shutdown that
@@ -1036,10 +1038,10 @@ func installServerShutdownSignals(ctx context.Context, notify func(chan<- os.Sig
 // when a second signal forces the shutdown, or at the teardown deadline
 // of the shutdown budget (server.hub.conduit.shutdown_grace). The servers
 // are then still running, so the store and the other deferred closes must
-// not run under them: awaitServerExit closes the audit writer within
-// exitClose's bound and ends the process (exitProcess) with
-// exitCodeUnfinishedShutdown.
-func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error, exit <-chan struct{}, exitClose func() (context.Context, context.CancelFunc)) error {
+// not run under them: awaitServerExit closes the audit writer, then
+// flushes the logs (flushLogs, may be nil), both within exitClose's bound,
+// and ends the process (exitProcess) with exitCodeUnfinishedShutdown.
+func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.CancelFunc, wait func(), closeAudit func(context.Context) error, exit <-chan struct{}, exitClose func() (context.Context, context.CancelFunc), flushLogs func()) error {
 	select {
 	case err := <-errCh:
 		cancel()
@@ -1056,12 +1058,23 @@ func awaitServerExit(ctx context.Context, errCh <-chan error, cancel context.Can
 		select {
 		case <-waited:
 		case <-exit:
+			log.Printf("Exiting before the servers stopped (shutdown forced or its budget used up)")
 			closeCtx, cancelClose := exitClose()
-			if closeAudit != nil {
-				_ = closeAudit(closeCtx)
+			flushed := make(chan struct{})
+			go func() {
+				defer close(flushed)
+				if closeAudit != nil {
+					_ = closeAudit(closeCtx)
+				}
+				if flushLogs != nil {
+					flushLogs()
+				}
+			}()
+			select {
+			case <-flushed:
+			case <-closeCtx.Done():
 			}
 			cancelClose()
-			log.Printf("Exiting before the servers stopped (shutdown forced or its budget used up)")
 			exitProcess(exitCodeUnfinishedShutdown)
 			return nil // reached only when exitProcess is a test fake
 		}

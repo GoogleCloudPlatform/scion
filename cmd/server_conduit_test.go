@@ -309,8 +309,16 @@ func TestStartConduit(t *testing.T) {
 				enableHub = true
 				t.Setenv("K_SERVICE", "")
 				captureStdLog(t)
-				prevStart, prevDrain := startConduitRelayFn, conduitShutdownDrain
-				t.Cleanup(func() { startConduitRelayFn, conduitShutdownDrain = prevStart, prevDrain })
+				prevStart, prevDrain, prevSetGrace := startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace
+				t.Cleanup(func() {
+					startConduitRelayFn, conduitShutdownDrain, conduitSetShutdownGrace = prevStart, prevDrain, prevSetGrace
+				})
+				var recordedGrace []time.Duration
+				var recordedSrv *hub.Server
+				conduitSetShutdownGrace = func(s *hub.Server, grace time.Duration) {
+					recordedSrv = s
+					recordedGrace = append(recordedGrace, grace)
+				}
 				startConduitRelayFn = func(context.Context, *config.GlobalConfig, *hub.Server, string, *sync.WaitGroup, chan<- error, bool) error {
 					return nil
 				}
@@ -349,6 +357,15 @@ func TestStartConduit(t *testing.T) {
 				assert.Same(t, srv, gotSrv)
 				assert.Equal(t, tc.wantGrace, gotGrace)
 				assert.Equal(t, tc.wantCap, gotCap)
+				// conduit review F1: a set grace is recorded on the hub (the
+				// teardown's relay shutdown then caps the drain too); unset,
+				// nothing is recorded.
+				if tc.wantCap {
+					assert.Equal(t, []time.Duration{tc.wantGrace}, recordedGrace, "startConduit must record the set shutdown_grace on the hub")
+					assert.Same(t, srv, recordedSrv)
+				} else {
+					assert.Empty(t, recordedGrace, "no grace recorded when shutdown_grace is unset")
+				}
 				assert.Error(t, ctx.Err())
 			})
 		}

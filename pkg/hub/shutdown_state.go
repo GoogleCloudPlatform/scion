@@ -19,7 +19,6 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -99,25 +98,30 @@ func (st *shutdownState) refuseDuringShutdown(next http.Handler, exempt func(*ht
 	})
 }
 
-// isBrokerRequest reports whether r is authenticated as a Runtime Broker.
-// The hub lets these through during shutdown: a co-located broker still
-// reports to the hub through the hub's listener while it shuts down, and
-// the hub waits for it (ShutdownHooks.BeforeHTTPDrain) before closing the
-// listener.
+// isBrokerRequest reports whether r is authenticated as a Runtime Broker
+// acting for itself. The hub lets these through during shutdown: a
+// co-located broker still reports to the hub through the hub's listener
+// while it shuts down, and the hub waits for it
+// (ShutdownHooks.BeforeHTTPDrain) before closing the listener. A broker
+// request on behalf of a user (a user identity in the context too) is user
+// work and is refused like any other.
 func isBrokerRequest(r *http.Request) bool {
-	return GetBrokerIdentityFromContext(r.Context()) != nil
+	ctx := r.Context()
+	return GetBrokerIdentityFromContext(ctx) != nil && GetUserIdentityFromContext(ctx) == nil
 }
 
-// isMountedHubRequest reports whether the web server forwards r to the
-// mounted hub API (MountHubAPI). The hub handler applies its own shutdown
-// refusal, which knows the caller's identity, so the web server leaves
-// these requests to it.
+// isMountedHubRequest reports whether the web server's mux dispatches r to
+// the mounted hub API (the "/api/v1/" and "/.well-known/" patterns of
+// MountHubAPI). The hub handler applies its own shutdown refusal, which
+// knows the caller's identity, so the web server leaves these requests to
+// it. Web routes under /api/v1/ with their own, more specific pattern (for
+// example /api/v1/auth/test-login) stay with the web server's refusal.
 func (ws *WebServer) isMountedHubRequest(r *http.Request) bool {
-	if ws.hubHandler == nil {
+	if ws.hubHandler == nil || ws.mux == nil {
 		return false
 	}
-	p := r.URL.Path
-	return strings.HasPrefix(p, "/api/v1/") || strings.HasPrefix(p, "/.well-known/")
+	_, pattern := ws.mux.Handler(r)
+	return pattern == "/api/v1/" || pattern == "/.well-known/"
 }
 
 // writeShuttingDown writes the refusal of a request received during
