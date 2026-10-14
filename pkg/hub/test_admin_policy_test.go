@@ -1659,7 +1659,13 @@ func TestTestAdminPolicy_FederationTokenRefused(t *testing.T) {
 		assert.False(t, d.Allowed, who)
 		assert.Equal(t, DeniedByTestAdminPolicy, d.DeniedBy, "%s: %s", who, d.Reason)
 
-		// The handler's caller check refuses the admin kind by stored kind.
+		// The handler's caller check refuses the admin kind by stored kind:
+		// the stored row is not a human kind, which is the check that refuses.
+		row, err := s.GetUser(ctx, k.Identity.ID)
+		require.NoError(t, err)
+		require.False(t, row.IsHumanKind(), "%s: the stored kind is not human", who)
+		require.Equal(t, store.UserStatusActive, row.Status, "%s: active, so only the kind check can refuse", who)
+		require.NotEmpty(t, row.Email, "%s: has an email, so only the kind check can refuse", who)
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/federation-token", nil).WithContext(contextWithIdentityAndUser(id))
 		w := httptest.NewRecorder()
 		u, ok := srv.federationTokenCaller(w, r)
@@ -1668,8 +1674,14 @@ func TestTestAdminPolicy_FederationTokenRefused(t *testing.T) {
 		assert.Equal(t, http.StatusForbidden, w.Code, "%s federationTokenCaller: %s", who, w.Body.String())
 	}
 
-	// Human control: the same caller check admits a human super-admin.
+	// Human control: decide does not refuse a human super-admin by the
+	// test-admin policy, and the same caller check admits it.
 	hid := tsaIdentity(t, s, human.ID)
+	hd := srv.authzService.Decide(ctx, AuthzRequest{
+		Principal: principalContextForIdentity(hid), Credential: credentialContextForIdentity(hid),
+		Resource: Resource{Type: permissions.ResourceFederationToken}, Action: Action(permissions.ActionMint), Permission: permissionFederationTokenMint,
+	})
+	assert.NotEqual(t, DeniedByTestAdminPolicy, hd.DeniedBy, "human super-admin: %s", hd.Reason)
 	r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/federation-token", nil).WithContext(contextWithIdentityAndUser(hid))
 	w := httptest.NewRecorder()
 	u, ok := srv.federationTokenCaller(w, r)
