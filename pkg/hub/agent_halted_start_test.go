@@ -153,15 +153,39 @@ func TestHaltedStart_InDoubtStartRecovers(t *testing.T) {
 	assert.Equal(t, "running", getAgent(t, f.s, a.ID).Phase)
 }
 
+// startedWriteFaultStore fails agentID's started-status write (the one that
+// clears the exit fields) while fail is armed and done is not, and
+// delegates otherwise. Two switches give the fault an end without
+// reassigning the server's store.
+type startedWriteFaultStore struct {
+	store.Store
+	agentID    string
+	fail, done *storeFaultSwitch
+}
+
+func (s *startedWriteFaultStore) UpdateAgentStatus(ctx context.Context, id string, u store.AgentStatusUpdate) error {
+	if s.fail.Active() && !s.done.Active() && id == s.agentID && u.ClearExit {
+		return errors.New("database is locked")
+	}
+	return s.Store.UpdateAgentStatus(ctx, id, u)
+}
+
 // A start from halted whose final status write fails leaves the row
 // starting; the next running heartbeat moves it to running.
 func TestHaltedStart_FailedFinalWriteThenRunningHeartbeat(t *testing.T) {
 	f, _, a := newClaimFixture(t)
+	// The fixture's setup writes through the raw store only, so the wrapper
+	// is installed before anything reads the server's store in the
+	// background.
+	done := &storeFaultSwitch{}
+	_, fail := installStoreFault(t, f.srv, func(inner store.Store, sw *storeFaultSwitch) *startedWriteFaultStore {
+		return &startedWriteFaultStore{Store: inner, agentID: a.ID, fail: sw, done: done}
+	})
 	setHalted(t, f.s, a.ID, "preempted")
-	f.srv.store = failRunningStatusStore{Store: f.s, agentID: a.ID}
+	fail.Arm()
 	code, _ := lifecycle(t, f, a.ID, "start")
 	assert.NotEqual(t, http.StatusBadGateway, code, "not answered as a failed dispatch")
-	f.srv.store = f.s
+	done.Arm()
 	require.Equal(t, "starting", getAgent(t, f.s, a.ID).Phase)
 
 	f.heartbeat(completeInventory(), a.Slug)

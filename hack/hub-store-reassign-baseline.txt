@@ -82,7 +82,7 @@ pkg/hub/handlers_health_test.go | 2
 pkg/hub/handlers_project_provider_localpath_test.go | 1
 pkg/hub/handlers_project_providers_capacity_test.go | 2
 pkg/hub/handlers_runtime_brokers_capacity_test.go | 1
-pkg/hub/handlers_runtime_brokers_test.go | 8
+pkg/hub/handlers_runtime_brokers_test.go | 6
 pkg/hub/handlers_user_terminal_workspace_test.go | 4
 pkg/hub/health_summary_integrations_test.go | 2
 pkg/hub/hub_agent_defaults_ladder_test.go | 1
