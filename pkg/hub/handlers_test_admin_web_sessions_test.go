@@ -514,12 +514,15 @@ func TestAdminWebSessions_LifetimeCappedAtKindMax(t *testing.T) {
 
 // --- B7: the classifier decides by kind -----------------------------------------
 
-// Every kind that is not human is a test identity session for the
-// classifier, decided from the row's kind alone: here each row has an
-// ordinary email outside every reserved domain, so the WS1 check (kind
+// Every kind other than human and federated is a test identity session
+// for the classifier, decided from the row's kind alone: here each row has
+// an ordinary email outside every reserved domain, so the WS1 check (kind
 // test_fixture or a reserved-domain email) would have missed every kind but
-// test_fixture. An unmarked session for such a row is invalid, and a
-// marked one for a kind with no web sessions is refused.
+// test_fixture, including a kind this binary does not know. An unmarked
+// session for such a row is invalid. Human and federated rows stay
+// ordinary accounts for the classifier (federated accounts belong to the
+// federation code), but a marked session (a scion_ti cookie and marker
+// values) for a federated or unknown-kind row is still refused.
 func TestAdminWebSessions_ClassifierKeysOnKind(t *testing.T) {
 	e := newWS4Env(t, true, true)
 	now := e.clock.Now()
@@ -531,7 +534,7 @@ func TestAdminWebSessions_ClassifierKeysOnKind(t *testing.T) {
 		{store.UserKindTestFixture, true},
 		{store.UserKindTestHubAdmin, true},
 		{store.UserKindTestSuperAdmin, true},
-		{store.UserKindFederated, true},
+		{store.UserKindFederated, false},
 		{"future_kind", true},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
@@ -539,9 +542,13 @@ func TestAdminWebSessions_ClassifierKeysOnKind(t *testing.T) {
 			row := ws4RawUser(t, e.st, tc.kind, email, store.UserRoleMember, now, now.Add(30*time.Minute))
 			require.False(t, isReservedTestIdentityEmail(row.Email), "an ordinary email")
 			assert.Equal(t, tc.testKind, testIdentityRowByKind(row))
-			assert.Equal(t, !tc.testKind, row.IsHumanKind())
+			assert.Equal(t, tc.kind == store.UserKindHuman, row.IsHumanKind())
 
 			res := e.classify(loginSession(t, e.ws, row.ID, row.Email, row.Role))
+			if tc.kind == store.UserKindFederated {
+				marked := e.craftMarkedSession(row, generateID(), now.Add(10*time.Minute), row.SessionGeneration)
+				assert.Equal(t, "kind_not_admitted", e.classify(marked).reason)
+			}
 			if !tc.testKind {
 				assert.Equal(t, tiSessionNotFixture, res.state)
 				return
@@ -551,7 +558,7 @@ func TestAdminWebSessions_ClassifierKeysOnKind(t *testing.T) {
 			if tc.kind != store.UserKindTestFixture {
 				assert.False(t, row.IsTestFixture() || isReservedTestIdentityEmail(row.Email), "outside the WS1 check")
 			}
-			if tc.kind == store.UserKindFederated || tc.kind == "future_kind" {
+			if tc.kind == "future_kind" {
 				marked := e.craftMarkedSession(row, generateID(), now.Add(10*time.Minute), row.SessionGeneration)
 				assert.Equal(t, "kind_not_admitted", e.classify(marked).reason)
 			}

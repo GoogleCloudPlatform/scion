@@ -50,6 +50,7 @@ func TestAdminWebSessions_RefusedWithAnotherHubID(t *testing.T) {
 			in := tiaValidInputs()
 			in.Level = level
 			in.AdminWebSessions = value
+			in.PolicyComplete = func() error { return nil }
 			res, err := resolveTestMode(in)
 			require.Error(t, err, "level %q value %q", level, value)
 			assert.ErrorIs(t, err, hub.ErrTestAdminWebSessionsHubIDMismatch, "level %q value %q", level, value)
@@ -66,6 +67,9 @@ func TestAdminWebSessions_AdmittedAtAdminLevels(t *testing.T) {
 		in := tiaValidInputs()
 		in.Level = level
 		in.AdminWebSessions = tiaCmdHubID
+		// G3 is not under test here: the super-admin level is admitted
+		// whatever the classification state of this binary.
+		in.PolicyComplete = func() error { return nil }
 		res, err := resolveTestMode(in)
 		require.NoError(t, err, level)
 		assert.Equal(t, hub.TestAdminWebSessionsConfig{HubID: tiaCmdHubID}, res.TestAdminWebSessions, level)

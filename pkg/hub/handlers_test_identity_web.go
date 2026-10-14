@@ -606,9 +606,9 @@ type tiSessionResult struct {
 // verified proxy assertion (fixtureSessionValid). It is
 // row-authoritative: whenever the session names a user it reads that
 // user's row (or uses row, when the caller already read it), and the
-// session is a test identity session when the row's immutable kind is not
-// human (testIdentityRowByKind: every test identity kind, current and
-// future, and any unrecognised kind), or when the request carries any test
+// session is a test identity session when the row's immutable kind is
+// neither human nor federated (testIdentityRowByKind: every test identity
+// kind, current and future, and any unrecognised kind), or when the request carries any test
 // identity hint (a scion_ti cookie, marker values, a reserved-domain
 // session email). Such a session is honoured only when fixtureSessionValid
 // passes. The session's own email is never what admits it.
@@ -644,7 +644,7 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 			}
 		}
 		// Fast path: a user already read as an ordinary account (a human
-		// kind: the cached value is exactly the row test below,
+		// or federated kind: the cached value is exactly the row test below,
 		// testIdentityRowByKind, so a cached answer always equals the
 		// uncached one) is answered without a row read when there is no
 		// hint. The trigger set for a full read is exactly: a hint, a
@@ -688,12 +688,18 @@ func (ws *WebServer) classifyTestIdentitySession(r *http.Request, session *sessi
 }
 
 // testIdentityRowByKind reports whether row is a test identity row for
-// the classifier: its immutable kind is not human (store.User.IsHumanKind
-// is false). That covers every test identity kind, current and future, and
-// fails closed on an unrecognised kind. A reserved-domain email on the row
-// also counts, as a second signal; it never makes a row ordinary.
+// the classifier, from its immutable kind: any kind other than human
+// (store.User.IsHumanKind) and federated (store.User.IsFederated, a local
+// account of a trusted external issuer, which the federation code owns and
+// the hub's own token check already refuses). That covers every test
+// identity kind, current and future, and fails closed on an unrecognised
+// kind. A reserved-domain email on the row also counts, as a second
+// signal; it never makes a row ordinary.
 func testIdentityRowByKind(row *store.User) bool {
-	return row != nil && (!row.IsHumanKind() || isReservedTestIdentityEmail(row.Email))
+	if row == nil {
+		return false
+	}
+	return (!row.IsHumanKind() && !row.IsFederated()) || isReservedTestIdentityEmail(row.Email)
 }
 
 // tiKind is a cached user kind for the classifier's fast path.
