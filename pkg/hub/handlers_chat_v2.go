@@ -1118,8 +1118,10 @@ func (s *Server) handleConversationSend(w http.ResponseWriter, r *http.Request, 
 	}
 
 	// Validated before the idempotency lookup, so an invalid body is never
-	// answered with a replay. sendChatMessage validates again.
-	content, _, serr := s.validateChatSendInput(ctx, user, target, in)
+	// answered with a replay. sendChatMessage validates again. An artifact
+	// attachment the sender already sent passes here only, so a retry of
+	// the send that bound it reaches the lookup (prevalidateChatSendInput).
+	content, serr := s.prevalidateChatSendInput(ctx, user, target, in)
 	if serr != nil {
 		serr.write(w)
 		return
@@ -5673,19 +5675,23 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 	// the artifact service is ready), each file is stored as an upload in
 	// the artifact service, with the artifact file size limit.
 	toArtifacts := s.attachmentUploadsToArtifacts()
-	maxFile := s.attachmentMaxBytes(toArtifacts)
+	maxFile := s.attachmentMaxBytes(ctx, toArtifacts)
 	formLimit := maxFile * MaxAttachmentsPerMessage
+
+	// The body is capped before anything reads it, so the total-size limit
+	// (the per-file limit times MaxAttachmentsPerMessage, plus room for the
+	// form fields) applies to the whole multipart body. Parts above
+	// uploadFormMemory are spooled to temporary files, not held in memory.
+	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
+	if err := r.ParseMultipartForm(uploadFormMemory); err != nil {
+		BadRequest(w, "invalid multipart form or request too large")
+		return
+	}
 
 	// project_id scopes the upload to a space. DMs belong to no space, so it is
 	// optional: an upload without one is stored project-less and reachable only
 	// through the messages that reference it.
 	projectID := r.FormValue("project_id")
-	if projectID == "" {
-		// Try multipart form value.
-		if err := r.ParseMultipartForm(formLimit); err == nil {
-			projectID = r.FormValue("project_id")
-		}
-	}
 
 	// Authorize: user must have read access to the project (same as sending
 	// messages). A project-less upload is a profile write: it needs no
@@ -5700,14 +5706,6 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else if !requireProfileWriter(w, r) {
-		return
-	}
-
-	// Parse multipart form (limit total to the per-file limit times
-	// MaxAttachmentsPerMessage).
-	r.Body = http.MaxBytesReader(w, r.Body, formLimit+1024*1024)
-	if err := r.ParseMultipartForm(formLimit); err != nil {
-		BadRequest(w, "invalid multipart form or request too large")
 		return
 	}
 
@@ -5771,6 +5769,10 @@ func (s *Server) handleAttachmentUpload(w http.ResponseWriter, r *http.Request) 
 		"failures":    failures,
 	})
 }
+
+// uploadFormMemory is how much of an upload's multipart body is held in
+// memory; larger parts are spooled to temporary files by ParseMultipartForm.
+const uploadFormMemory = 32 << 20
 
 // attachmentRejection is a refusal the uploader caused and could fix — a
 // blocked extension, an unreadable type, an oversized file. Anything else is
@@ -5926,7 +5928,8 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	// who reads it and delivers it; a caller who may not read it gets the
 	// same answer as for an unknown id, and its id is never looked up in
 	// the AttachmentStore.
-	if s.attachmentArtifactsReady() {
+	artifactsReady := s.attachmentArtifactsReady()
+	if artifactsReady {
 		switch s.attachmentService().ServeAttachment(w, r, id) {
 		case artifacts.ServeWritten:
 			return
@@ -5940,6 +5943,12 @@ func (s *Server) handleAttachmentDownload(w http.ResponseWriter, r *http.Request
 	}
 
 	if wcs == nil || as == nil {
+		if artifactsReady {
+			// The artifact service answered for this route: an id it does
+			// not know gets the same answer as one the caller may not read.
+			NotFound(w, "Attachment")
+			return
+		}
 		writeError(w, http.StatusServiceUnavailable, "SERVICE_UNAVAILABLE", "Attachments not available", nil)
 		return
 	}

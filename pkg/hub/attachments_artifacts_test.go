@@ -447,3 +447,146 @@ func TestAttachmentArtifacts_StagedForAgent(t *testing.T) {
 	require.NoError(t, err, "the attachment is staged for the agent")
 	assert.Equal(t, "agent bytes", string(got))
 }
+
+// A retry of a send whose upload the first send already bound, with the
+// same idempotency key, gets the replay of the first send, not a refusal.
+func TestAttachmentArtifacts_IdempotentRetryReplays(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "shot.txt", "once")
+	body := map[string]interface{}{"content": "see file", "attachments": []string{id}, "idempotency_key": "retry-" + id}
+
+	first := doRequestAsUser(t, f.srv, f.ua, http.MethodPost, "/api/v1/chat/conversations/"+dm+"/messages", body)
+	require.Equal(t, http.StatusCreated, first.Code, first.Body.String())
+	var sent chatMessageResponse
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &sent))
+	requireMessageScoped(t, st, id, sent.ID)
+	before := f.threadMessageCount(t, dm)
+
+	retry := doRequestAsUser(t, f.srv, f.ua, http.MethodPost, "/api/v1/chat/conversations/"+dm+"/messages", body)
+	require.Equal(t, http.StatusOK, retry.Code, retry.Body.String())
+	var replay chatMessageResponse
+	require.NoError(t, json.Unmarshal(retry.Body.Bytes(), &replay))
+	assert.Equal(t, sent.ID, replay.ID, "the replay names the first message")
+	assert.Equal(t, before, f.threadMessageCount(t, dm), "nothing is sent twice")
+
+	// Without the key, the same id is refused like an unknown one.
+	missing := f.unknownAttachmentAnswer(t, f.ua, dm)
+	requireSameAnswer(t, missing, f.attachmentRefusal(t, f.ua, dm, id))
+}
+
+// downloadAs serves the download route for identity directly (the route's
+// handler, with identity as the request's caller and no credential record,
+// as an internal caller would set it).
+func (f *refFixture) downloadAs(t *testing.T, identity Identity, id string) refAnswer {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/chat/attachments/"+id, nil)
+	req = req.WithContext(contextWithIdentity(req.Context(), identity))
+	rec := httptest.NewRecorder()
+	f.srv.handleAttachmentDownload(rec, req, id)
+	return refAnswer{status: rec.Code, body: rec.Body.String()}
+}
+
+// A user access token reaches attachments only within its boundary, as on
+// the other inbox routes: a project-boundary token with inbox.read reads an
+// attachment of its boundary project while its holder is a member, never
+// one of a direct message between users, and never without inbox.read.
+func TestAttachmentArtifacts_ScopedTokenBoundary(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	dmFile := f.uploadAs(t, f.ua, "", "dm.txt", "direct")
+	f.sendWith(t, f.ua, dm, dmFile)
+	threadFile := f.uploadAs(t, f.ua, f.projA.ID, "thread.txt", "in project A")
+	f.sendWith(t, f.ua, f.topicA, threadFile)
+	threadFileB := f.uploadAs(t, f.ub, f.projB.ID, "b.txt", "in project B")
+	f.sendWith(t, f.ub, f.topicB, threadFileB)
+
+	inA := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read")
+	missing := f.downloadAs(t, inA, uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+
+	got := f.downloadAs(t, inA, threadFile)
+	require.Equal(t, http.StatusOK, got.status, "boundary project, live member: %s", got.body)
+	assert.Equal(t, "in project A", got.body)
+	requireSameAnswer(t, missing, f.downloadAs(t, inA, dmFile))
+
+	// Without inbox.read the token reads no attachment at all.
+	noInbox := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read")
+	requireSameAnswer(t, missing, f.downloadAs(t, noInbox, threadFile))
+
+	// A token of bob bounded to project A, where bob is not a member, reads
+	// nothing there, and nothing of his own project B either.
+	bobInA := selfToken(t, f.ub.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read")
+	requireSameAnswer(t, missing, f.downloadAs(t, bobInA, threadFile))
+	requireSameAnswer(t, missing, f.downloadAs(t, bobInA, threadFileB))
+	bobInB := selfToken(t, f.ub.ID, projectBoundary(f.projB.ID), "project:read", "inbox:read")
+	require.Equal(t, http.StatusOK, f.downloadAs(t, bobInB, threadFileB).status)
+}
+
+// While the artifacts settings section is disabled, stored attachments
+// answer as unknown ids on download and are refused on send like unknown
+// ones; enabled again, they are back.
+func TestAttachmentArtifacts_SettingsSectionDisabled(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	sent := f.uploadAs(t, f.ua, "", "sent.txt", "x")
+	f.sendWith(t, f.ua, dm, sent)
+	unsent := f.uploadAs(t, f.ua, "", "unsent.txt", "y")
+
+	ops := artifactsOps(t, `{"enabled":false}`)
+	f.srv.SetOperationalSettings(ops)
+	require.False(t, f.srv.attachmentArtifactsReady())
+	missing := f.download(t, f.uc, uuid.NewString())
+	requireSameAnswer(t, missing, f.download(t, f.uc, sent))
+	refused := f.unknownAttachmentAnswer(t, f.ua, dm)
+	requireSameAnswer(t, refused, f.attachmentRefusal(t, f.ua, dm, unsent))
+
+	_, err := ops.Update(context.Background(), "artifacts", []byte(`{"enabled":true}`), "test", 0, "managed")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, f.download(t, f.uc, sent).status)
+}
+
+// failBindStore is an artifact store whose BindAttachment always loses, as
+// to a concurrent send of the same upload.
+type failBindStore struct{ artifacts.Store }
+
+func (failBindStore) BindAttachment(context.Context, string, string, string, string, time.Time) error {
+	return artifacts.ErrAttachmentBound
+}
+
+// An attachment whose bind is lost after the message is stored is left out
+// of the message: not in the response, not in history.
+func TestAttachmentArtifacts_LostBindLeftOut(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "race.txt", "lost")
+	f.srv.SetArtifactStore(failBindStore{st})
+
+	resp := f.sendWith(t, f.ua, dm, id)
+	assert.Empty(t, resp.Attachments, "the response names no attachment it could not bind")
+	hist := f.history(t, f.ua, dm)
+	assert.Empty(t, hist.MessageAttachments[resp.ID], "history names none either")
+	a, err := st.GetAttachment(context.Background(), id)
+	require.NoError(t, err)
+	assert.Equal(t, artifacts.ScopeKindUpload, a.ScopeKind, "the upload is still unsent")
+}
+
+// With the artifact service serving the route and no legacy store, an
+// unknown id gets the same answer as an attachment the caller may not read.
+func TestAttachmentArtifacts_NoLegacyStoreAnswersNotFound(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "a.txt", "x")
+	f.sendWith(t, f.ua, dm, id)
+	f.srv.SetAttachmentStore(nil)
+
+	missing := f.download(t, f.ub, uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+	requireSameAnswer(t, missing, f.download(t, f.ub, id))
+	require.Equal(t, http.StatusOK, f.download(t, f.uc, id).status)
+}

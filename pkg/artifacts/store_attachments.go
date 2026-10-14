@@ -75,8 +75,13 @@ func (s *sqlStore) GetAttachment(ctx context.Context, id string) (*Artifact, err
 	if id == "" {
 		return nil, ErrNotFound
 	}
-	return s.getArtifact(ctx, `(id = ? OR legacy_attachment_id = ?) AND scope_kind IN (?, ?)`,
-		id, id, ScopeKindUpload, ScopeKindMessage)
+	// An artifact id wins over a legacy id that happens to equal it, so the
+	// lookup never picks between two rows arbitrarily.
+	a, err := s.getArtifact(ctx, `id = ? AND scope_kind IN (?, ?)`, id, ScopeKindUpload, ScopeKindMessage)
+	if !errors.Is(err, ErrNotFound) {
+		return a, err
+	}
+	return s.getArtifact(ctx, `legacy_attachment_id = ? AND scope_kind IN (?, ?)`, id, ScopeKindUpload, ScopeKindMessage)
 }
 
 // BindAttachment implements Store.

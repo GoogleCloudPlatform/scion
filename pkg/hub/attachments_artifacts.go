@@ -67,11 +67,11 @@ func (s *Server) attachmentUploadsToArtifacts() bool {
 
 // attachmentMaxBytes is the per-file limit of an upload: the artifact file
 // size limit when it is stored as an artifact, MaxAttachmentSize otherwise.
-func (s *Server) attachmentMaxBytes(toArtifacts bool) int64 {
+func (s *Server) attachmentMaxBytes(ctx context.Context, toArtifacts bool) int64 {
 	if !toArtifacts {
 		return MaxAttachmentSize
 	}
-	if n := s.artifactLimits(context.Background()).MaxFileBytes; n > 0 {
+	if n := s.artifactLimits(ctx).MaxFileBytes; n > 0 {
 		return n
 	}
 	return artifacts.DefaultMaxFileBytes
@@ -168,7 +168,7 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 // retireMessageAttachments retires the artifact attachments of message
 // messageID, which was just deleted, so they are unreadable at once. A
 // failure is logged; the maintenance pass retires them later because the
-// message is gone (RetireAttachments).
+// message is gone (artifacts.AttachmentRetirer).
 func (s *Server) retireMessageAttachments(ctx context.Context, messageID string) {
 	if s.ArtifactStore() == nil {
 		return

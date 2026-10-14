@@ -231,6 +231,14 @@ func TestStoreAttachmentRowsHidden(t *testing.T) {
 		if got, err := st.GetAttachment(ctx, "legacy-7"); err != nil || got.ID != sent.ID {
 			t.Errorf("GetAttachment by legacy id = %+v, %v; want %s", got, err, sent.ID)
 		}
+		// A legacy id equal to another row's artifact id never shadows that
+		// row: the artifact id wins.
+		if _, err := db.Exec(s.rebind(`UPDATE artifact SET legacy_attachment_id = ? WHERE id = ?`), up.ID, sent.ID); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := st.GetAttachment(ctx, up.ID); err != nil || got.ID != up.ID {
+			t.Errorf("GetAttachment(%s) = %+v, %v; want the row whose artifact id it is", up.ID, got, err)
+		}
 
 		rows, err := st.ListCandidates(ctx, CandidateQuery{PrincipalKind: PrincipalKindUser, PrincipalRef: "user-1",
 			Limit: 50, Now: time.Now()})

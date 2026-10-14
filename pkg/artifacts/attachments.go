@@ -80,6 +80,10 @@ const (
 	AttachmentUnusable
 	// AttachmentUsable: an unsent upload of the sender.
 	AttachmentUsable
+	// AttachmentSentBySender: an attachment the sender uploaded and already
+	// sent in a message. It is not usable again; the host may let a retry
+	// of the send that bound it through to its idempotency check.
+	AttachmentSentBySender
 )
 
 // ServeOutcome is what ServeAttachment did.
@@ -148,7 +152,8 @@ func (s *Service) CreateAttachment(ctx context.Context, name, mediaType string, 
 
 // UsableAttachment reports whether id names an unsent upload of the sender
 // (senderKind, senderRef), for send validation before the message is
-// stored. It changes nothing; BindAttachment decides under the lock.
+// stored, or an attachment the sender already sent (AttachmentSentBySender).
+// It changes nothing; BindAttachment decides under the lock.
 func (s *Service) UsableAttachment(ctx context.Context, id, senderKind, senderRef string) (AttachmentInfo, AttachmentState, error) {
 	b, ok := s.backend()
 	if !ok || !canonicalID(id) {
@@ -161,8 +166,11 @@ func (s *Service) UsableAttachment(ctx context.Context, id, senderKind, senderRe
 	if err != nil {
 		return AttachmentInfo{}, AttachmentAbsent, err
 	}
-	if a.ScopeKind != ScopeKindUpload || a.OwnerKind != senderKind || a.OwnerRef != senderRef ||
-		a.ScopeRef != PrincipalRef(senderKind, senderRef) {
+	owned := a.OwnerKind == senderKind && a.OwnerRef == senderRef
+	if a.ScopeKind == ScopeKindMessage && owned {
+		return AttachmentInfo{}, AttachmentSentBySender, nil
+	}
+	if a.ScopeKind != ScopeKindUpload || !owned || a.ScopeRef != PrincipalRef(senderKind, senderRef) {
 		return AttachmentInfo{}, AttachmentUnusable, nil
 	}
 	f, err := attachmentFile(ctx, b, a)
@@ -346,8 +354,14 @@ func retireScope(ctx context.Context, st Store, kind, ref string) (int, error) {
 }
 
 // scopePageSize is how many message refs the maintenance pass asks the
-// ScopeChecker about at once.
-const scopePageSize = 100
+// ScopeChecker about at once, and maxScopePages how many such pages one
+// pass checks, so a pass costs the same however many messages have
+// attachments; the next pass goes on where it stopped. Variables so tests
+// can use small pages.
+var (
+	scopePageSize = 100
+	maxScopePages = 10
+)
 
 // maxRetireBatches bounds the batches of unsent uploads one pass retires,
 // so one pass stays short; the next pass goes on.
@@ -360,16 +374,27 @@ type RetireAttachmentsResult struct {
 	// Orphaned counts message attachments retired because their message
 	// is gone.
 	Orphaned int
+	// Checked counts the message refs asked about.
+	Checked int
 }
 
-// RetireAttachments runs one attachment maintenance pass at now: it retires
-// uploads not sent within UploadTTL, and, when checker is not nil, the
-// attachments of every message the checker reports gone
-// (ScopesExist with MessageScopeRef refs). The second covers messages
-// removed without the delete hook, such as store-level purges. A ref the
-// checker does not answer counts as existing. A checker error stops the
-// pass and changes nothing more.
-func RetireAttachments(ctx context.Context, st Store, checker ScopeChecker, now time.Time) (RetireAttachmentsResult, error) {
+// AttachmentRetirer runs the attachment maintenance pass and keeps, between
+// passes, the message ref the last one stopped after. The zero value starts
+// from the beginning. It is not safe for concurrent use.
+type AttachmentRetirer struct {
+	cursor string
+}
+
+// Retire runs one attachment maintenance pass at now: it retires uploads
+// not sent within UploadTTL, and, when checker is not nil, the attachments
+// of messages the checker reports gone (ScopesExist with MessageScopeRef
+// refs), checking at most maxScopePages pages of message refs from where
+// the last pass stopped and wrapping at the end. The second covers
+// messages removed without the delete hook, such as store-level purges. A
+// ref the checker does not answer counts as existing. A checker error
+// stops the pass, changes nothing more, and the next pass retries the same
+// page.
+func (r *AttachmentRetirer) Retire(ctx context.Context, st Store, checker ScopeChecker, now time.Time) (RetireAttachmentsResult, error) {
 	var res RetireAttachmentsResult
 	if st == nil {
 		return res, nil
@@ -387,13 +412,13 @@ func RetireAttachments(ctx context.Context, st Store, checker ScopeChecker, now 
 	if checker == nil {
 		return res, nil
 	}
-	after := ""
-	for {
-		page, err := st.ListLiveScopeRefs(ctx, ScopeKindMessage, after, scopePageSize)
+	for range maxScopePages {
+		page, err := st.ListLiveScopeRefs(ctx, ScopeKindMessage, r.cursor, scopePageSize)
 		if err != nil {
 			return res, err
 		}
 		if len(page) == 0 {
+			r.cursor = ""
 			return res, nil
 		}
 		refs := make([]string, len(page))
@@ -404,6 +429,7 @@ func RetireAttachments(ctx context.Context, st Store, checker ScopeChecker, now 
 		if err != nil {
 			return res, err
 		}
+		res.Checked += len(page)
 		for i, id := range page {
 			if e, known := exists[refs[i]]; known && !e {
 				n, err := retireScope(ctx, st, ScopeKindMessage, id)
@@ -414,10 +440,12 @@ func RetireAttachments(ctx context.Context, st Store, checker ScopeChecker, now 
 			}
 		}
 		if len(page) < scopePageSize {
+			r.cursor = ""
 			return res, nil
 		}
-		after = page[len(page)-1]
+		r.cursor = page[len(page)-1]
 	}
+	return res, nil
 }
 
 // CodeAttachmentNotShareable is the error code of the 409 a share, version

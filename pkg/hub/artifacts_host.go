@@ -641,21 +641,71 @@ func (h *artifactHost) AdministersScope(ctx context.Context, scopeRef string) bo
 
 var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 
-// PermitsMessageRead implements artifacts.MessageScopeHost: whether the
-// caller's credential allows reading messages at all. A session user or the
-// dev user may; a scoped user access token may when its ceiling allows
-// inbox.read. Every other identity is refused: agents read attachments
-// only through the fetch path of a later phase (ptone/scion#4596).
-func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
-	identity := GetIdentityFromContext(ctx)
-	if isNilIdentity(identity) {
+// tokenMayReadMessage applies a user access token's boundary to msg, with
+// the rule the conversation routes apply (tokenMayUseConversation for
+// inbox.read): the project of the message's conversation, or, for a
+// message stored without one, of its thread (a DM key names its peer agent's
+// project, or none for two users; a topic its project), must pass the
+// token's self-scope check, and a DM with an agent also needs agent:read on
+// that agent. Every lookup failure answers false.
+func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
+	s := h.server
+	if token == nil || msg == nil {
 		return false
 	}
-	switch id := identity.(type) {
-	case *AuthenticatedUser, *DevUser:
-		return id.ID() != ""
-	case *ScopedUserIdentity:
-		return id.ID() != "" && id.Ceiling().Allows(permInboxRead)
+	var conv *store.Conversation
+	switch {
+	case msg.ConversationID != "":
+		c, err := s.store.GetConversation(ctx, msg.ConversationID)
+		if err != nil || c == nil {
+			return false
+		}
+		conv = c
+	case strings.HasPrefix(msg.ThreadID, "dm:"):
+		conv = &store.Conversation{Kind: "direct", ExternalRef: msg.ThreadID}
+	case msg.ThreadID != "":
+		s.mu.RLock()
+		wcs := s.webChatStore
+		s.mu.RUnlock()
+		if wcs == nil {
+			return false
+		}
+		topic, err := wcs.GetTopic(ctx, msg.ThreadID)
+		if err != nil || topic == nil || topic.ProjectID == "" {
+			return false
+		}
+		pid := topic.ProjectID
+		conv = &store.Conversation{Kind: "group", ProjectID: &pid}
+	default:
+		return false
+	}
+	ok, err := s.tokenMayUseConversation(ctx, token, s.newSelfScopeCheck(ctx, token, permInboxRead), conv)
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment token boundary check failed", "message", msg.ID, "error", err)
+		return false
+	}
+	return ok
+}
+
+// PermitsMessageRead implements artifacts.MessageScopeHost: whether the
+// caller's credential allows reading messages at all, classified the way
+// the inbox and conversation routes classify it (inboxCredentialOf). A
+// session (the session allowlist) of a user or the dev user may. A user
+// access token may when its ceiling allows inbox.read; which messages it
+// reaches is then limited by its boundary, per message, in MayReadMessage.
+// Every other credential is refused: agents read attachments only through
+// the fetch path of a later phase (ptone/scion#4596).
+func (h *artifactHost) PermitsMessageRead(ctx context.Context) bool {
+	cred, token := inboxCredentialOf(ctx)
+	switch cred {
+	case inboxCredentialSession:
+		switch id := GetIdentityFromContext(ctx).(type) {
+		case *AuthenticatedUser, *DevUser:
+			return id.ID() != ""
+		}
+		return false
+	case inboxCredentialToken:
+		return token != nil && token.ID() != "" && token.Ceiling().Allows(permInboxRead)
 	default:
 		return false
 	}
@@ -696,6 +746,13 @@ func (h *artifactHost) MayReadMessage(ctx context.Context, messageID string) boo
 		if ext != nil && ext.DeletedAt != nil {
 			return false
 		}
+	}
+	// A user access token reaches only the messages its boundary admits,
+	// as on the inbox routes: a project-boundary token the messages of its
+	// boundary project while its holder is a member, never a direct message
+	// between users or a message of another project.
+	if cred, token := inboxCredentialOf(ctx); cred == inboxCredentialToken && !h.tokenMayReadMessage(ctx, token, msg) {
+		return false
 	}
 	if s.canReadNativeMessage(ctx, user, msg) {
 		return true

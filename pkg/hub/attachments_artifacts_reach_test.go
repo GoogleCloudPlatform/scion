@@ -34,7 +34,8 @@ import (
 //	sendAgentRouted -> stageChatAttachments -> stageArtifactAttachment -> OpenBoundAttachment
 //
 // and nothing else in the package (no handler, no route) may call any link
-// of it. A new caller fails this test and needs a security review.
+// of it; nor may any other package of the module reference the opener. A
+// new caller fails this test and needs a security review.
 func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
 	callers := callersInPackage(t, ".")
 	want := map[string][]string{
@@ -48,13 +49,99 @@ func TestOpenBoundAttachmentReachableOnlyFromSendPath(t *testing.T) {
 			t.Errorf("%s is called from %v; want only %v", callee, got, wantCallers)
 		}
 	}
-	// The functions of the chain are never used as values (a handler
-	// registered with one would escape the call check above).
-	for name, n := range valueUsesInPackage(t, ".", []string{"stageArtifactAttachment", "stageChatAttachments"}) {
+	// The functions of the chain, the opener included, are never used as
+	// values (a handler or method value made from one would escape the
+	// call check above).
+	for name, n := range valueUsesInPackage(t, ".", []string{"OpenBoundAttachment", "stageArtifactAttachment", "stageChatAttachments"}) {
 		if n > 0 {
 			t.Errorf("%s is used as a value %d times; it may only be called", name, n)
 		}
 	}
+	// The opener is an exported method of the artifact service, so the rest
+	// of the module is checked too: outside its own declaration, the only
+	// reference to it in non-test code is the call above.
+	refs := moduleReferences(t, "../..", "OpenBoundAttachment")
+	if want := []string{"pkg/hub/attachments_artifacts.go:stageArtifactAttachment"}; strings.Join(refs, ",") != strings.Join(want, ",") {
+		t.Errorf("OpenBoundAttachment is referenced at %v; want only %v", refs, want)
+	}
+}
+
+// moduleReferences returns, sorted, "<file>:<function>" for every reference
+// to name (an identifier or a selected name, called or not) in the non-test
+// Go files of the module rooted at root, skipping nested modules, hidden
+// directories, testdata, vendor and node_modules. A function's own
+// declaration name is not a reference; a reference outside any function is
+// reported with the function "<file scope>".
+func moduleReferences(t *testing.T, root, name string) []string {
+	t.Helper()
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(absRoot, "go.mod")); err != nil {
+		t.Fatalf("%s is not the module root: %v", absRoot, err)
+	}
+	var out []string
+	fset := token.NewFileSet()
+	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			base := d.Name()
+			if path != absRoot {
+				if strings.HasPrefix(base, ".") || base == "testdata" || base == "vendor" || base == "node_modules" {
+					return filepath.SkipDir
+				}
+				if _, err := os.Stat(filepath.Join(path, "go.mod")); err == nil {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(absRoot, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		declNames := map[ast.Node]bool{}
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				declNames[fn.Name] = true
+			}
+		}
+		seen := map[ast.Node]bool{}
+		record := func(fn string, n ast.Node) {
+			ast.Inspect(n, func(m ast.Node) bool {
+				id, ok := m.(*ast.Ident)
+				if !ok || id.Name != name || declNames[id] || seen[id] {
+					return true
+				}
+				seen[id] = true
+				out = append(out, rel+":"+fn)
+				return true
+			})
+		}
+		for _, decl := range f.Decls {
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				record(fn.Name.Name, fn.Body)
+			}
+		}
+		record("<file scope>", f)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("scan module: %v", err)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // nonTestGoFiles parses the package's non-test Go files in dir.

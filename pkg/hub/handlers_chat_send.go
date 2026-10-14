@@ -328,6 +328,25 @@ func (s *Server) dmPeerLookupFailure(ctx context.Context, user UserIdentity, key
 // a send by user and returns the trimmed content and the attachment
 // references. It writes nothing, so a refused send leaves no trace.
 func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, []AttachmentRef, *chatSendError) {
+	return s.validateChatSendInputMode(ctx, user, target, in, false)
+}
+
+// prevalidateChatSendInput is validateChatSendInput for the HTTP handler's
+// check before its idempotency lookup. It differs in one case: an
+// attachment stored as an artifact that this sender already sent passes,
+// because a retry of the send that bound it carries the same id and must
+// reach the idempotency lookup (and get the replay, or 409 while the first
+// send is still running) instead of a 400. The send itself always runs
+// validateChatSendInput, which refuses it. The references it returns are
+// incomplete and must not be used.
+func (s *Server) prevalidateChatSendInput(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput) (string, *chatSendError) {
+	content, _, serr := s.validateChatSendInputMode(ctx, user, target, in, true)
+	return content, serr
+}
+
+// validateChatSendInputMode is validateChatSendInput; with replay set, an
+// artifact attachment already sent by user passes (prevalidateChatSendInput).
+func (s *Server) validateChatSendInputMode(ctx context.Context, user UserIdentity, target *chatSendTarget, in chatSendInput, replay bool) (string, []AttachmentRef, *chatSendError) {
 	content := strings.TrimSpace(in.Content)
 	if content == "" && len(in.Attachments) == 0 {
 		return "", nil, chatSendValidationError("content or attachments required")
@@ -368,18 +387,22 @@ func (s *Server) validateChatSendInput(ctx context.Context, user UserIdentity, t
 			// usable only as an unsent upload of the sender, in any
 			// conversation the sender may post to; sending binds it to the
 			// message. Any other attachment of the artifact service is
-			// refused like a missing one, and never looked up below.
+			// refused like a missing one, and never looked up below. A
+			// failed lookup falls through to the AttachmentStore, which
+			// never holds an artifact id, so a legacy send does not depend
+			// on the artifact store being healthy.
 			if svc != nil {
 				info, state, err := svc.UsableAttachment(ctx, aid, artifacts.PrincipalKindUser, user.ID())
-				reason := ""
-				switch {
-				case err != nil:
-					reason = "attachment lookup failed: " + err.Error()
-				case state == artifacts.AttachmentUnusable:
-					reason = "attachment is not an unsent upload of the sender"
+				if err != nil {
+					slog.WarnContext(ctx, "chat v2 artifact attachment lookup failed; trying the attachment store",
+						"attachment", aid, "error", err)
+					state = artifacts.AttachmentAbsent
 				}
-				if reason != "" {
-					logReferenceRefused(ctx, chatSendPath(target.Key), reason, user)
+				if replay && state == artifacts.AttachmentSentBySender {
+					continue
+				}
+				if state == artifacts.AttachmentUnusable || state == artifacts.AttachmentSentBySender {
+					logReferenceRefused(ctx, chatSendPath(target.Key), "attachment is not an unsent upload of the sender", user)
 					return "", nil, chatSendValidationError(fmt.Sprintf("attachment %q is not available in this conversation", aid))
 				}
 				if state == artifacts.AttachmentUsable {

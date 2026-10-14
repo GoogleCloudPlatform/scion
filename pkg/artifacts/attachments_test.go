@@ -22,6 +22,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -367,7 +368,8 @@ func TestAttachmentDelivery(t *testing.T) {
 }
 
 // TestUsableAttachment: send validation accepts only an unsent upload of
-// the sender, and reports an id it does not know as absent.
+// the sender, tells the sender's own sent attachment apart (for retries),
+// and reports an id it does not know as absent.
 func TestUsableAttachment(t *testing.T) {
 	f := newAttachmentFixture(t, false)
 	ctx := context.Background()
@@ -381,8 +383,11 @@ func TestUsableAttachment(t *testing.T) {
 	if _, state, err := f.svc.UsableAttachment(ctx, up, outside.kind, outside.ref); err != nil || state != AttachmentUnusable {
 		t.Errorf("another user's upload = %d, %v; want AttachmentUnusable", state, err)
 	}
-	if _, state, err := f.svc.UsableAttachment(ctx, sent, userU.kind, userU.ref); err != nil || state != AttachmentUnusable {
-		t.Errorf("a sent attachment = %d, %v; want AttachmentUnusable", state, err)
+	if _, state, err := f.svc.UsableAttachment(ctx, sent, userU.kind, userU.ref); err != nil || state != AttachmentSentBySender {
+		t.Errorf("an attachment the sender already sent = %d, %v; want AttachmentSentBySender", state, err)
+	}
+	if _, state, err := f.svc.UsableAttachment(ctx, sent, outside.kind, outside.ref); err != nil || state != AttachmentUnusable {
+		t.Errorf("an attachment someone else sent = %d, %v; want AttachmentUnusable", state, err)
 	}
 	if _, state, err := f.svc.UsableAttachment(ctx, uuid.NewString(), userU.kind, userU.ref); err != nil || state != AttachmentAbsent {
 		t.Errorf("unknown id = %d, %v; want AttachmentAbsent", state, err)
@@ -502,8 +507,9 @@ func TestRetireAttachments(t *testing.T) {
 		live := seedAttachment(t, st, PrincipalKindUser, "u", ScopeKindMessage, "msg-live", now)
 		unanswered := seedAttachment(t, st, PrincipalKindUser, "u", ScopeKindMessage, "msg-unknown", now)
 
+		var r AttachmentRetirer
 		failing := &fakeScopeChecker{err: errors.New("down")}
-		res, err := RetireAttachments(ctx, st, failing, now)
+		res, err := r.Retire(ctx, st, failing, now)
 		if err == nil || res.Unsent != 1 || res.Orphaned != 0 {
 			t.Fatalf("with a failing checker = %+v, %v; want the stale upload only and an error", res, err)
 		}
@@ -514,9 +520,9 @@ func TestRetireAttachments(t *testing.T) {
 		checker := &fakeScopeChecker{exists: map[string]bool{
 			MessageScopeRef("msg-gone"): false, MessageScopeRef("msg-live"): true,
 		}}
-		res, err = RetireAttachments(ctx, st, checker, now)
+		res, err = r.Retire(ctx, st, checker, now)
 		if err != nil || res.Orphaned != 1 || res.Unsent != 0 {
-			t.Fatalf("RetireAttachments = %+v, %v; want one orphaned", res, err)
+			t.Fatalf("Retire = %+v, %v; want one orphaned", res, err)
 		}
 		for _, a := range []*Artifact{stale, gone} {
 			if _, err := st.GetAttachment(ctx, a.ID); !errors.Is(err, ErrNotFound) {
@@ -535,8 +541,54 @@ func TestRetireAttachments(t *testing.T) {
 				}
 			}
 		}
-		if res, err := RetireAttachments(ctx, st, nil, now); err != nil || res.Orphaned != 0 {
+		if res, err := r.Retire(ctx, st, nil, now); err != nil || res.Orphaned != 0 {
 			t.Errorf("without a checker = %+v, %v", res, err)
+		}
+	})
+}
+
+// TestRetireAttachmentsBoundedPerPass: one pass asks about at most
+// maxScopePages pages of message refs, and the next pass goes on after the
+// last ref the previous one checked, wrapping at the end.
+func TestRetireAttachmentsBoundedPerPass(t *testing.T) {
+	forEachBackend(t, func(t *testing.T, _ *sql.DB, st Store, _ func() *sql.DB) {
+		oldSize, oldPages := scopePageSize, maxScopePages
+		scopePageSize, maxScopePages = 2, 1
+		t.Cleanup(func() { scopePageSize, maxScopePages = oldSize, oldPages })
+		ctx := context.Background()
+		now := time.Now()
+		gone := map[string]bool{}
+		for _, m := range []string{"msg-a", "msg-b", "msg-c", "msg-d", "msg-e"} {
+			seedAttachment(t, st, PrincipalKindUser, "u", ScopeKindMessage, m, now)
+			gone[MessageScopeRef(m)] = false
+		}
+		checker := &fakeScopeChecker{exists: gone}
+		var r AttachmentRetirer
+		var asked [][]string
+		for pass, want := range []int{2, 2, 1} {
+			checker.asked = nil
+			res, err := r.Retire(ctx, st, checker, now)
+			if err != nil || res.Checked != want || res.Orphaned != want {
+				t.Fatalf("pass %d = %+v, %v; want %d checked and retired", pass+1, res, err, want)
+			}
+			if len(checker.asked) != 1 {
+				t.Fatalf("pass %d asked %d pages, want 1", pass+1, len(checker.asked))
+			}
+			asked = append(asked, checker.asked[0])
+		}
+		if got := fmt.Sprint(asked); got != "[[message:msg-a message:msg-b] [message:msg-c message:msg-d] [message:msg-e]]" {
+			t.Errorf("pages asked = %s", got)
+		}
+		left, err := st.ListLiveScopeRefs(ctx, ScopeKindMessage, "", 10)
+		if err != nil || len(left) != 0 {
+			t.Errorf("live message refs after three passes = %v, %v", left, err)
+		}
+		// After the last page the position wraps: a new message is found by
+		// the next pass from the start.
+		seedAttachment(t, st, PrincipalKindUser, "u", ScopeKindMessage, "msg-0", now)
+		checker.exists[MessageScopeRef("msg-0")] = false
+		if res, err := r.Retire(ctx, st, checker, now); err != nil || res.Orphaned != 1 {
+			t.Errorf("pass after wrap = %+v, %v; want msg-0 retired", res, err)
 		}
 	})
 }

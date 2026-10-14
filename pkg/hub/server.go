@@ -1799,6 +1799,9 @@ type Server struct {
 	// artifactBlobSweeper keeps the blob sweep's position between passes
 	// of the artifact maintenance loop (its only user).
 	artifactBlobSweeper artifacts.BlobSweeper
+	// artifactAttachmentRetirer keeps the attachment retirement's position
+	// between passes of the artifact maintenance loop (its only user).
+	artifactAttachmentRetirer artifacts.AttachmentRetirer
 
 	// Attachment file store for chat attachments (W7). Nil = attachments disabled.
 	// HA limitation: LocalDiskAttachmentStore is single-node only; see attachments.go.

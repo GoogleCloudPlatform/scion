@@ -210,13 +210,15 @@ func (s *Server) reconcileArtifactOwners(ctx context.Context, st artifacts.Store
 }
 
 // retireArtifactAttachments runs one attachment maintenance pass
-// (artifacts.RetireAttachments) with this server's artifacts.Host as the
+// (artifacts.AttachmentRetirer) with this server's artifacts.Host as the
 // scope checker: uploads not sent within artifacts.UploadTTL are retired,
 // and so are the attachments of messages that are gone, including those
-// removed without the delete hook. A failure is logged once and the rest
-// of the pass goes on; the next pass retries.
+// removed without the delete hook, checking a bounded number of messages
+// per pass from where the last pass stopped. A failure is logged once and
+// the rest of the pass goes on; the next pass retries. Only the
+// maintenance loop calls it, one pass at a time.
 func (s *Server) retireArtifactAttachments(ctx context.Context, st artifacts.Store, now time.Time) {
-	res, err := artifacts.RetireAttachments(ctx, st, newArtifactHost(s), now)
+	res, err := s.artifactAttachmentRetirer.Retire(ctx, st, newArtifactHost(s), now)
 	if err != nil {
 		slog.WarnContext(ctx, "artifacts: attachment retirement failed", "error", err,
 			"unsent", res.Unsent, "orphaned", res.Orphaned)
