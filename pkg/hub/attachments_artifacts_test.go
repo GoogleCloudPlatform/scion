@@ -26,6 +26,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -564,6 +565,66 @@ func TestAttachmentArtifacts_TokensReadNoArtifactAttachments(t *testing.T) {
 	}
 }
 
+// tokenRequest serves the chat conversation routes for a user access token:
+// the chat route wrapper and the handler, with token as the request's caller.
+func (f *refFixture) tokenRequest(t *testing.T, token *ScopedUserIdentity, method, path string, body interface{}) refAnswer {
+	t.Helper()
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		require.NoError(t, err)
+	}
+	req := httptest.NewRequest(method, path, bytes.NewReader(payload))
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	rec := httptest.NewRecorder()
+	f.srv.chatRoute(f.srv.handleChatConversationRoutes)(rec, req.WithContext(contextWithIdentity(req.Context(), token)))
+	return refAnswer{status: rec.Code, body: rec.Body.String()}
+}
+
+// A user access token cannot send an attachment stored as an artifact: an
+// upload its holder made in a session gets the same answer as an unknown id
+// when the token names it, and stays an unsent upload the session can send.
+func TestAttachmentArtifacts_TokenCannotSendArtifactAttachment(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	id := f.uploadAs(t, f.ua, f.projA.ID, "draft.txt", "session upload")
+	token := selfToken(t, f.ua.ID, projectBoundary(f.projA.ID), "project:read", "inbox:read", "inbox:write")
+	path := "/api/v1/chat/conversations/" + f.topicA + "/messages"
+
+	unknown := uuid.NewString()
+	missing := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{unknown}})
+	require.NotEqual(t, http.StatusCreated, missing.status, missing.body)
+	got := f.tokenRequest(t, token, http.MethodPost, path, map[string]interface{}{"content": "see file", "attachments": []string{id}})
+	require.Equal(t, missing.status, got.status, got.body)
+	require.Equal(t, strings.ReplaceAll(missing.body, unknown, "ID"), strings.ReplaceAll(got.body, id, "ID"), "the same answer as an unknown id")
+
+	// Still an unsent upload of alice: her session sends it.
+	resp := f.sendWith(t, f.ua, f.topicA, id)
+	require.Len(t, resp.Attachments, 1)
+}
+
+// A user access token's history of a conversation does not list attachments
+// stored as artifacts; the session's history of the same message does.
+func TestAttachmentArtifacts_TokenHistoryOmitsArtifactAttachments(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	dm := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	id := f.uploadAs(t, f.ua, "", "listed.txt", "for history")
+	resp := f.sendWith(t, f.ua, dm, id)
+	require.Len(t, f.history(t, f.ua, dm).MessageAttachments[resp.ID], 1, "the session's history lists it")
+
+	token := selfToken(t, f.ua.ID, hubBoundary(), "inbox:read")
+	got := f.tokenRequest(t, token, http.MethodGet, "/api/v1/chat/conversations/"+dm+"/messages", nil)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	var hist chatHistoryResponse
+	require.NoError(t, json.Unmarshal([]byte(got.body), &hist))
+	require.NotEmpty(t, hist.Messages, "the token reads the conversation")
+	require.Empty(t, hist.MessageAttachments[resp.ID], "the token's history lists no attachment stored as an artifact")
+}
+
 // With the experiment on, a user access token's upload is stored in the
 // AttachmentStore, not in the artifact service, and the token reads it back
 // under the AttachmentStore's rule, as with the experiment off.
@@ -595,7 +656,7 @@ func TestAttachmentArtifacts_TokenUploadsUseAttachmentStore(t *testing.T) {
 // caller it lets read attachments: a session. A user access token and a
 // federated user upload to the AttachmentStore as with the experiment off,
 // instead of storing a file they could not read back (or failing).
-func TestAttachmentArtifacts_FederatedUploadsUseAttachmentStore(t *testing.T) {
+func TestAttachmentArtifacts_NonSessionUploadsUseAttachmentStore(t *testing.T) {
 	f := newRefFixture(t)
 	enableAttachmentArtifacts(t, f)
 	ctx := context.Background()

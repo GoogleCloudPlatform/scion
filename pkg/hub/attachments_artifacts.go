@@ -154,6 +154,11 @@ func (s *Server) mergeArtifactAttachments(ctx context.Context, msgIDs []string, 
 	if len(msgIDs) == 0 || !s.attachmentArtifactsReady() {
 		return byMessage
 	}
+	// Only a caller the artifact service lets read attachments (a session)
+	// sees them listed; user access tokens do not (ptone/scion#4596).
+	if !newArtifactHost(s).PermitsMessageRead(ctx) {
+		return byMessage
+	}
 	found, err := s.attachmentService().MessageAttachments(ctx, msgIDs)
 	if err != nil {
 		s.messageLog.Error("Failed to list message attachments", "error", err)
