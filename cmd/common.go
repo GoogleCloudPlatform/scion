@@ -271,7 +271,7 @@ type HubContext struct {
 	// CredentialKind mirrors hubsync.HubContext.CredentialKind — see its doc
 	// for what it records and why (ptone/scion#2146). Zero value
 	// (hubsync.CredentialKindUnknown) on any HubContext not built via
-	// CheckHubAvailability* (e.g. a test double).
+	// requireHub (e.g. a test double).
 	CredentialKind hubsync.CredentialKind
 	// TargetProfile names the target-hub profile this context was built
 	// from (profileAgentHubContext), or is empty. A profile context has no
@@ -331,59 +331,31 @@ func loadSettingsForTarget(resolvedPath string) (*config.Settings, error) {
 	return config.LoadSettings(resolvedPath)
 }
 
-// CheckHubAvailability checks if Hub integration is enabled and returns a ready-to-use
-// Hub context if available. Returns nil if Hub should not be used (not enabled or --no-hub flag is set).
+// requireHub returns a ready-to-use Hub context for projectPath. Every
+// agent operation goes through a hub, so it never returns a nil HubContext
+// without an error:
+//   - no hub configured: errHubNotConfigured ("No hub selected. Add one with
+//     'scion hub add <name> <url>' ..."), or the local-only mode migration
+//     text for a project that still has local-mode agents;
+//   - the local workstation endpoint does not answer: "Local scion server
+//     is not running. Start it with 'scion server start'.";
+//   - a remote hub is unreachable: the error with the hub-check hint;
+//   - the project was unlinked (hub.linked=false): hubsync.ErrProjectUnlinked.
 //
-// IMPORTANT: When Hub is enabled, this function will return an error if the Hub is
-// unavailable or misconfigured. There is NO silent fallback to local mode - this is
-// by design to ensure users always know which mode they're operating in.
-//
-// This function now performs full Hub sync checks via hubsync.EnsureHubReady:
-// - Verifies project registration (prompts to register if not)
-// - Compares local and Hub agents (prompts to sync if mismatched)
-func CheckHubAvailability(projectPath string) (*HubContext, error) {
-	return CheckHubAvailabilityWithOptions(projectPath, false)
-}
-
-// CheckHubAvailabilityWithOptions is like CheckHubAvailability but allows skipping sync.
-func CheckHubAvailabilityWithOptions(projectPath string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(projectPath, nil, skipSync)
-}
-
-// CheckHubAvailabilityForAgent checks Hub availability for an operation on a specific agent.
-// The targetAgent parameter specifies the agent being operated on, which will be excluded
-// from sync requirements. This allows operations like delete to proceed without first
-// syncing the target agent (e.g., deleting a local-only agent without registering it).
-func CheckHubAvailabilityForAgent(projectPath, targetAgent string, skipSync bool) (*HubContext, error) {
-	return CheckHubAvailabilityForAgents(projectPath, []string{targetAgent}, skipSync)
-}
-
-// CheckHubAvailabilityForAgents checks Hub availability for operations on one or more agents.
-// All target agents are excluded from sync requirements so batch operations are not blocked
-// by sync drift on the exact agents being modified.
-func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, skipSync bool) (*HubContext, error) {
-	// A target-hub profile names the hub and, with --project, the project
-	// on it: no hub sync and no local project (ptone/scion#4240).
+// A target-hub profile (--hub-profile) names the hub and, with --project,
+// the project on it: no hub sync and no local project (ptone/scion#4240).
+// On the local workstation hub an unregistered project is linked without a
+// prompt (see hubsync.EnsureHubReady). There is no per-command agent
+// reconcile.
+func requireHub(projectPath string) (*HubContext, error) {
 	if hubProfileSelected() {
 		return profileAgentHubContext()
 	}
-	targetAgent := ""
-	if len(excludedAgents) > 0 {
-		targetAgent = excludedAgents[0] // compatibility field for older internals
-	}
-
 	opts := hubsync.EnsureHubReadyOptions{
 		AutoConfirm:      autoConfirm,
 		NonInteractive:   nonInteractive,
-		NoHub:            noHub,
 		EndpointOverride: hubEndpoint,
-		SkipSync:         skipSync,
-		TargetAgent:      targetAgent,
-		ExcludedAgents:   excludedAgents,
 		ExplicitProject:  explicitProjectTargetFor(projectPath),
-		// A project from the current context names a project on a
-		// specific hub, so the hub.enabled gate does not apply.
-		ExplicitHub: isContextProject(projectPath),
 		// The hub selected with 'scion use' never links or registers a
 		// project that is already linked to a hub.
 		HubFromContext: hubSource == targetSourceContext,
@@ -393,26 +365,11 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 		// print JSON on stdout. (The context hub always has an entry, so
 		// no new-hub line is printed here.)
 		RecordLink: contextLinkRecorder(os.Stderr, os.Stderr),
-		// On the local workstation hub, link an unregistered project
-		// without prompting; a remote hub keeps the prompt.
-		AutoLinkLocal: true,
-	}
-
-	// A hub project reference needs hub mode: offer to enable it (when
-	// logged in, interactively) or name 'scion hub enable' (#3533).
-	if !noHub && !opts.ExplicitHub && projectPath != "" && hubsync.IsHubProjectRef(projectPath) {
-		if err := ensureHubModeForHubProjectRefForInvocation(projectPath); err != nil {
-			return nil, err
-		}
 	}
 
 	hubCtx, err := hubsync.EnsureHubReady(projectPath, opts)
 	if err != nil {
 		return nil, err
-	}
-
-	if hubCtx == nil {
-		return nil, nil
 	}
 
 	// Convert hubsync.HubContext to cmd.HubContext
@@ -428,32 +385,10 @@ func CheckHubAvailabilityForAgents(projectPath string, excludedAgents []string, 
 	}, nil
 }
 
-// errHubNotConfigured is returned by requireHub when the command needs a hub
-// but none is in use (hub not enabled, or --no-hub was given).
-var errHubNotConfigured error = hubNotConfiguredError{}
-
-// hubNotConfiguredError is the type of errHubNotConfigured. Its message is
-// a full sentence that names the ways to select a hub.
-type hubNotConfiguredError struct{}
-
-func (hubNotConfiguredError) Error() string {
-	return "No hub selected. Add one with 'scion hub add <name> <url>', start a local hub with 'scion server start', or pick one with 'scion use --hub <name>'."
-}
-
-// requireHub is CheckHubAvailability for commands that only work against a
-// hub. It never returns a nil HubContext without an error: when no hub is in
-// use it returns errHubNotConfigured, so callers can use hubCtx.Client
-// directly.
-func requireHub(projectPath string) (*HubContext, error) {
-	hubCtx, err := CheckHubAvailability(projectPath)
-	if err != nil {
-		return nil, err
-	}
-	if hubCtx == nil {
-		return nil, errHubNotConfigured
-	}
-	return hubCtx, nil
-}
+// errHubNotConfigured is returned by requireHub when no hub endpoint is
+// configured (flag, environment, settings or the hub list). It matches every
+// hubsync.HubNotConfiguredError through errors.Is.
+var errHubNotConfigured = hubsync.ErrHubNotConfigured
 
 // detectCrossProjectTarget reports the target project when the caller is an
 // agent that set --project to a DIFFERENT project than its own. Returns ""
@@ -709,10 +644,6 @@ func getProjectIDForKeys(hubCtx *HubContext) (string, error) {
 // git remote. Every other branch (context/settings short-circuit, missing
 // remote, zero matches) is identical for both callers.
 func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bool) (string, error) {
-	if hubCtx == nil {
-		return "", errors.New("no hub context available to resolve the project ID")
-	}
-
 	// First, check if ProjectID is already set in the context
 	if hubCtx.ProjectID != "" {
 		return hubCtx.ProjectID, nil
@@ -738,11 +669,7 @@ func resolveProjectIDByGitRemote(hubCtx *HubContext, failOnAmbiguousGitRemote bo
 			"Link it with 'scion hub link', or pass --project <slug|id> to target a hub project")
 	}
 	if gitRemote == "" {
-		msg := "no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub"
-		if !config.IsHubManagedAgent() {
-			msg += ", or use --no-hub for local-only mode"
-		}
-		return "", errors.New(msg)
+		return "", errors.New("no git origin remote found for this project.\n\nThe Hub uses the origin remote URL to identify projects.\nRun 'scion hub link' to link this project with the Hub")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -901,7 +828,7 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 
 	// This allows starting/resuming an agent even if it exists on Hub but not locally
 	// (will be created via Hub) or if other agents are out of sync.
-	hubCtx, err := CheckHubAvailabilityForAgent(projectPath, agentName, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return err
 	}
@@ -1010,16 +937,14 @@ func RunAgent(cmd *cobra.Command, args []string, resume bool) error {
 	// hub connectivity. The --hub flag and host SCION_HUB_ENDPOINT env
 	// var are resolved here; the agent's scion-agent.yaml can override
 	// inside Start() via hub.endpoint or env.SCION_HUB_ENDPOINT.
-	if IsHubEnabled() {
-		if cliSettings, err := config.LoadSettings(projectPath); err == nil {
-			if !cliSettings.IsHubExplicitlyDisabled() {
-				if ep := GetHubEndpoint(cliSettings); ep != "" {
-					if opts.Env == nil {
-						opts.Env = make(map[string]string)
-					}
-					opts.Env["SCION_HUB_ENDPOINT"] = ep
-					opts.Env["SCION_HUB_URL"] = ep
+	if cliSettings, err := config.LoadSettings(projectPath); err == nil {
+		if !cliSettings.IsHubExplicitlyDisabled() {
+			if ep := GetHubEndpoint(cliSettings); ep != "" {
+				if opts.Env == nil {
+					opts.Env = make(map[string]string)
 				}
+				opts.Env["SCION_HUB_ENDPOINT"] = ep
+				opts.Env["SCION_HUB_URL"] = ep
 			}
 		}
 	}
@@ -1240,15 +1165,15 @@ func hubCloneTransportNote(cloneURL string) string {
 	lower := strings.ToLower(cloneURL)
 	switch {
 	case strings.HasPrefix(lower, "https://"):
-		return "Hub mode uses HTTPS clone with GITHUB_TOKEN"
+		return "the broker uses HTTPS clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "http://"):
-		return "Hub mode uses plain HTTP clone with GITHUB_TOKEN"
+		return "the broker uses plain HTTP clone with GITHUB_TOKEN"
 	case strings.HasPrefix(lower, "ssh://"), strings.HasPrefix(cloneURL, "git@"):
-		return "Hub mode uses SSH clone; GITHUB_TOKEN is not used"
+		return "the broker uses SSH clone; GITHUB_TOKEN is not used"
 	case strings.HasPrefix(lower, "git://"):
-		return "Hub mode uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
+		return "the broker uses unauthenticated git:// clone; GITHUB_TOKEN is not used"
 	default:
-		return "Hub mode clones this path on the runtime broker"
+		return "the runtime broker clones this path"
 	}
 }
 

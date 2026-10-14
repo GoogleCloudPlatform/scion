@@ -65,7 +65,7 @@ An artifact is a published file or folder with a stable reference,
 scion://artifact/<id>, that works from any broker and in the web UI. Each
 publish under the same --key adds a version; scion://artifact/<id>@<seq>
 names one version.
-Artifacts require Hub mode and the hub.artifacts experiment.
+Artifacts require a hub and the hub.artifacts experiment.
 
 Commands:
   scion artifact publish <file|dir> [--title] [--key] [--note] [--entry]
@@ -299,8 +299,8 @@ func init() {
 	rootCmd.AddCommand(artifactCmd)
 }
 
-// requireArtifactHubClient loads settings and a hub client, failing with an
-// artifact-specific message outside Hub mode.
+// requireArtifactHubClient loads settings and a hub client, failing with the
+// not-configured error when no hub endpoint is configured.
 func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
 	if hubProfileSelected() {
 		return requireArtifactProfileClient()
@@ -313,8 +313,8 @@ func requireArtifactHubClient() (*config.Settings, hubclient.Client, error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load settings: %w", err)
 	}
-	if !settings.IsHubEnabled() && !config.IsHubContext() {
-		return nil, nil, fmt.Errorf("artifacts require Hub mode. Enable with 'scion hub enable <endpoint>'")
+	if !hubConfigured(settings) {
+		return nil, nil, errHubNotConfigured
 	}
 	client, err := getHubClient(settings)
 	if err != nil {

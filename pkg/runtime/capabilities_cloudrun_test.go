@@ -16,6 +16,22 @@ package runtime
 
 import "testing"
 
+// The Cloud Run runtime cannot serve interactive attach, so it must opt out;
+// the broker gates, /info, heartbeat and registration all read this answer.
+func TestHasAttachSupport_CloudRunRuntimeOptsOut(t *testing.T) {
+	if HasAttachSupport(&CloudRunRuntime{}) {
+		t.Error("HasAttachSupport(&CloudRunRuntime{}) = true, want false: the Cloud Run runtime does not support attach")
+	}
+}
+
+// The cloudrun-sandbox runtime is a separate runtime that does support
+// attach; opting the Cloud Run runtime out must not change it.
+func TestHasAttachSupport_CloudRunSandboxRuntimeSupported(t *testing.T) {
+	if !HasAttachSupport(&CloudRunSandboxRuntime{}) {
+		t.Error("HasAttachSupport(&CloudRunSandboxRuntime{}) = false, want true: the cloudrun-sandbox runtime supports attach")
+	}
+}
+
 // Neither Cloud Run runtime calls RunConfig.Checkpoint or
 // RunConfig.OnResourceCreated, so both must opt out of async launch until
 // they do; otherwise an aborted launch would clean up nothing.

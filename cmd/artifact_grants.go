@@ -101,7 +101,7 @@ func parseGrantSubject(s string) (kind, ref string, err error) {
 		return "", "", fmt.Errorf("subject %q must be user:<id>, agent:<id> or project:<id>", s)
 	}
 	id = strings.TrimSpace(id)
-	switch strings.ToLower(prefix) {
+	switch strings.ToLower(strings.TrimSpace(prefix)) {
 	case "user":
 		return "principal", "user:" + id, nil
 	case "agent":

@@ -139,7 +139,7 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Enable Hub integration.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load. Local-only mode was removed; a configured hub.endpoint is what makes scion use a hub.",
           "x-env-var": "SCION_HUB_ENABLED",
           "x-since": "1"
         },
@@ -163,7 +163,7 @@
         },
         "local_only": {
           "type": "boolean",
-          "description": "Operate in local-only mode even when Hub is configured.",
+          "description": "Deprecated and ignored: accepted so existing settings files still load. Local-only mode was removed.",
           "x-env-var": "SCION_HUB_LOCAL_ONLY",
           "x-since": "1"
         },
@@ -1400,12 +1400,6 @@
           "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
           "x-since": "1"
         },
-        "async_agent_launch": {
-          "type": "boolean",
-          "description": "Turns on asynchronous agent create, off by default. A create is asynchronous only when this is on AND the client request also opts in (acceptAsyncLaunch); other requests, provision-only creates and reprovisioning stay synchronous, as do creates sent to a broker without async launch support. Restart required to change.",
-          "x-env-var": "SCION_SERVER_HUB_ASYNCAGENTLAUNCH",
-          "x-since": "1"
-        },
         "perf_trace": {
           "type": "boolean",
           "default": false,
@@ -1562,6 +1556,25 @@
               "type": "string",
               "description": "Bound on the wait for an agent port's response headers, the WebSocket handshake included; on timeout the proxy answers 504. The response body is not time-limited (e.g. '60s'; default '60s', between '5s' and '10m').",
               "x-env-var": "SCION_SERVER_HUB_PORTPROXY_RESPONSEHEADERTIMEOUT",
+              "x-since": "1"
+            }
+          }
+        },
+        "observability": {
+          "type": "object",
+          "description": "Switches for the hub's own metrics and trace export. Read at startup; restart required to change. The export project is the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) when set, else the project of the Google Cloud metadata server.",
+          "additionalProperties": false,
+          "properties": {
+            "metrics_enabled": {
+              "type": "boolean",
+              "description": "Hub metrics export. true: on; false: off. Unset: on when the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) is set. When true and no export project resolves, the hub logs a warning and starts without the metrics exporter.",
+              "x-env-var": "SCION_SERVER_HUB_OBSERVABILITY_METRICSENABLED",
+              "x-since": "1"
+            },
+            "tracing_enabled": {
+              "type": "boolean",
+              "description": "Hub trace export. true: on; false: off. Unset: on when SCION_TRACING_ENABLED and the hub GCP project ID (SCION_SERVER_HUB_GCPPROJECTID) are both set. When true and no export project resolves, the hub logs a warning and starts without the trace exporter.",
+              "x-env-var": "SCION_SERVER_HUB_OBSERVABILITY_TRACINGENABLED",
               "x-since": "1"
             }
           }

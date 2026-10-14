@@ -299,10 +299,10 @@ The `config.yaml` file at the root of a harness-config bundle defines its runtim
 `image` and `image_pull_policy` (the latter is Kubernetes-only; values `Always`, `IfNotPresent`,
 `Never`) can also be set — and, since ptone/scion#2156, overridden by an operator — via Hub
 settings `harness_configs.<name>.image` / `.image_pull_policy`, without editing the bundle. An
-explicit `image` or `kubernetes.imagePullPolicy` in a template or agent config still outranks the
-Hub setting, which in turn outranks this file's own default. An *explicitly set*
+explicit `image` or `kubernetes.imagePullPolicy` in an agent config still outranks the
+Hub setting, which in turn outranks this file's own default; in a template both keys are ignored. An *explicitly set*
 `profiles.<p>.harness_overrides.<name>.image` (and that override's `image_pull_policy`) is the exception:
-since ptone/scion#1799 it outranks a template or inline value too, and only the user's explicit
+since ptone/scion#1799 it outranks an inline (agent config) value too, and only the user's explicit
 `--image` (or explicit pull policy) ranks above it. See [Settings
 Precedence](/scion/reference/settings-precedence/#container-image-and-kubernetes-image-pull-policy--a-separate-chain-from-b1)
 for the full chain.
@@ -388,13 +388,23 @@ and Hub overrides (an override replaces the whole `ready` block), and passes the
 the container in `SCION_HARNESS_READY`. `sciontool init` records it in the container's readiness
 file, and both readers use those values: `sciontool init`, which reports the agent as working
 when it is ready, and the broker, which waits before pasting a held message. A
-`SCION_HARNESS_READY` value in a template's or caller's `env` cannot override it.
+`SCION_HARNESS_READY` value in a caller's `env` cannot override it (a template cannot set `SCION_*` keys).
 
 The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli, copilot and
 grok-build, and `delay` 8s for every other harness. A harness-config without the block (for
 example one installed before the block existed) uses the block of the built-in bundle for its
 `harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
 `delay` 8s.
+
+A harness-config without a provisioner that declares a `ready` or `delivery` block, in
+`config.yaml` or in an override, is treated like a harness-config with `command` or
+`config_dir`: its `ready` block is used, its `instructions_file`, `system_prompt_file` and
+`system_prompt_mode` (or the declarative defaults for instructions and system prompts) apply when
+the agent is provisioned, and the harness reports its `harness` type as its name instead of
+`generic`. A `ready` block taken from the built-in bundle does not have this effect. Message
+delivery and interrupts still use the built-in bundle for the `harness` type (the defaults for a
+type with no bundle), so a custom `delivery` block, `interrupt_key` and `interrupt_sequence` do
+not yet change how messages are submitted or interrupted.
 
 **Version skew.**
 
