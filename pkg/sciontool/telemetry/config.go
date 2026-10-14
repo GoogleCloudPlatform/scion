@@ -36,6 +36,10 @@ const (
 	EnvSkipTLSVerify = "SCION_OTEL_SKIP_TLS_VERIFY"
 	// EnvCAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	EnvCAFile = "SCION_OTEL_CA_FILE"
+	// EnvCertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	EnvCertFile = "SCION_OTEL_CERT_FILE"
+	// EnvKeyFile is the path to the PEM-encoded private key for EnvCertFile.
+	EnvKeyFile = "SCION_OTEL_KEY_FILE"
 	// EnvGRPCPort is the local gRPC receiver port.
 	EnvGRPCPort = "SCION_OTEL_GRPC_PORT"
 	// EnvHTTPPort is the local HTTP receiver port.
@@ -91,6 +95,11 @@ type Config struct {
 	SkipTLSVerify bool
 	// CAFile is the path to a PEM-encoded CA bundle for OTLP TLS.
 	CAFile string
+	// CertFile is the path to a PEM-encoded client certificate for OTLP mTLS.
+	// It must be set together with KeyFile.
+	CertFile string
+	// KeyFile is the path to the PEM-encoded private key for CertFile.
+	KeyFile string
 	// GRPCPort is the local gRPC receiver port.
 	GRPCPort int
 	// HTTPPort is the local HTTP receiver port.
@@ -151,6 +160,8 @@ func LoadConfig() *Config {
 		Insecure:      util.ParseBoolEnv(EnvInsecure, false),
 		SkipTLSVerify: util.ParseBoolEnv(EnvSkipTLSVerify, false),
 		CAFile:        os.Getenv(EnvCAFile),
+		CertFile:      os.Getenv(EnvCertFile),
+		KeyFile:       os.Getenv(EnvKeyFile),
 		GRPCPort:      parseIntEnv(EnvGRPCPort, DefaultGRPCPort),
 		HTTPPort:      parseIntEnv(EnvHTTPPort, DefaultHTTPPort),
 		ProjectID:     os.Getenv(EnvProjectID),
@@ -255,6 +266,11 @@ func (c *Config) IsCloudConfigured() bool {
 // Default Credentials (ADC). An explicit credentials file is not required.
 func (c *Config) IsGCP() bool {
 	return c != nil && c.CloudProvider == "gcp"
+}
+
+// hasClientCertificate reports whether either OTLP client certificate path is set.
+func (c *Config) hasClientCertificate() bool {
+	return c != nil && (c.CertFile != "" || c.KeyFile != "")
 }
 
 // parseIntEnv parses an integer environment variable with a default value.

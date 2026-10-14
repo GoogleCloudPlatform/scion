@@ -83,6 +83,7 @@ Auth type can be explicitly set via `auth_selectedType` in your Scion settings p
   - `extra-large` &rarr; `fable`
   The resolved model is set in the environment overlay as `ANTHROPIC_MODEL`. If no model is requested, it falls back to the default model `opus`. Note that setting `ANTHROPIC_MODEL` directly in your settings or a template environment block acts as an explicit, non-overridable pin.
 - **Claude Code version guard:** Claude Code versions older than 2.1.280 reject Opus 5.5 (`claude-opus-5-5*`, and the `opus` alias) with a `400 claude_code_version_too_old` error. If the container's `claude` binary is older than 2.1.280 and the resolved model is Opus 5.5, `provision.py` falls back to `claude-opus-4-8` and logs a warning. Rebuild the `scion-claude` image with Claude Code 2.1.280 or later to use Opus 5.5.
+- **Failed-tool hook:** the bundled settings register the `PostToolUseFailure` hook, which reports failed tool calls. The image installs the latest Claude Code. A custom image needs Claude Code 2.0.56 or later for this hook: the published package contains the event from that version on, although the Claude Code changelog does not name the version that added it. Claude Code 2.1.101 and later also tolerate hook event names they do not recognize in `settings.json`.
 - **Auto-updater disabled:** Scion sets `DISABLE_AUTOUPDATER=1` in the container, so Claude Code does not try to update itself in the background. To upgrade Claude Code, rebuild the harness image.
 
 ### Effort (Thinking Level)

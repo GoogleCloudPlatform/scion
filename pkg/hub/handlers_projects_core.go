@@ -1266,7 +1266,7 @@ func (s *Server) initHubManagedProject(project *store.Project) error {
 	// Write hub connection settings into the seeded settings file.
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -1326,7 +1326,7 @@ func (s *Server) cloneSharedWorkspaceProject(ctx context.Context, project *store
 	// Write hub connection settings
 	settingsUpdates := map[string]string{
 		"hub.enabled":   "true",
-		"hub.endpoint":  s.config.HubEndpoint,
+		"hub.endpoint":  s.HubEndpointFor(HubEndpointForProjectSettings),
 		"hub.projectId": project.ID,
 		"project_id":    project.ID,
 	}
@@ -1989,12 +1989,14 @@ func (s *Server) handleProjectRegister(w http.ResponseWriter, r *http.Request) {
 		// For linked projects (local directory) on the embedded broker,
 		// initialize the .scion directory structure so agents and templates
 		// directories exist. Only the embedded broker shares the hub's
-		// filesystem; other brokers manage their own.
+		// filesystem; other brokers manage their own. The broker's global
+		// directory is left to global init.
 		if localPath != "" && s.isEmbeddedBroker(broker.ID) {
-			scionDir := filepath.Join(localPath, ".scion")
-			if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
-				s.projectsLogger().Warn("failed to initialize .scion in linked project",
-					"project_id", project.ID, "localPath", localPath, "error", err.Error())
+			if scionDir, ok := linkedProjectInitDir(localPath); ok {
+				if err := initLinkedProjectDir(scionDir, nil, config.InitProjectOpts{SkipRuntimeCheck: true}); err != nil {
+					s.projectsLogger().Warn("failed to initialize .scion in linked project",
+						"project_id", project.ID, "localPath", localPath, "error", err.Error())
+				}
 			}
 		}
 
@@ -2784,8 +2786,8 @@ func (s *Server) createProjectAgent(w http.ResponseWriter, r *http.Request, proj
 // an agent reading its own record. getAgent applies the same exemption.
 // Reading a *different* agent in the caller's project goes through the
 // same agent.read check as getAgent (authorizeSingleAgentRead), which
-// denies it unless the caller directly launched that agent
-// (authz_launcher_read.go). An agent caller that is denied, or that names
+// denies it unless the caller launched that agent, directly or through
+// its descendants (authz_launcher_read.go). An agent caller that is denied, or that names
 // an agent in another project, gets the same 404 as for a missing agent.
 func (s *Server) getProjectAgent(w http.ResponseWriter, r *http.Request, projectID, agentID string) {
 	if !checkAgentReadScope(w, r) {
@@ -3385,9 +3387,12 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request, id string
 		http.Error(w, "deletion service not configured", http.StatusInternalServerError)
 		return
 	}
+	// force=true deletes the project even while agents remain whose
+	// runtime deletion is not confirmed (ptone/scion#4811).
 	req := ProjectDeleteRequest{
 		ProjectID: id,
 		Actor:     userIdentity,
+		Force:     r.URL.Query().Get("force") == "true",
 	}
 	result, decision := s.deletionService.Delete(ctx, req)
 	if decision != nil {
@@ -3626,7 +3631,7 @@ func isDirectChildOfAny(target string, roots []string) bool {
 // this removes the local directory as well. Only a single direct child of the
 // projects root is removed. An absent directory is not an error.
 func (s *Server) removeEmbeddedBrokerProjectDir(slug, removedPath string) {
-	if s.GetEmbeddedBrokerID() == "" {
+	if !s.hasEmbeddedBroker() {
 		return
 	}
 	if err := validateProjectSlug(slug); err != nil {

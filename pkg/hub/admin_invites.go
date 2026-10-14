@@ -165,7 +165,7 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	inviteURL := s.config.HubEndpoint + "/invite?code=" + code
+	inviteURL := s.HubEndpointFor(HubEndpointForInviteLinks) + "/invite?code=" + code
 
 	slog.Info("invite code created",
 		"invite_id", invite.ID,
@@ -180,7 +180,7 @@ func (s *Server) handleAdminInvitesCreate(w http.ResponseWriter, r *http.Request
 		"max_uses":   fmt.Sprintf("%d", invite.MaxUses),
 	})
 
-	s.events.PublishInviteChanged(r.Context(), "created", invite.ID, invite.CodePrefix)
+	s.events.PublishInviteChanged(r.Context(), "created", invite.ID)
 
 	writeJSON(w, http.StatusCreated, InviteCreateResponse{
 		Code:      code,
@@ -218,7 +218,7 @@ func (s *Server) handleAdminInviteRevoke(w http.ResponseWriter, r *http.Request,
 		"revoked_by", user.Email(),
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteRevoked, "", id, user.ID(), user.Email(), nil)
-	s.events.PublishInviteChanged(r.Context(), "revoked", id, "")
+	s.events.PublishInviteChanged(r.Context(), "revoked", id)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "revoked"})
 }
@@ -238,7 +238,7 @@ func (s *Server) handleAdminInviteDelete(w http.ResponseWriter, r *http.Request,
 		"deleted_by", user.Email(),
 	)
 	LogInviteAudit(r.Context(), s.auditLogger, InviteAuditInviteDeleted, "", id, user.ID(), user.Email(), nil)
-	s.events.PublishInviteChanged(r.Context(), "deleted", id, "")
+	s.events.PublishInviteChanged(r.Context(), "deleted", id)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

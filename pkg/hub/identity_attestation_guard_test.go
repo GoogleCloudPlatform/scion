@@ -126,6 +126,7 @@ return ok
 		"ScopedUserIdentity":    "switch",
 		"DevUser":               "marker",
 		"FederatedUserIdentity": "federated",
+		"VisitorIdentity":       "federated",
 		// Test fakes.
 		"bindableFederatedAdmin":  "federated",
 		"bypassAgentsDevIdentity": "not attested",

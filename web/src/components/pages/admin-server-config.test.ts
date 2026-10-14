@@ -839,6 +839,107 @@ describe('scion-page-admin-server-config', () => {
       expect(server.hub?.host).toBeUndefined();
     });
 
+    function brokerHostField(el: HTMLElement): Element {
+      const label = queryAll(el, 'sl-tab-panel[name="broker"] label').find(
+        (l) => l.textContent?.trim() === 'Host'
+      );
+      expect(label).toBeDefined();
+      return label!.closest('.form-field')!;
+    }
+
+    const workstation = { settings_tier: 'db', layer0_editable: true };
+
+    function withBrokerHost(host: string | undefined, overrides: Record<string, unknown>) {
+      const base = makeBaseConfig(overrides) as any;
+      base.server.broker = host === undefined ? { enabled: true } : { enabled: true, host };
+      return base;
+    }
+
+    it('runtime broker host is editable on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('10.0.0.5', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 127.0.0.1 on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, workstation)));
+      const field = brokerHostField(element);
+      const input = field.querySelector('sl-input')!;
+      expect(input.getAttribute('value')).toBe('');
+      expect(input.getAttribute('placeholder')).toBe('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('a 0.0.0.0 runtime broker host counts as unset on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('0.0.0.0', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('an untouched empty runtime broker host is not sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), () => {});
+      const server = payload.server as Record<string, Record<string, unknown>> | undefined;
+      expect(server?.broker?.host).toBeUndefined();
+    });
+
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
     // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
     // every Layer-1 field the page shows must be sent explicitly when it is
     // cleared: "" / [] / null / false, never left out.
@@ -3161,6 +3262,215 @@ describe('scion-page-admin-server-config', () => {
       type(element, URL_A);
       await (element as any).updateComplete;
       expect(field(element).querySelector('.monitoring-url-invalid')).toBeNull();
+    });
+  });
+
+  // ── Public URL pinned state (ptone/scion#3905) ──
+
+  describe('Public URL field (ptone/scion#3905)', () => {
+    function field(el: HTMLElement): Element {
+      const label = queryAll(el, 'label').find((l) => l.textContent?.trim() === 'Public URL');
+      expect(label).toBeTruthy();
+      return label!.closest('.form-field')!;
+    }
+
+    function withStatus(tier: string, status: Record<string, unknown>) {
+      return makeBaseConfig({ settings_tier: tier, public_url_status: status });
+    }
+
+    it.each([
+      ['db', 'SCION_SERVER_HUB_ENDPOINT'],
+      ['db', '--base-url'],
+      ['db', 'SCION_SERVER_BASE_URL'],
+    ])('is read-only and names the pinning setting (%s mode, %s)', async (tier, pin) => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus(tier, { effective: 'https://env.example.com', source: 'env', pinned_by: pin })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(`Set by ${pin}`);
+      expect(f.querySelector('.read-only-value')?.textContent).toContain('https://env.example.com');
+      expect(f.querySelector('.public-url-in-effect')).toBeNull();
+    });
+
+    it('a pinned public URL is not sent on save', async () => {
+      let captured: Record<string, unknown> | null = null;
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', {
+            effective: 'https://env.example.com',
+            source: 'env',
+            pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+          }),
+          {
+            putHandler: (body) => {
+              captured = body;
+              return { status: 200, body: { reload: { applied: [] } } };
+            },
+          }
+        )
+      );
+      (element as any).hubPublicUrl = 'https://other.example.com';
+      (element as any).hubMonitoringDashboardUrl = 'https://dash.example.com/d';
+      await (element as any).updateComplete;
+      const saveBtn = queryAll(element, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const body = captured as Record<string, unknown> | null;
+      expect(body).not.toBeNull();
+      const hub = ((body!.server as Record<string, unknown> | undefined)?.hub ?? {}) as Record<
+        string,
+        unknown
+      >;
+      expect(hub).not.toHaveProperty('public_url');
+    });
+
+    it('is editable when not pinned and shows the value in effect and its source', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          withStatus('db', { effective: 'https://db.example.com', source: 'database' })
+        )
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')?.getAttribute('value')).toBe('https://hub.example.com');
+      expect(f.querySelector('.read-only-badge')).toBeNull();
+      const hint = f.querySelector('.public-url-in-effect')?.textContent ?? '';
+      expect(hint).toContain('https://db.example.com');
+      expect(hint).toContain('from database');
+    });
+
+    it('is read-only in file mode when SCION_SERVER_HUB_ENDPOINT sets it', async () => {
+      element = await createComponent(
+        createFetchHandler(makeBaseConfig({ env_overrides: ['server.hub.public_url'] }))
+      );
+      const f = field(element);
+      expect(f.querySelector('sl-input')).toBeNull();
+      expect(f.querySelector('.read-only-badge')?.textContent).toContain(
+        'Set via environment variable'
+      );
+    });
+
+    it('is editable when the hub reports no status', async () => {
+      element = await createComponent(createFetchHandler(makeBaseConfig({ settings_tier: 'db' })));
+      expect(field(element).querySelector('sl-input')).not.toBeNull();
+    });
+
+    const supersededPublicUrl = {
+      endpoints: [
+        { key: 'server.hub.public_url', source: 'server_env' },
+        { key: 'image_registry', source: 'yaml' },
+      ],
+    };
+
+    function panelText(el: HTMLElement): string {
+      return query(el, '.superseded-panel')?.textContent ?? '';
+    }
+
+    async function clickSave(el: HTMLElement): Promise<void> {
+      const saveBtn = queryAll(el, 'sl-button[variant="primary"]').find(
+        (b) => b.textContent?.trim() === 'Save & Reload'
+      );
+      expect(saveBtn).toBeTruthy();
+      (saveBtn as HTMLElement).click();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await (el as any).updateComplete;
+    }
+
+    it('a pinned public URL is not listed as superseded by database settings', async () => {
+      // While a setting pins the public URL, the hub leaves it out of
+      // superseded_keys (computeSupersededKeys); the page shows the list
+      // as the hub sends it (ptone/scion#4707).
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: {
+              effective: 'https://env.example.com',
+              source: 'env',
+              pinned_by: 'SCION_SERVER_HUB_ENDPOINT',
+            },
+            superseded_keys: { endpoints: [{ key: 'image_registry', source: 'yaml' }] },
+          })
+        )
+      );
+      expect(panelText(element)).not.toContain('Public URL');
+      expect(panelText(element)).toContain('Image Registry');
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+    });
+
+    it('an unpinned public URL the database value supersedes is listed', async () => {
+      element = await createComponent(
+        createFetchHandler(
+          makeBaseConfig({
+            settings_tier: 'db',
+            public_url_status: { effective: 'https://file.example.com', source: 'file' },
+            superseded_keys: supersededPublicUrl,
+          })
+        )
+      );
+      expect(panelText(element)).toContain('Public URL');
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+    });
+
+    it('the Superseded badge goes away after the public URL is cleared', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://file.example.com', source: 'file' },
+        superseded_keys: { endpoints: [{ key: 'server.hub.public_url', source: 'yaml' }] },
+      }) as Record<string, any>;
+      cfg.server.hub.public_url = 'https://saved.example.com';
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: () => {
+            // After the clear the hub reports the bootstrap value in effect
+            // and nothing superseded.
+            delete cfg.superseded_keys;
+            cfg.server.hub.public_url = 'https://file.example.com';
+            return {
+              status: 200,
+              body: { reload: { applied_keys: [], pending_restart: ['server.hub.public_url'] } },
+            };
+          },
+        })
+      );
+      expect(field(element).querySelector('.superseded-badge')).not.toBeNull();
+
+      (element as any).hubPublicUrl = '';
+      await (element as any).updateComplete;
+      await clickSave(element);
+
+      expect(field(element).querySelector('.superseded-badge')).toBeNull();
+      expect(query(element, '.superseded-panel')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://file.example.com'
+      );
+    });
+
+    it('an echo save keeps the value in effect and reports no pending restart', async () => {
+      const cfg = makeBaseConfig({
+        settings_tier: 'db',
+        public_url_status: { effective: 'https://hub.example.com', source: 'file' },
+      }) as Record<string, any>;
+      let sent: unknown;
+      element = await createComponent(
+        createFetchHandler(cfg, {
+          putHandler: (body) => {
+            sent = (body.server as Record<string, any> | undefined)?.hub?.public_url;
+            return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+          },
+        })
+      );
+      await clickSave(element);
+
+      expect(sent).toBe('https://hub.example.com');
+      expect(query(element, '.pending-restart')).toBeNull();
+      expect(field(element).querySelector('sl-input')?.getAttribute('value')).toBe(
+        'https://hub.example.com'
+      );
     });
   });
 

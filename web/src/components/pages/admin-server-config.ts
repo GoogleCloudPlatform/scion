@@ -427,6 +427,7 @@ interface ServerConfigResponse {
   // the PUT writes them to settings.yaml. False on hosted hubs.
   layer0_editable?: boolean;
   env_overrides?: string[];
+  public_url_status?: PublicURLStatus;
   section_metadata?: Record<string, SectionMetadataInfo>;
   superseded_keys?: Record<string, SupersededKeyInfo[]>;
   deprecated_env_keys?: DeprecatedEnvKeyInfo[];
@@ -453,6 +454,17 @@ interface ReloadResult {
   // in applied, next to the section names).
   file_applied?: string[];
   error?: string;
+}
+
+/**
+ * How the hub resolved its endpoint (server.hub.public_url) at startup
+ * (ptone/scion#3905). The endpoint is restart-required, so after a save the
+ * value in effect can differ from the stored value until the next restart.
+ */
+interface PublicURLStatus {
+  effective: string;
+  source: string; // "env" | "flag" | "database" | "file" | a fallback label
+  pinned_by?: string; // SCION_SERVER_HUB_ENDPOINT, --base-url or SCION_SERVER_BASE_URL
 }
 
 /** Per-section provenance metadata from the settings-db GET response (DB-backed hubs). */
@@ -618,22 +630,36 @@ const KEYS_REJECTED_CODES = new Set([
 ]);
 
 /** Why a field is read-only: hosted Layer-0, env-pinned, or workstation flag-managed. */
-type ReadOnlyReason = 'bootstrap' | 'env' | 'flag';
+type ReadOnlyReason = 'bootstrap' | 'env' | 'flag' | 'pinned';
+
+/** The koanf key of the hub's public URL. */
+const PUBLIC_URL_KEY = 'server.hub.public_url';
 
 /**
  * Workstation fields that `scion server start` overrides at every start
  * (workstation defaults and flags such as --enable-runtime-broker,
  * --dev-auth, --host, --storage-bucket), so a settings.yaml value has no
- * effect. Shown read-only on workstation hubs.
+ * effect. Shown read-only on workstation hubs. server.broker.host is not
+ * listed: --host sets only the hub and web listeners, and the runtime
+ * broker uses server.broker.host (see WORKSTATION_BROKER_HOST_DEFAULT).
  */
 const WORKSTATION_FLAG_MANAGED_KEYS: Set<string> = new Set([
   'server.broker.enabled',
-  'server.broker.host',
   'server.hub.host',
   'server.auth.dev_mode',
   'server.storage.provider',
   'server.secrets.backend',
 ]);
+
+/**
+ * Runtime broker listen host on a workstation hub when server.broker.host is
+ * unset. An empty value or 0.0.0.0 counts as unset (applyServerListenHosts
+ * in cmd/server_foreground.go).
+ */
+const WORKSTATION_BROKER_HOST_DEFAULT = '127.0.0.1';
+
+/** Whether a server.broker.host value counts as unset in workstation mode. */
+const isUnsetBrokerHost = (host: string): boolean => host === '' || host === '0.0.0.0';
 
 /** Safe own-property check that won't match inherited keys on user-controlled objects. */
 const hasOwn = (obj: Record<string, unknown>, key: string): boolean =>
@@ -886,6 +912,7 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   // ── Settings-DB metadata (DB-backed hubs, any driver) ──
   @state() private envOverrides: string[] = [];
+  @state() private publicUrlStatus: PublicURLStatus | null = null;
   @state() private sectionMetadata: Record<string, SectionMetadataInfo> | null = null;
   @state() private ignoredKeysNotice: string[] | null = null;
   @state() private supersededKeys: Record<string, SupersededKeyInfo[]> | null = null;
@@ -1960,7 +1987,10 @@ export class ScionPageAdminServerConfig extends LitElement {
     this.layer0Editable = data.layer0_editable === true;
     this.envOverrides = data.env_overrides || [];
     this.envKeys = new Set(this.envOverrides);
+    this.publicUrlStatus = data.public_url_status || null;
     this.sectionMetadata = data.section_metadata || null;
+    // The hub leaves a pinned public URL out of superseded_keys
+    // (computeSupersededKeys), so the list is shown as it is.
     this.supersededKeys = data.superseded_keys || null;
     this.deprecatedEnvKeys =
       data.deprecated_env_keys && data.deprecated_env_keys.length > 0
@@ -2060,6 +2090,9 @@ export class ScionPageAdminServerConfig extends LitElement {
   }
 
   private readOnlyReason(koanfKey: string): ReadOnlyReason | null {
+    // The public URL is pinned by an operator setting on this node: the hub
+    // uses that value and ignores a saved one (ptone/scion#3905).
+    if (koanfKey === PUBLIC_URL_KEY && this.publicUrlStatus?.pinned_by) return 'pinned';
     if (this.layer1Only) {
       return this.layer1Keys.has(koanfKey) ? null : 'bootstrap';
     }
@@ -2084,12 +2117,50 @@ export class ScionPageAdminServerConfig extends LitElement {
 
   private renderReadOnlyBadge(reason: ReadOnlyReason): ReturnType<typeof html> {
     const text =
-      reason === 'bootstrap'
-        ? '🔒 Managed via deployment configuration'
-        : reason === 'flag'
-          ? '🔒 Set by workstation startup defaults / server flags'
-          : '🔒 Set via environment variable';
+      reason === 'pinned'
+        ? `🔒 Set by ${this.publicUrlStatus?.pinned_by ?? 'an operator setting'}`
+        : reason === 'bootstrap'
+          ? '🔒 Managed via deployment configuration'
+          : reason === 'flag'
+            ? '🔒 Set by workstation startup defaults / server flags'
+            : '🔒 Set via environment variable';
     return html`<span class="read-only-badge">${text}</span>`;
+  }
+
+  /**
+   * Runtime broker host. On a workstation hub an unset value (empty or
+   * 0.0.0.0) shows the address the broker binds to instead. An env-pinned
+   * value shows as loaded, with no effective hint: the page does not see
+   * the environment value.
+   */
+  private renderBrokerHostField(): ReturnType<typeof html> {
+    const onInput = (e: Event) => {
+      this.brokerHost = (e.target as HTMLInputElement).value;
+    };
+    if (!this.layer0Editable) {
+      return this.renderFieldValue(
+        'server.broker.host',
+        this.brokerHost || '0.0.0.0',
+        html`<sl-input value=${this.brokerHost || '0.0.0.0'} @sl-input=${onInput}></sl-input>`
+      );
+    }
+    if (this.readOnlyReason('server.broker.host') === 'env') {
+      return this.renderFieldValue('server.broker.host', this.brokerHost, html``);
+    }
+    const unset = isUnsetBrokerHost(this.brokerHost);
+    return html`${this.renderFieldValue(
+      'server.broker.host',
+      unset ? WORKSTATION_BROKER_HOST_DEFAULT : this.brokerHost,
+      html`<sl-input
+        value=${this.brokerHost}
+        placeholder=${WORKSTATION_BROKER_HOST_DEFAULT}
+        @sl-input=${onInput}
+      ></sl-input>`
+    )}${unset
+      ? html`<span class="hint broker-host-effective"
+          >Effective: ${WORKSTATION_BROKER_HOST_DEFAULT} (empty or 0.0.0.0 counts as unset)</span
+        >`
+      : ''}`;
   }
 
   private renderFieldValue(
@@ -2958,6 +3029,19 @@ export class ScionPageAdminServerConfig extends LitElement {
   private renderEnvBadge(...koanfKeys: string[]): typeof nothing | ReturnType<typeof html> {
     const overridden = koanfKeys.some((k) => this.envOverrides.includes(k));
     return overridden ? this.envBadgeTemplate() : nothing;
+  }
+
+  /**
+   * The hub URL in effect on this hub and where it came from, as resolved at
+   * startup. Not shown when an operator setting pins the field (the
+   * read-only value is then the value in effect).
+   */
+  private renderPublicUrlInEffect(): typeof nothing | ReturnType<typeof html> {
+    const st = this.publicUrlStatus;
+    if (!st || st.pinned_by || !st.effective) return nothing;
+    return html`<span class="hint public-url-in-effect"
+      >In effect: <code>${st.effective}</code> (from ${st.source})</span
+    >`;
   }
 
   /** The env-override badge shared by renderEnvBadge and renderEnvBadgeUnder. */
@@ -3956,9 +4040,10 @@ export class ScionPageAdminServerConfig extends LitElement {
                     >Hub-wide fallback GCP metadata mode for new agents, applied when neither the
                     agent create request nor the project's default GCP identity setting names one.
                     Passthrough set here applies only to agents on the hub's embedded broker; agents
-                    on any other broker get Block, except on the Kubernetes runtime, which does not
-                    offer Block — those agents get Passthrough instead. Assign requires a verified
-                    hub-scoped service account and gcpIamCheckMode=enforce.</span
+                    on any other broker get the runtime default: Block, or Passthrough on the
+                    Kubernetes runtime. Block set here applies on every runtime, Kubernetes
+                    included. Assign requires a verified hub-scoped service account and
+                    gcpIamCheckMode=enforce.</span
                   >
                   ${this.renderFieldValue(
                     'default_gcp_identity_mode',
@@ -4331,18 +4416,20 @@ export class ScionPageAdminServerConfig extends LitElement {
           </div>
           <div class="form-field full-width">
             <label>Public URL</label>
-            <span class="hint">Endpoint URL for agents to call back to the Hub</span>
+            <span class="hint"
+              >The Hub URL for agents, invite links and integrations. Applies after a restart.</span
+            >
             ${this.renderFieldValue(
-              'server.hub.public_url',
-              this.hubPublicUrl,
-              html`${this.renderEnvBadge('server.hub.public_url')}<sl-input
+              PUBLIC_URL_KEY,
+              this.publicUrlStatus?.pinned_by ? this.publicUrlStatus.effective : this.hubPublicUrl,
+              html`${this.renderEnvBadge(PUBLIC_URL_KEY)}<sl-input
                   value=${this.hubPublicUrl}
                   placeholder="https://hub.example.com"
                   @sl-input=${(e: Event) => {
                     this.hubPublicUrl = (e.target as HTMLInputElement).value;
                   }}
                 ></sl-input>`
-            )}
+            )}${this.renderPublicUrlInEffect()}
           </div>
           <div class="form-field full-width">
             <label>Monitoring Dashboard URL</label>
@@ -5529,16 +5616,7 @@ export class ScionPageAdminServerConfig extends LitElement {
           <div class="form-field">
             <label>Host</label>
             <span class="hint">Requires restart</span>
-            ${this.renderFieldValue(
-              'server.broker.host',
-              this.brokerHost || '0.0.0.0',
-              html`<sl-input
-                value=${this.brokerHost || '0.0.0.0'}
-                @sl-input=${(e: Event) => {
-                  this.brokerHost = (e.target as HTMLInputElement).value;
-                }}
-              ></sl-input>`
-            )}
+            ${this.renderBrokerHostField()}
           </div>
           <div class="form-field full-width">
             <label>Hub Endpoint</label>

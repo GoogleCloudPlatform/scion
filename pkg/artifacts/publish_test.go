@@ -307,7 +307,7 @@ func TestPublishMissingScope(t *testing.T) {
 	if rec.Code != http.StatusForbidden || errCode(t, rec) != CodeMissingScope {
 		t.Fatalf("unserved caller: %d %s", rec.Code, rec.Body.String())
 	}
-	const wantBody = `{"error":{"code":"missing_scope","message":"the credential does not carry the project:artifact:read scope needed to publish artifacts","details":{"scope":"project:artifact:read"}}}` + "\n"
+	const wantBody = `{"error":{"code":"missing_scope","message":"the credential does not carry the project:artifact:read scope needed to publish artifacts","details":{"scope":"project:artifact:read","scopes":["project:artifact:read"]}}}` + "\n"
 	if rec.Body.String() != wantBody {
 		t.Errorf("body:\n got %q\nwant %q", rec.Body.String(), wantBody)
 	}
@@ -355,5 +355,59 @@ func TestPublishMissingScope(t *testing.T) {
 	}
 	if host.calls != 0 {
 		t.Errorf("reads consulted the explainer %d times", host.calls)
+	}
+}
+
+// scopesExplainingHost is an explainingHost that also names every missing
+// scope through ScopesExplainer.
+type scopesExplainingHost struct {
+	*explainingHost
+	scopes []string
+}
+
+func (h *scopesExplainingHost) MissingScopes(_ context.Context, permission string) []string {
+	h.calls++
+	if h.forbid != nil {
+		h.forbid.Errorf("MissingScopes(%q) called on a path that must not consult it", permission)
+	}
+	if permission != PermissionCreate {
+		return nil
+	}
+	return h.scopes
+}
+
+// TestPublishMissingScopesNamesEveryScope: a host that implements
+// ScopesExplainer is preferred over ScopeExplainer, and the 403 names every
+// scope it reports, keeping the first under "scope" for older clients
+// (ptone/scion#4571). Reads still never consult it.
+func TestPublishMissingScopesNamesEveryScope(t *testing.T) {
+	f := newFixture(t, false)
+	existing := f.publish(agentA, "a.txt", []byte("x"), "")
+	host := &scopesExplainingHost{
+		explainingHost: &explainingHost{fakeHost: f.host, scope: "single-scope-must-not-be-used"},
+		scopes:         []string{"project:artifact:read", "project:artifact:write", "project:artifact:write", ""},
+	}
+	f.svc.host = host
+
+	rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil)
+	const wantBody = `{"error":{"code":"missing_scope","message":"the credential does not carry the project:artifact:read and project:artifact:write scopes needed to publish artifacts","details":{"scope":"project:artifact:read","scopes":["project:artifact:read","project:artifact:write"]}}}` + "\n"
+	if rec.Code != http.StatusForbidden || rec.Body.String() != wantBody {
+		t.Errorf("both scopes missing:\n got %d %q\nwant 403 %q", rec.Code, rec.Body.String(), wantBody)
+	}
+
+	// An empty answer from MissingScopes leaves the ordinary answer, even
+	// though MissingScope would name a scope.
+	host.scopes = nil
+	if rec := f.do(nil, http.MethodPost, "/api/v1/artifacts?name=b.txt", []byte("x"), nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no missing scope: %d, want 401", rec.Code)
+	}
+
+	host.scopes, host.calls, host.forbid = []string{"project:artifact:read"}, 0, t
+	id := existing.Artifact.ID
+	if rec := f.do(nil, http.MethodGet, "/api/v1/artifacts/"+id, nil, nil); rec.Code != http.StatusNotFound {
+		t.Errorf("GET: %d, want 404", rec.Code)
+	}
+	if host.calls != 0 {
+		t.Errorf("a read consulted the explainer %d times", host.calls)
 	}
 }

@@ -317,18 +317,31 @@ func ValidHubName(name string) bool {
 	return hubNameRe.MatchString(name)
 }
 
-// endpointKey returns endpoint in a form in which two spellings of one hub
-// URL compare equal: spaces and trailing slashes trimmed, scheme and host
-// lowercased.
-func endpointKey(endpoint string) string {
+// NormalizeEndpoint returns endpoint in the form in which two spellings of
+// one hub URL compare equal: spaces and trailing slashes trimmed, scheme and
+// host lowercased, and the scheme's default port (80 for http, 443 for
+// https) dropped. A value that does not parse as a URL with a host is only
+// trimmed. It is the key of hub entries and of stored logins.
+func NormalizeEndpoint(endpoint string) string {
 	e := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(e)
 	if err != nil || u.Host == "" {
 		return e
 	}
 	u.Scheme = strings.ToLower(u.Scheme)
-	u.Host = strings.ToLower(u.Host)
-	return u.String()
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	if port != "" {
+		host += ":" + port
+	}
+	u.Host = host
+	return strings.TrimRight(u.String(), "/")
 }
 
 // HubByEndpoint returns the name and entry of the hub with endpoint, or ""
@@ -337,9 +350,9 @@ func (c *CLIContext) HubByEndpoint(endpoint string) (string, *HubEntry) {
 	if endpoint == "" {
 		return "", nil
 	}
-	key := endpointKey(endpoint)
+	key := NormalizeEndpoint(endpoint)
 	for name, h := range c.Hubs {
-		if h != nil && endpointKey(h.Endpoint) == key {
+		if h != nil && NormalizeEndpoint(h.Endpoint) == key {
 			return name, h
 		}
 	}
@@ -385,7 +398,7 @@ func (c *CLIContext) EnsureHub(endpoint, baseName string) (name string, created 
 	if c.Hubs == nil {
 		c.Hubs = map[string]*HubEntry{}
 	}
-	c.Hubs[name] = &HubEntry{Endpoint: strings.TrimSpace(endpoint)}
+	c.Hubs[name] = &HubEntry{Endpoint: NormalizeEndpoint(endpoint)}
 	return name, true
 }
 

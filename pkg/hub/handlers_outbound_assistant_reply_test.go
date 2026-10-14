@@ -112,8 +112,8 @@ func newAssistantReplyFixture(t *testing.T, withBroker bool) *assistantReplyFixt
 	srv, s, project, agent, user := def138Setup(t)
 	ctx := context.Background()
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	inner := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	inner := NewWebChatStore(db, "sqlite")
 	require.NoError(t, inner.Init())
 	wcs := &webAffinityCountingStore{WebChatStore: inner}
 	srv.SetWebChatStore(wcs)

@@ -894,6 +894,7 @@ func sendMessageViaConversation(hubCtx *HubContext, ref *messaging.Reference, me
 		// Mention outcomes first, so the confirmation is the last line.
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 		// Distinguish accepted dispatch from confirmed delivery.
 		switch result.Status {
 		case "sent":
@@ -1032,6 +1033,7 @@ func sendOutboundMessageViaHub(hubCtx *HubContext, userRecipient string, message
 	if result != nil {
 		printMentionResults(result.MentionResults)
 		printArtifactWarning(result.ArtifactWarning)
+		printNoAgentWoken(result)
 	}
 	// #2026: name the conversation the message landed in when the hub
 	// reports it, so a send with --channel/--thread-id shows where it went.
@@ -1762,6 +1764,23 @@ func filterMentionNames(names []string, selfSlug, primarySlug string) []string {
 	return out
 }
 
+// printNoAgentWoken prints one line to stderr when the hub reports that a
+// group post reached no agent.
+func printNoAgentWoken(result *hubclient.OutboundMessageResult) {
+	if isJSONOutput() || result == nil || !result.NoAgentWoken {
+		return
+	}
+	if d := result.DefaultAgentResult; d != nil {
+		if d.Slug == "" {
+			fmt.Fprintf(os.Stderr, "No agent was woken: the default agent could not be reached (%s).\n", d.Status)
+		} else {
+			fmt.Fprintf(os.Stderr, "No agent was woken: default agent @%s was not reached (%s).\n", d.Slug, d.Status)
+		}
+		return
+	}
+	fmt.Fprintln(os.Stderr, "No agent was woken by this post.")
+}
+
 // printMentionResults prints one line per mention result to stderr,
 // describing the outcome for names that were not cleanly delivered. Skipped
 // entirely under --json output, where the caller includes the results in the
@@ -1960,7 +1979,7 @@ func init() {
 	messageCmd.Flags().BoolVarP(&msgInterrupt, "interrupt", "i", false, "Interrupt the harness before sending the message")
 	messageCmd.Flags().BoolVarP(&msgWake, "wake", "w", false, "Resume a suspended agent before delivering the message")
 	messageCmd.Flags().StringArrayVar(&msgArtifacts, "artifact", nil, "Reference a published artifact (scion://artifact/<id>[@<seq>]), repeatable, at most 10. The reference is added to the message text and the recipient is shown how to fetch it; the hub attaches only artifacts you can read.")
-	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; attachments the hub cannot read are reported as warnings after the message is sent.")
+	messageCmd.Flags().StringArrayVar(&msgAttach, "attach", nil, "Attach file path(s), repeatable; use paths under /workspace or /scion-volumes (bare relative paths resolve to /workspace). Absolute paths outside these roots are skipped with a warning; when an agent sends the message, attachments the hub cannot read are reported as warnings after it is sent (human sends do not report these yet).")
 	messageCmd.Flags().StringVar(&msgBodyFile, "body-file", "", "Read message body from a file instead of positional args ('-' reads stdin; trailing CR/LF characters are trimmed)")
 
 	// Deprecated flags — still functional, emit warnings when used.

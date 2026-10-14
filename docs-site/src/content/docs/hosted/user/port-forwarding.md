@@ -91,13 +91,17 @@ will forward a local request to `http://127.0.0.1:8000/api/v1/metrics?raw=true`.
 
 ## Manual Port Management
 
-You can manually manage exposed ports using the `sciontool` CLI from inside the agent container, or via the Hub API.
+You can manually manage exposed ports using the `scion` CLI from inside the agent container, or via the Hub API. The commands act as the calling agent, using its own Hub identity, so they only work inside an agent container with a Hub connection.
+
+:::note
+These commands were previously `sciontool expose` and `sciontool unexpose`. The `sciontool` forms now print a message pointing to `scion expose` and `scion unexpose` and exit with an error.
+:::
 
 ### Exposing a Port
-To expose a local port manually, run `sciontool expose` with the target port:
+To expose a local port manually, run `scion expose` with the target port:
 
 ```bash
-sciontool expose 8080 --label "my-web-app"
+scion expose 8080 --label "my-web-app"
 ```
 
 Options:
@@ -108,15 +112,15 @@ Options:
 To stop exposing a port, run:
 
 ```bash
-sciontool unexpose 8080
+scion unexpose 8080
 ```
-This operation is idempotent; if the port is not currently exposed, the command completes successfully and silently.
+This operation is idempotent; if the port is not currently exposed, the command completes successfully.
 
 ### Listing Exposed Ports
 To list all currently exposed ports for the agent, run:
 
 ```bash
-sciontool expose --list
+scion expose --list
 ```
 This outputs the current port number, label, and full proxy URL.
 

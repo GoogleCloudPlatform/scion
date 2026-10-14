@@ -30,8 +30,9 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
 	"github.com/GoogleCloudPlatform/scion/pkg/brokeridentity"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
-	"github.com/GoogleCloudPlatform/scion/pkg/hub"
+	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/runtime"
+	"github.com/GoogleCloudPlatform/scion/pkg/runtimebroker"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -150,60 +151,29 @@ func warnUnhostedFlatIdentities(globalDir string) {
 	}
 }
 
-// flatInstanceStartup is a flat instance that passed every startup check and
-// the embedded registration's bound-result validation.
-type flatInstanceStartup struct {
-	runtime  *runtime.DockerRuntime
-	identity *brokeridentity.Identity
-	instance config.V1RuntimeBrokerInstanceConfig
-	row      *store.RuntimeBroker
-}
-
-// prepareFlatInstance takes the instance's Docker runtime (constructed from
-// its explicit configuration), probes and verifies its execution scope, loads or
-// creates its identity, and registers it through the Hub's embedded flat
-// registration. Any refusal is reported through
-// EmbeddedBrokerRegistrationFailed and returned; the caller then does not
-// activate the instance (no Runtime Broker server, control channel,
-// heartbeat or dispatch), and nothing falls back to the legacy identity.
-func prepareFlatInstance(ctx context.Context, hubSrv *hub.Server, dr *runtime.DockerRuntime, inst config.V1RuntimeBrokerInstanceConfig, legacyIDs []string, globalDir string, opts hub.EmbeddedFlatRegistrationOptions, probe func(context.Context, string) (brokeridentity.ExecutionScope, error)) (*flatInstanceStartup, error) {
-	fail := func(err error) (*flatInstanceStartup, error) {
-		hubSrv.EmbeddedBrokerRegistrationFailed(err)
-		return nil, err
-	}
-	if inst.RuntimeTarget == nil || inst.RuntimeTarget.Type != brokeridentity.TargetTypeDocker {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: only runtime_target.type docker is supported in this release", inst.Key))
-	}
-	if probe == nil {
-		probe = probeDockerExecutionScope
-	}
-	scope, err := probe(ctx, dr.Command)
-	if err != nil {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: %w", inst.Key, err))
-	}
-	id, err := brokeridentity.LoadOrCreate(brokeridentity.InstanceDir(globalDir, inst.Key), inst.Key, inst.RuntimeTarget.Type, scope, legacyIDs)
-	if err != nil {
-		return fail(fmt.Errorf("flat Runtime Broker instance %q: %w", inst.Key, err))
-	}
-	// RegisterEmbeddedFlatRuntimeBroker reports its own refusals.
-	row, err := hubSrv.RegisterEmbeddedFlatRuntimeBroker(ctx, id, inst, opts)
-	if err != nil {
-		return nil, err
-	}
-	return &flatInstanceStartup{runtime: dr, identity: id, instance: inst, row: row}, nil
-}
-
 // flatInstanceCapabilities are the embedded flat instance's capabilities on
-// its Docker runtime (the same set the legacy embedded registration
-// reports for its runtime).
+// its runtime: the same static set its heartbeat reports
+// (runtimebroker.StaticCapabilities), so registration and heartbeat never
+// disagree.
 func flatInstanceCapabilities(rt runtime.Runtime) *store.BrokerCapabilities {
+	return storeBrokerCapabilities(runtimebroker.StaticCapabilities(rt))
+}
+
+// storeBrokerCapabilities converts the broker's reported capabilities to
+// the stored form, field for field.
+func storeBrokerCapabilities(c *hubclient.BrokerCapabilities) *store.BrokerCapabilities {
+	if c == nil {
+		return nil
+	}
 	return &store.BrokerCapabilities{
-		WebPTY:                 false,
-		Sync:                   true,
-		Attach:                 runtime.HasAttachSupport(rt),
-		Reprovision:            true,
-		AsyncLaunch:            true,
-		EmptyPerAgentWorkspace: runtime.HasEmptyPerAgentSupport(rt),
-		AgentMove:              false,
+		WebPTY:                   c.WebPTY,
+		Sync:                     c.Sync,
+		Attach:                   c.Attach,
+		Reprovision:              c.Reprovision,
+		AsyncLaunch:              c.AsyncLaunch,
+		EmptyPerAgentWorkspace:   c.EmptyPerAgentWorkspace,
+		AgentMove:                c.AgentMove,
+		ReprovisionEmptyPerAgent: c.ReprovisionEmptyPerAgent,
+		StartsInFlight:           c.StartsInFlight,
 	}
 }

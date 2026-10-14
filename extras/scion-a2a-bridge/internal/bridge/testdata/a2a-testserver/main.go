@@ -281,6 +281,7 @@ func (m *mockProdHubClient) Schedules(string) hubclient.ScheduleService         
 func (m *mockProdHubClient) GCPServiceAccounts() hubclient.GCPServiceAccountService { return nil }
 func (m *mockProdHubClient) Messages() hubclient.MessageService                     { return nil }
 func (m *mockProdHubClient) Conversations() hubclient.ConversationService           { return nil }
+func (m *mockProdHubClient) ThreadGroups() hubclient.ThreadGroupService             { return nil }
 func (m *mockProdHubClient) AllowList() hubclient.AllowListService                  { return nil }
 func (m *mockProdHubClient) Invites() hubclient.InviteService                       { return nil }
 func (m *mockProdHubClient) Skills() hubclient.SkillService                         { return nil }
@@ -296,8 +297,14 @@ func (m *mockProdHubClient) HubPreStartHooks() hubclient.HubPreStartHookService 
 func (m *mockProdHubClient) Artifacts() hubclient.ArtifactService               { return nil }
 func (m *mockProdHubClient) TestIdentities() hubclient.TestIdentityService      { return nil }
 func (m *mockProdHubClient) Messaging() hubclient.MessagingService              { return nil }
+func (m *mockProdHubClient) TestIdentityDelegations() hubclient.TestIdentityDelegationService {
+	return nil
+}
 func (m *mockProdHubClient) Health(ctx context.Context) (*hubclient.HealthResponse, error) {
 	return &hubclient.HealthResponse{}, nil
+}
+func (m *mockProdHubClient) HealthSummary(ctx context.Context) (*hubclient.HealthSummary, error) {
+	return nil, nil
 }
 func (m *mockProdHubClient) DiscoverSkillsDirectory(ctx context.Context, req hubclient.DiscoverSkillsDirectoryRequest) (*hubclient.DiscoverSkillsDirectoryResponse, error) {
 	return nil, nil

@@ -282,6 +282,7 @@ func (s *AllowListStore) BulkAddAllowListEntries(ctx context.Context, entries []
 // users.
 func (s *AllowListStore) ListEmailDomains(ctx context.Context) ([]string, error) {
 	emails, err := s.client.User.Query().
+		Where(notFederated()).
 		Select(user.FieldEmail).
 		Strings(ctx)
 	if err != nil {

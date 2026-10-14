@@ -215,6 +215,7 @@ var (
 		{Name: "launch_seq", Type: field.TypeInt64, Default: 0},
 		{Name: "launch_step", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "launch_error", Type: field.TypeString, Nullable: true, Default: ""},
+		{Name: "launch_cause", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_state", Type: field.TypeString, Nullable: true, Default: ""},
 		{Name: "deletion_claim", Type: field.TypeInt64, Default: 0},
 		{Name: "deletion_lease_at", Type: field.TypeTime, Nullable: true},
@@ -248,7 +249,7 @@ var (
 		ForeignKeys: []*schema.ForeignKey{
 			{
 				Symbol:     "agents_projects_agents",
-				Columns:    []*schema.Column{AgentsColumns[88]},
+				Columns:    []*schema.Column{AgentsColumns[89]},
 				RefColumns: []*schema.Column{ProjectsColumns[0]},
 				OnDelete:   schema.NoAction,
 			},
@@ -267,17 +268,17 @@ var (
 			{
 				Name:    "agent_slug_project_id",
 				Unique:  true,
-				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[88]},
+				Columns: []*schema.Column{AgentsColumns[3], AgentsColumns[89]},
 			},
 			{
 				Name:    "agent_project_id_owner_id",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[8]},
+				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[8]},
 			},
 			{
 				Name:    "agent_project_id_created_by",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[88], AgentsColumns[7]},
+				Columns: []*schema.Column{AgentsColumns[89], AgentsColumns[7]},
 			},
 			{
 				Name:    "agent_launch_deadline",
@@ -295,12 +296,12 @@ var (
 			{
 				Name:    "agent_runtime_broker_id_run_intent",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[74]},
+				Columns: []*schema.Column{AgentsColumns[27], AgentsColumns[75]},
 			},
 			{
 				Name:    "agent_start_claim_state_start_claim_lease_until",
 				Unique:  false,
-				Columns: []*schema.Column{AgentsColumns[79], AgentsColumns[83]},
+				Columns: []*schema.Column{AgentsColumns[80], AgentsColumns[84]},
 				Annotation: &entsql.IndexAnnotation{
 					Where: "start_claim_id IS NOT NULL",
 				},
@@ -1301,6 +1302,14 @@ var (
 				Name:    "externalidentity_user_id",
 				Unique:  false,
 				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+			},
+			{
+				Name:    "externalidentity_user_id_federation",
+				Unique:  true,
+				Columns: []*schema.Column{ExternalIdentitiesColumns[7]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "provider = 'federation'",
+				},
 			},
 		},
 	}
@@ -2324,6 +2333,7 @@ var (
 		{Name: "scope_type", Type: field.TypeEnum, Enums: []string{"system", "project"}},
 		{Name: "permissions", Type: field.TypeJSON, Nullable: true},
 		{Name: "system", Type: field.TypeBool, Default: false},
+		{Name: "confers_membership", Type: field.TypeBool, Default: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "updated", Type: field.TypeTime},
 	}
@@ -2951,7 +2961,7 @@ var (
 		{Name: "display_name", Type: field.TypeString},
 		{Name: "avatar_url", Type: field.TypeString, Nullable: true},
 		{Name: "role", Type: field.TypeEnum, Enums: []string{"admin", "member", "viewer"}, Default: "member"},
-		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited"}, Default: "active"},
+		{Name: "status", Type: field.TypeEnum, Enums: []string{"active", "suspended", "invited", "pending"}, Default: "active"},
 		{Name: "preferences", Type: field.TypeJSON, Nullable: true},
 		{Name: "created", Type: field.TypeTime},
 		{Name: "invited_by", Type: field.TypeString, Nullable: true},
@@ -2959,12 +2969,14 @@ var (
 		{Name: "last_login", Type: field.TypeTime, Nullable: true},
 		{Name: "last_seen", Type: field.TypeTime, Nullable: true},
 		{Name: "session_generation", Type: field.TypeInt64, Default: 0},
-		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin"}, Default: "human"},
+		{Name: "kind", Type: field.TypeEnum, Enums: []string{"human", "test_fixture", "test_hub_admin", "test_super_admin", "federated"}, Default: "human"},
 		{Name: "expires_at", Type: field.TypeTime, Nullable: true},
 		{Name: "issued_by", Type: field.TypeString, Nullable: true},
 		{Name: "purpose", Type: field.TypeString, Nullable: true},
 		{Name: "issuance_id", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_credential_id", Type: field.TypeString, Nullable: true},
+		{Name: "federated_email", Type: field.TypeString, Nullable: true},
+		{Name: "home_issuer", Type: field.TypeString, Nullable: true},
 		{Name: "issuer_delegation_id", Type: field.TypeString, Nullable: true},
 	}
 	// UsersTable holds the schema information for the "users" table.
@@ -2984,9 +2996,17 @@ var (
 				Columns: []*schema.Column{UsersColumns[13], UsersColumns[15]},
 			},
 			{
+				Name:    "user_home_issuer_federated_email",
+				Unique:  true,
+				Columns: []*schema.Column{UsersColumns[20], UsersColumns[19]},
+				Annotation: &entsql.IndexAnnotation{
+					Where: "kind = 'federated'",
+				},
+			},
+			{
 				Name:    "user_kind_issuer_delegation_id",
 				Unique:  false,
-				Columns: []*schema.Column{UsersColumns[13], UsersColumns[19]},
+				Columns: []*schema.Column{UsersColumns[13], UsersColumns[21]},
 			},
 		},
 	}
@@ -3370,6 +3390,7 @@ func init() {
 		Table: "users",
 	}
 	UsersTable.Annotation.Checks = map[string]string{
+		"users_federated_identity_check":  "(kind <> 'federated' OR (home_issuer IS NOT NULL AND federated_email IS NOT NULL))",
 		"users_test_admin_expiry_check":   "(kind NOT IN ('test_hub_admin', 'test_super_admin') OR expires_at IS NOT NULL)",
 		"users_test_fixture_expiry_check": "(kind <> 'test_fixture' OR expires_at IS NOT NULL)",
 	}

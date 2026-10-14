@@ -168,6 +168,9 @@ type Agent struct {
 	LaunchSeq          int64     `json:"-"`
 	LaunchStep         string    `json:"-"`
 	LaunchError        string    `json:"-"`
+	// LaunchCause is the fixed runtime cause code (api.BrokerRuntimeCause*)
+	// a failed launch report gave for LaunchError, or "" (ptone/scion#4666).
+	LaunchCause string `json:"-"`
 
 	// RunID is the identity of the agent's current or most recent run
 	// (ptone/scion#2550), minted by the Hub per create/start/restart
@@ -582,7 +585,11 @@ func redactCreateInputsForResponse(ci *AgentCreateInputs, canAttach bool) *Agent
 // response body: Env and the Telemetry cloud-export header map are cleared
 // unless canAttach is true, and GITHUB_TOKEN is stripped from Env
 // unconditionally, mirroring AgentAppliedConfig's own top-level rule (see
-// ResponseView/MarshalJSON above). The input is never mutated.
+// ResponseView/MarshalJSON above). ClearedFields is dropped for every
+// viewer: it is hub-internal bookkeeping (ptone/scion#3906), its env.<KEY>
+// entries name env keys a viewer without attach access must not learn, and
+// leaving it out means a GET echoed back into a PATCH never carries it. The
+// input is never mutated.
 //
 // This redaction lives here, in the response-view copy, and deliberately
 // not as a MarshalJSON method on api.ScionConfig or api.TelemetryConfig:
@@ -601,6 +608,7 @@ func redactInlineConfigForResponse(cfg *api.ScionConfig, canAttach bool) *api.Sc
 		return nil
 	}
 	copied := *cfg
+	copied.ClearedFields = nil
 	if !canAttach {
 		copied.Env = nil
 	} else if len(cfg.Env) > 0 {
@@ -1128,6 +1136,13 @@ type BrokerCapabilities struct {
 	// then does the hub read a start's absence from that list as "no start
 	// in flight".
 	StartsInFlight bool `json:"startsInFlight,omitempty"`
+	// TemplateTiers indicates the broker takes hub settings as separate
+	// tiers (ptone/scion#4218): the hub telemetry default in
+	// HubAgentDefaults.Telemetry and the project telemetry policy in
+	// TelemetryPolicy on create, start and restart. Only for such a broker
+	// does the hub stop writing those values into InlineConfig
+	// (ptone/scion#4222). Refreshed by every heartbeat.
+	TemplateTiers bool `json:"templateTiers,omitempty"`
 }
 
 // BrokerProfile describes a runtime profile available on a broker.
@@ -1461,6 +1476,13 @@ type User struct {
 	// session. Never bound from a request body (json:"-").
 	IssuanceID         *string `json:"-"`
 	IssuerCredentialID *string `json:"-"`
+	// FederatedEmail and HomeIssuer are set only on UserKindFederated
+	// rows, at create, and never change: the user's lower-cased email as
+	// asserted by HomeIssuer, the canonical URL of the trusted issuer.
+	// Such a row's Email is a synthetic address (FederatedSyntheticEmail).
+	// Never bound from a request body (json:"-").
+	FederatedEmail *string `json:"-"`
+	HomeIssuer     *string `json:"-"`
 	// IssuerDelegationID is set only on a test-fixture row issued through
 	// a workload-bound issuer delegation (TestIdentityDelegation), at
 	// create, and never changes. Nil for session and PAT issuance.
@@ -1491,6 +1513,11 @@ func (u *User) IsTestAdmin() bool {
 // a check must refuse anything that is not a known human row.
 func (u *User) IsHumanKind() bool {
 	return u != nil && (u.Kind == "" || u.Kind == UserKindHuman)
+}
+
+// IsFederated reports whether u is a federated account (kind federated).
+func (u *User) IsFederated() bool {
+	return u != nil && u.Kind == UserKindFederated
 }
 
 // IsTestIdentity reports whether u is any hub-issued test identity: every
@@ -1578,6 +1605,9 @@ const (
 	UserStatusActive    = "active"
 	UserStatusSuspended = "suspended"
 	UserStatusInvited   = "invited"
+	// UserStatusPending is used only on UserKindFederated rows: the
+	// account was recorded before the user's first verified request.
+	UserStatusPending = "pending"
 )
 
 // User kind constants.
@@ -1591,6 +1621,9 @@ const (
 	// expiring system super-admin binding. Its issuance stays refused until
 	// the admin tier's policy phase ships.
 	UserKindTestSuperAdmin = "test_super_admin"
+	// UserKindFederated is a local account for a user of a trusted
+	// external issuer. Only Store.CreateFederatedUser writes it.
+	UserKindFederated = "federated"
 )
 
 // IsTestAdminKind reports whether kind is one of the admin test identity
@@ -3499,6 +3532,21 @@ type RoleDefinition struct {
 	System      bool      `json:"system"`      // true = seeded, not user-modifiable
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt"`
+	// ConfersMembership reports whether a binding of this role makes its
+	// principal a project member. Every role confers membership except
+	// the seeded project-visitor role. CreateRoleDefinition stores nil
+	// as true. Read it through ConfersProjectMembership.
+	ConfersMembership *bool `json:"confersMembership,omitempty"`
+}
+
+// ConfersProjectMembership reports whether a binding of rd makes its
+// principal a project member. An unset ConfersMembership means true; a nil
+// rd (an unresolved role definition) confers nothing.
+func (rd *RoleDefinition) ConfersProjectMembership() bool {
+	if rd == nil {
+		return false
+	}
+	return rd.ConfersMembership == nil || *rd.ConfersMembership
 }
 
 // RoleBinding connects a principal to a role definition, optionally scoped.
@@ -3545,6 +3593,11 @@ const (
 	ProjectRoleOwner  = "project-owner"
 	ProjectRoleAdmin  = "project-admin"
 	ProjectRoleMember = "project-member"
+	// ProjectRoleVisitor is the seeded project role for a federated
+	// account granted visitor access to a project. It does not confer
+	// membership (RoleDefinition.ConfersMembership is false), and only
+	// CreateVisitorRoleBinding binds it.
+	ProjectRoleVisitor = "project-visitor"
 )
 
 // MembershipKindBuiltin is the value stored in the membership_kind column

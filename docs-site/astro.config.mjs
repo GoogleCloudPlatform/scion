@@ -28,11 +28,13 @@ const hostedUserGuide = {
 	items: [
 		{ label: 'Connecting to a Hub', slug: 'hosted/user/hosted-user' },
 		{ label: 'User Access Tokens', slug: 'hosted/user/personal-access-tokens' },
+		{ label: 'Test Identities on Another Test Hub', slug: 'hosted/user/test-identity-target-hubs' },
 		{ label: 'CLI from a Coding Agent', slug: 'hosted/user/coding-agent-cli' },
 		{ label: 'Secrets & Environment', slug: 'hosted/user/secrets' },
 		{ label: 'Pre-Start Hooks', slug: 'hosted/user/pre-start-hooks' },
 		{ label: 'Port Forwarding & Auto-Expose', slug: 'hosted/user/port-forwarding' },
 		{ label: 'Messaging & Notifications', slug: 'hosted/user/messaging' },
+		{ label: 'Using Artifacts', slug: 'hosted/user/artifacts' },
 		{ label: 'Scheduling & Events', slug: 'hosted/user/scheduling' },
 		{ label: 'Scheduled Chat Messages', slug: 'hosted/user/scheduled-send' },
 		{ label: 'External Channels', slug: 'hosted/user/external-channels' },

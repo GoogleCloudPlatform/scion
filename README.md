@@ -89,7 +89,7 @@ scion init
 
 > **Tip:** Add `.scion/agents` to your `.gitignore` to avoid issues with nested git worktrees.
 
-Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows, Container on macOS). Override this in `.scion/settings.yaml`.
+Scion auto-detects your OS and configures the default runtime (Docker on Linux/Windows; on macOS the first available of Podman, Docker, then Apple Container). Override this in `.scion/settings.yaml`.
 
 **NOTE** This project is evolving rapidly. Local mode, Hub-based workflows, and Kubernetes runtime are all supported and in active use. Expect continued iteration — APIs and configuration may change between releases.
 

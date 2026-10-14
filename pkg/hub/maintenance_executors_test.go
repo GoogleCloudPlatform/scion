@@ -39,10 +39,7 @@ func TestSecretMigrationExecutor_NoGCPBackend(t *testing.T) {
 	// Use a local backend (not GCP) — migration should fail.
 	localBackend := secret.NewLocalBackend(s, "test-hub-id", "test-secret")
 
-	executor := &SecretMigrationExecutor{
-		store:         s,
-		secretBackend: localBackend,
-	}
+	executor := NewSecretMigrationExecutor(s, localBackend)
 
 	var buf bytes.Buffer
 	err = executor.Run(context.Background(), &buf, map[string]string{})
@@ -83,11 +80,11 @@ func TestRebuildServerExecutor_BuildsToStagingThenInstalls(t *testing.T) {
 
 	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
 
-	executor := &RebuildServerExecutor{
-		repoPath:    repoDir,
-		binaryDest:  binaryDest,
-		serviceName: "test-scion",
-	}
+	executor := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:    repoDir,
+		BinaryDest:  binaryDest,
+		ServiceName: "test-scion",
+	})
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)
@@ -153,11 +150,11 @@ func TestRebuildServerExecutor_NonLinux(t *testing.T) {
 		t.Skip("this test verifies non-linux rejection")
 	}
 
-	executor := &RebuildServerExecutor{
-		repoPath:    "/tmp/fake",
-		binaryDest:  "/tmp/fake/scion",
-		serviceName: "test",
-	}
+	executor := NewRebuildServerExecutor(RebuildServerOptions{
+		RepoPath:    "/tmp/fake",
+		BinaryDest:  "/tmp/fake/scion",
+		ServiceName: "test",
+	})
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)
@@ -174,10 +171,10 @@ func TestRebuildServerExecutor_MissingRepoPath(t *testing.T) {
 		t.Skip("rebuild-server only runs on linux")
 	}
 
-	executor := &RebuildServerExecutor{
-		binaryDest:  "/tmp/fake/scion",
-		serviceName: "test",
-	}
+	executor := NewRebuildServerExecutor(RebuildServerOptions{
+		BinaryDest:  "/tmp/fake/scion",
+		ServiceName: "test",
+	})
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)
@@ -217,9 +214,7 @@ func TestRebuildContainerBinariesExecutor_RunsMake(t *testing.T) {
 	t.Setenv("PATH", stubDir+":"+os.Getenv("PATH"))
 	t.Setenv("SCION_DEV_BINARIES", "/tmp/test-dev-binaries")
 
-	executor := &RebuildContainerBinariesExecutor{
-		repoPath: repoDir,
-	}
+	executor := NewRebuildContainerBinariesExecutor(repoDir)
 
 	var buf bytes.Buffer
 	err := executor.Run(context.Background(), &buf, nil)

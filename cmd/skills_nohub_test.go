@@ -112,7 +112,7 @@ func TestSkillsCommands_NoHubConfigured(t *testing.T) {
 				assert.NotPanics(t, func() { err = tt.cmd.RunE(tt.cmd, args) })
 				require.Error(t, err)
 				assert.ErrorIs(t, err, errHubNotConfigured)
-				assert.Contains(t, err.Error(), "this command needs a hub")
+				assert.Contains(t, err.Error(), "No hub selected. Add one with 'scion hub add <name> <url>'")
 			})
 		}
 	}

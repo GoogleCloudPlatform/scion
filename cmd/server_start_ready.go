@@ -109,6 +109,35 @@ func (e *serverNotReadyError) Error() string {
 // run in the child's working directory); it is only called in workstation
 // mode with the broker enabled.
 func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) []serverReadyTarget {
+	l := serverListenersFromArgs(args, cfg, fallbackMode, registryCheck)
+	var targets []serverReadyTarget
+	switch {
+	case l.Web && l.Hub:
+		targets = append(targets, serverReadyTarget{Name: "hub API and web", URL: healthzURL(l.HubHost, l.WebPort), NeedsHub: true})
+	case l.Web:
+		targets = append(targets, serverReadyTarget{Name: "web", URL: healthzURL(l.HubHost, l.WebPort)})
+	case l.Hub:
+		targets = append(targets, serverReadyTarget{Name: "hub API", URL: healthzURL(l.HubHost, l.HubPort)})
+	}
+	if l.Broker {
+		targets = append(targets, serverReadyTarget{Name: "runtime broker", URL: healthzURL(l.BrokerHost, l.BrokerPort)})
+	}
+	return targets
+}
+
+// serverListeners is what a 'server start --foreground' argv resolves to:
+// which components run and the host and port each listens on. The web
+// listener uses HubHost.
+type serverListeners struct {
+	Hub, Broker, Web    bool
+	HubHost, BrokerHost string
+	HubPort, BrokerPort int
+	WebPort             int
+}
+
+// serverListenersFromArgs resolves the components, hosts and ports of the
+// server started with args, as described on serverReadyTargetsFromArgs.
+func serverListenersFromArgs(args []string, cfg *config.GlobalConfig, fallbackMode string, registryCheck func() error) serverListeners {
 	fs := pflag.NewFlagSet("server-start-ready", pflag.ContinueOnError)
 	fs.ParseErrorsAllowlist.UnknownFlags = true
 	fs.SetOutput(io.Discard)
@@ -180,19 +209,12 @@ func serverReadyTargetsFromArgs(args []string, cfg *config.GlobalConfig, fallbac
 		brokerPortVal = *brokerPortFlag
 	}
 
-	var targets []serverReadyTarget
-	switch {
-	case *web && *hub:
-		targets = append(targets, serverReadyTarget{Name: "hub API and web", URL: healthzURL(hubHostVal, *webPortFlag), NeedsHub: true})
-	case *web:
-		targets = append(targets, serverReadyTarget{Name: "web", URL: healthzURL(hubHostVal, *webPortFlag)})
-	case *hub:
-		targets = append(targets, serverReadyTarget{Name: "hub API", URL: healthzURL(hubHostVal, hubPortVal)})
+	return serverListeners{
+		Hub: *hub, Broker: *broker, Web: *web,
+		HubHost: hubHostVal, BrokerHost: brokerHostVal,
+		HubPort: hubPortVal, BrokerPort: brokerPortVal,
+		WebPort: *webPortFlag,
 	}
-	if *broker {
-		targets = append(targets, serverReadyTarget{Name: "runtime broker", URL: healthzURL(brokerHostVal, brokerPortVal)})
-	}
-	return targets
 }
 
 // healthzURL builds the /healthz URL for a listener bound to host:port. A

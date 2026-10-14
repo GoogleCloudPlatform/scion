@@ -20,6 +20,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -50,6 +52,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/plugin"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
+	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/google/uuid"
 	"github.com/knadh/koanf/v2"
@@ -1583,8 +1586,8 @@ func setupRoutedTestEnv(t *testing.T) routedTestEnv {
 	enableWriteDenySwitch(t, srv)
 
 	// Wire webChatStore for reply affinity assertions.
-	wcsDB := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(wcsDB, "sqlite3")
+	wcsDB := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(wcsDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -1836,8 +1839,8 @@ func setupMutePinTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.
 	// The dev user is a member: chat tracks unread only in member projects.
 	bindProjectMember(t, s, proj.ID, DevUserID)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -1864,8 +1867,8 @@ func setupChatAuthzTest(t *testing.T) (*Server, store.Store, WebChatStore, *stor
 	t.Helper()
 	srv, s, _, _, project := setupDemoPolicyTest(t)
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2174,8 +2177,8 @@ func setupSendTest(t *testing.T) (*Server, store.Store, WebChatStore, *store.Pro
 		t.Fatalf("CreateProject: %v", err)
 	}
 
-	db := openTestMemorySQLite(t, "sqlite3")
-	wcs := NewWebChatStore(db, "sqlite3")
+	db := openTestMemorySQLite(t, "sqlite")
+	wcs := NewWebChatStore(db, "sqlite")
 	if err := wcs.Init(); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -2520,7 +2523,7 @@ func wireSharedWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatSto
 	rawDB := dbProvider.DB()
 	require.NotNil(t, rawDB, "store DB() returned nil")
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return wcs
@@ -2541,7 +2544,7 @@ func setupGroupConvTopicTest(t *testing.T) (*Server, store.Store, WebChatStore, 
 	rawDB := dbProvider.DB()
 	require.NotNil(t, rawDB, "store DB() returned nil")
 
-	wcs := NewWebChatStore(rawDB, "sqlite3")
+	wcs := NewWebChatStore(rawDB, "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -3361,6 +3364,42 @@ func setupProjectWithBroker(t *testing.T, s store.Store, projectID, projectName 
 
 const testOIDCIssuerURL = "https://scion.example.com"
 
+// installTestOIDCKeyManager sets an OIDCKeyManager with a fresh RS256 key and
+// the testOIDCIssuerURL issuer on srv. Routes that New() registers only when
+// the OIDC provider is enabled stay unregistered.
+func installTestOIDCKeyManager(t *testing.T, srv *Server) {
+	t.Helper()
+
+	// Generate a test RSA key pair.
+	privKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	kid := computeKeyID(&privKey.PublicKey)
+	signingKey := &OIDCSigningKey{
+		KeyID:      kid,
+		PrivateKey: privKey,
+		PublicKey:  &privKey.PublicKey,
+		Active:     true,
+	}
+
+	// Create the RS256 signer (needed by identity token endpoint).
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: jose.RS256, Key: privKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", kid),
+	)
+	require.NoError(t, err)
+
+	mgr := &OIDCKeyManager{
+		activeKey: signingKey,
+		allKeys:   []*OIDCSigningKey{signingKey},
+		signer:    signer,
+		issuerURL: testOIDCIssuerURL,
+	}
+
+	srv.oidcKeyManager = mgr
+	srv.oidcIssuerURL = testOIDCIssuerURL
+}
+
 // testOIDCServerWithRoutes creates a Server with OIDC enabled via config so
 // that routes are registered during New(). Use for mux-routing tests.
 func testOIDCServerWithRoutes(t *testing.T) *Server {
@@ -3650,7 +3689,7 @@ func def162Setup(t *testing.T) (srv *Server, s store.Store, project *store.Proje
 	// thread membership requires.
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok, "store does not expose DB()")
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 
@@ -3803,7 +3842,7 @@ func attachWebChatStore(t *testing.T, srv *Server, s store.Store) WebChatStore {
 	t.Helper()
 	dbProvider, ok := s.(interface{ DB() *sql.DB })
 	require.True(t, ok)
-	wcs := NewWebChatStore(dbProvider.DB(), "sqlite3")
+	wcs := NewWebChatStore(dbProvider.DB(), "sqlite")
 	require.NoError(t, wcs.Init())
 	srv.SetWebChatStore(wcs)
 	return wcs
@@ -4703,7 +4742,7 @@ func unwrapTestFixtureClamp(s store.Store) store.Store {
 type kindErrStore struct{ store.Store }
 
 // enableTestIdentitiesForTest turns the feature on for a server built by a
-// shared helper (the effect of --enable-test-identities).
+// shared helper (the effect of --test-mode=member).
 func enableTestIdentitiesForTest(srv *Server) {
 	srv.testIdentities = newTestIdentityState(true)
 	srv.authConfig.TestIdentitiesEnabled = true

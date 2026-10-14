@@ -577,10 +577,16 @@ func (s *Server) resolveOutboundRouting(
 				return nil, fmt.Errorf("project mismatch")
 			}
 
-			// Auto-register sender as participant (listing concern, non-fatal).
-			// Group conversation authorization is project-based, not participant-based,
-			// so this only ensures the conversation appears in the sender's listing.
-			if authKind, authID := authenticatedSender(ctx); authID != "" {
+			// The sender's message mode applies to group posts
+			// (group_message_mode.go).
+			decision, ok := s.checkAgentGroupPost(ctx, w, agent, conv.ID)
+			if !ok {
+				return nil, fmt.Errorf("group post refused: %s", decision.Reason)
+			}
+
+			// Auto-register sender as participant (listing concern, non-fatal)
+			// when its message mode allows joining by posting.
+			if authKind, authID := authenticatedSender(ctx); authID != "" && decision.MayJoin {
 				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 					ConversationID: req.ConversationID,
 					PrincipalKind:  authKind,
@@ -633,6 +639,12 @@ func (s *Server) resolveOutboundRouting(
 			s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 				"thread_id", req.ThreadID, "agent_id", agent.ID, "error", deriveErr)
 		} else {
+			// The sender's message mode is checked before the thread
+			// conversation is resolved, so a refused post writes no row
+			// (group_message_mode.go).
+			if kind == "group" && !s.precheckThreadGroupPost(ctx, w, agent, agent.ProjectID, extRef, req.ThreadID, outboundThreadSurface(kind, req.Channel)) {
+				return nil, fmt.Errorf("group post refused by message mode")
+			}
 			var keyOpts []messaging.ConversationByKeyOption
 			s.mu.RLock()
 			wcs := s.webChatStore
@@ -696,6 +708,14 @@ func (s *Server) resolveOutboundRouting(
 				}
 				s.messageLog.Warn("conversation resolution failed (write-deny OFF, continuing)", "error", convErr)
 			} else {
+				// A thread conversation is a group conversation: the
+				// sender's message mode applies (group_message_mode.go).
+				// Posting by thread key never registers the sender.
+				if convResult.Kind == "group" {
+					if decision, ok := s.checkAgentGroupPost(ctx, w, agent, convResult.ConversationID); !ok {
+						return nil, fmt.Errorf("group post refused: %s", decision.Reason)
+					}
+				}
 				if err := messaging.ValidateAttributed(convResult.ConversationID); err != nil {
 					if s.writeDenyEnabled() {
 						messaging.WriteDenialMetrics.Inc("outbound.validate")
@@ -1347,7 +1367,8 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	// agent can read under its own request credential. The flag lets
 	// deliverToUser record them on the broker path.
 	outboundArtifactRefs, outboundArtifactWarning := []artifacts.MessageRef(nil), ""
-	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+	structuredMsg.Metadata, outboundArtifactRefs, outboundArtifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+		directUserRecipient(result, agent.ID))
 	structuredMsg.ArtifactRefsAdmitted = len(outboundArtifactRefs) > 0
 
 	// Process attachments.
@@ -1535,6 +1556,26 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 		HumanMembers:       humanMembers,
 	})
 
+	// A group post that @mentions no agent goes to the conversation's
+	// default agent. The sender's agentGroupPostDecision already allowed
+	// the post in resolveOutboundRouting; wakeGroupDefaultAgent adds the
+	// pairwise check, the loop guard, and groupAgentJoinAllowed
+	// (group_message_mode.go).
+	isGroupPost := result.ConvResult != nil && result.ConvResult.Kind == "group"
+	var defaultAgentResult *messages.MentionResult
+	if isGroupPost {
+		defaultAgentResult = s.wakeGroupDefaultAgent(ctx, groupDefaultWakeInput{
+			Sender:          agent,
+			SenderIdent:     agentIdent,
+			Conv:            result.ConvResult,
+			Msg:             originalMsgForMentions,
+			Type:            req.Type,
+			MentionResults:  mentionResults,
+			ParentMessageID: storeMsg.ID,
+			Channel:         result.Channel,
+		})
+	}
+
 	// One message record per message: when the delivery path already
 	// wrote it, this line is a lifecycle entry; otherwise it is the record.
 	outboundLogAttrs := []any{
@@ -1572,6 +1613,19 @@ func (s *Server) handleAgentOutboundMessage(w http.ResponseWriter, r *http.Reque
 	}
 	if len(mentionResults) > 0 {
 		respBody["mention_results"] = mentionResults
+	}
+	// Which agents a group post reached, and an explicit flag when none.
+	// Types that never reach an agent (outside mentionFanoutTypes) report
+	// neither.
+	if isGroupPost && mentionFanoutTypes[req.Type] {
+		if defaultAgentResult != nil {
+			respBody["default_agent_result"] = defaultAgentResult
+		}
+		if woken := wokenAgentSlugs(mentionResults, defaultAgentResult); len(woken) > 0 {
+			respBody["woken_agents"] = woken
+		} else {
+			respBody["no_agent_woken"] = true
+		}
 	}
 	// ptone/scion#3667: attachments the hub could not record. Additive: the
 	// message was still sent, and the status is unchanged.
@@ -2330,6 +2384,9 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// a conversation the mentioned agent already belongs to. Only the
 		// looked-up case is used to key a mention row's thread identity.
 		groupConvIsExistingReference := false
+		// threadPostSender is the agent sender's record, read once when it
+		// posts by thread key, for the message mode checks below.
+		var threadPostSender *store.Agent
 		if structuredMsg.ConversationID != "" {
 			// DEF-49 SECURITY: authorize the caller-supplied conversation_id
 			// against the authenticated sender before honouring it.
@@ -2411,8 +2468,21 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					return
 				}
 
-				// Auto-register both sender and recipient as participants.
-				if authKind, authID := authenticatedSender(ctx); authID != "" {
+				// An agent sender's message mode applies to group posts
+				// (group_message_mode.go). A user sender is unchanged.
+				senderMayJoin := true
+				if authKind == "agent" {
+					decision, ok := s.checkInboundAgentGroupPost(ctx, w, authID, conv.ID)
+					if !ok {
+						return
+					}
+					senderMayJoin = decision.MayJoin
+				}
+
+				// Auto-register the sender (when its mode allows joining by
+				// posting) and the recipient (when the sender may add it) as
+				// participants.
+				if authKind, authID := authenticatedSender(ctx); authID != "" && senderMayJoin {
 					if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 						ConversationID: structuredMsg.ConversationID,
 						PrincipalKind:  authKind,
@@ -2427,7 +2497,12 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					}
 				}
 				// Also register the recipient agent.
-				if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
+				if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, GetIdentityFromContext(ctx), agent); !joinOK {
+					s.messageLog.Info("recipient not registered as group participant: message mode",
+						"conversation_id", structuredMsg.ConversationID,
+						"agent_id", agent.ID,
+						"reason", joinReason)
+				} else if ensureErr := s.store.EnsureParticipant(ctx, &store.ConversationParticipant{
 					ConversationID: structuredMsg.ConversationID,
 					PrincipalKind:  "agent",
 					PrincipalID:    agent.ID,
@@ -2485,6 +2560,19 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 				s.messageLog.Warn("skipping conversation resolution: key derivation refused (write-deny OFF)",
 					"thread_id", structuredMsg.ThreadID, "error", deriveErr)
 			} else {
+				// An agent sender's message mode is checked before the
+				// thread conversation is resolved, so a refused post writes
+				// no row (group_message_mode.go).
+				if kind == "group" && authKind == "agent" {
+					sender, ok := s.loadGroupPostSender(ctx, w, authID)
+					if !ok {
+						return
+					}
+					threadPostSender = sender
+					if !s.precheckThreadGroupPost(ctx, w, sender, agent.ProjectID, extRef, structuredMsg.ThreadID, "") {
+						return
+					}
+				}
 				var keyOpts []messaging.ConversationByKeyOption
 				s.mu.RLock()
 				wcs := s.webChatStore
@@ -2530,6 +2618,23 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 					return
 				}
 				s.messageLog.Warn("ValidateAttributed failed (write-deny OFF, continuing)", "error", err)
+			}
+		}
+		// A thread conversation is a group conversation: an agent
+		// sender's message mode applies (group_message_mode.go). Posting
+		// by thread key never registers the sender. The caller-supplied
+		// conversation_id branch above already decided this.
+		if convResult != nil && convResult.Kind == "group" && !groupConvIsExistingReference {
+			if threadPostSender != nil {
+				if _, ok := s.checkAgentGroupPost(ctx, w, threadPostSender, convResult.ConversationID); !ok {
+					return
+				}
+			} else if authKind, authID := authenticatedSender(ctx); authKind == "agent" {
+				// Defensive fallback: the pre-check above sets
+				// threadPostSender for every agent thread post.
+				if _, ok := s.checkInboundAgentGroupPost(ctx, w, authID, convResult.ConversationID); !ok {
+					return
+				}
 			}
 		}
 		if convResult != nil && convResult.Kind == "group" {
@@ -2698,7 +2803,8 @@ func (s *Server) handleAgentMessage(w http.ResponseWriter, r *http.Request, id s
 		// artifact references the sender can read under its own request
 		// credential (ptone/scion#3222).
 		var artifactRefs, recordedRefs []artifacts.MessageRef
-		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata)
+		structuredMsg.Metadata, artifactRefs, artifactWarning = s.admitMessageArtifacts(ctx, structuredMsg.Metadata,
+			directAgentRecipient(agent, groupID))
 		structuredMsg.ArtifactRefsAdmitted = len(artifactRefs) > 0
 
 		if err := s.store.CreateMessage(ctx, storeMsg); err != nil {
@@ -4156,8 +4262,15 @@ func (s *Server) processMentions(ctx context.Context, mentionSlugs []string, pri
 		// F2b (design doc §3.3): the mention target was actually dispatched
 		// into a group conversation — record it as a participant. Best
 		// effort, never affects the response (AC-12).
+		// The sender must be allowed to add the mentioned agent under its
+		// message mode (group_message_mode.go).
 		if groupConversationID != "" {
-			s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+			if joinOK, joinReason := s.groupAgentJoinAllowed(ctx, senderIdentity, mentionAgent); joinOK {
+				s.ensureGroupParticipants(ctx, groupConversationID, []*store.Agent{mentionAgent})
+			} else {
+				s.messageLog.Info("mention target not registered as group participant: message mode",
+					"conversation_id", groupConversationID, "agent_id", mentionAgent.ID, "reason", joinReason)
+			}
 		}
 	}
 

@@ -201,6 +201,13 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Pattern: "/api/v1/auth/scopes", RouteID: "auth.scopes",
 		Classification: RouteAuthenticated,
 	},
+	// User access credential for a peer hub: the handler admits an
+	// interactive session or a hub-boundary user access token carrying
+	// federation_token:mint (handlers_federation_token.go).
+	"POST /api/v1/auth/federation-token": {
+		Pattern: "POST /api/v1/auth/federation-token", RouteID: "auth.federationToken",
+		Classification: RouteAuthenticated,
+	},
 	"/api/v1/metrics/session/": {
 		Pattern: "/api/v1/metrics/session/", RouteID: "metrics.session",
 		Classification: RouteAuthenticated,
@@ -219,6 +226,10 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/users/me/injected-skills/": {
 		Pattern: "/api/v1/users/me/injected-skills/", RouteID: "users.me.injectedSkills.byId",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/users/me/delegations": {
+		Pattern: "/api/v1/users/me/delegations", RouteID: "users.me.delegations",
 		Classification: RouteAuthenticated,
 	},
 	"/api/v1/users/me/terminal-workspace": {
@@ -263,6 +274,14 @@ var routeMetadataTable = map[string]RouteMetadata{
 	},
 	"/api/v1/conversations/resolve": {
 		Pattern: "/api/v1/conversations/resolve", RouteID: "conversations.resolve",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups": {
+		Pattern: "/api/v1/thread-groups", RouteID: "threadGroups.list",
+		Classification: RouteAuthenticated,
+	},
+	"/api/v1/thread-groups/": {
+		Pattern: "/api/v1/thread-groups/", RouteID: "threadGroups.byId",
 		Classification: RouteAuthenticated,
 	},
 
@@ -1048,7 +1067,7 @@ var routeMetadataTable = map[string]RouteMetadata{
 	// Hub test identities (ptone/scion#4240): test_identity.issue at hub
 	// scope, admitting a hub-boundary token carrying test_identity:issue.
 	// The handlers return 404 unless the hub runs with
-	// --enable-test-identities.
+	// --test-mode=member or above.
 	// -------------------------------------------------------------------------
 	"POST /api/v1/test-identities": {
 		Pattern: "POST /api/v1/test-identities", RouteID: "testIdentities.create",
@@ -1068,9 +1087,11 @@ var routeMetadataTable = map[string]RouteMetadata{
 		Permission:     "test_identity.issue", Resource: "test_identity", Action: "issue",
 		BearerTarget: "hub_collection",
 	},
-	// The handler further limits the code to the identity's issuer or an
-	// unscoped platform admin session (canManageTestIdentity) and to hubs
-	// where test identity web sessions are available.
+	// The handler further limits the code to the identity's issuer, a
+	// workload delegation for the member-tier identities it issued, or an
+	// unscoped platform admin session (canManageTestIdentity,
+	// workloadWebCodeAdmitted) and to hubs where test identity web sessions
+	// are available.
 	"POST /api/v1/test-identities/{id}/web-login-code": {
 		Pattern: "POST /api/v1/test-identities/{id}/web-login-code", RouteID: "testIdentities.webLoginCode",
 		Classification: RouteHubAdmin,
@@ -1362,6 +1383,12 @@ func (s *Server) routeGuard(meta RouteMetadata, next http.HandlerFunc) http.Hand
 		// Every guarded route's decision audit carries its RouteID.
 		if meta.RouteID != "" {
 			r = r.WithContext(ContextWithRoute(r.Context(), meta.RouteID))
+		}
+		// A visitor (a federated account, VisitorIdentity) is refused on
+		// every route, whatever its classification, until per-route
+		// visitor admission replaces this check.
+		if refuseVisitorRequest(w, r) {
+			return
 		}
 		// An agent delegated credential is admitted only on the routes in
 		// agentDelegationAdmittedRoutes, whatever the route's

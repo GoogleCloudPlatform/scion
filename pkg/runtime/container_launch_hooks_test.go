@@ -319,3 +319,24 @@ func TestAppleContainerRun_HandleIsPrintedName(t *testing.T) {
 		t.Fatalf("handles = %+v, want [%+v]", handles, want)
 	}
 }
+
+// TestContainerRun_ObserverOnlySyncPathSeesContainer: on the synchronous
+// path (an observer, no OnResourceCreated) every Docker-family runtime
+// reports the created container to the observer, exactly once.
+func TestContainerRun_ObserverOnlySyncPathSeesContainer(t *testing.T) {
+	for _, tc := range containerRuntimeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			cli, _ := writeMockContainerCLI(t, "")
+			config := containerHookConfig()
+			var observed []api.ResourceHandle
+			config.ObserveResourceCreated = func(h api.ResourceHandle) { observed = append(observed, h) }
+			if _, err := tc.new(cli).Run(context.Background(), config); err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			want := api.ResourceHandle{Kind: api.ResourceKindContainer, Name: "hook-agent", UID: mockContainerID}
+			if len(observed) != 1 || observed[0] != want {
+				t.Fatalf("observed = %+v, want [%+v]", observed, want)
+			}
+		})
+	}
+}

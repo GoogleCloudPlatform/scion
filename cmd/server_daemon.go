@@ -84,24 +84,20 @@ func buildDaemonStartArgs(cmd *cobra.Command) []string {
 	// unless forwarded. appendDaemonBoolFlag omits them when unset.
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "no-auto-migrate", noAutoMigrate)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-login", enableTestLogin)
-	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-test-identities", enableTestIdentities)
-	// Test admin tier flags (string values): forwarded when given, so the
-	// child runs the same gate. validateTestAdminFlagsEarly already refused
-	// --production (which the re-exec would otherwise turn into --hosted)
-	// and the super-admin flag in this parent.
-	if cmd.Flags().Changed(testAdminIdentitiesFlag) {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testAdminIdentitiesFlag, enableTestAdminIdentities))
-	}
-	if cmd.Flags().Changed(testSuperAdminIdentitiesFlag) {
-		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testSuperAdminIdentitiesFlag, enableTestSuperAdminIdentities))
+	// --test-mode (string value): forwarded verbatim when given, so the
+	// child resolves the same level and runs the same gate.
+	// validateTestModeFlagsEarly already refused the removed flags,
+	// super-admin and --production with a level (which the re-exec would
+	// otherwise turn into --hosted) in this parent.
+	if cmd.Flags().Changed(testModeFlag) {
+		daemonArgs = append(daemonArgs, fmt.Sprintf("--%s=%s", testModeFlag, testModeValue))
 	}
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "enable-debug-endpoints", enableDebugEndpoints)
 	daemonArgs = appendDaemonBoolFlag(cmd, daemonArgs, "simulate-remote-broker", simulateRemoteBroker)
 	// Only forward --host when explicitly set. The parent never loads config, so
 	// hubHost holds a default here; forwarding it unconditionally would make the
-	// child treat --host as changed and clobber a config-file host (and skip the
-	// workstation loopback default for the runtime broker). Unset → the child
-	// derives its own default (127.0.0.1 in workstation mode).
+	// child treat --host as changed and clobber a config-file host. Unset → the
+	// child derives its own default (127.0.0.1 in workstation mode).
 	if cmd.Flags().Changed("host") {
 		daemonArgs = append(daemonArgs, fmt.Sprintf("--host=%s", hubHost))
 	}
@@ -179,7 +175,7 @@ func resolveDaemonServerMode(cmd *cobra.Command) error {
 	if err := validateDebugEndpoints(hostedMode, enableDebugEndpoints); err != nil {
 		return err
 	}
-	return validateTestAdminFlagsEarly(cmd)
+	return validateTestModeFlagsEarly(cmd)
 }
 
 // runServerStartOrDaemon handles the server start command. By default it launches
@@ -274,9 +270,15 @@ func runServerStartOrDaemon(cmd *cobra.Command, args []string) error {
 	fmt.Printf("PID file: %s\n", daemon.GetPIDPathComponent(serverDaemonComponent, globalDir))
 	fmt.Println()
 
-	// Print quickstart info for workstation mode
+	// Print quickstart info for workstation mode. The server settings name
+	// the dev token file the child uses; if they cannot be loaded, the
+	// quickstart falls back to the default file, as the child does.
 	if !hostedMode {
-		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
+		serverCfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(daemonArgs))
+		if err != nil {
+			serverCfg = nil
+		}
+		printWorkstationQuickstart(settingsMissingBeforeStart, globalDir, serverCfg, hubHost, webPort, enableWeb, enableDevAuth, enableHub, enableRuntimeBroker)
 	}
 
 	fmt.Println("Use 'scion server stop' to stop the daemon.")
@@ -902,10 +904,10 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	client := &http.Client{Timeout: 2 * time.Second}
-	// The broker is probed on the server's configured broker port
-	// (--runtime-broker-port or server.broker.port), not always 9800.
-	brokerURL := fmt.Sprintf("http://127.0.0.1:%d", serverBrokerPort(globalDir))
-	probed := probeServerStatus(client, "http://127.0.0.1:8080", "http://127.0.0.1:9810", brokerURL)
+	// Probe the ports the server was started with (its saved start args and
+	// config), not the defaults.
+	webBase, hubBase, brokerBase := serverStatusBaseURLs(globalDir, running)
+	probed := probeServerStatus(client, webBase, hubBase, brokerBase)
 	status.HubRunning = probed.HubRunning
 	status.BrokerRunning = probed.BrokerRunning
 	status.WebRunning = probed.WebRunning
@@ -938,6 +940,33 @@ func runServerStatus(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// serverStatusBaseURLs returns the base URLs (no trailing slash) 'server
+// status' probes: the web port, the standalone hub port and the runtime
+// broker port of the server, with their hosts, resolved by
+// serverListenersFromArgs as the start wait does. While the daemon runs they
+// come from its saved start args and the config those args name. Otherwise
+// the saved args are ignored: they outlive 'server stop' (restart reads
+// them) and a foreground server saves none, so the ports come from the
+// config and the defaults, as a foreground server's do.
+func serverStatusBaseURLs(globalDir string, daemonRunning bool) (webBase, hubBase, brokerBase string) {
+	var saved []string
+	if daemonRunning {
+		if args, err := daemon.LoadArgs(serverDaemonComponent, globalDir); err == nil {
+			saved = args
+		}
+	}
+	cfg, err := config.LoadGlobalConfig(serverConfigPathFromArgs(saved))
+	if err != nil {
+		cfg = nil
+	}
+	// The registry check only decides whether the broker runs, not where it
+	// listens; status probes every component.
+	noRegistryCheck := func() error { return nil }
+	l := serverListenersFromArgs(saved, cfg, config.LoadServerMode(), noRegistryCheck)
+	base := func(host string, port int) string { return strings.TrimSuffix(healthzURL(host, port), "/healthz") }
+	return base(l.HubHost, l.WebPort), base(l.HubHost, l.HubPort), base(l.BrokerHost, l.BrokerPort)
 }
 
 // formatServerStatusComponents renders the "Components:" lines of
@@ -1083,25 +1112,28 @@ func quickstartReadyMessage(ready bool, lastHealth healthProbeResponse) (msg str
 // global settings file was absent before the daemon started (see
 // quickstartWebPath). When the co-located broker was skipped for lack of an
 // image registry, it prints the fix next to the URL.
-func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+//
+// serverCfg is the server configuration the daemon child loads; its dev
+// token settings decide which token file the quickstart shows. A nil
+// serverCfg means the default settings.
+func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir string, serverCfg *config.GlobalConfig, host string, wPort int, webEnabled, devAuth, hubEnabled, brokerEnabled bool) {
+	if serverCfg == nil {
+		serverCfg = &config.GlobalConfig{}
+	}
+	tokenFile := daemonDevTokenFilePath(serverCfg.Auth.TokenFile, globalDir)
+
 	if webEnabled {
 		displayHost := host
 		if displayHost == "0.0.0.0" || displayHost == "" {
 			displayHost = "127.0.0.1"
 		}
 
-		// Auto-configure hub.endpoint so that `scion hub` commands work
-		// immediately after workstation-mode start.
-		hubEndpoint := fmt.Sprintf("http://%s:%d", displayHost, wPort)
-		if vs, err := config.LoadSingleFileVersioned(globalDir); err == nil {
-			if vs.GetHubEndpoint() == "" {
-				if err := config.UpdateVersionedSetting(globalDir, "hub.endpoint", hubEndpoint); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to auto-configure hub endpoint: %v\n", err)
-				} else {
-					fmt.Printf("Configured hub endpoint: %s (run 'scion hub status' to verify)\n", hubEndpoint)
-				}
-			}
-		}
+		// Register the local hub in the hub list, so that `scion hub`
+		// commands work immediately after workstation-mode start (see
+		// registerLocalHub for when it becomes the current hub). No
+		// hub.endpoint is written: the server advertises its loopback
+		// endpoint without one.
+		registerLocalHub(os.Stdout, os.Stderr, fmt.Sprintf("http://%s:%d", displayHost, wPort))
 
 		// Wait for the server before asking the hub for its onboarding
 		// status. The Hub API is mounted on the web port in workstation mode.
@@ -1111,7 +1143,14 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		msg, serverUp := quickstartReadyMessage(quickstartWaitReady(displayHost, wPort, quickstartReadyTimeout))
 		status, statusErr := onboardingStatusResult{}, errOnboardingStatusNotAsked
 		if serverUp && hubEnabled {
-			status, statusErr = quickstartOnboardingStatus(baseURL, readDevTokenFile(globalDir))
+			// The token is sent only to the local server's status endpoint,
+			// never printed: the settings token if one is set, else the
+			// token file's contents.
+			statusToken := serverCfg.Auth.Token
+			if statusToken == "" {
+				statusToken = readDevTokenFile(tokenFile)
+			}
+			status, statusErr = quickstartOnboardingStatus(baseURL, statusToken)
 		}
 		if statusErr != nil {
 			slog.Debug("Onboarding status unavailable; using the settings-file signal", "error", statusErr)
@@ -1122,7 +1161,10 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 		if msg != "" {
 			fmt.Println(msg)
 		}
-		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, requireImageRegistryForBroker) {
+		// The server runs in the global directory, so check the registry
+		// there: a registry set only in the current project does not keep
+		// its broker on.
+		if brokerSkippedForRegistry(brokerEnabled, status, statusErr, daemonRegistryCheck(globalDir)) {
 			fmt.Println(brokerSkippedNotice)
 		}
 
@@ -1133,20 +1175,48 @@ func printWorkstationQuickstart(settingsMissingBeforeStart bool, globalDir strin
 	}
 
 	if devAuth {
-		// Read the dev token from the token file (written by the daemon child process)
-		if token := readDevTokenFile(globalDir); token != "" {
-			fmt.Println()
-			fmt.Println("Developer token (for CLI authentication):")
-			fmt.Printf("  export SCION_DEV_TOKEN=%s\n", token)
+		// Show where the server keeps its dev token: the configured token
+		// file (which the server creates if it does not exist yet), or a
+		// plain note when the token is set in the settings. Never the value.
+		fmt.Println()
+		fmt.Println("Developer token (for CLI authentication):")
+		hint := devTokenExportHint(tokenFile)
+		if serverCfg.Auth.Token != "" {
+			hint = devTokenStartupHint(serverCfg, globalDir)
 		}
+		fmt.Printf("  %s\n", hint)
 	}
 	fmt.Println()
 }
 
-// readDevTokenFile returns the workstation dev token the daemon child wrote
-// to <globalDir>/dev-token, or "" if there is none.
-func readDevTokenFile(globalDir string) string {
-	data, err := os.ReadFile(filepath.Join(globalDir, "dev-token"))
+// daemonDevTokenFilePath returns the dev token file the daemon child uses
+// (see devTokenFilePath). The child opens a relative configured path from
+// its working directory (see daemonChildDir), so the path is resolved
+// against that directory here, not against the directory 'server start'
+// was run in.
+func daemonDevTokenFilePath(configured, globalDir string) string {
+	if configured != "" && !filepath.IsAbs(configured) {
+		return filepath.Join(daemonChildDir(globalDir), configured)
+	}
+	return devTokenFilePath(configured, globalDir)
+}
+
+// daemonChildDir returns the working directory of the daemon child:
+// daemon.StartComponent starts it in globalDir, and with --global it
+// changes to the home directory (runServerStart).
+func daemonChildDir(globalDir string) string {
+	if globalMode {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			return home
+		}
+	}
+	return globalDir
+}
+
+// readDevTokenFile returns the dev token stored in the file at path, or ""
+// if there is none.
+func readDevTokenFile(path string) string {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return ""
 	}

@@ -190,18 +190,14 @@ With the `hub.conduit` [experiment](/scion/reference/experiments/) on, each of t
 
 To register a broker on a machine where you cannot sign in interactively (a build host or a VM), mint a short-lived hub-boundary token on a machine where you are signed in, then use it on the host.
 
-1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration. `scion hub token create` does not yet offer a hub boundary, so create the token through the API with your CLI session:
+1. **Mint a hub token.** You must be a hub member, which grants `broker.create`. Include `broker:read` as well, so that `register` can check its existing registration:
 
    ```bash
-   HUB=https://hub.example.com
-   SESSION=$(jq -r --arg hub "$HUB" '.hubs[$hub].accessToken' ~/.scion/credentials.json)
-   curl -sS -X POST "$HUB/api/v1/auth/tokens" \
-     -H "Authorization: Bearer $SESSION" \
-     -H "Content-Type: application/json" \
-     -d '{"name":"build-host-3","boundary":{"kind":"hub"},"scopes":["broker:create","broker:read"],"expiresAt":"2026-12-01T00:00:00Z"}'
+   scion hub token create --boundary hub --name build-host-3 \
+     --scopes broker:create,broker:read --expires 2h
    ```
 
-   The response contains the token value (`scion_pat_...`) once. Choose an `expiresAt` that is shortly after you plan to register.
+   The command prints the token value (`scion_pat_...`) once. Choose an `--expires` that is shortly after you plan to register.
 
 2. **Register on the host** with the broker server running (`scion runtime-broker start`):
 
@@ -242,7 +238,7 @@ Related rules:
 
 ## Broker Health Monitoring
 
-A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. The one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it.
+A Runtime Broker whose default runtime failed to resolve at startup reports itself `degraded` on `/healthz` (still HTTP `200`), and its `/readyz` returns `503`, so point readiness probes at `/readyz`. Starting or restarting an existing agent whose saved profile the Runtime Broker cannot resolve returns a retryable `503 runtime_unavailable` (with `Retry-After`) before anything is stopped, instead of falling back to the default runtime. On a Runtime Broker without the Hub's stored profiles, the one exception is an agent that last ran on a plain Docker or Podman default runtime, which falls back to it. Where the Hub's stored profiles apply (a Runtime Broker co-located with the Hub), an agent whose saved profile is not one of them gets the `503` and never falls back, even if it last ran on the default runtime; the error names the available profiles. A dispatch that names no profile uses `active_profile` when it is one of the Hub's stored profiles, otherwise the only stored profile when there is exactly one, and otherwise gets the same `503`.
 
 The Hub monitors broker health via a recurring heartbeat timeout scheduler. If a broker's WebSocket control channel disconnects and the disconnect event is not received (for example, due to a Hub crash or network partition), the Hub automatically marks the broker as **offline** after approximately five minutes of missed heartbeats. This mirrors the existing agent heartbeat timeout pattern and ensures the broker selection cascade does not dispatch work to unreachable brokers.
 

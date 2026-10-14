@@ -357,16 +357,15 @@ harness_configs:
 	})
 }
 
-// TestStart_RestartAfterTemplateImageEdited_LiveTemplateWinsOverCreateTimeSnapshot
-// pins ptone/scion#2156: the value ProvisionAgent persists to
-// agent-info.json for the explicit tier's restart fallback must be the
-// INLINE config's contribution only, never the template's — a template is
-// re-read live on every Start, so persisting its create-time value would
-// let a stale template snapshot outrank the CURRENT template on every later
-// restart. Here the agent is created with only a template image (no inline
-// config at all), the template file is then edited, and a restart must
-// pick up the new template value.
-func TestStart_RestartAfterTemplateImageEdited_LiveTemplateWinsOverCreateTimeSnapshot(t *testing.T) {
+// TestStart_RestartAfterTemplateImageEdited_TemplateImageNeverUsed pins
+// ptone/scion#2156 together with ptone/scion#4524: the value ProvisionAgent
+// persists for the explicit tier's restart fallback is the INLINE config's
+// contribution only, never the template's, and a template's image is an
+// ignored environment key. Here the agent is created with only a template
+// image (no inline config at all), the template file is then edited, and
+// neither the create-time nor the edited template image is ever run: both
+// starts use the harness-config file default.
+func TestStart_RestartAfterTemplateImageEdited_TemplateImageNeverUsed(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	oldWd, _ := os.Getwd()
@@ -421,8 +420,8 @@ profiles:
 	if err != nil {
 		t.Fatalf("create Start failed: %v", err)
 	}
-	if capturedConfig.Image != "template-pinned:v1" {
-		t.Fatalf("precondition failed: create-time image = %q, want template-pinned:v1", capturedConfig.Image)
+	if capturedConfig.Image != "file-default:latest" {
+		t.Fatalf("create-time image = %q, want file-default:latest (the template's image is ignored)", capturedConfig.Image)
 	}
 
 	// Edit the template to pin v2, then restart with no --config.
@@ -438,9 +437,9 @@ profiles:
 		t.Fatalf("restart Start failed: %v", err)
 	}
 
-	if capturedConfig.Image != "template-pinned:v2" {
-		t.Errorf("restart image = %q, want the current template's image %q (not a create-time snapshot)",
-			capturedConfig.Image, "template-pinned:v2")
+	if capturedConfig.Image != "file-default:latest" {
+		t.Errorf("restart image = %q, want file-default:latest (neither the create-time snapshot nor the edited template image)",
+			capturedConfig.Image)
 	}
 }
 
@@ -451,6 +450,11 @@ profiles:
 // recorded at an earlier provision, matching pre-existing (origin/main)
 // behaviour, rather than silently falling through to Hub settings or the
 // file default just because the template disappeared.
+//
+// Since ptone/scion#4524 a template's image is an ignored environment key,
+// so a new agent records no template image. The recorded value exercised
+// here is that of an agent provisioned before that change: the test writes
+// it into the broker-side image provenance after the create.
 func TestStart_RestartAfterTemplateDeleted_FallsBackToRecordedImage(t *testing.T) {
 	tmpDir := t.TempDir()
 
@@ -507,8 +511,23 @@ profiles:
 	if err != nil {
 		t.Fatalf("create Start failed: %v", err)
 	}
-	if capturedConfig.Image != "tpl:v1" {
-		t.Fatalf("precondition failed: create-time image = %q, want tpl:v1", capturedConfig.Image)
+	if capturedConfig.Image != "file-default:latest" {
+		t.Fatalf("precondition failed: create-time image = %q, want file-default:latest (the template's image is ignored)", capturedConfig.Image)
+	}
+
+	// Record the template image and pull policy a pre-ptone/scion#4524
+	// provision would have recorded.
+	agentDir := filepath.Join(projectScionDir, "agents", "test-agent")
+	prov, err := readImageProvenance(agentDir)
+	if err != nil || prov == nil {
+		t.Fatalf("read image provenance: %v (record %v)", err, prov)
+	}
+	if prov.TemplateImage != "" || prov.TemplateImagePullPolicy != "" {
+		t.Fatalf("a new agent recorded template image values %q / %q; the template's are ignored", prov.TemplateImage, prov.TemplateImagePullPolicy)
+	}
+	prov.TemplateImage, prov.TemplateImagePullPolicy = "tpl:v1", "Never"
+	if err := writeImageProvenance(agentDir, *prov); err != nil {
+		t.Fatal(err)
 	}
 
 	// Delete the template entirely — renamed or removed since creation.

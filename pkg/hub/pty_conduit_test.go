@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/conduit/clock"
 	"github.com/GoogleCloudPlatform/scion/pkg/conduit/grant"
 	sconduit "github.com/GoogleCloudPlatform/scion/pkg/sciontool/conduit"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -363,6 +364,73 @@ func TestAgentPTY_RevocationClosesBothLegs(t *testing.T) {
 	assert.Equal(t, conduitReasonAuthzExpired, ce.Text)
 	waitClosedPTY(t, p)
 	assert.Zero(t, a.Len(), "the stream is untracked once it ends")
+}
+
+// TestAgentPTY_IntervalRenewalNoticeDelivered: the agent-path PTY stream,
+// whose agent session is held by this node, is tracked with the shared
+// renewal sender (conduitStreamRenewal). At its deadline the hub sends
+// AuthRefresh{stream_id} on the agent's session without error, the
+// deadline moves by one interval, and the terminal keeps working.
+func TestAgentPTY_IntervalRenewalNoticeDelivered(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	f.setBrokerRow(t, attachCaps(false), "")
+	f.startPTYAgent(t, f.public.URL)
+	a := f.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	clk, ok := a.cfg.Clock.(*clock.Fake)
+	require.True(t, ok, "the relay fixture runs on a fake clock")
+	require.Zero(t, a.Len())
+	// Short enough that reaching it fires no keepalive on the relay's
+	// clock; streams tracked from now on take it.
+	a.cfg.UserStreamAuthzMax = time.Second
+
+	c, _, err := f.dialPTY(t, "")
+	require.NoError(t, err)
+	p := waitSpawn(t, f.spawned)
+	echoRoundTrip(t, c, "before")
+	st := soleTrackedStream(t, a)
+	require.Equal(t, grant.StreamKindPTY, st.Kind)
+	require.NotNil(t, st.Renew, "the agent's session is local: a notice sender is set")
+	calls := watchStream(st)
+	d0 := st.Deadline()
+	require.False(t, d0.IsZero())
+
+	clk.Advance(time.Second)
+	assert.Equal(t, d0.Add(time.Second), st.Deadline(), "the deadline moved by exactly one interval")
+	closes, renews := calls.snapshot()
+	assert.Empty(t, closes)
+	require.Len(t, renews, 1, "one renewal notice")
+	assert.NoError(t, renews[0], "the notice was sent on the agent's session")
+
+	echoRoundTrip(t, c, "after renewal")
+	require.NoError(t, c.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second)))
+	waitClosedPTY(t, p)
+}
+
+// TestAgentPTY_CrossNodeHasNoRenewalSender: an agent-path PTY stream whose
+// agent session is held by another relay is tracked without a renewal
+// sender (the notice is not forwarded across nodes).
+func TestAgentPTY_CrossNodeHasNoRenewalSender(t *testing.T) {
+	f := newPTYConduitFixture(t)
+	f.setBrokerRow(t, attachCaps(false), "")
+	hubB := f.startPeerRelay(t, "hub-b")
+	f.startPTYAgent(t, hubB)
+	recs := f.agentSessions(t)
+	require.Len(t, recs, 1)
+	require.Equal(t, "hub-b", recs[0].RelayInstanceID, "the agent session is on the other node")
+
+	c, _, err := f.dialPTY(t, "")
+	require.NoError(t, err)
+	p := waitSpawn(t, f.spawned)
+	echoRoundTrip(t, c, "across nodes")
+	a := f.srv.conduitAuthz.Load()
+	require.NotNil(t, a)
+	st := soleTrackedStream(t, a)
+	assert.Nil(t, st.Renew, "the target's session is held by hub-b: no notice sender")
+	require.NoError(t, c.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, "detach"), time.Now().Add(time.Second)))
+	waitClosedPTY(t, p)
 }
 
 // TestAgentPTY_TargetGoneClosesWith4404: an agent deletion found by a

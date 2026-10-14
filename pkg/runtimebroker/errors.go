@@ -101,6 +101,11 @@ const (
 	// it, not (yet) the hub or the CLI.
 	ErrCodeAgentIdentityUnknown = "agent_identity_unknown"
 
+	// ErrCodeLocalWorktreeRefused marks a refused local-worktree dispatch
+	// for a linked checkout (resolveLinkedCheckout); see
+	// api.BrokerErrCodeLocalWorktreeRefused.
+	ErrCodeLocalWorktreeRefused = api.BrokerErrCodeLocalWorktreeRefused
+
 	// ErrCodeStaleDispatch marks a delete refused because it arrived after
 	// the deadline the hub sent with it (notAfter, ptone/scion#2906): the
 	// hub's claim on the delete may have lapsed, so acting could remove an
@@ -692,10 +697,13 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // fixes. err need not be a *startContextError at all (any error
 // buildStartContext could return, including ones from other call sites in
 // this package): a plain error still gets the pre-existing generic 500
-// behavior. The one exception is errSavedProfileUnresolved (a saved profile
-// that no longer resolves), which is checked ahead of every other case and
-// written as the retryable 503 from writeSavedProfileUnresolved; its text is
-// client-safe by construction.
+// behavior. The exceptions are errSavedProfileUnresolved (a saved profile
+// that no longer resolves), errDefaultProfileUnresolved (a dispatch needing
+// a default profile the Hub's stored profiles lack) and
+// errProfileUnresolved (a named profile the Hub's stored profiles lack),
+// which are checked ahead of every other case and written as the retryable
+// 503 from writeProfileUnresolved; their text is client-safe by
+// construction.
 //
 // Within that Hub branch, a missing local file (OriginalErr matches
 // fs.ErrNotExist) is checked first and written as a 422 template_error by
@@ -723,9 +731,11 @@ func skillResolutionFailedWithDetails(w http.ResponseWriter, err *agent.SkillRes
 // out of the response body.
 func (s *Server) writeStartContextError(w http.ResponseWriter, err error, op string) int {
 	// errSavedProfileUnresolved's text names only the agent, the profile
-	// and a fixed or ResolveRuntime cause, and is client-safe as is.
-	if errors.Is(err, errSavedProfileUnresolved) {
-		writeSavedProfileUnresolved(w, err)
+	// and a fixed or ResolveRuntime cause, and is client-safe as is;
+	// errDefaultProfileUnresolved's and errProfileUnresolved's also name
+	// the stored profile names.
+	if errors.Is(err, errSavedProfileUnresolved) || errors.Is(err, errDefaultProfileUnresolved) || errors.Is(err, errProfileUnresolved) {
+		writeProfileUnresolved(w, err)
 		return http.StatusServiceUnavailable
 	}
 	sce, ok := err.(*startContextError)

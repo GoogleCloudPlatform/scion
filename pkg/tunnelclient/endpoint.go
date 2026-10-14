@@ -44,9 +44,10 @@ func RedactEndpoint(endpoint string) string {
 // gives "invalid:" and a short digest of the input, so different invalid
 // inputs never compare equal and no input text is kept.
 //
-// Normalisation is for session reuse and comparison only. The credential
-// lookup is exact by design: it receives the endpoint exactly as given,
-// and the connection uses the endpoint as configured.
+// Normalisation here is for session reuse and comparison. The CLI's
+// credential lookup normalises endpoints with config.NormalizeEndpoint;
+// under it a different scheme, host, port or path never matches a stored
+// login. The connection uses the endpoint as configured.
 func NormalizeEndpoint(endpoint string) string {
 	s := strings.TrimRight(strings.TrimSpace(endpoint), "/")
 	u, err := url.Parse(s)

@@ -44,6 +44,9 @@ var ProjectTargetApplicability = map[string]bool{
 	// agent.delegation.* — issuance and exchange target an existing agent
 	// in its project (.design/agent-delegation.md §18.5).
 	"agent.delegation.create": true, "agent.delegation.exchange": true,
+	// Grant management is held on a project for grants bounded to it.
+	"agent.delegation.revoke": true, "agent.delegation.credential.revoke": true,
+	"agent.delegation.list": true, "agent.delegation.read": true,
 
 	// project.* — read/update/delete/manage/set_messaging_policy target an
 	// existing project; create/register/clone/list are hub-level collection
@@ -52,6 +55,7 @@ var ProjectTargetApplicability = map[string]bool{
 	"project.create": false, "project.read": true, "project.update": true,
 	"project.delete": true, "project.manage": true, "project.register": false,
 	"project.set_messaging_policy": true, "project.clone": false, "project.list": false,
+	"project.manage_visitors": true,
 
 	// skill.* — create/read/update/delete/list can target a project-scoped
 	// skill; create_global and register are explicitly hub-catalog actions.
@@ -182,6 +186,7 @@ var ProjectTargetApplicability = map[string]bool{
 	// records, never an existing project, so no project role binding or
 	// system authority proof admits them.
 	"inbox.read": false, "inbox.write": false, "user_skill_injection.update": false,
+	"federation_token.mint": false,
 }
 
 // AppliesToExistingProjectTarget reports the reviewed disposition for
@@ -245,6 +250,9 @@ var PermissionAllowedBoundaries = map[string][]BoundaryKind{
 	// skills reach agents in every project.
 	"inbox.read": {BoundaryKindProject, BoundaryKindHub}, "inbox.write": {BoundaryKindProject, BoundaryKindHub},
 	"user_skill_injection.update": {BoundaryKindHub},
+	// federation_token.mint is hub-only: the credential it yields names the
+	// holder, not a project.
+	"federation_token.mint": {BoundaryKindHub},
 
 	// hub.* configuration permissions act on the hub itself, so their
 	// selectors are hub-only.
@@ -426,6 +434,7 @@ var SupportedTargetClasses = map[string][]TargetClassKind{
 	// Self-scoped permissions.
 	"inbox.read": {TargetClassKindSelf}, "inbox.write": {TargetClassKindSelf},
 	"user_skill_injection.update": {TargetClassKindSelf},
+	"federation_token.mint":       {TargetClassKindSelf},
 
 	// hub.* configuration permissions target the hub instance.
 	"hub.config.read": {TargetClassKindHubResource}, "hub.config.update": {TargetClassKindHubResource},

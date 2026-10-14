@@ -252,6 +252,14 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     isAlias: false,
   },
   {
+    value: 'federation_token:mint',
+    label: 'federation_token:mint',
+    description:
+      'Obtain a short-lived user access credential for yourself to present to a peer hub',
+    resource: 'federation_token',
+    isAlias: false,
+  },
+  {
     value: 'gcp_service_account:assign',
     label: 'gcp_service_account:assign',
     description: 'Assign GCP service accounts to agents',
@@ -481,7 +489,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue',
     label: 'test_identity:issue',
     description:
-      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --enable-test-identities)',
+      'Issue short-lived synthetic member or viewer test identities (only when the hub runs with --test-mode=member or above)',
     resource: 'test_identity',
     isAlias: false,
   },
@@ -489,7 +497,7 @@ const FALLBACK_SCOPES: ScopeOption[] = [
     value: 'test_identity:issue_admin',
     label: 'test_identity:issue_admin',
     description:
-      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with the test admin gate); held only by super-admin',
+      'Issue short-lived test identities holding an expiring hub-admin role (only on hubs started with --test-mode=admin); held only by super-admin',
     resource: 'test_identity',
     isAlias: false,
   },

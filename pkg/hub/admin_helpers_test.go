@@ -22,9 +22,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
+	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/require"
 )
 
@@ -91,6 +93,13 @@ func githubAppRowRaw(t *testing.T, f *fakeHubSettingStore) map[string]interface{
 // fakeHubSettingStore and OperationalSettings wired up for testing.
 func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalSettings) {
 	t.Helper()
+	return newTestDBServerWithStore(t, nil)
+}
+
+// newTestDBServerWithStore is newTestDBServer with st as the server's store,
+// set when the server is built.
+func newTestDBServerWithStore(t *testing.T, st store.Store) (*Server, *fakeHubSettingStore, *OperationalSettings) {
+	t.Helper()
 	fakeStore := newFakeHubSettingStore()
 	fileK := emptyKoanf()
 	envK := emptyKoanf()
@@ -100,6 +109,7 @@ func newTestDBServer(t *testing.T) (*Server, *fakeHubSettingStore, *OperationalS
 	srv := &Server{
 		dbDriver:    "postgres",
 		maintenance: NewMaintenanceState(false, ""),
+		store:       st,
 	}
 	srv.SetOperationalSettings(ops)
 
@@ -212,4 +222,31 @@ func fileModePutServerConfig(t *testing.T, srv *Server, body string) (*httptest.
 	rr := httptest.NewRecorder()
 	srv.handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", body))
 	return rr, filepath.Join(tmpHome, ".scion", "settings.yaml")
+}
+
+// settingsAuditStore records the mutation audit records a settings write
+// makes, for tests whose server has no other store. A change to the stored
+// public URL is recorded before it is written and is not made when the
+// record cannot be written (ptone/scion#3905), so such a save needs a store.
+// Its other store methods are not implemented. Tests give it to the server
+// when the server is built (newTestDBServerWithStore, or store: in the
+// Server literal).
+type settingsAuditStore struct {
+	store.Store
+	mu   sync.Mutex
+	recs []*store.MutationAuditRecord
+}
+
+func (s *settingsAuditStore) CreateMutationAudit(_ context.Context, rec *store.MutationAuditRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recs = append(s.recs, rec)
+	return nil
+}
+
+// records returns the audit records written so far.
+func (s *settingsAuditStore) records() []*store.MutationAuditRecord {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]*store.MutationAuditRecord(nil), s.recs...)
 }

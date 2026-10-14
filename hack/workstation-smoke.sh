@@ -18,7 +18,8 @@
 # In a temporary HOME and a temporary git repo, with no hub configured:
 #   1. scion hub link              fails with the one-line "No hub configured"
 #                                  error and starts no server
-#   2. scion server start          starts the local workstation server and,
+#   2. scion server start          starts the local workstation server,
+#                                  registers it as the hub 'local' and,
 #                                  with onboarding not complete, prints the
 #                                  /onboarding URL (SCION_NO_BROWSER=1)
 #   3. scion hub link              links to the local hub without a prompt
@@ -58,6 +59,13 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 ISOLATED=0
 
 warn() { printf 'WARN: %s\n' "$*" >&2; }
+
+# web_endpoint prints the scheme, host and port of the "Web UI:" URL in a
+# 'scion server start' output file. In workstation mode the Hub API is
+# served on the web port, so that is the hub endpoint.
+web_endpoint() {
+  sed -n 's|^Web UI:  \(http://[^/ ]*\).*|\1|p' "$1" | head -n 1
+}
 
 # The server daemon's PID, from its PID file in the current (temporary)
 # HOME. Read it before 'scion server stop', which removes the file as soon
@@ -268,9 +276,10 @@ grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start.out" |
 if grep -q "Runtime broker not started" "$WORK/start.out"; then
   fail "server start reported a skipped broker although an image registry is set"
 fi
-grep -q "Configured hub endpoint: http://127.0.0.1:" "$WORK/start.out" || {
-  cat "$WORK/start.out" >&2; fail "server start did not configure the hub endpoint"; }
-ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start.out" | head -n 1)"
+grep -q "^Registered hub 'local' (http://127.0.0.1:" "$WORK/start.out" || {
+  cat "$WORK/start.out" >&2; fail "server start did not register the local hub"; }
+ENDPOINT="$(web_endpoint "$WORK/start.out")"
+[ -n "$ENDPOINT" ] || fail "server start did not print the Web UI URL"
 ready=0
 for ((i = 1; i <= 60; i++)); do
   if curl -fsS "$ENDPOINT/healthz" >/dev/null 2>&1; then ready=1; break; fi
@@ -364,8 +373,8 @@ grep -Eq "^Web UI:  http://127\.0\.0\.1:[0-9]+/onboarding\$" "$WORK/start-noreg.
 if ! { [ -f "$HOME/.scion/server.pid" ] && kill -0 "$(cat "$HOME/.scion/server.pid")" 2>/dev/null; }; then
   fail "the server is not running"
 fi
-ENDPOINT="$(sed -n 's/^Configured hub endpoint: \(http:[^ ]*\).*/\1/p' "$WORK/start-noreg.out" | head -n 1)"
-[ -n "$ENDPOINT" ] || fail "server start did not configure the hub endpoint"
+ENDPOINT="$(web_endpoint "$WORK/start-noreg.out")"
+[ -n "$ENDPOINT" ] || fail "server start did not print the Web UI URL"
 # The first "status" key is the composite (top-level) status.
 curl -fsS "$ENDPOINT/healthz" | tr -d '[:space:]' | grep -o '"status":"[a-z]*"' | sed -n 1p | grep -qx '"status":"healthy"' || {
   curl -sS "$ENDPOINT/healthz" >&2 || true; fail "/healthz is not healthy without the broker"; }

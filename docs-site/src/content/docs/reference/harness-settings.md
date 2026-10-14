@@ -21,6 +21,20 @@ When an agent is created, Scion composes its home directory by layering files fr
 
 This multi-layered approach allows you to define a "base" Gemini configuration once, and then overlay different "roles" (like Code Reviewer or Security Auditor) on top of it.
 
+### When harness-config changes reach an agent
+
+A harness-config has two parts that reach an agent at different times:
+
+- **`home/` files** (for example `home/.claude/settings.json`, which registers the Claude Code hooks) are copied into the agent home only when the agent is provisioned: when it is created, and when it is [reincarnated](/scion/local/agent-lifecycle/#reincarnating-an-agent). Starting an existing agent reuses its agent home and does not copy them again.
+- **The provisioning bundle** (`config.yaml` and the provisioner scripts) is cleared and staged again from the harness-config on every start.
+
+So after you change a harness-config's `home/` files, an existing agent keeps its old copies through stops and starts. Reincarnate or recreate the agent to pick up the change.
+
+Where the start reads the harness-config from depends on the mode:
+
+- **Workstation:** a local agent uses the harness-config on disk (template-bundled, then project, then global). When the workstation server starts, it syncs the global harness-configs (`~/.scion/harness-configs/`) to the Hub: it imports each one the Hub does not have yet (except a built-in that was deleted on the Hub) and re-uploads each one whose content hash changed.
+- **Hosted:** the Hub stores each harness-config as a record plus its files in storage, written by `scion harness-config sync` (alias `push`) or re-imported by `scion harness-config update`. When the Runtime Broker creates, starts or restarts an agent, it fetches the Hub's current version of the agent's harness-config (cached on the broker by content hash), not the version the agent was created with. A start still keeps the agent's existing `home/` files.
+
 ## Managing Harness-Configs
 
 A **harness-config** is a named, versioned bundle that defines a harness: its `config.yaml`
@@ -341,6 +355,56 @@ their tables. If you maintain a customized `config.yaml` for one of these harnes
 merges missing top-level keys such as `thinking:` without overwriting your values. Without the
 block, the provisioner writes no thinking setting, so the CLI's own default applies. codex logs
 a warning on every start; antigravity and claude log one when a thinking level was requested.
+
+### Readiness (`ready`)
+
+A newly started harness needs a moment before it reads its terminal input. A message sent to the
+agent in that window is held and pasted once the harness is ready. The `ready` block says how
+"ready" is decided:
+
+```yaml
+ready:
+  strategy: hook   # hook | delay (default delay)
+  settle: 1.5s     # 0s to 60s; default 8s for delay, 1.5s for hook
+  timeout: 90s     # hook only, 10s to 10m; default 90s
+```
+
+There is one rule: the harness is ready at *signal time + `settle`*.
+
+- `hook`: the signal is a ready marker that the harness's first session-start hook (or any later
+  hook event) writes for the current run. A session-start from `/clear` or `/compact` does not
+  count. Use `hook` only when the harness fires a hook at startup, before any user input. If no
+  marker appears, the agent is reported as working `timeout` after the launch, and a held
+  message is pasted anyway at most `timeout` after its delivery began.
+- `delay`: the signal is the creation of the agent's tmux session. Use it when the harness has no
+  early hook. `timeout` is not allowed with `delay`.
+
+Rules (checked when the harness-config is loaded; a violation fails the load): the units are
+those of Go durations (`ns`, `us`, `ms`, `s`, `m`, `h`), a zero must be written `0s`, and no other
+keys are allowed.
+
+**How the value travels.** The broker resolves the harness-config, including project, template
+and Hub overrides (an override replaces the whole `ready` block), and passes the resolved spec to
+the container in `SCION_HARNESS_READY`. `sciontool init` records it in the container's readiness
+file, and both readers use those values: `sciontool init`, which reports the agent as working
+when it is ready, and the broker, which waits before pasting a held message. A
+`SCION_HARNESS_READY` value in a template's or caller's `env` cannot override it.
+
+The built-in bundles use `hook` (settle 1.5s, timeout 90s) for claude, gemini-cli, copilot and
+grok-build, and `delay` 8s for every other harness. A harness-config without the block (for
+example one installed before the block existed) uses the block of the built-in bundle for its
+`harness` type, so an older claude config keeps `hook`; a harness with no built-in bundle uses
+`delay` 8s.
+
+**Version skew.**
+
+- Upgrade brokers with or before the Hub. A broker older than the `ready` block rejects a
+  harness-config that has one, so agent launch fails on that broker.
+- A broker older than this reader, starting a newer image, does not pass the spec. The
+  container then uses `delay` 8s for every harness (logged at Info), so hook harnesses lose
+  marker gating until the broker is upgraded.
+- A newer broker with an older image finds no spec in the readiness file and uses the built-in
+  timings, as before.
 
 ### Command Execution (`command`)
 

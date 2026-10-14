@@ -263,129 +263,14 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 			continue
 		}
 
-		// Reserve a slot in the per-pair loop/storm cap before authorizing
-		// or creating any conversation, so a suppressed pair never creates
-		// one either. Reservation and admission happen together so two
-		// concurrent fan-outs for the same pair cannot both slip through
-		// when only one slot remains.
-		if !s.mentionPairLimiter.Reserve(in.Sender.ID, target.ID) {
-			results[i].Status = "suppressed"
-			results[i].Error = "mention loop protection: too many mentions between these agents; retry later"
-			counts["suppressed"]++
-			continue
-		}
-
-		// Authorize before any conversation is created: a mention must
-		// never reach an agent the sender could not otherwise DM, and a
-		// denied mention must leave no conversation behind. ExecuteAgentDM
-		// re-checks this same authorization; that second check is harmless
-		// and keeps the invariant local to the one function responsible for
-		// agent DM delivery.
-		if allowed, _, _ := s.authorizeAgentMessage(aggregateCtx, in.SenderIdent, target, false); !allowed {
-			s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
-			// authorizeAgentMessage has no error return; if the aggregate
-			// deadline expired during the check, an internal store call
-			// inside it fails closed the same way a genuine denial would.
-			// Distinguish the two so a deadline is reported as a timeout,
-			// not a false "the recipient denied this".
-			if aggregateCtx.Err() != nil {
-				results[i].Status = "timeout"
-				results[i].Error = "aggregate mention dispatch timeout exceeded"
-			} else {
-				results[i].Status = "unauthorized"
-				results[i].Error = "message delivery denied"
-			}
-			counts[results[i].Status]++
-			continue
-		}
-
-		convResult, convID, threadID, registerAfter, convOK := s.resolveMentionConversation(aggregateCtx, in, target)
-		if !convOK {
-			s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
-			results[i].Status = "error"
-			results[i].Error = "conversation resolution failed"
-			counts["error"]++
-			continue
-		}
-
-		// mention_source names where the mention came from, for the
-		// mentioned agent's own benefit. It is the verified group's own
-		// reference when the mention landed there (registerAfter is true
-		// only in that case — see resolveMentionConversation); otherwise
-		// it is just the sender, never the parent message's own recipient.
-		mentionSource := "agent:" + in.Sender.Slug
-		if registerAfter {
-			mentionSource = threadID
-		}
-		metadata := map[string]string{
-			"mention_source":   mentionSource,
-			"mention_position": "body",
-		}
-		if in.ParentMessageID != "" {
-			metadata["mention_of"] = in.ParentMessageID
-		}
-
-		// Bound this one mention's delivery attempt inside the aggregate
-		// budget, so a single slow or unreachable recipient cannot consume
-		// the whole budget and starve every mention after it.
-		dispatchCtx, dispatchCancel := context.WithTimeout(aggregateCtx, mentionDispatchTimeout)
-		dmResult, dmErr := s.ExecuteAgentDM(dispatchCtx, &AgentDMInput{
-			SenderAgent:    in.Sender,
-			SenderIdentity: in.SenderIdent,
-			TargetAgent:    target,
-			Msg:            in.Msg,
-			Type:           messages.TypeMention,
-			Metadata:       metadata,
-			ConversationID: convID,
-			ConvResult:     convResult,
-			Channel:        in.Channel,
-			ThreadID:       threadID,
-			ProjectID:      in.Sender.ProjectID,
-			// A mention must not wake a stopped or suspended agent — that
-			// would be a surprising side effect of merely being mentioned —
-			// but it must also not be silently dropped just because the
-			// recipient isn't running right now: it still gets a persisted
-			// row and a dispatch attempt, the same as any other message to
-			// an agent that isn't currently reachable.
-			SkipPhaseGate: true,
-		})
-		dispatchCancel()
-		if dmErr != nil {
-			s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
-			switch dmErr.Code {
-			case ErrCodeRateLimited:
-				results[i].Status = "rate_limited"
-				results[i].Error = dmErr.Message
-				budgetExhausted = true
-			case ErrCodeMessageDenied:
-				results[i].Status = "unauthorized"
-				results[i].Error = dmErr.Message
-			default:
-				results[i].Status = "error"
-				results[i].Error = dmErr.Message
-			}
-			counts[results[i].Status]++
-			continue
-		}
-
-		switch dmResult.Outcome {
-		case AgentDMAmbiguous:
-			results[i].Status = "ambiguous"
-		default:
-			results[i].Status = "delivered"
-			results[i].AgentPhase = target.Phase
+		out := s.deliverAgentMentionCopy(ctx, aggregateCtx, in, target, "body")
+		results[i].Status = out.Status
+		results[i].Error = out.Error
+		results[i].AgentPhase = out.AgentPhase
+		if out.BudgetExhausted {
+			budgetExhausted = true
 		}
 		counts[results[i].Status]++
-
-		if results[i].Status == "delivered" && registerAfter {
-			// A short, detached context of its own: the aggregate budget
-			// may already be nearly spent by the delivery above, and this
-			// write matters even if it is. Same pattern as the dispatch
-			// side's own post-dispatch state transitions.
-			registerCtx, registerCancel := finalizationContext(ctx)
-			s.ensureGroupParticipants(registerCtx, convID, []*store.Agent{target})
-			registerCancel()
-		}
 	}
 
 	// Summary line, deliberately body-free: counts per status only, no
@@ -398,6 +283,148 @@ func (s *Server) fanOutAgentMentions(ctx context.Context, in agentMentionFanoutI
 	)
 
 	return results
+}
+
+// mentionCopyOutcome is the result of one deliverAgentMentionCopy call.
+type mentionCopyOutcome struct {
+	// Status is a MentionResult status: delivered, ambiguous, suppressed,
+	// unauthorized, timeout, rate_limited or error.
+	Status string
+	// Error is the human-readable reason when Status is not delivered.
+	Error string
+	// AgentPhase is the target's lifecycle phase, set when delivered.
+	AgentPhase string
+	// BudgetExhausted reports that the sender's rate budget refused the
+	// delivery, so later deliveries in the same call should not be tried.
+	BudgetExhausted bool
+}
+
+// deliverAgentMentionCopy delivers one TypeMention copy of an
+// agent-authored message to target: it reserves a slot in the per-pair
+// loop/storm cap, authorizes the sender pairwise, resolves the
+// conversation the copy lands in, delivers it through ExecuteAgentDM and,
+// when the copy landed in a verified group conversation, registers target
+// as a participant if the sender's message mode allows it. position is
+// stamped as the copy's mention_position metadata.
+//
+// ctx is the caller's request context, used for the participant write;
+// aggregateCtx bounds authorization and delivery.
+func (s *Server) deliverAgentMentionCopy(ctx, aggregateCtx context.Context, in agentMentionFanoutInput, target *store.Agent, position string) mentionCopyOutcome {
+	// Reserve a slot in the per-pair loop/storm cap before authorizing
+	// or creating any conversation, so a suppressed pair never creates
+	// one either. Reservation and admission happen together so two
+	// concurrent fan-outs for the same pair cannot both slip through
+	// when only one slot remains.
+	if !s.mentionPairLimiter.Reserve(in.Sender.ID, target.ID) {
+		return mentionCopyOutcome{Status: "suppressed",
+			Error: "mention loop protection: too many mentions between these agents; retry later"}
+	}
+
+	// Authorize before any conversation is created: a mention must
+	// never reach an agent the sender could not otherwise DM, and a
+	// denied mention must leave no conversation behind. ExecuteAgentDM
+	// re-checks this same authorization; that second check is harmless
+	// and keeps the invariant local to the one function responsible for
+	// agent DM delivery.
+	if allowed, _, _ := s.authorizeAgentMessage(aggregateCtx, in.SenderIdent, target, false); !allowed {
+		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
+		// authorizeAgentMessage has no error return; if the aggregate
+		// deadline expired during the check, an internal store call
+		// inside it fails closed the same way a genuine denial would.
+		// Distinguish the two so a deadline is reported as a timeout,
+		// not a false "the recipient denied this".
+		if aggregateCtx.Err() != nil {
+			return mentionCopyOutcome{Status: "timeout", Error: "aggregate mention dispatch timeout exceeded"}
+		}
+		return mentionCopyOutcome{Status: "unauthorized", Error: "message delivery denied"}
+	}
+
+	convResult, convID, threadID, registerAfter, convOK := s.resolveMentionConversation(aggregateCtx, in, target)
+	if !convOK {
+		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
+		return mentionCopyOutcome{Status: "error", Error: "conversation resolution failed"}
+	}
+
+	// mention_source names where the mention came from, for the
+	// mentioned agent's own benefit. It is the verified group's own
+	// reference when the mention landed there (registerAfter is true
+	// only in that case — see resolveMentionConversation); otherwise
+	// it is just the sender, never the parent message's own recipient.
+	mentionSource := "agent:" + in.Sender.Slug
+	if registerAfter {
+		mentionSource = threadID
+	}
+	metadata := map[string]string{
+		"mention_source":   mentionSource,
+		"mention_position": position,
+	}
+	if in.ParentMessageID != "" {
+		metadata["mention_of"] = in.ParentMessageID
+	}
+
+	// Bound this one mention's delivery attempt inside the aggregate
+	// budget, so a single slow or unreachable recipient cannot consume
+	// the whole budget and starve every mention after it.
+	dispatchCtx, dispatchCancel := context.WithTimeout(aggregateCtx, mentionDispatchTimeout)
+	dmResult, dmErr := s.ExecuteAgentDM(dispatchCtx, &AgentDMInput{
+		SenderAgent:    in.Sender,
+		SenderIdentity: in.SenderIdent,
+		TargetAgent:    target,
+		Msg:            in.Msg,
+		Type:           messages.TypeMention,
+		Metadata:       metadata,
+		ConversationID: convID,
+		ConvResult:     convResult,
+		Channel:        in.Channel,
+		ThreadID:       threadID,
+		ProjectID:      in.Sender.ProjectID,
+		// A mention must not wake a stopped or suspended agent — that
+		// would be a surprising side effect of merely being mentioned —
+		// but it must also not be silently dropped just because the
+		// recipient isn't running right now: it still gets a persisted
+		// row and a dispatch attempt, the same as any other message to
+		// an agent that isn't currently reachable.
+		SkipPhaseGate: true,
+	})
+	dispatchCancel()
+	if dmErr != nil {
+		s.mentionPairLimiter.Release(in.Sender.ID, target.ID)
+		switch dmErr.Code {
+		case ErrCodeRateLimited:
+			return mentionCopyOutcome{Status: "rate_limited", Error: dmErr.Message, BudgetExhausted: true}
+		case ErrCodeMessageDenied:
+			return mentionCopyOutcome{Status: "unauthorized", Error: dmErr.Message}
+		default:
+			return mentionCopyOutcome{Status: "error", Error: dmErr.Message}
+		}
+	}
+
+	var out mentionCopyOutcome
+	switch dmResult.Outcome {
+	case AgentDMAmbiguous:
+		out.Status = "ambiguous"
+	default:
+		out.Status = "delivered"
+		out.AgentPhase = target.Phase
+	}
+
+	// The sender must be allowed to add the target under its message
+	// mode (group_message_mode.go).
+	if out.Status == "delivered" && registerAfter {
+		if joinOK, joinReason := s.groupAgentJoinAllowed(aggregateCtx, in.SenderIdent, target); !joinOK {
+			s.messageLog.Info("mention target not registered as group participant: message mode",
+				"conversation_id", convID, "agent_id", target.ID, "reason", joinReason)
+			return out
+		}
+		// A short, detached context of its own: the aggregate budget
+		// may already be nearly spent by the delivery above, and this
+		// write matters even if it is. Same pattern as the dispatch
+		// side's own post-dispatch state transitions.
+		registerCtx, registerCancel := finalizationContext(ctx)
+		s.ensureGroupParticipants(registerCtx, convID, []*store.Agent{target})
+		registerCancel()
+	}
+	return out
 }
 
 // resolveMentionConversation picks the conversation a mention row belongs

@@ -68,6 +68,7 @@ func tiaGateServerConfig() ServerConfig {
 		MarkerClass:     config.HubClassTest,
 		MarkerCreatedAt: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC),
 	}
+	cfg.TestMode = TestModeConfig{Level: TestModeAdmin, HubID: tiaHubID, HubClass: config.HubClassTest, MarkerHubID: tiaHubID, MarkerClass: config.HubClassTest}
 	return cfg
 }
 
@@ -306,7 +307,13 @@ func TestTestAdminGate_NoExportedMutator(t *testing.T) {
 	// In production code the gate field is assigned exactly once, in New.
 	assignments := 0
 	fset := token.NewFileSet()
-	files, err := filepath.Glob("*.go")
+	// pkgmove:scan-covers pkg/hub/apierr
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/internal/principal
+	// scanned through guardScanSubdirs; guards testAdminGate assignments.
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// scanned through guardScanSubdirs once it exists; guards testAdminGate assignments.
+	files, err := globGuardScanDirs(".", "*.go")
 	require.NoError(t, err)
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
@@ -361,6 +368,8 @@ func TestTestInfraMarker_NoRouteOrHubCodeTouchesIt(t *testing.T) {
 	// writer, so no handler can reach it. The hub never reads it either: cmd
 	// reads it once at startup and passes the result in ServerConfig.
 	for _, dir := range []string{".", "../store"} {
+		// pkgmove:scan-covers pkg/hub/maintenance
+		// recursive walk of "." already includes pkg/hub/maintenance (no SkipDir).
 		err := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -878,6 +887,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 	fset := token.NewFileSet()
 	seenConst := map[string]bool{}
 	seenSite := map[string]bool{}
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -978,6 +989,8 @@ func TestSigningKeySource_EveryKeySourceClassified(t *testing.T) {
 // definition names it.
 func TestRegisterInProcessPluginBroker_CalledOnlyFromCmd(t *testing.T) {
 	fset := token.NewFileSet()
+	// pkgmove:scan-covers pkg/hub/maintenance
+	// recursive walk already includes pkg/hub/maintenance (no SkipDir for it).
 	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err

@@ -45,6 +45,12 @@ type Section struct {
 	// entry must also be listed in KoanfPaths and be a top-level key of the
 	// section document (see DurationKeys).
 	Durations []string
+
+	// NestedDurations lists duration-valued keys below the top level of
+	// the section document, as koanf paths that begin with the section
+	// name. A "*" segment matches every key of a map (for example each
+	// named runtime). A DB-tier save validates them as for Durations.
+	NestedDurations []string
 }
 
 // DurationKey is a duration-valued key of a section (Section.Durations).
@@ -176,6 +182,7 @@ func init() {
 				"telemetry.cloud", "telemetry.cloud.enabled", "telemetry.cloud.endpoint",
 				"telemetry.cloud.protocol", "telemetry.cloud.headers", "telemetry.cloud.provider",
 				"telemetry.cloud.tls", "telemetry.cloud.tls.enabled", "telemetry.cloud.tls.insecure_skip_verify", "telemetry.cloud.tls.ca_file",
+				"telemetry.cloud.tls.cert_file", "telemetry.cloud.tls.key_file",
 				"telemetry.cloud.batch", "telemetry.cloud.batch.max_size", "telemetry.cloud.batch.timeout",
 				"telemetry.hub", "telemetry.hub.enabled", "telemetry.hub.report_interval",
 				"telemetry.local", "telemetry.local.enabled", "telemetry.local.file", "telemetry.local.console",
@@ -185,7 +192,8 @@ func init() {
 				"telemetry.filter.sampling", "telemetry.filter.sampling.default", "telemetry.filter.sampling.rates",
 				"telemetry.resource",
 			},
-			New: func() any { return &TelemetrySettings{} },
+			New:             func() any { return &TelemetrySettings{} },
+			NestedDurations: []string{"telemetry.cloud.batch.timeout", "telemetry.hub.report_interval"},
 		},
 		{
 			Name: "auto_expose_ports",
@@ -285,9 +293,10 @@ func init() {
 			// the entire map as JSONB. Prefix-only KoanfPath ("runtimes") means
 			// OwningSection walks up from any nested key (e.g. "runtimes.docker.type")
 			// and hits this entry.
-			Name:       "runtimes",
-			KoanfPaths: []string{"runtimes"},
-			New:        func() any { m := make(RuntimesSettings); return &m },
+			Name:            "runtimes",
+			KoanfPaths:      []string{"runtimes"},
+			New:             func() any { m := make(RuntimesSettings); return &m },
+			NestedDurations: []string{"runtimes.*.substrate.template_ready_timeout"},
 		},
 		{
 			// profiles is a map-of-objects section, same pattern as runtimes.
@@ -300,6 +309,12 @@ func init() {
 			Name:       "harness_configs",
 			KoanfPaths: []string{"harness_configs"},
 			New:        func() any { m := make(HarnessConfigsSettings); return &m },
+			NestedDurations: []string{
+				"harness_configs.*.provisioner.timeout",
+				"harness_configs.*.ready.settle",
+				"harness_configs.*.ready.timeout",
+				"harness_configs.*.delivery.extra_submit_delay",
+			},
 		},
 		{
 			// experiments is durable via DB but has no settings.yaml

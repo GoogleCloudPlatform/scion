@@ -26,7 +26,6 @@ import (
 	"io/fs"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,6 +37,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/apiclient"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/util/logging"
@@ -573,13 +573,10 @@ func (ws *WebServer) logger() *slog.Logger {
 
 // IsLoopbackHost reports whether host is a loopback address (127.0.0.0/8,
 // ::1, or "localhost"). It returns false for non-loopback IPs (including
-// "0.0.0.0" and "::") and for unresolvable hostnames.
+// "0.0.0.0" and "::") and for unresolvable hostnames. It is
+// config.IsLoopbackHost, the rule the public URL check uses too.
 func IsLoopbackHost(host string) bool {
-	if host == "localhost" {
-		return true
-	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	return config.IsLoopbackHost(host)
 }
 
 // NewWebServer creates a new web frontend server.
@@ -801,6 +798,34 @@ func (ws *WebServer) defaultUserRole() string {
 		return "member"
 	}
 	return ws.accessSettings.DefaultUserRole()
+}
+
+// auditLoggerSource is implemented by an access settings provider that also
+// carries the hub's audit logger. *Server is the production provider (see
+// SetAccessSettingsProvider's caller in cmd/server_foreground.go).
+type auditLoggerSource interface {
+	GetAuditLogger() AuditLogger
+}
+
+var _ auditLoggerSource = (*Server)(nil)
+
+// auditLogger returns the hub's audit logger when the access settings
+// provider carries one, otherwise nil (LogInviteAuditFailure treats nil as
+// a no-op).
+func (ws *WebServer) auditLogger() AuditLogger {
+	if src, ok := ws.accessSettings.(auditLoggerSource); ok {
+		return src.GetAuditLogger()
+	}
+	return nil
+}
+
+// auditSignInDenied records a refused web sign-in with the same event and
+// reason as provisionUser and the identity resolver: InviteAuditLoginDenied
+// with signInDenialAuditReason(denial, mode). denial may be empty, in which
+// case the reason follows the access mode.
+func (ws *WebServer) auditSignInDenied(ctx context.Context, email, denial string) {
+	LogInviteAuditFailure(ctx, ws.auditLogger(), InviteAuditLoginDenied, email,
+		signInDenialAuditReason(denial, ws.userAccessMode()))
 }
 
 // SetAccessSettingsProvider sets the live operational access settings provider.
@@ -2300,8 +2325,9 @@ func (ws *WebServer) authorizeSSESubjects(r *http.Request, subjects []string) []
 			// TODO(ptone/scion#1934): scope notification.created per-user
 			// and drop this pass-through.
 		case "system":
-			// Only a concrete image-build job ID is allowed; no wildcards
-			// and no trailing tokens past the job ID.
+			// Only a concrete image-pull job ID is allowed; no wildcards
+			// and no trailing tokens past the job ID. Image-build output
+			// is published on user.<requesterId>.images.<jobId> instead.
 			if len(tokens) != 3 || tokens[1] != "images" || isNATSWildcard(tokens[2]) {
 				denied = append(denied, sub)
 			}
@@ -2674,6 +2700,11 @@ func (ws *WebServer) proxyAuthMiddleware(next http.Handler) http.Handler {
 
 		if !checkUserAuthorized(ctx, proxyUser.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store) {
 			ws.logger().Warn("Proxy auth: user not authorized", "email", proxyUser.Email)
+			// The decision above stands; the code is read again only for the
+			// audit reason. If it reads "" (settings changed in between), the
+			// reason follows the access mode.
+			denial := checkSignInDenial(ctx, proxyUser.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store)
+			ws.auditSignInDenied(ctx, proxyUser.Email, denial)
 			http.Error(w, "access denied: email not authorized", http.StatusForbidden)
 			return
 		}
@@ -3107,6 +3138,7 @@ func (ws *WebServer) handleOAuthCallback(w http.ResponseWriter, r *http.Request)
 	// Check if user is authorized (admin bypass, domain check, access mode)
 	if denial := checkSignInDenial(ctx, userInfo.Email, ws.authorizedDomains(), ws.adminEmails(), ws.userAccessMode(), ws.store); denial != "" {
 		ws.logger().Warn("Unauthorized user", "email", userInfo.Email, "reason", denial)
+		ws.auditSignInDenied(ctx, userInfo.Email, denial)
 		http.Redirect(w, r, "/login?error="+denial, http.StatusFound)
 		return
 	}

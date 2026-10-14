@@ -127,7 +127,7 @@ type AuthConfig struct {
 	// AgentRunScope checks the run an agent token was issued for. Nil when
 	// server.auth.agent_run_scope is off: the check is then not run.
 	AgentRunScope *agentRunScopeChecker
-	// TestIdentitiesEnabled mirrors --enable-test-identities. The JWT arm's
+	// TestIdentitiesEnabled mirrors --test-mode (member or above). The JWT arm's
 	// per-request user-row block refuses every test-fixture row while it is
 	// false, and an expired one while it is true (testFixtureRejection).
 	// When it is true a UserStore is required: without one the row block
@@ -152,6 +152,14 @@ type AuthConfig struct {
 	// not be determined and any other error to refuse the credential. Nil
 	// refuses every delegated credential.
 	DelegatedAgentAuth func(ctx context.Context, token string) (*delegatedRequestState, error)
+	// ResolveFederatedVisitor maps a verified federated identity to the
+	// VisitorIdentity of its linked active federated account
+	// (Server.resolveFederatedVisitor). It returns (nil, nil) to keep the
+	// verified identity, which it does for every identity that is not a
+	// linked active account and whenever the federation.project_visitors
+	// experiment is off. An error answers 503. Nil keeps every verified
+	// identity.
+	ResolveFederatedVisitor func(ctx context.Context, identity FederatedIdentity) (*VisitorIdentity, error)
 	// WorkloadIssuer is the workload-bound issuer delegation arm's startup
 	// state (test_identity_workload_issuer.go). Nil when no workload issuer
 	// is configured: a request that names a delegation is then refused.
@@ -202,6 +210,10 @@ func isConstraintAuditAuthFailureRoute(r *http.Request) bool {
 // body. Infrastructure failures remain unchanged.
 type constraintAuditAuthFailureWriter struct {
 	http.ResponseWriter
+	// header is the response header map as it was when the writer was
+	// wrapped. A normalized response carries exactly these headers plus
+	// the not-found response's own.
+	header     http.Header
 	normalized bool
 }
 
@@ -212,6 +224,11 @@ func (w *constraintAuditAuthFailureWriter) WriteHeader(statusCode int) {
 	switch statusCode {
 	case http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden:
 		w.normalized = true
+		h := w.Header()
+		clear(h)
+		for k, v := range w.header {
+			h[k] = v
+		}
 		NotFound(w.ResponseWriter, "Access Constraint")
 		return
 	}
@@ -227,7 +244,7 @@ func (w *constraintAuditAuthFailureWriter) Write(body []byte) (int, error) {
 
 func normalizeConstraintAuditAuthFailures(w http.ResponseWriter, r *http.Request) http.ResponseWriter {
 	if isConstraintAuditAuthFailureRoute(r) {
-		return &constraintAuditAuthFailureWriter{ResponseWriter: w}
+		return &constraintAuditAuthFailureWriter{ResponseWriter: w, header: w.Header().Clone()}
 	}
 	return w
 }
@@ -318,7 +335,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						var refusal agentTokenRefusal
 						ctx, refusal = verifyAgentTokenCredential(ctx, cfg, log, claims, runScopeRequestFrom(r), runScopeSourceHTTP)
 						if refusal != agentTokenAccepted {
-							writeAgentTokenRefusal(w, refusal)
+							writeAgentTokenRefusal(ctx, w, log, refusal, claims.Subject)
 							return
 						}
 
@@ -335,8 +352,7 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 						return
 					} else if r.Header.Get("X-Scion-Agent-Token") != "" {
 						// Agent token header was present but invalid
-						writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
-							"invalid agent token: "+err.Error(), nil)
+						refuseAgentToken(ctx, w, log, agentTokenCauseInvalidToken, "error", err)
 						return
 					}
 				}
@@ -363,6 +379,22 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 					writeError(w, http.StatusUnauthorized, ErrCodeUnauthorized,
 						"invalid federation token", nil)
 					return
+				}
+				// A verified user token whose (issuer, subject) is linked
+				// to an active federated account becomes that account's
+				// VisitorIdentity; every other case keeps the verified
+				// identity unchanged.
+				if cfg.ResolveFederatedVisitor != nil {
+					visitor, vErr := cfg.ResolveFederatedVisitor(ctx, identity)
+					if vErr != nil {
+						log.Error("Federation visitor lookup failed", "issuer", identity.IssuerURL(), "error", vErr)
+						writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+							"unable to verify federated account", nil)
+						return
+					}
+					if visitor != nil {
+						identity = visitor
+					}
 				}
 				ctx = contextWithIdentity(ctx, identity)
 				ctx = contextWithCredentialContext(ctx, credentialContextForIdentity(identity))
@@ -701,6 +733,16 @@ func UnifiedAuthMiddleware(cfg AuthConfig) func(http.Handler) http.Handler {
 							"user_id", claims.UserID)
 						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
 							"invalid access token: no user record for this token", nil)
+						return
+					}
+					// A federated account authenticates only with its
+					// issuer's token (the federated branch above), never
+					// with a hub-issued session or user token.
+					if u.IsFederated() {
+						log.Warn("JWT auth rejected: federated account",
+							"user_id", claims.UserID)
+						writeError(w, http.StatusUnauthorized, ErrCodeUserNotFound,
+							"invalid access token: no active user record for this token", nil)
 						return
 					}
 					// Test identities (ptone/scion#4240): the row is the

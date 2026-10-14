@@ -186,3 +186,67 @@ func TestEnsureHubReady_HubFromContextControls(t *testing.T) {
 		})
 	}
 }
+
+// TestEnsureHubReady_RecordLinkAfterRegistration: when EnsureHubReady
+// registers or links a project, RecordLink gets the hub endpoint, the ID
+// the hub knows the project by and the project path. A refused
+// registration records nothing.
+func TestEnsureHubReady_RecordLinkAfterRegistration(t *testing.T) {
+	type call struct {
+		endpoint, id, path string
+		isGlobal           bool
+	}
+	t.Run("registered: recorded once", func(t *testing.T) {
+		home := clearHubCredentialEnv(t)
+		t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+		server, _, _ := contextGuardHub(t, false)
+		setupLinkedGlobalProject(t, home, false)
+		_ = withPromptIO(t, strings.NewReader(""), false)
+
+		var calls []call
+		if _, err := EnsureHubReady("", EnsureHubReadyOptions{
+			EndpointOverride: server.URL,
+			SkipSync:         true,
+			AutoLinkLocal:    true,
+			HubFromContext:   true,
+			RecordLink: func(endpoint, id, path string, isGlobal bool) {
+				calls = append(calls, call{endpoint, id, path, isGlobal})
+			},
+		}); err != nil {
+			t.Fatalf("EnsureHubReady: %v", err)
+		}
+		if len(calls) != 1 {
+			t.Fatalf("RecordLink calls = %+v, want 1", calls)
+		}
+		c := calls[0]
+		if c.endpoint != server.URL || c.id != "local-project-id" || !c.isGlobal {
+			t.Errorf("RecordLink call = %+v", c)
+		}
+		want, _ := filepath.EvalSymlinks(filepath.Join(home, ".scion"))
+		if got, _ := filepath.EvalSymlinks(c.path); got != want {
+			t.Errorf("RecordLink path = %q, want %q", c.path, want)
+		}
+	})
+	t.Run("guard refuses: nothing recorded", func(t *testing.T) {
+		home := clearHubCredentialEnv(t)
+		t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
+		server, _, _ := contextGuardHub(t, false)
+		setupLinkedGlobalProject(t, home, true)
+		_ = withPromptIO(t, strings.NewReader(""), false)
+
+		called := false
+		_, err := EnsureHubReady("", EnsureHubReadyOptions{
+			EndpointOverride: server.URL,
+			SkipSync:         true,
+			AutoLinkLocal:    true,
+			HubFromContext:   true,
+			RecordLink:       func(string, string, string, bool) { called = true },
+		})
+		if err == nil || err.Error() != wantMustBeLinked {
+			t.Fatalf("EnsureHubReady error = %v, want %q", err, wantMustBeLinked)
+		}
+		if called {
+			t.Error("RecordLink was called for a refused registration")
+		}
+	})
+}
