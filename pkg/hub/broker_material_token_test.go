@@ -46,6 +46,7 @@ type brokerMaterialFixture struct {
 	broker     *store.RuntimeBroker
 	owner      *store.User
 	nonOwner   *store.User
+	viewer     *store.User
 	superAdmin *store.User
 	project    string
 }
@@ -59,6 +60,11 @@ func newBrokerMaterialFixture(t *testing.T) *brokerMaterialFixture {
 
 	owner := newHubMemberUser(t, s, "bmt-owner")
 	nonOwner := newHubMemberUser(t, s, "bmt-non-owner")
+	// A user bound to the seeded hub-viewer role, which holds broker.read
+	// at system scope and no broker.update.
+	seedRoleUser(t, s, tid("bmt-viewer"), store.SystemRoleHubViewer, false)
+	viewer, err := s.GetUser(ctx, tid("bmt-viewer"))
+	require.NoError(t, err)
 	superAdmin := newSuperAdminUser(t, s, "bmt-super-admin")
 	ensureHubMembership(ctx, s, superAdmin.ID)
 
@@ -72,7 +78,7 @@ func newBrokerMaterialFixture(t *testing.T) *brokerMaterialFixture {
 		ID: tid("bmt-envvar"), Key: brokerMaterialEnvKey, Value: brokerMaterialEnvValue, Sensitive: true,
 		Scope: store.ScopeRuntimeBroker, ScopeID: broker.ID, Created: time.Now(), Updated: time.Now(),
 	}))
-	_, _, err := backend.Set(ctx, &secret.SetSecretInput{
+	_, _, err = backend.Set(ctx, &secret.SetSecretInput{
 		Name: brokerMaterialSecretKey, Value: "1", SecretType: secret.TypeEnvironment,
 		Scope: secret.ScopeRuntimeBroker, ScopeID: broker.ID,
 	})
@@ -84,7 +90,7 @@ func newBrokerMaterialFixture(t *testing.T) *brokerMaterialFixture {
 	require.NoError(t, s.CreateProject(ctx, &store.Project{ID: project, Name: "BMT Project", Slug: "bmt-project"}))
 	createTestUserWithProjectRole(t, s, owner.ID, owner.Email, project, store.ProjectRoleOwner)
 
-	return &brokerMaterialFixture{srv: srv, store: s, broker: broker, owner: owner, nonOwner: nonOwner, superAdmin: superAdmin, project: project}
+	return &brokerMaterialFixture{srv: srv, store: s, broker: broker, owner: owner, nonOwner: nonOwner, viewer: viewer, superAdmin: superAdmin, project: project}
 }
 
 // mint returns a real token for user, or "" with the mint error when the
@@ -116,7 +122,8 @@ func brokerMaterialReadPaths(brokerID string) map[string]string {
 // TestBrokerMaterial_ReadsRequireBrokerRead pins the read rule for a
 // broker's env vars and secret metadata: broker.read on the broker plus the
 // owner relationship or broker.update. A token also needs the broker:read
-// selector on a hub boundary.
+// selector on a hub boundary. The seeded hub-member and hub-viewer roles
+// hold broker.read without broker.update and are refused.
 func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 	f := newBrokerMaterialFixture(t)
 
@@ -126,7 +133,11 @@ func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 	require.NoError(t, err)
 	nonOwnerWithSelector, err := f.mint(f.nonOwner, hubBoundary(), "broker:read")
 	require.NoError(t, err)
-	ownerProjectToken, projectMintErr := f.mint(f.owner, projectBoundary(f.project), "broker:read")
+	// broker:read is a hub-only selector, so a project token carrying it
+	// cannot be minted.
+	_, projectMintErr := f.mint(f.owner, projectBoundary(f.project), "broker:read")
+	require.Error(t, projectMintErr, "a project token with broker:read must not be mintable")
+	viewerToken, viewerMintErr := f.mint(f.viewer, hubBoundary(), "broker:read")
 
 	for name, path := range brokerMaterialReadPaths(f.broker.ID) {
 		t.Run(name, func(t *testing.T) {
@@ -134,6 +145,17 @@ func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 			// the material of a broker it does not own.
 			rec := doRequestAsUser(t, f.srv, f.nonOwner, http.MethodGet, path, nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "non-owner session: %s", rec.Body.String())
+
+			// The seeded hub-viewer role holds broker.read but not
+			// broker.update.
+			rec = doRequestAsUser(t, f.srv, f.viewer, http.MethodGet, path, nil)
+			assert.Equal(t, http.StatusForbidden, rec.Code, "hub-viewer session: %s", rec.Body.String())
+			if viewerMintErr != nil {
+				t.Logf("a hub-viewer hub token with broker:read cannot be minted: %v", viewerMintErr)
+			} else {
+				rec = doRequestWithToken(t, f.srv, viewerToken, http.MethodGet, path, nil)
+				assert.Equal(t, http.StatusForbidden, rec.Code, "hub-viewer hub token with broker:read: %s", rec.Body.String())
+			}
 
 			rec = doRequestAsUser(t, f.srv, f.owner, http.MethodGet, path, nil)
 			assert.Equal(t, http.StatusOK, rec.Code, "owner session: %s", rec.Body.String())
@@ -150,12 +172,6 @@ func TestBrokerMaterial_ReadsRequireBrokerRead(t *testing.T) {
 			rec = doRequestWithToken(t, f.srv, nonOwnerWithSelector, http.MethodGet, path, nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "non-owner hub token with broker:read: %s", rec.Body.String())
 
-			if projectMintErr != nil {
-				t.Logf("a project token with broker:read cannot be minted: %v", projectMintErr)
-			} else {
-				rec = doRequestWithToken(t, f.srv, ownerProjectToken, http.MethodGet, path, nil)
-				assert.Equal(t, http.StatusForbidden, rec.Code, "owner project token with broker:read: %s", rec.Body.String())
-			}
 		})
 	}
 }
@@ -383,6 +399,9 @@ func TestBrokerListing_TokenWithoutBrokerReadListsNoBrokers(t *testing.T) {
 // auto-provide broker and is refused on any other; a holder of
 // broker.dispatch is admitted. An admitted request reaches the broker call,
 // which fails against the unreachable test endpoint (not 403).
+// brokerImageOpRefusal is the 403 message of the image-op broker check.
+const brokerImageOpRefusal = "You do not have permission to perform image operations on this broker"
+
 func TestHarnessImageOps_DispatchAuthorityCheckedFirst(t *testing.T) {
 	srv, s := testServer(t)
 	srv.brokerClient = &HybridBrokerClient{
@@ -422,20 +441,53 @@ func TestHarnessImageOps_DispatchAuthorityCheckedFirst(t *testing.T) {
 		t.Run(op.name, func(t *testing.T) {
 			// The super-admin holds broker.dispatch, but its token carries
 			// no broker dispatch selector: refused on both brokers.
+			// The refusal names the broker check, so the token passed the
+			// harness-config route gate and was refused by the dispatch
+			// decision, ahead of the auto-provide rule.
 			for _, b := range []*store.RuntimeBroker{shared, private} {
 				rec := doRequestWithToken(t, srv, adminToken, op.method, path(b), nil)
 				assert.Equal(t, http.StatusForbidden, rec.Code, "token on %s: %s", b.Name, rec.Body.String())
+				assert.Contains(t, rec.Body.String(), brokerImageOpRefusal, "token on %s", b.Name)
 			}
 
 			rec := doRequestAsUser(t, srv, member, op.method, path(shared), nil)
 			assert.NotEqual(t, http.StatusForbidden, rec.Code, "session on the auto-provide broker: %s", rec.Body.String())
 			rec = doRequestAsUser(t, srv, member, op.method, path(private), nil)
 			assert.Equal(t, http.StatusForbidden, rec.Code, "session without broker.dispatch: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), brokerImageOpRefusal)
 
 			for _, b := range []*store.RuntimeBroker{shared, private} {
 				rec = doRequestAsUser(t, srv, superAdmin, op.method, path(b), nil)
 				assert.NotEqual(t, http.StatusForbidden, rec.Code, "broker.dispatch holder on %s: %s", b.Name, rec.Body.String())
 			}
 		})
+	}
+}
+
+// TestBrokerImageOps_OnlySessionCredentialsReachAutoProvide pins the
+// credential allow-list of the image-op broker check on an auto-provide
+// broker the caller holds no broker.dispatch on: an interactive session or
+// dev credential uses the auto-provide rule; a user access token, a
+// federation credential and a request with no credential kind are refused.
+func TestBrokerImageOps_OnlySessionCredentialsReachAutoProvide(t *testing.T) {
+	srv, s := testServer(t)
+	ctx := context.Background()
+	user := newHubMemberUser(t, s, "bio-member")
+	broker := &store.RuntimeBroker{
+		ID: tid("bio-auto"), Name: "bio-auto", Slug: "bio-auto", Status: store.BrokerStatusOnline,
+		AutoProvide: true, Created: time.Now(), Updated: time.Now(),
+	}
+	require.NoError(t, s.CreateRuntimeBroker(ctx, broker))
+
+	identity := NewAuthenticatedUser(user.ID, user.Email, user.DisplayName, "member", "web")
+	for kind, want := range map[CredentialKind]bool{
+		CredentialKindInteractive: true,
+		CredentialKindDev:         true,
+		CredentialKindUAT:         false,
+		CredentialKindFederation:  false,
+		"":                        false,
+	} {
+		reqCtx := contextWithCredentialContext(contextWithIdentity(ctx, identity), CredentialContext{Kind: kind})
+		assert.Equal(t, want, srv.canRunBrokerImageOps(reqCtx, broker), "credential kind %q", kind)
 	}
 }
