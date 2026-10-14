@@ -54,6 +54,16 @@ type QuotaService struct {
 	// scopeConflictMetrics counts reservation scope conflicts; nil until
 	// Server.SetQuotaScopeConflictMetrics.
 	scopeConflictMetrics atomic.Pointer[OTelQuotaScopeConflictMetrics]
+
+	// capacityMetrics counts backstop re-asserts and releases on
+	// deregistered Runtime Broker scopes; nil until
+	// Server.SetQuotaCapacityMetrics.
+	capacityMetrics atomic.Pointer[OTelQuotaCapacityMetrics]
+
+	// brokerRowsBackfilled maps a Runtime Broker ID to the Created time of
+	// the broker row this replica last backfilled reservations for
+	// (Server.backfillRegisteredBrokerOnce).
+	brokerRowsBackfilled sync.Map
 }
 
 // Sites of a reservation scope conflict, the site attribute of

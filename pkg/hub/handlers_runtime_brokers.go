@@ -1636,6 +1636,16 @@ func (s *Server) handleBrokerHeartbeat(w http.ResponseWriter, r *http.Request, i
 	s.settleQueuedStops(ctx, id, prevBroker, &heartbeat, report)
 	s.drainQueuedStopsFromHeartbeat(ctx, id, prevBroker, &heartbeat, report)
 
+	// The first heartbeat this replica handles for a broker row (a broker
+	// registered again under the same ID after a deregistration released
+	// its reservations, or a Hub restart): record the reservations of the
+	// agents it still runs now, not at the hourly backfill. The row is
+	// read through loadHeartbeatBroker, not prevBroker, whose
+	// nil-unless-complete-targets semantics the reconcilers above rely on.
+	if broker, err := loadHeartbeatBroker(); err == nil {
+		s.backfillRegisteredBrokerOnce(ctx, broker)
+	}
+
 	writeJSON(w, http.StatusOK, heartbeatResp)
 }
 

@@ -19,7 +19,9 @@ import (
 	"errors"
 	"time"
 
-	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -48,22 +50,113 @@ const reconcileMinReservationAge = 15 * time.Minute
 // phase (created/provisioning/cloning/starting/running) either occupies, or
 // is actively moving toward occupying, broker capacity. Stopped and suspended
 // agents have no running container; error means the container already
-// exited or crashed.
+// exited or crashed. The rule lives in the store
+// (store.BrokerQuotaCountedPhase), which evaluates it on a locked row for the
+// conditional release (store.AgentReleaseCond.NotCounted).
 func isBrokerQuotaCountedPhase(phase string) bool {
-	switch state.Phase(phase) {
-	case state.PhaseStopped, state.PhaseSuspended, state.PhaseError:
-		return false
-	default:
-		return true
-	}
+	return store.BrokerQuotaCountedPhase(phase)
 }
 
 // agentHoldsBrokerCapacity reports whether agent's reservation must be kept:
 // it is in a counted phase, or its stop is queued for an offline broker (the
 // container may still be running until the stop is applied or the container
-// is confirmed gone).
+// is confirmed gone). See store.AgentHoldsBrokerCapacity.
 func agentHoldsBrokerCapacity(agent *store.Agent) bool {
-	return isBrokerQuotaCountedPhase(agent.Phase) || agent.ContainerStatus == containerStatusStopQueued
+	return store.AgentHoldsBrokerCapacity(agent)
+}
+
+// Sites of scion.hub.quota.backstop_reassert: a backstop re-assert that
+// actually wrote a reservation, which means a release slipped through an
+// unguarded path (design §4.4).
+const (
+	// backstopSiteRestart: reassertBrokerReservation, the restart's
+	// re-assert after its stop leg and after its final write.
+	backstopSiteRestart = "restart"
+	// backstopSiteSettle: settleQueuedStops' re-assert after a start
+	// superseded the queued stop during the release.
+	backstopSiteSettle = "settle"
+)
+
+// OTelQuotaCapacityMetrics counts capacity repairs:
+// scion.hub.quota.backstop_reassert (attribute site: restart or settle), each
+// backstop re-assert that wrote a reservation, and
+// scion.hub.quota.deregistered_scope_released, each reservation the sweep
+// released on a Runtime Broker scope confirmed deregistered. The agent and
+// broker IDs are in the log line and audit event, not in the attributes.
+type OTelQuotaCapacityMetrics struct {
+	backstop     metric.Int64Counter
+	deregistered metric.Int64Counter
+}
+
+// NewOTelQuotaCapacityMetrics creates the counters.
+func NewOTelQuotaCapacityMetrics(mp metric.MeterProvider) (*OTelQuotaCapacityMetrics, error) {
+	if mp == nil {
+		return nil, errors.New("otel quota capacity metrics: nil MeterProvider")
+	}
+	m := mp.Meter(instrumentationScope)
+	backstop, err := m.Int64Counter("scion.hub.quota.backstop_reassert", metric.WithUnit("{reservation}"))
+	if err != nil {
+		return nil, err
+	}
+	deregistered, err := m.Int64Counter("scion.hub.quota.deregistered_scope_released", metric.WithUnit("{reservation}"))
+	if err != nil {
+		return nil, err
+	}
+	return &OTelQuotaCapacityMetrics{backstop: backstop, deregistered: deregistered}, nil
+}
+
+// SetQuotaCapacityMetrics wires the capacity counters. Until it is set, the
+// events are logged and audited but not counted.
+func (s *Server) SetQuotaCapacityMetrics(m *OTelQuotaCapacityMetrics) {
+	if s.quotaService != nil {
+		s.quotaService.capacityMetrics.Store(m)
+	}
+}
+
+// recordBackstopReassert counts one backstop re-assert write at site.
+func (qs *QuotaService) recordBackstopReassert(site string) {
+	if m := qs.capacityMetrics.Load(); m != nil {
+		m.backstop.Add(context.Background(), 1, metric.WithAttributes(attribute.String("site", site)))
+	}
+}
+
+// recordDeregisteredScopeReleased counts one reservation released on a
+// deregistered Runtime Broker scope.
+func (qs *QuotaService) recordDeregisteredScopeReleased() {
+	if m := qs.capacityMetrics.Load(); m != nil {
+		m.deregistered.Add(context.Background(), 1)
+	}
+}
+
+// Mutation audit types of the capacity repairs (target: the agent).
+const (
+	auditQuotaBackstopReassert         = "quota_backstop_reassert"
+	auditQuotaDeregisteredScopeRelease = "quota_deregistered_scope_released"
+	auditStartClaimBrokerDeregistered  = "start_claim_released_broker_deregistered"
+)
+
+// capacityAuditSummary is the audit summary of a capacity repair.
+type capacityAuditSummary struct {
+	Reason          string `json:"reason"`
+	RuntimeBrokerID string `json:"runtimeBrokerId"`
+	Site            string `json:"site,omitempty"`
+	ReservationID   string `json:"reservationId,omitempty"`
+	ClaimID         string `json:"claimId,omitempty"`
+	ClaimKind       string `json:"claimKind,omitempty"`
+}
+
+// writeCapacityAudit writes a mutation audit record of a capacity repair on
+// agentID, attributed to the hub. Best-effort: a failure is logged.
+func (s *Server) writeCapacityAudit(ctx context.Context, mutationType, agentID string, summary capacityAuditSummary) {
+	record, err := lifecycleAudit(mutationType, agentID, AuditActor{}, time.Now(), summary)
+	if err == nil {
+		err = s.store.CreateMutationAudit(ctx, record)
+	}
+	if err != nil {
+		s.agentLifecycleLog.Warn("quota: writing the capacity audit event failed",
+			"mutation_type", mutationType, "agent_id", agentID,
+			"runtime_broker_id", summary.RuntimeBrokerID, "error", err)
+	}
 }
 
 // releaseBrokerQuota releases agent's max_agents_per_broker reservation, if
@@ -89,6 +182,64 @@ func (s *Server) rollbackBrokerQuota(ctx context.Context, agent *store.Agent, cr
 	s.releaseBrokerQuota(ctx, agent)
 }
 
+// releaseBrokerQuotaIf releases agent's max_agents_per_broker reservation
+// only if cond holds on the stored agent row, in one conditional store write
+// (store.ReleaseReservationIfAgent): a start that claimed the agent, or
+// minted a run, since the caller read it keeps its slot. Reports whether a
+// reservation was released. Best-effort: a failure is logged. A missing
+// agent row releases nothing here; the sweep releases a missing agent's row
+// itself.
+func (s *Server) releaseBrokerQuotaIf(ctx context.Context, agent *store.Agent, cond store.AgentReleaseCond) bool {
+	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
+		return false
+	}
+	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: conditional release: limit lookup failed",
+				"agent_id", agent.ID, "error", err)
+		}
+		return false
+	}
+	released, err := s.store.ReleaseReservationIfAgent(ctx, def.ID, agent.ID, cond)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("quota: conditional release failed",
+			"agent_id", agent.ID, "error", err)
+	}
+	return released
+}
+
+// releaseSlotIfIdle releases agentID's max_agents_per_broker reservation if
+// the agent, as stored at the write, holds no capacity
+// (store.AgentHoldsBrokerCapacity is false) and no start-kind claim, keyed on
+// the run ID it reads. The check is the store's, on the locked row
+// (NotCounted), so this costs one read and one conditional write. It runs
+// right after a claim is released without a running outcome, so a release
+// that was skipped while the claim was held does not wait for the hourly
+// sweep (design §4.4, k8s merge condition 2). On a running agent it is a
+// no-op. Best-effort.
+func (s *Server) releaseSlotIfIdle(ctx context.Context, agentID string) {
+	if s.quotaService == nil || agentID == "" {
+		return
+	}
+	row, err := s.store.GetAgent(ctx, agentID)
+	if err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota: release after the claim cleared: reading the agent failed",
+				"agent_id", agentID, "error", err)
+		}
+		return
+	}
+	if s.releaseBrokerQuotaIf(ctx, row, store.AgentReleaseCond{
+		ExpectedRunID:    row.RunID,
+		NoStartKindClaim: true,
+		NotCounted:       true,
+	}) {
+		s.agentLifecycleLog.Info("quota: released the slot of an agent left idle when its claim cleared",
+			"agent_id", agentID, "runtime_broker_id", row.RuntimeBrokerID)
+	}
+}
+
 // checkAndReserveBrokerQuota reserves agent's max_agents_per_broker slot with
 // the cap check. Start-type dispatch sites call it through
 // beginStartDispatch. Returns nil if the reservation
@@ -107,25 +258,36 @@ func (s *Server) checkAndReserveBrokerQuota(ctx context.Context, agent *store.Ag
 // reservation if it holds none, without the cap check, the way
 // ReconcileStaleBrokerQuotaReservations backfills one: it is accounting for
 // a slot the caller already held, not a new admission decision. A restart
-// calls it after its stop leg, because the dying container's own status
-// report (phase stopped) releases the reservation through
-// reconcileBrokerQuotaOnPhaseChange while the stop leg runs (and again
-// after its final write). Because it skips the cap check, a racing start
-// that took the freed slot in between can leave the broker one over its cap
-// until a slot frees; that is accepted, rather than refusing a restart whose
-// container is already stopped. Reports whether it created a reservation.
-// An active reservation on another broker is never overwritten or moved: it
-// is reported as a scope conflict (log and metric, site "reassert").
-// Best-effort: failures are logged.
+// calls it after its stop leg and after its final write. The restart holds
+// its restart claim across both legs, and the observed-phase release skips
+// an agent holding a start-kind claim (reconcileBrokerQuotaOnPhaseChange),
+// so the dying container's own stopped report no longer frees the slot. The
+// re-assert is therefore a backstop: it writes only if a release slipped
+// through an unguarded path, such as a report handled by another replica
+// between the restart's reserve and its claim. Because it skips the cap
+// check, a racing start that took the freed slot in between can leave the
+// broker one over its cap per in-flight restart until a slot frees; that is
+// accepted, rather than refusing a restart whose container is already
+// stopped. Every write is counted (scion.hub.quota.backstop_reassert, site
+// "restart"), logged and audited with the agent and broker IDs. Reports
+// whether it created a reservation. An active reservation on another broker
+// is never overwritten or moved: it is reported as a scope conflict (log and
+// metric, site "reassert"). Best-effort: failures are logged.
 func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Agent) bool {
+	return s.reassertBrokerReservationAt(ctx, agent, backstopSiteRestart)
+}
+
+// reassertBrokerReservationAt is reassertBrokerReservation with the backstop
+// site that a write is counted and audited under.
+func (s *Server) reassertBrokerReservationAt(ctx context.Context, agent *store.Agent, site string) bool {
 	if s.quotaService == nil || agent == nil || agent.RuntimeBrokerID == "" {
 		return false
 	}
 	def, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
 	if err != nil {
 		if !errors.Is(err, store.ErrNotFound) {
-			s.agentLifecycleLog.Warn("quota: restart re-assert: limit lookup failed",
-				"agent_id", agent.ID, "error", err)
+			s.agentLifecycleLog.Warn("quota: backstop re-assert: limit lookup failed",
+				"site", site, "agent_id", agent.ID, "error", err)
 		}
 		return false
 	}
@@ -137,8 +299,8 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 		}
 		return false
 	case !errors.Is(err, store.ErrNotFound):
-		s.agentLifecycleLog.Warn("quota: restart re-assert: reservation check failed",
-			"agent_id", agent.ID, "error", err)
+		s.agentLifecycleLog.Warn("quota: backstop re-assert: reservation check failed",
+			"site", site, "agent_id", agent.ID, "error", err)
 		return false
 	}
 	created, err := s.recordBrokerReservationUnchecked(ctx, def.ID, agent.RuntimeBrokerID, agent.ID)
@@ -148,11 +310,28 @@ func (s *Server) reassertBrokerReservation(ctx context.Context, agent *store.Age
 			s.reportBrokerScopeConflict(scopeConflictSiteReassert, agent, conflict.HeldScopeID)
 			return false
 		}
-		s.agentLifecycleLog.Warn("quota: restart re-assert failed",
-			"agent_id", agent.ID, "error", err)
+		s.agentLifecycleLog.Warn("quota: backstop re-assert failed",
+			"site", site, "agent_id", agent.ID, "error", err)
 		return false
 	}
+	if created {
+		s.recordBackstopWrite(ctx, agent, site)
+	}
 	return created
+}
+
+// recordBackstopWrite counts, logs and audits a backstop re-assert that
+// wrote agent's reservation at site: a release slipped through an unguarded
+// path, and the broker may be one over its cap until a slot frees.
+func (s *Server) recordBackstopWrite(ctx context.Context, agent *store.Agent, site string) {
+	s.quotaService.recordBackstopReassert(site)
+	s.agentLifecycleLog.Warn("quota: backstop re-asserted a released reservation without the cap check",
+		"site", site, "agent_id", agent.ID, "runtime_broker_id", agent.RuntimeBrokerID)
+	s.writeCapacityAudit(ctx, auditQuotaBackstopReassert, agent.ID, capacityAuditSummary{
+		Reason:          "backstop re-assert: the reservation was released while the agent held its slot",
+		RuntimeBrokerID: agent.RuntimeBrokerID,
+		Site:            site,
+	})
 }
 
 // recordBrokerReservationUnchecked records agentID's max_agents_per_broker
@@ -219,7 +398,17 @@ func (s *Server) reportBrokerScopeConflict(site string, agent *store.Agent, held
 // release/reserve calls in the lifecycle handlers (ptone/scion#1963).
 //
 //   - counted → not counted (e.g. the broker reports the container exited or
-//     crashed): release.
+//     crashed): release, unless a start owns the slot. The release is one
+//     conditional store write keyed on the run ID read with agent and on no
+//     start-kind claim being held (store.ReleaseReservationIfAgent), so a
+//     restart, or any start that claimed the agent or minted a run since the
+//     read, keeps its reservation; a stop-kind claim does not block it (a stop
+//     claim blocks every start). It is also skipped while a lifecycle
+//     operation for the agent runs on this replica. Countedness comes from
+//     the observed phase, not the stored row: two callers run before the
+//     phase is persisted, so the condition does not include NotCounted. A
+//     release skipped because a claim was held is completed by
+//     releaseSlotIfIdle when the claim clears, or by the sweep.
 //   - not counted → counted (e.g. an operator or the runtime restarted the
 //     container out of band, and the hub only learns about it via heartbeat):
 //     best-effort re-reserve. The container is already running by the time
@@ -246,8 +435,18 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 		}
 		return
 	}
-	s.releaseBrokerQuota(ctx, agent)
+	if agent == nil || s.lifecycleOps.active(agent.ID) {
+		return
+	}
+	s.releaseBrokerQuotaIf(ctx, agent, store.AgentReleaseCond{
+		ExpectedRunID:    agent.RunID,
+		NoStartKindClaim: true,
+	})
 }
+
+// reconcileBrokerListLimit bounds the sweep's Runtime Broker list (one page,
+// brokerScopedListLimit). A variable for tests.
+var reconcileBrokerListLimit = brokerScopedListLimit
 
 // ReconcileStaleBrokerQuotaReservations reconciles max_agents_per_broker
 // reservations against observed reality, per runtime broker (ptone/scion#1963):
@@ -261,31 +460,47 @@ func (s *Server) reconcileBrokerQuotaOnPhaseChange(ctx context.Context, agent *s
 //     beginStartDispatch's pre-dispatch "starting" write (ptone/scion#2011,
 //     ptone/scion#2014); the missing/soft-deleted case is never subject to
 //     that grace period.
-//   - Backfill: an agent in a counted phase on this broker with no active
+//   - Backfill: an agent on this broker that holds capacity with no active
 //     reservation gets one recorded directly (no cap check — this is
 //     accounting for an agent that already exists and is already running,
 //     not a new admission decision; see checkAndReserveBrokerQuota for the
 //     cap-enforced path used at start/resume). Covers legacy agents created
-//     before max_agents_per_broker existed, which hold no reservation at all.
+//     before max_agents_per_broker existed, which hold no reservation at all,
+//     and an agent whose stop is queued and still intended that lost its
+//     reservation (brokerBackfillHolds).
 //   - Scope conflicts: a pinned agent whose active reservation is on a broker
 //     other than its Runtime Broker is never moved or backfilled, and is not
 //     released while the agent holds capacity (agentHoldsBrokerCapacity);
 //     once it holds none, the release rule above applies (contract erratum
 //     E-FC11-1). While it is kept it is reported (log and metric, sites
 //     "sweep" and "backfill") in each pass that reads it, and shown with
-//     scopeConflict on the admin usage view. A pass that cannot load a listed broker's
-//     agents skips that broker, so its conflicts are reported on a later
-//     pass. An
-//     unpinned agent's row on another broker is released by the phase rule
-//     above as before, and its backfill is refused and reported the same way.
+//     scopeConflict on the admin usage view. A pass that cannot load a
+//     listed broker's agents skips that broker, so its conflicts are
+//     reported on a later pass. An unpinned agent's row on another broker is
+//     released by the phase rule above as before, and its backfill is
+//     refused and reported the same way.
+//   - Deregistered scopes: a reservation whose broker is not in the list is
+//     released only when a point lookup confirms the broker is gone
+//     (releaseDeregisteredScopeReservations).
+//
+// Every release is conditional on what the pass read. A missing agent's row
+// is released by its reservation ID, so a newer reservation of the same
+// agent (a restore and a start after the read) is left alone. The
+// phase-based release is one conditional store write on the agent row: the
+// reservation the pass read, the run ID it read, no start-kind claim, and
+// the stored row holding no capacity (store.ReleaseReservationIfAgent). A
+// start that claimed the agent, minted a run or re-reserved since the read
+// therefore keeps its slot, including a same-broker start that reuses the
+// row as an idempotent retry (it holds a start claim from before its
+// reserve).
 //
 // Idempotent both ways: releasing an already-released reservation and
 // re-running the backfill after a prior successful pass are no-ops (the
 // latter enforced by the DB's unique-active-reservation-per-resource index,
-// not just the in-memory reservedIDs check below). Safe to call on every hub
-// startup. Best-effort throughout — this is bookkeeping, not on any
-// request's critical path, so individual failures are logged and skipped
-// rather than aborting the whole pass.
+// not just the in-memory check below). Safe to call on every hub startup.
+// Best-effort throughout — this is bookkeeping, not on any request's
+// critical path, so individual failures are logged and skipped rather than
+// aborting the whole pass.
 func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 	if s.quotaService == nil {
 		return
@@ -298,39 +513,53 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		return
 	}
 
-	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: brokerScopedListLimit})
+	brokers, err := s.store.ListRuntimeBrokers(ctx, store.RuntimeBrokerFilter{}, store.ListOptions{Limit: reconcileBrokerListLimit})
 	if err != nil {
 		s.agentLifecycleLog.Warn("quota reconcile: failed to list runtime brokers", "error", err)
 		return
 	}
 
 	// One query for every broker's active reservations (ptone/scion#2314),
-	// grouped by broker below. Only listed brokers are visited, so rows whose
-	// scope ID is not a listed broker are not touched, as before. If this
-	// query fails the whole pass is skipped; the next scheduled pass retries.
+	// grouped by broker below. If this query fails the whole pass is
+	// skipped; the next scheduled pass retries.
 	//
 	// The rows are one snapshot taken at the start of the pass, not a fresh
 	// read per broker, so a later broker's rows can be older than the work
-	// already done for earlier brokers. That is acceptable: a release still
-	// needs the agent, re-read per broker below, to be missing or not in a
-	// counted phase, releasing an already-released row is a no-op, and the
-	// backfill is idempotent through the unique active-reservation index.
+	// already done for earlier brokers. That is acceptable: every release is
+	// conditional on what the pass read (see above), releasing an
+	// already-released row is a no-op, and the backfill is idempotent through
+	// the unique active-reservation index.
 	allReservations, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBroker)
 	if err != nil {
 		s.agentLifecycleLog.Warn("quota reconcile: failed to list active reservations", "error", err)
 		return
 	}
-	reservationsByBroker := groupReservationsByScopeID(allReservations)
-	// heldBroker maps each reserved agent to the broker its active row is on,
-	// so a backfill can see a row held on another broker.
-	heldBroker := make(map[string]string, len(allReservations))
-	for _, res := range allReservations {
-		heldBroker[res.ResourceID] = res.ScopeID
-	}
 
 	listedBrokers := make(map[string]bool, len(brokers.Items))
 	for _, broker := range brokers.Items {
 		listedBrokers[broker.ID] = true
+	}
+
+	// Rows on unlisted scopes: released only on a confirmed-deleted broker.
+	// Released rows are dropped from the snapshot, so the backfill below
+	// can record a running agent on its real broker in this pass.
+	deregistered := s.releaseDeregisteredScopeReservations(ctx, allReservations, listedBrokers)
+	if len(deregistered) > 0 {
+		kept := make([]*store.UsageReservation, 0, len(allReservations))
+		for _, res := range allReservations {
+			if !deregistered[res.ID] {
+				kept = append(kept, res)
+			}
+		}
+		allReservations = kept
+	}
+
+	reservationsByBroker := groupReservationsByScopeID(allReservations)
+	// heldBroker maps each reserved agent to the broker its active row is on,
+	// so a backfill can see a row held on this or another broker.
+	heldBroker := make(map[string]string, len(allReservations))
+	for _, res := range allReservations {
+		heldBroker[res.ResourceID] = res.ScopeID
 	}
 
 	var checked, released, backfilled, conflicts int
@@ -344,10 +573,8 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 		// hard-deleted one — its stored phase (which may still read e.g.
 		// "running") never enters into it.
 		resourceIDs := make([]string, len(reservations))
-		reservedIDs := make(map[string]bool, len(reservations))
 		for i, res := range reservations {
 			resourceIDs[i] = res.ResourceID
-			reservedIDs[res.ResourceID] = true
 		}
 		agentsByID, err := s.store.GetAgentsByIDs(ctx, resourceIDs)
 		if err != nil {
@@ -363,78 +590,265 @@ func (s *Server) ReconcileStaleBrokerQuotaReservations(ctx context.Context) {
 				// No longer exists or soft-deleted: release the stale row.
 				// It should have been released at delete time; release it
 				// now regardless.
-				s.quotaService.Release(ctx, store.LimitMaxAgentsPerBroker, res.ResourceID)
-				released++
+				if s.releaseObservedReservation(ctx, res) {
+					released++
+				}
 				continue
 			}
 			if !agentHoldsBrokerCapacity(agent) && time.Since(res.CreatedAt) >= reconcileMinReservationAge {
 				// No container to protect, wherever the row is: release.
 				// For a pinned agent's row on another broker this is not a
-				// move; its next start reserves on its own broker. The
-				// release is conditional on this row: a start that
-				// re-reserved since this pass read it holds a new row,
-				// which is left alone.
-				if err := s.store.ReleaseReservationByID(ctx, res.ID); err != nil {
-					if !errors.Is(err, store.ErrNotFound) {
-						s.agentLifecycleLog.Warn("quota reconcile: failed to release reservation",
-							"agent_id", agent.ID, "reservation_id", res.ID, "error", err)
-					}
-					continue
+				// move; its next start reserves on its own broker.
+				if s.releaseObservedIdleReservation(ctx, limitDef.ID, agent, res) {
+					released++
 				}
-				released++
 				continue
 			}
 			if agent.IsPinned() && agent.RuntimeBrokerID != res.ScopeID {
-				// A pinned agent that holds capacity, with its row on another
-				// broker: report it, never release or move it.
+				// A pinned agent whose row on another broker is not released
+				// above (it holds capacity, or the row is within the grace):
+				// report it, never release or move it.
 				s.reportBrokerScopeConflict(scopeConflictSiteSweep, agent, res.ScopeID)
 				conflicts++
 			}
 		}
 
-		// Backfill: agents on this broker in a counted phase with no active
-		// reservation (legacy agents predating the cap, or any other gap).
-		agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: broker.ID}, store.ListOptions{Limit: 10000})
+		// Backfill: agents on this broker that hold capacity with no active
+		// reservation (legacy agents predating the cap, or any other gap). A
+		// pinned agent's row on another broker is reported here only when
+		// that broker is not listed; the release pass reports it otherwise.
+		n, c, err := s.backfillBrokerAgents(ctx, limitDef.ID, broker.ID, heldBroker, func(held string) bool { return !listedBrokers[held] })
+		backfilled += n
+		conflicts += c
 		if err != nil {
 			s.agentLifecycleLog.Warn("quota reconcile: failed to list agents for broker",
 				"broker_id", broker.ID, "error", err)
 			continue
 		}
-		for i := range agents.Items {
-			agent := &agents.Items[i]
-			if reservedIDs[agent.ID] || !isBrokerQuotaCountedPhase(agent.Phase) {
-				continue
-			}
-			if held, ok := heldBroker[agent.ID]; ok && agent.IsPinned() {
-				// A pinned agent holding a row on another broker is not
-				// backfilled here. The release pass above reports it when
-				// that broker is listed; report it here when it is not.
-				if !listedBrokers[held] {
-					s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, held)
-					conflicts++
-				}
-				continue
-			}
-			created, err := s.recordBrokerReservationUnchecked(ctx, limitDef.ID, broker.ID, agent.ID)
-			if err != nil {
-				var conflict *ReservationScopeConflictError
-				if errors.As(err, &conflict) {
-					s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, conflict.HeldScopeID)
-					conflicts++
-					continue
-				}
-				s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
-					"agent_id", agent.ID, "broker_id", broker.ID, "error", err)
-				continue
-			}
-			if created {
-				backfilled++
-			}
-		}
 	}
 
-	if released > 0 || backfilled > 0 || conflicts > 0 {
+	if released > 0 || backfilled > 0 || conflicts > 0 || len(deregistered) > 0 {
 		s.agentLifecycleLog.Info("quota reconcile: reconciled max_agents_per_broker reservations",
-			"checked", checked, "released", released, "backfilled", backfilled, "scope_conflicts", conflicts)
+			"checked", checked, "released", released, "backfilled", backfilled, "scope_conflicts", conflicts,
+			"deregistered_released", len(deregistered))
+	}
+}
+
+// releaseObservedReservation releases the reservation row res that the
+// reconcile read, and only that row, in one conditional write: a start (or
+// a restore and a start) that re-reserved since the read holds a new row,
+// which is left alone. Reports whether it released res. Best-effort: a
+// failure is logged.
+func (s *Server) releaseObservedReservation(ctx context.Context, res *store.UsageReservation) bool {
+	if err := s.store.ReleaseReservationByID(ctx, res.ID); err != nil {
+		if !errors.Is(err, store.ErrNotFound) {
+			s.agentLifecycleLog.Warn("quota reconcile: failed to release reservation",
+				"agent_id", res.ResourceID, "reservation_id", res.ID, "error", err)
+		}
+		return false
+	}
+	return true
+}
+
+// releaseObservedIdleReservation releases res, the row the reconcile read for
+// agent, only if the stored agent row still has the run ID the reconcile
+// read, holds no start-kind claim and holds no capacity, in one conditional
+// store write (store.ReleaseReservationIfAgent). Reports whether it released
+// res. Best-effort: a failure is logged.
+func (s *Server) releaseObservedIdleReservation(ctx context.Context, limitDefID string, agent *store.Agent, res *store.UsageReservation) bool {
+	released, err := s.store.ReleaseReservationIfAgent(ctx, limitDefID, agent.ID, store.AgentReleaseCond{
+		ExpectedRunID:    agent.RunID,
+		NoStartKindClaim: true,
+		NotCounted:       true,
+		ReservationID:    res.ID,
+	})
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		s.agentLifecycleLog.Warn("quota reconcile: failed to release reservation",
+			"agent_id", agent.ID, "reservation_id", res.ID, "error", err)
+	}
+	return released
+}
+
+// releaseDeregisteredScopeReservations releases the active reservations, of
+// reservations, whose Runtime Broker scope is not listed and is confirmed
+// deregistered, and returns the IDs it released. Not being listed is only a
+// candidate: the list is capped (the oldest brokers beyond the cap are not
+// in it), and it is read before the reservations, so a broker registered in
+// between is not in it either. Each candidate scope is confirmed with a
+// point lookup, once per pass: store.ErrNotFound confirms it; a found broker
+// is live and its rows are not touched; any other error skips the scope
+// this pass. Each row of a confirmed scope is released with one conditional
+// write that also requires that no broker has the scope's ID
+// (store.ReleaseReservationIfScopeBrokerAbsent), so a broker that
+// re-registers with the same ID after the lookup keeps its rows. Each
+// release is counted (scion.hub.quota.deregistered_scope_released), logged
+// and audited. A pinned agent's row is released here too: the broker it is
+// on no longer exists, so the row counts against no live instance.
+func (s *Server) releaseDeregisteredScopeReservations(ctx context.Context, reservations []*store.UsageReservation, listed map[string]bool) map[string]bool {
+	const (
+		scopeLive = iota
+		scopeDeleted
+		scopeUnknown
+	)
+	lookups := map[string]int{}
+	var released map[string]bool
+	for _, res := range reservations {
+		if listed[res.ScopeID] {
+			continue
+		}
+		st, seen := lookups[res.ScopeID]
+		if !seen {
+			_, err := s.store.GetRuntimeBroker(ctx, res.ScopeID)
+			switch {
+			case err == nil:
+				st = scopeLive
+			case errors.Is(err, store.ErrNotFound):
+				st = scopeDeleted
+			default:
+				st = scopeUnknown
+				s.agentLifecycleLog.Warn("quota reconcile: looking up an unlisted Runtime Broker scope failed; its reservations are kept this pass",
+					"broker_id", res.ScopeID, "error", err)
+			}
+			lookups[res.ScopeID] = st
+		}
+		if st != scopeDeleted {
+			continue
+		}
+		ok, err := s.store.ReleaseReservationIfScopeBrokerAbsent(ctx, res.ID, res.ScopeID)
+		if err != nil {
+			s.agentLifecycleLog.Warn("quota reconcile: failed to release a reservation on a deregistered Runtime Broker",
+				"agent_id", res.ResourceID, "reservation_id", res.ID, "broker_id", res.ScopeID, "error", err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if released == nil {
+			released = map[string]bool{}
+		}
+		released[res.ID] = true
+		s.quotaService.recordDeregisteredScopeReleased()
+		s.agentLifecycleLog.Warn("quota reconcile: capacity released: Runtime Broker deregistered; runtime state unknown",
+			"agent_id", res.ResourceID, "runtime_broker_id", res.ScopeID, "reservation_id", res.ID)
+		s.writeCapacityAudit(ctx, auditQuotaDeregisteredScopeRelease, res.ResourceID, capacityAuditSummary{
+			Reason:          "capacity released: Runtime Broker " + res.ScopeID + " deregistered; runtime state unknown",
+			RuntimeBrokerID: res.ScopeID,
+			ReservationID:   res.ID,
+		})
+	}
+	return released
+}
+
+// brokerBackfillHolds reports whether the backfill records a reservation for
+// agent when it holds none: it is in a counted phase, or its stop is queued
+// and still intended (the container may still be running; container status
+// alone is not enough).
+func brokerBackfillHolds(agent *store.Agent) bool {
+	return isBrokerQuotaCountedPhase(agent.Phase) || (agentHoldsBrokerCapacity(agent) && queuedStopStillIntended(agent))
+}
+
+// backfillBrokerAgents records, without the cap check, the reservation of
+// every agent on brokerID that holds capacity (brokerBackfillHolds) and has
+// no active reservation. heldBroker maps each agent holding an active row to
+// that row's broker: an agent with a row on brokerID is skipped, and a
+// pinned agent with a row on another broker is never backfilled; it is
+// reported as a scope conflict when reportHeld returns true for that broker.
+// An unpinned agent's backfill onto a row held elsewhere is refused by the
+// unique index and reported. Returns the number of reservations recorded and
+// of conflicts reported; err is the agent list's error.
+func (s *Server) backfillBrokerAgents(ctx context.Context, limitDefID, brokerID string, heldBroker map[string]string, reportHeld func(heldBrokerID string) bool) (backfilled, conflicts int, err error) {
+	agents, err := s.store.ListAgents(ctx, store.AgentFilter{RuntimeBrokerID: brokerID}, store.ListOptions{Limit: 10000})
+	if err != nil {
+		return 0, 0, err
+	}
+	for i := range agents.Items {
+		agent := &agents.Items[i]
+		held, hasHeld := heldBroker[agent.ID]
+		if (hasHeld && held == brokerID) || !brokerBackfillHolds(agent) {
+			continue
+		}
+		if hasHeld && agent.IsPinned() {
+			if reportHeld(held) {
+				s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, held)
+				conflicts++
+			}
+			continue
+		}
+		created, err := s.recordBrokerReservationUnchecked(ctx, limitDefID, brokerID, agent.ID)
+		if err != nil {
+			var conflict *ReservationScopeConflictError
+			if errors.As(err, &conflict) {
+				s.reportBrokerScopeConflict(scopeConflictSiteBackfill, agent, conflict.HeldScopeID)
+				conflicts++
+				continue
+			}
+			s.agentLifecycleLog.Warn("quota reconcile: failed to backfill reservation",
+				"agent_id", agent.ID, "broker_id", brokerID, "error", err)
+			continue
+		}
+		if created {
+			backfilled++
+		}
+	}
+	return backfilled, conflicts, nil
+}
+
+// backfillBrokerReservations runs the reconcile's backfill for one broker
+// (backfillBrokerAgents), outside the hourly pass. Reports whether it ran to
+// the end (true also when no max_agents_per_broker limit is defined).
+func (s *Server) backfillBrokerReservations(ctx context.Context, brokerID string) bool {
+	if s.quotaService == nil {
+		return true
+	}
+	limitDef, err := s.store.GetLimitDefinitionByName(ctx, store.LimitMaxAgentsPerBroker)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return true
+		}
+		s.agentLifecycleLog.Warn("quota backfill: failed to look up max_agents_per_broker limit definition",
+			"broker_id", brokerID, "error", err)
+		return false
+	}
+	all, err := s.store.ListActiveReservationsByScopeType(ctx, limitDef.ID, store.QuotaScopeBroker)
+	if err != nil {
+		s.agentLifecycleLog.Warn("quota backfill: failed to list active reservations", "broker_id", brokerID, "error", err)
+		return false
+	}
+	heldBroker := make(map[string]string, len(all))
+	for _, res := range all {
+		heldBroker[res.ResourceID] = res.ScopeID
+	}
+	backfilled, conflicts, err := s.backfillBrokerAgents(ctx, limitDef.ID, brokerID, heldBroker, func(string) bool { return true })
+	if err != nil {
+		s.agentLifecycleLog.Warn("quota backfill: failed to list agents for broker", "broker_id", brokerID, "error", err)
+		return false
+	}
+	if backfilled > 0 || conflicts > 0 {
+		s.agentLifecycleLog.Info("quota backfill: recorded reservations of a Runtime Broker's agents",
+			"broker_id", brokerID, "backfilled", backfilled, "scope_conflicts", conflicts)
+	}
+	return true
+}
+
+// backfillRegisteredBrokerOnce runs backfillBrokerReservations for broker
+// once per broker row identity on this replica: the first heartbeat this
+// replica handles for a row whose Created timestamp it has not backfilled.
+// A broker that was deregistered (its reservations released by the sweep)
+// and registered again under the same ID has a new row, so its still
+// running agents are re-reserved on its first heartbeat rather than at the
+// next hourly backfill. A Hub restart runs one idempotent backfill per
+// broker. Created is recorded only after a backfill that ran to the end, so
+// a failed one is retried on the next heartbeat.
+func (s *Server) backfillRegisteredBrokerOnce(ctx context.Context, broker *store.RuntimeBroker) {
+	if s.quotaService == nil || broker == nil {
+		return
+	}
+	if v, ok := s.quotaService.brokerRowsBackfilled.Load(broker.ID); ok {
+		if created, _ := v.(time.Time); created.Equal(broker.Created) {
+			return
+		}
+	}
+	if s.backfillBrokerReservations(ctx, broker.ID) {
+		s.quotaService.brokerRowsBackfilled.Store(broker.ID, broker.Created)
 	}
 }

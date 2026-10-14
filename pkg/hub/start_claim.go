@@ -316,6 +316,12 @@ func (r *startClaimRun) finish(outcome startOutcome) bool {
 	if err != nil {
 		slog.Warn("Start claim: settling the claim failed; the reaper will settle it", "agent_id", r.agent, "claim_id", r.claim.ID, "error", err)
 	}
+	// Every outcome except a handoff, success included: an exit observed
+	// while the claim was held skipped its release (a synchronous create
+	// whose container exited during the dispatch keeps its terminal phase),
+	// so free the slot now if the agent holds no capacity. A no-op for a
+	// running agent, and while a start-kind claim is still held.
+	r.s.releaseSlotIfIdle(ctx, r.agent)
 	return held
 }
 
