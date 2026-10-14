@@ -17,11 +17,11 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -367,8 +367,8 @@ func TestRequireHubClient_NoHubEnabled_NoAgentContext_Errors(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when hub is neither enabled nor in an agent context")
 	}
-	if got := err.Error(); !strings.Contains(got, "require Hub mode") {
-		t.Errorf("error = %q, want it to mention %q", got, "require Hub mode")
+	if !errors.Is(err, errHubNotConfigured) {
+		t.Errorf("error = %v, want errHubNotConfigured", err)
 	}
 }
 
@@ -378,7 +378,7 @@ func TestRequireHubClient_NoHubEnabled_NoAgentContext_Errors(t *testing.T) {
 // comment), but the hub context env vars and an agent-scoped SCION_AUTH_TOKEN
 // are always present. requireHubClient must accept this the same way
 // hubsync.EnsureHubReady's in-container fallback already does, without
-// requiring settings.IsHubEnabled() to be true.
+// requiring hub.enabled to be set in settings.
 func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) {
 	orig := saveRequireHubClientTestState()
 	defer orig.restore()
@@ -403,8 +403,8 @@ func TestRequireHubClient_AgentHubContext_HubNotEnabledInSettings(t *testing.T) 
 	if client == nil {
 		t.Fatal("expected a non-nil hub client")
 	}
-	if settings.IsHubEnabled() {
-		t.Fatal("test setup error: this case only proves the in-container fallback, settings.IsHubEnabled() must stay false")
+	if settings.Hub != nil && settings.Hub.Enabled != nil {
+		t.Fatal("test setup error: this case only proves the in-container fallback, hub.enabled must stay unset")
 	}
 }
 

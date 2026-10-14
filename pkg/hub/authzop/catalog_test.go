@@ -1237,6 +1237,7 @@ var domainResourceCompatibility = map[string][]string{
 	"group":               {"ResourceGroup"},
 	"access.constraint":   {"ResourceAccessConstraint"},
 	"credential":          {"ResourceUser"},
+	"federation":          {"ResourceFederationToken"},
 	"gcp.identity":        {"ResourceGCPServiceAccount"},
 	"agent":               {"ResourceAgent"},
 	"project":             {"ResourceProject"},

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -40,10 +41,12 @@ import (
 )
 
 var (
-	tunnelPort      int
-	tunnelLocalPort int
-	tunnelStdio     bool
-	tunnelSSH       bool
+	tunnelPort         int
+	tunnelLocalPort    int
+	tunnelStdio        bool
+	tunnelSSH          bool
+	tunnelKnownHosts   string
+	tunnelHostKeyAlias string
 )
 
 var tunnelCmd = &cobra.Command{
@@ -80,6 +83,8 @@ func init() {
 	tunnelCmd.Flags().IntVar(&tunnelLocalPort, "local-port", 0, "Local port to listen on (default: a random free port)")
 	tunnelCmd.Flags().BoolVar(&tunnelStdio, "stdio", false, "Carry the tunnel on stdin/stdout instead of a local listener")
 	tunnelCmd.Flags().BoolVar(&tunnelSSH, "ssh", false, "Reach the agent's ssh service instead of a port")
+	tunnelCmd.Flags().StringVar(&tunnelKnownHosts, "known-hosts", "", "With --ssh: absolute path of the known-hosts file holding the agent's pin, for the host-key hint only (written by scion vscode)")
+	tunnelCmd.Flags().StringVar(&tunnelHostKeyAlias, "host-key-alias", "", "With --ssh: the pin's name in --known-hosts, the Host block's HostKeyAlias (written by scion vscode)")
 	tunnelCmd.SetFlagErrorFunc(tunnelFlagError)
 	rootCmd.AddCommand(tunnelCmd)
 }
@@ -326,26 +331,14 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 	if err := req.Validate(); err != nil {
 		return err
 	}
-	tunnelSSHHostKeyHint(cmd, tunnelSSH, endpoint, project, args[0])
-	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
+	pin, err := tunnelPinSource()
 	if err != nil {
-		return tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
+		return err
 	}
-	hub := &tunnelHub{endpoint: endpoint, src: src, mode: mode}
-	var apply func(h http.Header) error
-	if src != nil {
-		apply = func(h http.Header) error { return transportauth.ApplyHeaders(h, src, mode) }
-	}
-	cfg := tunnelclient.Config{
-		Endpoint:          endpoint,
-		ResolveCredential: func() tunnelclient.Credential { return tunnelCredential(endpoint) },
-		Hub:               hub,
-		ApplyTransport:    apply,
-		ClientVersion:     version.Short(),
-		Stderr:            cmd.ErrOrStderr(),
-	}
-	if store, err := tunnelStateStore(); err == nil {
-		cfg.State = store
+	tunnelSSHHostKeyHintIn(cmd, tunnelSSH, endpoint, project, args[0], pin)
+	cfg, hub, err := tunnelClientConfig(settings, endpoint, cmd.ErrOrStderr())
+	if err != nil {
+		return err
 	}
 	ctx, signalled, stop := tunnelSignalContext(cmd.Context())
 	defer stop()
@@ -361,6 +354,56 @@ func runTunnel(cmd *cobra.Command, args []string) error {
 		return tunnelNotFoundError(te, hub.lookupMissed.Load(), args[0], target)
 	}
 	return tunnelclient.Errorf(tunnelclient.ExitError, "%v", err)
+}
+
+// tunnelPinSource checks --known-hosts and --host-key-alias and returns
+// where the host-key hint reads the pin. The flags steer only that hint;
+// ssh's own host-key check is unchanged.
+func tunnelPinSource() (sshPinSource, error) {
+	if tunnelKnownHosts == "" && tunnelHostKeyAlias == "" {
+		return sshPinSource{}, nil
+	}
+	if tunnelKnownHosts == "" || tunnelHostKeyAlias == "" {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "--known-hosts and --host-key-alias must be given together")
+	}
+	if !tunnelSSH {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "--known-hosts and --host-key-alias need --ssh")
+	}
+	if !filepath.IsAbs(tunnelKnownHosts) || hasControl(tunnelKnownHosts) {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid --known-hosts %q: use an absolute path", tunnelKnownHosts)
+	}
+	parts := strings.Split(tunnelHostKeyAlias, ".")
+	if len(parts) != 4 || parts[0] != "scion" || checkSSHNameParts(parts[1], parts[2], parts[3]) != nil {
+		return sshPinSource{}, tunnelclient.Errorf(tunnelclient.ExitUsage, "invalid --host-key-alias %q: use scion.<hub>.<project>.<agent>", tunnelHostKeyAlias)
+	}
+	return sshPinSource{knownHosts: tunnelKnownHosts, alias: tunnelHostKeyAlias}, nil
+}
+
+// tunnelClientConfig builds the tunnel client configuration for endpoint:
+// the transport auth from settings, the CLI credential chain and the state
+// store. The returned hub records agent lookup misses.
+func tunnelClientConfig(settings *config.Settings, endpoint string, stderr io.Writer) (tunnelclient.Config, *tunnelHub, error) {
+	src, mode, err := tunnelTransportSource(hubTransportSettings(settings, endpoint))
+	if err != nil {
+		return tunnelclient.Config{}, nil, tunnelclient.Errorf(tunnelclient.ExitError, "resolving transport auth: %v", err)
+	}
+	hub := &tunnelHub{endpoint: endpoint, src: src, mode: mode}
+	var apply func(h http.Header) error
+	if src != nil {
+		apply = func(h http.Header) error { return transportauth.ApplyHeaders(h, src, mode) }
+	}
+	cfg := tunnelclient.Config{
+		Endpoint:          endpoint,
+		ResolveCredential: func() tunnelclient.Credential { return tunnelCredential(endpoint) },
+		Hub:               hub,
+		ApplyTransport:    apply,
+		ClientVersion:     version.Short(),
+		Stderr:            stderr,
+	}
+	if store, err := tunnelStateStore(); err == nil {
+		cfg.State = store
+	}
+	return cfg, hub, nil
 }
 
 // tunnelNotFoundError names the project and its source in te when the

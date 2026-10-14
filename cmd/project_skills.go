@@ -123,14 +123,10 @@ func init() {
 // optional project name/slug/UUID argument. When arg is empty, the project is
 // inferred from the current directory's settings.
 func resolveProjectSkillsClient(ctx context.Context, projectArg string) (hubclient.InjectedSkillsService, error) {
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return nil, fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return nil, fmt.Errorf("hub is not enabled; configure hub.endpoint to use project skills")
-	}
-
 	var projectID string
 	if projectArg != "" {
 		project, err := resolveProjectByNameOrID(ctx, hubCtx.Client, projectArg)
@@ -390,14 +386,10 @@ func runProjectSkillsFromDirectory(cmd *cobra.Command, projectArg, dirURL string
 	}
 
 	// Fix 4: Split nil-error check.
-	hubCtx, err := CheckHubAvailabilityWithOptions(projectPath, true)
+	hubCtx, err := requireHub(projectPath)
 	if err != nil {
 		return fmt.Errorf("hub connection required: %w", err)
 	}
-	if hubCtx == nil {
-		return fmt.Errorf("hub is not enabled; configure hub.endpoint to use project skills")
-	}
-
 	// Resolve project ID for auth token forwarding.
 	// Fix 3: Use separate context for discover phase (30s).
 	parentCtx := cmd.Context()

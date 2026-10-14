@@ -371,6 +371,14 @@ func (Agent) Fields() []ent.Field {
 		field.String("launch_error").
 			Optional().
 			Default(""),
+		// launch_cause is the fixed runtime cause code
+		// (api.BrokerRuntimeCause*, e.g. runtime_forbidden) a broker's
+		// failed launch report gave for the runtime_error in launch_error
+		// (ptone/scion#4666), or "". It is written with launch_error by a
+		// failed report and cleared wherever launch_error is cleared.
+		field.String("launch_cause").
+			Optional().
+			Default(""),
 
 		// --- Backend-driven agent delete (design ptone/scion#2483 §2.1) ---
 		// A leased, sticky delete marker. Every write goes through

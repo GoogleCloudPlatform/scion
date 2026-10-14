@@ -46,7 +46,7 @@ const dipWarningLines = "Warning: failed to remove container for agent dip-agent
 type dipRunner func(t *testing.T, stub *hubStartStub, projectID, agentName string) error
 
 func dipRunCreate(t *testing.T, stub *hubStartStub, projectID, agentName string) error {
-	return createAgentViaHub(stub.hubCtx(t, projectID), agentName, "do it")
+	return createAgentViaHub(stub.hubCtx(t, projectID), agentName, "do it", nil)
 }
 
 func dipRunStart(t *testing.T, stub *hubStartStub, projectID, agentName string) error {

@@ -839,6 +839,107 @@ describe('scion-page-admin-server-config', () => {
       expect(server.hub?.host).toBeUndefined();
     });
 
+    function brokerHostField(el: HTMLElement): Element {
+      const label = queryAll(el, 'sl-tab-panel[name="broker"] label').find(
+        (l) => l.textContent?.trim() === 'Host'
+      );
+      expect(label).toBeDefined();
+      return label!.closest('.form-field')!;
+    }
+
+    const workstation = { settings_tier: 'db', layer0_editable: true };
+
+    function withBrokerHost(host: string | undefined, overrides: Record<string, unknown>) {
+      const base = makeBaseConfig(overrides) as any;
+      base.server.broker = host === undefined ? { enabled: true } : { enabled: true, host };
+      return base;
+    }
+
+    it('runtime broker host is editable on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('10.0.0.5', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 127.0.0.1 on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, workstation)));
+      const field = brokerHostField(element);
+      const input = field.querySelector('sl-input')!;
+      expect(input.getAttribute('value')).toBe('');
+      expect(input.getAttribute('placeholder')).toBe('127.0.0.1');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('a 0.0.0.0 runtime broker host counts as unset on a workstation hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost('0.0.0.0', workstation)));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')?.textContent).toContain('127.0.0.1');
+    });
+
+    it('an untouched empty runtime broker host is not sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), () => {});
+      const server = payload.server as Record<string, Record<string, unknown>> | undefined;
+      expect(server?.broker?.host).toBeUndefined();
+    });
+
+    it('a typed runtime broker host is sent on a workstation hub', async () => {
+      const payload = await capturePut(withBrokerHost(undefined, workstation), (el) => {
+        el.brokerHost = '10.0.0.5';
+      });
+      const server = payload.server as Record<string, Record<string, unknown>>;
+      expect(server.broker?.host).toBe('10.0.0.5');
+    });
+
+    it('an env-pinned runtime broker host shows no effective hint', async () => {
+      const config = withBrokerHost(undefined, {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'environment variable'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('—');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an env-pinned runtime broker host shows the loaded value', async () => {
+      const config = withBrokerHost('10.0.0.5', {
+        ...workstation,
+        env_overrides: ['server.broker.host'],
+      });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-value')?.textContent?.trim()).toBe('10.0.0.5');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a file-backed hub', async () => {
+      element = await createComponent(createFetchHandler(withBrokerHost(undefined, {})));
+      const field = brokerHostField(element);
+      expect(field.querySelector('.read-only-badge')).toBeNull();
+      expect(field.querySelector('sl-input')?.getAttribute('value')).toBe('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
+    it('an empty runtime broker host shows 0.0.0.0 on a hosted hub', async () => {
+      const config = withBrokerHost(undefined, { settings_tier: 'db' });
+      element = await createComponent(createFetchHandler(config));
+      const field = brokerHostField(element);
+      expect(field.querySelector('sl-input')).toBeNull();
+      expect(field.querySelector('.read-only-badge')?.textContent).toContain(
+        'deployment configuration'
+      );
+      expect(field.querySelector('.read-only-value')?.textContent).toContain('0.0.0.0');
+      expect(field.querySelector('.broker-host-effective')).toBeNull();
+    });
+
     // The DB-backed save keeps a key the body omits (ptone/scion#3720), so
     // every Layer-1 field the page shows must be sent explicitly when it is
     // cleared: "" / [] / null / false, never left out.
@@ -3893,6 +3994,7 @@ describe('scion-page-admin-server-config', () => {
             stalled_threshold: '10m',
             gcp_iam_check_mode: 'enforce',
             gcp_iam_deny_unknown_policy: 'fail-closed',
+            observability: { metrics_enabled: true, tracing_enabled: false },
           },
           broker: {
             enabled: true,
@@ -4049,6 +4151,15 @@ describe('scion-page-admin-server-config', () => {
       'agent_secrets.user_scope_only': {
         clear: (el) => (el.agentSecretsUserScopeOnly = false),
         expected: false,
+      },
+      // hub_observability: "cleared" is unset (Use default), sent as null.
+      'server.hub.observability.metrics_enabled': {
+        clear: (el) => (el.hubMetricsEnabled = null),
+        expected: null,
+      },
+      'server.hub.observability.tracing_enabled': {
+        clear: (el) => (el.hubTracingEnabled = null),
+        expected: null,
       },
       // telemetry
       'telemetry.enabled': { clear: (el) => (el.telemetryEnabled = false), expected: false },
@@ -4683,5 +4794,261 @@ describe('save report', () => {
     });
     expect(query(element, '.reload-info .pending-restart')).toBeNull();
     expect(query(element, '.reload-info .applied-keys')).not.toBeNull();
+  });
+});
+
+// ── Hub observability export switches (ptone/scion#4914) ──
+
+describe('hub observability export switches', () => {
+  let element: HTMLElement | null = null;
+  const METRICS_KEY = 'server.hub.observability.metrics_enabled';
+  const TRACING_KEY = 'server.hub.observability.tracing_enabled';
+
+  beforeAll(async () => {
+    vi.stubGlobal('fetch', vi.fn(createFetchHandler(makeBaseConfig())));
+    await import('./admin-server-config.js');
+  });
+
+  afterEach(() => {
+    element?.remove();
+    element = null;
+    vi.restoreAllMocks();
+  });
+
+  const EXPORT_STATUS = {
+    project: { id: 'meta-project', source: 'metadata' },
+    metrics: {
+      exporter: 'metrics',
+      setting: true,
+      enabled: true,
+      basis: 'setting',
+      reason: 'server.hub.observability.metrics_enabled=true',
+      project: { id: 'meta-project', source: 'metadata' },
+    },
+    tracing: {
+      exporter: 'tracing',
+      setting: null,
+      enabled: false,
+      basis: 'legacy',
+      reason:
+        'server.hub.observability.tracing_enabled unset; off because SCION_TRACING_ENABLED is not set',
+      project: {},
+    },
+  };
+
+  /** A hosted DB-tier GET with the given switches and export status. */
+  function obsConfig(
+    observability: Record<string, unknown> | undefined,
+    extra: Record<string, unknown> = {}
+  ): Record<string, any> {
+    const cfg = makeBaseConfig({
+      settings_tier: 'db',
+      observability_export: EXPORT_STATUS,
+      ...extra,
+    }) as Record<string, any>;
+    if (observability) cfg.server.hub.observability = observability;
+    return cfg;
+  }
+
+  async function render(
+    cfg: Record<string, unknown>,
+    putHandler?: (body: Record<string, unknown>) => { status: number; body: unknown }
+  ): Promise<HTMLElement> {
+    return createComponent(
+      createFetchHandler(cfg, {
+        schemaResponse: registrySchemaResponse(),
+        ...(putHandler ? { putHandler } : {}),
+      })
+    );
+  }
+
+  function exportSwitch(el: HTMLElement, key: string): HTMLElement | null {
+    return query(el, `sl-switch.hub-export-switch[data-key="${key}"]`) as HTMLElement | null;
+  }
+
+  async function save(el: HTMLElement): Promise<void> {
+    await (el as any).updateComplete;
+    const btn = queryAll(el, 'sl-button[variant="primary"]').find(
+      (b) => b.textContent?.trim() === 'Save & Reload'
+    );
+    expect(btn).toBeDefined();
+    (btn as HTMLElement).click();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await (el as any).updateComplete;
+  }
+
+  it('shows a toggle per exporter, checked from the saved switch', async () => {
+    element = await render(obsConfig({ metrics_enabled: true, tracing_enabled: false }));
+    const metrics = exportSwitch(element, METRICS_KEY);
+    const tracing = exportSwitch(element, TRACING_KEY);
+    expect(metrics).not.toBeNull();
+    expect(tracing).not.toBeNull();
+    expect(metrics!.hasAttribute('checked')).toBe(true);
+    expect(tracing!.hasAttribute('checked')).toBe(false);
+    expect(metrics!.textContent).toContain('Export hub metrics');
+    expect(tracing!.textContent).toContain('Export hub traces');
+    // A set switch can be returned to the default rule.
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+  });
+
+  it('an unset switch shows the state in effect and the default rule', async () => {
+    element = await render(obsConfig(undefined));
+    // Metrics runs at startup, so the unset toggle shows on; tracing is off.
+    expect(exportSwitch(element, METRICS_KEY)!.hasAttribute('checked')).toBe(true);
+    expect(exportSwitch(element, TRACING_KEY)!.hasAttribute('checked')).toBe(false);
+    expect(query(element, `.hub-export-default[data-key="${METRICS_KEY}"]`)).toBeNull();
+    const hint = query(element, `.hub-export-restart[data-key="${TRACING_KEY}"]`);
+    expect(hint!.textContent).toContain('Not set: on when SCION_TRACING_ENABLED');
+  });
+
+  it('says each switch applies after a restart', async () => {
+    element = await render(obsConfig({ metrics_enabled: false }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const hint = query(element, `.hub-export-restart[data-key="${key}"]`);
+      expect(hint, key).not.toBeNull();
+      expect(hint!.textContent).toContain('Applies after restart.');
+    }
+  });
+
+  it('shows the exporters in effect and the export project with its source, read-only', async () => {
+    element = await render(obsConfig({ metrics_enabled: true }));
+    const project = query(element, '.hub-export-project');
+    expect(project).not.toBeNull();
+    expect(project!.textContent).toContain('meta-project');
+    expect(project!.textContent).toContain('(source: metadata)');
+    // No editable control for the project, endpoint or credentials.
+    const section = query(element, '.section.hub-observability')!;
+    expect(section.querySelectorAll('sl-input').length).toBe(0);
+    expect(section.textContent).toContain('Not editable here.');
+
+    const metricsInEffect = query(element, `.hub-export-in-effect[data-key="${METRICS_KEY}"]`);
+    expect(metricsInEffect!.textContent).toContain('In effect: on');
+    const tracingInEffect = query(element, `.hub-export-in-effect[data-key="${TRACING_KEY}"]`);
+    expect(tracingInEffect!.textContent).toContain('In effect: off');
+    expect(tracingInEffect!.textContent).toContain('SCION_TRACING_ENABLED is not set');
+  });
+
+  it('shows the source of an operator-set project and when none resolved', async () => {
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: { ...EXPORT_STATUS, project: { id: 'env-project', source: 'env' } },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('(source: env)');
+    element.remove();
+
+    element = await render(
+      obsConfig(undefined, {
+        observability_export: {
+          ...EXPORT_STATUS,
+          project: { detail: 'server.hub.gcp_project_id is not set' },
+        },
+      })
+    );
+    expect(query(element, '.hub-export-project')!.textContent).toContain('None resolved');
+    expect(shadowText(element)).toContain('server.hub.gcp_project_id is not set');
+    expect(query(element, '.hub-export-project-remedy')!.textContent).toContain(
+      'Set SCION_SERVER_HUB_GCPPROJECTID or run on Google Cloud.'
+    );
+  });
+
+  it('marks an env-set switch with the env badge', async () => {
+    element = await render(
+      obsConfig({ metrics_enabled: true }, { settings_tier: 'db', env_overrides: [METRICS_KEY] })
+    );
+    const sw = exportSwitch(element, METRICS_KEY);
+    expect(sw).not.toBeNull();
+    const badge = sw!.previousElementSibling;
+    expect(badge?.classList.contains('env-badge')).toBe(true);
+    const tracingBadge = exportSwitch(element, TRACING_KEY)!.previousElementSibling;
+    expect(tracingBadge?.classList.contains('env-badge') ?? false).toBe(false);
+  });
+
+  it('sends only a changed switch, and null to return it to the default', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig({ metrics_enabled: true }), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [METRICS_KEY, TRACING_KEY] } },
+      };
+    });
+    const el = element as any;
+
+    // Nothing changed: the switches are not sent.
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+
+    el.hubTracingEnabled = true;
+    el.hubMetricsEnabled = null;
+    await save(element);
+    expect(bodies[1].server.hub.observability).toEqual({
+      metrics_enabled: null,
+      tracing_enabled: true,
+    });
+
+    // The save report lists both keys as applying after a restart.
+    const pending = query(element, '.reload-info .pending-restart');
+    expect(pending).not.toBeNull();
+    expect(pending!.textContent).toContain('Saved; applies after restart');
+    expect(pending!.textContent).toContain(METRICS_KEY);
+    expect(pending!.textContent).toContain(TRACING_KEY);
+  });
+
+  it('labels an unset switch as the default next to the toggle', async () => {
+    element = await render(obsConfig(undefined));
+    const metrics = query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`);
+    const tracing = query(element, `.hub-export-default-state[data-key="${TRACING_KEY}"]`);
+    expect(metrics!.textContent).toContain('Default (on)');
+    expect(tracing!.textContent).toContain('Default (off)');
+  });
+
+  it('labels an unset switch as not reported when the hub gives no status, not as off', async () => {
+    element = await render(obsConfig(undefined, { observability_export: undefined }));
+    for (const key of [METRICS_KEY, TRACING_KEY]) {
+      const label = query(element, `.hub-export-default-state[data-key="${key}"]`);
+      expect(label, key).not.toBeNull();
+      expect(label!.textContent).toContain('Default (state not reported)');
+      expect(label!.textContent).not.toContain('Default (off)');
+    }
+  });
+
+  it('toggling an unset switch twice leaves it unset and sends nothing', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return { status: 200, body: { reload: { applied_keys: [], pending_restart: [] } } };
+    });
+    // Metrics runs at startup, so the unset toggle starts checked.
+    const sw = exportSwitch(element, METRICS_KEY)! as HTMLInputElement;
+    sw.checked = false;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBe(false);
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect((element as any).hubMetricsEnabled).toBeNull();
+    expect(query(element, `.hub-export-default-state[data-key="${METRICS_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0]?.server?.hub?.observability).toBeUndefined();
+  });
+
+  it('toggling the switch sets the value that is saved', async () => {
+    const bodies: Array<Record<string, any>> = [];
+    element = await render(obsConfig(undefined), (body) => {
+      bodies.push(body);
+      return {
+        status: 200,
+        body: { reload: { applied_keys: [], pending_restart: [TRACING_KEY] } },
+      };
+    });
+    const sw = exportSwitch(element, TRACING_KEY)! as HTMLInputElement;
+    sw.checked = true;
+    sw.dispatchEvent(new Event('sl-change'));
+    await (element as any).updateComplete;
+    expect(query(element, `.hub-export-default[data-key="${TRACING_KEY}"]`)).not.toBeNull();
+    await save(element);
+    expect(bodies[0].server.hub.observability).toEqual({ tracing_enabled: true });
   });
 });
