@@ -94,6 +94,9 @@ The directory mounted as the container user's home folder, holding that agent's 
 ### Hub
 The control plane of Scion — it owns identity, auth, project registration, and state, exposes the APIs and notifications that agents and users interact with, and dispatches commands to runtime brokers. Present in both workstation and hosted mode, not only hosted.
 
+### Hub nickname
+A short name for a Hub in the user's **hub list** (`~/.scion/context.yaml`), such as `local` or `prod`, managed with `scion hub add|list|rename|remove`. It is accepted wherever a Hub URL is (`--hub prod`). The hub list is CLI configuration only: logins stay keyed by the Hub URL, and servers use their own `server.*` endpoint settings. See [Working with Several Hubs](/scion/hosted/user/multiple-hubs/).
+
 ### Runtime Broker
 A service that manages the lifecycle of containerized agents on behalf of the Hub — provisioning workspaces, hydrating templates, and delegating container operations to a pluggable runtime. It is not itself a compute node. Brokers vary along two dimensions: whether they require host-level access to a container runtime (*node-bound* vs. *proxy*) and whether they run as a standalone process or are *embedded* in the Hub. See also *Managed Agent*, which bypasses the broker entirely via a direct cloud API integration.
 
@@ -132,6 +135,15 @@ A project whose workspace is created and managed by Scion in the hub-controlled 
 
 ### Linked project
 A project whose workspace is a pre-existing path on a broker machine, linked to a Hub for cross-broker visibility — as opposed to a Hub-managed project. May be plain or git-backed.
+
+### Hub list
+The CLI's per-user list of Hubs, each under a nickname that `--hub` accepts, kept in `~/.scion/context.yaml` and managed with `scion hub add|list|rename|remove`. A background workstation `scion server start` (with the web server on) adds the local Hub as `local` (`--foreground` does not add it). Agent containers never read it.
+
+### Current context
+The Hub and project selected with `scion use` (alias of `scion project use`), stored per user in `~/.scion/context.yaml`. Commands use it only when flags, environment variables and the current project directory choose nothing more specific.
+
+### Link entry
+The record in the hub list that ties a local project directory to its Hub project, written by `scion hub link` (and when a command registers the project on the current Hub). It replaces pinning `hub.endpoint` in the project's settings, so a linked checkout keeps targeting its own Hub after the current context changes.
 
 ### Server
 The `scion server` command group, and the single combined process it manages — one or more server components run together as a background daemon (or with `--foreground`) via `start`/`stop`/`restart`/`status`.

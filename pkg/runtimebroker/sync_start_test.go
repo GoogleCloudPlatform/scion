@@ -422,3 +422,152 @@ func TestStopAndDelete_NilLaunchRegistry(t *testing.T) {
 		})
 	}
 }
+
+// requestCancelGrace is how long a start in the tests below watches its
+// context after the request was cancelled. A request cancel that reached
+// the start would do so within microseconds (context propagation and
+// bind's AfterFunc), so the grace only has to be long enough to see it.
+const requestCancelGrace = 300 * time.Millisecond
+
+// createSyncCtx is createSync with the request served under reqCtx, so a
+// test can end the request (the hub giving up: its dispatch timeout, its
+// control-channel cancel frame or a dropped HTTP request) mid-start. extra
+// is spliced into the request body.
+func createSyncCtx(reqCtx context.Context, srv *Server, agentID, projectPath, extra string) *httptest.ResponseRecorder {
+	body := fmt.Sprintf(`{"id": %q, "name": "same-name", "projectPath": %q, %s"config": {"task": "t"}}`, agentID, projectPath, extra)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agents", strings.NewReader(body)).WithContext(reqCtx)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(w, req)
+	return w
+}
+
+// ptone/scion#4817: the request ending after a synchronous create's start
+// has begun (the hub's 120s dispatch timeout firing on a slow cold start)
+// must not cancel the start. A cancelled start is read by the runtime as
+// abandoned, and the Kubernetes runtime then deletes the pod and its
+// Secrets while the image is still pulling; the broker also removes the
+// agent's files. The start runs on to completion and keeps its files.
+func TestSyncCreate_RequestCancelDoesNotCancelStart(t *testing.T) {
+	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
+
+	started := make(chan struct{})
+	reqCancelled := make(chan struct{})
+	var startCtxErr error
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		writeAgentFiles(t, agentDir, "agent-a")
+		close(started)
+		<-reqCancelled
+		select {
+		case <-ctx.Done():
+			startCtxErr = ctx.Err()
+			return nil, ctx.Err()
+		case <-time.After(requestCancelGrace):
+		}
+		return &api.AgentInfo{ID: "c-a", Name: opts.Name, Phase: "running"}, nil
+	}
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- createSyncCtx(reqCtx, srv, "agent-a-id", projectPath, "") }()
+	waitSignal(t, started, "agent A's start")
+	cancelReq()
+	close(reqCancelled)
+
+	var w *httptest.ResponseRecorder
+	select {
+	case w = <-done:
+	case <-time.After(syncStartTestTimeout):
+		t.Fatal("timed out waiting for agent A's create to return")
+	}
+	if startCtxErr != nil {
+		t.Fatalf("the request ending cancelled the running start (start context error %v); want the start to run on", startCtxErr)
+	}
+	if w.Code != http.StatusCreated {
+		t.Errorf("agent A create status = %d, want %d: %s", w.Code, http.StatusCreated, w.Body.String())
+	}
+	if got := readAgentOwner(agentDir); got != "agent-a" {
+		t.Errorf("agent A's files were removed (owner file %q)", got)
+	}
+}
+
+// With the start detached from the request, an explicit delete is what
+// ends it. A hub that rolls the create back on its dispatch timeout (the
+// current hub does) sends DispatchAgentDelete with projectId, runId and
+// agentId as below; it must still cancel the start, so the runtime's
+// abandoned-start cleanup and the broker's file cleanup run as before. This
+// also passes without the detach (the request cancel alone ends the start
+// there); it guards that the delete keeps reaching a start whose request
+// has ended.
+func TestSyncCreate_DeleteCancelsStartAfterRequestEnded(t *testing.T) {
+	srv, mgr, projectPath, agentDir := newSyncStartTestServer(t)
+
+	started := make(chan struct{})
+	reqCancelled := make(chan struct{})
+	var startCtxErr error
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		writeAgentFiles(t, agentDir, "agent-a")
+		close(started)
+		<-reqCancelled
+		<-ctx.Done() // still pulling the image until something cancels it
+		startCtxErr = ctx.Err()
+		return nil, fmt.Errorf("waiting for pod: %w", ctx.Err())
+	}
+
+	reqCtx, cancelReq := context.WithCancel(context.Background())
+	defer cancelReq()
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- createSyncCtx(reqCtx, srv, "agent-a-id", projectPath, `"projectId": "p1", "runId": "run-1", `)
+	}()
+	waitSignal(t, started, "agent A's start")
+	cancelReq()
+	close(reqCancelled)
+
+	del := httptest.NewRequest(http.MethodDelete,
+		"/api/v1/agents/same-name?deleteFiles=true&projectId=p1&runId=run-1&"+api.AgentIDQueryParam+"=agent-a-id", nil)
+	srv.Handler().ServeHTTP(httptest.NewRecorder(), del)
+
+	select {
+	case <-done:
+	case <-time.After(syncStartTestTimeout):
+		t.Fatal("the delete did not cancel agent A's start after its request had ended")
+	}
+	if !errors.Is(startCtxErr, context.Canceled) {
+		t.Errorf("agent A's start context error = %v, want context.Canceled", startCtxErr)
+	}
+	if got := readAgentOwner(agentDir); got != "" {
+		t.Errorf("agent A's files were not cleaned up after the cancelled start (owner file %q)", got)
+	}
+}
+
+// A start detached from the request is still bounded by the broker
+// (syncStartMaxDuration), so one stuck in a call that never returns cannot
+// run forever.
+func TestSyncCreate_StartHasBrokerBound(t *testing.T) {
+	srv, mgr, projectPath, _ := newSyncStartTestServer(t)
+	srv.syncStartMaxDuration = 50 * time.Millisecond
+
+	var hasDeadline bool
+	var startCtxErr error
+	mgr.starts <- func(ctx context.Context, opts api.StartOptions) (*api.AgentInfo, error) {
+		if _, hasDeadline = ctx.Deadline(); !hasDeadline {
+			return &api.AgentInfo{ID: "c-a", Name: opts.Name, Phase: "running"}, nil
+		}
+		select {
+		case <-ctx.Done():
+			startCtxErr = ctx.Err()
+		case <-time.After(syncStartTestTimeout):
+		}
+		return nil, fmt.Errorf("waiting for pod: %w", ctx.Err())
+	}
+
+	createSyncCtx(context.Background(), srv, "agent-a-id", projectPath, "")
+	if !hasDeadline {
+		t.Fatal("the synchronous start context has no deadline; want the broker's own bound")
+	}
+	if !errors.Is(startCtxErr, context.DeadlineExceeded) {
+		t.Errorf("start context error = %v, want context.DeadlineExceeded at the broker's bound", startCtxErr)
+	}
+}

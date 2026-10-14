@@ -19,6 +19,7 @@ import (
 	"errors"
 	"io"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -38,7 +39,8 @@ var errLinkLost = closeErr(conduit.CloseRelayTimeout, ReasonUpstreamUnreachable,
 
 // wsStream is one conduit stream carried over one internal WebSocket
 // between two relays (design §3.5). It speaks conduit frames only
-// (StreamData, StreamWindow, StreamClose, StreamResize) with the same
+// (StreamData, StreamWindow, StreamClose, StreamResize, and AuthRefresh
+// toward the owner for the hub's renewals) with the same
 // credit-based flow control as a session: a side sends data only within
 // the window its peer granted and returns credit as its reader consumes.
 // It implements conduit.Stream, conduit.Resizable and CloseWrite.
@@ -73,12 +75,30 @@ type wsStream struct {
 
 	resizes chan conduit.WindowSize
 	done    chan struct{}
+
+	// onRenewal, when set (owner side), receives the credential of each
+	// AuthRefresh the caller sends, to be forwarded to the target stream.
+	onRenewal atomic.Pointer[func(credential []byte)]
 }
 
 var (
-	_ conduit.Stream    = (*wsStream)(nil)
-	_ conduit.Resizable = (*wsStream)(nil)
+	_ conduit.Stream        = (*wsStream)(nil)
+	_ conduit.Resizable     = (*wsStream)(nil)
+	_ conduit.StreamRenewer = (*wsStream)(nil)
 )
+
+// Renew implements conduit.StreamRenewer on the caller side: it sends
+// AuthRefresh{stream_id, credential} on the hop, which the owner forwards
+// to the target stream.
+func (s *wsStream) Renew(credential []byte) error {
+	if ended, _ := s.endedErr(); ended {
+		return conduit.ErrStreamClosed
+	}
+	return s.send(&conduitv1.Frame{Body: &conduitv1.Frame_AuthRefresh{AuthRefresh: &conduitv1.AuthRefresh{StreamId: hopStreamID, Credential: credential}}})
+}
+
+// setRenewalHandler installs the owner side's renewal forwarder.
+func (s *wsStream) setRenewalHandler(f func(credential []byte)) { s.onRenewal.Store(&f) }
 
 // newWSStream starts the frame reader. sendCredit is the peer's initial
 // window; recvWin is the window we grant (0 until the stream is accepted:
@@ -211,6 +231,16 @@ func (s *wsStream) readLoop() {
 				s.resizes <- ws
 			}
 			s.mu.Unlock()
+		case *conduitv1.Frame_AuthRefresh:
+			if body.AuthRefresh.GetStreamId() != hopStreamID {
+				s.fail(conduit.CloseProtocolError, reason(ReasonBadFrame, "auth_refresh for another stream"))
+				return
+			}
+			// The owner forwards it to the target stream; a side without
+			// a forwarder (the caller) ignores it.
+			if f := s.onRenewal.Load(); f != nil {
+				(*f)(body.AuthRefresh.GetCredential())
+			}
 		case *conduitv1.Frame_StreamClose:
 			c := body.StreamClose
 			var e error

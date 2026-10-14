@@ -334,7 +334,26 @@ func applyKeepalives(params map[string]string) {
 // keys were not enforced first get their key's declared ON DELETE action
 // (see reconcileSQLiteForeignKeys); orphans that cannot be repaired that way
 // are reported, and attached to the error if the migration fails.
+//
+// AutoMigrate is safe for concurrent use within one process: calls are
+// serialized by autoMigrateSem, because ent's schema migration mutates the
+// package-level tables in pkg/ent/migrate (Atlas setupTables writes each
+// table's column map), and two unserialized calls can crash the process with
+// "fatal error: concurrent map writes". The lock is process-local and is held
+// for the whole call. A caller whose ctx ends while it waits for the lock
+// returns ctx.Err() without migrating. The lock does not coordinate separate
+// processes or Hub replicas sharing one database; on Postgres that is the job
+// of the advisory lock taken by entadapter.CompositeStore.MigrateWithSchemaLock
+// (ptone/scion#1078). Code that calls client.Schema.Create directly bypasses
+// this lock.
 func AutoMigrate(ctx context.Context, client *ent.Client) error {
+	select {
+	case autoMigrateSem <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-autoMigrateSem }()
+
 	migrateOpts := []entschema.MigrateOption{
 		migrate.WithDropColumn(false),
 		migrate.WithDropIndex(false),
@@ -364,6 +383,11 @@ func AutoMigrate(ctx context.Context, client *ent.Client) error {
 	}
 	return dropDecisionAuditTable(ctx, client)
 }
+
+// autoMigrateSem is a one-slot semaphore that serializes AutoMigrate within
+// the process; see AutoMigrate. A channel rather than a sync.Mutex so that the
+// wait can end when the caller's context does.
+var autoMigrateSem = make(chan struct{}, 1)
 
 // skipExistingRelations is an Ent schema ApplyHook that makes DDL
 // idempotent on Postgres by skipping any statement that fails with
