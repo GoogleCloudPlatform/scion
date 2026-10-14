@@ -190,6 +190,55 @@ func TestStart_RewriteDoesNotPersistDefaultLimits(t *testing.T) {
 	wantPersistedLimits(t, "after rewrite", project, 0, 0, "")
 }
 
+// The HarnessAuth rewrite of scion-agent.json in Start persists the agent's
+// own limits only.
+func TestStart_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	withAuth := func(o *api.StartOptions) { o.HarnessAuth = "api-key" }
+
+	rc := startEnvCtx(t, hubLimitsCtx(10, 100, "1h"), project, withAuth)
+	wantLimitEnv(t, "first start", rc, "10", "100", "1h")
+	cfg, raw := persistedEnvAgentConfig(t, project)
+	if cfg.AuthSelectedType != "api-key" {
+		t.Fatalf("test precondition: Start did not rewrite scion-agent.json with the harness auth: %s", raw)
+	}
+	wantPersistedLimits(t, "after HarnessAuth rewrite", project, 0, 0, "")
+
+	rc = startEnvCtx(t, hubLimitsCtx(20, 200, "2h"), project, withAuth)
+	wantLimitEnv(t, "restart after hub change", rc, "20", "200", "2h")
+	wantPersistedLimits(t, "after second HarnessAuth rewrite", project, 0, 0, "")
+}
+
+// finishProvision's HarnessAuth rewrite (a provision-only create) persists
+// the agent's own limits only, while the returned config carries the
+// effective ones.
+func TestProvision_HarnessAuthRewriteDoesNotPersistDefaultLimits(t *testing.T) {
+	project, _ := envFixture(t, envSettingsV1)
+	mockRT := &runtime.MockRuntime{
+		ListFunc: func(ctx context.Context, labelFilter map[string]string) ([]api.AgentInfo, error) {
+			return []api.AgentInfo{}, nil
+		},
+	}
+	cfg, err := NewManager(mockRT).Provision(hubLimitsCtx(10, 100, "1h"), api.StartOptions{
+		Name:        "env-agent",
+		ProjectPath: project,
+		BrokerMode:  true,
+		NoAuth:      true,
+		HarnessAuth: "api-key",
+	})
+	if err != nil {
+		t.Fatalf("Provision: %v", err)
+	}
+	if cfg == nil || cfg.MaxTurns != 10 || cfg.MaxModelCalls != 100 || cfg.MaxDuration != "1h" {
+		t.Errorf("returned config = %+v, want the effective limits 10/100/1h", cfg)
+	}
+	persisted, raw := persistedEnvAgentConfig(t, project)
+	if persisted.AuthSelectedType != "api-key" {
+		t.Fatalf("test precondition: finishProvision did not rewrite scion-agent.json: %s", raw)
+	}
+	wantPersistedLimits(t, "after finishProvision rewrite", project, 0, 0, "")
+}
+
 // An agent provisioned before ptone/scion#623 has the defaults of that time
 // in scion-agent.json. They read back as the agent's own limits and keep
 // applying over a changed hub default (a documented limitation).

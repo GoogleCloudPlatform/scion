@@ -2929,7 +2929,8 @@ func (s *Server) startAgent(w http.ResponseWriter, r *http.Request, id, projectI
 		Branch        string              `json:"branch,omitempty"`
 		WorkspaceMode string              `json:"workspaceMode,omitempty"`
 		// HubAgentDefaults carries the hub defaults a start applies at its
-		// lowest tier (today the auto-expose default, for buildAgentEnv).
+		// lowest tiers: the limits, resources, auto-expose default,
+		// experiments and telemetry default (see api.HubAgentDefaults).
 		HubAgentDefaults *api.HubAgentDefaults `json:"hubAgentDefaults,omitempty"`
 		// TelemetryPolicy is the project's enforced telemetry on/off; see
 		// CreateAgentConfig.TelemetryPolicy (ptone/scion#4218).

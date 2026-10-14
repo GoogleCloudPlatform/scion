@@ -2170,7 +2170,9 @@ func withHubAgentDefaults(ctx context.Context, cfg *CreateAgentConfig) context.C
 
 // withStartHubAgentDefaults attaches hub defaults decoded from a start or
 // restart request body (or a create request's config) to ctx, so
-// Manager.Start's buildAgentEnv applies their env entries at its lowest tier.
+// Manager.Start applies them at their low-precedence tiers: the limits and
+// resources below the agent's own values, and the env entries at
+// buildAgentEnv's lowest tier.
 // Returns ctx unchanged for a nil or empty value.
 func withStartHubAgentDefaults(ctx context.Context, d *api.HubAgentDefaults) context.Context {
 	if ctx == nil {

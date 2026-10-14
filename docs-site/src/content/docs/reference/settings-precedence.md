@@ -713,8 +713,8 @@ harness_overrides.<hc>.resources   (broker settings.yaml)   <- highest, beats ev
         >  BuiltinDefaultResources()                        <- floor
 
    hub agent_defaults.resources  --  DELIBERATELY NOT A RUNG IN THIS CHAIN. Its position
-   moves with the hub's storage mode, and issue #623 leaves even that reading unsettled.
-   See "The rank of hub agent_defaults depends on the hub's storage mode" below.
+   moves with the hub's storage mode. See "The rank of hub agent_defaults depends on the
+   hub's storage mode" below.
 ```
 
 The `template resources` rung now holds only the agent's own `resources` (for example from `scion create --config`); a template's `resources` is ignored with a warning (see [templates no longer set environment keys](#changed-in-this-release--templates-no-longer-set-environment-keys-breaking)).
@@ -1043,25 +1043,28 @@ The practical consequence: if an admin later changes a hub default, projects tha
 unset pick up the new value, and projects that explicitly set it do not. Treating null as
 equivalent to "set to the hub default value" gets this backwards.
 
-### `Pending` — the precedence position of hub `agent_defaults` is not settled
+### Where hub `agent_defaults` rank
 
-:::caution[Intended model, and a contradiction that is not yet resolved]
-**Intended:** hub `agent_defaults` are a **low-priority fallback** — near the bottom of the chain,
-supplying a value only when nothing else did.
+Hub `agent_defaults` are a **low-priority fallback**: they supply a value only when nothing
+above them did.
 
-**Current implementation:** they are applied at **agent-create time**, which in practice makes
-them behave as though they were at or near the top.
+- **Limits and `resources`** (`default_max_turns`, `default_max_model_calls`,
+  `default_max_duration`, `resources`) follow this model. The Runtime Broker applies them on
+  every start, below the template and the agent's own config. In Postgres mode they rank above
+  the broker's own `settings.yaml` defaults, and in file mode at the bottom (see the next
+  section). A change to them reaches an agent at its next start or restart (see
+  [the change below](#changed-in-this-release--hub-agent_defaults-limits-and-resources-apply-on-every-start)).
+- **The other `agent_defaults`** (default template, harness config, harness auth, model,
+  thinking level) are resolved by the hub at agent create and stored with the agent. A later
+  change to them does not reach agents that already exist.
 
-**These do not agree, and the resolution is not decided.** It is deferred to a follow-up
-workstream. This page therefore documents the *intended* model and flags the current behaviour;
-**it does not publish a settled precedence position for hub `agent_defaults`.** Do not build on
-either reading. Tracked as [issue #623](https://github.com/ptone/scion/issues/623).
-:::
+Project-level default limits (project settings) are also written into the agent's config at
+create. They count as the agent's own values, outrank the template, and are not refreshed on
+start.
 
 ### The rank of hub `agent_defaults` depends on the hub's storage mode
 
-Independently of the question above, the rank differs by hub mode, and this has not previously
-been stated anywhere user-facing:
+The rank of the limits and `resources` differs by hub mode:
 
 | Hub mode | Rank of hub `agent_defaults` |
 | --- | --- |
@@ -1081,9 +1084,7 @@ harness overrides live in the same file and are merged *above* the hub tier.
 **This is why the hub tier does not appear as a rung in the `resources` chain.** The two rows of
 the table above are two *different* positions in that chain — above `default_resources` in
 Postgres mode, below it in file mode — so no single rung is correct. Read the chain for the five
-ranks that do not move, and read this table for where the hub tier lands in your deployment. And
-read both under the `Pending` box above: **issue #623 leaves even the Postgres-mode reading
-unsettled**, so neither position is something to build on yet.
+ranks that do not move, and read this table for where the hub tier lands in your deployment.
 
 ### `Changed in this release` — hub `agent_defaults` limits and resources apply on every start
 
