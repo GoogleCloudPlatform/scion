@@ -247,8 +247,6 @@ the next section) until you re-link it to a new hub project. Running `scion hub 
 3. In the repository, run `scion hub link` (or any agent command, which links automatically). The
    new project is registered with the `worktree-per-agent` mode; check with
    `scion hub projects info <name> --format json` (the text output does not show labels).
-4. Before starting agents, check that `scion hub status` shows this project. If you ever linked the
-   global project, its hub project ID can otherwise take over.
 
 #### On a remote Hub: a clone per agent
 

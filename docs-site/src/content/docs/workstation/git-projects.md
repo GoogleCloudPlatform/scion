@@ -172,7 +172,7 @@ You'll see the agent go through the clone-based startup:
 
 ```
 Using hub, cloning repo https://github.com/acme/backend.git
-  (Hub mode uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)
+  (the broker uses HTTPS clone with GITHUB_TOKEN; local worktrees are not used)
 
 Agent 'my-agent' starting on broker 'us-west-01'...
   Status: CLONING (github.com/acme/backend @ main)

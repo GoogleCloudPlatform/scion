@@ -253,7 +253,7 @@ scion message --non-interactive @reviewer "PR #42 is ready for review.\n\nBranch
 
 ### Conversation Management
 
-The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI. Requires Hub mode.
+The `scion conversation` command (alias `conv`) provides a surface-agnostic interface for managing conversations — the containers for message threads that span across the web chat, external channels, and CLI.
 
 Conversations are referenced using one of three forms:
 - `conv:<uuid>` — by conversation ID.

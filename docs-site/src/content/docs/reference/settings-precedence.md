@@ -777,7 +777,7 @@ through their own chain, defined in `ProvisionAgent`'s harness-config merge
 
 | Priority | `image` | `kubernetes.imagePullPolicy` |
 | --- | --- | --- |
-| Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; in hub mode, the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the create-time inline value recorded at provision (there is no per-request pull-policy flag) |
+| Highest | the user's **explicit request image**: the current request's `opts.Image` (CLI `--image`; a local `--config` file's `image` is promoted to it; the Hub's explicit image, sent on create, start and restart), **else** the request image recorded when the agent was provisioned | the user's **explicit pull policy**: the current request's inline config, **else** the create-time inline value recorded at provision (there is no per-request pull-policy flag) |
 | | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image`, re-resolved from current settings on every `Start` | an **explicitly set** `profiles.<p>.harness_overrides.<name>.image_pull_policy`, **only when that same override also sets an image**, re-resolved likewise |
 | | the current request's inline config image, **else** the create-time inline image (for an agent provisioned at this version or later; older agents rank it at the top tier, see below) | — (covered by the top row) |
 | | the template chain's own `image` — re-read from disk on every `Start`, or, if the template can no longer be resolved, the template's own value recorded at provision | the template chain's own `kubernetes.imagePullPolicy`, same rule |
@@ -883,7 +883,7 @@ profile happens to be active on the machine at restart time. For the image and p
 broker-side image provenance, the recorded provisioned profile is used instead, as described
 above.
 
-In hub mode, the top tier carries **only the user's explicit image**. The Hub sends it as
+The top tier carries **only the user's explicit image**. The Hub sends it as
 `Config.Image` on create (and on the re-dispatches that reuse the create request: finalize-env and
 reincarnate's reprovision), and as the start/restart body's `image`. All of these come from the
 agent's recorded explicit inputs: `AppliedConfig.CreateInputs`, or the live `InlineConfig` for an
@@ -952,7 +952,7 @@ template image from the template's files. Put it in the template file.
 overrides the image of every template that uses that harness config under that profile. Remove
 the override, or pass `--image`, if a template's own image must win. Conversely, a create-time
 `--image` (or `--config` image) now persists across plain restarts; a later local `scion start
---image` applies to that one start only (in Hub mode, `--image` is not applied to an existing
+--image` applies to that one start only (`--image` is not applied to an existing
 agent). Re-create the agent to drop a create-time image.
 
 #### `Changed in ptone/scion#2156` — Hub settings now wins over the harness-config file's image default

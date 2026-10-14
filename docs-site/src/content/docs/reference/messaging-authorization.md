@@ -243,7 +243,7 @@ is evaluated on the **human principal at delivery time**.
   [Permissions & Policy](/scion/hosted/ha/permissions/#access-control--authorization)) —
   so a project owner who is not the agent's creator or in its ancestry
   chain is sealed out of `none`-mode agents the same as anyone else without
-  a direct grant. The `scion keys` CLI uses the keys operation in Hub mode,
+  a direct grant. The `scion keys` CLI uses the keys operation,
   so the `none`-mode seal does not apply to it. Raw delivery through the
   message API has been removed (see [Retired raw field](#retired-raw-field)).
 
