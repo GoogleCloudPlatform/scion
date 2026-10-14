@@ -157,10 +157,10 @@ type HubServerConfig struct {
 	// (minimum 11m).
 	StartMaxDuration time.Duration `json:"startMaxDuration" yaml:"startMaxDuration" koanf:"startMaxDuration"`
 	// StartUnconfirmedHold bounds how long a start with an unknown outcome
-	// blocks other starts. Default 13m (minimum 12m40s).
+	// blocks other starts. Default 17m (minimum 16m).
 	StartUnconfirmedHold time.Duration `json:"startUnconfirmedHold" yaml:"startUnconfirmedHold" koanf:"startUnconfirmedHold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start. Default 5m (3m up to StartUnconfirmedHold).
+	// create-and-start. Default 16m (16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold time.Duration `json:"startCreateUnconfirmedHold" yaml:"startCreateUnconfirmedHold" koanf:"startCreateUnconfirmedHold"`
 
 	// DisableLegacyStorageFallback disables the legacy un-namespaced storage

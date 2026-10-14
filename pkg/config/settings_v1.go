@@ -1893,10 +1893,10 @@ type V1ServerHubConfig struct {
 	// wait for another hub node (e.g., "12m"; minimum 11m).
 	StartMaxDuration string `json:"start_max_duration,omitempty" yaml:"start_max_duration,omitempty" koanf:"start_max_duration"`
 	// StartUnconfirmedHold is the longest a start whose outcome is unknown
-	// blocks other starts of the agent (e.g., "13m"; minimum 12m40s).
+	// blocks other starts of the agent (e.g., "17m"; minimum 16m).
 	StartUnconfirmedHold string `json:"start_unconfirmed_hold,omitempty" yaml:"start_unconfirmed_hold,omitempty" koanf:"start_unconfirmed_hold"`
 	// StartCreateUnconfirmedHold is StartUnconfirmedHold for a new agent's
-	// create-and-start (e.g., "5m"; 3m up to StartUnconfirmedHold).
+	// create-and-start (e.g., "16m"; 16m up to StartUnconfirmedHold).
 	StartCreateUnconfirmedHold string `json:"start_create_unconfirmed_hold,omitempty" yaml:"start_create_unconfirmed_hold,omitempty" koanf:"start_create_unconfirmed_hold"`
 	// DisableLegacyStorageFallback disables legacy un-namespaced storage path fallback.
 	DisableLegacyStorageFallback *bool `json:"disable_legacy_storage_fallback,omitempty" yaml:"disable_legacy_storage_fallback,omitempty" koanf:"disable_legacy_storage_fallback"`

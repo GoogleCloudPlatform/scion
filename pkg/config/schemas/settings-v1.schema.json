@@ -1379,13 +1379,13 @@
         },
         "start_unconfirmed_hold": {
           "type": "string",
-          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '13m', minimum 12m40s.",
+          "description": "Longest time a start whose outcome is unknown blocks other starts of the agent, until the runtime shows what happened. Default '17m', minimum 16m.",
           "x-env-var": "SCION_SERVER_HUB_STARTUNCONFIRMEDHOLD",
           "x-since": "1"
         },
         "start_create_unconfirmed_hold": {
           "type": "string",
-          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '5m', allowed 3m up to start_unconfirmed_hold.",
+          "description": "start_unconfirmed_hold for a new agent's create-and-start. Default '16m', allowed 16m up to start_unconfirmed_hold.",
           "x-env-var": "SCION_SERVER_HUB_STARTCREATEUNCONFIRMEDHOLD",
           "x-since": "1"
         },
