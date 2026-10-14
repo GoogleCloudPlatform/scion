@@ -151,17 +151,16 @@ type HeartbeatService struct {
 	// is fixed for the process life. Every flat heartbeat carries it in
 	// full, with presentationTargetID (the instance's runtime target ID),
 	// presentationEpoch (the instance server's start time, Unix
-	// nanoseconds) and the next presentationSeq, so the Hub stores it only
-	// when this process's fence advances. Nil (legacy) omits all four.
+	// nanoseconds) and the next value of nextPresentationSeq (the server's
+	// process-wide counter), so the Hub stores it only when this process's
+	// fence advances. Nil (legacy) omits all four.
 	presentation         *api.RuntimeTargetPresentation
 	presentationTargetID string
 	presentationEpoch    int64
+	nextPresentationSeq  func() int64
 
 	mu          sync.Mutex
 	listFailing map[string]bool // target key -> last listing failed (guarded by mu)
-	// presentationSeq is the last presentation sequence sent (guarded by
-	// mu); every heartbeat built with a presentation takes the next one.
-	presentationSeq int64
 	// listings holds the listing in progress for each target key (guarded
 	// by mu). A heartbeat joins a listing that is still within its
 	// deadline instead of starting another, and starts no new listing for
@@ -462,15 +461,11 @@ func (s *HeartbeatService) buildHeartbeat(ctx context.Context) *hubclient.Broker
 			heartbeat.DefaultProfile = &v
 		}
 	}
-	if s.flat && s.presentation != nil {
-		s.mu.Lock()
-		s.presentationSeq++
-		seq := s.presentationSeq
-		s.mu.Unlock()
+	if s.flat && s.presentation != nil && s.nextPresentationSeq != nil {
 		heartbeat.RuntimeTargetPresentation = s.presentation
 		heartbeat.PresentationTargetID = s.presentationTargetID
 		heartbeat.PresentationEpoch = s.presentationEpoch
-		heartbeat.PresentationSeq = seq
+		heartbeat.PresentationSeq = s.nextPresentationSeq()
 	}
 
 	// Starts in flight are read BEFORE the agents are listed: a start that

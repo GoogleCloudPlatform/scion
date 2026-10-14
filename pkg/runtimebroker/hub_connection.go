@@ -692,15 +692,18 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.flat = s.isFlat()
 	if fi := s.flatInstance(); fi != nil {
 		// The instance publishes its FC4-a presentation, built only by
-		// config.PresentInstance, on every heartbeat (Flat Runtime Brokers
-		// phase 4 design §2.1). The epoch is the server's start time, so a
-		// restarted process fences out the one it replaced.
+		// config.PresentInstance, on every heartbeat
+		// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a). The
+		// epoch is the server's start time, so a restarted process fences
+		// out the one it replaced; the sequence is the server's, shared by
+		// every heartbeat service it builds.
 		p := config.PresentInstance(fi.Instance).API()
 		hb.presentation = &p
 		hb.presentationTargetID = fi.Identity.RuntimeTarget.ID
 		s.mu.RLock()
 		hb.presentationEpoch = s.startTime.UnixNano()
 		s.mu.RUnlock()
+		hb.nextPresentationSeq = func() int64 { return s.presentationSeq.Add(1) }
 	}
 	hb.SetVersion(s.version)
 	hb.SetDefaultRuntime(rt)

@@ -25,9 +25,10 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 )
 
-// Flat Runtime Brokers phase 4 (design §2.1): a flat instance sends its
-// FC4-a presentation on every heartbeat, as a full snapshot, with its
-// runtime target ID, the process epoch and a per-process sequence.
+// A flat instance sends its FC4-a presentation
+// (.design/flat-runtime-brokers/contract-appendix-p3.md FC4-a; ptone/scion#3282)
+// on every heartbeat, as a full snapshot, with its runtime target ID, the
+// process epoch and a per-process sequence.
 
 // TestFlatHeartbeat_SendsPresentationWithFence: every heartbeat of a flat
 // instance carries PresentInstance(entry).API() for its own entry, its
@@ -35,6 +36,10 @@ import (
 // that grows by one per heartbeat.
 func TestFlatHeartbeat_SendsPresentationWithFence(t *testing.T) {
 	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	start := time.Date(2026, 10, 14, 12, 0, 0, 123, time.UTC)
+	f.srv.mu.Lock()
+	f.srv.startTime = start
+	f.srv.mu.Unlock()
 	client := &mockRuntimeBrokerService{}
 	svc := f.srv.newHeartbeatService(client, f.identity.RuntimeBrokerID, f.srv.config.HubEndpoint, time.Hour)
 
@@ -54,14 +59,44 @@ func TestFlatHeartbeat_SendsPresentationWithFence(t *testing.T) {
 	if first.PresentationTargetID != f.identity.RuntimeTarget.ID || first.PresentationTargetID == "" {
 		t.Errorf("presentation target ID = %q, want the instance's %q", first.PresentationTargetID, f.identity.RuntimeTarget.ID)
 	}
-	f.srv.mu.RLock()
-	wantEpoch := f.srv.startTime.UnixNano()
-	f.srv.mu.RUnlock()
-	if first.PresentationEpoch != wantEpoch || second.PresentationEpoch != wantEpoch || wantEpoch == 0 {
+	wantEpoch := start.UnixNano()
+	if first.PresentationEpoch != wantEpoch || second.PresentationEpoch != wantEpoch {
 		t.Errorf("epochs = %d, %d, want the server start time %d on both", first.PresentationEpoch, second.PresentationEpoch, wantEpoch)
 	}
 	if first.PresentationSeq != 1 || second.PresentationSeq != 2 {
 		t.Errorf("sequences = %d, %d, want 1, 2", first.PresentationSeq, second.PresentationSeq)
+	}
+}
+
+// TestFlatHeartbeat_PresentationSeqIsPerProcess: the sequence is the
+// server's, not a heartbeat service's. A service rebuilt for the same hub
+// connection (re-initialisation), or a second connection's service, keeps
+// counting up under the same epoch, so its reports are never fenced out by
+// the process's own earlier ones.
+func TestFlatHeartbeat_PresentationSeqIsPerProcess(t *testing.T) {
+	f := newFlatInstanceTestServer(t, flatInstanceOpts{hubInProcess: true})
+	clientA, clientB := &mockRuntimeBrokerService{}, &mockRuntimeBrokerService{}
+	a := f.srv.newHeartbeatService(clientA, f.identity.RuntimeBrokerID, f.srv.config.HubEndpoint, time.Hour)
+	b := f.srv.newHeartbeatService(clientB, f.identity.RuntimeBrokerID, f.srv.config.HubEndpoint, time.Hour)
+
+	var seqs []int64
+	var epochs []int64
+	for _, step := range []struct {
+		svc    *HeartbeatService
+		client *mockRuntimeBrokerService
+	}{{a, clientA}, {a, clientA}, {b, clientB}, {a, clientA}, {b, clientB}} {
+		hb := lastHeartbeat(t, step.svc, step.client)
+		seqs = append(seqs, hb.PresentationSeq)
+		epochs = append(epochs, hb.PresentationEpoch)
+	}
+	if want := []int64{1, 2, 3, 4, 5}; !reflect.DeepEqual(seqs, want) {
+		t.Errorf("sequences = %v, want %v across both services", seqs, want)
+	}
+	for _, e := range epochs {
+		if e != epochs[0] {
+			t.Errorf("epochs = %v, want one epoch for the process", epochs)
+			break
+		}
 	}
 }
 
