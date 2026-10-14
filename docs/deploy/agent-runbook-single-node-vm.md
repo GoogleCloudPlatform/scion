@@ -1004,7 +1004,9 @@ gcloud compute ssh scion-hub-HUB_NAME \
 **Expected:** Rows for `localhost/scion/core-base`, `localhost/scion/scion-base`,
 and `localhost/scion/scion-antigravity`, all tagged `latest`. Rows for the
 unprefixed build names (`core-base`, `scion-base`, `scion-antigravity`, also
-`latest`) appear as well; they share image IDs with the `localhost/scion` rows.
+`latest`) appear as well, plus `core-base` and `scion-base` rows tagged with
+the short commit SHA of the checkout the images were built from. All of these
+share image IDs with the `localhost/scion` rows.
 
 ### 6.5 IAP access
 
@@ -1085,7 +1087,7 @@ Only when the hybrid tier is on.
 | `Permission denied` on instance create | Insufficient project permissions | User needs `roles/compute.admin` or `roles/editor` on the project |
 | `Quota exceeded` on instance create | Not enough compute CPU quota in the region | Request a quota increase via GCP Console, or try a different region |
 | Cloud-init timeout (script waits > 5 min) | VM is slow to provision | SSH in and check: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo cloud-init status --long'` |
-| `image_registry is not configured` | `settings.yaml` missing `image_registry` field | SSH to VM, verify `/home/scion/.scion/settings.yaml` has `image_registry: "localhost/scion"` for local builds or the registry path for registry builds |
+| `image_registry is not configured` | `settings.yaml` missing `image_registry` field | SSH to VM, verify `/home/scion/.scion/settings.yaml` (read it with `sudo -u scion cat`; see §7) has `image_registry: "localhost/scion"` for local builds or the registry path for registry builds |
 | IAP proxy deploy fails | IAP API not enabled or missing OAuth consent screen | Run `gcloud services enable iap.googleapis.com --project=PROJECT_ID`. Check the OAuth consent screen is configured in GCP Console > APIs & Services > OAuth consent screen. |
 | Hub health check fails after deploy | Binary crashed or settings invalid | SSH to VM, check logs: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo journalctl -u scion-hub.service --no-pager -n 50'` |
 | Hub health check fails after restart | Settings or IAP audience mismatch | SSH to VM, verify settings: `gcloud compute ssh scion-hub-HUB_NAME --zone=ZONE --project=PROJECT_ID --command='sudo -u scion cat /home/scion/.scion/settings.yaml'`. Confirm `auth.mode` is `proxy` and the `audience` string is correct. |
