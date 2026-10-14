@@ -1017,11 +1017,12 @@ func TestTelemetryCloudFields_Known(t *testing.T) {
 	assert.Equal(t, known, got, "telemetry.cloud members changed: check that \"\", null and {} still mean unset for each new member (telemetryCloudUnchanged), then update this list")
 }
 
-// File mode replaces the telemetry object whole, so a masked header is
-// kept only when the cloud object written, apart from headers, equals the
-// stored one: an exact echo keeps; a partial or empty tls, a case-variant
-// clear and a changed or cleared endpoint are rejected; "" for a member
-// GET omitted keeps.
+// File mode merges telemetry key by key, as DB mode does, so a masked
+// header is kept only when the cloud object written (the stored object
+// merged with the request), apart from headers, equals the stored one: an
+// exact echo, an omitted, partial or empty tls (the stored tls members are
+// kept) and "" for a member GET omitted keep; a case-variant clear and a
+// changed or cleared endpoint are rejected.
 func TestPutServerConfig_FileMode_TelemetryMaskedHeaderCloudRule(t *testing.T) {
 	const stored = `schema_version: "1"
 telemetry:
@@ -1040,9 +1041,9 @@ telemetry:
 		{"exact echo", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
 		{"empty string for a member GET omitted", `"endpoint":"otel.example.com:4317","protocol":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusOK},
 		{"case-variant nested clear", `"endpoint":"otel.example.com:4317","tls":{"enabled":true,"CA_FILE":""}`, http.StatusBadRequest},
-		{"partial tls", `"endpoint":"otel.example.com:4317","tls":{"enabled":true}`, http.StatusBadRequest},
-		{"empty tls", `"endpoint":"otel.example.com:4317","tls":{}`, http.StatusBadRequest},
-		{"omitted tls", `"endpoint":"otel.example.com:4317"`, http.StatusBadRequest},
+		{"partial tls", `"endpoint":"otel.example.com:4317","tls":{"enabled":true}`, http.StatusOK},
+		{"empty tls", `"endpoint":"otel.example.com:4317","tls":{}`, http.StatusOK},
+		{"omitted tls", `"endpoint":"otel.example.com:4317"`, http.StatusOK},
 		{"changed endpoint", `"endpoint":"other.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
 		{"cleared endpoint", `"endpoint":"","tls":{"enabled":true,"ca_file":"/etc/ca.pem"}`, http.StatusBadRequest},
 	} {
@@ -1065,9 +1066,61 @@ telemetry:
 			require.NotNil(t, vs.Telemetry)
 			require.NotNil(t, vs.Telemetry.Cloud)
 			assert.Equal(t, map[string]string{"x-api-key": "real-key"}, vs.Telemetry.Cloud.Headers)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS)
+			require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+			assert.True(t, *vs.Telemetry.Cloud.TLS.Enabled)
 			assert.Equal(t, "/etc/ca.pem", vs.Telemetry.Cloud.TLS.CAFile)
 		})
 	}
+}
+
+// maskedHeaderOmittedTLSBody echoes a masked header with the stored
+// endpoint and leaves out the stored cloud.tls. Both modes merge
+// telemetry, so the cloud object written is unchanged and the stored
+// header and tls are kept (the DB-mode and file-mode pair below).
+const maskedHeaderOmittedTLSBody = `{"telemetry":{"cloud":{"endpoint":"otel.example.com:4317","headers":{"x-api-key":"********"}}}}`
+
+func TestPutServerConfigDB_TelemetryMaskedHeaderOmittedTLSKeeps(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	srv, fake, ops := newTestDBServer(t)
+	fake.seedWithOrigin("telemetry", json.RawMessage(`{"cloud":{"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"real-key"}}}`), "managed")
+	_, err := ops.Refresh(context.Background())
+	require.NoError(t, err)
+
+	rr := putServerConfigDB(t, srv, ops, maskedHeaderOmittedTLSBody)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+	assert.Equal(t, decodeJSONValue(t, []byte(`{"cloud":{"endpoint":"otel.example.com:4317","tls":{"enabled":true,"ca_file":"/etc/ca.pem"},"headers":{"x-api-key":"real-key"}}}`)),
+		decodeJSONValue(t, storedRow(fake, "telemetry").Value))
+}
+
+func TestPutServerConfig_FileMode_TelemetryMaskedHeaderOmittedTLSKeeps(t *testing.T) {
+	settingsPath := setTempScionHome(t)
+	require.NoError(t, os.WriteFile(settingsPath, []byte(`schema_version: "1"
+telemetry:
+  cloud:
+    endpoint: otel.example.com:4317
+    tls:
+      enabled: true
+      ca_file: /etc/ca.pem
+    headers:
+      x-api-key: real-key
+`), 0600))
+	rr := httptest.NewRecorder()
+	(&Server{}).handleAdminServerConfig(rr, adminRequest(http.MethodPut, "/api/v1/admin/server-config", maskedHeaderOmittedTLSBody))
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	data, err := os.ReadFile(settingsPath)
+	require.NoError(t, err)
+	var vs config.VersionedSettings
+	require.NoError(t, yamlv3.Unmarshal(data, &vs))
+	require.NotNil(t, vs.Telemetry)
+	require.NotNil(t, vs.Telemetry.Cloud)
+	assert.Equal(t, "otel.example.com:4317", vs.Telemetry.Cloud.Endpoint)
+	assert.Equal(t, map[string]string{"x-api-key": "real-key"}, vs.Telemetry.Cloud.Headers)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS)
+	require.NotNil(t, vs.Telemetry.Cloud.TLS.Enabled)
+	assert.True(t, *vs.Telemetry.Cloud.TLS.Enabled)
+	assert.Equal(t, "/etc/ca.pem", vs.Telemetry.Cloud.TLS.CAFile)
 }
 
 func TestTelemetryCloudUnchanged(t *testing.T) {
