@@ -413,6 +413,7 @@ var testAdminSettingsSectionPolicy = map[string]testAdminPolicy{
 	"messaging":         testAdminPolicyDeny,
 	"telemetry":         testAdminPolicyDeny,
 	"auto_expose_ports": testAdminPolicyDeny,
+	"hub_observability": testAdminPolicyDeny,
 	"quotas":            testAdminPolicyDeny,
 	"gcp_iam":           testAdminPolicyDeny,
 	"agent_secrets":     testAdminPolicyDeny,
@@ -458,6 +459,8 @@ var testAdminSettingsKeyPolicy = map[string]testAdminPolicy{
 	"telemetry.cloud.tls.ca_file":              testAdminPolicyDeny,
 	"telemetry.cloud.tls.cert_file":            testAdminPolicyDeny,
 	"telemetry.cloud.tls.key_file":             testAdminPolicyDeny,
+	"server.hub.observability.metrics_enabled": testAdminPolicyDeny,
+	"server.hub.observability.tracing_enabled": testAdminPolicyDeny,
 	"telemetry.cloud.batch":                    testAdminPolicyDeny,
 	"telemetry.cloud.batch.max_size":           testAdminPolicyDeny,
 	"telemetry.cloud.batch.timeout":            testAdminPolicyDeny,
@@ -535,6 +538,7 @@ var testAdminFileLiveKeyPolicy = map[string]testAdminPolicy{
 // are deny: test identities never change an experiment.
 var testAdminExperimentPolicy = map[string]testAdminPolicy{
 	experiments.FederationProjectVisitors:    testAdminPolicyDeny,
+	experiments.AsyncAgentLaunch:             testAdminPolicyDeny,
 	experiments.AgentDelegation:              testAdminPolicyDeny,
 	experiments.AuthorizationDecisionAuditV2: testAdminPolicyDeny,
 	"web.terminal_workspace":                 testAdminPolicyDeny,

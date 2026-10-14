@@ -32,6 +32,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/agent/state"
 	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/experiments"
+	"github.com/GoogleCloudPlatform/scion/pkg/hub/brokersettings"
 	"github.com/GoogleCloudPlatform/scion/pkg/hub/permissions"
 	"github.com/GoogleCloudPlatform/scion/pkg/secret"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
@@ -1688,5 +1689,38 @@ func TestTestAdminPolicy_FederationTokenRefused(t *testing.T) {
 	assert.True(t, ok, "human super-admin passes federationTokenCaller: %s", w.Body.String())
 	if assert.NotNil(t, u) {
 		assert.Equal(t, human.ID, u.ID)
+	}
+}
+
+// Broker settings writes (GoogleCloudPlatform/scion#3475) require
+// brokerSettingsWritePermission (quota.update, allow) on every PUT and then
+// each changed key's declared permission, every one through decide, so the
+// test-admin policy still applies per key: a key declaring a deny-classified
+// permission stays refused for both admin kinds even though quota.update is
+// admitted. The one registered key, maxAgents, declares quota.update.
+func TestTestAdminPolicy_BrokerSettingsPerKeyStillChecked(t *testing.T) {
+	srv, s, _ := tsaServer(t)
+	issuer := taUser(t, s, "tsa-bs-iss", store.SystemRoleSuperAdmin)
+	issuer2 := taUser(t, s, "tsa-bs-iss2", store.SystemRoleSuperAdmin)
+	kinds := map[string]TestAdminIdentityTokenResponse{
+		"test_super_admin": tsaIssue(t, srv, issuer, testAdminRoleSuperAdmin),
+		"test_hub_admin":   tsaIssue(t, srv, issuer2, testAdminRoleHubAdmin),
+	}
+	assert.False(t, testAdminPermissionDenied(brokerSettingsWritePermission))
+	assert.False(t, testAdminPermissionDenied(brokersettings.MaxAgents.Permission))
+	deniedKey := brokersettings.KeyDef{Name: "tsaDeniedKey", Permission: "hub.config.update"}
+	require.True(t, testAdminPermissionDenied(deniedKey.Permission))
+	for who, k := range kinds {
+		id := tsaIdentity(t, s, k.Identity.ID)
+		write := func(keys ...brokersettings.KeyDef) (bool, int) {
+			r := httptest.NewRequest(http.MethodPut, "/api/v1/runtime-brokers/x/settings", nil).WithContext(contextWithIdentityAndUser(id))
+			w := httptest.NewRecorder()
+			return srv.authorizeBrokerSettingsWrite(w, r, keys), w.Code
+		}
+		ok, _ := write(brokersettings.MaxAgents)
+		assert.True(t, ok, "%s: maxAgents (quota.update) is admitted", who)
+		ok, code := write(brokersettings.MaxAgents, deniedKey)
+		assert.False(t, ok, "%s: a key declaring a deny-classified permission is refused", who)
+		assert.Equal(t, http.StatusForbidden, code, who)
 	}
 }
