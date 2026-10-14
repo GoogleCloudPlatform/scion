@@ -86,7 +86,7 @@ func (m *copyingMockStorage) Copy(ctx context.Context, src, dst string) (*storag
 	return m.Upload(ctx, dst, r, storage.UploadOptions{})
 }
 
-func newCommitTestServer(t *testing.T) (*Server, store.Store, *mockStorage) {
+func newHCCommitTestServer(t *testing.T) (*Server, store.Store, *mockStorage) {
 	t.Helper()
 	srv, s := testServer(t)
 	stor := newMockStorage("test-bucket")
@@ -219,7 +219,7 @@ func assertDerivedFrom(t *testing.T, hc *store.HarnessConfig, yaml string) {
 func TestHarnessConfigCommit_DerivedFieldsFollowConfigYAMLOnEveryPath(t *testing.T) {
 	for _, path := range harnessConfigCommitPaths {
 		t.Run(path.name, func(t *testing.T) {
-			srv, s, _ := newCommitTestServer(t)
+			srv, s, _ := newHCCommitTestServer(t)
 
 			full := path.apply(t, srv, s, deriveFullYAML)
 			assertDerivedFrom(t, full, deriveFullYAML)
@@ -267,7 +267,7 @@ func TestDeriveHarnessConfigIndex(t *testing.T) {
 // When config.yaml sets no harness and the name infers none, the commit keeps
 // the row's stored Harness (the column is non-empty).
 func TestHarnessConfigCommit_KeepsHarnessWhenNoneDerivable(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", map[string]interface{}{
 		"name": "custom-thing", "harness": "generic", "scope": "global",
 	})
@@ -285,7 +285,7 @@ func TestHarnessConfigCommit_KeepsHarnessWhenNoneDerivable(t *testing.T) {
 func TestHarnessConfigCommit_RefusesUnusableProvisionerOnAPIPaths(t *testing.T) {
 	for _, path := range harnessConfigCommitPaths[:4] { // finalize, file write, multipart, import
 		t.Run(path.name, func(t *testing.T) {
-			srv, s, _ := newCommitTestServer(t)
+			srv, s, _ := newHCCommitTestServer(t)
 			before := path.apply(t, srv, s, deriveFullYAML)
 
 			var rec *httptest.ResponseRecorder
@@ -318,7 +318,7 @@ func TestHarnessConfigCommit_RefusesUnusableProvisionerOnAPIPaths(t *testing.T) 
 // (CheckDir): warn and skip, no row and no storage change.
 func TestHarnessConfigBootstrap_UnusableProvisionerWarnsAndSkips(t *testing.T) {
 	t.Run("new config", func(t *testing.T) {
-		srv, s, stor := newCommitTestServer(t)
+		srv, s, stor := newHCCommitTestServer(t)
 		dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": unusableHCYAML, "extra.txt": "x"})
 		require.NoError(t, srv.BootstrapHarnessConfigsFromDir(context.Background(), dir), "startup does not fail")
 		assert.Nil(t, globalHC(t, s, deriveHCName), "no row is created")
@@ -326,7 +326,7 @@ func TestHarnessConfigBootstrap_UnusableProvisionerWarnsAndSkips(t *testing.T) {
 	})
 
 	t.Run("existing config", func(t *testing.T) {
-		srv, s, stor := newCommitTestServer(t)
+		srv, s, stor := newHCCommitTestServer(t)
 		dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveFullYAML})
 		require.NoError(t, srv.BootstrapHarnessConfigsFromDir(context.Background(), dir))
 		before := globalHC(t, s, deriveHCName)
@@ -346,7 +346,7 @@ func TestHarnessConfigBootstrap_UnusableProvisionerWarnsAndSkips(t *testing.T) {
 // Acceptance 2: repair refuses a stored config.yaml with an unusable
 // provisioner: the row and storage are left as they are.
 func TestHarnessConfigRepair_UnusableProvisionerLeavesRowAndStorage(t *testing.T) {
-	srv, s, stor := newCommitTestServer(t)
+	srv, s, stor := newHCCommitTestServer(t)
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
 	_, err := stor.Upload(context.Background(), hc.StoragePath+"/config.yaml", strings.NewReader(unusableHCYAML), storage.UploadOptions{})
 	require.NoError(t, err)
@@ -364,7 +364,7 @@ func TestHarnessConfigRepair_UnusableProvisionerLeavesRowAndStorage(t *testing.T
 // Acceptance 3: the build executor's BuiltImage survives a later commit, and
 // the image handlers use it.
 func TestHarnessConfigBuiltImage_SurvivesCommitAndIsTheCheckedImage(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
 
 	require.NoError(t, syncBuiltImage(context.Background(), s, io.Discard, hc, "registry.example/built:7"))
@@ -389,7 +389,7 @@ func TestHarnessConfigBuiltImage_SurvivesCommitAndIsTheCheckedImage(t *testing.T
 // when its slug changes before the import is persisted (here: while the
 // source is being fetched), and never creates a row under the source slug.
 func TestHarnessConfigReimport_UpdatesRowByIDAfterSlugRename(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	ctx := context.Background()
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
 
@@ -427,7 +427,7 @@ func TestHarnessConfigReimport_UpdatesRowByIDAfterSlugRename(t *testing.T) {
 
 // Acceptance 5: two finalizes that read the same row give exactly one 409.
 func TestHarnessConfigFinalize_ConcurrentCommitsGiveOneConflict(t *testing.T) {
-	srv, s, stor := newCommitTestServer(t)
+	srv, s, stor := newHCCommitTestServer(t)
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
 	stale := *hc
 
@@ -458,7 +458,7 @@ func TestHarnessConfigFinalize_ConcurrentCommitsGiveOneConflict(t *testing.T) {
 
 // Acceptance 5: a metadata PUT from a stale read does not revert a commit.
 func TestHarnessConfigPut_StaleReadDoesNotRevertCommit(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	stale := *harnessConfigCommitPaths[0].apply(t, srv, s, deriveBareYAML)
 	committed := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
 
@@ -481,7 +481,7 @@ func TestHarnessConfigPut_StaleReadDoesNotRevertCommit(t *testing.T) {
 // Acceptance 6: create with config is refused; a provided slug is
 // normalized.
 func TestHarnessConfigCreate_ConfigRefusedAndSlugNormalized(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 
 	rec := doRequest(t, srv, http.MethodPost, "/api/v1/harness-configs", map[string]interface{}{
 		"name": "with-config", "harness": "claude", "scope": "global",
@@ -505,7 +505,7 @@ func TestHarnessConfigCreate_ConfigRefusedAndSlugNormalized(t *testing.T) {
 
 // Acceptance 6: deleting config.yaml through the file API is refused.
 func TestHarnessConfigFileDelete_ConfigYAMLRefused(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	hc := ensureDeriveHC(t, srv, s)
 	rec := finalizeHCManifest(t, srv, hc, map[string]string{"config.yaml": deriveFullYAML, "extra.txt": "x"})
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
@@ -533,7 +533,7 @@ func TestHarnessConfigFileDelete_ConfigYAMLRefused(t *testing.T) {
 // Acceptance 7: a clone re-derives Harness and Config from the copied files
 // instead of copying the source's.
 func TestHarnessConfigClone_ReDerivesFromCopiedFiles(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	src := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
 	// Stage a stale derived Config on the source row.
 	src.Config = &store.HarnessConfigData{Image: "stale/image:0", Model: "stale"}
@@ -562,7 +562,7 @@ func TestProjectCloneHarnessConfigs_ReDerivesFromCopiedFiles(t *testing.T) {
 		{"no storage path", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, s, stor := newCommitTestServer(t)
+			srv, s, stor := newHCCommitTestServer(t)
 			ctx := context.Background()
 			srcProject := api.NewUUID()
 			srcHC := &store.HarnessConfig{
@@ -603,7 +603,7 @@ func TestProjectCloneHarnessConfigs_ReDerivesFromCopiedFiles(t *testing.T) {
 // harness-config reads the TZ its config.yaml sets, and none once the key is
 // removed (template-settings-arch, ptone/scion#4219).
 func TestCaptureCreateTimezone_ReadsHarnessConfigTZFromConfigYAML(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	ctx := context.Background()
 
 	capture := func(hc *store.HarnessConfig) string {
@@ -622,7 +622,7 @@ func TestCaptureCreateTimezone_ReadsHarnessConfigTZFromConfigYAML(t *testing.T) 
 // A bootstrap commit that loses the compare-and-swap is retried once against
 // the re-read row.
 func TestHarnessConfigBootstrap_RetriesOnceOnConflict(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	ctx := context.Background()
 	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
@@ -679,7 +679,7 @@ func (w *hcConflictStore) attempts() int {
 	return w.calls
 }
 
-func newCommitTestServerWithConflicts(t *testing.T) (*Server, store.Store, *hcConflictStore, *storeFaultSwitch) {
+func newHCCommitTestServerWithConflicts(t *testing.T) (*Server, store.Store, *hcConflictStore, *storeFaultSwitch) {
 	t.Helper()
 	srv, s := testServer(t)
 	w, fault := installStoreFault(t, srv, func(inner store.Store, f *storeFaultSwitch) *hcConflictStore {
@@ -693,7 +693,7 @@ func newCommitTestServerWithConflicts(t *testing.T) (*Server, store.Store, *hcCo
 // compare-and-swap once; a second conflict is an error, the config is
 // skipped (startup does not fail), and there is no third attempt.
 func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testing.T) {
-	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 	ctx := context.Background()
 	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML, "extra.txt": "x"})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
@@ -721,7 +721,7 @@ func TestHarnessConfigBootstrap_SecondConflictSkipsWithoutThirdAttempt(t *testin
 // A bootstrap whose commit succeeds reconciles storage after the row write:
 // an object under the storage path that no manifest lists is removed.
 func TestHarnessConfigBootstrap_ReconcilesAfterSuccessfulCommit(t *testing.T) {
-	srv, s, _ := newCommitTestServer(t)
+	srv, s, _ := newHCCommitTestServer(t)
 	ctx := context.Background()
 	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveBareYAML})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
@@ -741,7 +741,7 @@ func TestHarnessConfigBootstrap_ReconcilesAfterSuccessfulCommit(t *testing.T) {
 // content hash, another writer replaced the content and the re-derive is
 // skipped without a second attempt (ts4a-rev #4).
 func TestHarnessConfigOnHashMatch_SkipsWhenContentReplaced(t *testing.T) {
-	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 	ctx := context.Background()
 	dir := makeHarnessConfigDir(t, deriveHCName, map[string]string{"config.yaml": deriveFullYAML})
 	require.NoError(t, srv.BootstrapHarnessConfigsFromDir(ctx, dir))
@@ -767,7 +767,7 @@ func TestHarnessConfigOnHashMatch_SkipsWhenContentReplaced(t *testing.T) {
 // and skipped (nil), with no third attempt and the row unchanged
 // (ts4a-rev #4).
 func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
-	srv, s, w, fault := newCommitTestServerWithConflicts(t)
+	srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 	ctx := context.Background()
 	hc := harnessConfigCommitPaths[0].apply(t, srv, s, deriveFullYAML)
 	_, err := srv.GetStorage().Upload(ctx, hc.StoragePath+"/config.yaml", strings.NewReader(deriveBareYAML), storage.UploadOptions{})
@@ -788,7 +788,7 @@ func TestHarnessConfigRepair_SecondConflictSkips(t *testing.T) {
 // row's manifest never lists objects the reconcile deleted.
 func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 	t.Run("update", func(t *testing.T) {
-		srv, s, w, fault := newCommitTestServerWithConflicts(t)
+		srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 		ctx := context.Background()
 		rs := srv.harnessConfigStore("claude")
 		v1 := testBundledResource(storage.ResourceKindHarnessConfig, deriveHCName, map[string]string{
@@ -816,7 +816,7 @@ func TestHarnessConfigBootstrapSource_LostCommitDoesNotReconcile(t *testing.T) {
 	})
 
 	t.Run("storage repair", func(t *testing.T) {
-		srv, s, w, fault := newCommitTestServerWithConflicts(t)
+		srv, s, w, fault := newHCCommitTestServerWithConflicts(t)
 		ctx := context.Background()
 		v1 := testBundledResource(storage.ResourceKindHarnessConfig, deriveHCName, map[string]string{
 			"config.yaml": deriveBareYAML, "extra.txt": "x",
