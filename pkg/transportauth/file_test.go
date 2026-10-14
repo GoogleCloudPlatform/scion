@@ -139,6 +139,49 @@ func TestFileSource_MissingFileAndNoEnv(t *testing.T) {
 	assert.NoError(t, st.FileError, "a missing file is not a read error")
 }
 
+func TestFileSource_RetriesReadAfterHardlinkRemoval(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tt")
+	first := makeTestJWT(time.Now().Add(10 * time.Minute))
+	writeTokenFile(t, path, first)
+	src := NewFileSource(path, nil)
+	got, err := src.Token()
+	require.NoError(t, err)
+	require.Equal(t, first, got)
+
+	// A replacement with an extra hard link must be rejected, and the
+	// previously cached token must not survive the failed read.
+	second := makeTestJWT(time.Now().Add(time.Hour))
+	writeTokenFile(t, path, second)
+	link := path + ".link"
+	require.NoError(t, os.Link(path, link))
+	before, err := os.Stat(path)
+	require.NoError(t, err)
+
+	got, err = src.Token()
+	require.Error(t, err)
+	assert.Empty(t, got)
+	st := src.Status()
+	assert.False(t, st.FilePresent)
+	assert.ErrorIs(t, st.FileError, dirfd.ErrNotSingleLinkRegular)
+
+	// Removing only the extra link makes the file safe to read without
+	// changing any of the fields used to skip an unchanged file.
+	require.NoError(t, os.Remove(link))
+	after, err := os.Stat(path)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(before, after))
+	require.Equal(t, before.ModTime(), after.ModTime())
+	require.Equal(t, before.Size(), after.Size())
+
+	got, err = src.Token()
+	require.NoError(t, err, "a failed read must be retried even without a file replacement")
+	assert.Equal(t, second, got)
+	st = src.Status()
+	assert.True(t, st.FilePresent)
+	assert.Equal(t, SourceLabelFile, st.InUse)
+	assert.NoError(t, st.FileError)
+}
+
 func TestFileSource_SetTokenUsedUntilFileCatchesUp(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "tt")
 	src := NewFileSource(path, nil)

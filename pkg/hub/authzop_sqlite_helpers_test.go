@@ -92,6 +92,8 @@ type idFixtures struct {
 	roleBindingDel          string
 	projectMembership       string
 	projectMembershipUpdate string
+	projectVisitor          string
+	projectVisitorUpdate    string
 	projectMemberRoleID     string
 	allowListEmail          string
 	maintenanceOpKey        string
@@ -512,6 +514,24 @@ func seedLiveInventoryFixtures(t *testing.T, ctx context.Context, srv *Server, s
 	require.NoError(t, err)
 	f.projectMembershipUpdate = pmUpdate.ID
 
+	// project.visitors.update / .remove address a visitor (a federated
+	// account with a project-visitor binding on f.project) by account ID;
+	// update gets its own visitor so remove's is still there.
+	for _, v := range []struct {
+		email string
+		dst   *string
+	}{
+		{"li-visitor@corp.example", &f.projectVisitor},
+		{"li-visitor-update@corp.example", &f.projectVisitorUpdate},
+	} {
+		issuer, email := "https://li-issuer.example.com", v.email
+		acct := &store.User{DisplayName: "LI Visitor", Kind: store.UserKindFederated, Status: store.UserStatusPending, HomeIssuer: &issuer, FederatedEmail: &email}
+		require.NoError(t, s.CreateFederatedUser(ctx, acct))
+		_, err = s.CreateVisitorRoleBinding(ctx, &store.RoleBinding{PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: acct.ID, ScopeType: store.RoleScopeProject, ScopeID: f.project, CreatedBy: f.user})
+		require.NoError(t, err)
+		*v.dst = acct.ID
+	}
+
 	// Maintenance operations and migrations are seeded once, by key, during
 	// Migrate() (SeedMaintenanceOperations) — they are a fixed built-in
 	// registry, not something a test creates.
@@ -797,6 +817,7 @@ func opPatternOverrides(f idFixtures) map[overrideKey]map[string]string {
 		{"access.constraint.update", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"access.constraint.delete", "/api/v1/admin/access-constraints/{id}"}:     {"id": f.accessConstraintUD},
 		{"project.membership.update", "/api/v1/projects/{id}/members/{memberId}"}: {"id": f.project, "memberId": f.projectMembershipUpdate},
+		{"project.visitors.update", "/api/v1/projects/{id}/visitors/{visitorId}"}: {"id": f.project, "visitorId": f.projectVisitorUpdate},
 		// Grant revoke and grant read share their pattern; revoke takes
 		// the disposable twin grant.
 		{"agent.delegation.revoke", "/api/v1/agents/{id}/delegations/{grantId}"}: {"id": f.agent, "grantId": f.delegation.grantRevoke},
@@ -903,10 +924,12 @@ func patternOverrides(f idFixtures) map[string]map[string]string {
 		"/api/v1/projects/{projectId}/agents/{id}/reincarnate": {"projectId": f.project, "id": f.agent},
 
 		// --- project family ---
-		"/api/v1/projects/{id}":                    {"id": f.project},
-		"/api/v1/projects/{id}/members":            {"id": f.project},
-		"/api/v1/projects/{id}/members/{memberId}": {"id": f.project, "memberId": f.projectMembership},
-		"/api/v1/projects/{id}/transfer-ownership": {"id": f.project},
+		"/api/v1/projects/{id}":                      {"id": f.project},
+		"/api/v1/projects/{id}/members":              {"id": f.project},
+		"/api/v1/projects/{id}/members/{memberId}":   {"id": f.project, "memberId": f.projectMembership},
+		"/api/v1/projects/{id}/transfer-ownership":   {"id": f.project},
+		"/api/v1/projects/{id}/visitors":             {"id": f.project},
+		"/api/v1/projects/{id}/visitors/{visitorId}": {"id": f.project, "visitorId": f.projectVisitor},
 
 		// --- project-route operations family ---
 		"/api/v1/projects/{id}/env":                               {"id": f.project},
