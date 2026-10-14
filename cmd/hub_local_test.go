@@ -45,11 +45,16 @@ func TestIsLocalWorkstationEndpoint_CLI(t *testing.T) {
 func setupNoEndpointLink(t *testing.T) string {
 	t.Helper()
 	origProjectPath, origGlobal, origYes := projectPath, globalMode, autoConfirm
+	origEP, origSrc := hubEndpoint, hubSource
 	origOffer := offerTemplateSyncOnLinkFn
 	t.Cleanup(func() {
 		projectPath, globalMode, autoConfirm = origProjectPath, origGlobal, origYes
+		hubEndpoint, hubSource = origEP, origSrc
 		offerTemplateSyncOnLinkFn = origOffer
 	})
+	hubEndpoint, hubSource = "", ""
+	t.Setenv("SCION_HUB_ENDPOINT", "")
+	t.Setenv("SCION_HUB_URL", "")
 	offerTemplateSyncOnLinkFn = func(_, _, _ string, _ bool) {}
 
 	home := t.TempDir()
@@ -124,10 +129,11 @@ func TestRunHubLink_LocalHubSkipsLinkPrompt(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			globalDir := setupNoEndpointLink(t)
+			setupNoEndpointLink(t)
 			autoConfirm = false
 			server, registered := fakeLinkHub(t)
-			require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+			// The hub selected for the invocation (here as with --hub).
+			hubEndpoint = server.URL
 			t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 			t.Setenv("SCION_HUB_TOKEN", tc.hubToken)
 
@@ -150,7 +156,7 @@ func TestRunHubLink_LocalHubSkipsLinkPrompt(t *testing.T) {
 func TestRunHubLink_StaleDisableNotice(t *testing.T) {
 	globalDir := setupNoEndpointLink(t)
 	server, registered := fakeLinkHub(t)
-	require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.endpoint", server.URL))
+	hubEndpoint = server.URL
 	require.NoError(t, config.UpdateVersionedSetting(globalDir, "hub.enabled", "false"))
 	t.Setenv("SCION_DEV_TOKEN", "scion_dev_test")
 

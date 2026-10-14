@@ -184,6 +184,9 @@ func setupHubProject(t *testing.T, home, endpoint, projectID string) string {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(projectDir, "settings.json"), data, 0644))
 
+	// The CLI does not read hub.endpoint from settings: the hub is the
+	// one selected for the invocation.
+	useHubForTest(t, endpoint)
 	return projectDir
 }
 
