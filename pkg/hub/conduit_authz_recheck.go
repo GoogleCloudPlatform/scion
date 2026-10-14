@@ -382,8 +382,8 @@ type conduitUserStreamAuthz struct {
 // The tunnel open path and every re-check of an open user stream decide
 // with it, so a re-check evaluates the same authorization as the open:
 // the principal (a user identity, by its id), the user-status rule
-// (conduitUserStatus), every action conduitStreamActions requires, and for
-// tcp the agent-local target port.
+// (conduitUserStatus), every action conduitStreamActions requires, for ssh
+// that disable_ssh is off, and for tcp the agent-local target port.
 //
 // It returns conduitAuthzAllowed, conduitAuthzDenied or
 // conduitAuthzUnavailable, the re-check's reason, and the cause: a deny by

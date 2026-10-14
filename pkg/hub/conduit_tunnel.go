@@ -536,9 +536,9 @@ func parseConduitTunnelRequest(body []byte) (*conduitTunnelRequest, string, map[
 // stream repeats: the user's status, ActionTunnel and the kind's action
 // (ActionPortAccess on an authorized agent-local target for tcp,
 // ActionAttach for pty and ssh). It returns the tcp port (0 for other
-// kinds). mintConduitGrant repeats these checks when it mints; deciding
-// here first keeps a refused caller from learning the agent's state or
-// session.
+// kinds). mintConduitGrant repeats the permission and tcp target checks
+// when it mints; deciding here first keeps a refused caller from learning
+// the agent's state or session.
 //
 // A deny by the user-status rule is the *conduitTunnelError userActive
 // returns; a user lookup that fails wraps errConduitUserStatusUnavailable
