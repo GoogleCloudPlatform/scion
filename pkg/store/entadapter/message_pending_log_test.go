@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/GoogleCloudPlatform/scion/pkg/store/enttest"
 	"github.com/google/uuid"
@@ -54,7 +55,8 @@ func pendingLines(t *testing.T, buf *bytes.Buffer) ([]map[string]any, []string) 
 // TestCreateMessage_LogsSchemaDefaultPending pins the store-level
 // entered-pending line (ptone/scion#4827): a writer that leaves
 // DispatchState empty gets the schema default "pending", and that row is
-// logged with message_id, sender, recipient and creation_path only — never
+// logged with message_id, sender, recipient, type (bounded to the enum)
+// and creation_path only — never
 // the body. A row given an explicit state is not logged here.
 func TestCreateMessage_LogsSchemaDefaultPending(t *testing.T) {
 	var buf bytes.Buffer
@@ -68,6 +70,7 @@ func TestCreateMessage_LogsSchemaDefaultPending(t *testing.T) {
 	const body = "store-default-body-must-not-appear-7d1e"
 	defaulted := newTestMessage(projectID, "agent-1")
 	defaulted.Msg = body
+	defaulted.Type = "caller free text 4827"
 	require.NoError(t, s.CreateMessage(ctx, defaulted))
 	require.Equal(t, store.MessageDispatchPending, defaulted.DispatchState)
 
@@ -85,12 +88,13 @@ func TestCreateMessage_LogsSchemaDefaultPending(t *testing.T) {
 	assert.Equal(t, "user:alice", rec["sender"])
 	assert.Equal(t, "agent:coder", rec["recipient"])
 	assert.Equal(t, store.MessagePendingPathStoreDefault, rec["creation_path"])
+	assert.Equal(t, messages.LogTypeOther, rec["type"], "a type outside the enum is logged as other")
 	keys := make([]string, 0, len(rec))
 	for k := range rec {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	assert.Equal(t, []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time"}, keys)
+	assert.Equal(t, []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time", "type"}, keys)
 	assert.NotContains(t, lines[0], body, "the message body must never be logged")
 }
 

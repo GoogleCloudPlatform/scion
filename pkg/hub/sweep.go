@@ -44,11 +44,14 @@ const missingRecipientFailureReason = "recipient agent no longer exists"
 // Messages stuck beyond stuckMessageExpireTTL are transitioned to failed.
 // After Phase 4 (no-queuing delivery), the only writer of pending rows is
 // ExecuteAgentDM: it persists the row "pending" for the length of its
-// dispatch, then marks it dispatched or failed. A row still pending past the
-// threshold had an ambiguous dispatch outcome, a failed finalization, or a
-// hub that exited mid-dispatch (ptone/scion#4827). Every write of a pending
-// row is logged as store.MessageEnteredPendingLogMsg. Registered as a
-// RecurringSingleton guarded by LockBrokerMessageSweep (B5-2).
+// dispatch, then marks it dispatched or failed. The dispatch is detached
+// from the caller's cancellation (dispatchContext), so a row stays pending
+// past the threshold only by design after a deadline-ambiguous dispatch
+// (AC-4 of #1689), or by a fault: a failed finalization write, a hub that
+// exited mid-dispatch, or a writer that left the state empty
+// (ptone/scion#4827). Every write of a pending row is logged as
+// store.MessageEnteredPendingLogMsg. Registered as a RecurringSingleton
+// guarded by LockBrokerMessageSweep (B5-2).
 func (s *Server) brokerMessageSweepHandler() func(ctx context.Context) {
 	return func(ctx context.Context) {
 		// Tight timeout: fail fast if DB connections are saturated rather than

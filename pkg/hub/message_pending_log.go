@@ -17,6 +17,7 @@ package hub
 import (
 	"log/slog"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 )
 
@@ -36,7 +37,8 @@ const (
 // logMessageEnteredPending records that msg was persisted in dispatch_state
 // "pending" by the call site named by path. It must be called after the row
 // is persisted, so msg.DispatchState holds the stored state. It logs only
-// identifiers and routing fields: never the body, metadata or attachments.
+// identifiers and routing fields, with the type mapped through
+// messages.LogType: never the body, metadata or attachments.
 // A row in any other state is not logged.
 func (s *Server) logMessageEnteredPending(path string, msg *store.Message) {
 	if msg == nil || msg.DispatchState != store.MessageDispatchPending {
@@ -50,6 +52,7 @@ func (s *Server) logMessageEnteredPending(path string, msg *store.Message) {
 		"message_id", msg.ID,
 		"sender", msg.Sender,
 		"recipient", msg.Recipient,
+		"type", messages.LogType(msg.Type),
 		"creation_path", path,
 	)
 }

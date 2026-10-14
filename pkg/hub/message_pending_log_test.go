@@ -21,6 +21,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -85,8 +87,8 @@ func sortedKeys(rec map[string]any) []string {
 
 // TestMessagePendingLog_AgentDM pins the entered-pending line written by
 // ExecuteAgentDM when it persists the row "pending" (ptone/scion#4827): one
-// line per message, with message_id, sender, recipient and creation_path,
-// and nothing else — in particular never the body.
+// line per message, with message_id, sender, recipient, type and
+// creation_path, and nothing else — in particular never the body.
 func TestMessagePendingLog_AgentDM(t *testing.T) {
 	srv, _, _, sender, target, _, _ := deliverySetup(t)
 	logger, logs := newPendingLogCapture()
@@ -105,7 +107,8 @@ func TestMessagePendingLog_AgentDM(t *testing.T) {
 	assert.Equal(t, "agent:"+sender.Slug, rec["sender"])
 	assert.Equal(t, "agent:"+target.Slug, rec["recipient"])
 	assert.Equal(t, pendingPathAgentDM, rec["creation_path"])
-	wantKeys := []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time"}
+	assert.Equal(t, messages.TypeInstruction, rec["type"])
+	wantKeys := []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time", "type"}
 	assert.Equal(t, wantKeys, sortedKeys(rec), "the line carries only identifiers and routing fields")
 	assert.NotContains(t, lines[0], body, "the message body must never be logged")
 }
@@ -124,6 +127,22 @@ func TestMessagePendingLog_NotLoggedForOtherStates(t *testing.T) {
 	srv.logMessageEnteredPending(pendingPathAgentDM, nil)
 	recs, _ := logs.records(t, store.MessageEnteredPendingLogMsg)
 	assert.Empty(t, recs)
+}
+
+// TestMessagePendingLog_TypeIsBounded pins that the line carries a known
+// message type as is and maps any other value (the outbound DM type is caller
+// free text) to messages.LogTypeOther.
+func TestMessagePendingLog_TypeIsBounded(t *testing.T) {
+	logger, logs := newPendingLogCapture()
+	srv := &Server{messageLog: logger}
+	for _, typ := range []string{messages.TypeMention, "caller free text 4827", ""} {
+		srv.logMessageEnteredPending(pendingPathAgentDM, &store.Message{ID: uuid.NewString(), Type: typ, DispatchState: store.MessageDispatchPending})
+	}
+	recs, _ := logs.records(t, store.MessageEnteredPendingLogMsg)
+	require.Len(t, recs, 3)
+	assert.Equal(t, messages.TypeMention, recs[0]["type"], "a known type is logged as is")
+	assert.Equal(t, messages.LogTypeOther, recs[1]["type"], "free text is logged as other")
+	assert.Equal(t, messages.LogTypeOther, recs[2]["type"], "an empty type is logged as other")
 }
 
 // seedStuckPending creates n agent-addressed rows left pending well past the
@@ -201,4 +220,104 @@ func TestBrokerMessageSweep_StuckLineCapsMessageIDs(t *testing.T) {
 	for _, id := range ids[stuckMessageLogIDCap:] {
 		assert.False(t, strings.Contains(lines[0], id), "IDs past the cap are not on the line")
 	}
+}
+
+// cancelCallerDispatcher cancels the caller's context while the dispatch is
+// in flight, the way a client that disconnects (or a sender agent that is
+// being deleted) does, and then behaves like a transport that honors its
+// context: a cancelled or expired context fails the call with a wrapped
+// context error, as the control channel does.
+type cancelCallerDispatcher struct {
+	*recordingDispatcher
+	cancel   context.CancelFunc
+	deadline time.Time
+	hasDL    bool
+}
+
+func (d *cancelCallerDispatcher) DispatchAgentMessage(ctx context.Context, agent *store.Agent, message string, interrupt bool, sm *messages.StructuredMessage) error {
+	d.deadline, d.hasDL = ctx.Deadline()
+	d.cancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("control channel request failed: %w", err)
+	}
+	return d.recordingDispatcher.DispatchAgentMessage(ctx, agent, message, interrupt, sm)
+}
+
+// TestAgentDM_CallerCancelMidDispatch_RowNotLeftPending reproduces
+// ptone/scion#4827: the caller's request was cancelled while the broker
+// dispatch was in flight, the dispatch failed with "context canceled", and
+// ExecuteAgentDM left the persisted row pending for the 24h TTL. The dispatch
+// now runs detached from the caller's cancellation, so it completes and the
+// row ends dispatched.
+func TestAgentDM_CallerCancelMidDispatch_RowNotLeftPending(t *testing.T) {
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	d := &cancelCallerDispatcher{recordingDispatcher: &recordingDispatcher{}, cancel: cancel}
+	srv.SetDispatcher(d)
+
+	result, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "caller-cancel-4827"))
+	require.Nil(t, dmErr)
+	require.NotNil(t, result)
+	assert.Equal(t, AgentDMAccepted, result.Outcome, "a caller cancel must not make the dispatch ambiguous")
+	msg, err := s.GetMessage(context.Background(), result.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchDispatched, msg.DispatchState, "the row must not be left pending")
+	assert.Len(t, d.getCalls(), 1, "the dispatch completed exactly once")
+}
+
+// TestAgentDM_DispatchKeepsCallerDeadline pins that the detached dispatch
+// still honors the caller's deadline (the mention fan-out bounds each copy
+// this way), so only a deadline can leave a row ambiguous.
+func TestAgentDM_DispatchKeepsCallerDeadline(t *testing.T) {
+	srv, _, _, sender, target, _, _ := deliverySetup(t)
+	want := time.Now().Add(10 * time.Second)
+	ctx, cancel := context.WithDeadline(context.Background(), want)
+	defer cancel()
+	d := &cancelCallerDispatcher{recordingDispatcher: &recordingDispatcher{}, cancel: func() {}}
+	srv.SetDispatcher(d)
+
+	_, dmErr := srv.ExecuteAgentDM(ctx, deliveryDMInput(sender, target, "caller-deadline-4827"))
+	require.Nil(t, dmErr)
+	require.True(t, d.hasDL, "the dispatch context must carry a deadline")
+	assert.True(t, d.deadline.Equal(want), "the dispatch deadline must be the caller's (got %s, want %s)", d.deadline, want)
+}
+
+// TestMentionFanout_NotFoundLeavesNoPendingRow pins that an agent message
+// mentioning a name that resolves to no agent (status not_found) writes no
+// message row at all, so it cannot leave a pending one (ptone/scion#4827).
+func TestMentionFanout_NotFoundLeavesNoPendingRow(t *testing.T) {
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
+	ctx := context.Background()
+	in := agentMentionFanoutInput{
+		Sender:          sender,
+		SenderIdent:     GetAgentIdentityFromContext(agentCtx(ctx, sender)),
+		Primary:         target,
+		Msg:             "cc @nobody-by-this-name-4827",
+		Type:            messages.TypeInstruction,
+		ParentMessageID: uuid.NewString(),
+	}
+	results := srv.fanOutAgentMentions(ctx, in)
+	require.Len(t, results, 1)
+	assert.Equal(t, "not_found", results[0].Status)
+	n, err := s.CountStuckPendingMessages(ctx, time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "a not_found mention must leave no pending row")
+	page, err := s.ListMessages(ctx, store.MessageFilter{AgentID: sender.ID}, store.ListOptions{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, page.Items, "a not_found mention writes no message row")
+}
+
+// TestDispatchContext_DetachesCancelKeepsCap pins dispatchContext: a parent
+// that is already cancelled does not cancel the dispatch, and a parent with
+// no deadline still gets the cap.
+func TestDispatchContext_DetachesCancelKeepsCap(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+	ctx, dcancel := dispatchContext(parent, time.Minute)
+	defer dcancel()
+	assert.NoError(t, ctx.Err(), "the caller's cancellation must not reach the dispatch")
+	dl, ok := ctx.Deadline()
+	require.True(t, ok, "the dispatch must be capped")
+	assert.WithinDuration(t, time.Now().Add(time.Minute), dl, 5*time.Second)
 }

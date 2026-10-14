@@ -27,6 +27,7 @@ import (
 	"github.com/GoogleCloudPlatform/scion/pkg/ent"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/message"
 	"github.com/GoogleCloudPlatform/scion/pkg/ent/predicate"
+	"github.com/GoogleCloudPlatform/scion/pkg/messages"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/google/uuid"
 )
@@ -669,6 +670,7 @@ func (s *MessageStore) logDefaultedPending(msg *store.Message) {
 		"message_id", msg.ID,
 		"sender", msg.Sender,
 		"recipient", msg.Recipient,
+		"type", messages.LogType(msg.Type),
 		"creation_path", store.MessagePendingPathStoreDefault,
 	)
 }

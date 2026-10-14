@@ -358,8 +358,11 @@ func TestDelivery_WriteAgentDMResult_Ambiguous(t *testing.T) {
 func TestDelivery_ContextCancellation_AmbiguousOutcome(t *testing.T) {
 	srv, s, _, sender, target, _, _ := deliverySetup(t)
 
-	// Create a dispatcher that returns context.Canceled to simulate
-	// the request being cancelled during the dispatch call.
+	// A dispatcher that itself reports context.Canceled. The caller's
+	// cancellation no longer reaches the dispatch (dispatchContext,
+	// ptone/scion#4827; see TestAgentDM_CallerCancelMidDispatch_RowNotLeftPending),
+	// but a cancellation error that still comes back is classified
+	// ambiguous like any context error.
 	cancelDispatcher := &recordingDispatcher{returnErr: context.Canceled}
 	srv.SetDispatcher(cancelDispatcher)
 
@@ -380,7 +383,7 @@ func TestDelivery_ContextCancellation_AmbiguousOutcome(t *testing.T) {
 }
 
 func TestDelivery_DeadlineExceeded_AmbiguousOutcome(t *testing.T) {
-	srv, _, _, sender, target, _, _ := deliverySetup(t)
+	srv, s, _, sender, target, _, _ := deliverySetup(t)
 
 	// Context deadline exceeded during dispatch is ambiguous.
 	deadlineDispatcher := &recordingDispatcher{returnErr: context.DeadlineExceeded}
@@ -391,6 +394,12 @@ func TestDelivery_DeadlineExceeded_AmbiguousOutcome(t *testing.T) {
 	require.Nil(t, dmErr)
 	require.NotNil(t, result)
 	assert.Equal(t, AgentDMAmbiguous, result.Outcome)
+
+	// AC-4: a deadline-ambiguous row stays pending by design.
+	msg, err := s.GetMessage(ctx, result.MessageID)
+	require.NoError(t, err)
+	assert.Equal(t, store.MessageDispatchPending, msg.DispatchState,
+		"a deadline-ambiguous row must stay pending (AC-4)")
 }
 
 // ---------------------------------------------------------------------------

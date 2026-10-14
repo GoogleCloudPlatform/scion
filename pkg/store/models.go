@@ -2008,8 +2008,8 @@ const (
 
 // MessageEnteredPendingLogMsg is the text of the one structured log line
 // written whenever a message row is persisted in dispatch_state "pending"
-// (ptone/scion#4827). The line carries message_id, sender, recipient and
-// creation_path, and never the body. The hub call sites and the store-level
+// (ptone/scion#4827). The line carries message_id, sender, recipient, type
+// (messages.LogType) and creation_path, and never the body. The hub call sites and the store-level
 // default share this text so a row reported by the stuck-pending sweep can
 // be traced to its writer with one search.
 const MessageEnteredPendingLogMsg = "message dispatch: row entered pending"
