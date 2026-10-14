@@ -94,13 +94,14 @@ type ProfileCatalogFinding struct {
 // after, the profiles that before has and after drops unused, and the
 // single-stored-profile fallback of active_profile.
 //
-// after and before are effective settings as the system resolves them:
-// LoadEffectiveSettings, then the hub-stored profile overlay applied
-// (SettingsOverlay.Apply). before is what the running system resolves today;
-// after is what it will resolve, for example with a candidate or re-synced
-// stored set. A caller evaluating a candidate stored set applies it through a
-// throwaway overlay (NewSettingsOverlay, Update, Apply) and never installs
-// that overlay as the global one; Apply may log the single-profile fallback.
+// after and before are effective settings as the system resolves them, each
+// built with ProfileCatalogView from the stored set it reflects: before from
+// the stored set the running system applies today, after from the candidate
+// or re-synced one. Do not build them with LoadEffectiveSettings followed by
+// another overlay: LoadEffectiveSettings already applies the installed global
+// overlay, so a second overlay would keep an old stored set when the new one
+// is empty, and would lose the configured active_profile when the first
+// overlay's single-profile fallback already rewrote it.
 // A nil before is allowed: Source then comes from origins only (never
 // "stored"), PreExisting is false, and nothing is reported as dropped.
 //
@@ -205,6 +206,24 @@ func CheckProfileCatalog(after, before *VersionedSettings, origins map[string]Pr
 	return out
 }
 
+// ProfileCatalogView builds a settings view for CheckProfileCatalog:
+// projectPath's effective settings without the installed global overlay,
+// then storedRuntimes and storedProfiles applied through a fresh overlay, as
+// the hub's overlay applies a stored set. A nil or empty map leaves that
+// section unmanaged, so the settings files and built-in defaults stay in
+// effect (ptone/scion#5007). The fresh overlay is never installed globally;
+// Apply may log its single-profile fallback.
+func ProfileCatalogView(projectPath string, storedRuntimes map[string]V1RuntimeConfig, storedProfiles map[string]V1ProfileConfig) (*VersionedSettings, error) {
+	vs, _, err := loadEffectiveSettings(projectPath, false)
+	if err != nil {
+		return nil, err
+	}
+	o := NewSettingsOverlay()
+	o.Update(storedRuntimes, storedProfiles, nil, "")
+	o.Apply(vs)
+	return vs, nil
+}
+
 // hasProfile reports whether vs defines profile name.
 func hasProfile(vs *VersionedSettings, name string) bool {
 	_, ok := vs.Profiles[name]
@@ -241,6 +260,8 @@ func activeProfileResolves(vs *VersionedSettings) bool {
 // labelled here; CheckProfileCatalog labels them "stored" from before.
 func ProfileOrigins(projectPath string) (map[string]ProfileSource, error) {
 	out := map[string]ProfileSource{}
+	// The same branch LoadEffectiveSettings takes; the second result
+	// (a missing schema_version) only feeds its warnings.
 	if hasVersioned, _ := detectHierarchyFormat(projectPath); !hasVersioned {
 		legacy, err := LoadSettingsKoanf(projectPath)
 		if err != nil {

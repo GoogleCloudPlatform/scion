@@ -61,21 +61,25 @@ func catalogHome(t *testing.T, active string, fileProfiles ...string) string {
 	return globalDir
 }
 
-// catalogView loads globalDir's effective settings and, when stored is not
-// nil, applies it as the hub-stored profile set through a fresh overlay.
+// storedProfiles is a stored profile set of the named profiles, each on the
+// "docker" runtime; nil for no stored set.
+func storedProfiles(names []string) map[string]V1ProfileConfig {
+	if names == nil {
+		return nil
+	}
+	profiles := map[string]V1ProfileConfig{}
+	for _, p := range names {
+		profiles[p] = V1ProfileConfig{Runtime: "docker"}
+	}
+	return profiles
+}
+
+// catalogView is ProfileCatalogView of globalDir with stored as the stored
+// profile set (nil: none).
 func catalogView(t *testing.T, globalDir string, stored []string) *VersionedSettings {
 	t.Helper()
-	vs, _, err := LoadEffectiveSettings(globalDir)
+	vs, err := ProfileCatalogView(globalDir, nil, storedProfiles(stored))
 	require.NoError(t, err)
-	if stored != nil {
-		profiles := map[string]V1ProfileConfig{}
-		for _, p := range stored {
-			profiles[p] = V1ProfileConfig{Runtime: "docker"}
-		}
-		o := NewSettingsOverlay()
-		o.Update(nil, profiles, nil, "")
-		o.Apply(vs)
-	}
 	return vs
 }
 
@@ -243,6 +247,37 @@ func TestCheckProfileCatalog_Fixtures(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) { runCatalogCase(t, c) })
+	}
+}
+
+// With the running hub's overlay installed globally, ProfileCatalogView
+// ignores it: an empty candidate stored set leaves the files and built-ins,
+// and a single-profile fallback keeps the configured active_profile.
+func TestProfileCatalogView_IgnoresGlobalOverlay(t *testing.T) {
+	globalDir := catalogHome(t, "local", "gke", "local-nfs")
+	running := NewSettingsOverlay()
+	running.Update(nil, storedProfiles([]string{"gke"}), nil, "")
+	SetGlobalSettingsOverlay(running) // catalogHome restores the previous overlay
+
+	before := catalogView(t, globalDir, []string{"gke"})
+	after := catalogView(t, globalDir, []string{})
+	for _, name := range []string{"gke", "local-nfs", "local", "remote"} {
+		if !hasProfile(after, name) {
+			t.Fatalf("after with an empty stored set lacks %q: the global overlay was applied", name)
+		}
+	}
+	if before.activeProfileFallbackFrom == nil || *before.activeProfileFallbackFrom != "local" {
+		t.Fatalf("before lost the configured active_profile: fallback from %v, want \"local\"", before.activeProfileFallbackFrom)
+	}
+	// The change from the unmanaged view to the one-profile stored set.
+	got := CheckProfileCatalog(before, after, catalogOrigins(t, globalDir), nil, map[string]int{"": 2})
+	want := []ProfileCatalogFinding{
+		{Kind: ProfileFindingActiveProfileFallback, Profile: "local", Agents: 2, Source: ProfileSourceBuiltin},
+		{Kind: ProfileFindingDroppedUnused, Profile: "local-nfs", Source: ProfileSourceFile},
+		{Kind: ProfileFindingDroppedUnused, Profile: "remote", Source: ProfileSourceBuiltin},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("findings with a global overlay installed:\n got  %+v\n want %+v", got, want)
 	}
 }
 

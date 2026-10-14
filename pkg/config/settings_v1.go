@@ -5330,6 +5330,13 @@ func settingsCandidateDirs(projectPath string) []string {
 // - If all user files are legacy or absent → uses LoadSettingsKoanf + AdaptLegacySettings
 // Returns (settings, deprecation_warnings, error).
 func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, error) {
+	return loadEffectiveSettings(projectPath, true)
+}
+
+// loadEffectiveSettings is LoadEffectiveSettings; withGlobalOverlay false
+// skips the installed global settings overlay, for a caller that applies a
+// stored set of its own (ProfileCatalogView).
+func loadEffectiveSettings(projectPath string, withGlobalOverlay bool) (*VersionedSettings, []string, error) {
 	hasVersioned, missingSchemaVersion := detectHierarchyFormat(projectPath)
 	if hasVersioned {
 		vs, err := LoadVersionedSettings(projectPath)
@@ -5342,7 +5349,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 		}
 		// Apply DB-backed settings overlay (co-located hub+broker mode).
 		// DB values win over file values for runtimes, profiles, harness_configs.
-		if o := globalOverlay; o != nil {
+		if o := globalOverlay; o != nil && withGlobalOverlay {
 			o.Apply(vs)
 		}
 		return vs, warnings, nil
@@ -5385,7 +5392,7 @@ func LoadEffectiveSettings(projectPath string) (*VersionedSettings, []string, er
 	vs, legacyWarnings := AdaptLegacySettings(legacy)
 	warnings = append(warnings, legacyWarnings...)
 	// Apply DB-backed settings overlay (co-located hub+broker mode).
-	if o := globalOverlay; o != nil {
+	if o := globalOverlay; o != nil && withGlobalOverlay {
 		o.Apply(vs)
 	}
 	return vs, warnings, nil
