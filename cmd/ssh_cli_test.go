@@ -276,27 +276,27 @@ func TestSSHCLI_TunnelHostKeyHint(t *testing.T) {
 	t.Setenv("SCION_HUB_TOKEN", "tok")
 
 	c, out := hintTestCommand()
-	tunnelSSHHostKeyHint(c, true, hub.srv.URL, "a-b", "c")
+	tunnelSSHHostKeyHintIn(c, true, hub.srv.URL, "a-b", "c", sshPinSource{})
 	assert.Empty(t, out.String(), "matching key: no hint")
 
 	hub.rotateKey(t, "ag-c")
 	c, out = hintTestCommand()
-	tunnelSSHHostKeyHint(c, true, hub.srv.URL, "a-b", "c")
+	tunnelSSHHostKeyHintIn(c, true, hub.srv.URL, "a-b", "c", sshPinSource{})
 	assert.Equal(t, sshRecreatedHint+"\n", out.String())
 
 	c, out = hintTestCommand()
-	tunnelSSHHostKeyHint(c, false, hub.srv.URL, "a-b", "c")
+	tunnelSSHHostKeyHintIn(c, false, hub.srv.URL, "a-b", "c", sshPinSource{})
 	assert.Empty(t, out.String(), "without --ssh: nothing")
 
 	hub.deleteAgent("ag-c")
 	c, out = hintTestCommand()
-	tunnelSSHHostKeyHint(c, true, hub.srv.URL, "a-b", "c")
+	tunnelSSHHostKeyHintIn(c, true, hub.srv.URL, "a-b", "c", sshPinSource{})
 	assert.Empty(t, out.String(), "a failed fetch is silent")
 
 	hub.srv.Close()
 	c, out = hintTestCommand()
 	start := time.Now()
-	tunnelSSHHostKeyHint(c, true, hub.srv.URL, "a-b", "c")
+	tunnelSSHHostKeyHintIn(c, true, hub.srv.URL, "a-b", "c", sshPinSource{})
 	assert.Empty(t, out.String(), "an unreachable hub is silent")
 	assert.Less(t, time.Since(start), sshHostKeyHintTimeout+time.Second)
 }

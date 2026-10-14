@@ -535,7 +535,7 @@ func TestStartClaim_LaunchEndSettlement(t *testing.T) {
 
 	for i, reason := range []string{
 		store.LaunchEndReasonSucceeded, store.LaunchEndReasonRunningObserved,
-		store.LaunchEndReasonFailed, store.LaunchEndReasonNotLaunched,
+		store.LaunchEndReasonFailed,
 		store.LaunchEndReasonTimedOut, store.LaunchEndReasonLost, store.LaunchEndReasonSuperseded,
 	} {
 		t.Run(reason, func(t *testing.T) {
@@ -565,6 +565,58 @@ func TestStartClaim_LaunchEndSettlement(t *testing.T) {
 			}
 		})
 	}
+
+	// not_launched is written only on the claim holder's own dispatch path,
+	// so it leaves the claim to the holder, which settles it by outcome
+	// (ptone/scion#4709).
+	t.Run("not_launched leaves the holder's claim live and linked", func(t *testing.T) {
+		a := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-notl")
+		c, err := s.ClaimAgentStart(ctx, a.ID, "hub-1", store.StartClaimCreate, "", testClaimTTL)
+		require.NoError(t, err)
+		launchID, err := s.BeginLaunch(ctx, a.ID, store.LaunchKindCreate, time.Hour)
+		require.NoError(t, err)
+		before, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		require.Equal(t, launchID, before.StartClaimLaunchID)
+		require.NoError(t, s.EndLaunch(ctx, a.ID, launchID, store.LaunchEndReasonNotLaunched))
+
+		got, err := s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, store.LaunchEndReasonNotLaunched, got.LaunchEndReason)
+		assert.Equal(t, c.ID, got.StartClaimID, "not_launched does not release the claim")
+		assert.Equal(t, store.StartClaimLive, got.StartClaimState)
+		assert.Equal(t, launchID, got.StartClaimLaunchID, "the claim stays linked")
+		assert.Equal(t, before.StartClaimOwner, got.StartClaimOwner)
+		require.NotNil(t, before.StartClaimLeaseUntil)
+		require.NotNil(t, got.StartClaimLeaseUntil)
+		assert.True(t, before.StartClaimLeaseUntil.Equal(*got.StartClaimLeaseUntil), "the lease is unchanged")
+		assert.Nil(t, got.StartClaimUnconfirmedAt)
+
+		changed, err := s.SettleEndedLaunchClaim(ctx, a.ID, c.ID)
+		require.NoError(t, err)
+		assert.False(t, changed, "the backstop settles nothing for not_launched")
+
+		held, err := s.MarkStartUnconfirmed(ctx, a.ID, c.ID, "hub-1", time.Minute)
+		require.NoError(t, err)
+		assert.True(t, held, "the holder can still keep its claim unconfirmed")
+		got, err = s.GetAgent(ctx, a.ID)
+		require.NoError(t, err)
+		assert.Equal(t, c.ID, got.StartClaimID)
+		assert.Equal(t, store.StartClaimUnconfirmed, got.StartClaimState)
+
+		b := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-notl-rel")
+		cb, err := s.ClaimAgentStart(ctx, b.ID, "hub-1", store.StartClaimCreate, "", testClaimTTL)
+		require.NoError(t, err)
+		launchB, err := s.BeginLaunch(ctx, b.ID, store.LaunchKindCreate, time.Hour)
+		require.NoError(t, err)
+		require.NoError(t, s.EndLaunch(ctx, b.ID, launchB, store.LaunchEndReasonNotLaunched))
+		held, err = s.ReleaseAgentStart(ctx, b.ID, cb.ID, "hub-1")
+		require.NoError(t, err)
+		assert.True(t, held, "the holder still holds the claim and releases it")
+		got, err = s.GetAgent(ctx, b.ID)
+		require.NoError(t, err)
+		assert.Empty(t, got.StartClaimID)
+	})
 
 	t.Run("non-create claim untouched", func(t *testing.T) {
 		a := createLaunchableAgent(t, ctx, s, projectID, "sc-settle-user")

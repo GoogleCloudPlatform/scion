@@ -38,6 +38,7 @@ var (
 	deleteStopped     bool
 	deleteForce       bool
 	deleteCleanupOnly bool
+	deleteSelf        bool
 )
 
 // deleteCmd represents the delete command
@@ -62,7 +63,12 @@ agent directory and, unless --preserve-branch is given, its git branch. Use
 it when a delete went through on the Hub but the local cleanup failed. It
 refuses while the Hub still has the agent (run 'scion delete <agent>'
 instead). When the Hub cannot be checked (unreachable, or no Hub in use) it
-refuses unless --force is given.`,
+refuses unless --force is given.
+
+Inside an agent, if a named agent is the current agent (the one the
+command runs in), the command refuses and deletes none of the named agents
+unless --self is given. Other agents are deleted as usual. Outside an agent
+container --self has no effect.`,
 	ValidArgsFunction: getMultiAgentNames,
 	Args: func(cmd *cobra.Command, args []string) error {
 		if deleteStopped {
@@ -102,11 +108,21 @@ refuses unless --force is given.`,
 
 		if deleteCleanupOnly {
 			hubCtx, hubErr := requireHub(projectPath)
+			if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
+				return err
+			}
 			return deleteAgentsCleanupOnly(hubCtx, hubErr, args)
 		}
 
 		hubCtx, err := requireHub(projectPath)
 		if err != nil {
+			return err
+		}
+
+		// Checked for every named agent before any delete, so a refusal
+		// leaves all of them in place. With --stopped there are no named
+		// agents, and the current agent is running, so it is never listed.
+		if err := refuseCurrentAgentTarget(args, hubProjectID(hubCtx), deleteSelf); err != nil {
 			return err
 		}
 
@@ -754,5 +770,6 @@ func init() {
 	deleteCmd.Flags().BoolVarP(&preserveBranch, "preserve-branch", "b", false, "Preserve the git branch associated with the worktree")
 	deleteCmd.Flags().BoolVar(&deleteStopped, "stopped", false, "Delete all agents with stopped containers")
 	deleteCmd.Flags().BoolVar(&deleteCleanupOnly, "cleanup-only", false, "Only remove the agent's local files (worktree, agent directory, branch unless --preserve-branch); refuses while the Hub still has the agent")
+	deleteCmd.Flags().BoolVar(&deleteSelf, "self", false, "Allow deleting the current agent when run inside an agent; without it, naming the current agent is refused")
 	deleteCmd.Flags().BoolVarP(&deleteForce, "force", "f", false, "Delete from the Hub even if the broker is unreachable or cannot find the agent; permanent (no soft-delete)")
 }

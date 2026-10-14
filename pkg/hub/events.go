@@ -52,7 +52,10 @@ type EventPublisher interface {
 	PublishUserMessage(ctx context.Context, msg *store.Message, attachments []AttachmentRef, artifactRefs []artifacts.MessageRef)
 	PublishAgentPorts(ctx context.Context, agent *store.Agent)
 	PublishAllowListChanged(ctx context.Context, action string, email string)
-	PublishInviteChanged(ctx context.Context, action string, inviteID string, codePrefix string)
+	// PublishInviteChanged emits admin.invite.changed carrying only the
+	// invite id and the action. No part of the invite code is included; the
+	// admin UI reads the code prefix from the invite row.
+	PublishInviteChanged(ctx context.Context, action string, inviteID string)
 	// PublishDispatchDone emits a slim completion event on
 	// broker.dispatch.<dispatchID>.done so the originator's subscription wakes
 	// and reads the result from the dispatch row (design §6.3).
@@ -135,7 +138,7 @@ func (noopEventPublisher) PublishUserMessage(_ context.Context, _ *store.Message
 }
 func (noopEventPublisher) PublishAgentPorts(_ context.Context, _ *store.Agent)    {}
 func (noopEventPublisher) PublishAllowListChanged(_ context.Context, _, _ string) {}
-func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _, _ string) {}
+func (noopEventPublisher) PublishInviteChanged(_ context.Context, _, _ string)    {}
 func (noopEventPublisher) PublishDispatchDone(_ context.Context, _ string)        {}
 func (noopEventPublisher) PublishChatTopicEvent(_ context.Context, _ string, _ string, _ WebChatTopic) {
 }
@@ -363,11 +366,13 @@ type AllowListChangedEvent struct {
 	Email  string `json:"email,omitempty"`
 }
 
-// InviteChangedEvent is published when an invite code is created, redeemed, revoked, or deleted.
+// InviteChangedEvent is published when an invite code is created, redeemed,
+// revoked, or deleted. It carries identifiers only: no hub event channel
+// carries credential material, so no part of the invite code is included.
+// Consumers read the code prefix from the invite row.
 type InviteChangedEvent struct {
-	Action     string `json:"action"` // "created", "redeemed", "revoked", "deleted"
-	InviteID   string `json:"inviteId"`
-	CodePrefix string `json:"codePrefix,omitempty"`
+	Action   string `json:"action"` // "created", "redeemed", "revoked", "deleted"
+	InviteID string `json:"inviteId"`
 }
 
 // DispatchDoneEvent is a slim completion event emitted by the owner when a
@@ -740,11 +745,10 @@ func (p *eventBuilder) PublishAllowListChanged(_ context.Context, action, _ stri
 }
 
 // PublishInviteChanged publishes an invite code change event.
-func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID, codePrefix string) {
+func (p *eventBuilder) PublishInviteChanged(_ context.Context, action, inviteID string) {
 	evt := InviteChangedEvent{
-		Action:     action,
-		InviteID:   inviteID,
-		CodePrefix: codePrefix,
+		Action:   action,
+		InviteID: inviteID,
 	}
 	p.sink("admin.invite.changed", evt)
 }

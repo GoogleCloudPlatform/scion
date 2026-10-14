@@ -23,7 +23,8 @@
  * Picking attaches the current version. The hub checks every picked
  * reference again at send. With nothing to list, the empty state offers
  * New artifact, which opens the artifact publish dialog for the
- * conversation's project (ptone/scion#3761).
+ * conversation's project (ptone/scion#3761), to a caller the hub says may
+ * publish there (ptone/scion#4584).
  */
 
 import { LitElement, html, css, nothing } from 'lit';
@@ -32,6 +33,7 @@ import { apiFetch, extractApiError } from '../../../client/api.js';
 import {
   artifactListUrl,
   formatArtifactRef,
+  listProjectArtifacts,
   type ArtifactListItem,
   type ArtifactListResponse,
   type ArtifactResponse,
@@ -94,6 +96,12 @@ export class ScionArtifactPicker extends LitElement {
   @state() private names = new Map<string, string>();
   /** Whether the New artifact publish dialog is open. */
   @state() private publishOpen = false;
+  /** The project the hub said the caller may publish in, if any. */
+  @state() private canCreateFor = '';
+
+  /** The project whose create capability was asked for. */
+  private createAskedFor = '';
+  private createGen = 0;
 
   private generation = 0;
   private searchTimer: ReturnType<typeof setTimeout> | null = null;
@@ -105,6 +113,14 @@ export class ScionArtifactPicker extends LitElement {
       this.filter = 'all';
       this.publishOpen = false;
       void this.load(false);
+    }
+    if (
+      this.open &&
+      this.projectId &&
+      this.createAskedFor !== this.projectId &&
+      this.showsEmptyState()
+    ) {
+      void this.loadCanCreate(this.projectId);
     }
   }
 
@@ -243,6 +259,34 @@ export class ScionArtifactPicker extends LitElement {
     void this.load(false);
   }
 
+  /** Whether the list shows its empty state, the only place with New artifact. */
+  private showsEmptyState(): boolean {
+    return (
+      !this.loading &&
+      !this.error &&
+      this.items.length === 0 &&
+      !this.query.trim() &&
+      this.filter === 'all'
+    );
+  }
+
+  /**
+   * Asks the hub, once per project, whether the caller may publish in it:
+   * canCreate on a one-row list narrowed to the project, as the picker's own
+   * lists may not be. New artifact stays hidden until it says yes, and on a
+   * failure.
+   */
+  private async loadCanCreate(projectId: string): Promise<void> {
+    this.createAskedFor = projectId;
+    const gen = ++this.createGen;
+    try {
+      const page = await listProjectArtifacts(projectId, { limit: 1 });
+      if (gen === this.createGen && page.canCreate === true) this.canCreateFor = projectId;
+    } catch {
+      // New artifact stays hidden.
+    }
+  }
+
   private close(): void {
     this.dispatchEvent(new CustomEvent('artifact-picker-close', { bubbles: true, composed: true }));
   }
@@ -256,13 +300,14 @@ export class ScionArtifactPicker extends LitElement {
       return html`<div class="placeholder error">${this.error}</div>`;
     }
     if (rows.length === 0) {
+      const canCreate = !!this.projectId && this.canCreateFor === this.projectId;
       return this.query.trim() || this.filter !== 'all'
         ? html`<div class="placeholder">No artifacts match.</div>`
         : html`<div class="placeholder empty">
             <div class="empty-title">No artifacts yet</div>
             Artifacts you can read appear here. Agents publish them as they
-            work${this.projectId ? ', and you can create one.' : '.'}
-            ${this.projectId
+            work${canCreate ? ', and you can create one.' : '.'}
+            ${canCreate
               ? html`<div class="empty-action">
                   <sl-button
                     size="small"

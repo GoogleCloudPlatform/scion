@@ -248,7 +248,7 @@ func TestAgentDelegationManagement_BoundAgentToken(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, f.store.CreateAgentCredential(ctx, ac))
 		require.NoError(t, f.store.RevokeAgentCredential(ctx, ac.ID, "test", "test"))
-		adtAssertAPIError(t, f.readGrant(t, revoked, f.agentA.ID, grant.ID), http.StatusUnauthorized, ErrCodeUnauthorized)
+		adtAssertAPIError(t, f.readGrant(t, revoked, f.agentA.ID, grant.ID), http.StatusUnauthorized, agentTokenRefusedCode)
 
 		g, err := f.store.GetAgentDelegationGrant(ctx, grant.ID)
 		require.NoError(t, err)
