@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/GoogleCloudPlatform/scion/pkg/artifacts"
 	"github.com/GoogleCloudPlatform/scion/pkg/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -212,4 +213,55 @@ func TestArtifactHostMayGrantReview_ChainLive(t *testing.T) {
 		assert.False(t, f.may(newArtifactHost(&Server{}), f.user(f.admin), f.agent.ID, f.home))
 		assert.False(t, f.may(&artifactHost{}, f.user(f.admin), f.agent.ID, f.home))
 	})
+}
+
+// TestArtifactHostReviewGrantClause: ReviewGrantClause makes MayGrantReview's
+// decision and names its clause, project administration first
+// (ptone/scion#5120).
+func TestArtifactHostReviewGrantClause(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	cases := []struct {
+		name     string
+		identity Identity
+		agentID  string
+		home     string
+		want     string
+	}{
+		{"delegating user", f.user(f.delegator), f.agent.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"delegating user, agent-spawned agent", f.user(f.delegator), f.child.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"home-project admin", f.user(f.admin), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
+		{"home-project owner", f.user(f.owner), f.agent.ID, f.home, artifacts.ReviewClauseProjectAdmin},
+		{"another user's delegate", f.user(f.member), f.sibling.ID, f.home, artifacts.ReviewClauseDelegatingUser},
+		{"plain project member", f.user(f.member), f.agent.ID, f.home, ""},
+		{"admin of another project", f.user(f.otherAdmin), f.agent.ID, f.home, ""},
+		{"no identity", nil, f.agent.ID, f.home, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.identity != nil {
+				ctx = contextWithIdentity(ctx, tc.identity)
+			}
+			assert.Equal(t, tc.want, host.ReviewGrantClause(ctx, tc.agentID, tc.home))
+			assert.Equal(t, tc.want != "", host.MayGrantReview(ctx, tc.agentID, tc.home), "MayGrantReview agrees")
+		})
+	}
+}
+
+// TestArtifactHostReviewGrantClauseAuditsOnce: naming the clause costs no
+// extra authorization decision: a delegating user's ReviewGrantClause
+// records exactly the decisions MayGrantReview records (its one
+// project.manage check), so the decision log never adds an audit record.
+func TestArtifactHostReviewGrantClauseAuditsOnce(t *testing.T) {
+	f := newReviewGrantFixture(t)
+	host := newArtifactHost(f.srv)
+	ctx := contextWithIdentity(context.Background(), f.user(f.delegator))
+	emitter := &recordingDecisionAuditEmitter{}
+	f.srv.authzService.SetDecisionAuditEmitter(emitter)
+	require.True(t, host.MayGrantReview(ctx, f.agent.ID, f.home))
+	may := len(emitter.records)
+	emitter.records = nil
+	require.Equal(t, artifacts.ReviewClauseDelegatingUser, host.ReviewGrantClause(ctx, f.agent.ID, f.home))
+	assert.Equal(t, may, len(emitter.records), "ReviewGrantClause records the same decisions as MayGrantReview")
 }

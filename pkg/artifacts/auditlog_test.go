@@ -254,6 +254,9 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 		{delegator, reviewerID, logAuthorityDelegatingUser},
 		{projAdmin, memberID, logAuthorityProjectAdmin},
 	} {
+		f.host.mu.Lock()
+		f.host.calls = nil
+		f.host.mu.Unlock()
 		if rec := f.postGrantBody(tc.caller, id, reviewBody(SubjectPrincipal, tc.subject, GrantReview)); rec.Code != http.StatusCreated {
 			t.Fatalf("review grant by %s: %d %s", tc.caller.ref, rec.Code, rec.Body.String())
 		}
@@ -263,6 +266,22 @@ func TestDecisionLogReviewGrant(t *testing.T) {
 			logKeyPrincipalID: tc.caller.ref, logKeySubjectKind: SubjectPrincipal, logKeySubjectRef: tc.subject,
 			logKeyPermission: GrantReview, logKeyOwnerKind: PrincipalKindAgent,
 		})
+		// The clause comes from the host's one review evaluation: no second
+		// question (no AdministersScope call) is asked for the log.
+		f.host.mu.Lock()
+		reviews, administers := 0, 0
+		for _, call := range f.host.calls {
+			switch {
+			case strings.HasPrefix(call, "review "):
+				reviews++
+			case strings.HasPrefix(call, "administers "):
+				administers++
+			}
+		}
+		f.host.mu.Unlock()
+		if reviews != 1 || administers != 0 {
+			t.Errorf("grant by %s asked review %d times and AdministersScope %d times, want 1 and 0", tc.caller.ref, reviews, administers)
+		}
 	}
 }
 
@@ -691,4 +710,61 @@ func TestDecisionLogLinkSubjectRefNeverWritten(t *testing.T) {
 	if strings.Contains(raw, "token-hash-sentinel") {
 		t.Errorf("the link subject ref reached the entry: %s", raw)
 	}
+}
+
+// noClauseHost is the fake host without ReviewGrantClauser: it allows review
+// grants through ReviewGrantAuthority alone, which does not name the clause.
+type noClauseHost struct {
+	Host
+	ReviewGrantAuthority
+	ReviewSubjectAuthority
+}
+
+// TestDecisionLogReviewGrantUnnamedClause: on a host that does not name the
+// clause, a review grant is logged with authority review_grantor, and the
+// host is asked once (MayGrantReview), never a second question.
+func TestDecisionLogReviewGrantUnnamedClause(t *testing.T) {
+	f, id := newReviewGrantFixture(t)
+	f.svc.host = noClauseHost{f.host, f.host, f.host}
+	c := captureLog(f, slog.LevelDebug)
+	f.host.mu.Lock()
+	f.host.calls = nil
+	f.host.mu.Unlock()
+	if rec := f.postGrantBody(delegator, id, reviewBody(SubjectPrincipal, reviewerID, GrantReview)); rec.Code != http.StatusCreated {
+		t.Fatalf("review grant: %d %s", rec.Code, rec.Body.String())
+	}
+	entries, _ := c.take(t)
+	checkEntry(t, "unnamed clause", one(t, "unnamed clause", entries), "INFO", map[string]any{
+		logKeyAction: logActionGrantCreated, logKeyAuthority: logAuthorityReviewGrantor, logKeyPrincipalID: delegator.ref,
+	})
+	f.host.mu.Lock()
+	defer f.host.mu.Unlock()
+	reviews := 0
+	for _, call := range f.host.calls {
+		if strings.HasPrefix(call, "review ") {
+			reviews++
+		}
+	}
+	if reviews != 1 {
+		t.Errorf("the host was asked about review %d times, want 1: %v", reviews, f.host.calls)
+	}
+}
+
+// TestDecisionLogProjectAdminDelete: a delete by an administrator of the
+// home project is logged with authority project_admin (the event authority
+// custodian_project_admin is not a log value).
+func TestDecisionLogProjectAdminDelete(t *testing.T) {
+	f, id := newLinkFixture(t)
+	admin := principal{PrincipalKindUser, "user-home-admin", ""}
+	f.host.allow(admin, "project-1", PermissionRead)
+	f.host.allowAdmin(admin, "project-1")
+	c := captureLog(f, slog.LevelDebug)
+	if rec := f.do(&admin, http.MethodDelete, artifactPath(id), nil, nil); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete: %d %s", rec.Code, rec.Body.String())
+	}
+	entries, _ := c.take(t)
+	checkEntry(t, "project admin delete", one(t, "project admin delete", entries), "INFO", map[string]any{
+		logKeyAction: logActionDeleted, logKeyAuthority: logAuthorityProjectAdmin, logKeyPrincipalID: admin.ref,
+		logKeyArtifactID: id, logKeyProjectID: "project-1", logKeyOwnerKind: PrincipalKindUser,
+	})
 }

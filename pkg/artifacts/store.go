@@ -461,8 +461,9 @@ type Store interface {
 	// limit live artifacts of owner that are not marked, or clears it
 	// (orphaned false) on up to limit that are, recording one orphaned or
 	// unorphaned event per artifact in the same transaction. It returns
-	// the ids of those it changed; fewer than limit means none is left.
-	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]string, error)
+	// those it changed, each with its home scope; fewer than limit means none
+	// is left.
+	SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error)
 
 	// ListEvents returns the artifact_event rows of an artifact, oldest
 	// first.

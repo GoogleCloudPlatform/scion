@@ -357,6 +357,12 @@ func TestStoreOwnerReconcilerQueries(t *testing.T) {
 		owner := Owner{Kind: PrincipalKindAgent, Ref: "a-1"}
 		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 2 {
 			t.Fatalf("first batch = %d, %v; want 2", len(ids), err)
+		} else {
+			for _, ref := range ids {
+				if ref.ScopeRef != gone[0].ScopeRef {
+					t.Errorf("changed %s has scope %q, want %q", ref.ID, ref.ScopeRef, gone[0].ScopeRef)
+				}
+			}
 		}
 		if ids, err := st.SetOwnerOrphaned(ctx, owner, true, now, 2); err != nil || len(ids) != 1 {
 			t.Fatalf("second batch = %d, %v; want 1", len(ids), err)

@@ -210,9 +210,9 @@ func reconcileOwners(ctx context.Context, st Store, checker PrincipalChecker, no
 func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.Time, log *slog.Logger) (int, error) {
 	total := 0
 	for {
-		ids, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
-		logOwnerMarks(ctx, log, st, o, orphaned, now, ids)
-		n := len(ids)
+		refs, err := st.SetOwnerOrphaned(ctx, o, orphaned, now, orphanMarkBatch)
+		logOwnerMarks(ctx, log, o, orphaned, now, refs)
+		n := len(refs)
 		total += n
 		if err != nil || n < orphanMarkBatch {
 			return total, err
@@ -221,24 +221,16 @@ func markOwner(ctx context.Context, st Store, o Owner, orphaned bool, now time.T
 }
 
 // logOwnerMarks writes one entry per artifact of owner o whose orphan mark
-// a pass set (orphaned) or cleared. Each entry carries the artifact's home
-// project, read back from st only when the entries are written (the marked
-// artifacts are live); a failed read leaves it out of that entry.
-func logOwnerMarks(ctx context.Context, log *slog.Logger, st Store, o Owner, orphaned bool, now time.Time, ids []string) {
-	if len(ids) == 0 || !log.Enabled(ctx, slog.LevelInfo) {
-		return
-	}
+// a pass set (orphaned) or cleared, with its home project.
+func logOwnerMarks(ctx context.Context, log *slog.Logger, o Owner, orphaned bool, now time.Time, refs []ArtifactRef) {
 	action := logActionUnorphaned
 	var at *time.Time
 	if orphaned {
 		action, at = logActionOrphaned, &now
 	}
-	for _, id := range ids {
-		logged := &Artifact{ID: id, OwnerKind: o.Kind, OrphanedAt: at}
-		if a, err := st.GetArtifact(ctx, id); err == nil {
-			logged.ScopeRef = a.ScopeRef
-		}
-		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action, artifact: logged})
+	for _, ref := range refs {
+		writeSystemDecision(ctx, log, reconcilerActor, logEntry{action: action,
+			artifact: &Artifact{ID: ref.ID, ScopeRef: ref.ScopeRef, OwnerKind: o.Kind, OrphanedAt: at}})
 	}
 }
 

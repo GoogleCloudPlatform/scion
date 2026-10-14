@@ -202,33 +202,47 @@ func (h *artifactHost) Authorize(ctx context.Context, scopeRef, permission strin
 // Only users are answered; every other identity, a missing authz service,
 // and every lookup error answer false.
 func (h *artifactHost) MayGrantReview(ctx context.Context, ownerAgentID, homeScope string) bool {
+	return h.ReviewGrantClause(ctx, ownerAgentID, homeScope) != ""
+}
+
+var _ artifacts.ReviewGrantClauser = (*artifactHost)(nil)
+
+// ReviewGrantClause implements artifacts.ReviewGrantClauser: MayGrantReview's
+// single evaluation, naming the clause that allowed the caller
+// (artifacts.ReviewClauseProjectAdmin, checked first, or
+// artifacts.ReviewClauseDelegatingUser), or "" where MayGrantReview answers
+// false.
+func (h *artifactHost) ReviewGrantClause(ctx context.Context, ownerAgentID, homeScope string) string {
 	if h.server == nil || h.server.authzService == nil || ownerAgentID == "" || homeScope == "" {
-		return false
+		return ""
 	}
 	identity := GetIdentityFromContext(ctx)
 	if isNilIdentity(identity) {
-		return false
+		return ""
 	}
 	var userID string
 	switch id := identity.(type) {
 	case *AuthenticatedUser, *ScopedUserIdentity, *DevUser:
 		userID = id.ID()
 	default:
-		return false
+		return ""
 	}
 	if userID == "" {
-		return false
+		return ""
 	}
 	if h.AdministersScope(ctx, homeScope) {
-		return true
+		return artifacts.ReviewClauseProjectAdmin
 	}
 	root, err := h.server.authzService.ResolveProvenanceRoot(ctx, ownerAgentID, ResolveProvenanceOptions{PermissionID: artifacts.PermissionManage})
 	if err != nil {
 		slog.DebugContext(ctx, "artifacts: review grant: delegating user not resolved",
 			"agent_id", ownerAgentID, "cause", string(DenyCauseForProvenanceError(err)))
-		return false
+		return ""
 	}
-	return root.RootUser != nil && root.RootUser.ID == userID
+	if root.RootUser != nil && root.RootUser.ID == userID {
+		return artifacts.ReviewClauseDelegatingUser
+	}
+	return ""
 }
 
 // MemberScopes returns the projects the caller belongs to: for a user (a

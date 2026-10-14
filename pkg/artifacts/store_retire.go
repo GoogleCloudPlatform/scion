@@ -260,18 +260,19 @@ func ownersAfter(after *Owner) (string, []any) {
 }
 
 // SetOwnerOrphaned implements Store.
-func (s *sqlStore) SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]string, error) {
-	var changed []string
+func (s *sqlStore) SetOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int) ([]ArtifactRef, error) {
+	var changed []ArtifactRef
 	if _, err := s.setOwnerOrphaned(ctx, owner, orphaned, now, limit, &changed); err != nil {
 		return nil, err
 	}
 	return changed, nil
 }
 
-// setOwnerOrphaned is SetOwnerOrphaned, appending the id of each artifact
-// it changes to changed (valid only when it returns no error) and
-// returning how many it changed.
-func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int, changed *[]string) (int, error) {
+// setOwnerOrphaned is SetOwnerOrphaned, appending each artifact it changes,
+// with its home scope, to changed (valid only when it returns no error) and
+// returning how many it changed. It keeps the count result so this change
+// leaves the function's other lines as they were.
+func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned bool, now time.Time, limit int, changed *[]ArtifactRef) (int, error) {
 	if limit <= 0 {
 		return 0, errors.New("artifacts: SetOwnerOrphaned needs a positive limit")
 	}
@@ -284,20 +285,22 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 	if !orphaned {
 		cond, action = `orphaned_at IS NOT NULL`, EventUnorphaned
 	}
-	rows, err := tx.QueryContext(ctx, s.rebind(`SELECT id FROM artifact
+	rows, err := tx.QueryContext(ctx, s.rebind(`SELECT id, scope_ref FROM artifact
 		WHERE owner_kind = ? AND owner_ref = ? AND deleted_at IS NULL AND `+cond+`
 		ORDER BY id LIMIT `+strconv.Itoa(limit)), owner.Kind, owner.Ref)
 	if err != nil {
 		return 0, fmt.Errorf("artifacts: find owner's artifacts: %w", err)
 	}
 	var ids []string
+	scopeOf := map[string]string{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, scope string
+		if err := rows.Scan(&id, &scope); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("artifacts: scan artifact: %w", err)
 		}
 		ids = append(ids, id)
+		scopeOf[id] = scope
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
@@ -326,7 +329,7 @@ func (s *sqlStore) setOwnerOrphaned(ctx context.Context, owner Owner, orphaned b
 			map[string]any{"owner": PrincipalRef(owner.Kind, owner.Ref)}); err != nil {
 			return 0, err
 		}
-		*changed = append(*changed, id)
+		*changed = append(*changed, ArtifactRef{ID: id, ScopeRef: scopeOf[id]})
 		n++
 	}
 	if err := tx.Commit(); err != nil {

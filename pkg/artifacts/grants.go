@@ -357,6 +357,8 @@ func (s *Service) handlePutGrant(w http.ResponseWriter, r *http.Request, id stri
 // about why. The store re-checks the home and owner under the artifact's
 // lock and never replaces an existing read, write or admin grant.
 func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backend, a *Artifact) {
+	var clause string // the review clause that allowed the grant, for the decision log
+	r = r.WithContext(context.WithValue(r.Context(), reviewClauseNote{}, &clause))
 	ctx := r.Context()
 	subject, ok := s.reviewGrantSubject(r, a)
 	if !ok {
@@ -397,7 +399,7 @@ func (s *Service) putReviewGrant(w http.ResponseWriter, r *http.Request, b backe
 		writeError(w, http.StatusInternalServerError, "internal", "could not record the grant")
 		return
 	}
-	s.logGrantPut(r, a, g, created, s.reviewGrantLogAuthority(r, a))
+	s.logGrantPut(r, a, g, created, reviewGrantLogAuthority(clause))
 	status := http.StatusOK
 	if created {
 		status = http.StatusCreated
@@ -423,10 +425,20 @@ func (s *Service) reviewGrantCaller(ctx context.Context, a *Artifact) bool {
 // reviewGrantAuthorized reports whether the host's ReviewGrantAuthority
 // lets the caller of ctx give review access on a (the delegating user of
 // a's owning agent, the project owners and admins of a's home project, and
-// super-admins). A host without the authority answers no.
+// super-admins). A host without the authority answers no. A host with
+// ReviewGrantClauser is asked that instead, and the clause is kept for the
+// decision log when ctx carries a reviewClauseNote (putReviewGrant).
 func (s *Service) reviewGrantAuthorized(ctx context.Context, a *Artifact) bool {
-	authority, ok := s.host.(ReviewGrantAuthority)
-	return ok && authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef)
+	clause := reviewClauseUnnamed
+	if clauser, ok := s.host.(ReviewGrantClauser); ok {
+		clause = clauser.ReviewGrantClause(ctx, a.OwnerRef, a.ScopeRef)
+	} else if authority, ok := s.host.(ReviewGrantAuthority); !ok || !authority.MayGrantReview(ctx, a.OwnerRef, a.ScopeRef) {
+		clause = ""
+	}
+	if note, ok := ctx.Value(reviewClauseNote{}).(*string); ok {
+		*note = clause
+	}
+	return clause != ""
 }
 
 // mayGrantReview is the caller half of the review-grant decision (design
