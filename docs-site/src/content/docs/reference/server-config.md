@@ -1023,6 +1023,20 @@ For local development where the Hub runs on `localhost` but agents are in contai
 
 The endpoint resolved above (or `server.hub.agent_endpoint`, if set — see below) is what the co-located broker then forwards to the container, applying its own bridging rules (host-gateway mapping for a hostname on co-located Docker, no rewrite for an already-reachable IP, and the `cloudrun-sandbox` runtime's own link-local logic).
 
+#### The hub a Runtime Broker reports to
+
+A Runtime Broker sends its heartbeat and control channel to `server.broker.hub_endpoint` (`SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT`). On a combo server whose Runtime Broker runs next to the Hub, the Runtime Broker uses the Hub's localhost address when that setting is unset. A server that runs only a Runtime Broker falls back to the CLI's `hub.endpoint` (deprecated, see below). `scion runtime-broker register` and `join` save `server.broker.hub_endpoint` when it is unset, except on a host that runs a local workstation Hub, and never write `hub.endpoint`.
+
+#### Deprecated fallback to the CLI's hub endpoint
+
+`hub.endpoint` and `SCION_HUB_ENDPOINT` are CLI settings. The CLI now keeps its Hubs in a per-user hub list (see [Working with Several Hubs](/scion/hosted/user/multiple-hubs/)), and the server's own endpoints belong in `server.hub.public_url` and `server.broker.hub_endpoint`. When the server's endpoint actually comes from the legacy fallback, the server logs this warning once at startup:
+
+```text
+deprecated: the server's hub endpoint came from hub.endpoint/SCION_HUB_ENDPOINT; set server.hub.public_url (SCION_SERVER_HUB_ENDPOINT) or server.broker.hub_endpoint (SCION_SERVER_RUNTIMEBROKER_HUBENDPOINT).
+```
+
+There is no warning when removing the fallback would not change the result, for example on a workstation whose `hub.endpoint` is its own loopback address. On a host configured as a server, `scion doctor` reports the same text as its `server-hub-endpoint` check; it cannot see the server's flags, so it warns only when every way the server could run would be affected. Selecting a Hub with `scion use` never changes the endpoint a server advertises.
+
 #### Splitting the agent endpoint from the public URL
 
 `server.hub.agent_endpoint` overrides the endpoint above for agents only — invite links, chat-bridge links, the OIDC issuer default, and the `cloudrun_invoker` audience default keep reading `public_url`. Use it when agents must reach the Hub on an address that would be wrong for a human clicking a link, such as an internal VPC IP in a topology where a proxy fronts the Hub for users. When unset, agents receive the Hub's regular endpoint — `public_url`, or the endpoint the Hub resolves above when `public_url` is itself unset.
