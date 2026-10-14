@@ -105,6 +105,73 @@ func TestInitDevAuth_LogsTokenFilePath(t *testing.T) {
 	}
 }
 
+// TestInitDevAuth_RelativeTokenFile checks that a relative
+// server.auth.dev_token_file names a file under the global directory in
+// every start mode, not under the working directory: the server reads (or
+// creates) that file, and the log shows its absolute path, never the value.
+func TestInitDevAuth_RelativeTokenFile(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		global bool
+		// existing, when true, writes the token file before startup.
+		existing bool
+	}{
+		{name: "foreground existing file", existing: true},
+		{name: "foreground generated file"},
+		{name: "global existing file", global: true, existing: true},
+		{name: "global generated file", global: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("SCION_DEV_TOKEN", "")
+			t.Setenv("SCION_AUTH_TOKEN", "")
+			prevGlobal := globalMode
+			t.Cleanup(func() { globalMode = prevGlobal })
+			globalMode = tc.global
+
+			// The working directory holds a different file at the same
+			// relative path; the server must not use it or create one there.
+			cwd := t.TempDir()
+			t.Chdir(cwd)
+			rel := filepath.Join("tokens", "dev-token")
+			if tc.existing {
+				require.NoError(t, os.MkdirAll(filepath.Join(cwd, "tokens"), 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(cwd, rel), []byte("scion_dev_cwd\n"), 0o600))
+			}
+
+			globalDir := t.TempDir()
+			wantPath := filepath.Join(globalDir, rel)
+			if tc.existing {
+				require.NoError(t, os.MkdirAll(filepath.Dir(wantPath), 0o700))
+				require.NoError(t, os.WriteFile(wantPath, []byte(fixtureDevToken+"\n"), 0o600))
+			}
+			cfg := &config.GlobalConfig{}
+			cfg.Auth.Enabled = true
+			cfg.Auth.TokenFile = rel
+
+			out := captureDevTokenLog(t)
+			token, err := initDevAuth(cfg, globalDir)
+			require.NoError(t, err)
+			require.NotEmpty(t, token)
+
+			data, err := os.ReadFile(wantPath)
+			require.NoError(t, err, "the token file under the global directory should exist")
+			assert.True(t, strings.TrimSpace(string(data)) == token, "the server should use the token file under the global directory")
+			if tc.existing {
+				assert.True(t, token == fixtureDevToken, "the server should read the existing file under the global directory")
+			} else {
+				_, statErr := os.Stat(filepath.Join(cwd, rel))
+				assert.True(t, os.IsNotExist(statErr), "no token file should be created under the working directory")
+			}
+
+			// Compare without printing the log, which a failure would echo.
+			logged := out.String()
+			assert.True(t, strings.Contains(logged, wantDevTokenExport(wantPath)), "the log should show the file under the global directory")
+			assert.Equal(t, wantDevTokenExport(wantPath), devTokenStartupHint(cfg, globalDir))
+			assert.False(t, strings.Contains(logged, "scion_dev_"), "the log should not contain a token value")
+		})
+	}
+}
+
 // TestInitDevAuth_GeneratedTokenNotLogged covers first start, when the
 // server generates the token and writes the file itself.
 func TestInitDevAuth_GeneratedTokenNotLogged(t *testing.T) {

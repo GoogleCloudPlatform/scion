@@ -1809,7 +1809,7 @@ func initDevAuth(cfg *config.GlobalConfig, globalDir string) (string, error) {
 	devAuthCfg := apiclient.DevAuthConfig{
 		Enabled:   cfg.Auth.Enabled,
 		Token:     cfg.Auth.Token,
-		TokenFile: cfg.Auth.TokenFile,
+		TokenFile: devTokenFilePath(cfg.Auth.TokenFile, globalDir),
 	}
 
 	devAuthToken, err := apiclient.InitDevAuth(devAuthCfg, globalDir)
@@ -1862,12 +1862,18 @@ func devTokenStartupHint(cfg *config.GlobalConfig, globalDir string) string {
 }
 
 // devTokenFilePath returns the file the server keeps its dev token in: the
-// configured token file, or <globalDir>/dev-token by default.
+// configured token file, or <globalDir>/dev-token by default. A relative
+// configured path is resolved against globalDir, so it names the same file
+// however the server was started (foreground, background or --global) and
+// whatever the working directory is.
 func devTokenFilePath(configured, globalDir string) string {
-	if configured != "" {
-		return configured
+	if configured == "" {
+		return filepath.Join(globalDir, "dev-token")
 	}
-	return filepath.Join(globalDir, "dev-token")
+	if !filepath.IsAbs(configured) {
+		return filepath.Join(globalDir, configured)
+	}
+	return configured
 }
 
 // devTokenExportHint returns the shell command that exports the dev token
