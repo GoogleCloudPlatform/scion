@@ -144,20 +144,21 @@ func TestGCPHandler_SeverityMapping(t *testing.T) {
 // (ptone/scion#4998).
 func TestGCPHandler_CustomLevelSeverity(t *testing.T) {
 	tests := []struct {
+		name  string
 		level slog.Level
 		want  string
 	}{
-		{slog.LevelDebug - 4, "DEBUG"},
-		{slog.LevelDebug + 1, "DEBUG"},
-		{slog.LevelInfo - 1, "DEBUG"},
-		{slog.LevelInfo + 1, "INFO"},
-		{slog.LevelWarn - 1, "INFO"},
-		{slog.LevelWarn + 1, "WARNING"},
-		{slog.LevelError - 1, "WARNING"},
-		{slog.LevelError + 4, "ERROR"},
+		{"below_debug", slog.LevelDebug - 4, "DEBUG"},
+		{"debug_plus_1", slog.LevelDebug + 1, "DEBUG"},
+		{"info_minus_1", slog.LevelInfo - 1, "DEBUG"},
+		{"info_plus_1", slog.LevelInfo + 1, "INFO"},
+		{"warn_minus_1", slog.LevelWarn - 1, "INFO"},
+		{"warn_plus_1", slog.LevelWarn + 1, "WARNING"},
+		{"error_minus_1", slog.LevelError - 1, "WARNING"},
+		{"above_error", slog.LevelError + 4, "ERROR"},
 	}
 	for _, tt := range tests {
-		t.Run(tt.level.String(), func(t *testing.T) {
+		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
 			opts := &slog.HandlerOptions{Level: slog.LevelDebug - 4}
 			slog.New(NewGCPHandler(&buf, opts, "test-component", "")).Log(t.Context(), tt.level, "msg")
@@ -168,7 +169,7 @@ func TestGCPHandler_CustomLevelSeverity(t *testing.T) {
 			}
 			assertKeys(t, buf.Bytes(), want...)
 			if got := decodeLine(t, buf.Bytes())[GCPKeySeverity]; got != tt.want {
-				t.Errorf("severity = %v, want %s", got, tt.want)
+				t.Errorf("custom level %d: severity = %v, want %s", int(tt.level), got, tt.want)
 			}
 		})
 	}
@@ -184,7 +185,7 @@ func TestGCPHandler_TopLevelLevelAttrNoDuplicateSeverity(t *testing.T) {
 	}{
 		{"record", func(l *slog.Logger) { l.Info("msg", "level", slog.LevelWarn) }},
 		{"With", func(l *slog.Logger) { l.With("level", slog.LevelWarn).Info("msg") }},
-		{"With before group", func(l *slog.Logger) { l.With("level", slog.LevelWarn).WithGroup("g").Info("msg") }},
+		{"With_before_group", func(l *slog.Logger) { l.With("level", slog.LevelWarn).WithGroup("g").Info("msg") }},
 		{"LogValuer", func(l *slog.Logger) { l.Info("msg", "level", levelValuer(slog.LevelWarn)) }},
 	}
 	for _, tt := range tests {

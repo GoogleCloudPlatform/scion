@@ -200,7 +200,7 @@ func TestGCPHandler_GroupedErrorKeepsSpecialFieldsTopLevel(t *testing.T) {
 	var buf bytes.Buffer
 	slog.New(NewGCPHandler(&buf, nil, "test-component", "")).WithGroup("g").WithGroup("h").Error("boom", "a", 1)
 
-	assertKeys(t, buf.Bytes(), withBaseKeys(gcpKeyStackTrace, gcpKeyType, "g")...)
+	assertKeys(t, buf.Bytes(), withBaseKeys("g", gcpKeyStackTrace, gcpKeyType)...)
 	data := decodeLine(t, buf.Bytes())
 	if data[gcpKeyType] != errorReportingType {
 		t.Errorf("@type = %v, want %s", data[gcpKeyType], errorReportingType)
@@ -228,7 +228,7 @@ func TestGCPHandler_GroupedCallerErrorFieldsTopLevel(t *testing.T) {
 		{"With", func(l *slog.Logger) {
 			l.WithGroup("g").With(gcpKeyStackTrace, "my stack").With("a", 1, gcpKeyType, "my type").Error("boom")
 		}},
-		{"With, INFO", func(l *slog.Logger) {
+		{"With_INFO", func(l *slog.Logger) {
 			l.WithGroup("g").With(gcpKeyStackTrace, "my stack", gcpKeyType, "my type").Info("m", "a", 1)
 		}},
 	}
@@ -261,7 +261,7 @@ func TestGCPHandler_GroupedTraceIDTopLevel(t *testing.T) {
 		name string
 		log  func(l *slog.Logger)
 	}{
-		{"no group", func(l *slog.Logger) {
+		{"no_group", func(l *slog.Logger) {
 			l.Info("m", AttrTraceID, traceID, "a", 1)
 		}},
 		{"record", func(l *slog.Logger) {
@@ -270,7 +270,7 @@ func TestGCPHandler_GroupedTraceIDTopLevel(t *testing.T) {
 		{"With", func(l *slog.Logger) {
 			l.WithGroup("g").With(AttrTraceID, traceID).Info("m", "a", 1)
 		}},
-		{"nested groups", func(l *slog.Logger) {
+		{"nested_groups", func(l *slog.Logger) {
 			l.WithGroup("g").With("a", 1).WithGroup("h").Info("m", AttrTraceID, traceID)
 		}},
 	}
@@ -281,7 +281,7 @@ func TestGCPHandler_GroupedTraceIDTopLevel(t *testing.T) {
 
 			data := decodeLine(t, buf.Bytes())
 			userKey := "g"
-			if tc.name == "no group" {
+			if tc.name == "no_group" {
 				userKey = "a"
 			}
 			assertKeys(t, buf.Bytes(), withBaseKeys(GCPKeyTrace, userKey)...)
@@ -292,7 +292,7 @@ func TestGCPHandler_GroupedTraceIDTopLevel(t *testing.T) {
 			if labels[gcpTraceIDLabelKey] != traceID {
 				t.Errorf("trace label = %v, want %s", labels[gcpTraceIDLabelKey], traceID)
 			}
-			if tc.name != "no group" {
+			if tc.name != "no_group" {
 				if want := map[string]any{"a": float64(1)}; !reflect.DeepEqual(data["g"], want) {
 					t.Errorf("g = %v, want %v", data["g"], want)
 				}
@@ -311,16 +311,16 @@ func TestGCPHandler_GroupRendersEmptyValidJSON(t *testing.T) {
 		log  func(l *slog.Logger)
 		want []string
 	}{
-		{"error, only lifted record attr", func(l *slog.Logger) {
+		{"error_only_lifted_record_attr", func(l *slog.Logger) {
 			l.WithGroup("g").Error("boom", AttrTraceID, traceID)
 		}, withBaseKeys(GCPKeyTrace, gcpKeyStackTrace, gcpKeyType)},
-		{"info, only lifted With attr", func(l *slog.Logger) {
+		{"info_only_lifted_With_attr", func(l *slog.Logger) {
 			l.WithGroup("g").With(gcpKeyStackTrace, "s").WithGroup("h").Info("m")
 		}, withBaseKeys(gcpKeyStackTrace)},
-		{"error, only dropped attrs", func(l *slog.Logger) {
+		{"error_only_dropped_attrs", func(l *slog.Logger) {
 			l.WithGroup("g").With("drop", 1).Error("boom", "drop", 2)
 		}, withBaseKeys(gcpKeyStackTrace, gcpKeyType)},
-		{"empty trace ID in group", func(l *slog.Logger) {
+		{"empty_trace_ID_in_group", func(l *slog.Logger) {
 			l.WithGroup("g").Info("m", AttrTraceID, "")
 		}, withBaseKeys()},
 	}
