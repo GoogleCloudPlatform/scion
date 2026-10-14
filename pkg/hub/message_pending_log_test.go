@@ -79,7 +79,7 @@ func newPendingLogCapture() (*slog.Logger, *pendingLogBuffer) {
 	return slog.New(slog.NewJSONHandler(b, &slog.HandlerOptions{Level: slog.LevelDebug})), b
 }
 
-func sortedKeys(rec map[string]any) []string {
+func pendingLogKeys(rec map[string]any) []string {
 	keys := make([]string, 0, len(rec))
 	for k := range rec {
 		keys = append(keys, k)
@@ -112,7 +112,7 @@ func TestMessagePendingLog_AgentDM(t *testing.T) {
 	assert.Equal(t, pendingPathAgentDM, rec["creation_path"])
 	assert.Equal(t, messages.TypeInstruction, rec["type"])
 	wantKeys := []string{"creation_path", "level", "message_id", "msg", "recipient", "sender", "time", "type"}
-	assert.Equal(t, wantKeys, sortedKeys(rec), "the line carries only identifiers and routing fields")
+	assert.Equal(t, wantKeys, pendingLogKeys(rec), "the line carries only identifiers and routing fields")
 	assert.NotContains(t, lines[0], body, "the message body must never be logged")
 }
 
@@ -173,7 +173,7 @@ func seedStuckPending(t *testing.T, cs store.Store, n int) []string {
 	return ids
 }
 
-func anyStrings(t *testing.T, v any) []string {
+func pendingLogIDs(t *testing.T, v any) []string {
 	t.Helper()
 	raw, ok := v.([]any)
 	require.True(t, ok, "message_ids must be a JSON array, got %T", v)
@@ -199,7 +199,7 @@ func TestBrokerMessageSweep_StuckLineNamesMessageIDs(t *testing.T) {
 	recs, _ := logs.records(t, "sweep: stuck pending messages detected")
 	require.Len(t, recs, 1)
 	assert.EqualValues(t, 2, recs[0]["count"])
-	assert.Equal(t, ids, anyStrings(t, recs[0]["message_ids"]), "oldest first")
+	assert.Equal(t, ids, pendingLogIDs(t, recs[0]["message_ids"]), "oldest first")
 	assert.Equal(t, false, recs[0]["message_ids_truncated"])
 }
 
@@ -218,7 +218,7 @@ func TestBrokerMessageSweep_StuckLineCapsMessageIDs(t *testing.T) {
 	recs, lines := logs.records(t, "sweep: stuck pending messages detected")
 	require.Len(t, recs, 1)
 	assert.EqualValues(t, stuckMessageLogIDCap+3, recs[0]["count"])
-	assert.Equal(t, ids[:stuckMessageLogIDCap], anyStrings(t, recs[0]["message_ids"]))
+	assert.Equal(t, ids[:stuckMessageLogIDCap], pendingLogIDs(t, recs[0]["message_ids"]))
 	assert.Equal(t, true, recs[0]["message_ids_truncated"])
 	for _, id := range ids[stuckMessageLogIDCap:] {
 		assert.False(t, strings.Contains(lines[0], id), "IDs past the cap are not on the line")
