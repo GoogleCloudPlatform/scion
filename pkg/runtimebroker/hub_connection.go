@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/GoogleCloudPlatform/scion/pkg/brokercredentials"
+	"github.com/GoogleCloudPlatform/scion/pkg/config"
 	"github.com/GoogleCloudPlatform/scion/pkg/hubclient"
 	"github.com/GoogleCloudPlatform/scion/pkg/storage"
 	"github.com/GoogleCloudPlatform/scion/pkg/templatecache"
@@ -689,6 +690,18 @@ func (s *Server) newHeartbeatService(client hubclient.RuntimeBrokerService, brok
 	hb.startsInFlight = s.startsInFlightSnapshot
 	hb.defaultProfile = s.defaultProfile
 	hb.flat = s.isFlat()
+	if fi := s.flatInstance(); fi != nil {
+		// The instance publishes its FC4-a presentation, built only by
+		// config.PresentInstance, on every heartbeat (Flat Runtime Brokers
+		// phase 4 design §2.1). The epoch is the server's start time, so a
+		// restarted process fences out the one it replaced.
+		p := config.PresentInstance(fi.Instance).API()
+		hb.presentation = &p
+		hb.presentationTargetID = fi.Identity.RuntimeTarget.ID
+		s.mu.RLock()
+		hb.presentationEpoch = s.startTime.UnixNano()
+		s.mu.RUnlock()
+	}
 	hb.SetVersion(s.version)
 	hb.SetDefaultRuntime(rt)
 	return hb
