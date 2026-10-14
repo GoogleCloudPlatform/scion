@@ -136,6 +136,7 @@ export default defineConfig([
       'e2e/terminal-workspace/*.ts',
       'e2e/test-hub-banner/*.ts',
       'e2e/test-identity-session/*.ts',
+      'e2e/iap-driver/*.ts',
       'e2e/harness-selftest/*.ts',
       'e2e/async-create/*.ts',
       'e2e/client-main-stub.ts',
