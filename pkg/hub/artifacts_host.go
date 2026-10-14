@@ -647,9 +647,10 @@ var _ artifacts.MessageScopeHost = (*artifactHost)(nil)
 // message stored without one, of its thread (a DM key names its peer agent's
 // project, or none for two users; a topic its project), must pass the
 // token's self-scope check, and a DM with an agent also needs agent:read on
-// that agent. A message of a project's (non-direct) conversation also needs
-// project:read on that project through the token (canReadProject), the
-// rule the AttachmentStore download route applies to a project's file.
+// that agent. A message of a conversation that belongs to a project (a
+// group's project, or the peer agent's project of a direct message) also
+// needs project:read on that project through the token (canReadProject),
+// the rule the AttachmentStore download route applies to a project's file.
 // Every lookup failure answers false.
 func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUserIdentity, msg *store.Message) bool {
 	s := h.server
@@ -690,13 +691,20 @@ func (h *artifactHost) tokenMayReadMessage(ctx context.Context, token *ScopedUse
 	if !ok {
 		return false
 	}
-	// A message of a project's conversation also needs project:read on that
-	// project through the token, as the AttachmentStore download route
-	// requires for a project's file. This applies before the native and
-	// addressee checks, so an addressee's token reads no more than the
-	// token reads of the project.
-	if conv.Kind != "direct" && conv.ProjectID != nil && *conv.ProjectID != "" {
-		return s.canReadProject(ctx, token, *conv.ProjectID)
+	// A message whose conversation belongs to a project (a group's project,
+	// or the peer agent's project of a direct message with an agent) also
+	// needs project:read on that project through the token, as the
+	// AttachmentStore download route requires for a project's file. This
+	// applies before the native and addressee checks, so a participant's or
+	// an addressee's token reads no more than the token reads of the
+	// project. A direct message between users has no project.
+	projectID, _, err := s.conversationProject(ctx, conv, token.Type(), token.ID())
+	if err != nil {
+		slog.WarnContext(ctx, "artifacts: attachment token project lookup failed", "message", msg.ID, "error", err)
+		return false
+	}
+	if projectID != "" {
+		return s.canReadProject(ctx, token, projectID)
 	}
 	return true
 }

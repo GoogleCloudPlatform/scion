@@ -95,6 +95,19 @@ func (f *refFixture) sessionContext(user *store.User) context.Context {
 // id.
 func (f *refFixture) uploadAs(t *testing.T, user *store.User, projectID, name, content string) string {
 	t.Helper()
+	token, _, _, err := f.srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
+	require.NoError(t, err)
+	req := attachmentUploadRequest(t, projectID, name, content)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	f.srv.Handler().ServeHTTP(rec, req)
+	return uploadedAttachmentID(t, rec, name)
+}
+
+// attachmentUploadRequest returns a POST of one text file to the upload
+// route, with project_id projectID ("" for a direct-message upload).
+func attachmentUploadRequest(t *testing.T, projectID, name, content string) *http.Request {
+	t.Helper()
 	var body bytes.Buffer
 	mw := multipart.NewWriter(&body)
 	require.NoError(t, mw.WriteField("project_id", projectID))
@@ -107,14 +120,15 @@ func (f *refFixture) uploadAs(t *testing.T, user *store.User, projectID, name, c
 	_, err = part.Write([]byte(content))
 	require.NoError(t, err)
 	require.NoError(t, mw.Close())
-
-	token, _, _, err := f.srv.userTokenService.GenerateTokenPair(user.ID, user.Email, user.DisplayName, user.Role, ClientTypeWeb)
-	require.NoError(t, err)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/chat/attachments", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
-	req.Header.Set("Authorization", "Bearer "+token)
-	rec := httptest.NewRecorder()
-	f.srv.Handler().ServeHTTP(rec, req)
+	return req
+}
+
+// uploadedAttachmentID requires a 201 upload answer naming one attachment
+// called name and returns its id.
+func uploadedAttachmentID(t *testing.T, rec *httptest.ResponseRecorder, name string) string {
+	t.Helper()
 	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 	var resp struct {
 		Attachments []attachmentUploadResult `json:"attachments"`
@@ -565,6 +579,39 @@ func TestAttachmentArtifacts_TokenProjectMessageNeedsProjectRead(t *testing.T) {
 	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), id), "member without project:read")
 }
 
+// A user access token reads an attachment of a direct message with an
+// agent only with project:read on the agent's project as well, as the
+// AttachmentStore download route requires for the same file, which the web
+// client uploads with the agent's project.
+func TestAttachmentArtifacts_TokenAgentDMNeedsProjectRead(t *testing.T) {
+	f := newRefFixture(t)
+	enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	dm := dmKeyFor(t, "user", f.ua.ID, "agent", f.aa.ID)
+	msgID := f.seedMessage(t, f.projA.ID, dm, "", "for the agent")
+	id := f.uploadAs(t, f.ua, f.projA.ID, "notes.txt", "agent dm")
+	require.NoError(t, f.srv.attachmentService().BindAttachment(ctx, id, artifacts.PrincipalKindUser, f.ua.ID, msgID))
+	require.Equal(t, http.StatusOK, f.download(t, f.ua, id).status, "alice's session reads it")
+
+	missing := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), uuid.NewString())
+	require.Equal(t, http.StatusNotFound, missing.status, missing.body)
+
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read", "agent:read"), id), "without project:read")
+	got := f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read", "agent:read"), id)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, "agent dm", got.body)
+	require.Equal(t, missing, f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "project:read", "inbox:read"), id), "without agent:read")
+
+	// A direct message between users has no project: a hub-boundary token
+	// with inbox:read alone reads its attachment, as before.
+	userDM := dmKeyFor(t, "user", f.ua.ID, "user", f.uc.ID)
+	dmFile := f.uploadAs(t, f.ua, "", "between-users.txt", "users only")
+	f.sendWith(t, f.ua, userDM, dmFile)
+	got = f.downloadAs(t, selfToken(t, f.ua.ID, hubBoundary(), "inbox:read"), dmFile)
+	require.Equal(t, http.StatusOK, got.status, got.body)
+	assert.Equal(t, "users only", got.body)
+}
+
 // With the experiment on, uploads go to the artifact service only for a
 // caller it can own as a user principal: a session or a user access token.
 // A federated user, which the artifact service does not serve, uploads to
@@ -587,6 +634,43 @@ func TestAttachmentArtifacts_FederatedUploadsUseAttachmentStore(t *testing.T) {
 	// it is routed to the AttachmentStore.
 	_, _, _, ok := newArtifactHost(f.srv).Principal(fedCtx)
 	require.False(t, ok)
+}
+
+// End to end on the upload route (the chat route wrapper and the handler,
+// with a federated identity and credential): with the experiment on, a
+// federated user's project upload answers 201 and is stored in the
+// AttachmentStore, not in the artifact service. The persistent store cannot
+// record a federated binding today, so the binding is held by the
+// federatedBindingStore the federated authz tests use.
+func TestAttachmentArtifacts_FederatedUploadEndToEnd(t *testing.T) {
+	f := newRefFixture(t)
+	st := enableAttachmentArtifacts(t, f)
+	ctx := context.Background()
+	fed := fedIdentity("att-upload")
+	fs := &federatedBindingStore{Store: f.srv.authzService.store, groups: map[string][]string{}, users: map[string]*store.User{}}
+	orig := f.srv.authzService.store
+	f.srv.authzService.store = fs
+	t.Cleanup(func() { f.srv.authzService.store = orig })
+	rd, err := f.st.GetRoleDefinitionByName(ctx, store.ProjectRoleMember, store.RoleScopeProject)
+	require.NoError(t, err)
+	fs.addBinding(&store.RoleBinding{
+		RoleDefinitionID: rd.ID, PrincipalType: store.RoleBindingPrincipalUser, PrincipalID: fed.ID(),
+		ScopeType: store.RoleScopeProject, ScopeID: f.projA.ID, CreatedBy: "test",
+	})
+
+	req := attachmentUploadRequest(t, f.projA.ID, "fed.txt", "from a federated user")
+	rctx := contextWithCredentialContext(contextWithIdentity(req.Context(), fed), CredentialContext{Kind: CredentialKindFederation})
+	rec := httptest.NewRecorder()
+	f.srv.chatRoute(f.srv.handleChatAttachments)(rec, req.WithContext(rctx))
+	id := uploadedAttachmentID(t, rec, "fed.txt")
+
+	meta, err := f.wcs.GetAttachment(ctx, id)
+	require.NoError(t, err)
+	require.NotNil(t, meta, "the upload is a row of the AttachmentStore")
+	assert.Equal(t, fed.ID(), meta.UploadedBy)
+	assert.Equal(t, f.projA.ID, meta.ProjectID)
+	_, err = st.GetAttachment(ctx, id)
+	require.ErrorIs(t, err, artifacts.ErrNotFound, "nothing is stored in the artifact service")
 }
 
 // While the artifacts settings section is disabled, stored attachments
