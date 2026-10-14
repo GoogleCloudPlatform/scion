@@ -1601,6 +1601,7 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
             self.assertEqual(provision._safe_rel(rel), ok, repr(rel))
         # A tampered record pointing outside the plugin dir is ignored.
         self.install_p()
+        self.reconcile([])  # confirms (clears) the install's intent record
         outside = os.path.join(self.skills, "outside.txt")
         with open(outside, "w") as f:
             f.write("keep")
@@ -1717,6 +1718,7 @@ class ClaudeOwnershipTest(_ClaudePluginsBase):
         # A record that lists no files (written before this change) owns
         # nothing: the dir is handed back untouched.
         self.install_p()
+        self.reconcile([])  # confirms (clears) the install's intent record
         path = os.path.join(self.root, "state-claude.json")
         with open(path) as f:
             doc = json.load(f)
