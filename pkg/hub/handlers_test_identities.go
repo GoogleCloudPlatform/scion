@@ -399,12 +399,14 @@ func (s *Server) testIdentityCaller(w http.ResponseWriter, r *http.Request) (Use
 	return user, ok
 }
 
-// testIdentityCallerFor is testIdentityCaller with a set of permissions:
-// the handler-level check admits the caller when any of perms is allowed
-// at hub scope, and the returned map names the ones that are. The handler
-// then requires the permission the request actually needs (the web-login
-// code route: test_identity.issue for a member-tier identity, the admin
-// kind's capability for an admin-kind identity).
+// testIdentityCallerFor is testIdentityCaller with a list of permissions:
+// the handler-level check admits the caller when one of perms is allowed
+// at hub scope. They are decided in order until the first allowed one, and
+// the returned map holds that one (permissions after it are not decided).
+// The handler then requires the permission the request actually needs (the
+// web-login code route: test_identity.issue for a member-tier identity,
+// the admin kind's capability for an admin-kind identity, decided by
+// testAdminWebCodeIssuer when the map does not already hold it).
 func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, perms ...string) (UserIdentity, map[string]bool, bool) {
 	ctx := r.Context()
 	if !s.testIdentities.enabled {
@@ -444,10 +446,17 @@ func (s *Server) testIdentityCallerFor(w http.ResponseWriter, r *http.Request, p
 		writeForbiddenStructured(w, "requires test_identity.issue permission", permissions.ResourceTestIdentity, ActionIssue)
 		return nil, nil, false
 	}
-	// Defence in depth: the route guard already ran this decision.
+	// Defence in depth: the route guard already ran this decision. The
+	// permissions are decided in order and the first allowed one ends the
+	// loop, so a caller allowed the first never has the others decided
+	// (each decision writes a decision audit record); a handler that needs
+	// a later permission decides it itself (testAdminWebCodeIssuer).
 	allowed := make(map[string]bool, len(perms))
 	reason := ""
 	for _, p := range perms {
+		if len(allowed) > 0 {
+			break
+		}
 		decision := s.authzService.Decide(ctx, AuthzRequest{
 			Principal:      principalContextForIdentity(user),
 			Credential:     credentialContextForIdentity(user),

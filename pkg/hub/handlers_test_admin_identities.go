@@ -892,11 +892,15 @@ func (s *Server) handleRevokeAllTestAdminIdentities(w http.ResponseWriter, r *ht
 	// delete. A web session snapshots the generation at redeem and is
 	// refused on its next request (page, API or event stream) once the row
 	// moves on, even while the row delete below is still pending or is
-	// refused. A failed bump is logged; the delete or suspension below
-	// still ends the sessions.
+	// refused. It fails closed: if any bump fails, nothing is deleted and
+	// the answer is 503, so revoke-all never reports a revocation that may
+	// have left a live session behind. A row already gone needs no bump.
 	for i := range users {
 		if err := s.store.IncrementSessionGeneration(ctx, users[i].ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			slog.ErrorContext(ctx, "test admin revoke-all: session generation bump failed", "test_identity_id", users[i].ID, "error", err)
+			slog.ErrorContext(ctx, "test admin revoke-all: session generation bump failed; no identity deleted or suspended", "test_identity_id", users[i].ID, "error", err)
+			writeError(w, http.StatusServiceUnavailable, ErrCodeUnavailable,
+				"test admin revoke-all could not end every identity's web sessions; no identity was deleted or suspended; retry", nil)
+			return
 		}
 	}
 	auditActor := s.buildAuditActorFromContext(ctx)

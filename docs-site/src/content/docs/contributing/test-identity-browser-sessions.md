@@ -189,7 +189,7 @@ Redeem the code as in [Redeeming the code in Playwright](#redeeming-the-code-in-
 ### Lifetime, revocation and audit
 
 - An admin browser session never lasts longer than the kind's maximum identity lifetime: 60 minutes for a test hub-admin, 30 minutes for a test super-admin. The hub checks this on every request, together with the identity's own expiry.
-- `POST /api/v1/test-identities/admin/revoke-all` ends every admin browser session on its next request (page, API or event stream), before it deletes the identities. The session generation of each admin identity is advanced first, so a session ends even while the identity's delete is still pending or was refused.
+- `POST /api/v1/test-identities/admin/revoke-all` ends every admin browser session on its next request (page, API or event stream), before it deletes the identities. The session generation of each admin identity is advanced first, so a session ends even while the identity's delete is still pending or was refused. If a generation cannot be advanced, revoke-all answers `503` and deletes or suspends nothing; retry it.
 - Every API request from an admin browser session is written to the `[scion-test-admin-audit]` lines like a request with the identity's own token (user, kind, issuance ID), with `credential: "web_session"` instead of `credential: "bearer"`. Policy refusals and mutation audit labels carry the same `credential` value.
 - The session's per-request token has exactly the authority of the identity's own token. The browser session adds the web UI, not permissions.
 

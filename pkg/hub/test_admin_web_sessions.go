@@ -223,7 +223,8 @@ func testAdminKindSpecFor(kind string) (testAdminKindSpec, bool) {
 // testAdminWebCodeIssuer runs, for a web-login code for the admin-kind
 // identity u, the issuer checks of u's kind on top of the shared caller
 // checks (testIdentityCallerFor) and canManageTestIdentity: the request
-// holds the kind's capability (allowed, from the handler-level decision),
+// holds the kind's capability (from the handler-level decision in allowed,
+// or decided here when that decision stopped at another permission),
 // the caller is a live super-admin through its own current bindings
 // holding that capability (canIssueTestAdmin), and an access-token caller
 // presents a hub-boundary token with exactly the kind's scope, at most
@@ -249,7 +250,20 @@ func (s *Server) testAdminWebCodeIssuer(w http.ResponseWriter, r *http.Request, 
 		return false
 	}
 	if !allowed[spec.permission] {
-		return deny("the request does not hold the admin kind's capability", "")
+		// testIdentityCallerFor stops at the first allowed permission, so
+		// the kind's capability is decided here, for an admin-kind code
+		// only.
+		decision := s.authzService.Decide(ctx, AuthzRequest{
+			Principal:      principalContextForIdentity(caller),
+			Credential:     credentialContextForIdentity(caller),
+			Resource:       resource,
+			Action:         action,
+			Permission:     spec.permission,
+			TargetEvidence: hubCollectionEvidence(spec.permission),
+		})
+		if !decision.Allowed {
+			return deny(decision.Reason, "")
+		}
 	}
 	if err := s.canIssueTestAdmin(ctx, caller.ID(), spec.permission); err != nil {
 		return deny(err.Error(), testAdminReasonNotLiveAdmin)

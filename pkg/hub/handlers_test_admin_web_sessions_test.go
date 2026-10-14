@@ -25,6 +25,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -289,7 +290,7 @@ func TestAdminWebSessions_KindAdmittedOnlyAtItsLevel(t *testing.T) {
 // kind's capability on the request (an access token needs exactly the
 // kind's scope), a live super-admin issuer, and the identity's issuer (or
 // an unscoped platform admin session). A member-tier identity still needs
-// test_identity.issue.
+// test_identity.issue. Each refusal is pinned to the check that makes it.
 func TestAdminWebSessions_MintNeedsTheKindsIssuerChecks(t *testing.T) {
 	e := newWS4Env(t, false, true)
 	iss := e.issuer("ws4-mint-iss")
@@ -301,29 +302,59 @@ func TestAdminWebSessions_MintNeedsTheKindsIssuerChecks(t *testing.T) {
 	rec := doRequestWithToken(t, e.srv, adminKey, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
 
-	// The issuer's token scoped to the member capability: 403 (it does not
-	// carry the admin kind's capability).
+	// The issuer's token scoped to the member capability: 403 from the
+	// kind's capability check (testAdminWebCodeIssuer).
 	memberKey, _ := taPAT(t, e.srv, iss.ID, "test_identity:issue")
 	rec = doRequestWithToken(t, e.srv, memberKey, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	msg, reason := ws4ErrorBody(t, rec)
+	assert.Equal(t, "requires test_identity.issue_admin permission", msg)
+	assert.Empty(t, reason)
 
 	// Another issuer's member token: 404 (not its identity).
 	rec = doRequestWithToken(t, e.srv, e.issuerTok, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
 
-	// The admin-scoped token on a member-tier identity: 404.
-	fx := e.issue()
-	rec = doRequestWithToken(t, e.srv, adminKey, http.MethodPost, ws4WebCodePath(fx.Identity.ID), nil)
+	// A member-tier identity issued by the same issuer: its session mints
+	// a code, the admin-scoped token gets 404 (it does not hold
+	// test_identity.issue, which a member-tier identity needs).
+	rec = doRequestAsUser(t, e.srv, iss, http.MethodPost, "/api/v1/test-identities", map[string]string{"role": "member", "purpose": "ws4 member"})
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	member := tiDecode(t, rec)
+	rec = doRequestWithToken(t, e.srv, adminKey, http.MethodPost, ws4WebCodePath(member.Identity.ID), nil)
 	assert.Equal(t, http.StatusNotFound, rec.Code, rec.Body.String())
+	assert.Equal(t, http.StatusCreated, e.mintAsRec(iss, member.Identity.ID).Code)
 
 	// The admin identity's own bearer: 403 (a test identity never issues).
 	rec = doRequestWithToken(t, e.srv, adm.AccessToken, http.MethodPost, path, nil)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 
-	// An issuer that is no longer a live super-admin: 403.
-	taDeleteSystemRole(t, e.st, iss.ID, store.SystemRoleSuperAdmin)
+	// An issuer that still holds both capabilities through its super-admin
+	// binding but is no longer a live super-admin (its stored role is not
+	// admin): 403 from canIssueTestAdmin.
+	row := e.row(iss.ID)
+	row.Role = store.UserRoleMember
+	require.NoError(t, e.st.UpdateUser(context.Background(), row))
 	rec = e.mintAsRec(iss, adm.Identity.ID)
 	assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	msg, reason = ws4ErrorBody(t, rec)
+	assert.Equal(t, "requires test_identity.issue_admin permission", msg)
+	assert.Equal(t, testAdminReasonNotLiveAdmin, reason)
+}
+
+// ws4ErrorBody decodes an API error body into its message and
+// details.reason.
+func ws4ErrorBody(t *testing.T, rec *httptest.ResponseRecorder) (message, reason string) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Message string         `json:"message"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body), rec.Body.String())
+	reason, _ = body.Error.Details["reason"].(string)
+	return body.Error.Message, reason
 }
 
 // --- B4: revoke-all ends a live admin browser session ------------------------
@@ -699,9 +730,10 @@ func TestAdminWebSessions_NewRefusesMisconfiguration(t *testing.T) {
 		assert.True(t, srv.testAdminWeb.on)
 		assert.False(t, srv.testAdminWebSessionsAvailable(), "member web sessions are unavailable without the key")
 		assert.Contains(t, logs.String(), "Admin test identity web sessions are configured but unavailable")
-		assert.Contains(t, buf.String(), `"admin_web_sessions":true`)
-		rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-		assert.Contains(t, rec.Body.String(), `"testAdminWebSessions":false`)
+		assert.Equal(t, true, ws4GateStartLine(t, buf.String())["admin_web_sessions"])
+		st := ws4Status(t, srv)
+		assert.False(t, st.TestAdminWebSessions)
+		assert.True(t, st.TestHubAdmin)
 	})
 	t.Run("admin level with a web session key", func(t *testing.T) {
 		tiaCaptureAudit(t)
@@ -713,15 +745,15 @@ func TestAdminWebSessions_NewRefusesMisconfiguration(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, srv.testAdminWebSessionsAvailable())
 		assert.Contains(t, logs.String(), "Admin test identity web sessions are ENABLED")
-		rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
-		assert.Contains(t, rec.Body.String(), `"testAdminWebSessions":true`)
+		assert.True(t, ws4Status(t, srv).TestAdminWebSessions)
 	})
 	t.Run("unset", func(t *testing.T) {
 		buf := tiaCaptureAudit(t)
 		srv, _, err := tiaNewServer(t, tiaGateServerConfig())
 		require.NoError(t, err)
 		assert.False(t, srv.testAdminWeb.on)
-		assert.Contains(t, buf.String(), `"admin_web_sessions":false`)
+		assert.Equal(t, false, ws4GateStartLine(t, buf.String())["admin_web_sessions"])
+		assert.False(t, ws4Status(t, srv).TestAdminWebSessions)
 	})
 }
 
@@ -757,4 +789,118 @@ func TestAdminWebSessions_SettingNeverAPIWritable(t *testing.T) {
 		}
 	}
 	assert.True(t, strings.HasPrefix(config.TestIdentityAdminWebSessionsKey, config.TestIdentitiesKey+"."))
+}
+
+// ws4Status reads GET /api/v1/test-infra/status, requiring 200.
+func ws4Status(t *testing.T, srv *Server) TestInfraStatusResponse {
+	t.Helper()
+	rec := doRequestNoAuth(t, srv, http.MethodGet, "/api/v1/test-infra/status", nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var st TestInfraStatusResponse
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &st), rec.Body.String())
+	return st
+}
+
+// ws4GateStartLine returns the decoded test_admin_gate_start line of the
+// test admin audit sink output out, requiring exactly one.
+func ws4GateStartLine(t *testing.T, out string) map[string]any {
+	t.Helper()
+	var found []map[string]any
+	for _, l := range strings.Split(out, "\n") {
+		if !strings.HasPrefix(l, testAdminAuditTag+" ") {
+			continue
+		}
+		var m map[string]any
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(l, testAdminAuditTag+" ")), &m), l)
+		if m["event"] == testAdminAuditEventGateStart {
+			found = append(found, m)
+		}
+	}
+	require.Len(t, found, 1, "one gate-start line")
+	return found[0]
+}
+
+// ws4BumpFailStore fails every session generation bump.
+type ws4BumpFailStore struct{ store.Store }
+
+func (ws4BumpFailStore) IncrementSessionGeneration(context.Context, string) error {
+	return errors.New("session generation bump unavailable")
+}
+
+// revoke-all fails closed on the session generation bump: when a bump
+// fails it answers 503 and deletes or suspends nothing, so it never
+// reports a revocation that may have left a live session behind. Once the
+// bump works again, revoke-all ends the session and deletes the row.
+func TestAdminWebSessions_RevokeAllFailsClosedOnBumpError(t *testing.T) {
+	e := newWS4Env(t, false, true)
+	iss := e.issuer("ws4-b4b-iss")
+	adm := e.issueAdmin(iss, testAdminRoleHubAdmin)
+	jar := e.adminLogin(iss, adm.Identity.ID)
+	require.Equal(t, http.StatusOK, e.apiMe(jar).Code)
+	before := e.row(adm.Identity.ID)
+
+	orig := e.srv.store
+	e.srv.store = ws4BumpFailStore{orig}
+	rec := doRequestAsUser(t, e.srv, iss, http.MethodPost, taRevokeAllPath, nil)
+	e.srv.store = orig
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	after := e.row(adm.Identity.ID)
+	assert.Equal(t, store.UserStatusActive, after.Status, "nothing was suspended")
+	assert.Equal(t, before.SessionGeneration, after.SessionGeneration)
+	assert.Empty(t, tiWebAudits(t, e.st, testAdminRevokeMutation), "no revoke audit record")
+	assert.NotContains(t, e.sink.String(), `"event":"`+testAdminAuditEventRevoke+`"`, "no revoke sink line")
+
+	resp := taRevokeAll(t, e.srv, iss)
+	require.Equal(t, 1, resp.Count)
+	assert.Equal(t, "deleted", resp.Revoked[0].Outcome)
+	e.assertSessionRefusedEverywhere(jar, "after revoke-all")
+}
+
+// ws4DecisionRecorder records the permission of every decision audit
+// record.
+type ws4DecisionRecorder struct {
+	mu    sync.Mutex
+	perms []string
+}
+
+func (r *ws4DecisionRecorder) EmitDecisionAudit(_ context.Context, rec *store.DecisionAuditRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.perms = append(r.perms, rec.PermissionID)
+}
+
+func (r *ws4DecisionRecorder) count(perm string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, p := range r.perms {
+		if p == perm {
+			n++
+		}
+	}
+	return n
+}
+
+// A routine member-tier mint decides only test_identity.issue: the admin
+// capabilities are decided (and audited) only for an admin-kind code.
+func TestAdminWebSessions_MemberMintDecidesOnlyTheMemberCapability(t *testing.T) {
+	e := newWS4Env(t, false, true)
+	fx := e.issue()
+	rec := &ws4DecisionRecorder{}
+	e.srv.authzService.SetDecisionAuditEmitter(rec)
+	t.Cleanup(func() { e.srv.authzService.SetDecisionAuditEmitter(nil) })
+
+	e.mint(fx.Identity.ID)
+	assert.Positive(t, rec.count(permissionTestIdentityIssue), "the member capability is decided")
+	assert.Zero(t, rec.count(permissionTestIdentityIssueAdmin), "no admin capability decision for a member-tier code")
+	assert.Zero(t, rec.count(permissionTestIdentityIssueSuperAdmin), "no super-admin capability decision for a member-tier code")
+
+	// An admin-kind code by a super-admin session decides the kind's
+	// capability once more, in the issuer checks.
+	iss := e.issuer("ws4-f6-iss")
+	adm := e.issueAdmin(iss, testAdminRoleHubAdmin)
+	beforeAdmin := rec.count(permissionTestIdentityIssueAdmin)
+	e.mintAs(iss, adm.Identity.ID)
+	assert.Greater(t, rec.count(permissionTestIdentityIssueAdmin), beforeAdmin)
+	assert.Zero(t, rec.count(permissionTestIdentityIssueSuperAdmin))
 }
