@@ -285,6 +285,14 @@ func savedProfileWarnedKey(projectDir, id, profile string) string {
 // project directory, agent and profile holds the last catalog logged at
 // warn level, removed when the profile resolves again, so the map stays
 // bounded by the agents seen in this process times their saved profiles.
+//
+// A request that read older settings, in which the profile failed, can
+// record its catalog after a concurrent request that read newer settings
+// removed the entry on success. The only effect is that a later loss of the
+// profile back to exactly that catalog is logged at debug level rather than
+// warn. Compare-and-swap on this map cannot tell the stale write apart, and
+// ordering the two would need a per-key version, which a log level does not
+// justify.
 func (s *Server) logSavedProfileFallback(id, projectID, projectDir, profile, catalog string, err error) {
 	log := s.agentLifecycleLog.Debug
 	if prev, seen := s.savedProfileWarned.Swap(savedProfileWarnedKey(projectDir, id, profile), catalog); !seen || prev != catalog {
