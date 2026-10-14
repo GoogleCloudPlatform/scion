@@ -240,8 +240,9 @@ func TestAdminWebSessions_KindAdmittedOnlyAtItsLevel(t *testing.T) {
 	superJar := e.adminLogin(issS, superAdm.Identity.ID)
 	assert.Equal(t, http.StatusOK, e.apiMe(hubJar).Code)
 	assert.Equal(t, http.StatusOK, e.apiMe(superJar).Code)
-	assert.Equal(t, store.UserKindTestSuperAdmin, e.classify(superJar).row.Kind)
-	assert.Equal(t, tiSessionValid, e.classify(superJar).state)
+	valid := e.classify(superJar)
+	require.Equal(t, tiSessionValid, valid.state, valid.reason)
+	assert.Equal(t, store.UserKindTestSuperAdmin, valid.row.Kind)
 
 	// admin level: the super-admin kind is refused, the hub-admin kind is
 	// not.
